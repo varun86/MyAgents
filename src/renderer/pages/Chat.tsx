@@ -843,9 +843,13 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
         // 2. Compute effective values BEFORE setState (avoid stale closure)
         // External runtime: read from runtimePermissionMode (CC/Codex modes), not permissionMode (builtin)
         const effectivePermission = (initialMessage.permissionMode ?? (isExternalRuntime ? runtimePermissionMode : permissionMode)) as PermissionMode;
-        // External runtime uses runtimeModel as fallback (not selectedModel which is the builtin model).
-        // When both are undefined (user picked "默认"), pass undefined to let the CLI use its own default.
-        const effectiveModel = initialMessage.model ?? (isExternalRuntime ? runtimeModel : selectedModel);
+        // PRD 0.2.3: builtinSelection.model is the builtin runtime model (paired with providerId by type system);
+        // runtimeModel is the external runtime model (no provider). Picking the wrong fallback used to allow
+        // (provider X, model Y) mismatches — now the type narrows it to one or the other.
+        const builtinSel = initialMessage.builtinSelection;
+        const effectiveModel = isExternalRuntime
+          ? (initialMessage.runtimeModel ?? runtimeModel)
+          : (builtinSel?.model ?? selectedModel);
 
         // 3. Update local UI state to reflect Launcher choices
         if (initialMessage.permissionMode) {
@@ -857,23 +861,19 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             setPermissionMode(initialMessage.permissionMode);
           }
         }
-        if (initialMessage.model) {
-          // External runtime (Codex/CC) uses runtimeModel; builtin uses selectedModel.
-          // Setting the wrong one causes the model from Launcher to be ignored on subsequent messages.
-          if (isExternalRuntime) {
-            setRuntimeModel(initialMessage.model);
-          } else {
-            setSelectedModel(initialMessage.model);
-          }
-        }
-        if (initialMessage.providerId) {
-          setSelectedProviderId(initialMessage.providerId);
+        if (isExternalRuntime) {
+          if (initialMessage.runtimeModel) setRuntimeModel(initialMessage.runtimeModel);
+        } else if (builtinSel) {
+          // Apply the paired (provider, model) atomically — type system guarantees both present.
+          setSelectedProviderId(builtinSel.providerId);
+          setSelectedModel(builtinSel.model);
           providerInitRef.current = true; // suppress deferred provider-change effect
         }
 
-        // 4. Build providerEnv locally from providerId (never stored in Tab state for security)
-        const provider = initialMessage.providerId
-          ? providers.find(p => p.id === initialMessage.providerId) ?? currentProvider
+        // 4. Build providerEnv locally from providerId (never stored in Tab state for security).
+        // For builtin runtime, prefer the paired selection's provider; otherwise use currentProvider.
+        const provider = builtinSel
+          ? providers.find(p => p.id === builtinSel.providerId) ?? currentProvider
           : currentProvider;
         const providerEnv = buildProviderEnv(provider);
 

@@ -25,6 +25,7 @@ import {
     getAllMcpServers,
     getEnabledMcpServerIds,
     resolveProvider,
+    pairBuiltinSelection,
 } from '@/config/configService';
 import { patchAgentConfig, getAgentById } from '@/config/services/agentConfigService';
 import type { RuntimeType, RuntimeModelInfo, RuntimePermissionMode } from '../../shared/types/runtime';
@@ -345,13 +346,21 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
             return;
         }
 
+        // PRD 0.2.3 + cross-review: split provider/model by runtime dimension. For builtin,
+        // pairBuiltinSelection enforces model ∈ provider.models — closing the
+        // "stale agent.model paired with first-available fallback provider" hole when the
+        // primary provider's key was deleted between agent setup and send.
+        const builtinSelection = (!isExternalRuntime && launcherProvider)
+            ? pairBuiltinSelection(launcherProvider, launcherSelectedModel)
+            : undefined;
+        const runtimeModel = isExternalRuntime ? launcherSelectedModel : undefined;
         const initialMessage: InitialMessage = {
             text,
             images,
             permissionMode: launcherPermissionMode,
-            model: launcherSelectedModel,
-            providerId: launcherProvider?.id,
             mcpEnabledServers: launcherWorkspaceMcpEnabled.filter(id => launcherGlobalMcpEnabled.includes(id)),
+            ...(builtinSelection ? { builtinSelection } : {}),
+            ...(runtimeModel ? { runtimeModel } : {}),
         };
 
         // Persist launcher settings for next app launch
@@ -374,7 +383,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
         onLaunchProject(selectedWorkspace, effectiveProvider, undefined, initialMessage);
     }, [selectedWorkspace, launcherProvider, providers, launcherPermissionMode,
         launcherSelectedModel, launcherWorkspaceMcpEnabled, launcherGlobalMcpEnabled,
-        touchProject, onLaunchProject, updateConfig]);
+        isExternalRuntime, touchProject, onLaunchProject, updateConfig]);
 
     // Path input dialog state (for browser dev mode)
     const [pathDialogOpen, setPathDialogOpen] = useState(false);
@@ -531,14 +540,19 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
             return;
         }
         setAgentOverlay(null);
+        // PRD 0.2.3 + cross-review: same builtin/external split as handleBrandSend.
+        const builtinSelection = !isExternalRuntime
+            ? pairBuiltinSelection(effectiveProvider, launcherSelectedModel)
+            : undefined;
+        const runtimeModel = isExternalRuntime ? launcherSelectedModel : undefined;
         const initialMessage: InitialMessage = {
             text: '/init',
             permissionMode: launcherPermissionMode,
-            model: launcherSelectedModel,
-            providerId: effectiveProvider.id,
+            ...(builtinSelection ? { builtinSelection } : {}),
+            ...(runtimeModel ? { runtimeModel } : {}),
         };
         onLaunchProject(project, effectiveProvider, undefined, initialMessage);
-    }, [agentOverlay, projects, launcherProvider, providers, launcherPermissionMode, launcherSelectedModel, onLaunchProject]);
+    }, [agentOverlay, projects, launcherProvider, providers, launcherPermissionMode, launcherSelectedModel, isExternalRuntime, onLaunchProject]);
 
     return (
         <div className="flex h-full flex-col overflow-hidden bg-[var(--paper)] text-[var(--ink)]">

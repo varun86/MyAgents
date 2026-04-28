@@ -4,14 +4,23 @@ import type { ImageAttachment } from '@/components/SimpleChatInput';
 import type { PermissionMode } from '@/config/types';
 
 /** Message data passed from Launcher to Chat for auto-send on workspace open.
- *  Security: Only stores providerId, never the API key. Chat builds providerEnv at send time. */
+ *  Security: Only stores providerId, never the API key. Chat builds providerEnv at send time.
+ *
+ *  Provider/model pairing (PRD 0.2.3):
+ *    - builtinSelection: builtin runtime 的 (provider, model) 二元组。类型上强制成对，
+ *      消除「传 providerId 不传 model」导致的 env/model 错配（OPEN_AI_DISCUSSION P1）。
+ *      只能由 resolveBuiltinSelection helper 构造，不允许手拼。
+ *    - runtimeModel: external runtime（CC / Codex / Gemini）的 model；没有 provider 概念。
+ *    两者互斥：调用方根据当前 runtime 维度只填其一。 */
 export interface InitialMessage {
     text: string;
     images?: ImageAttachment[];
     permissionMode?: PermissionMode;
-    model?: string;
-    providerId?: string;
     mcpEnabledServers?: string[];
+    /** Builtin runtime 的 (provider, model) 选择 — 类型上强制成对 */
+    builtinSelection?: { providerId: string; model: string };
+    /** External runtime 的 model — 没有 provider 概念 */
+    runtimeModel?: string;
 }
 
 export interface Tab {
