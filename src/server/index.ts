@@ -88,6 +88,7 @@ import { scanAgents, readWorkspaceConfig, writeWorkspaceConfig, loadEnabledAgent
 import type { AgentFrontmatter, AgentMeta, AgentWorkspaceConfig } from '../shared/agentTypes';
 import type { McpServerDefinition } from '../renderer/config/types';
 import { ensureDirSync, ensureDir, isDirEntry } from './utils/fs-utils';
+import { writeBase64FilesToAgentDir } from './utils/workspace-files';
 import {
   setCronTaskContext,
   clearCronTaskContext,
@@ -3935,35 +3936,8 @@ async function main() {
             return jsonResponse({ success: false, error: 'Invalid target directory' }, 400);
           }
 
-          // Ensure target directory exists
-          await ensureDir(resolvedTarget);
-
-          const saved: string[] = [];
-
-          for (const file of files) {
-            // Sanitize filename
-            const safeName = file.name.replace(/[<>:"/\\|?*]/g, '_');
-
-            // Generate unique name if file exists
-            let finalName = safeName;
-            let counter = 1;
-            const ext = extname(safeName);
-            const base = basename(safeName, ext);
-            while (existsSync(join(resolvedTarget, finalName))) {
-              finalName = `${base}_${counter}${ext}`;
-              counter++;
-            }
-
-            const destination = join(resolvedTarget, finalName);
-
-            // Decode base64 and write file
-            const buffer = Buffer.from(file.content, 'base64');
-            await writeFile(destination, buffer);
-
-            saved.push(relative(currentAgentDir, destination));
-          }
-
-          return jsonResponse({ success: true, files: saved });
+          const written = await writeBase64FilesToAgentDir(files, resolvedTarget, currentAgentDir);
+          return jsonResponse({ success: true, files: written.map(w => w.relativePath) });
         } catch (error) {
           console.error('[api/files/import-base64] Error:', error);
           return jsonResponse(

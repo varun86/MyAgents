@@ -8,6 +8,8 @@ import { getCrossPlatformEnv, isSkillBlockedOnPlatform } from './utils/platform'
 import { ensureDirSync, isDirEntry } from './utils/fs-utils';
 import { lookupModelContextLength, modelSupportsModality } from './utils/model-capabilities';
 import { processImage, resizeToolImageContent, classifyImageError } from './utils/imageResize';
+import { writeBase64FilesToAgentDir } from './utils/workspace-files';
+import { ensureGitignorePattern } from './utils/gitignore';
 // Context helpers only — tool server singletons are no longer exported from
 // these modules. The actual SDK server objects are created on-demand via
 // `getBuiltinMcpInstance()` in buildSdkMcpServers() below. See
@@ -5273,6 +5275,11 @@ export async function enqueueUserMessage(
   const imagesAllowed = modelSupportsModality(modelForFilter, 'image');
   const filteredImageCount = hasImages && !imagesAllowed ? images!.length : 0;
 
+  // Mutable text payload — modality fallback (below) appends `@<path>`
+  // references for images that can't go in as image content blocks. Title /
+  // log / persistence continue to use the original `trimmed`.
+  let effectiveText = trimmed;
+
   // Add images first so Claude can see them before the text query
   // Images are resized/sliced server-side to stay within API limits (≤1568px, long images → 1:2 tiles)
   if (hasImages && imagesAllowed) {
@@ -5309,26 +5316,72 @@ export async function enqueueUserMessage(
         });
       }
     }
-  } else if (filteredImageCount > 0) {
-    // Models without image support: surface a synthetic note in the SDK
-    // payload so the model isn't confused by the user appearing to "send
-    // nothing". Same shape as the per-image error path above.
-    console.log(`[agent] modality filter: dropping ${filteredImageCount} image(s) for model=${modelForFilter ?? '(unknown)'} (text-only)`);
-    contentBlocks.push({
-      type: 'text',
-      text: `[${filteredImageCount} image attachment(s) omitted — current model does not support image input]`,
-    });
-    broadcast('chat:attachments-filtered', {
-      reason: 'modality',
-      kind: 'image',
-      count: filteredImageCount,
-      model: modelForFilter ?? null,
-    });
+  } else if (hasImages && filteredImageCount > 0) {
+    // Modality fallback (PRD prd_0.2.3_image_modality_file_fallback.md):
+    // model lacks image support → write the images into `<agentDir>/myagents_files/`
+    // and append `@<relative path>` to the user text so the model can choose
+    // to Read them (or hand them to other tools). Mirrors the behaviour of
+    // pasting non-image files in the Tab UI input. IM Bot path inherits this
+    // automatically via the same enqueueUserMessage entry point.
+    //
+    // Failure path (disk full, agent not yet bound, etc.) reverts to the
+    // legacy "synthetic text + chat:attachments-filtered" route so the SDK
+    // still sees a non-empty user turn and the message isn't silently lost.
+    let fallbackPaths: string[] = [];
+    if (agentDir) {
+      const targetDir = join(agentDir, 'myagents_files');
+      try {
+        const written = await writeBase64FilesToAgentDir(
+          images!.map((img) => ({ name: img.name, content: img.data })),
+          targetDir,
+          agentDir,
+        );
+        fallbackPaths = written.map((w) => w.relativePath);
+      } catch (err) {
+        const raw = err instanceof Error ? err.message : String(err);
+        console.warn(`[agent] modality fallback: failed to write ${filteredImageCount} image(s) to ${targetDir}, reverting to synthetic text. error=${raw}`);
+      }
+    }
+
+    if (fallbackPaths.length > 0) {
+      // Mirror the frontend non-image paste path (SimpleChatInput.tsx
+      // /api/files/add-gitignore call): keep workspace-internal artifacts
+      // out of git by default. PRD §6.4 explicitly calls for parity here.
+      ensureGitignorePattern(agentDir, 'myagents_files/');
+
+      const refs = fallbackPaths.map((p) => `@${p}`).join(' ');
+      effectiveText = effectiveText ? `${effectiveText}\n\n${refs}` : refs;
+      console.log(`[agent] modality fallback: ${fallbackPaths.length} image(s) → myagents_files/ (model=${modelForFilter ?? '(unknown)'})`);
+      broadcast('chat:attachments-fallback', {
+        kind: 'image',
+        count: fallbackPaths.length,
+        paths: fallbackPaths,
+        model: modelForFilter ?? null,
+      });
+    } else {
+      // Fallback unavailable (no agent dir or write failure): preserve the
+      // pre-PRD behaviour so we never drop the user turn entirely.
+      console.log(`[agent] modality filter: dropping ${filteredImageCount} image(s) for model=${modelForFilter ?? '(unknown)'} (text-only, fallback unavailable)`);
+      contentBlocks.push({
+        type: 'text',
+        text: `[${filteredImageCount} image attachment(s) omitted — current model does not support image input]`,
+      });
+      broadcast('chat:attachments-filtered', {
+        // 'fallback-failed' lets the frontend distinguish "model has no image
+        // modality, fallback worked" (no event) from "fallback was attempted
+        // but failed" (this branch). The pre-PRD path used 'modality'; we
+        // keep that as the legacy/no-agent-dir reason.
+        reason: agentDir ? 'fallback-failed' : 'modality',
+        kind: 'image',
+        count: filteredImageCount,
+        model: modelForFilter ?? null,
+      });
+    }
   }
 
-  // Add text content if present
-  if (trimmed) {
-    contentBlocks.push({ type: 'text', text: trimmed });
+  // Add text content if present (may include @reference suffix from fallback)
+  if (effectiveText) {
+    contentBlocks.push({ type: 'text', text: effectiveText });
   }
 
   const queueId = randomUUID();

@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### Improved
+
+- **图片粘贴现在永远不会丢**：以前在不支持图片输入的模型（DeepSeek、Kimi 文本模型等）下粘图，sidecar 会偷偷把图片丢掉只把文本送给 AI。现在改成自动把图片存到工作区 `myagents_files/`，输入框里出现 `@图片路径` 的引用——AI 至少知道你给了它什么文件，可以用 Read / OCR 等工具自己想办法处理。Tab UI 输入框（粘贴 + 拖拽）和 IM Bot（飞书 / Telegram / 钉钉 / 微信收到图片）都覆盖。Toast 文案也从原来的「会自动过滤，仅文本送达」改成「已转为文件存入工作区供模型读取」，更对得上实际行为。
+
+---
+
 ## [0.2.2] - 2026-04-28
 
 ### Added

@@ -61,6 +61,7 @@ const JSON_EVENTS = new Set([
     'chat:permission-mode-changed', // Backend permission mode changed (plan/auto/etc.) — sync frontend UI
     'workspace:files-changed', // File watcher detected workspace file changes
     'chat:attachments-filtered', // Sidecar stripped image/video/audio attachments because the resolved model lacks the modality (see modelSupportsModality)
+    'chat:attachments-fallback', // Sidecar wrote unsupported-modality attachments to <agentDir>/myagents_files/ and appended @<path> refs to the user text (see PRD prd_0.2.3_image_modality_file_fallback.md)
 ]);
 
 // Event types that can be JSON or plain string

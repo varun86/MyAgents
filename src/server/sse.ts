@@ -89,6 +89,7 @@ export const SSE_EVENT_PRIORITIES: Readonly<Record<string, SseEventPriority>> = 
   'chat:init': 'critical',
   'chat:api-retry': 'critical',
   'chat:attachments-filtered': 'critical',
+  'chat:attachments-fallback': 'critical',
   'chat:thinking-start': 'critical',
   'chat:content-block-stop': 'critical',
   'chat:message-sdk-uuid': 'critical',
