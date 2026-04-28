@@ -69,6 +69,12 @@ pub(crate) struct ImConsumerHandle {
     /// rotation — if the port changes, the old consumer must be cancelled
     /// and a new one spawned).
     pub(crate) sidecar_port: u16,
+    /// Sidecar session_id this consumer is bound to. Used to match sidecar-stop
+    /// broadcast events back to consumer entries: when a SessionSidecar is
+    /// removed (last owner released, drift kill, etc.), the registry sweeps
+    /// for handles whose `sidecar_session_id` matches the broadcast payload
+    /// and cancels them, preventing orphan reconnect loops against a dead port.
+    pub(crate) sidecar_session_id: String,
     /// Join handle is kept alive for the consumer task lifetime; we don't
     /// await it but holding it ensures the task isn't immediately dropped.
     pub(crate) _join: tauri::async_runtime::JoinHandle<()>,
@@ -1220,6 +1226,58 @@ async fn create_bot_instance<R: Runtime>(
     // session reset / Sidecar shutdown.
     let im_consumers: ImConsumers = Arc::new(Mutex::new(HashMap::new()));
     let im_consumers_for_loop = Arc::clone(&im_consumers);
+
+    // Subscribe to sidecar-stop broadcast and cancel matching consumers in
+    // lockstep. Without this, when the IM Agent owner is released and the
+    // sidecar shuts down (Owner model: last owner → kill), the long-poll
+    // ImEventConsumer kept reconnecting to the dead port forever (only the
+    // 60s idle collector or app shutdown would notice — and only if the
+    // router-level last_active also crossed the idle threshold). Subscribe
+    // once per IM bot; tokio broadcast handles fan-out to multiple bots.
+    let im_consumers_for_sidecar_stop = Arc::clone(&im_consumers);
+    let mut sidecar_stop_rx = sidecar_manager.lock().unwrap().subscribe_stop_events();
+    let mut sidecar_stop_shutdown_rx = shutdown_rx.clone();
+    let _sidecar_stop_handle = tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::select! {
+                evt = sidecar_stop_rx.recv() => {
+                    match evt {
+                        Ok(stopped_session_id) => {
+                            let mut guard = im_consumers_for_sidecar_stop.lock().await;
+                            // Sweep registry for any consumer bound to this sidecar
+                            // session_id. Multiple peer_session_keys can in principle
+                            // share a session_id (e.g. cross-runtime fork transitions
+                            // momentarily), so we collect all matches and cancel each.
+                            let to_remove: Vec<String> = guard.iter()
+                                .filter(|(_, h)| h.sidecar_session_id == stopped_session_id)
+                                .map(|(k, _)| k.clone())
+                                .collect();
+                            for key in to_remove {
+                                if let Some(handle) = guard.remove(&key) {
+                                    handle.cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+                                    ulog_info!(
+                                        "[im] Cancelled ImEventConsumer for {} (sidecar session {} stopped)",
+                                        key, stopped_session_id
+                                    );
+                                }
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                            ulog_warn!(
+                                "[im] sidecar-stop subscriber lagged by {} events — may have leaked consumers",
+                                n
+                            );
+                            continue;
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+                _ = sidecar_stop_shutdown_rx.changed() => {
+                    if *sidecar_stop_shutdown_rx.borrow() { break; }
+                }
+            }
+        }
+    });
     let platform_for_loop = config.platform.clone();
     // Agent link — starts as None; set after bot is moved into AgentInstance.
     // The processing loop holds a clone of this Arc and checks it after each message.
@@ -3200,6 +3258,7 @@ where
             cancel,
             reply_router: Arc::clone(&reply_router),
             sidecar_port,
+            sidecar_session_id: sidecar_session_id.to_string(),
             _join: join,
         },
     );
