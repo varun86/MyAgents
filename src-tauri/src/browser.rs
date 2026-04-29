@@ -21,12 +21,15 @@ use crate::ulog_info;
 /// WKWebView's default UA on macOS omits the `Version/X Safari/Y` suffix
 /// that real Safari emits, which several big sites — baidu.com main page is
 /// the canonical example — fingerprint as a non-browser client and respond
-/// to with degraded/empty pages or redirect chains. Setting an explicit
-/// real-Safari UA makes those sites treat us as a normal Safari install.
+/// with degraded/empty pages or redirect chains. (A user session log showed
+/// baidu.com cycling at ~30 redirects/sec until the user navigated away.)
 ///
-/// Bot-detection arms race notwithstanding, this single line is the difference
-/// between baidu.com loading normally and a 30-redirects-per-second loop.
-const BROWSER_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15";
+/// We pretend to be Chrome rather than Safari: most CN sites optimize for
+/// Chrome and the recognition rate is higher. The tradeoff is that the
+/// underlying engine is still WebKit, so a small number of UA-sniffing sites
+/// may serve Blink-only code paths and hit subtle rendering or JS-API
+/// differences. Worth it for the "things actually load" win.
+const BROWSER_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36";
 
 /// Parse a URL string that may be an absolute file path or an http(s) URL.
 /// Handles both Unix (`/Users/...`) and Windows (`C:\Users\...`) paths.
