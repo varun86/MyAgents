@@ -164,10 +164,13 @@ export default function BrowserPanel({
         if (cancelled) return;
         const next = event.payload;
         setCurrentUrl(next);
-        // Latch hasNavigated on first real (non-blank) URL — lets the React
-        // empty state release control over the panel for the rest of this
-        // webview's lifetime.
-        if (next && next !== BROWSER_BLANK_URL) {
+        // Latch hasNavigated on first real navigation — lets the React empty
+        // state release control over the panel for the rest of this webview's
+        // lifetime. Anchored to the scheme (anything but `data:`) rather than
+        // string equality with BROWSER_BLANK_URL: WebKit reports the data: URL
+        // back with Tauri's CSP `<meta>` injection appended, so equality check
+        // breaks and the latch would fire on the very first blank-page load.
+        if (next && !next.startsWith('data:')) {
           setHasNavigated((prev) => (prev ? prev : true));
         }
         onUrlChangeRef.current?.(next);
