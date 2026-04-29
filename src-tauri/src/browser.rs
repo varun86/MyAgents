@@ -18,18 +18,99 @@ use crate::ulog_info;
 
 /// User-Agent for the embedded browser webview.
 ///
-/// WKWebView's default UA on macOS omits the `Version/X Safari/Y` suffix
-/// that real Safari emits, which several big sites — baidu.com main page is
-/// the canonical example — fingerprint as a non-browser client and respond
-/// with degraded/empty pages or redirect chains. (A user session log showed
-/// baidu.com cycling at ~30 redirects/sec until the user navigated away.)
+/// The default WebView UA on each platform is missing parts (macOS WKWebView
+/// drops the `Version/X Safari/Y` suffix; Windows WebView2 advertises Edge
+/// instead of Chrome; Linux WebKitGTK is rarer and frequently fingerprinted
+/// as a bot) which several big sites — baidu.com main page is the canonical
+/// case — flag and respond to with degraded/empty pages or redirect chains.
+/// (A user session log showed baidu.com cycling at ~30 redirects/sec.)
 ///
-/// We pretend to be Chrome rather than Safari: most CN sites optimize for
-/// Chrome and the recognition rate is higher. The tradeoff is that the
-/// underlying engine is still WebKit, so a small number of UA-sniffing sites
-/// may serve Blink-only code paths and hit subtle rendering or JS-API
-/// differences. Worth it for the "things actually load" win.
+/// We pretend to be a recent stable Chrome on each host OS rather than the
+/// host engine's actual identity: most sites — especially the CN ecosystem —
+/// optimize for Chrome and the recognition rate is highest there. The
+/// tradeoff is that some UA-sniffing sites may serve Blink-only code paths
+/// that the host engine (WebKit on macOS, WebKit2GTK on Linux) doesn't
+/// implement identically. Worth it for the "things actually load" win.
+#[cfg(target_os = "macos")]
 const BROWSER_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36";
+#[cfg(target_os = "windows")]
+const BROWSER_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36";
+#[cfg(target_os = "linux")]
+const BROWSER_USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36";
+
+/// Document-start init script injected into every page in the embedded
+/// browser. Two responsibilities:
+///
+/// 1. **`window.open` shim** — we don't have multi-tab; route programmatic
+///    `window.open(url)` calls to the same page so the user actually sees
+///    something happen instead of a silently-blocked popup. (WKWebView's
+///    `javaScriptCanOpenWindowsAutomatically` defaults to false and isn't
+///    exposed by wry, so non-user-gesture window.open never reaches our
+///    on_new_window handler.) The `<a target="_blank">` path goes through
+///    on_new_window → navigate-current-webview separately.
+///
+/// 2. **Cmd/Ctrl/middle-click escape hatch** — power users expect modifier+
+///    click to open in the system browser. Since wry's on_new_window doesn't
+///    surface modifier state, we intercept the click in JS and signal Rust
+///    via a navigation to a custom `myagents-internal://open-external/?url=`
+///    scheme. on_navigation parses the request, opens the target in the OS
+///    default browser, and cancels the navigation so the current page stays.
+///    An iframe is used so the trigger doesn't replace the visible page.
+const BROWSER_INIT_SCRIPT: &str = r#"
+(function() {
+  if (window.__myagentsBrowserShimInstalled) return;
+  window.__myagentsBrowserShimInstalled = true;
+
+  // 1. Route window.open() to current page (no multi-tab support).
+  var origOpen = window.open;
+  window.open = function(url, target, features) {
+    if (url && /^https?:/i.test(String(url))) {
+      window.location.href = String(url);
+      return window;
+    }
+    return origOpen ? origOpen.apply(this, arguments) : null;
+  };
+
+  // 2. Cmd/Ctrl/middle-click on links → external browser via custom scheme.
+  function handleClick(e) {
+    var a = e.target && e.target.closest && e.target.closest('a[href]');
+    if (!a) return;
+    var href = a.href;
+    if (!href || !/^https?:/i.test(href)) return;
+    if (e.metaKey || e.ctrlKey || e.button === 1) {
+      e.preventDefault();
+      e.stopPropagation();
+      var ifr = document.createElement('iframe');
+      ifr.src = 'myagents-internal://open-external/?url=' + encodeURIComponent(href);
+      ifr.style.display = 'none';
+      (document.documentElement || document.body).appendChild(ifr);
+      setTimeout(function() {
+        if (ifr.parentNode) ifr.parentNode.removeChild(ifr);
+      }, 100);
+    }
+  }
+  document.addEventListener('click', handleClick, true);
+  document.addEventListener('auxclick', handleClick, true);
+})();
+"#;
+
+/// Spawn the OS default-browser opener for a URL. URL must already be
+/// validated as http/https/mailto by the caller — we don't want to hand
+/// arbitrary schemes (`file:`, `javascript:`, etc.) to the system opener.
+fn spawn_external_open(url: &str) {
+    // OS openers are user-visible system commands (CLAUDE.md exception);
+    // skip `process_cmd` here and match the pattern used by thought.rs/task.rs.
+    #[cfg(target_os = "macos")]
+    let res = std::process::Command::new("open").arg(url).spawn();
+    #[cfg(target_os = "windows")]
+    let res = std::process::Command::new("cmd").args(["/C", "start", "", url]).spawn();
+    #[cfg(target_os = "linux")]
+    let res = std::process::Command::new("xdg-open").arg(url).spawn();
+
+    if let Err(e) = res {
+        ulog_info!("[browser] spawn_external_open failed for {}: {}", url, e);
+    }
+}
 
 /// Parse a URL string that may be an absolute file path or an http(s) URL.
 /// Handles both Unix (`/Users/...`) and Windows (`C:\Users\...`) paths.
@@ -111,6 +192,7 @@ pub async fn cmd_browser_create(
 
     let builder = WebviewBuilder::new(&label, tauri::WebviewUrl::External(parsed_url.clone()))
         .user_agent(BROWSER_USER_AGENT)
+        .initialization_script(BROWSER_INIT_SCRIPT)
         .on_navigation(move |nav_url| {
             let scheme = nav_url.scheme();
             // Security: block dangerous schemes; allow everything else.
@@ -118,6 +200,27 @@ pub async fn cmd_browser_create(
             // already sandboxed (browser.json zero Tauri permissions).
             if scheme == "javascript" {
                 ulog_info!("[browser] on_navigation BLOCKED: {} (scheme: {})", nav_url, scheme);
+                return false;
+            }
+            // Internal signaling channel: BROWSER_INIT_SCRIPT triggers an
+            // iframe nav to myagents-internal://open-external/?url=… on
+            // Cmd/Ctrl/middle-click. Hand the URL to the OS default browser
+            // and cancel the navigation so the current page is undisturbed.
+            if scheme == "myagents-internal" && nav_url.host_str() == Some("open-external") {
+                let target_str = nav_url
+                    .query_pairs()
+                    .find(|(k, _)| k == "url")
+                    .map(|(_, v)| v.into_owned());
+                if let Some(target_str) = target_str {
+                    if let Ok(target) = Url::parse(&target_str) {
+                        if matches!(target.scheme(), "http" | "https" | "mailto") {
+                            ulog_info!("[browser] open-external (Cmd/Ctrl/middle-click): {}", target);
+                            spawn_external_open(target.as_str());
+                        } else {
+                            ulog_info!("[browser] open-external rejected non-allowlisted scheme: {}", target.scheme());
+                        }
+                    }
+                }
                 return false;
             }
             // Emit URL changes for http/https/file (skip about:, data:, blob: noise)
