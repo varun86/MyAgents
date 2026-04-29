@@ -2171,9 +2171,18 @@ async function main() {
               return jsonResponse({ success: false, error: runtimeResult.error ?? 'Failed to start cron via external runtime' }, 503);
             }
           } else {
-            // Cron tasks are unattended — bypass all permissions so tool requests
-            // don't block indefinitely waiting for a user who isn't present.
-            await enqueueUserMessage(wrappedPrompt, [], 'fullAgency', effectiveModel, effectiveProviderEnv);
+            // Cron tasks are unattended — by default bypass all permissions
+            // so tool requests don't block indefinitely waiting for a user
+            // who isn't present. But if the user explicitly picked a stricter
+            // mode in the task editor, honor it (PRD 0.2.4 §需求 4 — "默认
+            // 最大权限，主动选择则尊重"). Precedence: payload.permissionMode
+            // > snapshot resolved > 'fullAgency'.
+            const effectivePermissionMode = (
+              (payload.permissionMode as PermissionMode | undefined)
+              ?? (effectiveRuntimeConfig?.permissionMode as PermissionMode | undefined)
+              ?? 'fullAgency'
+            );
+            await enqueueUserMessage(wrappedPrompt, [], effectivePermissionMode, effectiveModel, effectiveProviderEnv);
           }
           // Reset scenario after enqueue — already consumed by startStreamingSession()
           resetInteractionScenario();
@@ -2469,11 +2478,20 @@ async function main() {
             // from interleaving across the abort/restart window).
             await applyMcpOverrideAndAwaitReady(target);
 
-            // Cron tasks are unattended — bypass all permissions so tool requests
-            // (e.g. Bash) don't block forever waiting for human approval.
+            // Cron tasks are unattended — by default bypass all permissions
+            // so tool requests (e.g. Bash) don't block forever waiting for
+            // human approval. But if the user explicitly picked a stricter
+            // mode in the task editor, honor it (PRD 0.2.4 §需求 4 — "默认
+            // 最大权限，主动选择则尊重"). Precedence: payload.permissionMode
+            // > snapshot resolved > 'fullAgency'.
             // T15: effectiveModel / effectiveProviderEnv come from the session snapshot
             //      (single_session) or payload defaults (new_session / fallback).
-            const enqueueResult = await enqueueUserMessage(wrappedPrompt, [], 'fullAgency', effectiveModel, effectiveProviderEnv);
+            const effectivePermissionMode = (
+              (payload.permissionMode as PermissionMode | undefined)
+              ?? (effectiveRuntimeConfig?.permissionMode as PermissionMode | undefined)
+              ?? 'fullAgency'
+            );
+            const enqueueResult = await enqueueUserMessage(wrappedPrompt, [], effectivePermissionMode, effectiveModel, effectiveProviderEnv);
             console.log('[cron] execute-sync: user message enqueued, queued:', enqueueResult.queued, 'queueId:', enqueueResult.queueId);
 
             // Wait for session to become idle (execution complete)
