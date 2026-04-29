@@ -289,7 +289,7 @@ export function TaskAdvancedConfigEditor(props: Props) {
   const resetMcpToFollow = () => setMcpEnabledServers(undefined);
 
   return (
-    <div className="rounded-[var(--radius-md)] border border-[var(--line-subtle)] bg-[var(--paper-inset)]/50">
+    <div className="rounded-[var(--radius-md)] border border-[var(--line)]">
       {/* Toggle header */}
       <button
         type="button"
@@ -388,16 +388,14 @@ export function TaskAdvancedConfigEditor(props: Props) {
             </FieldRow>
           )}
 
-          {/* MCP enable list — builtin only */}
+          {/* MCP enable list — builtin only. Hint + reset action share a
+              single bottom row: status text on the left, "恢复跟随 Agent"
+              on the right (only when there's actually an override to revert
+              — pristine state hides the button rather than disabling it,
+              since a disabled button reads as "I should be able to click
+              this but can't" while no button reads as "nothing to do here"). */}
           {isBuiltin && (
-            <FieldRow
-              label="MCP 工具"
-              hint={
-                mcpEnabledServers === undefined
-                  ? '当前跟随 Agent 工作区的 MCP 启用列表'
-                  : `当前启用 ${mcpEnabledServers.length} 个 MCP 工具`
-              }
-            >
+            <FieldRow label="MCP 工具">
               {mcpCatalogue.length === 0 ? (
                 <div className="rounded-[var(--radius-md)] border border-dashed border-[var(--line)] px-3 py-3 text-[12px] text-[var(--ink-muted)]">
                   尚未在「设置 → MCP 工具」中安装任何 MCP，无法在此覆盖。
@@ -429,15 +427,21 @@ export function TaskAdvancedConfigEditor(props: Props) {
                       );
                     })}
                   </div>
-                  <div className="mt-2 flex items-center gap-3 text-[11px]">
-                    <button
-                      type="button"
-                      onClick={resetMcpToFollow}
-                      disabled={mcpEnabledServers === undefined}
-                      className="text-[var(--ink-muted)] hover:text-[var(--accent-warm)] disabled:cursor-not-allowed disabled:opacity-40"
-                    >
-                      恢复跟随 Agent
-                    </button>
+                  <div className="mt-2 flex items-center justify-between gap-3 text-[12px] leading-snug text-[var(--ink-muted)]">
+                    <span>
+                      {mcpEnabledServers === undefined
+                        ? '当前跟随 Agent 工作区的 MCP 启用列表'
+                        : `当前启用 ${mcpEnabledServers.length} 个 MCP 工具`}
+                    </span>
+                    {mcpEnabledServers !== undefined && (
+                      <button
+                        type="button"
+                        onClick={resetMcpToFollow}
+                        className="shrink-0 text-[var(--ink-muted)] transition-colors hover:text-[var(--accent-warm)]"
+                      >
+                        恢复跟随 Agent
+                      </button>
+                    )}
                   </div>
                 </>
               )}

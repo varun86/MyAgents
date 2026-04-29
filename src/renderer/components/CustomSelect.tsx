@@ -27,6 +27,17 @@ interface CustomSelectProps {
     placeholder?: string;
     triggerIcon?: ReactNode;
     className?: string;
+    /**
+     * Trigger size — controls the closed-state padding + font size:
+     *   'compact' (default when `compact={true}`): 11px / px-2 py-1
+     *   'sm'      (default): 12px / px-3 py-2 — fine-print fields, dense forms
+     *   'md':                14px / px-3 py-2.5 — primary fields the user
+     *                        focuses on (e.g. workspace picker in dispatch
+     *                        dialog where the active workspace is the most
+     *                        important context to read at a glance).
+     * `compact` prop kept for back-compat; `size` is the modern API.
+     */
+    size?: 'sm' | 'md';
     compact?: boolean;
     footerAction?: {
         label: string;
@@ -42,6 +53,7 @@ export default function CustomSelect({
     placeholder = '请选择',
     triggerIcon,
     className,
+    size = 'sm',
     compact,
     footerAction,
 }: CustomSelectProps) {
@@ -61,10 +73,23 @@ export default function CustomSelect({
                 ref={triggerRef}
                 type="button"
                 onClick={() => setIsOpen(!isOpen)}
-                className={`flex w-full items-center gap-2 rounded-lg border border-[var(--line)] bg-[var(--paper)] text-left transition-colors hover:border-[var(--ink-subtle)] ${compact ? 'px-2 py-1 text-[11px]' : 'px-3 py-2 text-xs'}`}
+                className={`flex w-full items-center gap-2 rounded-lg border border-[var(--line)] bg-[var(--paper)] text-left transition-colors hover:border-[var(--ink-subtle)] ${
+                    compact
+                        ? 'px-2 py-1 text-[11px]'
+                        : size === 'md'
+                            ? 'px-3 py-2.5 text-sm'
+                            : 'px-3 py-2 text-xs'
+                }`}
             >
                 {triggerIcon && (
                     <span className="shrink-0 text-[var(--ink-muted)]">{triggerIcon}</span>
+                )}
+                {/* Mirror the selected option's `icon` (when present) into the
+                    closed trigger so users see the same visual marker as the
+                    dropdown row they picked. Falls back gracefully when the
+                    option set has no icons. */}
+                {!triggerIcon && selectedOption?.icon && (
+                    <span className="shrink-0">{selectedOption.icon}</span>
                 )}
                 <span className={`min-w-0 flex-1 truncate ${selectedOption ? 'text-[var(--ink)]' : 'text-[var(--ink-muted)]'}`}>
                     {selectedOption?.label ?? placeholder}

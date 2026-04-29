@@ -397,6 +397,7 @@ export function DispatchTaskDialog({
                   options={projectOptions}
                   onChange={setWorkspacePath}
                   placeholder="选择工作区"
+                  size="md"
                 />
                 <p className="mt-2 text-[13px] text-[var(--ink-muted)]">
                   默认使用该 Agent 的 runtime / 模型 / 权限 / MCP 工具。可在下方「高级配置」单独覆盖。
