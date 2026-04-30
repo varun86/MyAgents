@@ -741,10 +741,11 @@ function printCronList(tasks: Array<Record<string, unknown>>): void {
   }
   const pad = (s: string, n: number) => s.padEnd(n);
 
-  // R9: status vocabulary is translated server-side in
-  // `CronTaskSummary::from` (management_api.rs) so plain-text and `--json`
-  // modes stay consistent. CLI just displays whatever it got.
-  const displayStatus = (raw: unknown): string => String(raw);
+  // R9: status carries the raw enum name (Running / Stopped) — the
+  // scheduler-state vocabulary. The transient "currently executing" state
+  // is a separate concept, surfaced via `t.currentlyExecuting` and
+  // rendered as a `*` marker after the task ID. See `cron readme` for
+  // the full vocabulary explanation.
 
   // R6: short time format for "Next" / "Last" columns. Locale-independent,
   // fixed width (16 chars), readable.
@@ -786,9 +787,12 @@ function printCronList(tasks: Array<Record<string, unknown>>): void {
     const lastMark = lastOk === true ? '✓ ' : lastOk === false ? '✗ ' : '  ';
     const lastTime = fmtTime(t.lastExecutedAt);
     const last = lastTime === '—' ? '—' : `${lastMark}${lastTime}`;
+    // Asterisk marker = a tick is firing this very instant (scheduled or
+    // run-now). Distinct from `Running` status — see `cron readme`.
+    const idDisplay = `${String(t.id).slice(0, 22)}${t.currentlyExecuting ? '*' : ''}`;
     console.log(
-      pad(String(t.id).slice(0, 22), 24) +
-      pad(displayStatus(t.status), 10) +
+      pad(idDisplay, 24) +
+      pad(String(t.status), 10) +
       pad(schedule.slice(0, 16), 18) +
       pad(fmtTime(t.nextExecutionAt), 18) +
       pad(last.slice(0, 17), 18) +
@@ -797,8 +801,10 @@ function printCronList(tasks: Array<Record<string, unknown>>): void {
       String(t.name ?? (t.prompt as string)?.slice(0, 40) ?? '')
     );
   }
-  const enabled = tasks.filter(t => t.status === 'enabled').length;
-  console.log(`\n${tasks.length} cron tasks (${enabled} enabled)`);
+  const running = tasks.filter(t => t.status === 'Running').length;
+  const executing = tasks.filter(t => t.currentlyExecuting === true).length;
+  const execNote = executing > 0 ? `, ${executing} executing now` : '';
+  console.log(`\n${tasks.length} cron tasks (${running} running${execNote})`);
 }
 
 function printCronRuns(runs: Array<Record<string, unknown>>, full: boolean = false): void {
@@ -846,7 +852,7 @@ function printCronRuns(runs: Array<Record<string, unknown>>, full: boolean = fal
 
 function printCronStatus(data: Record<string, unknown>): void {
   console.log(`Total tasks: ${data.totalTasks ?? 0}`);
-  console.log(`Enabled:     ${data.enabledTasks ?? 0}`);
+  console.log(`Running:     ${data.runningTasks ?? 0}`);
   if (data.lastExecutedAt) console.log(`Last executed: ${data.lastExecutedAt}`);
   if (data.nextExecutionAt) console.log(`Next execution: ${data.nextExecutionAt}`);
 }

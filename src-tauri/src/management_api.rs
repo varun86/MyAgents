@@ -199,27 +199,32 @@ struct CronTaskSummary {
     /// PRD 0.2.5 R6.
     #[serde(skip_serializing_if = "Option::is_none")]
     last_run_duration_ms: Option<u64>,
+    /// PRD 0.2.5 R9 — transient flag: a tick (scheduled or run-now) is
+    /// firing this very instant. Distinct from `status`: a task can be
+    /// `status: Running` (scheduler enabled, not currently firing) or
+    /// `status: Running, currently_executing: true` (scheduler enabled
+    /// AND a tick is in flight). Populated by the list handler from
+    /// `executing_tasks`; not persisted. Default false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    currently_executing: bool,
 }
 
 impl From<CronTask> for CronTaskSummary {
     fn from(t: CronTask) -> Self {
-        // PRD 0.2.5 R9 — translate the underlying enum values into the
-        // scheduler-semantic vocabulary at the API boundary. Both CLI
-        // plain-text and `--json` output flow through this struct, so the
-        // vocabulary is uniform across modes (matters for AI agents that
-        // consume both forms in the same session). Persistence
-        // (`cron_tasks.json`) and Tauri IPC keep the raw enum
-        // (`Running` / `Stopped`) — no schema migration, frontend untouched.
-        let status = match t.status {
-            cron_task::TaskStatus::Running => "enabled".to_string(),
-            cron_task::TaskStatus::Stopped => "disabled".to_string(),
-        };
-
+        // Status field carries the raw `TaskStatus` enum name
+        // ("Running" / "Stopped") — matches enum, persistence, Tauri IPC,
+        // and frontend. The persistent state and the transient
+        // "currently executing" state are SEPARATE concepts; the latter
+        // is surfaced via `currently_executing` populated by the list
+        // handler (PRD 0.2.5 R9 — vocabulary clarification).
         Self {
             id: t.id,
             name: t.name,
             prompt: t.prompt,
-            status,
+            status: serde_json::to_value(&t.status)
+                .ok()
+                .and_then(|v| v.as_str().map(|s| s.to_string()))
+                .unwrap_or_else(|| "unknown".to_string()),
             schedule: t.schedule,
             interval_minutes: t.interval_minutes,
             execution_count: t.execution_count,
@@ -228,6 +233,10 @@ impl From<CronTask> for CronTaskSummary {
             next_execution_at: t.next_execution_at,
             last_run_ok: t.last_run_ok,
             last_run_duration_ms: t.last_run_duration_ms,
+            // Default false — list_cron_handler post-processes to set true
+            // for ids in the executing snapshot. Single-task projections
+            // (e.g. /api/cron/run) don't need this.
+            currently_executing: false,
         }
     }
 }
@@ -349,7 +358,19 @@ async fn list_cron_handler(
         manager.get_all_tasks().await
     };
 
-    let summaries: Vec<CronTaskSummary> = tasks.into_iter().map(CronTaskSummary::from).collect();
+    // PRD 0.2.5 R9 — single snapshot of "currently executing" set, applied
+    // to all summaries. Avoids N separate lock acquisitions; correct for
+    // a moment-in-time read (the field is transient by design).
+    let executing = manager.executing_snapshot().await;
+    let summaries: Vec<CronTaskSummary> = tasks
+        .into_iter()
+        .map(|t| {
+            let is_executing = executing.contains(&t.id);
+            let mut summary = CronTaskSummary::from(t);
+            summary.currently_executing = is_executing;
+            summary
+        })
+        .collect();
     Json(serde_json::json!({ "ok": true, "tasks": summaries }))
 }
 
@@ -491,17 +512,14 @@ async fn status_cron_handler(
     };
 
     let total = tasks.len();
-    // PRD 0.2.5 R9 — vocabulary uniform with `cron list`. `enabledTasks`
-    // counts tasks whose scheduler is active (raw enum: Running). Both
-    // CLI plain text and `--json` consumers see the same field name.
-    let enabled = tasks.iter().filter(|t| t.status == cron_task::TaskStatus::Running).count();
+    let running = tasks.iter().filter(|t| t.status == cron_task::TaskStatus::Running).count();
     let last_executed = tasks.iter().filter_map(|t| t.last_executed_at).max();
     let next_execution = tasks.iter().filter_map(|t| t.next_execution_at.clone()).min();
 
     Json(serde_json::json!({
         "ok": true,
         "totalTasks": total,
-        "enabledTasks": enabled,
+        "runningTasks": running,
         "lastExecutedAt": last_executed,
         "nextExecutionAt": next_execution,
     }))

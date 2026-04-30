@@ -1560,6 +1560,13 @@ impl CronTaskManager {
         executing.contains(task_id)
     }
 
+    /// PRD 0.2.5 R9 — clone the currently-executing set in one read-lock
+    /// acquisition. Lets `list_cron_handler` mark `currently_executing`
+    /// per task without N separate `is_task_executing` calls.
+    pub async fn executing_snapshot(&self) -> HashSet<String> {
+        self.executing_tasks.read().await.clone()
+    }
+
     /// PRD 0.2.5 (cross-review C4) — atomic check-and-insert. Returns true if
     /// the task was successfully reserved (was NOT executing), false if it
     /// was already executing. Caller MUST `mark_task_complete` if true is
@@ -1610,7 +1617,11 @@ impl CronTaskManager {
         // `trigger_now` call could both observe "not executing" between
         // is_task_executing() and mark_task_executing().
         if !self.try_mark_task_executing(task_id).await {
-            return Err("task is currently executing; try again after the current run completes".to_string());
+            return Err(format!(
+                "Cannot run-now: a scheduled tick or earlier run-now is firing for {} this instant. \
+                 Wait for it to finish (typically <60s); see `myagents cron runs {} --limit 1` after.",
+                task_id, task_id
+            ));
         }
 
         let dispatched_at = Utc::now();

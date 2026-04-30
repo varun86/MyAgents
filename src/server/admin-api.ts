@@ -2005,6 +2005,28 @@ COMMANDS
                                   truncated to 80 chars per row; pass --full
                                   for untruncated output)
 
+STATUS VOCABULARY (in 'list' / 'status' output and --json)
+  Two ORTHOGONAL concepts. Don't confuse them.
+
+  status field — the persistent scheduler state:
+    Running    Scheduler is enabled. The task fires at its next scheduled
+               time (see the 'Next' column). NOT the same as "currently
+               executing" — see currentlyExecuting below.
+    Stopped    Scheduler is disabled. The task never fires while in this
+               state, even when the schedule expression matches. Resume
+               with 'cron start <taskId>'.
+
+  currentlyExecuting field (--json) / '*' marker after the ID (plain text):
+    A tick is firing this very instant — either a scheduled fire or a
+    'cron run-now' invocation. Calling 'cron run-now' on a task whose
+    marker is showing returns a busy error.
+
+  status=Running  +  no '*' marker     →  scheduled, not firing right now
+  status=Running  +  '*' marker        →  scheduled AND firing this instant
+  status=Stopped  +  no '*' marker     →  disabled, not firing
+  status=Stopped  +  '*' marker        →  rare; a scheduled tick was already
+                                          in flight when the task got stopped
+
 CREATE OPTIONS (myagents cron add ...)
   --name <text>                   Human-readable label (optional)
   --prompt <text>                 The prompt the AI runs each tick. For short
