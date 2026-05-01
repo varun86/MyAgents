@@ -39,15 +39,15 @@ interface LauncherInputContextRowProps {
   onRuntimeChange?: (runtime: RuntimeType) => void;
 }
 
-// Resting background that distinguishes the chip area from the launcher's
-// cream page background. `var(--paper-inset)` is the project's "sunken
-// surface" token — half a step darker than the page, reads as "this is a
-// distinct slot". The inner button's existing
-// `hover:bg-[var(--hover-bg)]` deepens the tint on hover; the
-// `transition-colors` on this wrapper smooths the no-hover-state edge so
-// the cursor leaving the button doesn't snap back.
+// Resting → hover deepening contract: chip starts on the lighter `--hover-bg`
+// (7% warm-brown tint) so it's barely there but distinguishable from the
+// cream page; hover lands on the heavier `--paper-inset` (solid beige). The
+// inner button's hardcoded `hover:bg-[var(--hover-bg)]` would normally
+// paint over the wrapper's bg on hover, defeating the deepening — we
+// override with `[&_button:hover]:!bg-transparent` so the wrapper's hover
+// bg is what the user sees. `!` forces precedence over the button's class.
 const CHIP_WRAPPER_CLASS =
-  'inline-flex items-center rounded-lg bg-[var(--paper-inset)] transition-colors hover:bg-[var(--hover-bg)]';
+  'inline-flex items-center rounded-lg bg-[var(--hover-bg)] transition-colors hover:bg-[var(--paper-inset)] [&_button:hover]:!bg-transparent';
 
 export default memo(function LauncherInputContextRow({
   projects,
