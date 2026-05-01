@@ -82,8 +82,16 @@ export default function WorkspaceSelector({
                 anchorRef={triggerRef}
                 placement="top-start"
                 offset={6}
-                className="w-64 max-h-72 overflow-auto rounded-xl bg-[var(--paper)] py-1"
+                className="w-64 rounded-xl bg-[var(--paper)]"
             >
+                {/* Scroll container — same pit-of-failure as CustomSelect.tsx
+                 *  (see its comment): Popover's DEFAULT_CHROME ships
+                 *  `overflow-hidden` for rounded-corner clipping. Putting
+                 *  `overflow-auto` on the same element gets overridden by
+                 *  `overflow-hidden` due to Tailwind's alphabetical generation
+                 *  order — trackpad scroll gets eaten silently. Nested div
+                 *  sidesteps the conflict: outer clips, inner scrolls. */}
+                <div className="max-h-72 overflow-y-auto py-1">
                 {/* Default workspace group */}
                 {defaultProject && (
                     <>
@@ -149,6 +157,7 @@ export default function WorkspaceSelector({
                         <Plus className="h-3.5 w-3.5" />
                         <span>选择文件夹...</span>
                     </button>
+                </div>
                 </div>
             </Popover>
         </>
