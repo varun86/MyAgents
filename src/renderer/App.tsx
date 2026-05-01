@@ -33,11 +33,13 @@ import { apiGetJson } from '@/api/apiFetch';
 import { updateSession } from '@/api/sessionClient';
 import { dismissTopmost } from '@/utils/closeLayer';
 import { forceFlushLogs, setLogServerUrl, clearLogServerUrl } from '@/utils/frontendLogger';
-import { CUSTOM_EVENTS, createPendingSessionId } from '../shared/constants';
+import { normalizeRuntime, planSessionOpen } from '@/utils/sessionOpenPlan';
+import { CUSTOM_EVENTS, createPendingSessionId, isPendingSessionId } from '../shared/constants';
 import type { CapabilityInitialSelect } from '../shared/skillsTypes';
 import { ensureSelfAwarenessWorkspace, resolveBuiltinSelection, pairBuiltinSelection } from '@/config/configService';
 import { getAgentByWorkspacePath, getAgentById } from '@/config/services/agentConfigService';
 import type { SessionMetadata } from '@/api/sessionClient';
+import type { RuntimeType } from '../shared/types/runtime';
 
 // ============================================================
 // User Support Prompt Builder
@@ -53,6 +55,25 @@ function buildSupportPrompt(description: string, appVersion: string): string {
     ``,
     `请使用 /support skill 帮助用户解决这个问题。`,
   ].join('\n');
+}
+
+async function resolveSessionRuntimeForOpen(
+  sessionId: string | null | undefined,
+  fallbackRuntime: RuntimeType,
+  multiAgentRuntime: boolean | undefined,
+): Promise<RuntimeType> {
+  if (!multiAgentRuntime || !sessionId || isPendingSessionId(sessionId)) {
+    return fallbackRuntime;
+  }
+  try {
+    const meta = await apiGetJson<{ success: boolean; session?: SessionMetadata }>(`/sessions/${encodeURIComponent(sessionId)}?limit=1`);
+    return normalizeRuntime(meta.session?.runtime ?? fallbackRuntime);
+  } catch (error) {
+    // Non-fatal: sidecar spawn/switch paths remain authoritative. Falling
+    // back only affects whether the UI opens a new tab proactively.
+    console.warn(`[App] Failed to resolve runtime for session ${sessionId}, using fallback ${fallbackRuntime}:`, error);
+    return fallbackRuntime;
+  }
 }
 
 // ============================================================
@@ -809,67 +830,82 @@ export default function App() {
 
     setTabErrors((prev) => ({ ...prev, [activeTabId]: null }));
     setLoadingTabs((prev) => ({ ...prev, [activeTabId]: true }));
+    let targetTabId = activeTabId;
 
     try {
-      // ========================================
-      // Scenario 1: Session already open in a Tab
-      // ========================================
+      const activeTab = tabsRef.current.find(t => t.id === activeTabId);
+
       if (sessionId) {
-        // Find if session is already open in any existing Tab
-        const existingTab = tabsRef.current.find(t => t.sessionId === sessionId);
-        if (existingTab) {
-          console.log(`[App] Scenario 1: Session ${sessionId} already in tab ${existingTab.id}, jumping to it`);
-          setActiveTabId(existingTab.id);
+        const cfg = configRef.current;
+        const targetAgentRuntime = normalizeRuntime(getAgentByWorkspacePath(cfg, project.path)?.runtime);
+        const currentAgentRuntime = activeTab?.agentDir
+          ? normalizeRuntime(getAgentByWorkspacePath(cfg, activeTab.agentDir)?.runtime)
+          : targetAgentRuntime;
+        const [
+          targetRuntime,
+          resolvedCurrentRuntime,
+          activation,
+          currentTabCronTask,
+        ] = await Promise.all([
+          resolveSessionRuntimeForOpen(sessionId, targetAgentRuntime, cfg?.multiAgentRuntime),
+          resolveSessionRuntimeForOpen(activeTab?.sessionId, currentAgentRuntime, cfg?.multiAgentRuntime),
+          getSessionActivation(sessionId),
+          getTabCronTask(activeTabId),
+        ]);
+        const currentRuntime = activeTab?.sessionId ? resolvedCurrentRuntime : targetRuntime;
+        const plan = planSessionOpen({
+          tabs: tabsRef.current,
+          targetSessionId: sessionId,
+          multiAgentRuntime: !!cfg?.multiAgentRuntime,
+          currentRuntime,
+          targetRuntime,
+          targetActivation: activation,
+          currentTabCronRunning: currentTabCronTask?.status === 'running',
+        });
+        console.log(`[App] handleLaunchProject: session-open plan=${plan.type}${plan.type === 'open-new-tab' ? ` reason=${plan.reason}` : ''}, target=${sessionId}`);
+
+        if (plan.type === 'jump-to-tab') {
+          console.log(`[App] Scenario 1: Session ${sessionId} already in tab ${plan.tabId}, jumping to it`);
+          setActiveTabId(plan.tabId);
           setLoadingTabs((prev) => ({ ...prev, [activeTabId]: false }));
           launchingTabRef.current = null;
           return;
         }
-      }
 
-      // ========================================
-      // Scenario 2: Session has running cron task (no Tab)
-      // Using Session-centric API: add Tab as owner to existing Sidecar
-      // ========================================
-      if (sessionId) {
-        const activation = await getSessionActivation(sessionId);
-        console.log(`[App] Scenario 2 check: sessionId=${sessionId}, activation=`, activation);
-        if (activation && activation.task_id) {
-          // Session is activated by a cron task - add Tab as owner to its Sidecar
-          console.log(`[App] Scenario 2: Session ${sessionId} has cron task ${activation.task_id} on port ${activation.port}`);
-
-          // Determine target Tab (may need new Tab if current has cron task)
-          let targetTabId = activeTabId;
-          const currentTabCronTask = await getTabCronTask(activeTabId);
-          if (currentTabCronTask && currentTabCronTask.status === 'running') {
-            // Current Tab has running cron task, need new Tab
-            if (tabsRef.current.length >= MAX_TABS) {
-              setTabErrors((prev) => ({ ...prev, [activeTabId]: '已达到最大标签页数量，请关闭其他标签页后重试' }));
-              setLoadingTabs((prev) => ({ ...prev, [activeTabId]: false }));
-              launchingTabRef.current = null;
-              return;
-            }
-            const newTab = createNewTab();
-            setTabs((prev) => [...prev, newTab]);
-            targetTabId = newTab.id;
-            setLoadingTabs((prev) => ({ ...prev, [activeTabId]: false, [targetTabId]: true }));
+        if (plan.type === 'open-new-tab') {
+          if (tabsRef.current.length >= MAX_TABS) {
+            setTabErrors((prev) => ({ ...prev, [activeTabId]: '已达到最大标签页数量，请关闭其他标签页后重试' }));
+            setLoadingTabs((prev) => ({ ...prev, [activeTabId]: false }));
+            launchingTabRef.current = null;
+            return;
           }
+          const newTab = createNewTab();
+          setTabs((prev) => [...prev, newTab]);
+          targetTabId = newTab.id;
+          setLoadingTabs((prev) => ({ ...prev, [activeTabId]: false, [targetTabId]: true }));
+        }
 
-          // Add Tab as owner to the Session's Sidecar (cron task already owns it)
-          // This uses ensureSessionSidecar which will add Tab as owner without creating new Sidecar
+        if (plan.type === 'attach-existing-sidecar') {
+          console.log(`[App] Scenario 2: Session ${sessionId} has cron task ${plan.taskId} on port ${activation?.port}`);
           const result = await ensureSessionSidecar(sessionId, project.path, 'tab', targetTabId);
           console.log(`[App] Tab ${targetTabId} added as owner to session ${sessionId} Sidecar on port ${result.port}`);
 
-          // Update session activation to include this Tab
           await updateSessionTab(sessionId, targetTabId);
 
-          // Update tab state (no cronTaskId/sidecarPort - managed by Owner model)
+          const oldSessionId = tabsRef.current.find(t => t.id === targetTabId)?.sessionId;
+          if (oldSessionId && oldSessionId !== sessionId) {
+            await stopSseProxy(targetTabId);
+            await releaseSessionSidecar(oldSessionId, 'tab', targetTabId);
+            await deactivateSession(oldSessionId);
+          }
+
           setTabs((prev) =>
             prev.map((t) =>
               t.id === targetTabId
                 ? {
                   ...t,
                   agentDir: project.path,
-                  sessionId: sessionId,
+                  sessionId,
                   view: 'chat',
                   title: project.displayName || getFolderName(project.path),
                   joinedExistingSidecar: !result.isNew,
@@ -885,27 +921,26 @@ export default function App() {
           launchingTabRef.current = null;
           return;
         }
-      }
+      } else {
+        // ========================================
+        // New session: current Tab has running cron task
+        // ========================================
+        const currentTabCronTask = await getTabCronTask(activeTabId);
+        if (currentTabCronTask && currentTabCronTask.status === 'running') {
+          console.log(`[App] Scenario 3: Current tab ${activeTabId} has running cron task ${currentTabCronTask.id}, creating new tab`);
 
-      // ========================================
-      // Scenario 3: Current Tab has running cron task
-      // ========================================
-      let targetTabId = activeTabId;
-      const currentTabCronTask = await getTabCronTask(activeTabId);
-      if (currentTabCronTask && currentTabCronTask.status === 'running') {
-        console.log(`[App] Scenario 3: Current tab ${activeTabId} has running cron task ${currentTabCronTask.id}, creating new tab`);
+          if (tabsRef.current.length >= MAX_TABS) {
+            setTabErrors((prev) => ({ ...prev, [activeTabId]: '已达到最大标签页数量，请关闭其他标签页后重试' }));
+            setLoadingTabs((prev) => ({ ...prev, [activeTabId]: false }));
+            launchingTabRef.current = null;
+            return;
+          }
 
-        if (tabsRef.current.length >= MAX_TABS) {
-          setTabErrors((prev) => ({ ...prev, [activeTabId]: '已达到最大标签页数量，请关闭其他标签页后重试' }));
-          setLoadingTabs((prev) => ({ ...prev, [activeTabId]: false }));
-          launchingTabRef.current = null;
-          return;
+          const newTab = createNewTab();
+          setTabs((prev) => [...prev, newTab]);
+          targetTabId = newTab.id;
+          setLoadingTabs((prev) => ({ ...prev, [activeTabId]: false, [targetTabId]: true }));
         }
-
-        const newTab = createNewTab();
-        setTabs((prev) => [...prev, newTab]);
-        targetTabId = newTab.id;
-        setLoadingTabs((prev) => ({ ...prev, [activeTabId]: false, [targetTabId]: true }));
       }
 
       // ========================================
@@ -978,6 +1013,7 @@ export default function App() {
       if (targetTabId !== activeTabId) {
         setActiveTabId(targetTabId);
       }
+      setLoadingTabs((prev) => ({ ...prev, [targetTabId]: false }));
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err);
       console.error('[App] Failed to start:', errorMsg);
@@ -1001,7 +1037,7 @@ export default function App() {
       }
     } finally {
       launchingTabRef.current = null;
-      setLoadingTabs((prev) => ({ ...prev, [activeTabId]: false }));
+      setLoadingTabs((prev) => ({ ...prev, [activeTabId]: false, [targetTabId]: false }));
     }
   }, []);
 
@@ -1070,83 +1106,112 @@ export default function App() {
    * Implements Session singleton with all 4 scenarios
    */
   const handleSwitchSession = useCallback(async (tabId: string, sessionId: string) => {
-    // Scenario 1: Session already open in a Tab → Jump to that Tab
-    const existingTab = tabsRef.current.find(t => t.sessionId === sessionId);
-    if (existingTab) {
-      console.log(`[App] handleSwitchSession Scenario 1: Session ${sessionId} already in tab ${existingTab.id}, jumping to it`);
-      setActiveTabId(existingTab.id);
+    const tabsSnapshot = tabsRef.current;
+    const currentTab = tabsSnapshot.find(t => t.id === tabId);
+
+    // Fast path: Session already open in a Tab → Jump to that Tab.
+    // Skip the ~100ms of runtime/activation/cron IO below if we already know we're
+    // jumping. Hard-coded inputs (`multiAgentRuntime: false`, no activation, no cron
+    // running) ensure this call can only return `jump-to-tab` (when an existing
+    // tab matches) or `switch-current-tab` (otherwise). The `switch-current-tab`
+    // result is intentionally ignored — the full re-plan below uses real values.
+    const jumpPlan = planSessionOpen({
+      tabs: tabsSnapshot,
+      targetSessionId: sessionId,
+      multiAgentRuntime: false,
+      targetActivation: null,
+      currentTabCronRunning: false,
+    });
+    if (jumpPlan.type === 'jump-to-tab') {
+      console.log(`[App] handleSwitchSession Scenario 1: Session ${sessionId} already in tab ${jumpPlan.tabId}, jumping to it`);
+      setActiveTabId(jumpPlan.tabId);
       return;
     }
 
-    // Scenario 1.5 (T12): Cross-runtime session → Open in NEW Tab
-    //
-    // With v0.1.69 config-snapshot, a session's runtime is part of its immutable
-    // identity. If we took over the current tab's sidecar (spawned with the agent's
-    // runtime), the sidecar's MYAGENTS_RUNTIME would mismatch the session — the
-    // Rust layer would then kill + respawn on sidecar drift detection, and the
-    // current tab's chat UI would fight the adoption by re-snapshotting its own
-    // defaults into the session. Safer: open in a new Tab so the sidecar spawn
-    // path picks up session.runtime naturally via resolve_session_runtime().
-    //
-    // Gated on multiAgentRuntime — when disabled, everything runs as builtin and
-    // this mismatch cannot arise.
     const cfg = configRef.current;
-    if (cfg?.multiAgentRuntime) {
-      const currentTabForRuntimeCheck = tabsRef.current.find(t => t.id === tabId);
-      if (currentTabForRuntimeCheck?.agentDir) {
-        try {
-          const meta = await apiGetJson<{ success: boolean; session: SessionMetadata }>(`/sessions/${sessionId}?limit=1`);
-          const sessionRuntime = meta.session.runtime || 'builtin';
-          const currentAgent = getAgentByWorkspacePath(cfg, currentTabForRuntimeCheck.agentDir);
-          const currentAgentRuntime = currentAgent?.runtime || 'builtin';
-          if (sessionRuntime !== currentAgentRuntime) {
-            console.log(`[App] handleSwitchSession Scenario 1.5: Cross-runtime session (session=${sessionRuntime}, agent=${currentAgentRuntime}), opening in new tab`);
-            if (tabsRef.current.length >= MAX_TABS) {
-              toastRef.current.error('标签页已达上限，请关闭一个后重试');
-              return;
-            }
-            const newTab: Tab = {
-              ...createNewTab(),
-              agentDir: currentTabForRuntimeCheck.agentDir,
-              sessionId,
-              view: 'chat',
-              title: currentTabForRuntimeCheck.title || getFolderName(currentTabForRuntimeCheck.agentDir),
-            };
-            setTabs(prev => [...prev, newTab]);
-            setLoadingTabs(prev => ({ ...prev, [newTab.id]: true }));
-            try {
-              const result = await ensureSessionSidecar(sessionId, currentTabForRuntimeCheck.agentDir, 'tab', newTab.id);
-              await activateSession(sessionId, newTab.id, null, result.port, currentTabForRuntimeCheck.agentDir, false);
-              setTabs(prev => prev.map(t =>
-                t.id === newTab.id
-                  ? { ...t, joinedExistingSidecar: !result.isNew }
-                  : t,
-              ));
-              setActiveTabId(newTab.id);
-            } catch (error) {
-              console.error('[App] Failed to open cross-runtime session in new tab:', error);
-              setTabs(prev => prev.filter(t => t.id !== newTab.id));
-            } finally {
-              setLoadingTabs(prev => ({ ...prev, [newTab.id]: false }));
-            }
-            return;
-          }
-        } catch (error) {
-          // Non-fatal: if metadata fetch fails (e.g., session just created, transient 404),
-          // fall through to scenarios 2-4. The Rust resolve_session_runtime() on the sidecar
-          // spawn path is still authoritative for correctness.
-          console.warn('[App] Cross-runtime check failed, falling through to normal switch:', error);
-        }
+    const currentAgentRuntime = currentTab?.agentDir
+      ? normalizeRuntime(getAgentByWorkspacePath(cfg, currentTab.agentDir)?.runtime)
+      : 'builtin';
+
+    const [
+      targetRuntime,
+      resolvedCurrentRuntime,
+      activation,
+      currentTabCronTask,
+    ] = await Promise.all([
+      resolveSessionRuntimeForOpen(sessionId, currentAgentRuntime, cfg?.multiAgentRuntime),
+      resolveSessionRuntimeForOpen(currentTab?.sessionId, currentAgentRuntime, cfg?.multiAgentRuntime),
+      getSessionActivation(sessionId),
+      getTabCronTask(tabId),
+    ]);
+    // When the current Tab has no session yet (fresh chat), there's no "current
+    // session runtime" to compare against — treat target's runtime as current,
+    // so cross-runtime check doesn't false-positive on an empty Tab. Mirrors
+    // handleLaunchProject's identical guard.
+    const currentRuntime = currentTab?.sessionId ? resolvedCurrentRuntime : targetRuntime;
+
+    const plan = planSessionOpen({
+      tabs: tabsRef.current,
+      targetSessionId: sessionId,
+      multiAgentRuntime: !!cfg?.multiAgentRuntime,
+      currentRuntime,
+      targetRuntime,
+      targetActivation: activation,
+      currentTabCronRunning: currentTabCronTask?.status === 'running',
+    });
+
+    if (plan.type === 'jump-to-tab') {
+      console.log(`[App] handleSwitchSession Scenario 1: Session ${sessionId} already in tab ${plan.tabId}, jumping to it`);
+      setActiveTabId(plan.tabId);
+      return;
+    }
+
+    // Scenario 1.5 (T12): Cross-runtime session → Open in NEW Tab.
+    // The comparison is session-vs-session, not target session-vs-current agent:
+    // an existing tab's sidecar belongs to the session it already loaded, while
+    // the agent runtime is only the template for future sessions.
+    if (plan.type === 'open-new-tab' && plan.reason === 'runtime-mismatch') {
+      console.log(`[App] handleSwitchSession Scenario 1.5: Cross-runtime session (session=${plan.targetRuntime}, current=${plan.currentRuntime}), opening in new tab`);
+      if (tabsRef.current.length >= MAX_TABS) {
+        toastRef.current.error('标签页已达上限，请关闭一个后重试');
+        return;
       }
+      if (!currentTab?.agentDir) {
+        console.error('[App] Cannot switch: current tab has no agentDir');
+        return;
+      }
+      const newTab: Tab = {
+        ...createNewTab(),
+        agentDir: currentTab.agentDir,
+        sessionId,
+        view: 'chat',
+        title: currentTab.title || getFolderName(currentTab.agentDir),
+      };
+      setTabs(prev => [...prev, newTab]);
+      setLoadingTabs(prev => ({ ...prev, [newTab.id]: true }));
+      try {
+        const result = await ensureSessionSidecar(sessionId, currentTab.agentDir, 'tab', newTab.id);
+        await activateSession(sessionId, newTab.id, null, result.port, currentTab.agentDir, false);
+        setTabs(prev => prev.map(t =>
+          t.id === newTab.id
+            ? { ...t, joinedExistingSidecar: !result.isNew }
+            : t,
+        ));
+        setActiveTabId(newTab.id);
+      } catch (error) {
+        console.error('[App] Failed to open cross-runtime session in new tab:', error);
+        setTabs(prev => prev.filter(t => t.id !== newTab.id));
+      } finally {
+        setLoadingTabs(prev => ({ ...prev, [newTab.id]: false }));
+      }
+      return;
     }
 
     // Scenario 2: Session has running cron task (no Tab) → Add Tab as owner to existing Sidecar
-    const activation = await getSessionActivation(sessionId);
-    if (activation && activation.task_id) {
-      console.log(`[App] handleSwitchSession Scenario 2: Session ${sessionId} has cron task ${activation.task_id}`);
+    if (plan.type === 'attach-existing-sidecar') {
+      console.log(`[App] handleSwitchSession Scenario 2: Session ${sessionId} has cron task ${plan.taskId}`);
 
       // Get current tab info to find agentDir
-      const currentTab = tabsRef.current.find(t => t.id === tabId);
       if (!currentTab?.agentDir) {
         console.error('[App] Cannot switch: current tab has no agentDir');
         return;
@@ -1186,8 +1251,7 @@ export default function App() {
     }
 
     // Scenario 3: Current Tab has running cron task → Create new Tab + new Sidecar
-    const currentTabCronTask = await getTabCronTask(tabId);
-    if (currentTabCronTask && currentTabCronTask.status === 'running') {
+    if (plan.type === 'open-new-tab' && plan.reason === 'current-cron-running') {
       console.log(`[App] handleSwitchSession Scenario 3: Current tab ${tabId} has cron task, creating new tab`);
 
       // Check max tabs limit

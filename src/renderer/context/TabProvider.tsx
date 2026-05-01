@@ -2552,8 +2552,28 @@ export default function TabProvider({
     // session loading effect.
     const loadSession = useCallback(async (
         targetSessionId: string,
-        options?: { skipLoadingReset?: boolean }
+        options?: { skipLoadingReset?: boolean; previousSessionId?: string | null }
     ): Promise<boolean> => {
+        // Rollback target for the prop-sync ref/state move (line 340-344). Prop
+        // sync fires synchronously when tab.sessionId changes, moving
+        // `currentSessionIdRef` to target before /sessions/switch is verified.
+        // On switch failure, restore so context.sessionId stays consistent with
+        // the visible history (which we deliberately don't replace on failure).
+        //
+        // Scope-of-rollback note: only Provider-internal ref/state is reverted.
+        // `tab.sessionId` (App-level) and the Rust-side sidecar swap that
+        // App.handleSwitchSession performed before this loadSession ran are NOT
+        // unwound. PRD 0.2.6 §5.3 step 5 explicitly accepts this: on rare
+        // /sessions/switch failure, surface an error and keep the visible UI
+        // stable, but do not implement a four-layer two-phase commit. Users
+        // retry; closing/reopening the Tab fully resets state.
+        const rollbackSessionId = options?.previousSessionId ?? null;
+        const rollbackOnSwitchFailure = () => {
+            if (rollbackSessionId && rollbackSessionId !== targetSessionId) {
+                currentSessionIdRef.current = rollbackSessionId;
+                setCurrentSessionId(rollbackSessionId);
+            }
+        };
         try {
             console.log(`[TabProvider ${tabId}] Loading session: ${targetSessionId}`);
             isLoadingSessionRef.current = true;
@@ -2594,6 +2614,32 @@ export default function TabProvider({
                 console.log(`[TabProvider ${tabId}] Session ${targetSessionId} not found in storage (may be deleted or empty)`);
                 isLoadingSessionRef.current = false;
                 setIsSessionLoading(false);
+                return false;
+            }
+
+            // Confirm the sidecar runtime has switched before replacing the
+            // visible message history. Otherwise a failed /sessions/switch can
+            // leave the UI showing target history while subsequent send/SSE
+            // traffic still belongs to the previous session.
+            let switchResult: { success: boolean; error?: string };
+            try {
+                switchResult = await postJson<{ success: boolean; error?: string }>('/sessions/switch', { sessionId: targetSessionId });
+            } catch (error) {
+                const message = error instanceof Error ? error.message : String(error);
+                console.warn(`[TabProvider ${tabId}] Session switch failed for ${targetSessionId}: ${message}`);
+                setAgentError(message);
+                isLoadingSessionRef.current = false;
+                setIsSessionLoading(false);
+                rollbackOnSwitchFailure();
+                return false;
+            }
+            if (!switchResult.success) {
+                const message = switchResult.error || 'Session switch failed.';
+                console.warn(`[TabProvider ${tabId}] Session switch rejected for ${targetSessionId}: ${message}`);
+                setAgentError(message);
+                isLoadingSessionRef.current = false;
+                setIsSessionLoading(false);
+                rollbackOnSwitchFailure();
                 return false;
             }
 
@@ -2760,9 +2806,6 @@ export default function TabProvider({
             if (response.session.title) {
                 onTitleChangeRef.current?.(response.session.title);
             }
-
-            // Notify backend about session switch (fire-and-forget — UI is already updated)
-            void postJson('/sessions/switch', { sessionId: targetSessionId });
 
             console.log(`[TabProvider ${tabId}] Loaded ${loadedMessages.length} messages from session`);
             return true;
@@ -3057,7 +3100,7 @@ export default function TabProvider({
             // This happens when user selects a history session while current tab has unused pending session
             console.log(`[TabProvider ${tabId}] Switching from unused pending to ${sessionId}, loading session`);
             initialSessionLoadedRef.current = true;
-            void loadSession(sessionId);
+            void loadSession(sessionId, { previousSessionId: prevSessionId ?? null });
             return;
         }
 
@@ -3096,7 +3139,7 @@ export default function TabProvider({
             console.log(`[TabProvider ${tabId}] Initial session load: ${sessionId}`);
         }
         initialSessionLoadedRef.current = true;
-        void loadSession(sessionId);
+        void loadSession(sessionId, { previousSessionId: prevSessionId ?? null });
     }, [sessionId, isConnected, tabId, loadSession]);
 
     // Cancel a queued message — returns the original text (for restoring to input)

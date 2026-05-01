@@ -326,6 +326,8 @@ import {
   getExternalPendingInteractiveRequests,
   getExternalSessionId,
   getExternalLiveAssistantMessage,
+  getExternalSessionModel,
+  getExternalSessionPermissionMode,
   prewarmExternalSession,
   awaitExternalSessionStarting,
 } from './runtimes/external-session';
@@ -7860,6 +7862,17 @@ async function main() {
       // the session's config instead of pushing their own.
       if (pathname === '/api/session/config' && request.method === 'GET') {
         try {
+          if (shouldUseExternalRuntime()) {
+            return jsonResponse({
+              success: true,
+              runtime: getActiveRuntimeType(),
+              model: getExternalSessionModel(),
+              mcpServerIds: null,
+              agentNames: null,
+              permissionMode: getExternalSessionPermissionMode(),
+            });
+          }
+
           const { getSessionModel, getMcpServers, getAgents, getSessionPermissionMode } = await import('./agent-session');
           const model = getSessionModel();
           const mcpServers = getMcpServers();
@@ -7867,6 +7880,7 @@ async function main() {
           const permissionMode = getSessionPermissionMode();
           return jsonResponse({
             success: true,
+            runtime: 'builtin',
             model: model ?? null,
             mcpServerIds: mcpServers?.map(s => s.id) ?? null,
             agentNames: agents ? Object.keys(agents) : null,
