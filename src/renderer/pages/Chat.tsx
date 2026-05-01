@@ -29,6 +29,7 @@ import { useTauriFileDrop } from '@/hooks/useTauriFileDrop';
 import { useCronTask } from '@/hooks/useCronTask';
 import { getSessionCronTask, updateCronTaskTab, isTaskExecuting, createCronTask, startCronTask as startCronTaskIpc, startCronScheduler } from '@/api/cronTaskClient';
 import { updateSession as patchSessionMetadata } from '@/api/sessionClient';
+import { persistInputOptionChange } from '@/api/persistInputOption';
 import type { CronTask } from '@/types/cronTask';
 import { formatScheduleDescription } from '@/types/cronTask';
 import CronTaskCard from '@/components/scheduled-tasks/CronTaskCard';
@@ -45,7 +46,6 @@ import {
   resolveProvider,
 } from '@/config/configService';
 import { patchAgentConfig, getAgentById } from '@/config/services/agentConfigService';
-import type { AgentConfig } from '../../shared/types/agent';
 import { BrowserPanelContext } from '@/context/BrowserPanelContext';
 import { BROWSER_BLANK_URL } from '@/components/browserConstants';
 import { CUSTOM_EVENTS, isPendingSessionId } from '../../shared/constants';
@@ -860,6 +860,18 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
 
     initialMessageConsumedRef.current = true;
 
+    // Resolved values hoisted out of `try` so the `catch` failure-recovery path
+    // (PRD 0.2.7 §4.5) can reference them when restoring the launcher draft.
+    const builtinSel = initialMessage.builtinSelection;
+    const effectivePermission = (initialMessage.permissionMode ?? (isExternalRuntime ? runtimePermissionMode : permissionMode)) as PermissionMode;
+    const effectiveModel = isExternalRuntime
+      ? (initialMessage.runtimeModel ?? runtimeModel)
+      : (builtinSel?.model ?? selectedModel);
+    const provider = builtinSel
+      ? providers.find(p => p.id === builtinSel.providerId) ?? currentProvider
+      : currentProvider;
+    const providerEnv = buildProviderEnv(provider);
+
     const autoSend = async () => {
       try {
         // 1. Sync MCP configuration
@@ -872,17 +884,6 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
           );
           await apiPost('/api/mcp/set', { servers: effective });
         }
-
-        // 2. Compute effective values BEFORE setState (avoid stale closure)
-        // External runtime: read from runtimePermissionMode (CC/Codex modes), not permissionMode (builtin)
-        const effectivePermission = (initialMessage.permissionMode ?? (isExternalRuntime ? runtimePermissionMode : permissionMode)) as PermissionMode;
-        // PRD 0.2.3: builtinSelection.model is the builtin runtime model (paired with providerId by type system);
-        // runtimeModel is the external runtime model (no provider). Picking the wrong fallback used to allow
-        // (provider X, model Y) mismatches — now the type narrows it to one or the other.
-        const builtinSel = initialMessage.builtinSelection;
-        const effectiveModel = isExternalRuntime
-          ? (initialMessage.runtimeModel ?? runtimeModel)
-          : (builtinSel?.model ?? selectedModel);
 
         // 3. Update local UI state to reflect Launcher choices
         if (initialMessage.permissionMode) {
@@ -903,23 +904,40 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
           providerInitRef.current = true; // suppress deferred provider-change effect
         }
 
-        // 4. Build providerEnv locally from providerId (never stored in Tab state for security).
-        // For builtin runtime, prefer the paired selection's provider; otherwise use currentProvider.
-        const provider = builtinSel
-          ? providers.find(p => p.id === builtinSel.providerId) ?? currentProvider
-          : currentProvider;
-        const providerEnv = buildProviderEnv(provider);
-
         // 5. Send message (fire-and-forget — resolves before backend turn actually starts)
         setIsLoading(true);
         scrollToBottom();
-        await sendMessage(
-          initialMessage.text,
-          initialMessage.images,
-          effectivePermission,
-          effectiveModel,
-          isExternalRuntime ? undefined : providerEnv
-        );
+
+        // 5a. Cron handoff (PRD 0.2.7): if launcher staged a cron config, switch
+        //     from the normal send path to startCronTask. This both creates the
+        //     CronTask via Rust and triggers the first execution — same as if the
+        //     user had typed in the chat input and clicked send with cron enabled.
+        if (initialMessage.cron) {
+          enableCronMode({
+            prompt: initialMessage.text,
+            intervalMinutes: initialMessage.cron.intervalMinutes,
+            endConditions: initialMessage.cron.endConditions,
+            runMode: initialMessage.cron.runMode,
+            notifyEnabled: initialMessage.cron.notifyEnabled,
+            schedule: initialMessage.cron.schedule,
+            delivery: initialMessage.cron.delivery,
+            model: effectiveModel,
+            permissionMode: effectivePermission,
+            providerEnv: isExternalRuntime ? undefined : providerEnv,
+            runtime: currentRuntime,
+            runtimeConfig: buildCronRuntimeConfig(),
+          });
+          await startCronTask(initialMessage.text);
+        } else {
+          // 5b. Normal send path.
+          await sendMessage(
+            initialMessage.text,
+            initialMessage.images,
+            effectivePermission,
+            effectiveModel,
+            isExternalRuntime ? undefined : providerEnv
+          );
+        }
 
         // 6. Mark initialMessage consumed. DO NOT close overlay here:
         //    sendMessage() returns immediately (fire-and-forget), and on external
@@ -932,8 +950,37 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       } catch (err) {
         console.error('[Chat] Auto-send failed:', err);
         setShowStartupOverlay(false);
+        // PRD 0.2.7 §4.5 failure recovery: restore the launcher draft (text /
+        // images / cron config) into the chat input so the user can retry
+        // without losing what they typed. Pre-PRD-0.2.7 the toast just said
+        // "请重试" while the textarea was empty, silently dropping the draft.
+        try {
+          chatInputRef.current?.setValue(initialMessage.text);
+          if (initialMessage.images && initialMessage.images.length > 0) {
+            chatInputRef.current?.setImages(initialMessage.images);
+          }
+          if (initialMessage.cron) {
+            enableCronMode({
+              prompt: initialMessage.text,
+              intervalMinutes: initialMessage.cron.intervalMinutes,
+              endConditions: initialMessage.cron.endConditions,
+              runMode: initialMessage.cron.runMode,
+              notifyEnabled: initialMessage.cron.notifyEnabled,
+              schedule: initialMessage.cron.schedule,
+              delivery: initialMessage.cron.delivery,
+              model: effectiveModel,
+              permissionMode: effectivePermission,
+              providerEnv: isExternalRuntime ? undefined : providerEnv,
+              runtime: currentRuntime,
+              runtimeConfig: buildCronRuntimeConfig(),
+            });
+          }
+        } catch (restoreErr) {
+          // Restore is best-effort; don't double-fail the user.
+          console.warn('[Chat] failed to restore launcher draft:', restoreErr);
+        }
         onInitialMessageConsumedRef.current?.();
-        toast.error('发送失败，请重试');
+        toast.error('发送失败，已恢复草稿，请重试');
       }
     };
     void autoSend();
@@ -1362,35 +1409,44 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   // current session is using the value in-memory; only on-disk drift is
   // surfaced so the user knows to retry or expects a possible revert on reload.
   //
-  // `model: null` means "clear"; `patchAgentConfig` uses undefined for the same
-  // intent, so we normalize here so callers don't have to.
+  // PRD 0.2.7: dual-write fan-out lives in the shared `persistInputOptionChange`
+  // helper, so Chat and Launcher write the exact same fields to the exact same
+  // places. The helper ALSO branches permission mode / model on
+  // `isExternalRuntime` (writing to `agent.runtimeConfig` for external runtimes
+  // instead of `agent.permissionMode` / `agent.model`) — fixing a long-standing
+  // bug where Chat's path sent external-runtime permission to the wrong field.
   const persistTabConfigChange = useCallback(async (patch: {
     providerId?: string;
+    /** Builtin model. Use `runtimeModel` instead for external runtimes. */
     model?: string | null;
+    /** External runtime model. Routed to `agent.runtimeConfig.model`. */
+    runtimeModel?: string | null;
     permissionMode?: PermissionMode;
     mcpEnabledServers?: string[];
   }) => {
-    try {
-      if (isOwnedSession) {
-        await patchSnapshot(patch);
-      }
-      if (currentProject) {
-        await patchProject(currentProject.id, patch);
-        if (currentProject.agentId) {
-          const agentPatch: Partial<Omit<AgentConfig, 'id'>> = {};
-          if (patch.providerId !== undefined) agentPatch.providerId = patch.providerId;
-          if (patch.model !== undefined) agentPatch.model = patch.model ?? undefined;
-          if (patch.permissionMode !== undefined) agentPatch.permissionMode = patch.permissionMode;
-          if (patch.mcpEnabledServers !== undefined) agentPatch.mcpEnabledServers = patch.mcpEnabledServers;
-          await patchAgentConfig(currentProject.agentId, agentPatch);
-        }
-      }
-    } catch (err) {
-      console.error('[chat] tab config dual-write failed:', err);
+    if (!currentProject) return;
+    const result = await persistInputOptionChange({
+      workspaceId: currentProject.id,
+      agentId: currentProject.agentId ?? null,
+      isExternalRuntime,
+      currentRuntimeConfig: currentAgent?.runtimeConfig,
+      fields: {
+        providerId: patch.providerId,
+        builtinModel: patch.model,
+        runtimeModel: patch.runtimeModel,
+        permissionMode: patch.permissionMode,
+        mcpEnabledServers: patch.mcpEnabledServers,
+      },
+      patchProject,
+      patchAgentConfig,
+      patchSnapshot: isOwnedSession ? patchSnapshot : undefined,
+    });
+    if (!result.ok) {
+      console.error('[chat] tab config dual-write failed:', result.errors);
       toastRef.current.warning('配置未能完全保存，重启后可能恢复旧值');
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed to .id/.agentId to avoid churn on unrelated project changes
-  }, [isOwnedSession, currentProject?.id, currentProject?.agentId, patchSnapshot, patchProject]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed deps; persistInputOptionChange is a pure import, runtimeConfig accessed via currentAgent ref
+  }, [isOwnedSession, currentProject?.id, currentProject?.agentId, isExternalRuntime, currentAgent?.runtimeConfig, patchSnapshot, patchProject]);
 
   // Handle workspace MCP toggle — Tab UI edits dual-write:
   // (1) session snapshot so THIS session uses the new tool set immediately (owned sessions only
@@ -1861,6 +1917,18 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     setSelectedModel(model);
     void persistTabConfigChange({ model });
   }, [selectedModel, persistTabConfigChange]);
+
+  // External-runtime model change. Same dual-write policy as builtin
+  // `handleModelChange`, routed through `runtimeModel` so the helper writes
+  // to `agent.runtimeConfig.model` rather than `agent.model`. Pre-PRD-0.2.7
+  // chat would only call `setRuntimeModel` (UI state), so the user's choice
+  // was lost on next session — matching launcher's persist behavior closes
+  // that gap.
+  const handleRuntimeModelChange = useCallback((model: string) => {
+    if (runtimeModel === model) return;
+    setRuntimeModel(model);
+    void persistTabConfigChange({ runtimeModel: model });
+  }, [runtimeModel, persistTabConfigChange]);
 
   // Handle permission mode change — same dual-write policy as handleModelChange.
   const handlePermissionModeChange = useCallback((mode: PermissionMode) => {
@@ -2841,11 +2909,12 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             sessionState={sessionState}
             systemStatus={systemStatus}
             agentDir={agentDir}
+            workspacePath={agentDir}
             provider={currentProvider}
             providers={providers}
             onProviderChange={handleProviderChange}
             selectedModel={isExternalRuntime ? runtimeModel : selectedModel}
-            onModelChange={isExternalRuntime ? setRuntimeModel : handleModelChange}
+            onModelChange={isExternalRuntime ? handleRuntimeModelChange : handleModelChange}
             sessionUnlocked={isSessionUnlocked}
             permissionMode={effectivePermissionMode}
             onPermissionModeChange={isExternalRuntime

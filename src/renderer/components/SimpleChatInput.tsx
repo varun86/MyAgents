@@ -5,7 +5,8 @@ import Tip from '@/components/Tip';
 import { useToast } from '@/components/Toast';
 import { ModalityBadges } from '@/components/ModalityBadges';
 import { useImagePreview } from '@/context/ImagePreviewContext';
-import { useTabApiOptional, type SessionState } from '@/context/TabContext';
+import { type SessionState } from '@/context/TabContext';
+import { useWorkspaceFileService } from '@/hooks/useWorkspaceFileService';
 import { type PermissionMode, PERMISSION_MODES, type Provider, type ProviderVerifyStatus, getModelDisplayName } from '@/config/types';
 import SlashCommandMenu, { type SlashCommand, filterAndSortCommands } from './SlashCommandMenu';
 import QueuedMessagesPanel from './QueuedMessageBubble';
@@ -78,6 +79,12 @@ interface SimpleChatInputProps {
   active?: boolean;
   onStop?: () => void; // Called when stop button is clicked
   isLoading: boolean;
+  /** Workspace path that anchors workspace_files invokes — file upload, @ mention,
+   *  / slash command listing. Required for those features to work in launcher
+   *  mode (chat-tab passes this in via the agentDir prop, launcher via the
+   *  selected workspace). When null/undefined the input still renders but those
+   *  features error toast if the user tries them. (PRD 0.2.7) */
+  workspacePath?: string | null;
   /** Session state for stop button UI ('stopping' shows disabled spinner) */
   sessionState?: SessionState;
   /** System status (e.g., 'compacting') - when set, shows disabled send button instead of stop */
@@ -170,6 +177,20 @@ interface SimpleChatInputProps {
   onForceExecuteQueued?: (queueId: string) => void;
 }
 
+// Used when the slash command service is unavailable (browser dev mode) or
+// returns empty. Mirrors the Rust BUILTIN_SLASH_COMMANDS table at
+// `src-tauri/src/workspace_files/slash.rs`.
+const BUILTIN_FALLBACK_SLASH_COMMANDS: SlashCommand[] = [
+  { name: 'compact', description: '压缩对话历史，释放上下文空间', source: 'builtin' },
+  { name: 'context', description: '显示或管理当前上下文', source: 'builtin' },
+  { name: 'cost', description: '查看 token 使用量和费用', source: 'builtin' },
+  { name: 'init', description: '初始化项目配置 (.CLAUDE.md)', source: 'builtin' },
+  { name: 'pr-comments', description: '生成 Pull Request 评论', source: 'builtin' },
+  { name: 'release-notes', description: '根据最近提交生成发布说明', source: 'builtin' },
+  { name: 'review', description: '对代码进行审查', source: 'builtin' },
+  { name: 'security-review', description: '进行安全相关的代码审查', source: 'builtin' },
+];
+
 const LINE_HEIGHT = 26; // px per line (text-base 16px * leading-relaxed 1.625 = 26px)
 const MAX_LINES_COLLAPSED = 3;
 const MAX_LINES_EXPANDED = 12;
@@ -205,6 +226,14 @@ export interface SimpleChatInputHandle {
    *  switcher so the caret lands in the input the moment the user
    *  clicks 任务 / 想法 — no second click required. */
   focus: () => void;
+  /** Strip `@myagents_files/...` references from the textarea and clear the
+   *  `images[]` attachments. Used by the launcher when the user switches
+   *  workspaces — the references and physical files belonged to the
+   *  previous workspace and would either be dead links (best case) or, if a
+   *  same-named file existed in the new workspace, point to the wrong file.
+   *  Returns the count of stripped references so the caller can decide
+   *  whether to surface a toast (PRD 0.2.7 D3). */
+  clearWorkspaceBoundDraft: () => { strippedReferences: number; clearedImages: number };
 }
 
 // File search result type
@@ -222,7 +251,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   isLoading,
   sessionState,
   systemStatus,
-  agentDir,
+  agentDir: _agentDir,
   provider,
   providers = [],
   onProviderChange,
@@ -264,6 +293,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   onForceExecuteQueued,
   isExpanded: controlledExpanded,
   onExpandedChange,
+  workspacePath = null,
 }, ref) {
   const isLauncherMode = mode === 'launcher';
   // Launcher-vs-Chat minimum row count, referenced by both the auto-resize
@@ -306,10 +336,21 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   const canSendMessageRef = useRef(canSendMessage);
   canSendMessageRef.current = canSendMessage;
 
-  // Get Tab-scoped API functions (for @file search and file operations)
-  const tabApiContext = useTabApiOptional();
-  const apiGet = tabApiContext?.apiGet;
-  const apiPost = tabApiContext?.apiPost;
+  // PRD 0.2.7: input no longer touches sidecar HTTP directly — workspace file
+  // IO and slash command listing all go through `useWorkspaceFileService`
+  // (Rust invokes), and option-change persistence goes through
+  // `persistInputOptionChange` at the parent (Chat / Launcher) level. The
+  // tab API context import is therefore intentionally unused now; kept as a
+  // stub here for future analytics / sidecar pings if they materialize.
+
+  // PRD 0.2.7: workspace file IO is now Rust-side, not sidecar HTTP. The
+  // hook is identical for launcher and chat-tab — both pass workspacePath in.
+  // Where chat-tab previously relied on `apiPost` / `apiGet` to reach the
+  // session sidecar's `/api/files/*` and `/agent/search-files`, we now invoke
+  // `cmd_workspace_*` directly. Pre-PRD-0.2.7 the launcher's missing tab API
+  // was the source of "API 未就绪" toast — gone now because the hook works
+  // off `workspacePath` only and doesn't care if a Sidecar is running.
+  const fileService = useWorkspaceFileService(workspacePath);
 
   const toast = useToast();
   // Stabilize toast reference to avoid unnecessary effect re-runs
@@ -489,48 +530,36 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
     // eslint-disable-next-line react-hooks/exhaustive-deps -- textareaRef is stable
   }, [inputValue, isExpanded]);
 
-  // Fetch slash commands function (extracted for reuse)
+  // Fetch slash commands function (extracted for reuse).
+  // PRD 0.2.7: routed through fileService.listSlashCommands (Rust scan +
+  // frontmatter parse), not the sidecar /api/commands. Launcher gets the
+  // exact same menu as chat-tab — no more "ah, the launcher has no apiGet"
+  // empty-menu bug.
   const fetchCommands = useCallback(async () => {
-    if (!apiGet) return;
-
+    if (!fileService.isAvailable) {
+      // Fall back to builtins so the menu isn't empty in browser dev mode.
+      setSlashCommands(BUILTIN_FALLBACK_SLASH_COMMANDS);
+      return;
+    }
     try {
-      const response = await apiGet<{ success: boolean; commands: SlashCommand[] }>('/api/commands');
+      const response = await fileService.listSlashCommands();
       if (response.success && response.commands.length > 0) {
         setSlashCommands(response.commands);
       } else {
-        // Fallback to builtin commands imported from SlashCommandMenu
-        console.warn('[slash-commands] API returned empty, using builtin fallback');
-        setSlashCommands([
-          { name: 'compact', description: '压缩对话历史，释放上下文空间', source: 'builtin' },
-          { name: 'context', description: '显示或管理当前上下文', source: 'builtin' },
-          { name: 'cost', description: '查看 token 使用量和费用', source: 'builtin' },
-          { name: 'init', description: '初始化项目配置 (.CLAUDE.md)', source: 'builtin' },
-          { name: 'pr-comments', description: '生成 Pull Request 评论', source: 'builtin' },
-          { name: 'release-notes', description: '根据最近提交生成发布说明', source: 'builtin' },
-          { name: 'review', description: '对代码进行审查', source: 'builtin' },
-          { name: 'security-review', description: '进行安全相关的代码审查', source: 'builtin' },
-        ]);
+        console.warn('[slash-commands] Rust returned empty, using builtin fallback');
+        setSlashCommands(BUILTIN_FALLBACK_SLASH_COMMANDS);
       }
     } catch (err) {
       console.error('Failed to fetch slash commands, using fallback:', err);
-      // Fallback to builtin commands
-      setSlashCommands([
-        { name: 'compact', description: '压缩对话历史，释放上下文空间', source: 'builtin' },
-        { name: 'context', description: '显示或管理当前上下文', source: 'builtin' },
-        { name: 'cost', description: '查看 token 使用量和费用', source: 'builtin' },
-        { name: 'init', description: '初始化项目配置 (.CLAUDE.md)', source: 'builtin' },
-        { name: 'pr-comments', description: '生成 Pull Request 评论', source: 'builtin' },
-        { name: 'release-notes', description: '根据最近提交生成发布说明', source: 'builtin' },
-        { name: 'review', description: '对代码进行审查', source: 'builtin' },
-        { name: 'security-review', description: '进行安全相关的代码审查', source: 'builtin' },
-      ]);
+      setSlashCommands(BUILTIN_FALLBACK_SLASH_COMMANDS);
     }
-  }, [apiGet]);
+  }, [fileService]);
 
-  // Fetch slash commands on mount or when agentDir changes
+  // Fetch slash commands on mount or when workspacePath changes (so launcher
+  // workspace switching reloads project-level skills).
   useEffect(() => {
     fetchCommands();
-  }, [agentDir, fetchCommands]);
+  }, [workspacePath, fetchCommands]);
 
   // Listen for skill copy events to refresh commands list
   useEffect(() => {
@@ -655,15 +684,21 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
       addImage(file);
     }
 
-    // Handle non-image files - upload to myagents_files and insert @references
+    // Handle non-image files - upload to myagents_files and insert @references.
+    // PRD 0.2.7: invokes Rust `cmd_workspace_import_files_b64`, no longer the
+    // sidecar HTTP route. Launcher and chat-tab share this exact path.
     if (otherFiles.length > 0) {
-      if (!apiPost) {
-        console.error('[SimpleChatInput] apiPost not available for file upload');
-        toastRef.current.error('无法上传文件：API 未就绪，请在对话页面中操作');
+      if (!fileService.isAvailable) {
+        console.error('[SimpleChatInput] workspace file service unavailable');
+        toastRef.current.error(
+          workspacePath
+            ? '无法上传文件：当前为浏览器开发模式，请使用桌面应用'
+            : '无法上传文件：请先选择工作区',
+        );
         return;
       }
       try {
-        // Convert files to base64 for JSON upload (works in Tauri)
+        // Convert files to base64 for JSON IPC.
         const base64Files = await Promise.all(
           otherFiles.map(async (file) => ({
             name: file.name,
@@ -671,19 +706,18 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
           }))
         );
 
-        // Upload via base64 API endpoint
-        const result = await apiPost<{ success: boolean; files: string[]; error?: string }>(
-          '/api/files/import-base64',
-          { files: base64Files, targetDir: 'myagents_files' }
-        );
+        const result = await fileService.importBase64Files({
+          files: base64Files,
+          targetDir: 'myagents_files',
+        });
 
         if (!result.success || !result.files || result.files.length === 0) {
-          throw new Error(result.error || '上传失败');
+          throw new Error('上传失败');
         }
 
         // Add .gitignore rule for myagents_files folder
         try {
-          await apiPost('/api/files/add-gitignore', { pattern: 'myagents_files/' });
+          await fileService.addGitignore({ pattern: 'myagents_files/' });
         } catch {
           // Non-fatal, continue silently
         }
@@ -728,17 +762,21 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
         toastRef.current.error(err instanceof Error ? err.message : '文件上传失败');
       }
     }
-  }, [apiPost, addImage, inputValue, textareaRef, undoStack, fileToBase64, onWorkspaceRefresh, provider, currentModelId, isExternalRuntime]);
+  }, [fileService, workspacePath, addImage, inputValue, textareaRef, undoStack, fileToBase64, onWorkspaceRefresh, provider, currentModelId, isExternalRuntime]);
 
-  // Process file paths from Tauri drag-drop (uses /api/files/copy)
+  // Process file paths from Tauri drag-drop (uses cmd_workspace_copy_paths via fileService).
   const processDroppedFilePaths = useCallback(async (paths: string[]) => {
     if (isDebugMode()) {
       console.log('[SimpleChatInput] processDroppedFilePaths called with', paths.length, 'paths:', paths);
     }
 
-    if (!apiPost) {
-      console.error('[SimpleChatInput] apiPost not available');
-      toastRef.current.error('无法处理文件：API 未就绪');
+    if (!fileService.isAvailable) {
+      console.error('[SimpleChatInput] workspace file service unavailable for path drop');
+      toastRef.current.error(
+        workspacePath
+          ? '无法处理文件：当前为浏览器开发模式，请使用桌面应用'
+          : '无法处理文件：请先选择工作区',
+      );
       return;
     }
 
@@ -779,20 +817,11 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
       imagePaths.length = 0;
     }
 
-    // Handle image files - read via backend API and add as image attachments
+    // Handle image files — read absolute paths via Rust and add as image attachments.
+    // PRD 0.2.7: routed through fileService.readPathsAsBase64 (no Sidecar dependency).
     if (imagePaths.length > 0) {
       try {
-        const readResult = await apiPost<{
-          success: boolean;
-          files: Array<{
-            path: string;
-            name: string;
-            mimeType: string;
-            data: string;
-            error?: string;
-          }>;
-        }>('/api/files/read-as-base64', { paths: imagePaths });
-
+        const readResult = await fileService.readPathsAsBase64({ paths: imagePaths });
         if (readResult.success && readResult.files) {
           for (const fileData of readResult.files) {
             if (fileData.data && !fileData.error) {
@@ -819,22 +848,18 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
       }
     }
 
-    // Handle non-image files - copy to myagents_files and insert @references
+    // Handle non-image files - copy to myagents_files and insert @references.
+    // PRD 0.2.7: cmd_workspace_copy_paths via fileService.
     if (otherPaths.length > 0) {
       try {
-        // Copy files to myagents_files using /api/files/copy
-        const result = await apiPost<{
-          success: boolean;
-          copiedFiles: Array<{ sourcePath: string; targetPath: string; renamed: boolean }>;
-          error?: string;
-        }>('/api/files/copy', {
+        const result = await fileService.copyPaths({
           sourcePaths: otherPaths,
           targetDir: 'myagents_files',
           autoRename: true,
         });
 
         if (!result.success) {
-          throw new Error(result.error || '复制失败');
+          throw new Error('复制失败');
         }
 
         // Handle partial success - some files may have been copied
@@ -845,7 +870,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
 
         // Add .gitignore rule for myagents_files folder
         try {
-          await apiPost('/api/files/add-gitignore', { pattern: 'myagents_files/' });
+          await fileService.addGitignore({ pattern: 'myagents_files/' });
         } catch {
           // Non-fatal, continue silently
         }
@@ -893,7 +918,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
         toastRef.current.error(err instanceof Error ? err.message : '文件复制失败');
       }
     }
-  }, [apiPost, addImage, inputValue, textareaRef, undoStack, onWorkspaceRefresh, provider, currentModelId, isExternalRuntime]);
+  }, [fileService, workspacePath, addImage, inputValue, textareaRef, undoStack, onWorkspaceRefresh, provider, currentModelId, isExternalRuntime]);
 
   // Insert @references at cursor position or end of input
   // Uses inputValueRef for stable callback (avoids rebuilding on every input change)
@@ -983,8 +1008,26 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
     setValue,
     setImages,
     focus: () => textareaRef.current?.focus(),
+    clearWorkspaceBoundDraft: () => {
+      // Match `@<path>` tokens that target the workspace-managed `myagents_files/`
+      // upload directory. Plain typed `@something` (not workspace-tied) survives.
+      // Trailing whitespace after the token is also consumed so we don't leave
+      // double spaces / orphan whitespace at the cursor position.
+      const current = inputValueRef.current;
+      const pattern = /@myagents_files\/[^\s]+\s?/g;
+      const stripped = current.replace(pattern, '');
+      const strippedCount = (current.match(pattern) ?? []).length;
+      if (strippedCount > 0) {
+        setInputValue(stripped);
+      }
+      const clearedImages = images.length;
+      if (clearedImages > 0) {
+        setImages([]);
+      }
+      return { strippedReferences: strippedCount, clearedImages };
+    },
     // eslint-disable-next-line react-hooks/exhaustive-deps -- textareaRef is stable
-  }), [processDroppedFiles, processDroppedFilePaths, insertReferences, appendReferenceToken, insertSlashCommand, setValue]);
+  }), [processDroppedFiles, processDroppedFilePaths, insertReferences, appendReferenceToken, insertSlashCommand, setValue, images.length]);
 
   // Handle file input change
   const handleFileChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
@@ -1024,9 +1067,11 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
     }
   }, [processDroppedFiles]);
 
-  // @file search logic
+  // @file search logic — PRD 0.2.7: routed via fileService.searchFiles
+  // (cmd_workspace_search_files_fuzzy). Works identically in launcher and chat
+  // tab as long as `workspacePath` is bound.
   const searchFiles = useCallback(async (query: string) => {
-    if (!agentDir || query.length < 1 || !apiGet) {
+    if (query.length < 1 || !fileService.isAvailable) {
       setFileSearchResults([]);
       setIsFileSearching(false);
       return;
@@ -1034,7 +1079,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
 
     setIsFileSearching(true);
     try {
-      const results = await apiGet<FileSearchResult[]>(`/agent/search-files?q=${encodeURIComponent(query)}`);
+      const results = await fileService.searchFiles({ query });
       setFileSearchResults(results.slice(0, 10)); // Limit to 10 results
       setSelectedFileIndex(0);
     } catch (err) {
@@ -1043,7 +1088,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
     } finally {
       setIsFileSearching(false);
     }
-  }, [agentDir, apiGet]);
+  }, [fileService]);
 
   // Debounced file search
   useEffect(() => {
@@ -1110,10 +1155,13 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
     let currentShowSlashMenu = showSlashMenu;
     let currentSlashPosition = slashPosition;
 
-    // Detect new @ or / character (only when adding)
+    // Detect new @ or / character (only when adding).
+    // PRD 0.2.7: previously gated by `!isLauncherMode` because launcher had no
+    // sidecar HTTP, so `@`/`/` would silently do nothing. Now both pickers run
+    // off the workspace_files Rust commands and work in either mode.
     if (newValue.length > inputValue.length) {
       const addedChar = newValue[cursorPos - 1];
-      if (addedChar === '@' && !isLauncherMode) {
+      if (addedChar === '@') {
         currentShowFileSearch = true;
         currentAtPosition = cursorPos - 1;
         setShowFileSearch(true);
@@ -1125,7 +1173,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
         currentSlashPosition = null;
         setShowSlashMenu(false);
         setSlashPosition(null);
-      } else if (addedChar === '/' && !isLauncherMode) {
+      } else if (addedChar === '/') {
         currentShowSlashMenu = true;
         currentSlashPosition = cursorPos - 1;
         setShowSlashMenu(true);
@@ -1178,7 +1226,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
     }
 
     setInputValue(newValue);
-  }, [inputValue, showFileSearch, atPosition, showSlashMenu, slashPosition, isLauncherMode]);
+  }, [inputValue, showFileSearch, atPosition, showSlashMenu, slashPosition]);
 
   // Cycle permission mode — runtime-aware:
   // Builtin: auto → plan → fullAgency → auto
@@ -1288,14 +1336,14 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
         }
         setInputValue(newInputValue);
 
-        // Delete all copied files
-        if (apiPost) {
+        // Delete all copied files (PRD 0.2.7: Rust cmd_workspace_delete).
+        if (fileService.isAvailable) {
           let successCount = 0;
           let failCount = 0;
 
           for (const a of batchActions) {
             try {
-              await apiPost('/agent/delete', { path: a.copiedFilePath });
+              await fileService.deleteFile({ path: a.copiedFilePath });
               successCount++;
             } catch {
               failCount++;
@@ -1447,7 +1495,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- textareaRef is stable
-  }, [cyclePermissionMode, undoStack, apiPost, showSlashMenu, filteredSlashCommands, slashSearchQuery, selectedSlashIndex, slashPosition, showFileSearch, fileSearchResults, selectedFileIndex, inputValue, atPosition, fileSearchQuery, images.length, handleSend, handleSkillSelect, mentionTab, thoughtResults]);
+  }, [cyclePermissionMode, undoStack, fileService, showSlashMenu, filteredSlashCommands, slashSearchQuery, selectedSlashIndex, slashPosition, showFileSearch, fileSearchResults, selectedFileIndex, inputValue, atPosition, fileSearchQuery, images.length, handleSend, handleSkillSelect, mentionTab, thoughtResults]);
 
   // Handler for selecting a slash command from the menu
   const handleSlashSelect = useCallback((cmd: SlashCommand) => {
@@ -1493,8 +1541,12 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
           />
         )}
 
-        {/* Cron task status bar - shows when cron mode enabled but task not started (always directly above input) */}
-        {!isLauncherMode && cronModeEnabled && !cronTask && cronConfig && (
+        {/* Cron task status bar — shown when cron mode is enabled but the task
+         *  hasn't started yet. PRD 0.2.7 D1: launcher SHOULD show this so the
+         *  user sees their staged cron config; the actual cron creation happens
+         *  after handoff to chat. Overlay (running status) stays gated below
+         *  because launcher never reaches "running" — handoff fires first. */}
+        {cronModeEnabled && !cronTask && cronConfig && (
           <CronTaskStatusBar
             intervalMinutes={cronConfig.intervalMinutes}
             schedule={cronConfig.schedule}
@@ -1724,9 +1776,14 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
 
             {/* /slash command popup. Same ownership pattern — textarea owns
                 the keyboard (↑↓/Enter/Tab/Esc); the primitive just positions
-                the content above the input. */}
+                the content above the input.
+                PRD 0.2.7: previously `!isLauncherMode && showSlashMenu` so the
+                launcher could never open the menu. Now we rely on `showSlashMenu`
+                — the typing handler controls when it opens, and it opens in
+                both launcher and chat modes (workspace_files Rust commands
+                power both). */}
             <Popover
-              open={!isLauncherMode && showSlashMenu}
+              open={showSlashMenu}
               onClose={() => setShowSlashMenu(false)}
               anchorRef={textareaWrapperRef}
               placement="top-start"
@@ -1794,7 +1851,10 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                 placement="top-start"
                 className="w-48 py-1"
               >
-                {!isLauncherMode && (
+                {/* PRD 0.2.7: previously gated by `!isLauncherMode`; both
+                 *  launcher and chat-tab now route file ops through the
+                 *  workspace_files Rust commands, so the launcher's plus menu
+                 *  can offer 引用文件 / 使用技能 the same way. */}
                 <button
                   type="button"
                   onClick={(e) => {
@@ -1818,8 +1878,6 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                   <AtSign className="h-4 w-4" />
                   引用文件
                 </button>
-                )}
-                {!isLauncherMode && (
                 <button
                   type="button"
                   onClick={(e) => {
@@ -1844,7 +1902,6 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                   <span className="inline-flex h-4 w-4 items-center justify-center font-medium text-[var(--ink-muted)]">/</span>
                   使用技能
                 </button>
-                )}
                 <button
                   type="button"
                   onClick={(e) => {
@@ -2062,8 +2119,10 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
               </>
               )}
 
-              {/* Heartbeat Loop Button */}
-              {!isLauncherMode && onCronButtonClick && (
+              {/* Heartbeat Loop Button — PRD 0.2.7 D1: launcher exposes this
+               *  too. The handler stages cron config on launcher; actual
+               *  cmd_create_cron_task runs after handoff to chat. */}
+              {onCronButtonClick && (
                 <button
                   type="button"
                   onClick={(e) => {

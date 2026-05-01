@@ -53,6 +53,10 @@ uuid = { version = "1.11", features = ["v4"] }
 tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
 prost = "0.13"
 pulldown-cmark = "0.12"
+# YAML frontmatter parsing for slash command / skill SKILL.md files (workspace_files::slash)
+serde_yaml = "0.9"
+# Fuzzy file name search for @ mention picker — small dependency, used only inside workspace_files::search
+fuzzy-matcher = "0.3"
 axum = { version = "0.8", default-features = false, features = ["json", "tokio", "query", "http1"] }
 cron = "0.15"
 portable-pty = "0.8"

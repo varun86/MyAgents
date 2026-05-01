@@ -28,7 +28,8 @@ import {
     pairBuiltinSelection,
 } from '@/config/configService';
 import { patchAgentConfig, getAgentById } from '@/config/services/agentConfigService';
-import type { RuntimeType, RuntimeModelInfo, RuntimePermissionMode } from '../../shared/types/runtime';
+import { persistInputOptionChange } from '@/api/persistInputOption';
+import type { RuntimeType, RuntimeModelInfo, RuntimePermissionMode, RuntimeDetections } from '../../shared/types/runtime';
 import { CC_MODELS, CC_PERMISSION_MODES, CODEX_PERMISSION_MODES, GEMINI_PERMISSION_MODES } from '../../shared/types/runtime';
 import { apiGetJson } from '@/api/apiFetch';
 import { isBrowserDevMode, pickFolderForDialog } from '@/utils/browserMock';
@@ -130,6 +131,25 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
     // Runtime state — adapts model/permission selectors when workspace uses external runtime
     const multiAgentRuntimeEnabled = !!config.multiAgentRuntime;
 
+    // PRD 0.2.7 D6 / Phase F: Launcher exposes Runtime selector in the row
+    // below the input. We detect once on mount, mirroring Chat.tsx's pattern.
+    const [runtimeDetections, setRuntimeDetections] = useState<RuntimeDetections>({
+        builtin: { installed: true },
+        'claude-code': { installed: false },
+        codex: { installed: false },
+        gemini: { installed: false },
+    });
+    useEffect(() => {
+        if (!multiAgentRuntimeEnabled) return;
+        let cancelled = false;
+        import('@tauri-apps/api/core').then(({ invoke }) => {
+            invoke<Record<string, { installed: boolean; version?: string; path?: string }>>('cmd_detect_runtimes')
+                .then(d => { if (!cancelled) setRuntimeDetections(d as RuntimeDetections); })
+                .catch(() => { /* non-fatal */ });
+        });
+        return () => { cancelled = true; };
+    }, [multiAgentRuntimeEnabled]);
+
     // MCP state
     const [launcherMcpServers, setLauncherMcpServers] = useState<McpServerDefinition[]>([]);
     const [launcherGlobalMcpEnabled, setLauncherGlobalMcpEnabled] = useState<string[]>([]);
@@ -222,20 +242,27 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
         })();
     }, [isActive]);
 
-    // Handle workspace MCP toggle — persist to project config via patchProject (updates disk + React state)
+    // Handle workspace MCP toggle — delegates to the shared dual-write helper
+    // (PRD 0.2.7) so launcher and chat-tab persist identical fields.
     const handleWorkspaceMcpToggle = useCallback((serverId: string, enabled: boolean) => {
         setLauncherWorkspaceMcpEnabled(prev => {
             const newEnabled = enabled ? [...prev, serverId] : prev.filter(id => id !== serverId);
             if (selectedWorkspace) {
-                void patchProject(selectedWorkspace.id, { mcpEnabledServers: newEnabled });
-                if (selectedWorkspace.agentId) {
-                    void patchAgentConfig(selectedWorkspace.agentId, { mcpEnabledServers: newEnabled });
-                }
+                void persistInputOptionChange({
+                    workspaceId: selectedWorkspace.id,
+                    agentId: selectedWorkspace.agentId ?? null,
+                    isExternalRuntime,
+                    currentRuntimeConfig: runtimeConfigRef.current,
+                    fields: { mcpEnabledServers: newEnabled },
+                    patchProject,
+                    patchAgentConfig,
+                    // Launcher has no Sidecar — sidecar push happens after handoff.
+                });
             }
             return newEnabled;
         });
     // eslint-disable-next-line react-hooks/exhaustive-deps -- only re-create when workspace ID changes, not on every property change
-    }, [selectedWorkspace?.id, patchProject]);
+    }, [selectedWorkspace?.id, patchProject, isExternalRuntime]);
 
     // Restore launcherLastUsed settings once config finishes loading from disk.
     // useState initializers run before async config load completes (config = DEFAULT_CONFIG
@@ -281,17 +308,15 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
     const handleLauncherPermissionModeChange = useCallback((mode: PermissionMode) => {
         setLauncherPermissionMode(mode);
         if (selectedWorkspace) {
-            if (isExternalRuntime && selectedWorkspace.agentId) {
-                // External runtime: persist to runtimeConfig via ref (avoids stale closure on rapid changes)
-                void patchAgentConfig(selectedWorkspace.agentId, {
-                    runtimeConfig: { ...runtimeConfigRef.current, permissionMode: mode },
-                });
-            } else {
-                void patchProject(selectedWorkspace.id, { permissionMode: mode });
-                if (selectedWorkspace.agentId) {
-                    void patchAgentConfig(selectedWorkspace.agentId, { permissionMode: mode });
-                }
-            }
+            void persistInputOptionChange({
+                workspaceId: selectedWorkspace.id,
+                agentId: selectedWorkspace.agentId ?? null,
+                isExternalRuntime,
+                currentRuntimeConfig: runtimeConfigRef.current,
+                fields: { permissionMode: mode },
+                patchProject,
+                patchAgentConfig,
+            });
         }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed deps; runtimeConfigRef is a ref
     }, [selectedWorkspace?.id, patchProject, isExternalRuntime]);
@@ -299,20 +324,36 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
     const handleLauncherModelChange = useCallback((model: string | undefined) => {
         setLauncherSelectedModel(model);
         if (selectedWorkspace) {
-            if (isExternalRuntime && selectedWorkspace.agentId) {
-                // External runtime: persist to runtimeConfig via ref (avoids stale closure on rapid changes)
-                void patchAgentConfig(selectedWorkspace.agentId, {
-                    runtimeConfig: { ...runtimeConfigRef.current, model: model ?? undefined },
-                });
-            } else {
-                void patchProject(selectedWorkspace.id, { model: model ?? null });
-                if (selectedWorkspace.agentId) {
-                    void patchAgentConfig(selectedWorkspace.agentId, { model: model ?? undefined });
-                }
-            }
+            void persistInputOptionChange({
+                workspaceId: selectedWorkspace.id,
+                agentId: selectedWorkspace.agentId ?? null,
+                isExternalRuntime,
+                currentRuntimeConfig: runtimeConfigRef.current,
+                fields: isExternalRuntime
+                    ? { runtimeModel: model ?? null }
+                    : { builtinModel: model ?? null },
+                patchProject,
+                patchAgentConfig,
+            });
         }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed deps; runtimeConfigRef is a ref
     }, [selectedWorkspace?.id, patchProject, isExternalRuntime]);
+
+    // PRD 0.2.7 D6: Runtime change in launcher persists to Agent.runtime so the
+    // next Chat session boots in the chosen runtime. No live sidecar to fork —
+    // the next handoff creates a fresh sidecar with the persisted runtime.
+    const handleLauncherRuntimeChange = useCallback(async (runtime: RuntimeType) => {
+        if (!selectedWorkspace?.agentId) {
+            toastRef.current.warning('该工作区未配置 Agent，无法切换 Runtime');
+            return;
+        }
+        try {
+            await patchAgentConfig(selectedWorkspace.agentId, { runtime });
+        } catch (err) {
+            console.error('[Launcher] runtime change failed:', err);
+            toastRef.current.error('切换 Runtime 失败，请重试');
+        }
+    }, [selectedWorkspace?.agentId]);
 
     const handleLauncherProviderChange = useCallback((providerId: string | undefined, targetModel?: string) => {
         setLauncherProviderId(providerId);
@@ -322,15 +363,21 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
             setLauncherSelectedModel(model);
         }
         if (selectedWorkspace) {
-            const patch: Partial<Omit<Project, 'id'>> = { providerId: providerId ?? undefined };
-            if (model) patch.model = model;
-            void patchProject(selectedWorkspace.id, patch);
-            if (selectedWorkspace.agentId) {
-                void patchAgentConfig(selectedWorkspace.agentId, { providerId: providerId ?? undefined, model: model ?? undefined });
-            }
+            void persistInputOptionChange({
+                workspaceId: selectedWorkspace.id,
+                agentId: selectedWorkspace.agentId ?? null,
+                isExternalRuntime,
+                currentRuntimeConfig: runtimeConfigRef.current,
+                fields: {
+                    providerId: providerId ?? undefined,
+                    builtinModel: model ?? undefined,
+                },
+                patchProject,
+                patchAgentConfig,
+            });
         }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- only re-create when workspace ID changes
-    }, [selectedWorkspace?.id, patchProject, providers]);
+    }, [selectedWorkspace?.id, patchProject, providers, isExternalRuntime]);
 
     // Navigate to Settings > Providers page
     const handleGoToSettings = useCallback(() => {
@@ -339,8 +386,14 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
         }));
     }, []);
 
-    // Handle send from BrandSection
-    const handleBrandSend = useCallback(async (text: string, images?: ImageAttachment[]) => {
+    // Handle send from BrandSection — `cron` is the launcher-staged cron config
+    // (PRD 0.2.7 D1); when present, Chat's autoSend dispatches startCronTask
+    // instead of sendMessage.
+    const handleBrandSend = useCallback(async (
+        text: string,
+        images?: ImageAttachment[],
+        cron?: import('@/types/tab').InitialMessageCron,
+    ) => {
         if (!selectedWorkspace) {
             toastRef.current.error('请先选择工作区');
             return;
@@ -361,6 +414,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
             mcpEnabledServers: launcherWorkspaceMcpEnabled.filter(id => launcherGlobalMcpEnabled.includes(id)),
             ...(builtinSelection ? { builtinSelection } : {}),
             ...(runtimeModel ? { runtimeModel } : {}),
+            ...(cron ? { cron } : {}),
         };
 
         // Persist launcher settings for next app launch
@@ -600,6 +654,12 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
                         runtime={isExternalRuntime ? launcherRuntime : undefined}
                         runtimeModels={isExternalRuntime ? launcherRuntimeModels : undefined}
                         runtimePermissionModes={isExternalRuntime ? launcherRuntimePermissionModes : undefined}
+                        /* PRD 0.2.7 Phase F: runtime selector lives below the input
+                         * (LauncherInputContextRow) when the experimental gate is on. */
+                        multiAgentRuntimeEnabled={multiAgentRuntimeEnabled}
+                        runtimeDetections={runtimeDetections}
+                        onRuntimeChange={handleLauncherRuntimeChange}
+                        activeRuntime={launcherRuntime}
                     />
                 </section>
 

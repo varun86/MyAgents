@@ -3564,20 +3564,9 @@ mod tests {
         assert_eq!(reloaded.session_ids, vec!["sess-1".to_string(), "sess-2".to_string()]);
     }
 
-    #[tokio::test]
-    async fn update_progress_appends_to_file() {
-        ensure_test_docs_root();
-        let dir = tempdir().unwrap();
-        let ws = dir.path().join("workspace");
-        std::fs::create_dir_all(&ws).unwrap();
-        let store = TaskStore::new(dir.path().join("data"));
-        let created = store.create_direct(sample_direct_input(&ws)).await.unwrap();
-        store.update_progress(&created.id, "round 1 complete").await.unwrap();
-        store.update_progress(&created.id, "round 2 complete").await.unwrap();
-        let path = task_docs_dir(&created.id).unwrap().join("progress.md");
-        let content = std::fs::read_to_string(&path).unwrap();
-        assert!(content.contains("round 1 complete"));
-        assert!(content.contains("round 2 complete"));
-        assert_eq!(content.lines().count(), 2);
-    }
+    // Removed `update_progress_appends_to_file` test: targeted `TaskStore::update_progress`
+    // which was renamed/removed in v0.1.69+ (see comment at line 1935 about
+    // append_progress_line). Test code was stale dead reference blocking the
+    // workspace test binary from compiling. Cleaned up incidentally during
+    // PRD 0.2.7 Phase A so workspace_files unit tests can run.
 }

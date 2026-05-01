@@ -25,6 +25,7 @@ pub mod terminal;
 pub mod browser;
 pub mod search;
 pub mod thought;
+pub mod workspace_files;
 mod tray;
 mod updater;
 pub mod utils;
@@ -337,6 +338,22 @@ pub fn run() {
             commands::cmd_read_file_base64,
             commands::cmd_open_file,
             config_io::cmd_fsync_path,
+            // Workspace file IO (workspace_files module) — Phase A of input-box unification.
+            // These replace sidecar HTTP endpoints (/api/files/*, /agent/search-files,
+            // /api/commands, /agent/delete) so the launcher input — which has no Sidecar —
+            // can do the same operations as the chat-tab input. See PRD 0.2.7.
+            //
+            // tauri::generate_handler! resolves auto-generated `__cmd__<name>` wrappers
+            // from the same module that defined the command, so we MUST use the
+            // submodule path (e.g. `workspace_files::files_b64::cmd_…`), not the
+            // re-export at the parent module level.
+            workspace_files::files_b64::cmd_workspace_import_files_b64,
+            workspace_files::files_b64::cmd_workspace_read_files_b64,
+            workspace_files::transfer::cmd_workspace_copy_paths,
+            workspace_files::gitignore::cmd_workspace_add_gitignore,
+            workspace_files::search::cmd_workspace_search_files_fuzzy,
+            workspace_files::delete::cmd_workspace_delete,
+            workspace_files::slash::cmd_list_slash_commands,
             // Full-text search commands
             search::cmd_search_sessions,
             search::cmd_search_workspace_files,
