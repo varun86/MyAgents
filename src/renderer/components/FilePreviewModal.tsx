@@ -102,12 +102,6 @@ interface FilePreviewModalProps {
 // Files above this threshold use plaintext mode (skip tokenization) to prevent UI freeze
 const LARGE_FILE_TOKENIZATION_THRESHOLD = 100 * 1024; // 100KB
 
-function formatFileSize(bytes: number): string {
-    if (bytes < 1024) return `${bytes} B`;
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
 /** Auto-save status indicator — same treatment as the existing code-file editor.
  *  Silent on idle; surfaces saving/saved/error only when relevant. */
 function AutoSaveIndicator({ status }: { status: 'idle' | 'saving' | 'saved' | 'error' }) {
@@ -321,13 +315,12 @@ export default function FilePreviewModal({
     // (fileService.saveFile path) OR an explicit `onSave` prop overrides
     // (Settings panels editing `~/.myagents/agents/...`).
     const canEdit = !!(workspacePath || onSave);
-    // Reveal: only when caller provides `onRevealFile`. Phase D.5 red-line:
-    // workspace file ops must go through Rust workspace_files (the caller
-    // wraps `fileService.openInFinder`), not sidecar HTTP. Removing the
-    // sidecar `apiPost('/agent/open-in-finder')` fallback hides the button
-    // for callers that haven't been migrated rather than silently violating
-    // the red-line.
-    const canReveal = !!onRevealFile;
+    // Reveal: explicit `onRevealFile` prop OR `workspacePath` (modal asks
+    // fileService directly). Phase D.5 red-line: routes go through Rust
+    // workspace_files, never sidecar HTTP. Either path is acceptable, so
+    // Chat.tsx's split-view / fullscreen mounts don't need to wire
+    // onRevealFile manually — passing `workspacePath` is enough.
+    const canReveal = !!(onRevealFile || workspacePath);
 
     const isMarkdown = useMemo(() => isMarkdownFile(name), [name]);
     const monacoLanguage = useMemo(() => getMonacoLanguage(name), [name]);
@@ -661,13 +654,20 @@ export default function FilePreviewModal({
     const monacoQuote = onQuoteSelection ? handleMonacoQuote : undefined;
 
     const handleOpenInFinder = useCallback(async () => {
-        if (!canReveal || !onRevealFile) return;
+        if (!canReveal) return;
         try {
-            await onRevealFile();
+            if (onRevealFile) {
+                await onRevealFile();
+            } else if (workspacePath) {
+                // No explicit override → modal handles it via the workspace
+                // file service. `pathRef.current` reflects the latest path
+                // (rename keeps it fresh).
+                await fileServiceRef.current.openInFinder({ path: pathRef.current });
+            }
         } catch {
             toastRef.current.error('无法打开目录');
         }
-    }, [canReveal, onRevealFile]);
+    }, [canReveal, onRevealFile, workspacePath]);
 
     // Markdown is in "edit" mode when user toggled the segment AND the file is editable.
     // Read-only markdown stays in preview regardless of toggle (the toggle is hidden anyway).
@@ -780,7 +780,6 @@ export default function FilePreviewModal({
                             busy={renameInFlight}
                             className="text-[13px] font-medium text-[var(--ink)]"
                         />
-                        <span className="flex-shrink-0 text-[11px] text-[var(--ink-muted)]">{formatFileSize(size)}</span>
                         {isDirectEdit && <AutoSaveIndicator status={autoSaveStatus} />}
                     </div>
 
@@ -881,13 +880,21 @@ export default function FilePreviewModal({
                                     busy={renameInFlight}
                                     className="text-[13px] font-semibold text-[var(--ink)]"
                                 />
-                                <span className="flex-shrink-0 text-[11px] text-[var(--ink-muted)]">{formatFileSize(size)}</span>
                                 {isDirectEdit && <AutoSaveIndicator status={autoSaveStatus} />}
                             </div>
                             <div className="flex items-center gap-1.5">
-                                <span className="max-w-[400px] truncate text-[11px] text-[var(--ink-muted)]" title={path}>
-                                    {shortenPathForDisplay(path)}
-                                </span>
+                                {/* Show the absolute path (workspace + relative) shortened with `~`
+                                    so users see "~/Documents/project/foo/bar.md" instead of just
+                                    "bar.md". Title attribute carries the full unshortened path. */}
+                                {(() => {
+                                    const sep = workspacePath?.includes('\\') ? '\\' : '/';
+                                    const absolute = workspacePath ? `${workspacePath}${sep}${path}` : path;
+                                    return (
+                                        <span className="max-w-[400px] truncate text-[11px] text-[var(--ink-muted)]" title={absolute}>
+                                            {shortenPathForDisplay(absolute)}
+                                        </span>
+                                    );
+                                })()}
                                 {canReveal && (
                                     <button
                                         type="button"
