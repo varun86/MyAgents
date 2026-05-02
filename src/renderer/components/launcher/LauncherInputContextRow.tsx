@@ -49,8 +49,13 @@ interface LauncherInputContextRowProps {
 // paint over the wrapper's bg on hover, defeating the deepening — we
 // override with `[&_button:hover]:!bg-transparent` so the wrapper's hover
 // bg is what the user sees. `!` forces precedence over the button's class.
+//
+// `shadow-md` matches the input panel above (`SimpleChatInput.tsx`'s root
+// `shadow-md`) so the chip row reads as the same elevation tier — without
+// it the chips appear "flat against the page" while the input "floats",
+// breaking the unified-surface feel.
 const CHIP_WRAPPER_CLASS =
-  'inline-flex items-center rounded-lg bg-[var(--hover-bg)] transition-colors hover:bg-[var(--paper-inset)] [&_button:hover]:!bg-transparent';
+  'inline-flex items-center rounded-lg bg-[var(--hover-bg)] shadow-md transition-colors hover:bg-[var(--paper-inset)] [&_button:hover]:!bg-transparent';
 
 export default memo(function LauncherInputContextRow({
   projects,
