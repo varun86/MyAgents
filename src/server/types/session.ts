@@ -31,6 +31,11 @@ export interface SessionMetadata {
     cronTaskId?: string;
     /** Session origin — undefined or 'desktop' for Desktop, '{platform}_{type}' for IM/channels */
     source?: SessionSource;
+    /** User-pinned to the 收藏 filter view in TaskCenterOverlay /
+     *  SessionHistoryDropdown. Only `true` is persisted; absent/false has
+     *  identical semantics, so the on-disk size cost is zero for the common
+     *  case. */
+    favorite?: boolean;
     /** Preview of the last user message (truncated, for Task Center display) */
     lastMessagePreview?: string;
     /** How the title was set: default (first message truncation), auto (AI-generated), user (manually renamed) */

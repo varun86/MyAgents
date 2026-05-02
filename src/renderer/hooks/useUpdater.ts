@@ -10,7 +10,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { getVersion } from '@tauri-apps/api/app';
 import { invoke } from '@tauri-apps/api/core';
-import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { listenWithCleanup } from '@/utils/tauriListen';
 import { relaunch } from '@tauri-apps/plugin-process';
 
 import { track } from '@/analytics';
@@ -261,57 +261,37 @@ export function useUpdater(): UseUpdaterResult {
         if (isDebugMode()) {
             console.log('[useUpdater] Setting up event listener for updater:ready-to-restart...');
         }
-        let isMounted = true;
-        // Multiple events feed the same state machine; collect their
-        // unlisteners so the cleanup tears them down together.
-        const unlisteners: UnlistenFn[] = [];
+        const ac = new AbortController();
 
-        const setup = async () => {
-            try {
-                unlisteners.push(await listen<UpdateReadyInfo>('updater:ready-to-restart', (event) => {
-                    if (isDebugMode()) {
-                        console.log('[useUpdater] Event received: updater:ready-to-restart', event.payload);
-                    }
-                    if (!isMounted) return;
-                    setUpdateVersion(event.payload.version);
-                    setUpdateReady(true);
-                    setDownloading(false);
-                    setPreparing(false);
-                }));
-                // `download-started` hides the install button: the bytes that
-                // would back a click are mid-replacement, so the click target
-                // is briefly inconsistent. Mirror via `download-failed` to
-                // un-hide if the download couldn't commit.
-                unlisteners.push(await listen<UpdateReadyInfo>('updater:download-started', (event) => {
-                    if (isDebugMode()) {
-                        console.log('[useUpdater] Event received: updater:download-started', event.payload);
-                    }
-                    if (!isMounted) return;
-                    setPreparing(true);
-                }));
-                unlisteners.push(await listen<UpdateReadyInfo>('updater:download-failed', (event) => {
-                    if (isDebugMode()) {
-                        console.log('[useUpdater] Event received: updater:download-failed', event.payload);
-                    }
-                    if (!isMounted) return;
-                    setPreparing(false);
-                }));
-                if (isDebugMode()) {
-                    console.log('[useUpdater] Event listeners registered successfully');
-                }
-            } catch (err) {
-                console.error('[useUpdater] Failed to setup event listener:', err);
-                // Partial registration: still tear down whatever succeeded.
-                for (const fn of unlisteners) fn();
+        void listenWithCleanup<UpdateReadyInfo>('updater:ready-to-restart', (event) => {
+            if (isDebugMode()) {
+                console.log('[useUpdater] Event received: updater:ready-to-restart', event.payload);
             }
-        };
+            setUpdateVersion(event.payload.version);
+            setUpdateReady(true);
+            setDownloading(false);
+            setPreparing(false);
+        }, ac.signal);
 
-        void setup();
+        // `download-started` hides the install button: the bytes that
+        // would back a click are mid-replacement, so the click target
+        // is briefly inconsistent. Mirror via `download-failed` to
+        // un-hide if the download couldn't commit.
+        void listenWithCleanup<UpdateReadyInfo>('updater:download-started', (event) => {
+            if (isDebugMode()) {
+                console.log('[useUpdater] Event received: updater:download-started', event.payload);
+            }
+            setPreparing(true);
+        }, ac.signal);
 
-        return () => {
-            isMounted = false;
-            for (const fn of unlisteners) fn();
-        };
+        void listenWithCleanup<UpdateReadyInfo>('updater:download-failed', (event) => {
+            if (isDebugMode()) {
+                console.log('[useUpdater] Event received: updater:download-failed', event.payload);
+            }
+            setPreparing(false);
+        }, ac.signal);
+
+        return () => ac.abort();
     }, []);
 
     // Windows: check for pending update on disk at startup

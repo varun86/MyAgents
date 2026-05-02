@@ -12,7 +12,9 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import SimpleChatInput, { type ImageAttachment, type SimpleChatInputHandle } from '@/components/SimpleChatInput';
-import WorkspaceSelector from './WorkspaceSelector';
+import CronTaskSettingsModal, { type CronSettingsResult } from '@/components/cron/CronTaskSettingsModal';
+import LauncherInputContextRow from './LauncherInputContextRow';
+import type { RuntimeDetections } from '../../../shared/types/runtime';
 import ModeSegment, { type InputMode } from '@/components/task-center/ModeSegment';
 import RecentThoughtsRow from '@/components/task-center/RecentThoughtsRow';
 import { ThoughtInput, type ThoughtInputHandle } from '@/components/task-center/ThoughtInput';
@@ -33,8 +35,18 @@ interface BrandSectionProps {
     defaultWorkspacePath?: string;
     onSelectWorkspace: (project: Project) => void;
     onAddFolder: () => void;
-    // Input
-    onSend: (text: string, images?: ImageAttachment[]) => void;
+    /** Promote a project to the global default workspace (writes
+     *  `config.defaultWorkspacePath`). Threaded through to the chip row's
+     *  WorkspaceSelector so its hover-only "设为默认" button has somewhere
+     *  to write. */
+    onSetDefaultWorkspace?: (project: Project) => void;
+    // Input — `cron` carries the launcher-staged cron config forward so the
+    // Launcher → InitialMessage handoff can include it (PRD 0.2.7 Cron handoff).
+    onSend: (
+        text: string,
+        images?: ImageAttachment[],
+        cron?: import('@/types/tab').InitialMessageCron,
+    ) => void;
     isStarting?: boolean;
     // Provider/Model (pass-through to SimpleChatInput)
     provider?: Provider | null;
@@ -58,6 +70,15 @@ interface BrandSectionProps {
     runtime?: RuntimeType;
     runtimeModels?: RuntimeModelInfo[];
     runtimePermissionModes?: RuntimePermissionMode[];
+    // PRD 0.2.7 Phase F: runtime selector lives in the row below the input
+    // (not the toolbar) when `multiAgentRuntime` is on. Caller provides the
+    // detection map + onChange just like in chat-tab.
+    multiAgentRuntimeEnabled?: boolean;
+    runtimeDetections?: RuntimeDetections;
+    onRuntimeChange?: (runtime: RuntimeType) => void;
+    /** All runtimes (builtin + external) so the row's chip shows the full picture.
+     *  Distinct from `runtime` which is the *external* runtime when in external mode. */
+    activeRuntime?: RuntimeType;
 }
 
 export default memo(function BrandSection({
@@ -66,6 +87,7 @@ export default memo(function BrandSection({
     defaultWorkspacePath,
     onSelectWorkspace,
     onAddFolder,
+    onSetDefaultWorkspace,
     onSend,
     isStarting,
     provider,
@@ -86,6 +108,10 @@ export default memo(function BrandSection({
     runtime,
     runtimeModels,
     runtimePermissionModes,
+    multiAgentRuntimeEnabled,
+    runtimeDetections,
+    onRuntimeChange,
+    activeRuntime,
 }: BrandSectionProps) {
     const toast = useToast();
     // Project convention: keep `toast` behind a ref so it stays out of
@@ -97,6 +123,12 @@ export default memo(function BrandSection({
         toastRef.current = toast;
     }, [toast]);
     const [mode, setMode] = useState<InputMode>('task');
+    // PRD 0.2.7 D1 + C6: cron settings staged in the launcher. The actual
+    // `cmd_create_cron_task` does NOT run here — we only collect the params,
+    // then carry them forward to Chat via InitialMessage.cron at send time.
+    // Keeps "user closed launcher mid-edit → no orphan cron" the default.
+    const [showCronSettings, setShowCronSettings] = useState(false);
+    const [stagedCron, setStagedCron] = useState<CronSettingsResult | null>(null);
     // Lifted "expand" state — shared between SimpleChatInput and
     // ThoughtInput. The user's intent ("I want more writing room") is
     // mode-agnostic: expanding in 对话 should persist into 想法 and vice
@@ -212,15 +244,79 @@ export default memo(function BrandSection({
         }
     }, [mode]);
 
+    // PRD 0.2.7 D3: switching workspaces in the launcher invalidates any
+    // workspace-bound draft state — `@myagents_files/...` references point to
+    // files in the previous workspace's `myagents_files/`, `images[]`
+    // captured via Tauri drag-drop / copyPaths similarly belong to the prior
+    // tree, and a staged cron task that referenced those files would now
+    // execute against an inconsistent prompt. Strip them silently and surface
+    // a toast (text outside references survives, so this is a soft reset).
+    // Cross-review (CC) caught the stagedCron-not-cleared subtle UX trap.
+    const lastWorkspacePathRef = useRef<string | null>(selectedProject?.path ?? null);
+    useEffect(() => {
+        const next = selectedProject?.path ?? null;
+        if (lastWorkspacePathRef.current === next) return;
+        // Skip the first run (initial selection — no draft to clear yet).
+        if (lastWorkspacePathRef.current !== null) {
+            const result = inputRef.current?.clearWorkspaceBoundDraft();
+            const total = (result?.strippedReferences ?? 0) + (result?.clearedImages ?? 0);
+            const hadCron = stagedCron !== null;
+            if (hadCron) setStagedCron(null);
+            if (total > 0 || hadCron) {
+                toastRef.current.info('已切换工作区，已清理上一工作区的附件草稿');
+            }
+        }
+        lastWorkspacePathRef.current = next;
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- stagedCron read intentionally; we don't want this effect to re-fire when the user merely stages a new cron, only when workspace changes
+    }, [selectedProject?.path]);
+
     // Task-mode submit is a straight pass-through to the parent's `onSend`.
     // Thought-mode submit is owned entirely by ThoughtInput (below) — it
     // calls `thoughtCreate` itself and fires `handleThoughtCreated`, so
     // this handler never sees thought content anymore.
     const handleSend = useCallback(
         (text: string, images?: ImageAttachment[]) => {
-            onSend(text, images);
+            // Repackage staged cron config into the InitialMessageCron shape so
+            // Chat's autoSend can dispatch to startCronTask without poking back
+            // into the modal's `CronSettingsResult` schema. Schedule fallback
+            // to a fixed-interval shape preserves the modal's plain-interval
+            // config (it leaves `schedule` undefined when the user picks the
+            // simple cadence dial).
+            const cron = stagedCron
+                ? {
+                      schedule:
+                          stagedCron.schedule ??
+                          ({ kind: 'every', minutes: stagedCron.intervalMinutes } as const),
+                      runMode: stagedCron.runMode,
+                      endConditions: stagedCron.endConditions,
+                      notifyEnabled: stagedCron.notifyEnabled,
+                      delivery: stagedCron.delivery,
+                      name: stagedCron.name,
+                      intervalMinutes: stagedCron.intervalMinutes,
+                      // Carry executionTarget through to Launcher (which
+                      // short-circuits on `new_task` to create a background
+                      // task) and to the chat-side cron state (so re-opening
+                      // the editor shows the user's actual choice, not the
+                      // 'current_session' default).
+                      executionTarget: stagedCron.executionTarget,
+                  }
+                : undefined;
+            onSend(text, images, cron);
         },
-        [onSend],
+        [onSend, stagedCron],
+    );
+
+    // Cron config for the StatusBar — derived from staged (immutable while
+    // dialog is closed). Built per the SimpleChatInput contract: { intervalMinutes, schedule? }.
+    const cronStatusBarConfig = useMemo(
+        () =>
+            stagedCron
+                ? {
+                      intervalMinutes: stagedCron.intervalMinutes,
+                      schedule: stagedCron.schedule,
+                  }
+                : null,
+        [stagedCron],
     );
 
     // Called from ThoughtInput after a successful thoughtCreate. Mirrors the
@@ -376,7 +472,32 @@ export default memo(function BrandSection({
                      * switches (SimpleChatInput's text + images, ThoughtInput's
                      * text + caret position) because nothing unmounts.
                      */}
-                    <div className="grid *:col-start-1 *:row-start-1">
+                    {/* Center-axis growth compensation. Without this, the
+                     *  flex-1 brand block above absorbs all of the input's
+                     *  height growth → input bottom is anchored by `pb-[12vh]`
+                     *  → input grows entirely upward. The user sees "the
+                     *  input snaps to the top, then the bottom expands down"
+                     *  even though the textarea height transitions smoothly.
+                     *
+                     *  Counter the layout shift by translating the input
+                     *  wrapper DOWN by half the growth (`g/2`). Combined
+                     *  with the layout's natural top-shift of `g`, the net
+                     *  effect is: top moves up by `g/2`, bottom moves down
+                     *  by `g/2` — symmetric center-axis growth.
+                     *
+                     *  Hardcoded `117` = (MAX_LINES_EXPANDED - LAUNCHER_MIN_LINES)
+                     *  * LINE_HEIGHT / 2 = (12 - 3) * 26 / 2. If the
+                     *  SimpleChatInput / ThoughtInput growth changes, update
+                     *  this constant in lockstep. Same easing + duration
+                     *  as the textarea's own height transition so they
+                     *  stay in phase. */}
+                    <div
+                        className="grid *:col-start-1 *:row-start-1"
+                        style={{
+                            transform: `translateY(${inputExpanded ? 117 : 0}px)`,
+                            transition: 'transform 220ms cubic-bezier(0.22, 1, 0.36, 1)',
+                        }}
+                    >
                         <div
                             className={mode === 'thought' ? 'invisible pointer-events-none' : ''}
                             aria-hidden={mode === 'thought'}
@@ -396,6 +517,15 @@ export default memo(function BrandSection({
                                 onModelChange={onModelChange}
                                 permissionMode={permissionMode}
                                 onPermissionModeChange={onPermissionModeChange}
+                                /* PRD 0.2.7: workspace_files invokes need a path; selectedProject
+                                 * is the launcher's "current workspace" from WorkspaceSelector. */
+                                workspacePath={selectedProject?.path ?? null}
+                                /* PRD 0.2.7 cron staging — StatusBar shows iff a config is staged. */
+                                cronModeEnabled={stagedCron !== null}
+                                cronConfig={cronStatusBarConfig}
+                                onCronButtonClick={() => setShowCronSettings(true)}
+                                onCronSettings={() => setShowCronSettings(true)}
+                                onCronCancel={() => setStagedCron(null)}
                                 apiKeys={apiKeys}
                                 providerVerifyStatus={providerVerifyStatus}
                                 workspaceMcpEnabled={workspaceMcpEnabled}
@@ -406,15 +536,8 @@ export default memo(function BrandSection({
                                 runtime={runtime}
                                 runtimeModels={runtimeModels}
                                 runtimePermissionModes={runtimePermissionModes}
-                                toolbarPrefix={
-                                    <WorkspaceSelector
-                                        projects={projects}
-                                        selectedProject={selectedProject}
-                                        defaultWorkspacePath={defaultWorkspacePath}
-                                        onSelect={onSelectWorkspace}
-                                        onAddFolder={onAddFolder}
-                                    />
-                                }
+                                /* PRD 0.2.7 Phase F: workspace + runtime selectors moved out of
+                                 * the toolbar to the row below — toolbarPrefix dropped here. */
                             />
                         </div>
                         {modeSegmentEnabled && (
@@ -451,6 +574,27 @@ export default memo(function BrandSection({
                             />
                         </div>
                     )}
+                    {/* PRD 0.2.7 Phase F: launcher-only chip row that surfaces
+                     *  the Agent workspace + Runtime in the same screen slot the
+                     *  thought-mode `RecentThoughtsRow` uses. Mutually exclusive
+                     *  with that strip — task mode shows this, thought mode
+                     *  shows recent thoughts. */}
+                    {mode === 'task' && (
+                        <div className="absolute left-0 right-0 top-full mt-3">
+                            <LauncherInputContextRow
+                                projects={projects}
+                                selectedProject={selectedProject}
+                                defaultWorkspacePath={defaultWorkspacePath}
+                                onSelectWorkspace={onSelectWorkspace}
+                                onAddFolder={onAddFolder}
+                                onSetDefaultWorkspace={onSetDefaultWorkspace}
+                                showRuntime={!!multiAgentRuntimeEnabled}
+                                runtime={activeRuntime}
+                                runtimeDetections={runtimeDetections}
+                                onRuntimeChange={onRuntimeChange}
+                            />
+                        </div>
+                    )}
                 </div>
                 {!hasAnyProvider && (
                     <p className="mt-6 text-center text-[13px] text-[var(--ink-muted)]">
@@ -465,6 +609,28 @@ export default memo(function BrandSection({
                     </p>
                 )}
             </div>
+
+            {/* PRD 0.2.7 D1: launcher cron settings modal — confirming stages
+             *  the config locally; the actual cron task is created by Chat
+             *  after handoff. We pass `workspacePath` so the modal can
+             *  populate workspace-relative defaults the same way it does in
+             *  the chat tab. */}
+            <CronTaskSettingsModal
+                isOpen={showCronSettings}
+                onClose={() => setShowCronSettings(false)}
+                initialPrompt=""
+                initialConfig={stagedCron ?? undefined}
+                workspacePath={selectedProject?.path ?? ''}
+                onConfirm={(config) => {
+                    setStagedCron(config);
+                    setShowCronSettings(false);
+                    track('launcher_cron_stage', {
+                        interval_minutes: config.intervalMinutes,
+                        run_mode: config.runMode,
+                        execution_target: config.executionTarget,
+                    });
+                }}
+            />
         </section>
     );
 });

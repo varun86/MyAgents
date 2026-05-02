@@ -33,6 +33,8 @@ import { updateSession } from '@/api/sessionClient';
 import { dismissTopmost } from '@/utils/closeLayer';
 import { forceFlushLogs, setLogServerUrl, clearLogServerUrl } from '@/utils/frontendLogger';
 import { normalizeRuntime, planSessionOpen } from '@/utils/sessionOpenPlan';
+import { applyTerminalSessionToTabs } from '@/utils/sessionTermination';
+import { listenWithCleanup } from '@/utils/tauriListen';
 import { CUSTOM_EVENTS, createPendingSessionId, isPendingSessionId } from '../shared/constants';
 import type { CapabilityInitialSelect } from '../shared/skillsTypes';
 import { ensureSelfAwarenessWorkspace, resolveBuiltinSelection, pairBuiltinSelection, isProviderAvailable } from '@/config/configService';
@@ -405,90 +407,164 @@ export default function App() {
 
     // 方案 A: Rust 统一恢复 - 监听恢复事件（仅用于日志和 UI 反馈）
     // Rust 层会自动恢复任务，前端只需要监听结果
-    let unlistenManagerReady: (() => void) | null = null;
-    let unlistenRecoverySummary: (() => void) | null = null;
-    let unlistenTaskRecovered: (() => void) | null = null;
-    let unlistenBgComplete: (() => void) | null = null;
-    let unlistenSidecarRestarted: (() => void) | null = null;
+    const listenerAc = new AbortController();
 
-    const setupCronRecoveryListeners = async () => {
-      if (!isTauriEnvironment()) return;
+    if (isTauriEnvironment()) {
+      // Listen for background session completion events
+      void listenWithCleanup<{ sessionId: string; sidecarStopped: boolean }>(
+        'session:background-complete',
+        (event) => {
+          if (!mountedRef.current) return;
+          const { sessionId, sidecarStopped } = event.payload;
+          console.log(`[App] Background session completion finished: session=${sessionId}, sidecarStopped=${sidecarStopped}`);
+        },
+        listenerAc.signal,
+      );
 
-      try {
-        const { listen } = await import('@tauri-apps/api/event');
+      // Listen for individual task recovered events
+      void listenWithCleanup<CronTaskRecoveredPayload>(
+        CRON_EVENTS.TASK_RECOVERED,
+        (event) => {
+          if (!mountedRef.current) return;
+          const { taskId, sessionId, port } = event.payload;
+          console.log(`[App] Cron task recovered: ${taskId} (session: ${sessionId}, port: ${port})`);
+        },
+        listenerAc.signal,
+      );
 
-        // Listen for background session completion events
-        unlistenBgComplete = await listen<{ sessionId: string; sidecarStopped: boolean }>(
-          'session:background-complete',
-          (event) => {
-            if (mountedRef.current) {
-              const { sessionId, sidecarStopped } = event.payload;
-              console.log(`[App] Background session completion finished: session=${sessionId}, sidecarStopped=${sidecarStopped}`);
+      // Listen for recovery summary event
+      void listenWithCleanup<CronRecoverySummaryPayload>(
+        CRON_EVENTS.RECOVERY_SUMMARY,
+        (event) => {
+          if (!mountedRef.current) return;
+          const { totalTasks, recoveredCount, failedCount, failedTasks } = event.payload;
+          if (totalTasks > 0) {
+            console.log(
+              `[App] Cron recovery summary: ${recoveredCount}/${totalTasks} recovered, ${failedCount} failed`
+            );
+            if (failedTasks.length > 0) {
+              console.warn('[App] Failed tasks:', failedTasks);
             }
+            track('cron_recover', {
+              recovered_count: recoveredCount,
+              failed_count: failedCount,
+            });
           }
-        );
+        },
+        listenerAc.signal,
+      );
 
-        // Listen for individual task recovered events
-        unlistenTaskRecovered = await listen<CronTaskRecoveredPayload>(
-          CRON_EVENTS.TASK_RECOVERED,
-          (event) => {
-            if (mountedRef.current) {
-              const { taskId, sessionId, port } = event.payload;
-              console.log(`[App] Cron task recovered: ${taskId} (session: ${sessionId}, port: ${port})`);
+      // Listen for manager ready event (indicates recovery is complete)
+      void listenWithCleanup(CRON_EVENTS.MANAGER_READY, () => {
+        if (!mountedRef.current) return;
+        console.log('[App] Cron manager ready (Rust recovery complete)');
+      }, listenerAc.signal);
+
+      // Listen for Global Sidecar auto-restart by Rust health monitor
+      void listenWithCleanup<string>('global-sidecar:restarted', (event) => {
+        if (!mountedRef.current) return;
+        const newUrl = event.payload;
+        console.log('[App] Global sidecar auto-restarted by health monitor:', newUrl);
+        updateGlobalServerUrl(newUrl);
+        setLogServerUrl(newUrl);
+        // Safety net: if the initial startGlobalSidecar() invoke is still blocked
+        // (e.g., monitor killed the first sidecar during its TCP health check),
+        // the ready promise would never resolve. Resolve it here so that components
+        // waiting on waitForGlobalSidecar() can proceed with the new sidecar. (#58)
+        markGlobalSidecarReady();
+      }, listenerAc.signal);
+
+      // session:sidecar-terminal — emitted by Rust ONLY when a Session
+      // Sidecar is removed with no remaining owners (so the health monitor
+      // will not auto-restart it). This is the single source of truth for
+      // "the underlying session is gone for good"; reset any Tab whose
+      // sessionId matches so the next `planSessionOpen` doesn't jump-to-tab
+      // into a Tab whose sidecar has been dead for hours. The crash-with-
+      // owners path stays handled by `session-sidecar:restarted` in
+      // TabProvider — this listener deliberately doesn't fire for that case.
+      //
+      // Stale-event guard (Codex review CRIT-1): a same-session-id relaunch
+      // can happen between Rust emitting and us receiving the event (user
+      // clicks history → Scenario 4 spins up a fresh sidecar with a higher
+      // generation — Rust's `instance_counter` guarantees uniqueness). The
+      // stale terminal event would then wipe a tab that's already bound to
+      // the live new sidecar. Re-query Rust at handling time: if a sidecar
+      // entry exists for this sessionId NOW, the event is stale and the
+      // current binding must NOT be cleared.
+      void listenWithCleanup<{ sessionId: string; generation: number }>(
+        'session:sidecar-terminal',
+        async (event) => {
+          if (!mountedRef.current) return;
+          const { sessionId, generation } = event.payload;
+          // Presence check — Rust returns a port iff a sidecar entry
+          // exists in the manager (a relaunch since the event was emitted
+          // would re-create one with a fresh generation). Non-null ⇒
+          // event is stale; current binding is valid. (`getSessionPort`
+          // is presence, not process-health — adequate here.)
+          const livePort = await getSessionPort(sessionId);
+          if (livePort !== null) {
+            console.log(
+              `[App] Ignoring stale terminal event for ${sessionId} (gen=${generation}) — live sidecar present on port ${livePort}`
+            );
+            return;
+          }
+          if (!mountedRef.current) return;
+          setTabs((prev) => {
+            const next = applyTerminalSessionToTabs(prev, sessionId);
+            if (next !== prev) {
+              console.log(`[App] Tab.sessionId reset for terminated session ${sessionId}`);
             }
-          }
-        );
+            return next as typeof prev;
+          });
+        },
+        listenerAc.signal,
+      );
 
-        // Listen for recovery summary event
-        unlistenRecoverySummary = await listen<CronRecoverySummaryPayload>(
-          CRON_EVENTS.RECOVERY_SUMMARY,
-          (event) => {
-            if (mountedRef.current) {
-              const { totalTasks, recoveredCount, failedCount, failedTasks } = event.payload;
-              if (totalTasks > 0) {
-                console.log(
-                  `[App] Cron recovery summary: ${recoveredCount}/${totalTasks} recovered, ${failedCount} failed`
-                );
-                if (failedTasks.length > 0) {
-                  console.warn('[App] Failed tasks:', failedTasks);
-                }
-                // Track cron_recover event
-                track('cron_recover', {
-                  recovered_count: recoveredCount,
-                  failed_count: failedCount,
-                });
-              }
+      // Reconcile path — Rust emits this when its terminal_events broadcast
+      // lagged (capacity 64 exceeded by a shutdown burst). Payload is the
+      // currently-live session id list snapshotted at lag-detection time;
+      // any Tab.sessionId NOT in that set is suspect.
+      //
+      // Two layers of guarding (Codex review CRIT-2):
+      //  (1) The snapshot can be stale by the time we receive — for each
+      //      suspect, re-query Rust live state and only treat it as gone
+      //      if Rust currently has no sidecar for that id.
+      //  (2) Candidates are taken from a tabsRef snapshot; new tabs may
+      //      appear during our async work. To avoid clearing those, we
+      //      apply cleanup tab-by-tab via `applyTerminalSessionToTabs`
+      //      against the *current* prev, and only for the exact session
+      //      ids we definitively confirmed gone.
+      void listenWithCleanup<{ liveSessionIds: string[] }>(
+        'session:sidecar-terminal-reconcile',
+        async (event) => {
+          if (!mountedRef.current) return;
+          const stillLive = new Set<string>(event.payload.liveSessionIds);
+          const candidates = tabsRef.current
+            .filter((t) => t.sessionId && !isPendingSessionId(t.sessionId))
+            .map((t) => t.sessionId as string)
+            .filter((sid) => !stillLive.has(sid));
+          const goneIds: string[] = [];
+          await Promise.all(
+            candidates.map(async (sid) => {
+              const port = await getSessionPort(sid);
+              if (port === null) goneIds.push(sid);
+            })
+          );
+          if (!mountedRef.current || goneIds.length === 0) return;
+          setTabs((prev) => {
+            let next = prev;
+            for (const sid of goneIds) {
+              next = applyTerminalSessionToTabs(next, sid) as typeof prev;
             }
-          }
-        );
-
-        // Listen for manager ready event (indicates recovery is complete)
-        unlistenManagerReady = await listen(CRON_EVENTS.MANAGER_READY, () => {
-          if (mountedRef.current) {
-            console.log('[App] Cron manager ready (Rust recovery complete)');
-          }
-        });
-
-        // Listen for Global Sidecar auto-restart by Rust health monitor
-        unlistenSidecarRestarted = await listen<string>('global-sidecar:restarted', (event) => {
-          if (mountedRef.current) {
-            const newUrl = event.payload;
-            console.log('[App] Global sidecar auto-restarted by health monitor:', newUrl);
-            updateGlobalServerUrl(newUrl);
-            setLogServerUrl(newUrl);
-            // Safety net: if the initial startGlobalSidecar() invoke is still blocked
-            // (e.g., monitor killed the first sidecar during its TCP health check),
-            // the ready promise would never resolve. Resolve it here so that components
-            // waiting on waitForGlobalSidecar() can proceed with the new sidecar. (#58)
-            markGlobalSidecarReady();
-          }
-        });
-      } catch (error) {
-        console.error('[App] Failed to setup cron recovery listeners:', error);
-      }
-    };
-
-    void setupCronRecoveryListeners();
+            if (next !== prev) {
+              console.log(`[App] Reconcile cleared ${goneIds.length} stale binding(s)`);
+            }
+            return next;
+          });
+        },
+        listenerAc.signal,
+      );
+    }
 
     return () => {
       mountedRef.current = false;
@@ -497,22 +573,10 @@ export default function App() {
         clearTimeout(retryTimeoutRef.current);
         retryTimeoutRef.current = null;
       }
-      // Cleanup cron recovery listeners
-      if (unlistenTaskRecovered) {
-        unlistenTaskRecovered();
-      }
-      if (unlistenRecoverySummary) {
-        unlistenRecoverySummary();
-      }
-      if (unlistenManagerReady) {
-        unlistenManagerReady();
-      }
-      if (unlistenBgComplete) {
-        unlistenBgComplete();
-      }
-      if (unlistenSidecarRestarted) {
-        unlistenSidecarRestarted();
-      }
+      // Tear down all listeners registered above (each listenWithCleanup
+      // wires its own teardown on `signal.abort`, so a single abort here
+      // reaches every one).
+      listenerAc.abort();
       // Flush any pending frontend logs before shutdown
       forceFlushLogs();
       clearLogServerUrl();
@@ -866,11 +930,42 @@ export default function App() {
         console.log(`[App] handleLaunchProject: session-open plan=${plan.type}${plan.type === 'open-new-tab' ? ` reason=${plan.reason}` : ''}, target=${sessionId}`);
 
         if (plan.type === 'jump-to-tab') {
-          console.log(`[App] Scenario 1: Session ${sessionId} already in tab ${plan.tabId}, jumping to it`);
-          setActiveTabId(plan.tabId);
-          setLoadingTabs((prev) => ({ ...prev, [activeTabId]: false }));
-          launchingTabRef.current = null;
-          return;
+          // Defensive presence check — race window between Rust emitting
+          // `session:sidecar-terminal` and the renderer applying the cleanup.
+          // The terminal-event listener above is the primary fix (clears
+          // stale Tab.sessionId), but if the user clicks task center inside
+          // that tiny window, the planner can still match the not-yet-cleaned
+          // tab and we'd "jump" to a tab whose sidecar is dead. A direct
+          // `getSessionPort` query asks Rust whether ANY sidecar entry
+          // currently exists for this session id (this is presence, not
+          // process-health — sufficient for "is something around to talk to"
+          // because the auto-restart path keeps the entry resident through
+          // brief restart windows). Null means the manager has nothing,
+          // which is the exact stale-binding case. Fall through to
+          // Scenario 4 (`ensureSessionSidecar` re-spawns the session, adds
+          // this Tab as owner) so the user always gets a working session,
+          // never an empty UI. (Codex review AI-2 wording fix.)
+          const livePort = await getSessionPort(sessionId);
+          if (livePort === null) {
+            console.warn(
+              `[App] Scenario 1 stale: tab ${plan.tabId} bound to session ${sessionId} but no live sidecar — falling through to relaunch`
+            );
+            // Continue to Scenario 4 below. We do NOT pre-rewrite the tab's
+            // sessionId here (the terminal-event listener will catch up
+            // shortly, and Scenario 4's setTabs at the tail of this function
+            // sets it authoritatively after `ensureSessionSidecar` succeeds).
+            targetTabId = plan.tabId;
+            if (plan.tabId !== activeTabId) {
+              setActiveTabId(plan.tabId);
+            }
+            setLoadingTabs((prev) => ({ ...prev, [activeTabId]: false, [plan.tabId]: true }));
+          } else {
+            console.log(`[App] Scenario 1: Session ${sessionId} already in tab ${plan.tabId}, jumping to it`);
+            setActiveTabId(plan.tabId);
+            setLoadingTabs((prev) => ({ ...prev, [activeTabId]: false }));
+            launchingTabRef.current = null;
+            return;
+          }
         }
 
         if (plan.type === 'open-new-tab') {
@@ -1018,14 +1113,20 @@ export default function App() {
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err);
       console.error('[App] Failed to start:', errorMsg);
-      setTabErrors((prev) => ({ ...prev, [activeTabId]: errorMsg }));
+      // Surface the error on the tab the user is actually looking at — when
+      // the stale jump-to-tab fallthrough rerouted us to `plan.tabId`, the
+      // visible tab is `targetTabId`, not the originally-active one. Writing
+      // to `activeTabId` would silently drop the error on a hidden tab while
+      // the user stares at a stuck loader. (Codex review WARN-2.)
+      const errorTabId = targetTabId !== activeTabId ? targetTabId : activeTabId;
+      setTabErrors((prev) => ({ ...prev, [errorTabId]: errorMsg }));
 
       // In browser dev mode, still allow navigation
       if (isBrowserDevMode()) {
         console.log('[App] Browser mode: continuing despite error');
         setTabs((prev) =>
           prev.map((t) =>
-            t.id === activeTabId
+            t.id === errorTabId
               ? {
                 ...t,
                 agentDir: project.path,
@@ -2149,21 +2250,17 @@ export default function App() {
   // Store tabId as pending navigation so focus-regain auto-switches to the tab
   useEffect(() => {
     if (!isTauriEnvironment()) return;
-
-    let unlisten: (() => void) | null = null;
-    const setup = async () => {
-      const { listen } = await import('@tauri-apps/api/event');
-      unlisten = await listen<{ title: string; body: string; tabId?: string | null }>(
-        'notification:show',
-        (event) => {
-          const { title, body, tabId } = event.payload;
-          // Send actual OS notification (Rust only emits the event, doesn't send OS notification)
-          notifyCronTaskComplete(title, body, tabId ?? undefined);
-        }
-      );
-    };
-    setup();
-    return () => { unlisten?.(); };
+    const ac = new AbortController();
+    void listenWithCleanup<{ title: string; body: string; tabId?: string | null }>(
+      'notification:show',
+      (event) => {
+        const { title, body, tabId } = event.payload;
+        // Send actual OS notification (Rust only emits the event, doesn't send OS notification)
+        notifyCronTaskComplete(title, body, tabId ?? undefined);
+      },
+      ac.signal,
+    );
+    return () => ac.abort();
   }, []);
 
   return (

@@ -33,6 +33,7 @@ import { subscribeFrontendLogs, setCurrentTabId } from '@/utils/frontendLogger';
 import { getTabServerUrl, proxyFetch, isTauri, getSessionActivation, getSessionPort, ensureSessionSidecar, resetTabServerUrlCache, setActiveCorrelation } from '@/api/tauriClient';
 import { resolveAttachmentUrl } from '@/utils/attachmentUrl';
 import { refreshWorkspaceFileIndex } from '@/api/searchClient';
+import { listenWithCleanup } from '@/utils/tauriListen';
 import type { PermissionMode } from '@/config/types';
 import type { QueuedMessageInfo } from '@/types/queue';
 import {
@@ -611,22 +612,13 @@ export default function TabProvider({
     // This avoids a log loop: Rust log → API call → Rust proxy logs the call → new Rust log → ...
     useEffect(() => {
         if (!isTauri()) return;
-
-        let unlisten: (() => void) | undefined;
-
-        (async () => {
-            const { listen } = await import('@tauri-apps/api/event');
-            unlisten = await listen<LogEntry>('log:rust', (event) => {
-                const entry = event.payload;
-                // Add to unified logs for UI display only
-                // Do NOT call queueLogsForPersistence - that would cause infinite loop
-                appendUnifiedLog(entry);
-            });
-        })();
-
-        return () => {
-            unlisten?.();
-        };
+        const ac = new AbortController();
+        void listenWithCleanup<LogEntry>('log:rust', (event) => {
+            // Add to unified logs for UI display only
+            // Do NOT call queueLogsForPersistence - that would cause infinite loop
+            appendUnifiedLog(event.payload);
+        }, ac.signal);
+        return () => ac.abort();
     }, [appendUnifiedLog]);
 
     // ─── RAF batching for streaming chunks ───
@@ -2080,13 +2072,10 @@ export default function TabProvider({
                 break;
             }
 
-            case 'workspace:files-changed': {
-                // File watcher detected workspace file changes — trigger directory tree refresh.
-                // This is the authoritative catch-all: covers sub-agent tools, external editors,
-                // terminal operations, and any other source of filesystem change.
-                setToolCompleteCount(c => c + 1);
-                break;
-            }
+            // (Phase E PRD 0.2.7: `workspace:files-changed` SSE handler
+            // removed. The Rust workspace_files watcher emits a Tauri event
+            // — `workspace:files-changed:<eventKey>` — that DirectoryPanel
+            // subscribes to directly.)
 
             default: {
                 // Log unhandled events for debugging
@@ -2364,21 +2353,15 @@ export default function TabProvider({
     // we need to reconnect SSE to the new port.
     useEffect(() => {
         if (!isTauri()) return;
-        let cancelled = false;
-        let unlisten: (() => void) | null = null;
-        (async () => {
-            const { listen } = await import('@tauri-apps/api/event');
-            if (cancelled) return; // Unmounted before listen resolved
-            unlisten = await listen<{ sessionId: string; port: number }>('session-sidecar:restarted', (event) => {
-                if (cancelled) return; // Stale listener after unmount
-                const { sessionId: restartedSid, port } = event.payload;
-                if (restartedSid === currentSessionIdRef.current) {
-                    console.log(`[TabProvider ${tabId}] Session Sidecar restarted on port ${port}, reconnecting SSE`);
-                    void recoverSessionSidecar();
-                }
-            });
-        })();
-        return () => { cancelled = true; if (unlisten) unlisten(); };
+        const ac = new AbortController();
+        void listenWithCleanup<{ sessionId: string; port: number }>('session-sidecar:restarted', (event) => {
+            const { sessionId: restartedSid, port } = event.payload;
+            if (restartedSid === currentSessionIdRef.current) {
+                console.log(`[TabProvider ${tabId}] Session Sidecar restarted on port ${port}, reconnecting SSE`);
+                void recoverSessionSidecar();
+            }
+        }, ac.signal);
+        return () => ac.abort();
     }, [tabId, recoverSessionSidecar]);
 
     // Send message with optional images, permission mode, and model
@@ -2970,63 +2953,59 @@ export default function TabProvider({
 
     useEffect(() => {
         if (!isTauri()) return;
+        const ac = new AbortController();
+        void listenWithCleanup<{ taskId: string; success: boolean; executionCount: number; internalSessionId?: string }>(
+            'cron:execution-complete',
+            async (event) => {
+                const { internalSessionId } = event.payload;
+                const currentSid = currentSessionIdRef.current;
+                if (!internalSessionId || !currentSid || internalSessionId !== currentSid) return;
 
-        let unlisten: (() => void) | undefined;
+                // Don't disturb an in-flight turn. If the user is still streaming
+                // or actively loading this session, let the normal SSE path
+                // deliver new messages — appending mid-turn would compete with
+                // the streaming message's final move-to-history step.
+                if (isStreamingRef.current || isLoadingSessionRef.current) {
+                    return;
+                }
 
-        (async () => {
-            const { listen } = await import('@tauri-apps/api/event');
-            unlisten = await listen<{ taskId: string; success: boolean; executionCount: number; internalSessionId?: string }>(
-                'cron:execution-complete',
-                async (event) => {
-                    const { internalSessionId } = event.payload;
-                    const currentSid = currentSessionIdRef.current;
-                    if (!internalSessionId || !currentSid || internalSessionId !== currentSid) return;
+                const last = historyMessagesRef.current.at(-1);
+                if (!last) {
+                    // Empty tab view — fall through to a full load (first-time open).
+                    console.log(`[TabProvider ${tabId}] Cron complete on empty view, full load`);
+                    loadSessionRef.current(internalSessionId);
+                    return;
+                }
 
-                    // Don't disturb an in-flight turn. If the user is still streaming
-                    // or actively loading this session, let the normal SSE path
-                    // deliver new messages — appending mid-turn would compete with
-                    // the streaming message's final move-to-history step.
-                    if (isStreamingRef.current || isLoadingSessionRef.current) {
-                        return;
-                    }
+                try {
+                    const resp = await apiGetJson<{
+                        success: boolean;
+                        fromIndex: number;
+                        messages: Array<{
+                            id: string;
+                            role: 'user' | 'assistant';
+                            content: string;
+                            timestamp: string;
+                            sdkUuid?: string;
+                            attachments?: Array<{ id: string; name: string; mimeType: string; path: string }>;
+                            metadata?: Message['metadata'];
+                        }>;
+                    }>(`/sessions/${encodeURIComponent(internalSessionId)}/since/${encodeURIComponent(last.id)}`);
 
-                    const last = historyMessagesRef.current.at(-1);
-                    if (!last) {
-                        // Empty tab view — fall through to a full load (first-time open).
-                        console.log(`[TabProvider ${tabId}] Cron complete on empty view, full load`);
+                    if (!resp.success) return;
+
+                    // Server couldn't locate our baseline (rewind / compaction /
+                    // JSONL rewrite). Fall back to a full reload — still better
+                    // than stale data.
+                    if (resp.fromIndex === -1) {
+                        console.log(`[TabProvider ${tabId}] Cron complete, baseline lost, full reload`);
                         loadSessionRef.current(internalSessionId);
                         return;
                     }
 
-                    try {
-                        const resp = await apiGetJson<{
-                            success: boolean;
-                            fromIndex: number;
-                            messages: Array<{
-                                id: string;
-                                role: 'user' | 'assistant';
-                                content: string;
-                                timestamp: string;
-                                sdkUuid?: string;
-                                attachments?: Array<{ id: string; name: string; mimeType: string; path: string }>;
-                                metadata?: Message['metadata'];
-                            }>;
-                        }>(`/sessions/${encodeURIComponent(internalSessionId)}/since/${encodeURIComponent(last.id)}`);
+                    if (resp.messages.length === 0) return;
 
-                        if (!resp.success) return;
-
-                        // Server couldn't locate our baseline (rewind / compaction /
-                        // JSONL rewrite). Fall back to a full reload — still better
-                        // than stale data.
-                        if (resp.fromIndex === -1) {
-                            console.log(`[TabProvider ${tabId}] Cron complete, baseline lost, full reload`);
-                            loadSessionRef.current(internalSessionId);
-                            return;
-                        }
-
-                        if (resp.messages.length === 0) return;
-
-                        const appended: Message[] = resp.messages.map((msg) => {
+                    const appended: Message[] = resp.messages.map((msg) => {
                             let parsedContent: string | ContentBlock[] = msg.content ?? '';
                             if (typeof msg.content === 'string' && msg.content.length > 0 && msg.content.startsWith('[') && msg.content.includes('"type"')) {
                                 try {
@@ -3067,17 +3046,14 @@ export default function TabProvider({
                             return [...prev, ...fresh];
                         });
                         console.log(`[TabProvider ${tabId}] Cron incremental sync appended ${appended.length} message(s)`);
-                    } catch (err) {
-                        console.warn(`[TabProvider ${tabId}] Incremental sync failed, falling back to full reload:`, err);
-                        loadSessionRef.current(internalSessionId);
-                    }
+                } catch (err) {
+                    console.warn(`[TabProvider ${tabId}] Incremental sync failed, falling back to full reload:`, err);
+                    loadSessionRef.current(internalSessionId);
                 }
-            );
-        })();
-
-        return () => {
-            unlisten?.();
-        };
+            },
+            ac.signal,
+        );
+        return () => ac.abort();
         // eslint-disable-next-line react-hooks/exhaustive-deps -- apiGetJson is stable via useMemo
     }, [tabId]);
 

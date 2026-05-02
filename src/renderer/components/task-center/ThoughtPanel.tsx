@@ -19,6 +19,7 @@ import { ThoughtBulkBar } from './ThoughtBulkBar';
 import ConfirmDialog from '@/components/ConfirmDialog';
 import { useToast } from '@/components/Toast';
 import { useConfig } from '@/hooks/useConfig';
+import { listenWithCleanup } from '@/utils/tauriListen';
 // `projects` (not `config.agents`) feeds the # picker — see
 // useThoughtTagCandidates for the rationale.
 import { useThoughtTagCandidates } from '@/hooks/useThoughtTagCandidates';
@@ -107,24 +108,11 @@ export function ThoughtPanel({
   // its source thought), refetch so "已派生 N 个任务" count stays live.
   useEffect(() => {
     if (!taskCenterAvailable()) return;
-    let off: (() => void) | undefined;
-    let cancelled = false;
-    void (async () => {
-      const { listen } = await import('@tauri-apps/api/event');
-      if (cancelled) return;
-      const unlisten = await listen('task:status-changed', () => {
-        void reload();
-      });
-      if (cancelled) {
-        unlisten();
-      } else {
-        off = unlisten;
-      }
-    })();
-    return () => {
-      cancelled = true;
-      off?.();
-    };
+    const ac = new AbortController();
+    void listenWithCleanup('task:status-changed', () => {
+      void reload();
+    }, ac.signal);
+    return () => ac.abort();
   }, [reload]);
 
   const handleCardChanged = useCallback(

@@ -1,6 +1,6 @@
 import { appendFileSync, cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, statSync, unlinkSync, writeFileSync , rmSync, renameSync } from 'fs';
-import { copyFile as copyFileAsync, glob as nodeGlob, readdir as readdirAsync, readFile, rename, rm, stat, writeFile } from 'fs/promises';
-import { spawn as subprocessSpawn, fireAndForget } from './utils/subprocess';
+import { copyFile as copyFileAsync, readdir as readdirAsync, rm, stat } from 'fs/promises';
+import { spawn as subprocessSpawn } from './utils/subprocess';
 import { fileResponse, sniffMime } from './utils/file-response';
 import { serve as honoServe } from '@hono/node-server';
 import { createWriteStream } from 'node:fs';
@@ -66,14 +66,12 @@ import { randomUUID } from 'crypto';
 // adm-zip lazy-loaded at its one call site below (/api/skill/upload with zip
 // content) — saves ~30ms of module-init cost when users never upload skills.
 import {
-  BUILTIN_SLASH_COMMANDS,
   parseSkillFrontmatter,
   extractCommandName,
   parseFullSkillContent,
   parseFullCommandContent,
   serializeSkillContent,
   serializeCommandContent,
-  type SlashCommand,
   type SkillFrontmatter,
   type CommandFrontmatter
 } from '../shared/slashCommands';
@@ -81,14 +79,12 @@ import { sanitizeFolderName, isWindowsReservedName } from '../shared/utils';
 import { resolveSkillUrl } from './skills/url-resolver';
 import { fetchSkillZip, TarballFetchError } from './skills/tarball-fetcher';
 import { analyseTree, buildInstallPayload, writeSkillFiles, type SkillCandidate } from './skills/installer';
-import { isPreviewable } from '../shared/fileTypes';
 import type { SessionSource } from './types/session';
 import { parseAgentFrontmatter, parseFullAgentContent, serializeAgentContent } from '../shared/agentCommands';
 import { scanAgents, readWorkspaceConfig, writeWorkspaceConfig, loadEnabledAgents, readAgentMeta, writeAgentMeta, findAgent } from './agents/agent-loader';
 import type { AgentFrontmatter, AgentMeta, AgentWorkspaceConfig } from '../shared/agentTypes';
 import type { McpServerDefinition } from '../renderer/config/types';
 import { ensureDirSync, ensureDir, isDirEntry } from './utils/fs-utils';
-import { writeBase64FilesToAgentDir } from './utils/workspace-files';
 import {
   setCronTaskContext,
   clearCronTaskContext,
@@ -216,7 +212,6 @@ process.on('SIGINT', () => {
 crashLog('STARTUP', 'Server starting...');
 // ============= END CRASH DIAGNOSTICS =============
 
-
 import {
   enqueueUserMessage,
   cancelQueueItem,
@@ -234,6 +229,7 @@ import {
   switchToSession,
   setMcpServers,
   getMcpServers,
+  getCurrentMcpServers,
   applyMcpOverrideAndAwaitReady,
   withCronDispatchLock,
   setAgents,
@@ -260,7 +256,6 @@ import {
 } from './agent-session';
 import { getHomeDirOrNull, isSkillBlockedOnPlatform } from './utils/platform';
 import { getScriptDir } from './utils/runtime';
-import { buildDirectoryTree, expandDirectory } from './dir-info';
 import {
   createSession,
   deleteSession,
@@ -290,7 +285,7 @@ import { createSseClient, getClients } from './sse';
 import { imEventBus } from './utils/im-event-bus';
 import { imRequestRegistry } from './utils/im-request-registry';
 import type { CancelReason } from './utils/cancellation';
-import { checkAnthropicSubscription, getGitBranch, verifyProviderViaSdk, verifySubscription } from './provider-verify';
+import { checkAnthropicSubscription, verifyProviderViaSdk, verifySubscription } from './provider-verify';
 // openai-bridge is lazy-loaded via ensureBridgeHandler() below — only users on
 // OpenAI-protocol providers (DeepSeek/Moonshot/etc.) ever hit /v1/messages, so
 // most sessions never need to pay the 2.6k-line module's init cost.
@@ -537,27 +532,13 @@ function bumpSkillsGeneration(): void {
  * syncProjectUserConfig(). This covers the case where the Global Sidecar modified
  * global skills (create/toggle/delete) without the Tab Sidecar knowing.
  */
-let lastSyncedSkillsGeneration = -1;  // -1 forces first sync
-
-/**
- * Sync project skill symlinks if the skills generation has changed.
- * Returns true if sync was performed, false if skipped (already up-to-date).
- */
-function syncSkillsIfNeeded(projectDir: string): boolean {
-  const config = readSkillsConfig();
-  if (config.generation === lastSyncedSkillsGeneration) return false;
-  syncProjectUserConfig(projectDir);
-  lastSyncedSkillsGeneration = config.generation;
-  return true;
-}
-
-/**
- * Mark the current generation as synced (call after explicit syncProjectUserConfig
- * in CRUD handlers to avoid redundant re-sync on next /api/commands fetch).
- */
-function markSkillsSynced(): void {
-  lastSyncedSkillsGeneration = readSkillsConfig().generation;
-}
+// Phase E (PRD 0.2.7): the `syncSkillsIfNeeded` wrapper + generation-tracking
+// optimization is gone. Rust `cmd_list_slash_commands` is the canonical UI
+// path and runs `sync_workspace_skills` (idempotent) every call. The sidecar
+// only syncs as a side-effect of skill/command CRUD via direct
+// `syncProjectUserConfig(...)` calls; CRUD-time correctness is what matters
+// (the picker UI lives in Rust now). `markSkillsSynced` is also gone — there's
+// no longer a generation-cached fast-path to invalidate.
 
 /**
  * Resolve bundled-skills directory.
@@ -831,91 +812,10 @@ function resolveAgentPath(root: string, relativePath: string): string | null {
   return resolved;
 }
 
-/** Read-only safety check: block system/sensitive directories, allow user-accessible paths */
-function isSafeReadPath(resolved: string): boolean {
-  const homeDir = getHomeDirOrNull() || '';
-  const isWin = process.platform === 'win32';
-
-  // Windows paths are case-insensitive; normalize for comparison
-  const norm = isWin ? (p: string) => p.toLowerCase() : (p: string) => p;
-  const resolvedN = norm(resolved);
-  const sepN = norm(sep);
-
-  const forbidden: string[] = isWin
-    ? [
-        'C:\\Windows', 'C:\\Program Files', 'C:\\Program Files (x86)',
-        'C:\\ProgramData', 'C:\\Recovery', 'C:\\$Recycle.Bin',
-      ]
-    : [
-        '/etc', '/var', '/usr', '/bin', '/sbin',
-        '/boot', '/root', '/sys', '/proc', '/dev',
-      ];
-
-  if (homeDir) {
-    if (isWin) {
-      forbidden.push(join(homeDir, 'AppData', 'Local', 'Microsoft'));
-    }
-    // Credential / key stores
-    forbidden.push(
-      join(homeDir, '.ssh'),
-      join(homeDir, '.gnupg'),
-      join(homeDir, '.aws'),
-      join(homeDir, '.kube'),
-      join(homeDir, '.docker'),
-      join(homeDir, '.config', 'op'),
-    );
-    if (!isWin) {
-      // macOS sensitive Library subdirectories
-      forbidden.push(
-        join(homeDir, 'Library', 'Keychains'),
-        join(homeDir, 'Library', 'Cookies'),
-        join(homeDir, 'Library', 'Mail'),
-        join(homeDir, 'Library', 'Messages'),
-        join(homeDir, 'Library', 'Safari'),
-      );
-    }
-  }
-
-  for (const f of forbidden) {
-    const fN = norm(f);
-    if (resolvedN === fN || resolvedN.startsWith(fN + sepN)) return false;
-  }
-
-  if (!isWin) {
-    const allowed = [homeDir, '/tmp', '/Users', '/home'].filter(Boolean);
-    return allowed.some(p => resolvedN === p || resolvedN.startsWith(p + sep));
-  }
-
-  // Windows: allow any drive letter path (system dirs already excluded above)
-  return /^[A-Z]:\\/i.test(resolved);
-}
-
-/** Resolve path for read-only operations: supports both absolute and relative paths */
-function resolveReadPath(root: string, inputPath: string): string | null {
-  const trimmed = inputPath.trim();
-  const isAbsolute = trimmed.startsWith('/') || /^[A-Z]:\\/i.test(trimmed);
-  if (isAbsolute) {
-    const resolved = resolve(trimmed);
-    return isSafeReadPath(resolved) ? resolved : null;
-  }
-  return resolveAgentPath(root, trimmed);
-}
-
-
-/**
- * Check if a file can be previewed as text.
- * Uses the shared binary-blocklist from `fileTypes.ts` (same logic as frontend)
- * plus MIME-type hints from Bun to cover extensionless files.
- */
-function isPreviewableText(name: string, mimeType: string | undefined): boolean {
-  // MIME-type hint: trust Bun's detection for text/* and known structured types
-  if (mimeType) {
-    if (mimeType.startsWith('text/')) return true;
-    if (['application/json', 'application/xml', 'application/x-yaml', 'image/svg+xml'].includes(mimeType)) return true;
-  }
-  // Fall back to shared binary-blocklist strategy (consistent with frontend)
-  return isPreviewable(name);
-}
+// Phase E (PRD 0.2.7): the legacy read-side helpers `isSafeReadPath`,
+// `resolveReadPath`, `isPreviewableText` are removed. Their gates now live
+// in Rust workspace_files (`path_safety::validate_workspace_root`,
+// `resolve_existing_inside_workspace`, `read_preview::is_previewable`).
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -1080,7 +980,6 @@ function stripHeartbeatToken(text: string, ackMaxChars: number): { status: strin
   return { status: 'content', text: stripped };
 }
 
-
 /**
  * Strip YAML frontmatter from file content.
  * Frontmatter is delimited by --- at the start and a second --- line.
@@ -1216,7 +1115,7 @@ function buildCronEventPrompt(
 /**
  * Write a startup beacon directly to unified log file (bypasses initLogger).
  * This is critical for diagnosing Windows startup hangs where initLogger
- * may not be reached yet and zero BUN logs appear.
+ * may not be reached yet and zero NODE logs appear.
  */
 function startupBeacon(step: string): void {
   // Write to stderr — captured by Rust drain thread → unified log
@@ -1237,7 +1136,7 @@ function startupBeacon(step: string): void {
     const s = String(now.getSeconds()).padStart(2, '0');
     const ms = String(now.getMilliseconds()).padStart(3, '0');
     const ts = `${y}-${m}-${d} ${h}:${mi}:${s}.${ms}`;
-    appendFileSync(filePath, `${ts} [BUN  ] [INFO ] [startup] ${step}\n`);
+    appendFileSync(filePath, `${ts} [NODE ] [INFO ] [startup] ${step}\n`);
   } catch { /* ignore */ }
 }
 
@@ -2503,9 +2402,26 @@ async function main() {
             // already matches `currentMcpServers` it's a cheap no-op.
             let target: McpServerDefinition[];
             if (payload.mcpEnabledServers !== undefined) {
-              const allServers = getAllMcpServers();
               const overrideIds = new Set(payload.mcpEnabledServers);
-              target = allServers.filter((s) => overrideIds.has(s.id));
+              // Prefer `currentMcpServers` (set by frontend's /api/mcp/set)
+              // when its IDs cover all override IDs. Sidecar's
+              // `getAllMcpServers()` and the renderer's mcpService produce
+              // McpServerDefinition objects with subtly different env/args
+              // shapes, and feeding sidecar-shaped definitions back through
+              // `applyMcpOverrideAndAwaitReady` triggers a fingerprint
+              // mismatch → abort+restart that wastes ~5s on the launcher
+              // cron handoff. When the frontend already pushed shapes that
+              // cover the override set, reusing those keeps the fingerprint
+              // stable and the call becomes a cheap no-op.
+              const fromCurrent = (getCurrentMcpServers() ?? []).filter(
+                (s) => overrideIds.has(s.id),
+              );
+              if (fromCurrent.length === overrideIds.size) {
+                target = fromCurrent;
+              } else {
+                const allServers = getAllMcpServers();
+                target = allServers.filter((s) => overrideIds.has(s.id));
+              }
               console.log(
                 `[cron] execute-sync taskId=${taskId} applying task MCP override: [${
                   target.map((s) => s.id).join(',') || '(empty)'
@@ -3121,6 +3037,11 @@ async function main() {
         interface PatchPayload {
           title?: string;
           titleSource?: 'default' | 'auto' | 'user';
+          /** Pin/unpin to the 收藏 filter view. Storage convention: only
+           *  `true` is persisted; `false` is stored as `undefined` so a
+           *  freshly toggled-off session matches "never favorited" exactly
+           *  on disk. */
+          favorite?: boolean;
           model?: string | null;
           permissionMode?: string | null;
           mcpEnabledServers?: string[] | null;
@@ -3135,9 +3056,34 @@ async function main() {
           return jsonResponse({ success: false, error: 'Invalid JSON payload.' }, 400);
         }
 
-        const updates: Record<string, unknown> = { lastActiveAt: new Date().toISOString() };
+        // `lastActiveAt` is the recency signal that drives history sort
+        // order. Bumping it on EVERY PATCH means a pure-UI flag change
+        // (favorite toggle) makes an old session jump to the top of the
+        // dropdown — confusing UX (Codex round-4 caught). Only the fields
+        // that genuinely represent "session was used" should refresh it.
+        const RECENCY_BUMP_FIELDS = new Set([
+          'title',           // user-edited title implies engagement
+          'titleSource',
+          'model',
+          'permissionMode',
+          'mcpEnabledServers',
+          'providerId',
+          'providerEnvJson',
+        ]);
+        const touchedRecencyField = (Object.keys(payload) as Array<keyof PatchPayload>)
+          .filter((k) => payload[k] !== undefined)
+          .some((k) => RECENCY_BUMP_FIELDS.has(k));
+
+        const updates: Record<string, unknown> = touchedRecencyField
+          ? { lastActiveAt: new Date().toISOString() }
+          : {};
         if (payload.title !== undefined) updates.title = String(payload.title).slice(0, 100);
         if (payload.titleSource !== undefined) updates.titleSource = payload.titleSource;
+        if (payload.favorite !== undefined) {
+          // Convert false → undefined so the on-disk shape stays minimal
+          // (the JSON serializer drops undefined keys).
+          updates.favorite = payload.favorite === true ? true : undefined;
+        }
 
         // Snapshot fields: null → clear (undefined in stored JSON); value → set.
         // `undefined` in stored metadata is how the resolver recognizes "fall back to agent".
@@ -3162,7 +3108,7 @@ async function main() {
           updates.configSnapshotAt = new Date().toISOString();
         }
 
-        const updated = await updateSessionMetadata(sessionId, updates as Parameters<typeof updateSessionMetadata>[1]);
+        const updated = await updateSessionMetadata(sessionId, updates);
 
         if (!updated) {
           return jsonResponse({ success: false, error: 'Session not found.' }, 404);
@@ -3384,230 +3330,12 @@ async function main() {
         }
       }
 
-      if (pathname === '/agent/dir' && request.method === 'GET') {
-        try {
-          const info = await buildDirectoryTree(currentAgentDir);
-          return jsonResponse(info);
-        } catch (error) {
-          return jsonResponse(
-            { error: error instanceof Error ? error.message : 'Unknown error' },
-            500
-          );
-        }
-      }
 
-      // Expand a specific directory (lazy loading for directories marked as loaded: false)
-      if (pathname === '/agent/dir/expand' && request.method === 'GET') {
-        try {
-          const targetPath = url.searchParams.get('path');
-          if (!targetPath) {
-            return jsonResponse({ error: 'Missing path parameter' }, 400);
-          }
-          // Security: Validate that targetPath doesn't escape currentAgentDir (prevent path traversal)
-          const resolvedTarget = resolve(currentAgentDir, targetPath);
-          if (!resolvedTarget.startsWith(currentAgentDir + sep) && resolvedTarget !== currentAgentDir) {
-            return jsonResponse({ error: 'Invalid path: access denied' }, 403);
-          }
-          console.log('[agent] dir/expand:', targetPath);
-          const result = await expandDirectory(currentAgentDir, targetPath);
-          return jsonResponse(result);
-        } catch (error) {
-          return jsonResponse(
-            { error: error instanceof Error ? error.message : 'Unknown error' },
-            500
-          );
-        }
-      }
 
-      // Search files in workspace for @mention feature
-      if (pathname === '/agent/search-files' && request.method === 'GET') {
-        try {
-          const query = url.searchParams.get('q') ?? '';
-          if (!query) {
-            return jsonResponse([]);
-          }
 
-          // Escape glob special characters in user query to prevent pattern injection
-          const safeQuery = query.replace(/[*?[\]{}()\\]/g, '\\$&');
-          // Use glob to search files (node:fs/promises glob, Node 22+)
-          const results: { path: string; name: string; type: 'file' | 'dir' }[] = [];
-          const globIter = nodeGlob(`**/*${safeQuery}*`, {
-            cwd: currentAgentDir,
-            exclude: (entry) => {
-              // Ignore dotfiles and skip node_modules/.git fast
-              const basePart = entry.split(sep).pop() ?? '';
-              if (basePart.startsWith('.')) return true;
-              return entry.includes(`node_modules${sep}`) || entry.includes(`.git${sep}`);
-            },
-          });
 
-          for await (const file of globIter) {
-            const relFile = file as string;
-            const fullPath = join(currentAgentDir, relFile);
-            try {
-              const stats = await stat(fullPath);
-              results.push({
-                path: relFile,
-                name: basename(relFile),
-                type: stats.isDirectory() ? 'dir' : 'file',
-              });
 
-              // Limit results
-              if (results.length >= 20) break;
-            } catch {
-              // Skip files we can't stat
-            }
-          }
 
-          return jsonResponse(results);
-        } catch (error) {
-          console.error('[agent] search-files error:', error);
-          return jsonResponse(
-            { error: error instanceof Error ? error.message : 'Search failed' },
-            500
-          );
-        }
-      }
-
-      // Batch check whether paths exist (for inline code path detection in AI output)
-      if (pathname === '/agent/check-paths' && request.method === 'POST') {
-        try {
-          const payload = await request.json() as { paths?: string[] };
-          const paths = payload?.paths;
-          if (!Array.isArray(paths)) {
-            return jsonResponse({ error: 'paths must be an array.' }, 400);
-          }
-          if (paths.length > 200) {
-            return jsonResponse({ error: 'Too many paths (max 200).' }, 400);
-          }
-          const results: Record<string, { exists: boolean; type: 'file' | 'dir' }> = {};
-          for (const p of paths) {
-            if (typeof p !== 'string' || !p) {
-              results[p] = { exists: false, type: 'file' };
-              continue;
-            }
-            const resolved = resolveReadPath(currentAgentDir, p);
-            if (!resolved) {
-              results[p] = { exists: false, type: 'file' };
-              continue;
-            }
-            try {
-              const s = statSync(resolved);
-              results[p] = { exists: true, type: s.isDirectory() ? 'dir' : 'file' };
-            } catch {
-              results[p] = { exists: false, type: 'file' };
-            }
-          }
-          return jsonResponse({ results });
-        } catch (error) {
-          return jsonResponse(
-            { error: error instanceof Error ? error.message : 'check-paths failed' },
-            500
-          );
-        }
-      }
-
-      if (pathname === '/agent/download' && request.method === 'GET') {
-        const relativePath = url.searchParams.get('path') ?? '';
-        if (!relativePath) {
-          return jsonResponse({ error: 'Missing path.' }, 400);
-        }
-        // Get agentDir from query param, fallback to currentAgentDir
-        const queryAgentDir = url.searchParams.get('agentDir');
-        if (queryAgentDir && !isValidAgentDir(queryAgentDir).valid) {
-          return jsonResponse({ error: 'Invalid agentDir.' }, 400);
-        }
-        const targetDir = queryAgentDir || currentAgentDir;
-        const resolvedPath = resolveReadPath(targetDir, relativePath);
-        if (!resolvedPath) {
-          return jsonResponse({ error: 'Invalid path.' }, 400);
-        }
-        const name = basename(resolvedPath);
-        // RFC 5987: use filename* with UTF-8 encoding for non-ASCII filenames
-        // (HTTP header spec rejects non-ASCII in quoted-string).
-        const encodedName = encodeURIComponent(name);
-        const resp = await fileResponse(resolvedPath, {
-          contentType: sniffMime(resolvedPath),
-          headers: {
-            'Content-Disposition': `attachment; filename="${encodedName}"; filename*=UTF-8''${encodedName}`,
-          },
-        });
-        return resp ?? jsonResponse({ error: 'File not found.' }, 404);
-      }
-
-      if (pathname === '/agent/file' && request.method === 'GET') {
-        const relativePath = url.searchParams.get('path') ?? '';
-        if (!relativePath) {
-          return jsonResponse({ error: 'Missing path.' }, 400);
-        }
-        const resolvedPath = resolveReadPath(currentAgentDir, relativePath);
-        if (!resolvedPath) {
-          return jsonResponse({ error: 'Invalid path.' }, 400);
-        }
-        if (!existsSync(resolvedPath)) {
-          return jsonResponse({ error: 'File not found.' }, 404);
-        }
-        const name = basename(resolvedPath);
-        const mimeType = sniffMime(resolvedPath);
-        if (!isPreviewableText(name, mimeType)) {
-          return jsonResponse({ error: 'File type not supported.' }, 415);
-        }
-        const statResult = await stat(resolvedPath);
-        const size = statResult.size;
-        const maxSize = 512 * 1024;
-        if (size > maxSize) {
-          return jsonResponse({ error: 'File too large to preview.' }, 413);
-        }
-        try {
-          const content = await readFile(resolvedPath, 'utf8');
-          return jsonResponse({ content, name, size });
-        } catch (error) {
-          return jsonResponse(
-            { error: error instanceof Error ? error.message : 'Failed to read file.' },
-            500
-          );
-        }
-      }
-
-      // Save file content
-      if (pathname === '/agent/save-file' && request.method === 'POST') {
-        try {
-          const payload = await request.json() as { path?: string; content?: string };
-          const relativePath = payload?.path?.trim();
-          const content = payload?.content;
-
-          if (!relativePath) {
-            return jsonResponse({ success: false, error: 'path is required.' }, 400);
-          }
-
-          if (content === undefined || content === null) {
-            return jsonResponse({ success: false, error: 'content is required.' }, 400);
-          }
-
-          const resolvedPath = resolveAgentPath(currentAgentDir, relativePath);
-          if (!resolvedPath) {
-            return jsonResponse({ success: false, error: 'Invalid path.' }, 400);
-          }
-
-          if (!existsSync(resolvedPath)) {
-            return jsonResponse({ success: false, error: 'File not found.' }, 404);
-          }
-
-          // Check file size limit (512KB)
-          const maxSize = 512 * 1024;
-          if (content.length > maxSize) {
-            return jsonResponse({ success: false, error: 'Content too large.' }, 413);
-          }
-
-          await writeFile(resolvedPath, content);
-          return jsonResponse({ success: true });
-        } catch (error) {
-          return jsonResponse(
-            { success: false, error: error instanceof Error ? error.message : 'Save failed' },
-            500
-          );
-        }
-      }
 
       if (pathname === '/agent/upload' && request.method === 'POST') {
         const targetParam = url.searchParams.get('path') ?? '';
@@ -3643,698 +3371,20 @@ async function main() {
         }
       }
 
-      // Create new file
-      if (pathname === '/agent/new-file' && request.method === 'POST') {
-        try {
-          const payload = await request.json() as { parentDir?: string; name?: string };
-          const parentDir = payload?.parentDir?.trim() ?? '';
-          const name = payload?.name?.trim();
 
-          if (!name) {
-            return jsonResponse({ success: false, error: 'name is required.' }, 400);
-          }
 
-          if (name.includes('/') || name.includes('\\')) {
-            return jsonResponse({ success: false, error: 'Invalid file name.' }, 400);
-          }
 
-          const resolvedParent = parentDir
-            ? resolveAgentPath(currentAgentDir, parentDir)
-            : currentAgentDir;
-          if (!resolvedParent) {
-            return jsonResponse({ success: false, error: 'Invalid path.' }, 400);
-          }
 
-          const filePath = join(resolvedParent, name);
 
-          if (existsSync(filePath)) {
-            return jsonResponse({ success: false, error: 'File already exists.' }, 409);
-          }
 
-          await writeFile(filePath, '');
-          return jsonResponse({ success: true, path: relative(currentAgentDir, filePath) });
-        } catch (error) {
-          return jsonResponse(
-            { success: false, error: error instanceof Error ? error.message : 'Create failed' },
-            500
-          );
-        }
-      }
 
-      // Create new folder
-      if (pathname === '/agent/new-folder' && request.method === 'POST') {
-        try {
-          const payload = await request.json() as { parentDir?: string; name?: string };
-          const parentDir = payload?.parentDir?.trim() ?? '';
-          const name = payload?.name?.trim();
 
-          if (!name) {
-            return jsonResponse({ success: false, error: 'name is required.' }, 400);
-          }
-
-          if (name.includes('/') || name.includes('\\')) {
-            return jsonResponse({ success: false, error: 'Invalid folder name.' }, 400);
-          }
-
-          const resolvedParent = parentDir
-            ? resolveAgentPath(currentAgentDir, parentDir)
-            : currentAgentDir;
-          if (!resolvedParent) {
-            return jsonResponse({ success: false, error: 'Invalid path.' }, 400);
-          }
-
-          const folderPath = join(resolvedParent, name);
-
-          if (existsSync(folderPath)) {
-            return jsonResponse({ success: false, error: 'Folder already exists.' }, 409);
-          }
-
-          await ensureDir(folderPath);
-          return jsonResponse({ success: true, path: relative(currentAgentDir, folderPath) });
-        } catch (error) {
-          return jsonResponse(
-            { success: false, error: error instanceof Error ? error.message : 'Create failed' },
-            500
-          );
-        }
-      }
-
-      // Rename file or folder
-      if (pathname === '/agent/rename' && request.method === 'POST') {
-        try {
-          const payload = await request.json() as { oldPath?: string; newName?: string };
-          const oldPath = payload?.oldPath?.trim();
-          const newName = payload?.newName?.trim();
-
-          if (!oldPath || !newName) {
-            return jsonResponse({ success: false, error: 'oldPath and newName are required.' }, 400);
-          }
-
-          // Validate newName doesn't contain path separators
-          if (newName.includes('/') || newName.includes('\\')) {
-            return jsonResponse({ success: false, error: 'Invalid file name.' }, 400);
-          }
-
-          const resolvedOld = resolveAgentPath(currentAgentDir, oldPath);
-          if (!resolvedOld) {
-            return jsonResponse({ success: false, error: 'Invalid path.' }, 400);
-          }
-
-          const parentDir = dirname(resolvedOld);
-          const resolvedNew = join(parentDir, newName);
-
-          if (!existsSync(resolvedOld)) {
-            return jsonResponse({ success: false, error: 'File or folder not found.' }, 404);
-          }
-
-          await rename(resolvedOld, resolvedNew);
-          return jsonResponse({ success: true, newPath: relative(currentAgentDir, resolvedNew) });
-        } catch (error) {
-          return jsonResponse(
-            { success: false, error: error instanceof Error ? error.message : 'Rename failed' },
-            500
-          );
-        }
-      }
-
-      // Move files/folders to a target directory
-      if (pathname === '/agent/move' && request.method === 'POST') {
-        try {
-          const payload = await request.json() as { sourcePaths?: string[]; targetDir?: string };
-          const sourcePaths = payload?.sourcePaths;
-          const targetDir = payload?.targetDir?.trim() ?? '';
-
-          if (!sourcePaths || !Array.isArray(sourcePaths) || sourcePaths.length === 0) {
-            return jsonResponse({ success: false, error: 'sourcePaths is required.' }, 400);
-          }
-
-          // Resolve target directory (empty string = workspace root)
-          const resolvedTargetDir = targetDir
-            ? resolveAgentPath(currentAgentDir, targetDir)
-            : currentAgentDir;
-          if (!resolvedTargetDir) {
-            return jsonResponse({ success: false, error: 'Invalid target directory.' }, 400);
-          }
-          if (!existsSync(resolvedTargetDir) || !statSync(resolvedTargetDir).isDirectory()) {
-            return jsonResponse({ success: false, error: 'Target must be an existing directory.' }, 400);
-          }
-
-          const movedFiles: Array<{ oldPath: string; newPath: string }> = [];
-          const errors: string[] = [];
-
-          for (const src of sourcePaths) {
-            const resolvedSrc = resolveAgentPath(currentAgentDir, src.trim());
-            if (!resolvedSrc || !existsSync(resolvedSrc)) {
-              errors.push(`Not found: ${src}`);
-              continue;
-            }
-
-            // Prevent moving a directory into itself or its descendant
-            if (resolvedTargetDir === resolvedSrc || resolvedTargetDir.startsWith(resolvedSrc + sep)) {
-              errors.push(`Cannot move folder into itself: ${src}`);
-              continue;
-            }
-
-            // Skip if already in the target directory
-            if (dirname(resolvedSrc) === resolvedTargetDir) continue;
-
-            const itemName = basename(resolvedSrc);
-            let destination = join(resolvedTargetDir, itemName);
-
-            // Auto-rename on conflict
-            if (existsSync(destination)) {
-              const ext = extname(itemName);
-              const base = ext ? itemName.slice(0, -ext.length) : itemName;
-              let counter = 1;
-              do {
-                destination = join(resolvedTargetDir, `${base} (${counter})${ext}`);
-                counter++;
-              } while (existsSync(destination));
-            }
-
-            await rename(resolvedSrc, destination);
-            movedFiles.push({
-              oldPath: relative(currentAgentDir, resolvedSrc),
-              newPath: relative(currentAgentDir, destination),
-            });
-          }
-
-          return jsonResponse({ success: true, movedFiles, errors: errors.length > 0 ? errors : undefined });
-        } catch (error) {
-          return jsonResponse(
-            { success: false, error: error instanceof Error ? error.message : 'Move failed' },
-            500
-          );
-        }
-      }
-
-      // Delete file or folder
-      if (pathname === '/agent/delete' && request.method === 'POST') {
-        try {
-          const payload = await request.json() as { path?: string };
-          const targetPath = payload?.path?.trim();
-
-          if (!targetPath) {
-            return jsonResponse({ success: false, error: 'path is required.' }, 400);
-          }
-
-          const resolved = resolveAgentPath(currentAgentDir, targetPath);
-          if (!resolved) {
-            return jsonResponse({ success: false, error: 'Invalid path.' }, 400);
-          }
-
-          if (!existsSync(resolved)) {
-            return jsonResponse({ success: false, error: 'File or folder not found.' }, 404);
-          }
-
-          await rm(resolved, { recursive: true, force: true });
-          return jsonResponse({ success: true });
-        } catch (error) {
-          return jsonResponse(
-            { success: false, error: error instanceof Error ? error.message : 'Delete failed' },
-            500
-          );
-        }
-      }
-
-      // Open in Finder/Explorer
-      if (pathname === '/agent/open-in-finder' && request.method === 'POST') {
-        try {
-          const payload = await request.json() as { path?: string; agentDir?: string };
-          const targetPath = payload?.path?.trim();
-
-          if (!targetPath) {
-            return jsonResponse({ success: false, error: 'path is required.' }, 400);
-          }
-
-          // Use provided agentDir or fall back to currentAgentDir
-          const effectiveAgentDir = payload?.agentDir || currentAgentDir;
-          const resolved = resolveReadPath(effectiveAgentDir, targetPath);
-          if (!resolved) {
-            return jsonResponse({ success: false, error: 'Invalid path.' }, 400);
-          }
-
-          if (!existsSync(resolved)) {
-            return jsonResponse({ success: false, error: 'File or folder not found.' }, 404);
-          }
-
-          // Use 'open -R' on macOS to reveal in Finder, 'explorer /select' on Windows
-          const isMac = process.platform === 'darwin';
-          const isWin = process.platform === 'win32';
-
-          if (isMac) {
-            fireAndForget(['open', '-R', resolved]);
-          } else if (isWin) {
-            fireAndForget(['explorer', '/select,', resolved]);
-          } else {
-            // Linux: open parent directory
-            fireAndForget(['xdg-open', dirname(resolved)]);
-          }
-
-          return jsonResponse({ success: true });
-        } catch (error) {
-          return jsonResponse(
-            { success: false, error: error instanceof Error ? error.message : 'Failed to open' },
-            500
-          );
-        }
-      }
-
-      // Open file with system default application
-      if (pathname === '/agent/open-with-default' && request.method === 'POST') {
-        try {
-          const payload = await request.json() as { path?: string; agentDir?: string };
-          const targetPath = payload?.path?.trim();
-
-          if (!targetPath) {
-            return jsonResponse({ success: false, error: 'path is required.' }, 400);
-          }
-
-          const effectiveAgentDir = payload?.agentDir || currentAgentDir;
-          const resolved = resolveReadPath(effectiveAgentDir, targetPath);
-          if (!resolved) {
-            return jsonResponse({ success: false, error: 'Invalid path.' }, 400);
-          }
-
-          if (!existsSync(resolved)) {
-            return jsonResponse({ success: false, error: 'File not found.' }, 404);
-          }
-
-          const isMac = process.platform === 'darwin';
-          const isWin = process.platform === 'win32';
-
-          if (isMac) {
-            fireAndForget(['open', resolved]);
-          } else if (isWin) {
-            // Use PowerShell Start-Process to avoid cmd /c shell interpretation
-            // which could treat & | > in filenames as command operators
-            fireAndForget(['powershell', '-NoProfile', '-Command', `Start-Process -FilePath '${resolved.replace(/'/g, "''")}'`]);
-          } else {
-            fireAndForget(['xdg-open', resolved]);
-          }
-
-          return jsonResponse({ success: true });
-        } catch (error) {
-          return jsonResponse(
-            { success: false, error: error instanceof Error ? error.message : 'Failed to open' },
-            500
-          );
-        }
-      }
-
-      // Open absolute path in Finder/Explorer (for user-level skills/commands)
-      if (pathname === '/agent/open-path' && request.method === 'POST') {
-        try {
-          const payload = await request.json() as { fullPath?: string };
-          const fullPath = payload?.fullPath?.trim();
-
-          if (!fullPath) {
-            return jsonResponse({ success: false, error: 'fullPath is required.' }, 400);
-          }
-
-          // Security: Only allow paths under home directory or temp directories
-          const homeDir = getHomeDirOrNull() || '';
-          const resolvedPath = resolve(fullPath);
-          // Cross-platform path comparison: case-insensitive on Windows (drive letter casing)
-          const ci = process.platform === 'win32';
-          const pathEq = (a: string, b: string) => ci ? a.toLowerCase() === b.toLowerCase() : a === b;
-          const pathStartsWith = (p: string, prefix: string) => ci ? p.toLowerCase().startsWith(prefix.toLowerCase()) : p.startsWith(prefix);
-          const isUnderHome = homeDir && (pathStartsWith(resolvedPath, homeDir + sep) || pathEq(resolvedPath, homeDir));
-          const systemTmpDir = tmpdir();
-          const isUnderTmp = pathStartsWith(resolvedPath, systemTmpDir + sep) || pathEq(resolvedPath, systemTmpDir);
-          if (!isUnderHome && !isUnderTmp) {
-            return jsonResponse({ success: false, error: 'Path not allowed.' }, 403);
-          }
-
-          if (!existsSync(resolvedPath)) {
-            return jsonResponse({ success: false, error: 'File or folder not found.' }, 404);
-          }
-
-          const isMac = process.platform === 'darwin';
-          const isWin = process.platform === 'win32';
-
-          if (isMac) {
-            fireAndForget(['open', '-R', resolvedPath]);
-          } else if (isWin) {
-            fireAndForget(['explorer', '/select,', resolvedPath]);
-          } else {
-            fireAndForget(['xdg-open', dirname(resolvedPath)]);
-          }
-
-          return jsonResponse({ success: true });
-        } catch (error) {
-          return jsonResponse(
-            { success: false, error: error instanceof Error ? error.message : 'Failed to open' },
-            500
-          );
-        }
-      }
-
-      // Import files to a specific directory
-      if (pathname === '/agent/import' && request.method === 'POST') {
-        const targetDir = url.searchParams.get('targetDir') ?? '';
-        const resolvedTarget = targetDir ? resolveAgentPath(currentAgentDir, targetDir) : currentAgentDir;
-
-        if (!resolvedTarget) {
-          return jsonResponse({ error: 'Invalid target directory.' }, 400);
-        }
-
-        try {
-          const oversized = rejectIfOversizedUpload(request);
-          if (oversized) return oversized;
-          const formData = await request.formData();
-          const files = Array.from(formData.values()).filter(
-            (value) => typeof value !== 'string'
-          ) as File[];
-
-          if (files.length === 0) {
-            return jsonResponse({ error: 'No files provided.' }, 400);
-          }
-
-          await ensureDir(resolvedTarget);
-          const saved: string[] = [];
-
-          for (const file of files) {
-            const safeName = file.name.replace(/[<>:"/\\|?*]/g, '_');
-            const destination = join(resolvedTarget, safeName);
-            await streamUploadToFile(file, destination);
-            saved.push(relative(currentAgentDir, destination));
-          }
-
-          return jsonResponse({ success: true, files: saved });
-        } catch (error) {
-          return jsonResponse(
-            { error: error instanceof Error ? error.message : 'Import failed' },
-            500
-          );
-        }
-      }
 
       // ============= FILE MANAGEMENT API =============
 
-      // POST /api/files/import-base64 - Import files via base64 encoding (works in Tauri)
-      if (pathname === '/api/files/import-base64' && request.method === 'POST') {
-        try {
-          const payload = await request.json() as {
-            files: Array<{ name: string; content: string }>; // content is base64 encoded
-            targetDir?: string;
-          };
 
-          const { files, targetDir = '' } = payload;
 
-          if (!files || files.length === 0) {
-            return jsonResponse({ success: false, error: 'No files provided' }, 400);
-          }
 
-          const resolvedTarget = targetDir
-            ? resolveAgentPath(currentAgentDir, targetDir)
-            : currentAgentDir;
-
-          if (!resolvedTarget) {
-            return jsonResponse({ success: false, error: 'Invalid target directory' }, 400);
-          }
-
-          const written = await writeBase64FilesToAgentDir(files, resolvedTarget, currentAgentDir);
-          return jsonResponse({ success: true, files: written.map(w => w.relativePath) });
-        } catch (error) {
-          console.error('[api/files/import-base64] Error:', error);
-          return jsonResponse(
-            { success: false, error: error instanceof Error ? error.message : 'Import failed' },
-            500
-          );
-        }
-      }
-
-      // POST /api/files/copy - Copy external files to workspace
-      if (pathname === '/api/files/copy' && request.method === 'POST') {
-        try {
-          const payload = await request.json() as {
-            sourcePaths: string[];
-            targetDir: string;
-            autoRename?: boolean;
-          };
-
-          const { sourcePaths, targetDir, autoRename = true } = payload;
-
-          if (!sourcePaths || sourcePaths.length === 0) {
-            return jsonResponse({ success: false, error: 'sourcePaths is required' }, 400);
-          }
-
-          const resolvedTarget = targetDir
-            ? resolveAgentPath(currentAgentDir, targetDir)
-            : currentAgentDir;
-
-          if (!resolvedTarget) {
-            return jsonResponse({ success: false, error: 'Invalid target directory' }, 400);
-          }
-
-          // Ensure target directory exists
-          await ensureDir(resolvedTarget);
-
-          const copiedFiles: Array<{ sourcePath: string; targetPath: string; renamed: boolean }> = [];
-
-          // Helper function to generate unique filename
-          const getUniqueName = (dir: string, name: string): { name: string; renamed: boolean } => {
-            const ext = extname(name);
-            const base = basename(name, ext);
-            let finalName = name;
-            let counter = 1;
-            let renamed = false;
-
-            while (existsSync(join(dir, finalName))) {
-              if (!autoRename) {
-                throw new Error(`File ${name} already exists`);
-              }
-              finalName = `${base}_${counter}${ext}`;
-              counter++;
-              renamed = true;
-            }
-
-            return { name: finalName, renamed };
-          };
-
-          // Helper function to copy directory recursively
-          const copyDirectory = async (src: string, dest: string) => {
-            await ensureDir(dest);
-            const entries = readdirSync(src, { withFileTypes: true });
-
-            for (const entry of entries) {
-              const srcPath = join(src, entry.name);
-              const destPath = join(dest, entry.name);
-
-              if (entry.isDirectory()) {
-                await copyDirectory(srcPath, destPath);
-              } else {
-                await copyFileAsync(srcPath, destPath);
-              }
-            }
-          };
-
-          for (const sourcePath of sourcePaths) {
-            // Validate source path safety (block sensitive directories)
-            const resolvedSource = resolve(sourcePath);
-            if (!isSafeReadPath(resolvedSource)) {
-              console.warn(`[api/files/copy] Blocked unsafe source path: ${sourcePath}`);
-              continue;
-            }
-
-            // Validate source path exists
-            if (!existsSync(sourcePath)) {
-              console.warn(`[api/files/copy] Source not found: ${sourcePath}`);
-              continue;
-            }
-
-            const sourceInfo = await stat(sourcePath);
-            const sourceName = basename(sourcePath);
-
-            if (sourceInfo.isDirectory()) {
-              // Copy directory
-              const { name: uniqueName, renamed } = getUniqueName(resolvedTarget, sourceName);
-              const destPath = join(resolvedTarget, uniqueName);
-              await copyDirectory(sourcePath, destPath);
-              copiedFiles.push({
-                sourcePath,
-                targetPath: relative(currentAgentDir, destPath),
-                renamed,
-              });
-            } else {
-              // Copy file
-              const { name: uniqueName, renamed } = getUniqueName(resolvedTarget, sourceName);
-              const destPath = join(resolvedTarget, uniqueName);
-              await copyFileAsync(sourcePath, destPath);
-              copiedFiles.push({
-                sourcePath,
-                targetPath: relative(currentAgentDir, destPath),
-                renamed,
-              });
-            }
-          }
-
-          return jsonResponse({ success: true, copiedFiles });
-        } catch (error) {
-          console.error('[api/files/copy] Error:', error);
-          return jsonResponse(
-            { success: false, error: error instanceof Error ? error.message : 'Copy failed' },
-            500
-          );
-        }
-      }
-
-      // POST /api/files/add-gitignore - Add pattern to .gitignore
-      if (pathname === '/api/files/add-gitignore' && request.method === 'POST') {
-        try {
-          const payload = await request.json() as { pattern: string };
-          const { pattern } = payload;
-
-          if (!pattern || typeof pattern !== 'string') {
-            return jsonResponse({ success: false, error: 'pattern is required' }, 400);
-          }
-
-          const gitignorePath = join(currentAgentDir, '.gitignore');
-
-          // Check if .gitignore exists
-          if (!existsSync(gitignorePath)) {
-            // Create new .gitignore with the pattern
-            writeFileSync(gitignorePath, `${pattern}\n`);
-            return jsonResponse({ success: true, added: true, reason: 'created new .gitignore' });
-          }
-
-          // Read existing content
-          const content = readFileSync(gitignorePath, 'utf-8');
-          const lines = content.split('\n');
-
-          // Check if pattern already exists
-          const trimmedPattern = pattern.trim();
-          const patternExists = lines.some(line => line.trim() === trimmedPattern);
-
-          if (patternExists) {
-            return jsonResponse({ success: true, added: false, reason: 'pattern already exists' });
-          }
-
-          // Append pattern to .gitignore
-          const newContent = content.endsWith('\n')
-            ? `${content}${pattern}\n`
-            : `${content}\n${pattern}\n`;
-
-          writeFileSync(gitignorePath, newContent);
-          return jsonResponse({ success: true, added: true });
-        } catch (error) {
-          console.error('[api/files/add-gitignore] Error:', error);
-          return jsonResponse(
-            { success: false, error: error instanceof Error ? error.message : 'Failed to update .gitignore' },
-            500
-          );
-        }
-      }
-
-      // POST /api/files/read-as-base64 - Read external files and return as base64 (for Tauri image drops)
-      if (pathname === '/api/files/read-as-base64' && request.method === 'POST') {
-        try {
-          const payload = await request.json() as {
-            paths: string[];
-          };
-
-          const { paths } = payload;
-
-          if (!paths || paths.length === 0) {
-            return jsonResponse({ success: false, error: 'paths is required' }, 400);
-          }
-
-          const results: Array<{
-            path: string;
-            name: string;
-            mimeType: string;
-            data: string; // base64
-            error?: string;
-          }> = [];
-
-          // Allowed image extensions for this endpoint
-          const allowedImageExts = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico', 'tiff', 'tif', 'avif']);
-
-          for (const filePath of paths) {
-            try {
-              // Only allow image files (this endpoint is specifically for image drops)
-              const ext = extname(filePath).toLowerCase().slice(1);
-              if (!allowedImageExts.has(ext)) {
-                results.push({
-                  path: filePath,
-                  name: basename(filePath),
-                  mimeType: '',
-                  data: '',
-                  error: 'Only image files are allowed',
-                });
-                continue;
-              }
-
-              // Block sensitive directories
-              const resolvedFilePath = resolve(filePath);
-              if (!isSafeReadPath(resolvedFilePath)) {
-                results.push({
-                  path: filePath,
-                  name: basename(filePath),
-                  mimeType: '',
-                  data: '',
-                  error: 'Access denied',
-                });
-                continue;
-              }
-
-              // Validate file exists
-              if (!existsSync(filePath)) {
-                results.push({
-                  path: filePath,
-                  name: basename(filePath),
-                  mimeType: '',
-                  data: '',
-                  error: 'File not found',
-                });
-                continue;
-              }
-
-              // Check file size (limit to 10MB for images)
-              const fileInfo = await stat(filePath);
-              if (fileInfo.size > 10 * 1024 * 1024) {
-                results.push({
-                  path: filePath,
-                  name: basename(filePath),
-                  mimeType: '',
-                  data: '',
-                  error: 'File too large (max 10MB)',
-                });
-                continue;
-              }
-
-              // Read file
-              const bytes = await readFile(filePath);
-              const base64 = bytes.toString('base64');
-              const mimeType = sniffMime(filePath);
-
-              results.push({
-                path: filePath,
-                name: basename(filePath),
-                mimeType,
-                data: base64,
-              });
-            } catch (err) {
-              results.push({
-                path: filePath,
-                name: basename(filePath),
-                mimeType: '',
-                data: '',
-                error: err instanceof Error ? err.message : 'Read failed',
-              });
-            }
-          }
-
-          return jsonResponse({ success: true, files: results });
-        } catch (error) {
-          console.error('[api/files/read-as-base64] Error:', error);
-          return jsonResponse(
-            { success: false, error: error instanceof Error ? error.message : 'Read failed' },
-            500
-          );
-        }
-      }
 
       // GET /api/image?path=... - Serve generated images (for browser dev mode)
       if (pathname === '/api/image' && request.method === 'GET') {
@@ -4649,16 +3699,6 @@ async function main() {
         }
       }
 
-      // GET /api/git/branch - Get current git branch for the workspace
-      if (pathname === '/api/git/branch' && request.method === 'GET') {
-        try {
-          const branch = getGitBranch(currentAgentDir);
-          return jsonResponse({ branch: branch || null });
-        } catch (error) {
-          console.error('[api/git/branch] Error:', error);
-          return jsonResponse({ branch: null }, 200); // Non-fatal, just return null
-        }
-      }
 
       // GET /api/assets/qr-code - Fetch QR code image with local caching
       // Downloads from CDN on first launch and caches locally for subsequent requests
@@ -5544,191 +4584,9 @@ async function main() {
       // ============= END ADMIN API =============
 
       // ============= SLASH COMMANDS API =============
-      // GET /api/commands - Get all available slash commands and skills
-      if (pathname === '/api/commands' && request.method === 'GET') {
-        try {
-          // Lazy sync: only re-sync symlinks if global skills have changed (generation counter).
-          // Covers the case where Global Sidecar (Settings) modified skills without Tab Sidecar knowing.
-          if (currentAgentDir) syncSkillsIfNeeded(currentAgentDir);
-
-          // Start with empty array, builtin commands added at the end
-          // Order: project commands -> user commands -> skills -> builtin (so custom can override builtin)
-          const commands: SlashCommand[] = [];
-          const homeDir = getHomeDirOrNull() || '';
-
-          // ===== COMMANDS SCANNING =====
-          // Helper function to scan commands from a directory
-          const scanCommandsDir = (commandsDir: string, scope: 'user' | 'project') => {
-            if (!existsSync(commandsDir)) return;
-            try {
-              const files = readdirSync(commandsDir);
-              for (const file of files) {
-                if (!file.endsWith('.md')) continue;
-                const filePath = join(commandsDir, file);
-                try {
-                  const content = readFileSync(filePath, 'utf-8');
-                  const { frontmatter } = parseFullCommandContent(content);
-                  const fileName = extractCommandName(file);
-                  commands.push({
-                    name: frontmatter.name || fileName,  // Prefer frontmatter name
-                    description: frontmatter.description || '',
-                    source: 'custom',
-                    scope,
-                    path: filePath,
-                    fileName,  // Disk identifier — needed to route to detail panel
-                  });
-                } catch (err) {
-                  console.warn(`[api/commands] Error reading command ${file}:`, err);
-                }
-              }
-            } catch (err) {
-              console.warn(`[api/commands] Error scanning commands dir ${commandsDir}:`, err);
-            }
-          };
-
-          // 1. Scan project-level commands (.claude/commands/) - highest priority
-          const claudeCommandsDir = join(currentAgentDir, '.claude', 'commands');
-          scanCommandsDir(claudeCommandsDir, 'project');
-
-          // 2. Scan user-level commands (~/.myagents/commands/)
-          const userCommandsDir = join(homeDir, '.myagents', 'commands');
-          scanCommandsDir(userCommandsDir, 'user');
-          // ===== END COMMANDS SCANNING =====
-
-          // ===== SKILLS SCANNING =====
-          // Helper function to scan skills from a directory
-          const skillsConfig = readSkillsConfig();
-          const scanSkillsDir = (skillsDir: string, scope: 'user' | 'project') => {
-            if (!existsSync(skillsDir)) return;
-            try {
-              const skillFolders = readdirSync(skillsDir, { withFileTypes: true });
-              for (const folder of skillFolders) {
-                // isDirEntry follows symlinks + Windows junctions (issue #104);
-                // bare `isDirectory()` alone drops junction-mounted skills.
-                if (!isDirEntry(folder, join(skillsDir, folder.name))) continue;
-                if (isSkillBlockedOnPlatform(folder.name)) continue;
-                // Skip disabled user-level skills in slash commands
-                if (scope === 'user' && skillsConfig.disabled.includes(folder.name)) continue;
-                const skillMdPath = join(skillsDir, folder.name, 'SKILL.md');
-                if (!existsSync(skillMdPath)) continue;
-
-                try {
-                  const content = readFileSync(skillMdPath, 'utf-8');
-                  const { name, description } = parseSkillFrontmatter(content);
-                  // Use parsed name or fall back to folder name
-                  const skillName = name || folder.name;
-                  commands.push({
-                    name: skillName,
-                    description: description || '',
-                    source: 'skill',
-                    scope,
-                    path: skillMdPath,
-                    folderName: folder.name, // Actual folder name for copy operations
-                  });
-                } catch (err) {
-                  console.warn(`[api/commands] Error reading skill ${folder.name}:`, err);
-                }
-              }
-            } catch (err) {
-              console.warn(`[api/commands] Error scanning skills dir ${skillsDir}:`, err);
-            }
-          };
-
-          // 1. Scan project-level skills (.claude/skills/) - higher priority
-          const projectSkillsDir = join(currentAgentDir, '.claude', 'skills');
-          scanSkillsDir(projectSkillsDir, 'project');
-
-          // 2. Scan user-level skills (~/.myagents/skills/) - lower priority
-          const userSkillsDir = join(homeDir, '.myagents', 'skills');
-          scanSkillsDir(userSkillsDir, 'user');
-          // ===== END SKILLS SCANNING =====
-
-          // 3. Add builtin commands at the end (so custom/skills can override them)
-          commands.push(...BUILTIN_SLASH_COMMANDS);
-
-          // Collect global skill folderNames before dedup (dedup removes global version when project version exists)
-          const globalSkillFolderNames = commands
-            .filter(c => c.source === 'skill' && c.scope === 'user' && c.folderName)
-            .map(c => c.folderName!);
-
-          // Deduplicate commands by name (keep first occurrence - custom/skills take precedence over builtin)
-          const seenNames = new Set<string>();
-          const uniqueCommands = commands.filter(cmd => {
-            if (seenNames.has(cmd.name)) {
-              return false;
-            }
-            seenNames.add(cmd.name);
-            return true;
-          });
-
-          return jsonResponse({ success: true, commands: uniqueCommands, globalSkillFolderNames });
-        } catch (error) {
-          console.error('[api/commands] Error:', error);
-          return jsonResponse(
-            { success: false, error: error instanceof Error ? error.message : 'Failed to get commands' },
-            500
-          );
-        }
-      }
 
       // ============= CLAUDE.md API =============
-      // GET /api/claude-md - Read CLAUDE.md from workspace
-      if (pathname === '/api/claude-md' && request.method === 'GET') {
-        try {
-          // Get agentDir from query param, fallback to currentAgentDir
-          // Get agentDir from query param, fallback to currentAgentDir
-          const queryAgentDir = url.searchParams.get('agentDir');
-          if (queryAgentDir && !isValidAgentDir(queryAgentDir).valid) {
-            return jsonResponse({ success: false, error: 'Invalid agentDir' }, 400);
-          }
-          const targetDir = queryAgentDir || currentAgentDir;
-          const claudeMdPath = join(targetDir, 'CLAUDE.md');
-          if (!existsSync(claudeMdPath)) {
-            return jsonResponse({
-              success: true,
-              exists: false,
-              path: claudeMdPath,
-              content: ''
-            });
-          }
-          const content = readFileSync(claudeMdPath, 'utf-8');
-          return jsonResponse({
-            success: true,
-            exists: true,
-            path: claudeMdPath,
-            content
-          });
-        } catch (error) {
-          console.error('[api/claude-md] Error:', error);
-          return jsonResponse(
-            { success: false, error: error instanceof Error ? error.message : 'Failed to read CLAUDE.md' },
-            500
-          );
-        }
-      }
 
-      // POST /api/claude-md - Write CLAUDE.md to workspace
-      if (pathname === '/api/claude-md' && request.method === 'POST') {
-        try {
-          const payload = await request.json() as { content: string };
-          // Get agentDir from query param, fallback to currentAgentDir
-          // Get agentDir from query param, fallback to currentAgentDir
-          const queryAgentDir = url.searchParams.get('agentDir');
-          if (queryAgentDir && !isValidAgentDir(queryAgentDir).valid) {
-            return jsonResponse({ success: false, error: 'Invalid agentDir' }, 400);
-          }
-          const targetDir = queryAgentDir || currentAgentDir;
-          const claudeMdPath = join(targetDir, 'CLAUDE.md');
-          writeFileSync(claudeMdPath, payload.content, 'utf-8');
-          return jsonResponse({ success: true, path: claudeMdPath });
-        } catch (error) {
-          console.error('[api/claude-md] Error:', error);
-          return jsonResponse(
-            { success: false, error: error instanceof Error ? error.message : 'Failed to write CLAUDE.md' },
-            500
-          );
-        }
-      }
 
       // Security: Validate item names to prevent path traversal attacks
       // Supports Unicode (Chinese, Japanese, etc.) while maintaining security
@@ -6010,8 +4868,9 @@ async function main() {
       // Supports ?agentDir= for listing skills from a specific workspace (e.g. from Launcher)
       if (pathname === '/api/skills' && request.method === 'GET') {
         try {
-          // Lazy sync: ensure symlinks are current before listing
-          if (currentAgentDir) syncSkillsIfNeeded(currentAgentDir);
+          // Phase E (PRD 0.2.7): always-sync (cheap when nothing changed) —
+          // the gen-tracking wrapper is gone.
+          if (currentAgentDir) syncProjectUserConfig(currentAgentDir);
 
           const scope = url.searchParams.get('scope') || 'all';
           const queryAgentDir = url.searchParams.get('agentDir');
@@ -6090,7 +4949,7 @@ async function main() {
           writeSkillsConfig(config);
           // Re-sync project skill symlinks if this sidecar has an agentDir
           // (Global Sidecar has no agentDir; Tab Sidecars will sync on next /api/commands or /api/skills)
-          if (agentDir) { syncProjectUserConfig(agentDir); markSkillsSynced(); }
+          if (agentDir) { syncProjectUserConfig(agentDir); }
           return jsonResponse({ success: true });
         } catch (error) {
           console.error('[api/skill/toggle-enable] Error:', error);
@@ -6255,7 +5114,7 @@ async function main() {
           // Imported user skills — bump generation + sync symlinks into project
           if (synced > 0) {
             bumpSkillsGeneration();
-            if (agentDir) { syncProjectUserConfig(agentDir); markSkillsSynced(); }
+            if (agentDir) { syncProjectUserConfig(agentDir); }
           }
           return jsonResponse({
             success: true,
@@ -6372,7 +5231,7 @@ async function main() {
             // User skill renamed — bump generation + re-sync to fix old dangling symlink + create new one
             if (payload.scope === 'user') {
               bumpSkillsGeneration();
-              if (agentDir) { syncProjectUserConfig(agentDir); markSkillsSynced(); }
+              if (agentDir) { syncProjectUserConfig(agentDir); }
             }
             return jsonResponse({
               success: true,
@@ -6424,7 +5283,7 @@ async function main() {
           // User skill deleted — bump generation + re-sync to remove dangling symlinks
           if (scope === 'user') {
             bumpSkillsGeneration();
-            if (agentDir) { syncProjectUserConfig(agentDir); markSkillsSynced(); }
+            if (agentDir) { syncProjectUserConfig(agentDir); }
           }
           return jsonResponse({ success: true });
         } catch (error) {
@@ -6475,7 +5334,7 @@ async function main() {
 
           // Bump generation + sync symlinks into project
           bumpSkillsGeneration();
-          if (currentAgentDir) { syncProjectUserConfig(currentAgentDir); markSkillsSynced(); }
+          if (currentAgentDir) { syncProjectUserConfig(currentAgentDir); }
 
           return jsonResponse({ success: true, folderName });
         } catch (error) {
@@ -6529,7 +5388,7 @@ async function main() {
           // New user skill — bump generation so Tab Sidecars re-sync symlinks
           if (payload.scope === 'user') {
             bumpSkillsGeneration();
-            if (agentDir) { syncProjectUserConfig(agentDir); markSkillsSynced(); }
+            if (agentDir) { syncProjectUserConfig(agentDir); }
           }
           return jsonResponse({ success: true, path: skillPath, folderName });
         } catch (error) {
@@ -6688,7 +5547,7 @@ async function main() {
 
               if (payload.scope === 'user') {
                 bumpSkillsGeneration();
-                if (agentDir) { syncProjectUserConfig(agentDir); markSkillsSynced(); }
+                if (agentDir) { syncProjectUserConfig(agentDir); }
               }
               return jsonResponse({
                 success: true,
@@ -6744,7 +5603,7 @@ async function main() {
 
             if (payload.scope === 'user') {
               bumpSkillsGeneration();
-              if (agentDir) { syncProjectUserConfig(agentDir); markSkillsSynced(); }
+              if (agentDir) { syncProjectUserConfig(agentDir); }
             }
             return jsonResponse({
               success: true,
@@ -6860,7 +5719,7 @@ async function main() {
 
           if (payload.scope === 'user') {
             bumpSkillsGeneration();
-            if (agentDir) { syncProjectUserConfig(agentDir); markSkillsSynced(); }
+            if (agentDir) { syncProjectUserConfig(agentDir); }
           }
           return jsonResponse({
             success: true,
@@ -7067,7 +5926,7 @@ async function main() {
 
             if (scope === 'user') {
               bumpSkillsGeneration();
-              if (agentDir) { syncProjectUserConfig(agentDir); markSkillsSynced(); }
+              if (agentDir) { syncProjectUserConfig(agentDir); }
             }
 
             return jsonResponse({
@@ -7157,7 +6016,7 @@ async function main() {
 
           if (scope === 'user') {
             bumpSkillsGeneration();
-            if (agentDir) { syncProjectUserConfig(agentDir); markSkillsSynced(); }
+            if (agentDir) { syncProjectUserConfig(agentDir); }
           }
 
           return jsonResponse({
@@ -8102,7 +6961,6 @@ async function main() {
 
       // ============= IM BOT API =============
       // These endpoints are called by the Rust IM layer (SessionRouter)
-
 
       // ============= IM Pipeline v2 (Pattern C/D) =============
       // /api/im/enqueue   — sync ACK, no SSE; peer_lock on Rust side only

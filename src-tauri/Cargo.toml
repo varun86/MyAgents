@@ -1,6 +1,6 @@
 [package]
 name = "myagents"
-version = "0.2.6"
+version = "0.2.7"
 description = "MyAgents - Desktop Claude Code for everyone"
 authors = ["MyAgents Team <myagents.io@gmail.com>"]
 license = "Apache-2.0"
@@ -53,6 +53,10 @@ uuid = { version = "1.11", features = ["v4"] }
 tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
 prost = "0.13"
 pulldown-cmark = "0.12"
+# YAML frontmatter parsing for slash command / skill SKILL.md files (workspace_files::slash)
+serde_yaml = "0.9"
+# Fuzzy file name search for @ mention picker — small dependency, used only inside workspace_files::search
+fuzzy-matcher = "0.3"
 axum = { version = "0.8", default-features = false, features = ["json", "tokio", "query", "http1"] }
 cron = "0.15"
 portable-pty = "0.8"
@@ -85,6 +89,12 @@ windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_System_Threading",
 ] }
+# `junction` creates NTFS directory junctions without admin / Developer Mode
+# (`std::os::windows::fs::symlink_dir` would otherwise need ERROR_PRIVILEGE_NOT_HELD
+# elevated rights). Used by `workspace_files::skill_sync` to mirror
+# user-level skills into `<workspace>/.claude/skills/` — the Node.js
+# sidecar uses `symlinkSync(target, link, 'junction')` for the same reason.
+junction = "1.0"
 
 [dev-dependencies]
 tempfile = "3.10"

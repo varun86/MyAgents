@@ -21,6 +21,7 @@ import { useCloseLayer } from '@/hooks/useCloseLayer';
 import { useAgentStatuses } from '@/hooks/useAgentStatuses';
 import { useConfig } from '@/hooks/useConfig';
 import { useToast } from '@/components/Toast';
+import { listenWithCleanup } from '@/utils/tauriListen';
 import {
   taskArchive,
   taskDelete,
@@ -193,14 +194,13 @@ export function TaskDetailOverlay({
   // critical for the "任务执行" section to show runs that fire while the
   // overlay is open.
   useEffect(() => {
-    const unlisteners: Array<() => void> = [];
-    let cancelled = false;
+    const ac = new AbortController();
     const reloadIfMatches = async (taskId: string | undefined) => {
-      if (cancelled || !isMountedRef.current) return;
+      if (ac.signal.aborted || !isMountedRef.current) return;
       if (taskId !== task.id) return;
       try {
         const fresh = await taskGet(task.id);
-        if (cancelled || !isMountedRef.current) return;
+        if (ac.signal.aborted || !isMountedRef.current) return;
         if (fresh) {
           setTask(fresh);
           setReloadToken((n) => n + 1);
@@ -209,24 +209,12 @@ export function TaskDetailOverlay({
         /* silent */
       }
     };
-    void (async () => {
-      const { listen } = await import('@tauri-apps/api/event');
-      if (cancelled) return;
-      for (const evt of ['task:status-changed', 'task:session-appended']) {
-        const unlisten = await listen<{ taskId?: string }>(evt, (e) => {
-          void reloadIfMatches(e.payload?.taskId);
-        });
-        if (cancelled) {
-          unlisten();
-        } else {
-          unlisteners.push(unlisten);
-        }
-      }
-    })();
-    return () => {
-      cancelled = true;
-      for (const off of unlisteners) off();
-    };
+    for (const evt of ['task:status-changed', 'task:session-appended']) {
+      void listenWithCleanup<{ taskId?: string }>(evt, (e) => {
+        void reloadIfMatches(e.payload?.taskId);
+      }, ac.signal);
+    }
+    return () => ac.abort();
   }, [task.id]);
 
   const runStatus = useCallback(

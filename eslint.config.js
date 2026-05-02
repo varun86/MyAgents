@@ -33,6 +33,48 @@ export default defineConfig(
       }
     }
   },
+  // Pit-of-success guard: bare imports of `listen` from `@tauri-apps/api/event`
+  // leak the Tauri-side listener if the component unmounts during the
+  // `await listen(...)` race window. `listenWithCleanup` from
+  // `@/utils/tauriListen` encapsulates the correct teardown pattern (pre-await
+  // abort, handler-time abort, post-await unlisten, auto-cleanup on signal).
+  // Files that legitimately need bare `listen` (`SseConnection.ts`, the helper
+  // itself, the helper test, and `TerminalPanel.tsx` whose listener lifecycle
+  // is intentionally decoupled from the React effect) are exempted via
+  // `ignores`. `import type { UnlistenFn }` is fine — type-only imports erase.
+  {
+    files: ['src/renderer/**/*.{ts,tsx}'],
+    ignores: [
+      'src/renderer/utils/tauriListen.ts',
+      'src/renderer/utils/tauriListen.test.ts',
+      'src/renderer/api/SseConnection.ts',
+      'src/renderer/components/TerminalPanel.tsx',
+    ],
+    rules: {
+      'no-restricted-imports': 'off',
+      '@typescript-eslint/no-restricted-imports': [
+        'error',
+        {
+          paths: [
+            {
+              name: '@tauri-apps/api/event',
+              importNames: ['listen'],
+              message: "Use `listenWithCleanup` from '@/utils/tauriListen' instead — bare `await listen(...)` leaks the Tauri listener if the component unmounts mid-registration. See `tauriListen.ts` doc-comment.",
+              allowTypeImports: true,
+            },
+          ],
+        },
+      ],
+      // NOTE: `no-restricted-syntax` for dynamic-import detection lives in
+      // the renderer block below (~line 130), MERGED with the Phase E sidecar
+      // endpoint selectors. Splitting it across two config blocks doesn't
+      // work — Flat Config's later-block-wins semantics meant the renderer
+      // block's `no-restricted-syntax` wiped out anything we set here, so a
+      // dynamic `import('@tauri-apps/api/event').then(({ listen }) => …)`
+      // slipped through the guard. (Codex review of this migration caught
+      // exactly this — 4 such callsites had been quietly bypassed.)
+    },
+  },
   // Renderer process (Browser + React environment)
   {
     files: ['src/renderer/**/*.{ts,tsx}'],
@@ -54,7 +96,60 @@ export default defineConfig(
       ...react.configs.recommended.rules,
       ...react.configs['jsx-runtime'].rules,
       ...reactHooks.configs.recommended.rules,
-      'react/prop-types': 'off' // Using TypeScript for prop validation
+      'react/prop-types': 'off', // Using TypeScript for prop validation
+      // Phase E (PRD 0.2.7): the renderer MUST NOT reach the deleted
+      // sidecar workspace-IO endpoints. Workspace file ops go through Rust
+      // `cmd_workspace_*` invokes via `useWorkspaceFileService`. Each
+      // banned endpoint is matched via a `Literal[value=...]` selector
+      // (esquery's regex literals are flaky in flat-config mode, so we
+      // enumerate). Comments aren't `Literal` nodes, so red-line history
+      // can still reference these strings in CLAUDE.md / PRD docs.
+      'no-restricted-syntax': [
+        'error',
+        // Dynamic-import guard for `@tauri-apps/api/event`. Catches
+        // `import('@tauri-apps/api/event').then(({ listen }) => …)` which
+        // bypasses the static `no-restricted-imports` rule above — that
+        // rule only sees named imports in `ImportDeclaration` nodes. The
+        // dynamic-import form ALSO needs to be locked down to seal the
+        // pit-of-success: 4 such callsites bypassed the migration before
+        // this selector was added. (Codex review CRIT-1 of the migration.)
+        // Note: this matches ALL dynamic imports of the package, including
+        // `emit`-only access. Migrate any legitimate `emit` callsite to a
+        // static `import { emit } from '@tauri-apps/api/event'` (no leak
+        // risk because emit doesn't subscribe).
+        {
+          selector: "ImportExpression > Literal[value='@tauri-apps/api/event']",
+          message: "Dynamic `import('@tauri-apps/api/event')` is forbidden — bypasses the static `listen` ban. Use `listenWithCleanup` from '@/utils/tauriListen' for subscriptions, or a static `import { emit } from '@tauri-apps/api/event'` for one-shot dispatch.",
+        },
+        ...[
+          '/api/files/import-base64',
+          '/api/files/copy',
+          '/api/files/read-as-base64',
+          '/api/files/add-gitignore',
+          '/api/commands',
+          '/api/git/branch',
+          '/api/claude-md',
+          '/agent/dir',
+          '/agent/dir/expand',
+          '/agent/file',
+          '/agent/download',
+          '/agent/import',
+          '/agent/new-file',
+          '/agent/new-folder',
+          '/agent/rename',
+          '/agent/delete',
+          '/agent/move',
+          '/agent/open-in-finder',
+          '/agent/open-with-default',
+          '/agent/open-path',
+          '/agent/search-files',
+          '/agent/check-paths',
+          '/agent/save-file'
+        ].map((endpoint) => ({
+          selector: `Literal[value=${JSON.stringify(endpoint)}]`,
+          message: `Phase E (PRD 0.2.7): sidecar HTTP endpoint '${endpoint}' was deleted. Workspace file IO must go through Rust cmd_workspace_* invokes via useWorkspaceFileService. See CLAUDE.md red-line.`
+        }))
+      ]
     }
   },
   // Global rules for all files

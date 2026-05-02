@@ -27,8 +27,10 @@ import { useConfig } from '@/hooks/useConfig';
 import { useFileDropZone } from '@/hooks/useFileDropZone';
 import { useTauriFileDrop } from '@/hooks/useTauriFileDrop';
 import { useCronTask } from '@/hooks/useCronTask';
+import { useWorkspaceFileService } from '@/hooks/useWorkspaceFileService';
 import { getSessionCronTask, updateCronTaskTab, isTaskExecuting, createCronTask, startCronTask as startCronTaskIpc, startCronScheduler } from '@/api/cronTaskClient';
 import { updateSession as patchSessionMetadata } from '@/api/sessionClient';
+import { persistInputOptionChange } from '@/api/persistInputOption';
 import type { CronTask } from '@/types/cronTask';
 import { formatScheduleDescription } from '@/types/cronTask';
 import CronTaskCard from '@/components/scheduled-tasks/CronTaskCard';
@@ -45,7 +47,6 @@ import {
   resolveProvider,
 } from '@/config/configService';
 import { patchAgentConfig, getAgentById } from '@/config/services/agentConfigService';
-import type { AgentConfig } from '../../shared/types/agent';
 import { BrowserPanelContext } from '@/context/BrowserPanelContext';
 import { BROWSER_BLANK_URL } from '@/components/browserConstants';
 import { CUSTOM_EVENTS, isPendingSessionId } from '../../shared/constants';
@@ -206,6 +207,14 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   const isActive = useTabActive();
   const toast = useToast();
 
+  // Workspace file service — Phase D coherence fix: SimpleChatInput already
+  // sources its slash menu from `cmd_list_slash_commands`; the chat sidebar
+  // (loadSkillsAndCommands below) used to hit the sidecar `/api/commands`
+  // route, so the two surfaces could drift when sidecar fingerprint and Rust
+  // scan disagreed (different builtin tables, different filter rules). Routing
+  // both through one Rust source of truth removes the drift class.
+  const fileService = useWorkspaceFileService(agentDir);
+
   // Get config to find current project provider
   const { config, projects, providers, patchProject, apiKeys, providerVerifyStatus, refreshProviderData, refreshConfig } = useConfig();
   const currentProject = projects.find((p) => p.path === agentDir);
@@ -268,9 +277,12 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     return () => window.removeEventListener('resize', check);
   }, []);
 
-  // Split view: right-side file preview panel (experimental)
+  // Split view: right-side file preview panel (experimental).
+  // `initialEditMode` is set when a fresh `note-…md` is created via 「新建笔记」 —
+  // FilePreviewModal opens directly in the editable Monaco view instead of the
+  // markdown rendered preview.
   const isSplitViewEnabled = config.experimentalSplitView ?? true;
-  const [splitFile, setSplitFile] = useState<{ name: string; content: string; size: number; path: string } | null>(null);
+  const [splitFile, setSplitFile] = useState<{ name: string; content: string; size: number; path: string; initialEditMode?: boolean } | null>(null);
   // Clear split panel when feature is turned off (prevents stale split state)
   useEffect(() => { if (!isSplitViewEnabled) setSplitFile(null); }, [isSplitViewEnabled]);
   const [splitRatio, setSplitRatio] = useState(0.5); // 0-1, left panel fraction
@@ -370,9 +382,9 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   }, 0);
 
   // Fullscreen preview triggered from split panel's "全屏预览" button
-  const [fullscreenPreviewFile, setFullscreenPreviewFile] = useState<{ name: string; content: string; size: number; path: string } | null>(null);
+  const [fullscreenPreviewFile, setFullscreenPreviewFile] = useState<{ name: string; content: string; size: number; path: string; initialEditMode?: boolean } | null>(null);
 
-  const handleSplitFilePreview = useCallback((file: { name: string; content: string; size: number; path: string }) => {
+  const handleSplitFilePreview = useCallback((file: { name: string; content: string; size: number; path: string }, options?: { initialEditMode?: boolean }) => {
     const ext = file.name.toLowerCase().split('.').pop();
     if ((ext === 'html' || ext === 'htm') && isSplitViewEnabled) {
       // HTML files → open in embedded browser for live preview
@@ -384,7 +396,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       setBrowserUrl(absPath);
       setSplitActiveView('browser');
     } else {
-      setSplitFile(file);
+      setSplitFile({ ...file, initialEditMode: options?.initialEditMode });
       setSplitActiveView('file');
     }
     // Keep workspace open — user can dismiss it manually
@@ -860,6 +872,18 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
 
     initialMessageConsumedRef.current = true;
 
+    // Resolved values hoisted out of `try` so the `catch` failure-recovery path
+    // (PRD 0.2.7 §4.5) can reference them when restoring the launcher draft.
+    const builtinSel = initialMessage.builtinSelection;
+    const effectivePermission = (initialMessage.permissionMode ?? (isExternalRuntime ? runtimePermissionMode : permissionMode)) as PermissionMode;
+    const effectiveModel = isExternalRuntime
+      ? (initialMessage.runtimeModel ?? runtimeModel)
+      : (builtinSel?.model ?? selectedModel);
+    const provider = builtinSel
+      ? providers.find(p => p.id === builtinSel.providerId) ?? currentProvider
+      : currentProvider;
+    const providerEnv = buildProviderEnv(provider);
+
     const autoSend = async () => {
       try {
         // 1. Sync MCP configuration
@@ -872,17 +896,6 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
           );
           await apiPost('/api/mcp/set', { servers: effective });
         }
-
-        // 2. Compute effective values BEFORE setState (avoid stale closure)
-        // External runtime: read from runtimePermissionMode (CC/Codex modes), not permissionMode (builtin)
-        const effectivePermission = (initialMessage.permissionMode ?? (isExternalRuntime ? runtimePermissionMode : permissionMode)) as PermissionMode;
-        // PRD 0.2.3: builtinSelection.model is the builtin runtime model (paired with providerId by type system);
-        // runtimeModel is the external runtime model (no provider). Picking the wrong fallback used to allow
-        // (provider X, model Y) mismatches — now the type narrows it to one or the other.
-        const builtinSel = initialMessage.builtinSelection;
-        const effectiveModel = isExternalRuntime
-          ? (initialMessage.runtimeModel ?? runtimeModel)
-          : (builtinSel?.model ?? selectedModel);
 
         // 3. Update local UI state to reflect Launcher choices
         if (initialMessage.permissionMode) {
@@ -903,23 +916,50 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
           providerInitRef.current = true; // suppress deferred provider-change effect
         }
 
-        // 4. Build providerEnv locally from providerId (never stored in Tab state for security).
-        // For builtin runtime, prefer the paired selection's provider; otherwise use currentProvider.
-        const provider = builtinSel
-          ? providers.find(p => p.id === builtinSel.providerId) ?? currentProvider
-          : currentProvider;
-        const providerEnv = buildProviderEnv(provider);
-
         // 5. Send message (fire-and-forget — resolves before backend turn actually starts)
         setIsLoading(true);
         scrollToBottom();
-        await sendMessage(
-          initialMessage.text,
-          initialMessage.images,
-          effectivePermission,
-          effectiveModel,
-          isExternalRuntime ? undefined : providerEnv
-        );
+
+        // 5a. Cron handoff (PRD 0.2.7): if launcher staged a cron config, switch
+        //     from the normal send path to startCronTask. This both creates the
+        //     CronTask via Rust and triggers the first execution — same as if the
+        //     user had typed in the chat input and clicked send with cron enabled.
+        if (initialMessage.cron) {
+          enableCronMode({
+            prompt: initialMessage.text,
+            intervalMinutes: initialMessage.cron.intervalMinutes,
+            endConditions: initialMessage.cron.endConditions,
+            runMode: initialMessage.cron.runMode,
+            notifyEnabled: initialMessage.cron.notifyEnabled,
+            schedule: initialMessage.cron.schedule,
+            delivery: initialMessage.cron.delivery,
+            model: effectiveModel,
+            permissionMode: effectivePermission,
+            providerEnv: isExternalRuntime ? undefined : providerEnv,
+            runtime: currentRuntime,
+            runtimeConfig: buildCronRuntimeConfig(),
+            // Without this, the editor reopens defaulting to 'current_session'
+            // because cronState.config.executionTarget is undefined → modal's
+            // computed runMode lies about the user's choice. (Bug 2A.)
+            executionTarget: initialMessage.cron.executionTarget,
+            // Pin the cron task's MCP set to the launcher's chosen list so
+            // /cron/execute-sync's `applyMcpOverrideAndAwaitReady` matches
+            // the pre-warm fingerprint and short-circuits as a no-op
+            // (agent-session.ts:1282) instead of an abort+restart that
+            // wastes ~5s on every launcher cron handoff.
+            mcpEnabledServers: initialMessage.mcpEnabledServers,
+          });
+          await startCronTask(initialMessage.text);
+        } else {
+          // 5b. Normal send path.
+          await sendMessage(
+            initialMessage.text,
+            initialMessage.images,
+            effectivePermission,
+            effectiveModel,
+            isExternalRuntime ? undefined : providerEnv
+          );
+        }
 
         // 6. Mark initialMessage consumed. DO NOT close overlay here:
         //    sendMessage() returns immediately (fire-and-forget), and on external
@@ -932,8 +972,39 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       } catch (err) {
         console.error('[Chat] Auto-send failed:', err);
         setShowStartupOverlay(false);
+        // PRD 0.2.7 §4.5 failure recovery: restore the launcher draft (text /
+        // images / cron config) into the chat input so the user can retry
+        // without losing what they typed. Pre-PRD-0.2.7 the toast just said
+        // "请重试" while the textarea was empty, silently dropping the draft.
+        try {
+          chatInputRef.current?.setValue(initialMessage.text);
+          if (initialMessage.images && initialMessage.images.length > 0) {
+            chatInputRef.current?.setImages(initialMessage.images);
+          }
+          if (initialMessage.cron) {
+            enableCronMode({
+              prompt: initialMessage.text,
+              intervalMinutes: initialMessage.cron.intervalMinutes,
+              endConditions: initialMessage.cron.endConditions,
+              runMode: initialMessage.cron.runMode,
+              notifyEnabled: initialMessage.cron.notifyEnabled,
+              schedule: initialMessage.cron.schedule,
+              delivery: initialMessage.cron.delivery,
+              model: effectiveModel,
+              permissionMode: effectivePermission,
+              providerEnv: isExternalRuntime ? undefined : providerEnv,
+              runtime: currentRuntime,
+              runtimeConfig: buildCronRuntimeConfig(),
+              executionTarget: initialMessage.cron.executionTarget,
+              mcpEnabledServers: initialMessage.mcpEnabledServers,
+            });
+          }
+        } catch (restoreErr) {
+          // Restore is best-effort; don't double-fail the user.
+          console.warn('[Chat] failed to restore launcher draft:', restoreErr);
+        }
         onInitialMessageConsumedRef.current?.();
-        toast.error('发送失败，请重试');
+        toast.error('发送失败，已恢复草稿，请重试');
       }
     };
     void autoSend();
@@ -1283,10 +1354,13 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     }
   }, [apiGet, apiPost]);
 
-  // Load skills/commands for sidebar display
+  // Load skills/commands for sidebar display.
+  // Sources the same Rust scan that SimpleChatInput's slash menu uses so the
+  // sidebar list and the slash-menu list cannot disagree.
   const loadSkillsAndCommands = useCallback(async () => {
+    if (!fileService.isAvailable) return;
     try {
-      const response = await apiGet<{ success: boolean; commands: Array<{ name: string; description: string; source: string; scope?: 'user' | 'project'; folderName?: string; fileName?: string }>; globalSkillFolderNames?: string[] }>('/api/commands');
+      const response = await fileService.listSlashCommands();
       if (response.success && response.commands) {
         setEnabledSkills(response.commands.filter(c => c.source === 'skill').map(c => ({ name: c.name, description: c.description, scope: c.scope, folderName: c.folderName })));
         setEnabledCommands(response.commands.filter(c => c.source === 'custom').map(c => ({ name: c.name, description: c.description, scope: c.scope, fileName: c.fileName })));
@@ -1295,7 +1369,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     } catch (err) {
       console.error('[Chat] Failed to load skills/commands:', err);
     }
-  }, [apiGet]);
+  }, [fileService]);
 
   // Sync project skill to global
   const loadSkillsAndCommandsRef = useRef(loadSkillsAndCommands);
@@ -1362,35 +1436,53 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   // current session is using the value in-memory; only on-disk drift is
   // surfaced so the user knows to retry or expects a possible revert on reload.
   //
-  // `model: null` means "clear"; `patchAgentConfig` uses undefined for the same
-  // intent, so we normalize here so callers don't have to.
+  // PRD 0.2.7: dual-write fan-out lives in the shared `persistInputOptionChange`
+  // helper, so Chat and Launcher write the exact same fields to the exact same
+  // places. The helper ALSO branches permission mode / model on
+  // `isExternalRuntime` (writing to `agent.runtimeConfig` for external runtimes
+  // instead of `agent.permissionMode` / `agent.model`) — fixing a long-standing
+  // bug where Chat's path sent external-runtime permission to the wrong field.
   const persistTabConfigChange = useCallback(async (patch: {
     providerId?: string;
+    /** Builtin model. Use `runtimeModel` instead for external runtimes. */
     model?: string | null;
+    /** External runtime model. Routed to `agent.runtimeConfig.model`. */
+    runtimeModel?: string | null;
     permissionMode?: PermissionMode;
     mcpEnabledServers?: string[];
   }) => {
-    try {
-      if (isOwnedSession) {
-        await patchSnapshot(patch);
-      }
-      if (currentProject) {
-        await patchProject(currentProject.id, patch);
-        if (currentProject.agentId) {
-          const agentPatch: Partial<Omit<AgentConfig, 'id'>> = {};
-          if (patch.providerId !== undefined) agentPatch.providerId = patch.providerId;
-          if (patch.model !== undefined) agentPatch.model = patch.model ?? undefined;
-          if (patch.permissionMode !== undefined) agentPatch.permissionMode = patch.permissionMode;
-          if (patch.mcpEnabledServers !== undefined) agentPatch.mcpEnabledServers = patch.mcpEnabledServers;
-          await patchAgentConfig(currentProject.agentId, agentPatch);
-        }
-      }
-    } catch (err) {
-      console.error('[chat] tab config dual-write failed:', err);
+    if (!currentProject) return;
+    const result = await persistInputOptionChange({
+      workspaceId: currentProject.id,
+      agentId: currentProject.agentId ?? null,
+      isExternalRuntime,
+      currentRuntimeConfig: currentAgent?.runtimeConfig,
+      fields: {
+        providerId: patch.providerId,
+        builtinModel: patch.model,
+        runtimeModel: patch.runtimeModel,
+        permissionMode: patch.permissionMode,
+        mcpEnabledServers: patch.mcpEnabledServers,
+      },
+      patchProject,
+      patchAgentConfig,
+      patchSnapshot: isOwnedSession ? patchSnapshot : undefined,
+      // Cross-review: Chat's MCP toggle previously did its own
+      // `apiPost('/api/mcp/set')` AFTER the helper, leaving the helper's
+      // `pushMcpToSidecar` plumbing dead-code. Wire it through so the
+      // "single source of truth" promise is real.
+      pushMcpToSidecar: async (servers) => {
+        await apiPost('/api/mcp/set', { servers });
+      },
+      getAllMcpServers,
+      getGlobalMcpEnabled: getEnabledMcpServerIds,
+    });
+    if (!result.ok) {
+      console.error('[chat] tab config dual-write failed:', result.errors);
       toastRef.current.warning('配置未能完全保存，重启后可能恢复旧值');
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed to .id/.agentId to avoid churn on unrelated project changes
-  }, [isOwnedSession, currentProject?.id, currentProject?.agentId, patchSnapshot, patchProject]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed deps; persistInputOptionChange is a pure import, runtimeConfig accessed via currentAgent ref, apiPost is stable from TabContext
+  }, [isOwnedSession, currentProject?.id, currentProject?.agentId, isExternalRuntime, currentAgent?.runtimeConfig, patchSnapshot, patchProject]);
 
   // Handle workspace MCP toggle — Tab UI edits dual-write:
   // (1) session snapshot so THIS session uses the new tool set immediately (owned sessions only
@@ -1405,21 +1497,13 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
 
     setWorkspaceMcpEnabled(newEnabled);
 
+    // PRD 0.2.7: persistTabConfigChange now also handles the sidecar push
+    // (via the helper's `pushMcpToSidecar` callback) so this site is just a
+    // single delegate call — disk dual-write + live MCP swap on the running
+    // session in one transaction. Pre-PRD-0.2.7 the duplicate `apiPost`
+    // here ran AFTER persist and left the helper's plumbing as dead code.
     void persistTabConfigChange({ mcpEnabledServers: newEnabled });
-
-    // Get the effective MCP servers and send to backend
-    const effectiveServers = mcpServers.filter(s =>
-      globalMcpEnabled.includes(s.id) && newEnabled.includes(s.id)
-    );
-
-    try {
-      await apiPost('/api/mcp/set', { servers: effectiveServers });
-      console.log('[Chat] MCP servers synced:', effectiveServers.map(s => s.id));
-    } catch (err) {
-      console.error('[Chat] Failed to sync MCP servers:', err);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- apiPost is stable, only care about state changes
-  }, [workspaceMcpEnabled, currentProject, mcpServers, globalMcpEnabled, isOwnedSession, patchSnapshot]);
+  }, [workspaceMcpEnabled, persistTabConfigChange]);
 
   // Sync selectedModel when provider changes (skip initial mount to preserve project-stored model)
   const providerInitRef = useRef(true);
@@ -1861,6 +1945,18 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     setSelectedModel(model);
     void persistTabConfigChange({ model });
   }, [selectedModel, persistTabConfigChange]);
+
+  // External-runtime model change. Same dual-write policy as builtin
+  // `handleModelChange`, routed through `runtimeModel` so the helper writes
+  // to `agent.runtimeConfig.model` rather than `agent.model`. Pre-PRD-0.2.7
+  // chat would only call `setRuntimeModel` (UI state), so the user's choice
+  // was lost on next session — matching launcher's persist behavior closes
+  // that gap.
+  const handleRuntimeModelChange = useCallback((model: string) => {
+    if (runtimeModel === model) return;
+    setRuntimeModel(model);
+    void persistTabConfigChange({ runtimeModel: model });
+  }, [runtimeModel, persistTabConfigChange]);
 
   // Handle permission mode change — same dual-write policy as handleModelChange.
   const handlePermissionModeChange = useCallback((mode: PermissionMode) => {
@@ -2769,6 +2865,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             callbacks) still clear the cache.
           */}
           <FileActionProvider
+            workspacePath={agentDir}
             onInsertReference={handleInsertReference}
             refreshTrigger={workspaceRefreshTrigger}
             onFilePreviewExternal={isSplitViewEnabled && !isNarrowLayout ? handleSplitFilePreview : undefined}
@@ -2841,11 +2938,12 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             sessionState={sessionState}
             systemStatus={systemStatus}
             agentDir={agentDir}
+            workspacePath={agentDir}
             provider={currentProvider}
             providers={providers}
             onProviderChange={handleProviderChange}
             selectedModel={isExternalRuntime ? runtimeModel : selectedModel}
-            onModelChange={isExternalRuntime ? setRuntimeModel : handleModelChange}
+            onModelChange={isExternalRuntime ? handleRuntimeModelChange : handleModelChange}
             sessionUnlocked={isSessionUnlocked}
             permissionMode={effectivePermissionMode}
             onPermissionModeChange={isExternalRuntime
@@ -3075,12 +3173,18 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
                     content={splitFile.content}
                     size={splitFile.size}
                     path={splitFile.path}
+                    workspacePath={agentDir}
+                    initialEditMode={splitFile.initialEditMode}
                     onClose={() => {
                       setSplitFile(null);
                       if (browserUrl) setSplitActiveView('browser');
                       else if (terminalPinned && terminalAlive) setSplitActiveView('terminal');
                     }}
                     onSaved={() => setWorkspaceRefreshTrigger(prev => prev + 1)}
+                    onRenamed={(newPath, newName) => {
+                      setSplitFile(prev => prev ? { ...prev, path: newPath, name: newName, initialEditMode: undefined } : prev);
+                      setWorkspaceRefreshTrigger(prev => prev + 1);
+                    }}
                     embedded
                     onFullscreen={(currentContent) => {
                       const file = currentContent !== undefined ? { ...splitFile!, content: currentContent } : splitFile!;
@@ -3182,8 +3286,14 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             content={fullscreenPreviewFile.content}
             size={fullscreenPreviewFile.size}
             path={fullscreenPreviewFile.path}
+            workspacePath={agentDir}
+            initialEditMode={fullscreenPreviewFile.initialEditMode}
             onClose={() => setFullscreenPreviewFile(null)}
             onSaved={() => setWorkspaceRefreshTrigger(prev => prev + 1)}
+            onRenamed={(newPath, newName) => {
+              setFullscreenPreviewFile(prev => prev ? { ...prev, path: newPath, name: newName, initialEditMode: undefined } : prev);
+              setWorkspaceRefreshTrigger(prev => prev + 1);
+            }}
             onQuoteFile={handleQuoteFile}
             onQuoteSelection={handleQuoteFileSelection}
           />

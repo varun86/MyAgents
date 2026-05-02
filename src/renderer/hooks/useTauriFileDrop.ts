@@ -13,7 +13,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { listenWithCleanup } from '@/utils/tauriListen';
 import { track } from '@/analytics';
 import { isTauriEnvironment } from '@/utils/browserMock';
 import { isDebugMode } from '@/utils/debug';
@@ -119,109 +119,86 @@ export function useTauriFileDrop(options: UseTauriFileDropOptions = {}): UseTaur
     if (!isTauriEnvironment()) {
       return;
     }
+    const ac = new AbortController();
 
-    const unlisteners: UnlistenFn[] = [];
+    // ── Critical gate ──
+    // Tauri broadcasts each drag event to ALL mounted listeners. In a multi-tab
+    // app, every tab's hook instance would otherwise fire handlers + update its
+    // own state (isDragging / activeZoneId / onDrop → attachment state), so a
+    // single file drop leaks into every tab. Gate at the earliest point in each
+    // handler using the enabledRef the caller wires to their tab's `isActive`.
+    const enabledGate = () => enabledRef.current;
 
-    const setupListeners = async () => {
-      // Listen to Tauri drag events
-      // The event names in Tauri v2 are tauri://drag-enter, tauri://drag-over, etc.
+    void listenWithCleanup<DragDropPayload>('tauri://drag-enter', (event) => {
+      if (!enabledGate()) return;
+      if (isDebugMode()) {
+        console.log('[useTauriFileDrop] drag-enter', event.payload);
+      }
+      setIsDragging(true);
+      onDragEnterRef.current?.();
+      if (event.payload.position) {
+        const zoneId = findZoneAtPosition(event.payload.position.x, event.payload.position.y);
+        setActiveZoneId(zoneId);
+      }
+    }, ac.signal);
 
-      // ── Critical gate ──
-      // Tauri broadcasts each drag event to ALL mounted listeners. In a multi-tab
-      // app, every tab's hook instance would otherwise fire handlers + update its
-      // own state (isDragging / activeZoneId / onDrop → attachment state), so a
-      // single file drop leaks into every tab. Gate at the earliest point in each
-      // handler using the enabledRef the caller wires to their tab's `isActive`.
-      const enabledGate = () => enabledRef.current;
+    void listenWithCleanup<DragDropPayload>('tauri://drag-over', (event) => {
+      if (!enabledGate()) return;
+      if (event.payload.position) {
+        const zoneId = findZoneAtPosition(event.payload.position.x, event.payload.position.y);
+        setActiveZoneId(zoneId);
+      }
+    }, ac.signal);
 
-      const enterUnlisten = await listen<DragDropPayload>('tauri://drag-enter', (event) => {
-        if (!enabledGate()) return;
-        if (isDebugMode()) {
-          console.log('[useTauriFileDrop] drag-enter', event.payload);
-        }
-        setIsDragging(true);
-        onDragEnterRef.current?.();
+    void listenWithCleanup<DragDropPayload>('tauri://drag-drop', (event) => {
+      if (!enabledGate()) return;
+      if (isDebugMode()) {
+        console.log('[useTauriFileDrop] drag-drop', event.payload);
+      }
+      setIsDragging(false);
 
-        // Update active zone based on position
-        if (event.payload.position) {
-          const zoneId = findZoneAtPosition(event.payload.position.x, event.payload.position.y);
-          setActiveZoneId(zoneId);
-        }
-      });
-      unlisteners.push(enterUnlisten);
-
-      const overUnlisten = await listen<DragDropPayload>('tauri://drag-over', (event) => {
-        if (!enabledGate()) return;
-        // Update active zone based on position
-        if (event.payload.position) {
-          const zoneId = findZoneAtPosition(event.payload.position.x, event.payload.position.y);
-          setActiveZoneId(zoneId);
-        }
-      });
-      unlisteners.push(overUnlisten);
-
-      const dropUnlisten = await listen<DragDropPayload>('tauri://drag-drop', (event) => {
-        if (!enabledGate()) return;
-        if (isDebugMode()) {
-          console.log('[useTauriFileDrop] drag-drop', event.payload);
-        }
-        setIsDragging(false);
-
-        const paths = event.payload.paths || [];
-        if (paths.length === 0) {
-          setActiveZoneId(null);
-          return;
-        }
-
-        // Find which zone was dropped on
-        let zoneId: string | null = null;
-        if (event.payload.position) {
-          zoneId = findZoneAtPosition(event.payload.position.x, event.payload.position.y);
-        }
-
-        if (isDebugMode()) {
-          console.log('[useTauriFileDrop] Drop on zone:', zoneId, 'paths:', paths);
-        }
-
-        // Track file_drop event
-        track('file_drop', { file_count: paths.length });
-
-        // Call zone-specific handler
-        if (zoneId) {
-          const zone = zonesRef.current.get(zoneId);
-          zone?.onDrop(paths);
-        }
-
-        // Call global handler
-        onDropRef.current?.(paths, zoneId);
-
+      const paths = event.payload.paths || [];
+      if (paths.length === 0) {
         setActiveZoneId(null);
-      });
-      unlisteners.push(dropUnlisten);
+        return;
+      }
 
-      const leaveUnlisten = await listen<DragDropPayload>('tauri://drag-leave', () => {
-        if (!enabledGate()) return;
-        setIsDragging(false);
-        setActiveZoneId(null);
-        onDragLeaveRef.current?.();
-      });
-      unlisteners.push(leaveUnlisten);
+      let zoneId: string | null = null;
+      if (event.payload.position) {
+        zoneId = findZoneAtPosition(event.payload.position.x, event.payload.position.y);
+      }
 
-      // Also listen to cancelled event (renamed in Tauri v2)
-      const cancelUnlisten = await listen<DragDropPayload>('tauri://drag-cancelled', () => {
-        if (!enabledGate()) return;
-        setIsDragging(false);
-        setActiveZoneId(null);
-        onDragLeaveRef.current?.();
-      });
-      unlisteners.push(cancelUnlisten);
-    };
+      if (isDebugMode()) {
+        console.log('[useTauriFileDrop] Drop on zone:', zoneId, 'paths:', paths);
+      }
 
-    setupListeners().catch(console.error);
+      track('file_drop', { file_count: paths.length });
 
-    return () => {
-      unlisteners.forEach(unlisten => unlisten());
-    };
+      if (zoneId) {
+        const zone = zonesRef.current.get(zoneId);
+        zone?.onDrop(paths);
+      }
+      onDropRef.current?.(paths, zoneId);
+
+      setActiveZoneId(null);
+    }, ac.signal);
+
+    void listenWithCleanup<DragDropPayload>('tauri://drag-leave', () => {
+      if (!enabledGate()) return;
+      setIsDragging(false);
+      setActiveZoneId(null);
+      onDragLeaveRef.current?.();
+    }, ac.signal);
+
+    // Also listen to cancelled event (renamed in Tauri v2)
+    void listenWithCleanup<DragDropPayload>('tauri://drag-cancelled', () => {
+      if (!enabledGate()) return;
+      setIsDragging(false);
+      setActiveZoneId(null);
+      onDragLeaveRef.current?.();
+    }, ac.signal);
+
+    return () => ac.abort();
   }, [findZoneAtPosition]);
 
   return {

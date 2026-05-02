@@ -1262,7 +1262,10 @@ fn merge_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
 
 /// Validate that a file path does not target sensitive system or credential directories.
 /// Resolves `..` components to prevent path traversal. Mirrors `isSafeReadPath()` in Bun.
-fn validate_file_path(raw_path: &str) -> Result<PathBuf, String> {
+///
+/// `pub(crate)` so workspace_files::path_safety can reuse the exact same blacklist —
+/// duplicating it would be a pit-of-failure (two places to update for new credential dirs).
+pub(crate) fn validate_file_path(raw_path: &str) -> Result<PathBuf, String> {
     let path = PathBuf::from(raw_path);
 
     if !path.is_absolute() {

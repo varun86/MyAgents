@@ -9,6 +9,7 @@ import { useCallback, useEffect, useState, useImperativeHandle, forwardRef, useM
 
 import { apiGetJson as globalApiGet, apiPostJson as globalApiPost, apiPutJson as globalApiPut, apiDelete as globalApiDelete } from '@/api/apiFetch';
 import { useTabApiOptional } from '@/context/TabContext';
+import { useWorkspaceFileService } from '@/hooks/useWorkspaceFileService';
 import { useToast } from '@/components/Toast';
 import Markdown from '@/components/Markdown';
 import MonacoEditor from '@/components/MonacoEditor';
@@ -29,14 +30,6 @@ export interface SystemPromptsPanelRef {
 
 /** Which file is selected */
 type FileId = { type: 'claude-md' } | { type: 'rule'; filename: string };
-
-interface ClaudeMdResponse {
-    success: boolean;
-    exists: boolean;
-    path: string;
-    content: string;
-    error?: string;
-}
 
 interface RuleContentResponse {
     success: boolean;
@@ -67,6 +60,15 @@ const SystemPromptsPanel = forwardRef<SystemPromptsPanelRef, SystemPromptsPanelP
         }, [apiGet, apiPost, apiPut, apiDeleteFn]);
 
         const isInTabContext = !!tabState;
+
+        // Phase E (PRD 0.2.7): CLAUDE.md goes through Rust workspace_files
+        // (`cmd_workspace_read_claude_md` / `cmd_workspace_write_claude_md`).
+        // The legacy `/api/claude-md` endpoints are removed in this phase.
+        // `.claude/rules/*` keeps using sidecar HTTP for now — those have
+        // separate `/api/rules` handlers not in the migration scope.
+        const fileService = useWorkspaceFileService(agentDir || null);
+        const fileServiceRef = useRef(fileService);
+        useEffect(() => { fileServiceRef.current = fileService; }, [fileService]);
 
         // Async safety: isMountedRef guard (project convention)
         const isMountedRef = useRef(false);
@@ -143,16 +145,16 @@ const SystemPromptsPanel = forwardRef<SystemPromptsPanelRef, SystemPromptsPanelP
             setError(null);
             try {
                 if (file.type === 'claude-md') {
-                    const endpoint = buildEndpoint('/api/claude-md');
-                    const res = await api.get<ClaudeMdResponse>(endpoint);
+                    // Phase E (PRD 0.2.7): CLAUDE.md read goes through Rust
+                    // workspace_files (`cmd_workspace_read_claude_md`) instead
+                    // of sidecar `/api/claude-md`. The Rust cmd resolves with
+                    // `{ exists, path, content }` (or rejects on real error);
+                    // missing file → `exists: false, content: ''`.
+                    const res = await fileServiceRef.current.readClaudeMd();
                     if (!isMountedRef.current || requestId !== loadRequestIdRef.current) return;
-                    if (res.success) {
-                        setContent(res.content);
-                        setEditContent(res.content);
-                        setExists(res.exists);
-                    } else {
-                        setError(res.error || 'Failed to load CLAUDE.md');
-                    }
+                    setContent(res.content);
+                    setEditContent(res.content);
+                    setExists(res.exists);
                 } else {
                     const endpoint = buildEndpoint(`/api/rules/${encodeURIComponent(file.filename)}`);
                     const res = await api.get<RuleContentResponse>(endpoint);
@@ -207,16 +209,19 @@ const SystemPromptsPanel = forwardRef<SystemPromptsPanelRef, SystemPromptsPanelP
             setSaving(true);
             try {
                 if (activeFile.type === 'claude-md') {
-                    const endpoint = buildEndpoint('/api/claude-md');
-                    const res = await api.post<{ success: boolean; error?: string }>(endpoint, { content: editContent });
-                    if (!isMountedRef.current) return;
-                    if (res.success) {
+                    // Phase E (PRD 0.2.7): write via Rust workspace_files —
+                    // `cmd_workspace_write_claude_md` does atomic tmp+rename
+                    // + symlink-escape gate.
+                    try {
+                        await fileServiceRef.current.writeClaudeMd({ content: editContent });
+                        if (!isMountedRef.current) return;
                         setContent(editContent);
                         setExists(true);
                         setIsEditing(false);
                         toastRef.current.success('CLAUDE.md 保存成功');
-                    } else {
-                        toastRef.current.error(res.error || '保存失败');
+                    } catch (err) {
+                        if (!isMountedRef.current) return;
+                        toastRef.current.error(err instanceof Error ? err.message : '保存失败');
                     }
                 } else {
                     const endpoint = buildEndpoint(`/api/rules/${encodeURIComponent(activeFile.filename)}`);

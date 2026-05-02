@@ -40,6 +40,7 @@ import {
 } from './services/projectService';
 import { migrateImBotConfigsToAgents, persistAgents, ensureAllProjectsHaveAgent, addAgentConfig } from './services/agentConfigService';
 import { isTauriEnvironment } from '@/utils/browserMock';
+import { listenWithCleanup } from '@/utils/tauriListen';
 
 /**
  * Normalize agents loaded from disk: ensure every agent has a `channels` array.
@@ -308,9 +309,7 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
 
     useEffect(() => {
         if (!isTauriEnvironment()) return;
-        let cancelled = false;
-        let unlistenIm: (() => void) | undefined;
-        let unlistenAgent: (() => void) | undefined;
+        const ac = new AbortController();
 
         const refreshOnEvent = () => {
             if (!isMountedRef.current) return;
@@ -322,23 +321,10 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
             });
         };
 
-        import('@tauri-apps/api/event').then(({ listen }) => {
-            if (cancelled) return;
-            listen<{ botId: string }>('im:bot-config-changed', refreshOnEvent).then(fn => {
-                if (cancelled) fn();
-                else unlistenIm = fn;
-            });
-            listen('agent:config-changed', refreshOnEvent).then(fn => {
-                if (cancelled) fn();
-                else unlistenAgent = fn;
-            });
-        });
+        void listenWithCleanup<{ botId: string }>('im:bot-config-changed', refreshOnEvent, ac.signal);
+        void listenWithCleanup('agent:config-changed', refreshOnEvent, ac.signal);
 
-        return () => {
-            cancelled = true;
-            unlistenIm?.();
-            unlistenAgent?.();
-        };
+        return () => ac.abort();
     }, []);
 
     // ============= Listen for Admin CLI config changes (via SSE → window event) =============

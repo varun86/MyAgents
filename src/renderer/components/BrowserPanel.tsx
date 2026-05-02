@@ -12,7 +12,7 @@
 
 import { useEffect, useRef, useCallback, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { listen } from '@tauri-apps/api/event';
+import { listenWithCleanup } from '@/utils/tauriListen';
 import { ChevronLeft, ChevronRight, Code2, RotateCw, ExternalLink, Loader2, Globe, X } from 'lucide-react';
 import { openExternal } from '@/utils/openExternal';
 import { BROWSER_BLANK_URL } from '@/components/browserConstants';
@@ -155,40 +155,28 @@ export default function BrowserPanel({
   // ── Listen for URL/loading events from Rust ──
   useEffect(() => {
     if (!browserAlive) return;
+    const ac = new AbortController();
 
-    let cancelled = false;
-    const unlisteners: Array<() => void> = [];
+    void listenWithCleanup<string>(`browser:url-changed:${tabId}`, (event) => {
+      const next = event.payload;
+      setCurrentUrl(next);
+      // Latch hasNavigated on first real navigation — lets the React empty
+      // state release control over the panel for the rest of this webview's
+      // lifetime. Anchored to the scheme (anything but `data:`) rather than
+      // string equality with BROWSER_BLANK_URL: WebKit reports the data: URL
+      // back with Tauri's CSP `<meta>` injection appended, so equality check
+      // breaks and the latch would fire on the very first blank-page load.
+      if (next && !next.startsWith('data:')) {
+        setHasNavigated((prev) => (prev ? prev : true));
+      }
+      onUrlChangeRef.current?.(next);
+    }, ac.signal);
 
-    (async () => {
-      const u1 = await listen<string>(`browser:url-changed:${tabId}`, (event) => {
-        if (cancelled) return;
-        const next = event.payload;
-        setCurrentUrl(next);
-        // Latch hasNavigated on first real navigation — lets the React empty
-        // state release control over the panel for the rest of this webview's
-        // lifetime. Anchored to the scheme (anything but `data:`) rather than
-        // string equality with BROWSER_BLANK_URL: WebKit reports the data: URL
-        // back with Tauri's CSP `<meta>` injection appended, so equality check
-        // breaks and the latch would fire on the very first blank-page load.
-        if (next && !next.startsWith('data:')) {
-          setHasNavigated((prev) => (prev ? prev : true));
-        }
-        onUrlChangeRef.current?.(next);
-      });
-      if (cancelled) { u1(); return; }
-      unlisteners.push(u1);
+    void listenWithCleanup<boolean>(`browser:loading:${tabId}`, (event) => {
+      setIsLoading(event.payload);
+    }, ac.signal);
 
-      const u2 = await listen<boolean>(`browser:loading:${tabId}`, (event) => {
-        if (!cancelled) setIsLoading(event.payload);
-      });
-      if (cancelled) { u2(); return; }
-      unlisteners.push(u2);
-    })();
-
-    return () => {
-      cancelled = true;
-      unlisteners.forEach((fn) => fn());
-    };
+    return () => ac.abort();
   }, [browserAlive, tabId]);
 
   // ── ResizeObserver ──
