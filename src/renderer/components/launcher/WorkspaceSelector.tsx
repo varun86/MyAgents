@@ -186,10 +186,10 @@ function WorkspaceRow({
 }: WorkspaceRowProps) {
     return (
         <div
-            // `group` lets both the row's hover-bg AND the action button's
-            // visibility key off a single hover state — without that they
-            // can desync on fast pointer moves (button visible while row
-            // bg has reverted, etc).
+            // `group` is the hover/focus anchor — only used for the action
+            // button's reveal. The row body has its own `hover:bg-*` because
+            // it's the parent <button>'s normal :hover state; using `group`
+            // here would be redundant.
             className="group relative"
         >
             <button
@@ -202,9 +202,14 @@ function WorkspaceRow({
                 }`}
             >
                 <WorkspaceIcon icon={project.icon} size={16} />
+                {/* `min-w-0` on the outer flex item AND on the inner name
+                 *  flex row — without it on the inner row, flex's default
+                 *  `min-width: auto` (= content width) prevents the name
+                 *  span's `truncate` from working, and a long displayName
+                 *  pushes the [默认] tag out of view (Codex review caught). */}
                 <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-1.5">
-                        <span className="truncate font-medium">
+                    <div className="flex min-w-0 items-center gap-1.5">
+                        <span className="min-w-0 flex-1 truncate font-medium">
                             {project.displayName || getFolderName(project.path)}
                         </span>
                         {isDefault && (
@@ -225,19 +230,37 @@ function WorkspaceRow({
                  *  align horizontally. */}
                 <span aria-hidden className="w-[76px] shrink-0" />
             </button>
-            {/* "设为默认" — absolute-positioned sibling, NOT nested inside
-             *  the row button (invalid HTML). Hidden by default,
-             *  group-hover-revealed. stopPropagation keeps the dropdown
-             *  open after a click (the row's button doesn't see the click
-             *  thanks to capture-phase placement above). */}
+            {/* "设为默认" — absolute-positioned sibling button (NOT nested
+             *  inside the row button — `<button>` inside `<button>` is
+             *  invalid HTML). Hidden by default, revealed on group-hover OR
+             *  keyboard focus.
+             *
+             *  CRITICAL pointer-events note: `opacity-0` does NOT disable
+             *  pointer events. Without `pointer-events-none`, the invisible
+             *  button still captures clicks in its absolute slot — a user
+             *  clicking the visually blank 76px right area would silently
+             *  trigger "set as default" instead of selecting the row (Codex
+             *  caught this). `group-hover:pointer-events-auto` re-enables
+             *  interaction once the button is visible, which is also the
+             *  only state in which the user could intend to click it.
+             *
+             *  Keyboard a11y: `group-focus-within:opacity-100` +
+             *  `focus-visible:opacity-100` reveals the button when it
+             *  receives keyboard focus — without this, a tab user would
+             *  trigger an unseen control. */}
             {onSetDefault && (
                 <button
                     type="button"
                     onClick={(e) => {
+                        // Sibling, not ancestor, so the row's onClick won't
+                        // see this click anyway. stopPropagation is belt-and-
+                        // suspenders against future restructuring (e.g. if
+                        // the wrapper picks up an onClick handler).
                         e.stopPropagation();
                         onSetDefault(project);
                     }}
-                    className="absolute right-2 top-1/2 inline-flex -translate-y-1/2 items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium text-[var(--ink-muted)] opacity-0 transition-opacity hover:bg-[var(--paper-inset)] hover:text-[var(--accent)] group-hover:opacity-100"
+                    className="absolute right-2 top-1/2 inline-flex -translate-y-1/2 items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium text-[var(--ink-muted)] opacity-0 pointer-events-none transition-opacity hover:bg-[var(--paper-inset)] hover:text-[var(--accent)] focus-visible:opacity-100 focus-visible:pointer-events-auto focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--accent)] group-hover:opacity-100 group-hover:pointer-events-auto group-focus-within:opacity-100 group-focus-within:pointer-events-auto"
+                    aria-label={`设为默认工作区：${project.displayName || getFolderName(project.path)}`}
                     title="设为默认工作区"
                 >
                     <Star className="h-3 w-3" />
