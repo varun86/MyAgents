@@ -7,6 +7,7 @@ import {
   FolderOpen,
   FolderPlus,
   GitBranch,
+  NotebookPen,
   Pencil,
   RefreshCw,
   SlidersHorizontal,
@@ -44,11 +45,10 @@ import {
 } from "@dnd-kit/core";
 
 import { useTabApi } from "@/context/TabContext";
-import { getTabServerUrl, proxyFetch, isTauri } from "@/api/tauriClient";
+import { useWorkspaceFileService } from "@/hooks/useWorkspaceFileService";
 import type {
   DirectoryTreeNode,
   DirectoryTree,
-  ExpandDirectoryResult,
 } from "../../shared/dir-types";
 import { isImageFile, isPreviewable } from "../../shared/fileTypes";
 import type { CapabilityInitialSelect } from "../../shared/skillsTypes";
@@ -58,6 +58,7 @@ import { useImagePreview } from "@/context/ImagePreviewContext";
 import { useToast } from "@/components/Toast";
 import { type Provider } from "@/config/types";
 import { isDebugMode } from "@/utils/debug";
+import { listenWithCleanup } from "@/utils/tauriListen";
 import { shortenPathForDisplay } from "@/utils/pathDetection";
 
 import ConfirmDialog from "./ConfirmDialog";
@@ -155,13 +156,20 @@ interface DirectoryPanelProps {
   /** Copy a project skill to global skills */
   onSyncSkillToGlobal?: (folderName: string) => void;
   /** When provided, file clicks route to this callback instead of opening the modal.
-   *  Used by split-view mode (experimentalSplitView) to open files in a side panel. */
-  onFilePreviewExternal?: (file: {
-    name: string;
-    content: string;
-    size: number;
-    path: string;
-  }) => void;
+   *  Used by split-view mode (experimentalSplitView) to open files in a side panel.
+   *
+   *  `options.initialEditMode` is set by 「新建笔记」 so the freshly-created
+   *  empty `note-…md` opens directly in the editable Monaco view instead of
+   *  the rendered-preview empty-state. */
+  onFilePreviewExternal?: (
+    file: {
+      name: string;
+      content: string;
+      size: number;
+      path: string;
+    },
+    options?: { initialEditMode?: boolean },
+  ) => void;
   /** Open embedded terminal in split panel */
   onOpenTerminal?: () => void;
   /** Whether an embedded terminal is currently alive (for indicator display) */
@@ -175,6 +183,10 @@ type FilePreview = {
   content: string;
   size: number;
   path: string;
+  /** When set, FilePreviewModal opens in markdown edit mode directly.
+   *  Wired by 「新建笔记」 so a fresh empty `note-…md` skips the rendered-
+   *  preview empty-state and lands the cursor in Monaco. */
+  initialEditMode?: boolean;
 };
 
 type ContextMenuState = {
@@ -333,7 +345,17 @@ const DirectoryPanel = memo(
     const toast = useToast();
 
     // Get Tab-scoped API functions and tabId
-    const { apiGet, apiPost, tabId } = useTabApi();
+    // PRD 0.2.7 Phase D: useTabApi() return value is no longer destructured —
+    // file IO has migrated entirely to `useWorkspaceFileService`. The TabApi
+    // hook still wraps React subscription state, so keeping the call
+    // ensures the component re-renders when Tab context changes (active /
+    // inactive). If a future refactor proves the call has no observable
+    // side effects, it can be dropped.
+    useTabApi();
+    // PRD 0.2.7 Phase D: workspace file IO migrated from sidecar HTTP to Rust
+    // invoke. The hook is identical to the one SimpleChatInput uses, just with
+    // the additional Phase D operations (dirTree, dirExpand, readPreview, etc.).
+    const fileService = useWorkspaceFileService(agentDir ?? null);
 
     // Narrow mode collapse state (for responsive layout)
     const [isNarrowMode, setIsNarrowMode] = useState(false);
@@ -391,7 +413,7 @@ const DirectoryPanel = memo(
     // session gets a fresh index exactly once.
     const rawRefresh = useCallback(() => {
       setError(null);
-      apiGet<DirectoryTree>("/agent/dir")
+      fileService.dirTree()
         .then((data) => {
           const newCount = data.tree?.children?.length || 0;
           if (newCount !== prevItemCountRef.current) {
@@ -403,9 +425,10 @@ const DirectoryPanel = memo(
           setDirectoryInfo(data);
         })
         .catch((err) => {
-          // Sidecar boot races are absorbed at the `tauriClient.getTabServerUrl`
-          // layer (it waits for readiness before returning), so a failure
-          // here means something genuinely went wrong — surface it.
+          // PRD 0.2.7 Phase D: switching from sidecar HTTP to Rust invoke
+          // means we no longer have to wait for sidecar readiness before
+          // refreshing — Rust commands are always live. A failure here is
+          // genuine (workspace deleted, permission denied, etc).
           setError(
             err instanceof Error
               ? err.message
@@ -413,7 +436,7 @@ const DirectoryPanel = memo(
           );
           console.error("[DirectoryPanel] Failed to refresh:", err);
         });
-    }, [apiGet]);
+    }, [fileService]);
 
     // Debounced refresh — coalesces rapid triggers (file watcher + tool completion
     // can fire within 500ms of each other) into a single API call.
@@ -471,9 +494,7 @@ const DirectoryPanel = memo(
         setLoadingDirs(new Set(loadingDirsRef.current));
 
         try {
-          const result = await apiGet<ExpandDirectoryResult>(
-            `/agent/dir/expand?path=${encodeURIComponent(dirPath)}`,
-          );
+          const result = await fileService.dirExpand({ path: dirPath });
 
           setDirectoryInfo((prev: DirectoryTree | null) => {
             if (!prev) return prev;
@@ -502,25 +523,69 @@ const DirectoryPanel = memo(
           setLoadingDirs(new Set(loadingDirsRef.current));
         }
       },
-      [apiGet, updateNodeInTree],
+      [fileService, updateNodeInTree],
     );
 
     useEffect(() => {
       rawRefresh(); // Initial load — no debounce needed
       // Clear old branch first to avoid flash, then fetch new
       setGitBranch(null);
-      apiGet<{ branch: string | null }>("/api/git/branch")
+      fileService.gitBranch()
         .then((data) => setGitBranch(data.branch))
         .catch(() => setGitBranch(null));
-    }, [agentDir, apiGet, rawRefresh]);
+    }, [agentDir, fileService, rawRefresh]);
 
-    // Respond to external refresh trigger (file watcher SSE + tool completion fast-path).
-    // Uses debounced refresh to coalesce rapid triggers.
+    // Respond to external refresh trigger (parent-driven, e.g. tool completion
+    // fast-path). Uses debounced refresh to coalesce rapid triggers.
     useEffect(() => {
       if (refreshTrigger && refreshTrigger > 0) {
         refresh();
       }
     }, [refreshTrigger, refresh]);
+
+    // PRD 0.2.7 Phase D: Tauri-side workspace fs watcher.
+    //
+    // Pre-PRD-0.2.7 the sidecar emitted SSE `agent:files-changed` from a Node
+    // chokidar watcher and DirectoryPanel listened via the SSE proxy. Phase D
+    // moves the watch to Rust (notify-debouncer-full) so the panel works
+    // without a sidecar; the event hops Tauri-side via `app.emit` and the
+    // renderer subscribes through `@tauri-apps/api/event::listen`.
+    //
+    // Lifecycle: start the watch on mount (or when agentDir changes), stop on
+    // unmount. The Rust side ref-counts, so multiple panels on the same
+    // workspace share one OS watch.
+    useEffect(() => {
+      if (!fileService.isAvailable) return;
+      const ac = new AbortController();
+      let token: string | null = null;
+
+      (async () => {
+        try {
+          // Phase D.5 — single round-trip returns the token (held for stop)
+          // and the eventKey (used for the listen subscription).
+          const handle = await fileService.watchStart();
+          if (ac.signal.aborted) {
+            // Race: unmount fired during the await — release immediately.
+            await fileService.watchStop({ token: handle.token }).catch(() => {});
+            return;
+          }
+          token = handle.token;
+          await listenWithCleanup(`workspace:files-changed:${handle.eventKey}`, () => {
+            // Coarse signal — refresh re-fetches the whole tree (debounced).
+            refreshRef.current();
+          }, ac.signal);
+        } catch (err) {
+          console.warn("[DirectoryPanel] watch start failed:", err);
+        }
+      })();
+
+      return () => {
+        ac.abort();
+        if (token) {
+          fileService.watchStop({ token }).catch(() => {});
+        }
+      };
+    }, [fileService]);
 
     // Safety-net polling: catch anything the file watcher might miss.
     // With the watcher active, this is a fallback — 120s is sufficient.
@@ -601,9 +666,31 @@ const DirectoryPanel = memo(
       selectedPaths,
     });
 
+    // Pending-selection paths — used by 「新建笔记」 to keep the synthetic
+    // newly-created file selected through the brief window between
+    // `setSelectedNodes` and the watcher-driven tree refresh that surfaces
+    // the file in `nodeMetaByPath`. Without this guard, the reconciliation
+    // below would prune the synthetic node before the refresh resolves
+    // (Codex round-4 caught). Pending paths auto-evict after 5 s — if the
+    // file truly never materialises (deleted externally mid-creation), we
+    // fall back to the normal filter behaviour.
+    const pendingSelectionPathsRef = useRef<Set<string>>(new Set());
+    const markPendingSelection = useCallback((path: string) => {
+      pendingSelectionPathsRef.current.add(path);
+      setTimeout(() => pendingSelectionPathsRef.current.delete(path), 5000);
+    }, []);
+
     useEffect(() => {
       setSelectedNodes((prev) => {
-        const next = prev.filter((node) => nodeMetaByPath.has(node.path));
+        const pending = pendingSelectionPathsRef.current;
+        const next = prev.filter((node) =>
+          nodeMetaByPath.has(node.path) || pending.has(node.path),
+        );
+        // Once a pending path materialises in nodeMetaByPath, drop it from
+        // pending — the real node has taken over.
+        for (const p of Array.from(pending)) {
+          if (nodeMetaByPath.has(p)) pending.delete(p);
+        }
         return next.length === prev.length ? prev : next;
       });
       if (
@@ -622,9 +709,7 @@ const DirectoryPanel = memo(
       setIsPreviewLoading(true);
 
       try {
-        const payload = await apiGet<Omit<FilePreview, "path">>(
-          `/agent/file?path=${encodeURIComponent(node.path)}`,
-        );
+        const payload = await fileService.readPreview({ path: node.path });
         const fileData = { ...payload, path: node.path };
         // Route to external handler (split view) if provided, otherwise open modal
         if (onFilePreviewExternal) {
@@ -650,7 +735,7 @@ const DirectoryPanel = memo(
     const handleSearchItemClick = async (path: string, initialLineNumber?: number) => {
       setIsPreviewLoading(true);
       try {
-        const payload = await apiGet<Omit<FilePreview, "path">>(`/agent/file?path=${encodeURIComponent(path)}`);
+        const payload = await fileService.readPreview({ path });
         const fileData = { ...payload, path, initialLineNumber };
         if (onFilePreviewExternal) {
           onFilePreviewExternal(fileData);
@@ -673,22 +758,13 @@ const DirectoryPanel = memo(
     const handleImagePreview = async (node: DirectoryTreeNode) => {
       if (node.type !== "file") return;
       try {
-        const endpoint = `/agent/download?path=${encodeURIComponent(node.path)}`;
-        let response: Response;
-        if (isTauri()) {
-          const baseUrl = await getTabServerUrl(tabId);
-          response = await proxyFetch(`${baseUrl}${endpoint}`);
-        } else {
-          response = await fetch(endpoint);
-        }
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        const blob = await response.blob();
-        const dataUrl = await new Promise<string>((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onload = () => resolve(reader.result as string);
-          reader.onerror = () => reject(reader.error);
-          reader.readAsDataURL(blob);
-        });
+        // PRD 0.2.7 Phase D: pre-migration this fetched the sidecar's
+        // /agent/download via Rust proxy, then converted the response Blob
+        // to a data URL. Rust now returns base64 directly so we skip the
+        // FileReader trip — `data:<mime>;base64,<body>` is the same thing
+        // FileReader.readAsDataURL would have produced.
+        const result = await fileService.downloadFile({ path: node.path });
+        const dataUrl = `data:${result.mimeType};base64,${result.data}`;
         openPreview(dataUrl, node.name);
       } catch (err) {
         console.error("[DirectoryPanel] Failed to load image:", err);
@@ -696,27 +772,40 @@ const DirectoryPanel = memo(
       }
     };
 
+    // Pre-PRD-0.2.7: a hidden <input type="file" multiple> fed File objects
+    // here, which we wrapped in FormData and POSTed to /agent/import (cap
+    // 500MB, streamed to disk by the sidecar). Tauri's IPC isn't built for
+    // 500MB base64 payloads — encoding inflates ~33% AND we need to fit the
+    // whole payload in renderer memory + IPC channel before Rust touches the
+    // disk. Cross-review caught: the migration removed the 500MB cap without
+    // adding a renderer-side equivalent, so picking a 4GB video would lock
+    // up the renderer building the base64 string. We enforce a per-batch
+    // size cap on the renderer side as a guardrail. Files needing larger
+    // upload are expected to come through the path-based drag-drop flow
+    // (handleTauriFileDrop → copyPaths) which has no IPC payload concern.
     const handleImport = async (files: FileList | null) => {
-      if (!files || files.length === 0 || isUploading) {
+      if (!files || files.length === 0 || isUploading) return;
+      const MAX_BATCH_BYTES = 100 * 1024 * 1024; // 100MB renderer cap
+      const totalBytes = Array.from(files).reduce((sum, f) => sum + f.size, 0);
+      if (totalBytes > MAX_BATCH_BYTES) {
+        setError(
+          `批量上传不能超过 ${MAX_BATCH_BYTES / 1024 / 1024} MB（当前 ${Math.round(totalBytes / 1024 / 1024)} MB）。大文件请直接拖拽到目录。`,
+        );
         return;
       }
-
       setIsUploading(true);
       try {
-        const formData = new FormData();
-        Array.from(files).forEach((file) => {
-          formData.append("files", file, file.name);
+        const base64Files = await Promise.all(
+          Array.from(files).map(async (file) => ({
+            name: file.name,
+            content: await fileToBase64(file),
+          })),
+        );
+        const result = await fileService.importBase64Files({
+          files: base64Files,
+          targetDir: importTargetDir || undefined,
         });
-        const url = importTargetDir
-          ? `/agent/import?targetDir=${encodeURIComponent(importTargetDir)}`
-          : "/agent/import";
-        const response = await fetch(url, {
-          method: "POST",
-          body: formData,
-        });
-        if (!response.ok) {
-          throw new Error("Import failed");
-        }
+        if (!result.success) throw new Error("Import failed");
         refresh();
       } catch (err) {
         setError(err instanceof Error ? err.message : "Import failed");
@@ -741,34 +830,25 @@ const DirectoryPanel = memo(
       });
     }, []);
 
-    // External file import for drag-drop
+    // External file drag-drop (browser File objects → no path → base64 path).
     const handleExternalFileDrop = useCallback(
       async (files: File[], targetDir: string = "") => {
         if (files.length === 0 || isUploading) {
           return;
         }
-
         setIsUploading(true);
         try {
-          // Convert files to base64 for JSON upload (works in Tauri)
           const base64Files = await Promise.all(
             files.map(async (file) => ({
               name: file.name,
               content: await fileToBase64(file),
             })),
           );
-
-          // Upload via base64 API endpoint
-          const result = await apiPost<{
-            success: boolean;
-            files: string[];
-            error?: string;
-          }>("/api/files/import-base64", { files: base64Files, targetDir });
-
-          if (!result.success) {
-            throw new Error(result.error || "Import failed");
-          }
-
+          const result = await fileService.importBase64Files({
+            files: base64Files,
+            targetDir: targetDir || undefined,
+          });
+          if (!result.success) throw new Error("Import failed");
           refresh();
         } catch (err) {
           console.error("[DirectoryPanel] File upload error:", err);
@@ -777,37 +857,23 @@ const DirectoryPanel = memo(
           setIsUploading(false);
         }
       },
-      [isUploading, refresh, apiPost, fileToBase64],
+      [isUploading, refresh, fileService, fileToBase64],
     );
 
-    // Handle file paths from Tauri drag-drop (copies from OS paths)
+    // Tauri drag-drop (real OS paths → cp directly, no base64).
     const handleTauriFileDrop = useCallback(
       async (paths: string[], targetDir: string = "") => {
         if (paths.length === 0 || isUploading) {
           return;
         }
-
         setIsUploading(true);
         try {
-          // Use /api/files/copy which handles copying from OS paths
-          const result = await apiPost<{
-            success: boolean;
-            copiedFiles: Array<{
-              sourcePath: string;
-              targetPath: string;
-              renamed: boolean;
-            }>;
-            error?: string;
-          }>("/api/files/copy", {
+          const result = await fileService.copyPaths({
             sourcePaths: paths,
-            targetDir: targetDir,
+            targetDir,
             autoRename: true,
           });
-
-          if (!result.success) {
-            throw new Error(result.error || "Copy failed");
-          }
-
+          if (!result.success) throw new Error("Copy failed");
           if (isDebugMode()) {
             console.log(
               "[DirectoryPanel] Tauri drop copied files:",
@@ -822,7 +888,7 @@ const DirectoryPanel = memo(
           setIsUploading(false);
         }
       },
-      [isUploading, refresh, apiPost],
+      [isUploading, refresh, fileService],
     );
 
     // Expose imperative handle for parent to call
@@ -943,17 +1009,28 @@ const DirectoryPanel = memo(
       // Don't clear dropTargetPath here - let tree level handler or drop handler do it
     }, []);
 
-    // Move handler (used by both internal DnD and context menu)
+    // Move handler (used by both internal DnD and context menu).
+    // Cross-review caught: pre-fix this ignored `result.errors`, so partial
+    // failures (3 of 5 files moved, 2 errored due to permission / collision
+    // exhaustion) silently dropped on the floor — user saw 2 files vanish
+    // with no feedback. Surface partial failures via toast so the user knows
+    // why some moves didn't happen.
     const handleMove = useCallback(
       async (sourcePaths: string[], targetDir: string) => {
         try {
-          await apiPost("/agent/move", { sourcePaths, targetDir });
+          const result = await fileService.movePaths({ sourcePaths, targetDir });
+          if (result.errors && result.errors.length > 0) {
+            const moved = result.movedFiles?.length ?? 0;
+            toast.warning(
+              `已移动 ${moved} 项；${result.errors.length} 项失败：${result.errors[0]}`,
+            );
+          }
           refresh();
         } catch (err) {
           setError(err instanceof Error ? err.message : "Move failed");
         }
       },
-      [apiPost, refresh],
+      [fileService, refresh, toast],
     );
 
     // --- Internal DnD via @dnd-kit (pointer-events based, reliable in Tauri WebView) ---
@@ -1133,7 +1210,7 @@ const DirectoryPanel = memo(
 
     const handleOpenInFinder = async (path: string) => {
       try {
-        await apiPost("/agent/open-in-finder", { path });
+        await fileService.openInFinder({ path });
       } catch (err) {
         setError(err instanceof Error ? err.message : "Failed to open");
       }
@@ -1141,7 +1218,7 @@ const DirectoryPanel = memo(
 
     const handleOpenWithDefault = async (path: string) => {
       try {
-        await apiPost("/agent/open-with-default", { path });
+        await fileService.openWithDefault({ path });
       } catch (err) {
         setError(err instanceof Error ? err.message : "Failed to open");
       }
@@ -1149,7 +1226,7 @@ const DirectoryPanel = memo(
 
     const handleRename = async (oldPath: string, newName: string) => {
       try {
-        await apiPost("/agent/rename", { oldPath, newName });
+        await fileService.rename({ oldPath, newName });
         refresh();
       } catch (err) {
         setError(err instanceof Error ? err.message : "Rename failed");
@@ -1158,7 +1235,7 @@ const DirectoryPanel = memo(
 
     const handleDelete = async (path: string) => {
       try {
-        await apiPost("/agent/delete", { path });
+        await fileService.deleteFile({ path });
         refresh();
       } catch (err) {
         setError(err instanceof Error ? err.message : "Delete failed");
@@ -1167,8 +1244,101 @@ const DirectoryPanel = memo(
 
     const handleNewFile = async (parentDir: string, name: string) => {
       try {
-        await apiPost("/agent/new-file", { parentDir, name });
+        await fileService.newFile({ parentDir, name });
         refresh();
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Create failed");
+      }
+    };
+
+    /** 「新建笔记」: pick the next free `note-YYYYMMDDHHMM[-N].md` slot in
+     *  `parentDir`, create it empty, then open the preview directly in
+     *  edit mode (Obsidian-like quick-capture flow). Local time — the
+     *  user expects "now" to be wall-clock now, not UTC.
+     *
+     *  Collision handling: probe up to 30 candidates via `checkPaths`
+     *  (single batched invoke), pick the first free one. The cap is
+     *  arbitrary but well above any plausible "I created 30 notes in one
+     *  minute" workflow; treats overflow as an error toast rather than
+     *  silently dropping the click. */
+    const handleNewNote = async (parentDir: string) => {
+      if (!fileService.isAvailable) return;
+      const now = new Date();
+      const pad = (n: number) => String(n).padStart(2, "0");
+      const stamp =
+        `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}` +
+        `${pad(now.getHours())}${pad(now.getMinutes())}`;
+      const baseStem = `note-${stamp}`;
+      const candidates = [
+        `${baseStem}.md`,
+        ...Array.from({ length: 29 }, (_, i) => `${baseStem}-${i + 2}.md`),
+      ];
+      const probePaths = candidates.map((n) =>
+        parentDir ? `${parentDir}/${n}` : n,
+      );
+      try {
+        const probe = await fileService.checkPaths({ paths: probePaths });
+        // Race-resilient creation: walk candidates in order, skip those
+        // already known occupied, and on `newFile` "already exists" race
+        // (another caller took the slot between probe and create — Codex
+        // round-4 caught) fall through to the next candidate. In the
+        // common case this is exactly one `newFile` call.
+        let createdPath: string | null = null;
+        let filename: string | null = null;
+        for (let i = 0; i < candidates.length; i++) {
+          if (probe.results[probePaths[i]]?.exists) continue;
+          const candidate = candidates[i];
+          try {
+            const created = await fileService.newFile({
+              parentDir,
+              name: candidate,
+            });
+            createdPath = created.path;
+            filename = candidate;
+            break;
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            if (/already exists/i.test(msg)) continue; // race — try next
+            throw e;
+          }
+        }
+        if (!createdPath || !filename) {
+          setError("当前分钟内已有过多笔记，请稍后再试");
+          return;
+        }
+
+        // Watcher refresh will surface the new file; we also kick a manual
+        // refresh so the highlight + selection are immediate.
+        refresh();
+
+        // Synthesize a tree-node so selectedNodes highlights the new file
+        // even before the watcher-driven re-fetch resolves. The pending
+        // selection mark protects this node from the reconciliation
+        // useEffect, which would otherwise filter it out (it isn't yet
+        // in `nodeMetaByPath`).
+        const newNode: DirectoryTreeNode = {
+          id: createdPath,
+          name: filename,
+          path: createdPath,
+          type: "file",
+        };
+        markPendingSelection(createdPath);
+        setSelectedNodes([newNode]);
+
+        // Open preview in edit mode. Split-view (Chat) routes via the
+        // external callback; otherwise open the inline modal.
+        const previewFile = {
+          name: filename,
+          content: "",
+          size: 0,
+          path: createdPath,
+        };
+        if (onFilePreviewExternal) {
+          onFilePreviewExternal(previewFile, { initialEditMode: true });
+        } else {
+          setPreview({ ...previewFile, initialEditMode: true });
+          setPreviewError(null);
+        }
       } catch (err) {
         setError(err instanceof Error ? err.message : "Create failed");
       }
@@ -1176,7 +1346,7 @@ const DirectoryPanel = memo(
 
     const handleNewFolder = async (parentDir: string, name: string) => {
       try {
-        await apiPost("/agent/new-folder", { parentDir, name });
+        await fileService.newFolder({ parentDir, name });
         refresh();
       } catch (err) {
         setError(err instanceof Error ? err.message : "Create failed");
@@ -1266,7 +1436,7 @@ const DirectoryPanel = memo(
         });
 
         for (const node of filteredNodes) {
-          await apiPost("/agent/delete", { path: node.path });
+          await fileService.deleteFile({ path: node.path });
         }
         setSelectedNodes([]);
         refresh();
@@ -1317,6 +1487,11 @@ const DirectoryPanel = memo(
       if (!node) {
         return [
           {
+            label: "新建笔记",
+            icon: <NotebookPen className="h-4 w-4" />,
+            onClick: () => void handleNewNote(""),
+          },
+          {
             label: "导入文件",
             icon: <Upload className="h-4 w-4" />,
             onClick: () => {
@@ -1351,6 +1526,11 @@ const DirectoryPanel = memo(
 
       if (isDir) {
         return [
+          {
+            label: "新建笔记",
+            icon: <NotebookPen className="h-4 w-4" />,
+            onClick: () => void handleNewNote(node.path),
+          },
           {
             label: "新建文件",
             icon: <FilePlus className="h-4 w-4" />,
@@ -1762,28 +1942,13 @@ const DirectoryPanel = memo(
                           if (isImageFile(data.name)) {
                             setIsPreviewLoading(true);
                             try {
-                              const endpoint = `/agent/download?path=${encodeURIComponent(data.path)}`;
-                              let response: Response;
-                              if (isTauri()) {
-                                const baseUrl = await getTabServerUrl(tabId);
-                                response = await proxyFetch(
-                                  `${baseUrl}${endpoint}`,
-                                );
-                              } else {
-                                response = await fetch(endpoint);
-                              }
-                              if (!response.ok)
-                                throw new Error(`HTTP ${response.status}`);
-                              const blob = await response.blob();
-                              const dataUrl = await new Promise<string>(
-                                (resolve, reject) => {
-                                  const reader = new FileReader();
-                                  reader.onload = () =>
-                                    resolve(reader.result as string);
-                                  reader.onerror = () => reject(reader.error);
-                                  reader.readAsDataURL(blob);
-                                },
-                              );
+                              // PRD 0.2.7 Phase D: same migration as
+                              // handleImagePreview — Rust returns base64
+                              // already, no FileReader round-trip needed.
+                              const result = await fileService.downloadFile({
+                                path: data.path,
+                              });
+                              const dataUrl = `data:${result.mimeType};base64,${result.data}`;
                               openPreview(dataUrl, data.name);
                             } catch (err) {
                               console.error(
@@ -1798,7 +1963,7 @@ const DirectoryPanel = memo(
                             void handlePreview(data);
                           } else {
                             toast.info(
-                              "暂不支持预览此文件类型，可右键进入文件夹打开",
+                              "暂不支持预览此文件类型，可右键菜单打开",
                             );
                           }
                         };
@@ -2002,11 +2167,31 @@ const DirectoryPanel = memo(
                 path={preview?.path ?? ""}
                 isLoading={isPreviewLoading}
                 error={previewError}
+                // Phase D.5: thread the absolute workspace root so rendered
+                // markdown previews can load relative-path images.
+                workspacePath={agentDir}
+                initialEditMode={preview?.initialEditMode}
                 onClose={() => {
                   setPreview(null);
                   setPreviewError(null);
                 }}
                 onSaved={refresh}
+                onRenamed={(newPath, newName) => {
+                  // Update the preview state so subsequent saves target the
+                  // new path. The fs watcher triggers a tree refresh on its
+                  // own (rename → delete-old + create-new event pair).
+                  setPreview((prev) =>
+                    prev ? { ...prev, path: newPath, name: newName, initialEditMode: undefined } : prev,
+                  );
+                  refresh();
+                }}
+                // Phase D.5: route reveal through fileService rather than the
+                // modal falling back to sidecar `/agent/open-in-finder`.
+                onRevealFile={async () => {
+                  const p = preview?.path;
+                  if (!p) return;
+                  await fileService.openInFinder({ path: p });
+                }}
                 onQuoteFile={onQuoteFile}
                 onQuoteSelection={onQuoteSelection}
               />

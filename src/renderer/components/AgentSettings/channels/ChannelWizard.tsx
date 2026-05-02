@@ -5,6 +5,7 @@ import { ArrowLeft, ArrowRight, Check, Copy, ExternalLink, Loader2, Plus, Puzzle
 import QRCode from 'qrcode';
 import { track } from '@/analytics';
 import { isTauriEnvironment } from '@/utils/browserMock';
+import { listenWithCleanup } from '@/utils/tauriListen';
 import { useToast } from '@/components/Toast';
 import { useConfig } from '@/hooks/useConfig';
 import { patchAgentConfig, invokeStartAgentChannel } from '@/config/services/agentConfigService';
@@ -443,12 +444,10 @@ export default function ChannelWizard({
     // Listen for user-bound events
     useEffect(() => {
         if (step !== bindingStep || !isTauriEnvironment()) return;
-        let cancelled = false;
-        let unlisten: (() => void) | undefined;
-
-        import('@tauri-apps/api/event').then(({ listen }) => {
-            if (cancelled) return;
-            listen<{ botId: string; userId: string; username?: string }>('im:user-bound', (event) => {
+        const ac = new AbortController();
+        void listenWithCleanup<{ botId: string; userId: string; username?: string }>(
+            'im:user-bound',
+            (event) => {
                 if (!isMountedRef.current || event.payload.botId !== channelId) return;
                 const { userId, username } = event.payload;
                 const displayName = username || userId;
@@ -458,16 +457,10 @@ export default function ChannelWizard({
                     toastRef.current.success(`用户 ${displayName} 已绑定`);
                     return [...prev, userId];
                 });
-            }).then(fn => {
-                if (cancelled) fn();
-                else unlisten = fn;
-            });
-        });
-
-        return () => {
-            cancelled = true;
-            unlisten?.();
-        };
+            },
+            ac.signal,
+        );
+        return () => ac.abort();
     }, [step, bindingStep, channelId]);
 
     // Check if credentials are filled

@@ -23,7 +23,10 @@ import { getBuiltinMcpInstance } from './tools/builtin-mcp-registry';
 // Cheap: just function-ref storage, no SDK/zod eval, no tool module loaded.
 import './tools/builtin-mcp-meta';
 import { startSocksBridge, stopSocksBridge, isSocksBridgeRunning } from './utils/socks-bridge';
-import { startFileWatcher } from './file-watcher';
+// Phase E (PRD 0.2.7): the sidecar file watcher (`file-watcher.ts` →
+// SSE `workspace:files-changed`) is removed. The renderer subscribes to
+// the Rust workspace_files watcher (Tauri event
+// `workspace:files-changed:<eventKey>`) instead.
 import { resolveAuthHeaders, onTokenChange, startTokenRefreshScheduler } from './mcp-oauth';
 // Side-effect imports: each registers itself in the builtin MCP registry
 // gemini-image / edge-tts / generative-ui registered in builtin-mcp-meta.ts.
@@ -1045,6 +1048,25 @@ type McpServerEntry = SdkMcpServerConfig | McpSdkServerConfigWithInstance;
 // Current MCP servers enabled for this workspace (set per-query)
 // null = never set (use config file fallback), [] = explicitly set to none
 let currentMcpServers: McpServerDefinition[] | null = null;
+
+/**
+ * Read-only accessor for `currentMcpServers`. Used by `/cron/execute-sync` to
+ * reuse the frontend-set MCP shapes (from `/api/mcp/set`) instead of
+ * recomputing via the sidecar's `getAllMcpServers()` — the two compute paths
+ * produce slightly different env/args field structures, and feeding the
+ * sidecar-shaped definitions into `applyMcpOverrideAndAwaitReady` triggers a
+ * fingerprint mismatch → abort+restart that wastes ~5s on every launcher
+ * cron handoff. The same fingerprint-mismatch hazard is documented at
+ * `agent-session.ts::initializeAgent` (line ~4972) where the Tab path
+ * deliberately skips self-resolve for the same reason.
+ *
+ * Returns `null` when no `/api/mcp/set` has happened yet (Tab not opened
+ * before cron firing — pure-cron / IM bot paths). Callers fall back to
+ * `getAllMcpServers()` in that case.
+ */
+export function getCurrentMcpServers(): readonly McpServerDefinition[] | null {
+  return currentMcpServers;
+}
 
 // Fingerprint of the MCP key set the SDK was last known to have (sorted server-id list).
 // Captured when query() starts and after each successful querySession.setMcpServers(),
@@ -4940,10 +4962,8 @@ export async function initializeAgent(
   initLogger(sessionId);
   console.log(`[agent] init dir=${agentDir} initialPrompt=${hasInitialPrompt ? 'yes' : 'no'} sessionId=${sessionId} resume=${sessionRegistered}`);
 
-  // Start file watcher for workspace directory changes → SSE push to frontend.
-  // Watcher is workspace-scoped (survives session restarts). startFileWatcher()
-  // deduplicates if already watching the same path.
-  startFileWatcher(agentDir);
+  // Phase E (PRD 0.2.7): file-watcher → SSE removed; renderer uses the Rust
+  // workspace_files watcher via Tauri events (`workspace:files-changed:*`).
 
   // Self-resolve workspace config from disk (MCP/provider/model).
   // Eliminates dependency on pre-serialized snapshots (providerEnvJson, mcpServersJson)

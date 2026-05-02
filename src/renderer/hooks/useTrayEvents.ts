@@ -2,9 +2,11 @@
 // Manages minimize-to-tray functionality and exit confirmation
 
 import { useEffect, useCallback, useRef } from 'react';
+import { emit } from '@tauri-apps/api/event';
 import { isTauriEnvironment } from '@/utils/browserMock';
 import { dismissTopmost } from '@/utils/closeLayer';
 import { setWindowVisible, consumePendingNavigation } from '@/services/notificationService';
+import { listenWithCleanup } from '@/utils/tauriListen';
 
 interface TrayEventsOptions {
   /** Whether minimize to tray is enabled */
@@ -56,7 +58,6 @@ export function useTrayEvents(options: TrayEventsOptions) {
     if (!isTauriEnvironment()) return;
 
     try {
-      const { emit } = await import('@tauri-apps/api/event');
       // Emit event to Rust to confirm exit
       await emit('tray:confirm-exit');
     } catch (error) {
@@ -68,22 +69,24 @@ export function useTrayEvents(options: TrayEventsOptions) {
   useEffect(() => {
     if (!isTauriEnvironment()) return;
 
-    let unlistenCmdW: (() => void) | null = null;
-    let unlistenCloseRequested: (() => void) | null = null;
-    let unlistenOpenSettings: (() => void) | null = null;
-    let unlistenExitRequested: (() => void) | null = null;
     let unlistenFocusChanged: (() => void) | null = null;
+    const ac = new AbortController();
+    // Shared closure state: tray-hide handler sets it true so the next
+    // focus-restored event distinguishes "hidden → visible" (consume pending
+    // navigation) from "alt-tab focus" (don't hijack).
+    let wasHidden = false;
 
     const setupListeners = async () => {
       try {
-        const { listen } = await import('@tauri-apps/api/event');
         const { getCurrentWindow } = await import('@tauri-apps/api/window');
         const window = getCurrentWindow();
 
-        // Listen for window focus changes (including when window is shown from tray)
-        // Track previous visibility to detect hidden→visible transitions
-        let wasHidden = false;
+        // window.onFocusChanged is a Tauri window API (not Tauri event API),
+        // so it isn't covered by `listenWithCleanup`. The hook still benefits
+        // from the AbortController for symmetry — we manually invoke the
+        // returned unlisten in the cleanup branch.
         unlistenFocusChanged = await window.onFocusChanged(({ payload: focused }) => {
+          if (ac.signal.aborted) return;
           console.debug('[useTrayEvents] Window focus changed:', focused);
           if (focused) {
             // Only consume pending navigation when window transitions from hidden to visible
@@ -104,11 +107,16 @@ export function useTrayEvents(options: TrayEventsOptions) {
             }
           }
         });
+        if (ac.signal.aborted) {
+          unlistenFocusChanged?.();
+          unlistenFocusChanged = null;
+          return;
+        }
 
         // ── Cmd+W handler (macOS custom menu item → window:cmd-w) ──
         // Separated from X button (CloseRequested). Cmd+W walks the close hierarchy:
         // overlay → split panel → tab → launcher (terminal state, never exits).
-        unlistenCmdW = await listen('window:cmd-w', () => {
+        void listenWithCleanup('window:cmd-w', () => {
           console.log('[useTrayEvents] Cmd+W received');
           // 1. Try dismissing topmost overlay/panel
           if (dismissTopmost()) {
@@ -123,17 +131,17 @@ export function useTrayEvents(options: TrayEventsOptions) {
           // 3. Close current tab (auto-creates launcher on last tab; launcher is no-op)
           optionsRef.current.onCmdWCloseTab?.();
           console.log('[useTrayEvents] Cmd+W: tab closed');
-        });
+        }, ac.signal);
 
         // ── X button / system close (CloseRequested → window:close-requested) ──
         // Pure tray/exit behavior — no overlay/tab logic (that's Cmd+W's job).
-        unlistenCloseRequested = await listen('window:close-requested', async () => {
+        void listenWithCleanup('window:close-requested', async () => {
           console.log('[useTrayEvents] Window close requested (X button)');
           const { minimizeToTray } = optionsRef.current;
 
           if (minimizeToTray) {
-            const window = getCurrentWindow();
-            await window.hide();
+            const win = getCurrentWindow();
+            await win.hide();
             wasHidden = true;
             setWindowVisible(false);
             console.log('[useTrayEvents] Window hidden to tray');
@@ -142,40 +150,33 @@ export function useTrayEvents(options: TrayEventsOptions) {
             if (onExitRequested) {
               const canExit = await onExitRequested();
               if (canExit) {
-                const { emit } = await import('@tauri-apps/api/event');
                 await emit('tray:confirm-exit');
               }
             } else {
-              const { emit } = await import('@tauri-apps/api/event');
               await emit('tray:confirm-exit');
             }
           }
-        });
+        }, ac.signal);
 
         // Listen for tray "open settings" menu click
-        unlistenOpenSettings = await listen('tray:open-settings', () => {
+        void listenWithCleanup('tray:open-settings', () => {
           console.log('[useTrayEvents] Open settings from tray');
-          const { onOpenSettings } = optionsRef.current;
-          if (onOpenSettings) {
-            onOpenSettings();
-          }
-        });
+          optionsRef.current.onOpenSettings?.();
+        }, ac.signal);
 
         // Listen for tray "exit" menu click
-        unlistenExitRequested = await listen('tray:exit-requested', async () => {
+        void listenWithCleanup('tray:exit-requested', async () => {
           console.log('[useTrayEvents] Exit requested from tray');
           const { onExitRequested } = optionsRef.current;
           if (onExitRequested) {
             const canExit = await onExitRequested();
             if (canExit) {
-              const { emit } = await import('@tauri-apps/api/event');
               await emit('tray:confirm-exit');
             }
           } else {
-            const { emit } = await import('@tauri-apps/api/event');
             await emit('tray:confirm-exit');
           }
-        });
+        }, ac.signal);
 
         console.log('[useTrayEvents] Event listeners setup complete');
       } catch (error) {
@@ -186,10 +187,7 @@ export function useTrayEvents(options: TrayEventsOptions) {
     setupListeners();
 
     return () => {
-      if (unlistenCmdW) unlistenCmdW();
-      if (unlistenCloseRequested) unlistenCloseRequested();
-      if (unlistenOpenSettings) unlistenOpenSettings();
-      if (unlistenExitRequested) unlistenExitRequested();
+      ac.abort();
       if (unlistenFocusChanged) unlistenFocusChanged();
     };
   }, []);

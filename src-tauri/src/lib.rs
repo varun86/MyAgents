@@ -25,6 +25,7 @@ pub mod terminal;
 pub mod browser;
 pub mod search;
 pub mod thought;
+pub mod workspace_files;
 mod tray;
 mod updater;
 pub mod utils;
@@ -112,6 +113,7 @@ pub fn run() {
     let sidecar_state_for_exit = sidecar_state.clone();
     let sidecar_state_for_monitor = sidecar_state.clone();
     let sidecar_state_for_session_monitor = sidecar_state.clone();
+    let sidecar_state_for_terminal_forwarder = sidecar_state.clone();
 
     let im_state_for_management = im_bot_state.clone();
     let agent_state_for_management = agent_state.clone();
@@ -132,6 +134,7 @@ pub fn run() {
     let cleanup_done_for_monitor = cleanup_done.clone();
     let cleanup_done_for_session_monitor = cleanup_done.clone();
     let cleanup_done_for_agent_monitor = cleanup_done.clone();
+    let cleanup_done_for_terminal_forwarder = cleanup_done.clone();
 
     // Create terminal manager state
     let terminal_state = terminal::TerminalManager::new();
@@ -195,6 +198,9 @@ pub fn run() {
         .manage(browser_state)
         .manage(thought_state)
         .manage(task_state)
+        // PRD 0.2.7 Phase D: per-process registry of active workspace
+        // filesystem watchers (one debouncer per workspace, ref-counted).
+        .manage(std::sync::Arc::new(workspace_files::watcher::WorkspaceWatchers::default()))
         // SearchEngine will be added as managed state in .setup()
         .invoke_handler(tauri::generate_handler![
             // Legacy commands (backward compatibility)
@@ -337,6 +343,44 @@ pub fn run() {
             commands::cmd_read_file_base64,
             commands::cmd_open_file,
             config_io::cmd_fsync_path,
+            // Workspace file IO (workspace_files module).
+            // Phase A (input-box unification): files_b64 / transfer / gitignore /
+            //   search / delete / slash.
+            // Phase D (DirectoryPanel migration): tree / read_preview / download /
+            //   crud / system_open / git_branch / watcher.
+            //
+            // These replace sidecar HTTP endpoints (/api/files/*, /agent/*,
+            // /api/commands, /api/git/branch). See PRD 0.2.7.
+            //
+            // tauri::generate_handler! resolves auto-generated `__cmd__<name>` wrappers
+            // from the same module that defined the command, so we MUST use the
+            // submodule path (e.g. `workspace_files::files_b64::cmd_…`), not the
+            // re-export at the parent module level.
+            workspace_files::files_b64::cmd_workspace_import_files_b64,
+            workspace_files::files_b64::cmd_workspace_read_files_b64,
+            workspace_files::check_paths::cmd_workspace_check_paths,
+            workspace_files::transfer::cmd_workspace_copy_paths,
+            workspace_files::gitignore::cmd_workspace_add_gitignore,
+            workspace_files::search::cmd_workspace_search_files_fuzzy,
+            workspace_files::delete::cmd_workspace_delete,
+            workspace_files::slash::cmd_list_slash_commands,
+            workspace_files::tree::cmd_workspace_dir_tree,
+            workspace_files::tree::cmd_workspace_dir_expand,
+            workspace_files::read_preview::cmd_workspace_read_preview,
+            workspace_files::download::cmd_workspace_download_file,
+            workspace_files::save_file::cmd_workspace_save_file,
+            workspace_files::claude_md::cmd_workspace_read_claude_md,
+            workspace_files::claude_md::cmd_workspace_write_claude_md,
+            workspace_files::crud::cmd_workspace_new_file,
+            workspace_files::crud::cmd_workspace_new_folder,
+            workspace_files::crud::cmd_workspace_rename,
+            workspace_files::crud::cmd_workspace_move,
+            workspace_files::system_open::cmd_workspace_open_in_finder,
+            workspace_files::system_open::cmd_workspace_open_with_default,
+            workspace_files::system_open::cmd_open_path_external,
+            workspace_files::git_branch::cmd_workspace_git_branch,
+            workspace_files::watcher::cmd_workspace_watch_start,
+            workspace_files::watcher::cmd_workspace_watch_stop,
             // Full-text search commands
             search::cmd_search_sessions,
             search::cmd_search_workspace_files,
@@ -613,6 +657,31 @@ pub fn run() {
                     Err(e) => log::error!("[App] Failed to start management API: {}", e),
                 }
             });
+
+            // Bridge `SidecarManager::terminal_events` → `session:sidecar-terminal`
+            // Tauri event. Renderer's App.tsx listens and resets `tab.sessionId`
+            // bindings whose underlying sidecar has been definitively released
+            // (no owners remained at removal → no auto-restart will revive it).
+            // Without this bridge, voluntary-release leaves stale Tab.sessionId
+            // values which `planSessionOpen` then "jump-to-tab"s into → empty
+            // UI + sidecar-not-running errors. See `forward_terminal_events_to_renderer`
+            // doc-comment for the full rationale.
+            //
+            // Spawn order: BEFORE cron/IM auto-start so any sidecar created
+            // and terminally-removed by those subsystems on startup is captured.
+            // The forwarder subscribes synchronously inside the spawned task
+            // (first await is `rx.recv()`); broadcast channel buffers up to 64
+            // events so the few-millisecond gap before `subscribe()` runs is
+            // covered. (Codex review ADV-4.)
+            let app_handle_for_terminal_forwarder = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                sidecar::forward_terminal_events_to_renderer(
+                    app_handle_for_terminal_forwarder,
+                    sidecar_state_for_terminal_forwarder,
+                    cleanup_done_for_terminal_forwarder,
+                ).await;
+            });
+            ulog_info!("[App] Sidecar terminal-event forwarder spawned");
 
             // Initialize cron task manager with app handle
             let cron_app_handle = app.handle().clone();

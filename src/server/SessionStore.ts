@@ -561,6 +561,7 @@ export async function updateSessionMetadata(
         | 'unifiedSession'
         | 'stats'
         | 'source'
+        | 'favorite'
         | 'lastMessagePreview'
         | 'titleSource'
         | 'runtime'

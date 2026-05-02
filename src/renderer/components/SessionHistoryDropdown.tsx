@@ -1,14 +1,15 @@
 import { useCallback, useEffect, useRef, useState, useMemo } from 'react';
 import { createPortal } from 'react-dom';
-import { BarChart2, Clock, Download, Trash2 } from 'lucide-react';
+import { BarChart2, Clock, Download, Star, Trash2 } from 'lucide-react';
 
-import { deleteSession, getSessionDetails, getSessions, type SessionMetadata } from '@/api/sessionClient';
+import { deleteSession, getSessionDetails, getSessions, updateSession, type SessionMetadata } from '@/api/sessionClient';
 import { deactivateSession } from '@/api/tauriClient';
 import { CUSTOM_EVENTS } from '../../shared/constants';
 import { getWorkspaceCronTasks, getBackgroundSessions } from '@/api/cronTaskClient';
 import type { CronTask } from '@/types/cronTask';
 import { formatTokens } from '@/utils/formatTokens';
 import { isTauriEnvironment } from '@/utils/browserMock';
+import { listenWithCleanup } from '@/utils/tauriListen';
 import type { AgentStatusMap } from '@/hooks/useAgentStatuses';
 import { extractPlatformDisplay } from '@/utils/taskCenterUtils';
 import type { SessionTag } from '@/hooks/useTaskCenterData';
@@ -190,43 +191,35 @@ export default function SessionHistoryDropdown({
     // Real-time tag updates: listen for cron/IM/agent status changes while dropdown is open
     useEffect(() => {
         if (!isOpen || !isTauriEnvironment()) return;
+        const ac = new AbortController();
 
-        let mounted = true;
-        const unlisteners: (() => void)[] = [];
-
-        (async () => {
-            const { listen } = await import('@tauri-apps/api/event');
-            if (!mounted) return;
-
-            // Cron task start/stop → refresh cron tasks (affects delete protection)
-            const refreshCron = () => {
-                getWorkspaceCronTasks(agentDir).then(tasks => { if (mounted) setCronTasks(tasks); }).catch(() => {});
-            };
-            const u1 = await listen('cron:task-started', refreshCron);
-            const u2 = await listen('cron:task-stopped', refreshCron);
-            unlisteners.push(u1, u2);
-
-            // Agent status changes → refresh statuses
-            const refreshStatuses = () => {
-                import('@tauri-apps/api/core').then(({ invoke }) => {
-                    invoke<AgentStatusMap>('cmd_all_agents_status')
-                        .then(s => { if (mounted) setAgentStatuses(s); }).catch(() => {});
-                }).catch(() => {});
-            };
-            const u3 = await listen('agent:status-changed', refreshStatuses);
-            unlisteners.push(u3);
-
-            // Background completion → refresh background sessions
-            const u5 = await listen('session:background-complete', () => {
-                getBackgroundSessions().then(ids => { if (mounted) setBackgroundSessionIds(ids); }).catch(() => {});
-            });
-            unlisteners.push(u5);
-        })();
-
-        return () => {
-            mounted = false;
-            unlisteners.forEach(fn => fn());
+        // Cron task start/stop → refresh cron tasks (affects delete protection)
+        const refreshCron = () => {
+            getWorkspaceCronTasks(agentDir)
+                .then(tasks => { if (!ac.signal.aborted) setCronTasks(tasks); })
+                .catch(() => {});
         };
+        void listenWithCleanup('cron:task-started', refreshCron, ac.signal);
+        void listenWithCleanup('cron:task-stopped', refreshCron, ac.signal);
+
+        // Agent status changes → refresh statuses
+        const refreshStatuses = () => {
+            import('@tauri-apps/api/core').then(({ invoke }) => {
+                invoke<AgentStatusMap>('cmd_all_agents_status')
+                    .then(s => { if (!ac.signal.aborted) setAgentStatuses(s); })
+                    .catch(() => {});
+            }).catch(() => {});
+        };
+        void listenWithCleanup('agent:status-changed', refreshStatuses, ac.signal);
+
+        // Background completion → refresh background sessions
+        void listenWithCleanup('session:background-complete', () => {
+            getBackgroundSessions()
+                .then(ids => { if (!ac.signal.aborted) setBackgroundSessionIds(ids); })
+                .catch(() => {});
+        }, ac.signal);
+
+        return () => ac.abort();
     }, [isOpen, agentDir]);
 
     // Outside-click + Escape dismissal are owned by the Popover primitive.
@@ -284,6 +277,39 @@ export default function SessionHistoryDropdown({
         e.stopPropagation();
         setStatsSession({ id: session.id, title: session.title });
     };
+
+    // Per-session in-flight guard — rapid double-click on the same star
+    // would otherwise fire two PATCHes whose responses can arrive out of
+    // order, leaving the optimistic UI and the disk disagreeing on the
+    // final state (Codex round-4).
+    const favoriteInFlightRef = useRef<Set<string>>(new Set());
+
+    const handleToggleFavorite = useCallback(async (e: React.MouseEvent, session: SessionMetadata) => {
+        e.stopPropagation();
+        if (favoriteInFlightRef.current.has(session.id)) return;
+        favoriteInFlightRef.current.add(session.id);
+        const next = !session.favorite;
+        // Optimistic update: flip the in-memory copy first so the star icon
+        // reacts instantly. On failure we revert + toast — better than an
+        // awaitable click that "feels broken" on slow disk writes.
+        setSessions(prev => prev?.map(s => s.id === session.id ? { ...s, favorite: next } : s) ?? prev);
+        try {
+            const result = await updateSession(session.id, { favorite: next });
+            if (!result) {
+                // updateSession returns null on caught error; revert + toast
+                // (no synthetic throw — it just gets caught by the same
+                // handler below for no UX gain, per Codex review).
+                setSessions(prev => prev?.map(s => s.id === session.id ? { ...s, favorite: !next } : s) ?? prev);
+                toast.error('收藏失败，请重试');
+            }
+        } catch (err) {
+            console.error('[SessionHistoryDropdown] Toggle favorite failed:', err);
+            setSessions(prev => prev?.map(s => s.id === session.id ? { ...s, favorite: !next } : s) ?? prev);
+            toast.error('收藏失败，请重试');
+        } finally {
+            favoriteInFlightRef.current.delete(session.id);
+        }
+    }, [toast]);
 
     // Export session as .md file
     const [exportingId, setExportingId] = useState<string | null>(null);
@@ -435,10 +461,12 @@ export default function SessionHistoryDropdown({
                             const hasStats = stats && (stats.messageCount > 0 || stats.totalInputTokens > 0);
                             const totalTokens = (stats?.totalInputTokens ?? 0) + (stats?.totalOutputTokens ?? 0);
 
+                            const isPendingDelete = pendingDeleteId === session.id;
+                            const cronProtected = tags.some(t => t.type === 'cron');
                             return (
                                 <div
                                     key={session.id}
-                                    className={`group flex cursor-pointer items-start gap-3 px-4 py-3 transition-colors ${isCurrent
+                                    className={`group relative cursor-pointer transition-colors ${isCurrent
                                         ? 'bg-[var(--accent)]/10'
                                         : 'hover:bg-[var(--hover-bg)]'
                                         }`}
@@ -449,97 +477,128 @@ export default function SessionHistoryDropdown({
                                         }
                                     }}
                                 >
-                                    <div className="min-w-0 flex-1">
-                                        <div className="flex items-center gap-2">
-                                            {isCurrent && (
-                                                <span className="flex-shrink-0 rounded bg-[var(--accent)]/20 px-1.5 py-0.5 text-[10px] font-medium text-[var(--accent)]">
-                                                    当前
+                                    {/* Row body — content extends to right edge in default state.
+                                     *  Action buttons live in the absolute overlay below so they
+                                     *  don't reserve layout space when not hovered (用户反馈：
+                                     *  默认背景的 item 信息应该一致延伸到右边线). */}
+                                    <div className="flex items-start gap-3 px-4 py-3">
+                                        <div className="min-w-0 flex-1">
+                                            <div className="flex items-center gap-2">
+                                                {isCurrent && (
+                                                    <span className="flex-shrink-0 rounded bg-[var(--accent)]/20 px-1.5 py-0.5 text-[10px] font-medium text-[var(--accent)]">
+                                                        当前
+                                                    </span>
+                                                )}
+                                                {tags.map((tag, i) => (
+                                                    <SessionTagBadge key={i} tag={tag} />
+                                                ))}
+                                                <span className={`truncate text-sm ${isCurrent ? 'font-medium text-[var(--accent)]' : 'text-[var(--ink)]'}`}>
+                                                    {session.title}
                                                 </span>
-                                            )}
-                                            {tags.map((tag, i) => (
-                                                <SessionTagBadge key={i} tag={tag} />
-                                            ))}
-                                            <span className={`truncate text-sm ${isCurrent ? 'font-medium text-[var(--accent)]' : 'text-[var(--ink)]'}`}>
-                                                {session.title}
-                                            </span>
+                                            </div>
+                                            <div className="mt-1 flex items-center gap-2 text-xs text-[var(--ink-muted)]">
+                                                <span className="flex items-center gap-1">
+                                                    <Clock className="h-3 w-3" />
+                                                    {formatTime(session.lastActiveAt)}
+                                                </span>
+                                                {hasStats && (
+                                                    <>
+                                                        <span>·</span>
+                                                        <span>{stats.messageCount} 条消息</span>
+                                                        <span>·</span>
+                                                        <span>{formatTokens(totalTokens)} tokens</span>
+                                                    </>
+                                                )}
+                                            </div>
                                         </div>
-                                        <div className="mt-1 flex items-center gap-2 text-xs text-[var(--ink-muted)]">
-                                            <span className="flex items-center gap-1">
-                                                <Clock className="h-3 w-3" />
-                                                {formatTime(session.lastActiveAt)}
-                                            </span>
-                                            {hasStats && (
+                                    </div>
+
+                                    {/* Hover/pending overlay — gradient mask + action buttons.
+                                     *  Pending-delete forces the overlay visible so the user
+                                     *  doesn't lose track of the confirmation prompt when the
+                                     *  cursor moves out. */}
+                                    <div
+                                        className={`pointer-events-none absolute inset-y-0 right-0 flex items-center transition-opacity ${
+                                            isPendingDelete
+                                                ? 'pointer-events-auto opacity-100'
+                                                : 'opacity-0 group-hover:pointer-events-auto group-hover:opacity-100'
+                                        }`}
+                                    >
+                                        <div className="h-full w-10 bg-gradient-to-r from-transparent to-[var(--paper-inset)]" />
+                                        <div className="flex h-full items-center gap-1 bg-[var(--paper-inset)] pr-3">
+                                            {isPendingDelete ? (
                                                 <>
-                                                    <span>·</span>
-                                                    <span>{stats.messageCount} 条消息</span>
-                                                    <span>·</span>
-                                                    <span>{formatTokens(totalTokens)} tokens</span>
+                                                    <button
+                                                        className="flex h-6 items-center justify-center rounded bg-[var(--error)] px-2 text-xs font-medium text-white transition-colors hover:bg-[var(--error)]/80"
+                                                        onClick={(e) => { e.stopPropagation(); handleConfirmDelete(); }}
+                                                    >
+                                                        确认
+                                                    </button>
+                                                    <button
+                                                        className="flex h-6 items-center justify-center rounded bg-[var(--paper)] px-2 text-xs font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--line)]"
+                                                        onClick={(e) => { e.stopPropagation(); handleCancelDelete(); }}
+                                                    >
+                                                        取消
+                                                    </button>
+                                                </>
+                                            ) : (
+                                                <>
+                                                    <Tip label={session.favorite ? '取消收藏' : '收藏'} position="bottom">
+                                                        <button
+                                                            aria-label={session.favorite ? '取消收藏' : '收藏'}
+                                                            className={`flex h-7 w-7 items-center justify-center rounded-md transition-colors hover:bg-[var(--paper)] ${
+                                                                session.favorite
+                                                                    ? 'text-[var(--accent)]'
+                                                                    : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
+                                                            }`}
+                                                            onClick={(e) => { void handleToggleFavorite(e, session); }}
+                                                        >
+                                                            <Star className="h-3.5 w-3.5" fill={session.favorite ? 'currentColor' : 'none'} />
+                                                        </button>
+                                                    </Tip>
+                                                    <Tip label="导出对话内容为 md 文件" position="bottom">
+                                                        <button
+                                                            aria-label="导出"
+                                                            className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper)] hover:text-[var(--ink)]"
+                                                            onClick={(e) => { void handleExport(e, session); }}
+                                                            disabled={exportingId === session.id}
+                                                        >
+                                                            <Download className="h-3.5 w-3.5" />
+                                                        </button>
+                                                    </Tip>
+                                                    <Tip label="查看统计" position="bottom">
+                                                        <button
+                                                            aria-label="查看统计"
+                                                            className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper)] hover:text-[var(--ink)]"
+                                                            onClick={(e) => handleShowStats(e, session)}
+                                                        >
+                                                            <BarChart2 className="h-3.5 w-3.5" />
+                                                        </button>
+                                                    </Tip>
+                                                    {cronProtected ? (
+                                                        <Tip label="请先停止循环任务后再删除" position="bottom">
+                                                            <button
+                                                                aria-label="删除（请先停止循环任务）"
+                                                                className="flex h-7 w-7 cursor-not-allowed items-center justify-center rounded-md text-[var(--ink-muted)] opacity-40"
+                                                                disabled
+                                                            >
+                                                                <Trash2 className="h-3.5 w-3.5" />
+                                                            </button>
+                                                        </Tip>
+                                                    ) : (
+                                                        <Tip label="删除" position="bottom">
+                                                            <button
+                                                                aria-label="删除"
+                                                                className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--ink-muted)] transition-colors hover:bg-[var(--error-bg)] hover:text-[var(--error)]"
+                                                                onClick={(e) => handleDeleteClick(e, session.id)}
+                                                            >
+                                                                <Trash2 className="h-3.5 w-3.5" />
+                                                            </button>
+                                                        </Tip>
+                                                    )}
                                                 </>
                                             )}
                                         </div>
-                                    </div>
-                                    <div className="flex flex-shrink-0 items-center gap-1">
-                                        {/* Show confirmation buttons when pending delete */}
-                                        {pendingDeleteId === session.id ? (
-                                            <>
-                                                <button
-                                                    className="flex h-6 items-center justify-center rounded bg-[var(--error)] px-2 text-xs font-medium text-white transition-colors hover:bg-[var(--error)]/80"
-                                                    onClick={(e) => { e.stopPropagation(); handleConfirmDelete(); }}
-                                                >
-                                                    确认
-                                                </button>
-                                                <button
-                                                    className="flex h-6 items-center justify-center rounded bg-[var(--paper-inset)] px-2 text-xs font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--line)]"
-                                                    onClick={(e) => { e.stopPropagation(); handleCancelDelete(); }}
-                                                >
-                                                    取消
-                                                </button>
-                                            </>
-                                        ) : (
-                                            <>
-                                                <Tip label="导出对话内容为 md 文件" position="bottom">
-                                                    <button
-                                                        aria-label="导出"
-                                                        className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--ink-muted)] opacity-0 transition-all hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] group-hover:opacity-100"
-                                                        onClick={(e) => { void handleExport(e, session); }}
-                                                        disabled={exportingId === session.id}
-                                                    >
-                                                        <Download className="h-3.5 w-3.5" />
-                                                    </button>
-                                                </Tip>
-                                                <Tip label="查看统计" position="bottom">
-                                                    <button
-                                                        aria-label="查看统计"
-                                                        className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--ink-muted)] opacity-0 transition-all hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] group-hover:opacity-100"
-                                                        onClick={(e) => handleShowStats(e, session)}
-                                                    >
-                                                        <BarChart2 className="h-3.5 w-3.5" />
-                                                    </button>
-                                                </Tip>
-                                                {/* Disable delete for sessions with running cron tasks */}
-                                                {tags.some(t => t.type === 'cron') ? (
-                                                    <Tip label="请先停止循环任务后再删除" position="bottom">
-                                                        <button
-                                                            aria-label="删除（请先停止循环任务）"
-                                                            className="flex h-7 w-7 cursor-not-allowed items-center justify-center rounded-md text-[var(--ink-muted)] opacity-0 group-hover:opacity-40"
-                                                            disabled
-                                                        >
-                                                            <Trash2 className="h-3.5 w-3.5" />
-                                                        </button>
-                                                    </Tip>
-                                                ) : (
-                                                    <Tip label="删除" position="bottom">
-                                                        <button
-                                                            aria-label="删除"
-                                                            className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--ink-muted)] opacity-0 transition-all hover:bg-[var(--error-bg)] hover:text-[var(--error)] group-hover:opacity-100"
-                                                            onClick={(e) => handleDeleteClick(e, session.id)}
-                                                        >
-                                                            <Trash2 className="h-3.5 w-3.5" />
-                                                        </button>
-                                                    </Tip>
-                                                )}
-                                            </>
-                                        )}
                                     </div>
                                 </div>
                             );

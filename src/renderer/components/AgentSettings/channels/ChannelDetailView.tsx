@@ -11,6 +11,7 @@ import dingtalkIcon from '../../ImSettings/assets/dingtalk.svg';
 import { track } from '@/analytics';
 import ConfirmDialog from '@/components/ConfirmDialog';
 import { isTauriEnvironment } from '@/utils/browserMock';
+import { listenWithCleanup } from '@/utils/tauriListen';
 import { useToast } from '@/components/Toast';
 import { useConfig } from '@/hooks/useConfig';
 import { getEffectiveModelAliases, getProviderModels } from '@/config/types';
@@ -278,46 +279,35 @@ export default function ChannelDetailView({
     // Listen for user-bound events
     useEffect(() => {
         if (!isTauriEnvironment()) return;
-        let cancelled = false;
-        let unlisten: (() => void) | undefined;
-
-        import('@tauri-apps/api/event').then(({ listen }) => {
-            if (cancelled) return;
-            listen<{ botId: string; userId: string; username?: string }>('im:user-bound', (event) => {
+        const ac = new AbortController();
+        void listenWithCleanup<{ botId: string; userId: string; username?: string }>(
+            'im:user-bound',
+            (event) => {
                 if (!isMountedRef.current || event.payload.botId !== channelId) return;
                 const { userId, username } = event.payload;
                 const displayName = username || userId;
                 toastRef.current.success(`用户 ${displayName} 已通过二维码绑定`);
-            }).then(fn => {
-                if (cancelled) fn();
-                else unlisten = fn;
-            });
-        });
-
-        return () => {
-            cancelled = true;
-            unlisten?.();
-        };
+            },
+            ac.signal,
+        );
+        return () => ac.abort();
     }, [channelId]);
 
     // Listen for group permission changes
     useEffect(() => {
         if (!isTauriEnvironment()) return;
-        let cancelled = false;
-        let unlisten: (() => void) | undefined;
-        import('@tauri-apps/api/event').then(({ listen }) => {
-            if (cancelled) return;
-            listen<{ botId: string; event: string; groupName?: string }>('im:group-permission-changed', (ev) => {
+        const ac = new AbortController();
+        void listenWithCleanup<{ botId: string; event: string; groupName?: string }>(
+            'im:group-permission-changed',
+            (ev) => {
                 if (!isMountedRef.current || ev.payload.botId !== channelId) return;
                 if (ev.payload.event === 'added') {
                     toastRef.current.info(`群聊「${ev.payload.groupName ?? ''}」待审核`);
                 }
-            }).then(fn => {
-                if (cancelled) fn();
-                else unlisten = fn;
-            });
-        });
-        return () => { cancelled = true; unlisten?.(); };
+            },
+            ac.signal,
+        );
+        return () => ac.abort();
     }, [channelId]);
 
     // Start channel via shared utility (resolves MCP + overrides)

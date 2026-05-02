@@ -652,6 +652,20 @@ pub struct SidecarManager {
     /// `Lagged` subscribers do a full reconciliation sweep against
     /// `live_sidecar_set()`.
     stop_events: tokio::sync::broadcast::Sender<(String, u64)>,
+    /// Broadcast sender — fires `(session_id, generation)` only when a removal
+    /// is *terminal* (no owners remained at the moment of removal). This is the
+    /// signal the renderer needs: distinguishes "voluntary release / shutdown /
+    /// terminal failure" (Tab binding now dangling, must be cleared) from
+    /// "crash with owners still attached" (health monitor will auto-restart on
+    /// the next 15-s cycle, Tab binding stays valid).
+    ///
+    /// Why a *second* channel and not a flag on `stop_events`: existing IM
+    /// consumers want every stop regardless of recoverability, and changing
+    /// the payload shape would ripple through the lock-gap reconciliation
+    /// code. A dedicated channel keeps both concerns orthogonal.
+    /// Capacity 64 mirrors `stop_events` — same burst envelope, same lag
+    /// recovery story (subscribers reconcile against `live_sidecar_set()`).
+    terminal_events: tokio::sync::broadcast::Sender<(String, u64)>,
 }
 
 impl SidecarManager {
@@ -660,6 +674,7 @@ impl SidecarManager {
         // `subscribe_stop_events()`. broadcast::Sender keeps working even with
         // zero receivers (send returns Err which we discard at call sites).
         let (stop_events, _drop_initial_rx) = tokio::sync::broadcast::channel(64);
+        let (terminal_events, _drop_terminal_rx) = tokio::sync::broadcast::channel(64);
         Self {
             sidecars: HashMap::new(),
             instances: HashMap::new(),
@@ -671,6 +686,7 @@ impl SidecarManager {
             // never collide with a real allocated generation.
             instance_counter: AtomicU64::new(1),
             stop_events,
+            terminal_events,
         }
     }
 
@@ -681,6 +697,16 @@ impl SidecarManager {
     /// from a previous one bound to the same session_id.
     pub fn subscribe_stop_events(&self) -> tokio::sync::broadcast::Receiver<(String, u64)> {
         self.stop_events.subscribe()
+    }
+
+    /// Subscribe to *terminal* sidecar removal events — emitted only when the
+    /// removed sidecar had no remaining owners (so the health monitor will not
+    /// attempt auto-restart and any frontend Tab binding to this session is
+    /// definitively dangling). Used by the lib.rs forwarder to drive the
+    /// `session:sidecar-terminal` Tauri event so the renderer can reset stale
+    /// Tab.sessionId bindings.
+    pub fn subscribe_terminal_events(&self) -> tokio::sync::broadcast::Receiver<(String, u64)> {
+        self.terminal_events.subscribe()
     }
 
     /// Snapshot of currently-live `(session_id, generation)` pairs. Subscribers
@@ -833,8 +859,15 @@ impl SidecarManager {
                 )
             })
             .collect();
-        for ev in to_broadcast {
-            let _ = self.stop_events.send(ev);
+        for ev in &to_broadcast {
+            let _ = self.stop_events.send(ev.clone());
+            // stop_all is unconditionally terminal — exposed via
+            // `cmd_stop_all_sidecars` (debug/admin) and the app-exit path.
+            // Either way no auto-restart will fire, so the renderer's tab
+            // bindings should be cleared. (App-exit usually beats the
+            // renderer's listener teardown to nothing, but `cmd_stop_all`
+            // mid-session is a real path and the listener is alive there.)
+            let _ = self.terminal_events.send(ev.clone());
         }
         self.sidecars.clear(); // Session-centric Sidecars (Drop kills processes)
         self.instances.clear(); // Global Sidecar (Drop kills process)
@@ -966,10 +999,21 @@ impl SidecarManager {
     fn remove_sidecar(&mut self, session_id: &str) -> Option<SessionSidecar> {
         let gen = self.current_generation(session_id);
         let removed = self.sidecars.remove(session_id);
-        if removed.is_some() {
+        if let Some(ref sidecar) = removed {
             // send() returns Err only when there are no subscribers — fine, we
             // don't require anyone listening for sidecar removal to be valid.
             let _ = self.stop_events.send((session_id.to_string(), gen));
+
+            // Terminal = no owners remained. Health monitor only auto-restarts
+            // when `is_dead() && !owners.is_empty()` (see `monitor_session_sidecars`
+            // line 2356), so empty-owners ⇒ no restart attempt ⇒ any frontend
+            // Tab binding to this session is now dangling and must be cleared.
+            // Crash-with-owners stays silent here: the bound Tab keeps its
+            // sessionId, and the existing `session-sidecar:restarted` Tauri
+            // event drives transparent reconnection in TabProvider.
+            if sidecar.owners.is_empty() {
+                let _ = self.terminal_events.send((session_id.to_string(), gen));
+            }
         }
         removed
     }
@@ -2298,6 +2342,100 @@ pub async fn monitor_global_sidecar(
             Err(e) => {
                 consecutive_restart_failures += 1;
                 ulog_error!("[sidecar] spawn_blocking failed during global sidecar restart: {}", e);
+            }
+        }
+    }
+}
+
+/// Forward `terminal_events` from `SidecarManager` to the renderer as the
+/// `session:sidecar-terminal` Tauri event. Lets the renderer drop stale
+/// `tab.sessionId` bindings the moment the underlying session is gone for good
+/// (no auto-restart will fire because no owners remained at removal). Without
+/// this bridge, a Tab that lost its sidecar via voluntary release silently
+/// keeps `sessionId` set; the next time the user clicks that session in the
+/// task center, `planSessionOpen` matches the stale Tab and "jumps" to a tab
+/// whose sidecar has been gone for hours — empty UI + flood of "no running
+/// sidecar" errors. (See unified-2026-05-02.log around 22:49:48 for the
+/// reference trace.)
+///
+/// `Lagged` recovery: capacity is 64, normally plenty. On a burst (e.g.
+/// shutdown / `cmd_stop_all`) we may drop events. Emit a one-shot reconcile
+/// payload carrying the *currently-live* session ids so the renderer can
+/// clear any tab whose `sessionId` is not in that set — equivalent to the
+/// IM module's reconcile-against-`live_sidecar_set()` pattern.
+pub async fn forward_terminal_events_to_renderer(
+    app_handle: AppHandle,
+    manager: ManagedSidecarManager,
+    shutdown: Arc<std::sync::atomic::AtomicBool>,
+) {
+    use std::sync::atomic::Ordering::Relaxed;
+
+    let mut rx = match manager.lock() {
+        Ok(g) => g.subscribe_terminal_events(),
+        Err(e) => {
+            ulog_error!(
+                "[sidecar] terminal-event forwarder failed to subscribe: {}",
+                e
+            );
+            return;
+        }
+    };
+
+    ulog_info!("[sidecar] Terminal-event forwarder started");
+
+    loop {
+        if shutdown.load(Relaxed) {
+            break;
+        }
+        match rx.recv().await {
+            Ok((session_id, generation)) => {
+                let _ = app_handle.emit(
+                    "session:sidecar-terminal",
+                    serde_json::json!({
+                        "sessionId": session_id,
+                        "generation": generation,
+                    }),
+                );
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                ulog_warn!(
+                    "[sidecar] Terminal-event forwarder lagged by {} — emitting reconcile",
+                    n
+                );
+                // On lock poison we cannot snapshot the live set safely.
+                // Fall through with `Skip` (don't emit at all) rather than
+                // emitting an empty list — an empty list would tell the
+                // renderer "no sessions are live, clear every tab", which is
+                // a destructive fallback exactly when our state is most
+                // uncertain. The renderer's defensive `getSessionPort` check
+                // in `handleLaunchProject` jump-to-tab still saves the user
+                // if they do click into a stale binding before our next
+                // event arrives. (Codex review WARN-1.)
+                let live: Option<Vec<String>> = match manager.lock() {
+                    Ok(g) => Some(
+                        g.live_sidecar_set()
+                            .into_iter()
+                            .map(|(sid, _)| sid)
+                            .collect(),
+                    ),
+                    Err(e) => {
+                        ulog_error!(
+                            "[sidecar] Terminal-event reconcile skipped — manager lock poisoned: {}",
+                            e
+                        );
+                        None
+                    }
+                };
+                if let Some(live) = live {
+                    let _ = app_handle.emit(
+                        "session:sidecar-terminal-reconcile",
+                        serde_json::json!({ "liveSessionIds": live }),
+                    );
+                }
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                ulog_info!("[sidecar] Terminal-event forwarder channel closed");
+                break;
             }
         }
     }

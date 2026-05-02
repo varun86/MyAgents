@@ -69,10 +69,9 @@ export const SSE_EVENT_PRIORITIES: Readonly<Record<string, SseEventPriority>> = 
   'chat:tool-result-delta': 'coalescible',
   'chat:subagent-tool-input-delta': 'coalescible',
   'chat:subagent-tool-result-delta': 'coalescible',
-  // Debounced refresh signals — only the latest one matters, so safe
-  // to coalesce. Prevents file-watcher bursts (e.g. `git checkout`,
-  // `npm install` in workspace) from filling the critical queue.
-  'workspace:files-changed': 'coalescible',
+  // (Phase E PRD 0.2.7: `workspace:files-changed` SSE event removed; the
+  // renderer subscribes to the Rust workspace_files watcher via Tauri
+  // events instead, so this whitelist no longer needs the entry.)
   // Logs / telemetry — droppable.
   'chat:log': 'droppable',
   'chat:logs': 'droppable',
@@ -441,7 +440,6 @@ const AGGREGATED_EVENTS = new Set([
 
 const SILENT_EVENTS = new Set([
   'chat:content-block-stop', 'chat:message-sdk-uuid', 'chat:log',
-  'workspace:files-changed', // File watcher fires frequently — skip console.log
 ]);
 
 // Time-window coalescing for high-frequency streaming deltas.

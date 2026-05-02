@@ -1,6 +1,28 @@
 /**
- * WorkspaceSelector - Dropdown workspace selector for Launcher brand section
- * Opens upward with default/recent workspace groups
+ * WorkspaceSelector - Dropdown workspace selector for Launcher brand section.
+ *
+ * Layout (post-PRD-0.2.7 layout polish):
+ *   ┌─ Agent 工作区 ─────────────────────────────────┐
+ *   │ [icon] mino [默认]                  [设为默认] │  ← line 1
+ *   │        ~/Documents/.../mino                    │  ← line 2 (full width)
+ *   │ [icon] zao_translate                [设为默认] │
+ *   │        ~/Documents/.../zao_translate           │
+ *   └────────────────────────────────────────────────┘
+ *
+ * Sort: default first → others by lastOpened desc. Single-action
+ * `选择文件夹` row was removed — workspace creation lives in Settings now,
+ * keeping this dropdown focused on selection.
+ *
+ * "设为默认" semantics: clicking it writes `defaultWorkspacePath` via the
+ * existing config service (same code path Settings → 通用设置 → 默认工作区
+ * uses), the list re-orders so the new default lands on top, and the
+ * dropdown stays open — the user can compare/keep browsing right after.
+ * Clicking the row body (anywhere except the button) selects + closes.
+ *
+ * Markup uses a `role="button"` div wrapper for the row so the real
+ * `<button>` inside ("设为默认") doesn't violate the no-button-in-button
+ * HTML rule. Both surfaces remain keyboard-reachable (Tab to row, Space /
+ * Enter to select; Shift+Tab to inner button when revealed).
  */
 
 import { ChevronUp, Plus } from 'lucide-react';
@@ -18,6 +40,9 @@ interface WorkspaceSelectorProps {
     defaultWorkspacePath?: string;
     onSelect: (project: Project) => void;
     onAddFolder: () => void;
+    /** Promote a project to default workspace. When omitted (e.g. caller has no
+     *  config write access), the hover-only "设为默认" button is hidden. */
+    onSetDefault?: (project: Project) => void;
 }
 
 export default function WorkspaceSelector({
@@ -26,6 +51,7 @@ export default function WorkspaceSelector({
     defaultWorkspacePath,
     onSelect,
     onAddFolder,
+    onSetDefault,
 }: WorkspaceSelectorProps) {
     const [isOpen, setIsOpen] = useState(false);
     const triggerRef = useRef<HTMLButtonElement>(null);
@@ -35,20 +61,20 @@ export default function WorkspaceSelector({
         setIsOpen(false);
     }, [onSelect]);
 
-    // Split projects into default and recent (memoized to avoid re-sort on every render)
-    const { defaultProject, recentProjects } = useMemo(() => {
-        const def = defaultWorkspacePath
-            ? projects.find(p => p.path === defaultWorkspacePath) ?? null
-            : null;
-        const recent = [...projects]
-            .sort((a, b) => {
-                const aTime = a.lastOpened ? new Date(a.lastOpened).getTime() : 0;
-                const bTime = b.lastOpened ? new Date(b.lastOpened).getTime() : 0;
-                return bTime - aTime;
-            })
-            .filter(p => p.path !== defaultWorkspacePath)
-            .slice(0, 5);
-        return { defaultProject: def, recentProjects: recent };
+    // Single sorted list: default first, others by lastOpened desc. Memoized
+    // to avoid re-sorting on every render — list size scales with project
+    // count which is small but the sort runs on every dropdown open otherwise.
+    const orderedProjects = useMemo(() => {
+        const sorted = [...projects].sort((a, b) => {
+            const aIsDefault = a.path === defaultWorkspacePath;
+            const bIsDefault = b.path === defaultWorkspacePath;
+            if (aIsDefault && !bIsDefault) return -1;
+            if (!aIsDefault && bIsDefault) return 1;
+            const aTime = a.lastOpened ? new Date(a.lastOpened).getTime() : 0;
+            const bTime = b.lastOpened ? new Date(b.lastOpened).getTime() : 0;
+            return bTime - aTime;
+        });
+        return sorted;
     }, [projects, defaultWorkspacePath]);
 
     if (projects.length === 0) {
@@ -82,75 +108,133 @@ export default function WorkspaceSelector({
                 anchorRef={triggerRef}
                 placement="top-start"
                 offset={6}
-                className="w-64 max-h-72 overflow-auto rounded-xl bg-[var(--paper)] py-1"
+                className="w-72 rounded-xl bg-[var(--paper)]"
             >
-                {/* Default workspace group */}
-                {defaultProject && (
-                    <>
-                        <div className="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60">
-                            默认
-                        </div>
-                        <button
-                            onClick={() => handleSelect(defaultProject)}
-                            className={`flex w-full items-center gap-2.5 px-3 py-2 text-left text-sm transition-colors ${
-                                selectedProject?.id === defaultProject.id
-                                    ? 'bg-[var(--accent)]/10 text-[var(--accent)]'
-                                    : 'text-[var(--ink)] hover:bg-[var(--hover-bg)]'
-                            }`}
-                        >
-                            <WorkspaceIcon icon={defaultProject.icon} size={16} />
-                            <div className="min-w-0 flex-1">
-                                <div className="truncate font-medium">{defaultProject.displayName || getFolderName(defaultProject.path)}</div>
-                                <div className="truncate text-[11px] text-[var(--ink-muted)]">
-                                    {shortenPathForDisplay(defaultProject.path)}
-                                </div>
-                            </div>
-                        </button>
-                    </>
-                )}
-
-                {/* Recent workspaces group */}
-                {recentProjects.length > 0 && (
-                    <>
-                        <div className={`px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60 ${defaultProject ? 'mt-1 border-t border-[var(--line)]' : ''}`}>
-                            最近打开
-                        </div>
-                        {recentProjects.map(project => (
-                            <button
+                {/* Header — fixed at the top above the scroll region. */}
+                <div className="border-b border-[var(--line)] px-3 py-2 text-[12px] font-semibold text-[var(--ink-muted)]">
+                    Agent 工作区
+                </div>
+                {/* Scroll region — see CustomSelect.tsx pit-of-failure note:
+                 *  Popover's DEFAULT_CHROME ships `overflow-hidden` for
+                 *  rounded-corner clipping; nested div is the correct way to
+                 *  add scroll without fighting Tailwind's class order. */}
+                <div className="max-h-72 overflow-y-auto py-1">
+                    {orderedProjects.map(project => {
+                        const isDefault = project.path === defaultWorkspacePath;
+                        const isSelected = selectedProject?.id === project.id;
+                        return (
+                            <WorkspaceRow
                                 key={project.id}
-                                onClick={() => handleSelect(project)}
-                                className={`flex w-full items-center gap-2.5 px-3 py-2 text-left text-sm transition-colors ${
-                                    selectedProject?.id === project.id
-                                        ? 'bg-[var(--accent)]/10 text-[var(--accent)]'
-                                        : 'text-[var(--ink)] hover:bg-[var(--hover-bg)]'
-                                }`}
-                            >
-                                <WorkspaceIcon icon={project.icon} size={16} />
-                                <div className="min-w-0 flex-1">
-                                    <div className="truncate font-medium">{project.displayName || getFolderName(project.path)}</div>
-                                    <div className="truncate text-[11px] text-[var(--ink-muted)]">
-                                        {shortenPathForDisplay(project.path)}
-                                    </div>
-                                </div>
-                            </button>
-                        ))}
-                    </>
-                )}
-
-                {/* Divider + add folder */}
-                <div className="mt-1 border-t border-[var(--line)]">
-                    <button
-                        onClick={() => {
-                            setIsOpen(false);
-                            onAddFolder();
-                        }}
-                        className="flex w-full items-center gap-2.5 px-3 py-2 text-left text-sm text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
-                    >
-                        <Plus className="h-3.5 w-3.5" />
-                        <span>选择文件夹...</span>
-                    </button>
+                                project={project}
+                                isDefault={isDefault}
+                                isSelected={isSelected}
+                                onSelect={handleSelect}
+                                // Hide the "设为默认" button on the row that
+                                // already IS the default — it would be a no-op
+                                // (user clarification 2026-05-02 option a).
+                                onSetDefault={!isDefault && onSetDefault ? onSetDefault : undefined}
+                            />
+                        );
+                    })}
                 </div>
             </Popover>
         </>
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+interface WorkspaceRowProps {
+    project: Project;
+    isDefault: boolean;
+    isSelected: boolean;
+    onSelect: (p: Project) => void;
+    /** Undefined = no button (hidden). Provided = button is hover-rendered. */
+    onSetDefault?: (p: Project) => void;
+}
+
+/** Single row, two-line layout:
+ *
+ *    [icon]  name [默认]                          [设为默认]
+ *            ~/full/path/here ───────────────────── ends at panel edge
+ *
+ *  Why the row is a `role="button"` div instead of a real `<button>`:
+ *  the right-side "设为默认" trigger MUST stay a real `<button>` for
+ *  keyboard a11y, and `<button>` inside `<button>` is invalid HTML.
+ *  Wrapping the row as a `role="button"` div with explicit Enter/Space
+ *  handling preserves keyboard reachability for both the row body
+ *  (select) and the inner trigger ("设为默认") without nesting.
+ *
+ *  The path on line 2 spans the full inner width (no spacer for the
+ *  hover trigger — which now sits on line 1, not in the path slot). */
+function WorkspaceRow({
+    project,
+    isDefault,
+    isSelected,
+    onSelect,
+    onSetDefault,
+}: WorkspaceRowProps) {
+    const displayName = project.displayName || getFolderName(project.path);
+    return (
+        <div
+            role="button"
+            tabIndex={0}
+            onClick={() => onSelect(project)}
+            onKeyDown={(e) => {
+                // Enter / Space activate the row body. We deliberately don't
+                // include the inner trigger — Tab moves into it on its own.
+                if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    onSelect(project);
+                }
+            }}
+            className={`group flex cursor-pointer items-center gap-3 px-3 py-2 text-left text-sm transition-colors ${
+                isSelected
+                    ? 'bg-[var(--accent)]/10 text-[var(--accent)]'
+                    : 'text-[var(--ink)] hover:bg-[var(--hover-bg)]'
+            }`}
+        >
+            <WorkspaceIcon icon={project.icon} size={28} />
+            <div className="min-w-0 flex-1">
+                {/* Line 1: name + 默认 tag (right-against-name) + flex spacer
+                 *  + "设为默认" hover trigger pinned to the right. */}
+                <div className="flex min-w-0 items-center gap-1.5">
+                    <span className="min-w-0 truncate font-medium">{displayName}</span>
+                    {isDefault && (
+                        <span className="shrink-0 rounded-full bg-[var(--accent)]/12 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-[var(--accent)]">
+                            默认
+                        </span>
+                    )}
+                    <div className="flex-1" />
+                    {onSetDefault && (
+                        <button
+                            type="button"
+                            onClick={(e) => {
+                                // Stop the click from bubbling to the row's
+                                // onClick — otherwise selecting "设为默认"
+                                // would also select the workspace.
+                                e.stopPropagation();
+                                onSetDefault(project);
+                            }}
+                            // `opacity-0` alone leaves the invisible button
+                            // capturing clicks; combine with
+                            // `pointer-events-none` so the bare row area
+                            // doesn't silently trigger this when the button
+                            // is hidden (Codex review).
+                            className="shrink-0 rounded-md px-2 py-0.5 text-[11px] font-medium text-[var(--ink-muted)] opacity-0 pointer-events-none transition-opacity hover:bg-[var(--paper-inset)] hover:text-[var(--accent)] focus-visible:opacity-100 focus-visible:pointer-events-auto focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--accent)] group-hover:opacity-100 group-hover:pointer-events-auto group-focus-within:opacity-100 group-focus-within:pointer-events-auto"
+                            aria-label={`设为默认工作区：${displayName}`}
+                            title="设为默认工作区"
+                        >
+                            设为默认
+                        </button>
+                    )}
+                </div>
+                {/* Line 2: path. No right-side spacer — the path is allowed
+                 *  to truncate at the panel's right edge. */}
+                <div className="truncate text-[11px] text-[var(--ink-muted)]">
+                    {shortenPathForDisplay(project.path)}
+                </div>
+            </div>
+        </div>
     );
 }

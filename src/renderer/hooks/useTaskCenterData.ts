@@ -11,6 +11,7 @@ import { taskCenterAvailable, taskList } from '@/api/taskCenter';
 import { deactivateSession } from '@/api/tauriClient';
 import { loadAppConfig } from '@/config/configService';
 import { isTauriEnvironment } from '@/utils/browserMock';
+import { listenWithCleanup } from '@/utils/tauriListen';
 import type { CronTask } from '@/types/cronTask';
 import type { Task } from '../../shared/types/task';
 import type { AgentConfig } from '../../shared/types/agent';
@@ -331,104 +332,51 @@ export function useTaskCenterData({ isActive }: UseTaskCenterDataOptions): TaskC
         return () => window.removeEventListener(CUSTOM_EVENTS.SESSION_TITLE_CHANGED, handler);
     }, [refreshSessionsDebounced]);
 
-    // Event listeners for real-time updates.
-    //
-    // Cleanup race (v0.1.69 cross-review W3): the prior shape pushed each
-    // `await listen()` result into `unlisteners[]` at the end of a long
-    // async sequence. If the component unmounted midway (cleanup runs,
-    // `mounted = false`, `unlisteners.forEach(fn)` sees a partial array),
-    // any listener that resolved AFTER cleanup would be added to a
-    // now-dead array and never be unlistened. Its callback is still
-    // no-oped by the `mounted` guard, but the Tauri-side registration
-    // leaks for the lifetime of the page.
-    //
-    // Fix: after each `await listen()`, check `mounted` — if false, call
-    // the returned unlisten function immediately. Only reachable when
-    // mounted is still true does the handle join `unlisteners[]`. A
-    // `register()` helper collapses that pattern so new listeners can't
-    // accidentally forget the guard.
+    // Event listeners for real-time updates. The previous shape needed a
+    // bespoke `register()` helper to handle the post-await unmount race
+    // (cross-review W3); `listenWithCleanup` now bakes that pattern in.
     useEffect(() => {
         if (!isTauriEnvironment()) return;
+        const ac = new AbortController();
 
-        let mounted = true;
-        const unlisteners: (() => void)[] = [];
+        // Background completion events
+        void listenWithCleanup('session:background-complete', () => {
+            refreshBackgroundSessionsDebounced();
+            refreshSessionsDebounced();
+        }, ac.signal);
 
-        (async () => {
-            const { listen } = await import('@tauri-apps/api/event');
-            if (!mounted) return;
-            type Listener = Parameters<typeof listen>[1];
-            const register = async (event: string, cb: Listener) => {
-                const off = await listen(event, cb);
-                if (!mounted) {
-                    off();
-                    return;
-                }
-                unlisteners.push(off);
-            };
+        // Cron task events
+        void listenWithCleanup('cron:task-stopped', () => refreshCronTasksDebounced(), ac.signal);
+        void listenWithCleanup('cron:task-started', () => refreshCronTasksDebounced(), ac.signal);
+        void listenWithCleanup('cron:execution-complete', () => {
+            refreshCronTasksDebounced();
+            refreshSessionsDebounced();
+        }, ac.signal);
 
-            // Background completion events
-            await register('session:background-complete', () => {
-                if (!mounted) return;
-                refreshBackgroundSessionsDebounced();
-                refreshSessionsDebounced();
-            });
+        // Scheduler started (resume / recovery)
+        void listenWithCleanup('cron:scheduler-started', () => {
+            refreshCronTasksDebounced();
+            refreshSessionsDebounced();
+        }, ac.signal);
 
-            // Cron task events
-            await register('cron:task-stopped', () => {
-                if (!mounted) return;
-                refreshCronTasksDebounced();
-            });
+        // Task deleted / updated
+        void listenWithCleanup('cron:task-deleted', () => refreshCronTasksDebounced(), ac.signal);
+        void listenWithCleanup('cron:task-updated', () => refreshCronTasksDebounced(), ac.signal);
 
-            await register('cron:task-started', () => {
-                if (!mounted) return;
-                refreshCronTasksDebounced();
-            });
+        // Agent status changes (channel started/stopped, session created)
+        void listenWithCleanup('agent:status-changed', () => {
+            refreshAgentStatusDebounced();
+            refreshSessionsDebounced(1000);
+        }, ac.signal);
 
-            await register('cron:execution-complete', () => {
-                if (!mounted) return;
-                refreshCronTasksDebounced();
-                refreshSessionsDebounced();
-            });
-
-            // Scheduler started (resume / recovery)
-            await register('cron:scheduler-started', () => {
-                if (!mounted) return;
-                refreshCronTasksDebounced();
-                refreshSessionsDebounced();
-            });
-
-            // Task deleted
-            await register('cron:task-deleted', () => {
-                if (!mounted) return;
-                refreshCronTasksDebounced();
-            });
-
-            // Task updated (fields edited via cmd_update_cron_task_fields)
-            await register('cron:task-updated', () => {
-                if (!mounted) return;
-                refreshCronTasksDebounced();
-            });
-
-            // Agent status changes (channel started/stopped, session created)
-            await register('agent:status-changed', () => {
-                if (!mounted) return;
-                refreshAgentStatusDebounced();
-                refreshSessionsDebounced(1000);
-            });
-
-            // New-model Task status changes (dispatch / run / done / delete).
-            // Mirrors the cron task listeners so the Launcher 「我的任务」
-            // tab reflects edits made elsewhere (Task Center, CLI, agent
-            // self-update) without the user manually refreshing.
-            await register('task:status-changed', () => {
-                if (!mounted) return;
-                refreshTasksDebounced();
-            });
-        })();
+        // New-model Task status changes (dispatch / run / done / delete).
+        // Mirrors the cron task listeners so the Launcher 「我的任务」 tab
+        // reflects edits made elsewhere (Task Center, CLI, agent self-update)
+        // without the user manually refreshing.
+        void listenWithCleanup('task:status-changed', () => refreshTasksDebounced(), ac.signal);
 
         return () => {
-            mounted = false;
-            unlisteners.forEach(fn => fn());
+            ac.abort();
             if (sessionRefreshTimerRef.current) clearTimeout(sessionRefreshTimerRef.current);
             if (agentRefreshTimerRef.current) clearTimeout(agentRefreshTimerRef.current);
             if (cronRefreshTimerRef.current) clearTimeout(cronRefreshTimerRef.current);

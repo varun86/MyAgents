@@ -9,16 +9,17 @@
  *   is purely a view switch.
  *
  * Edit capability comes from two sources (either is sufficient):
- * 1. Tab API (useTabApiOptional) — when rendered inside a Tab context
- * 2. Explicit onSave/onRevealFile props — when caller provides save logic directly
+ * 1. `workspacePath` prop — Rust workspace_files via `useWorkspaceFileService`
+ * 2. Explicit `onSave`/`onRevealFile` props — when caller provides save logic directly
+ *    (e.g. Settings panels editing `~/.myagents/agents/...`)
  */
 import { AtSign, Check, Edit2, Expand, Eye, FileText, FolderOpen, Loader2, X } from 'lucide-react';
 import Tip from './Tip';
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState, useRef } from 'react';
 import { createPortal } from 'react-dom';
 
-import { useTabApiOptional } from '@/context/TabContext';
 import { useCloseLayer } from '@/hooks/useCloseLayer';
+import { useWorkspaceFileService } from '@/hooks/useWorkspaceFileService';
 import { getMonacoLanguage, isMarkdownFile } from '@/utils/languageUtils';
 import { shortenPathForDisplay } from '@/utils/pathDetection';
 import { retainFocusOnMouseDown } from '@/utils/focusRetention';
@@ -65,6 +66,19 @@ interface FilePreviewModalProps {
     onSave?: (content: string) => Promise<void>;
     /** External reveal-in-finder handler — enables "Open in Finder" without Tab context */
     onRevealFile?: () => Promise<void>;
+    /** Absolute workspace root path — Phase D.5: required for rendered
+     *  markdown to load relative-path images via `useWorkspaceFileService`.
+     *  When omitted, embedded images in markdown won't load (the modal's
+     *  text/code preview still works fine). */
+    workspacePath?: string | null;
+    /** Notify parent that the file was renamed. Parent MUST update the
+     *  `name`/`path` it passes back so subsequent saves target the new
+     *  location (e.g., split-view's `splitFile` state). */
+    onRenamed?: (newPath: string, newName: string) => void;
+    /** When `true`, markdown opens directly in the editable Monaco view
+     *  instead of the rendered preview. Used by 「新建笔记」 flow so a fresh
+     *  empty `note-…md` is immediately editable without an extra click. */
+    initialEditMode?: boolean;
     /** When true, render inline (no portal/backdrop) for use in split-view panel */
     embedded?: boolean;
     /** Callback to open the fullscreen modal from embedded mode.
@@ -87,12 +101,6 @@ interface FilePreviewModalProps {
 
 // Files above this threshold use plaintext mode (skip tokenization) to prevent UI freeze
 const LARGE_FILE_TOKENIZATION_THRESHOLD = 100 * 1024; // 100KB
-
-function formatFileSize(bytes: number): string {
-    if (bytes < 1024) return `${bytes} B`;
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
 
 /** Auto-save status indicator — same treatment as the existing code-file editor.
  *  Silent on idle; surfaces saving/saved/error only when relevant. */
@@ -121,6 +129,99 @@ function AutoSaveIndicator({ status }: { status: 'idle' | 'saving' | 'saved' | '
             <X className="h-3 w-3" />
             保存失败
         </span>
+    );
+}
+
+/** Inline filename editor for the toolbar's filename slot. Stays unmounted
+ *  in the static state so consumers can keep the surrounding flex/grid
+ *  layout simple (one slot, two render modes). Width auto-fits the draft
+ *  via a `size`-style trick on the input — using `field-sizing: content`
+ *  via inline style would be cleaner but isn't supported on all WebViews;
+ *  inline `style.width = ch` keeps the input snug across platforms. */
+function FilenameSlot({
+    name,
+    canRename,
+    isEditing,
+    draft,
+    onDraftChange,
+    onCommit,
+    onCancel,
+    onStartEdit,
+    busy,
+    className,
+}: {
+    name: string;
+    canRename: boolean;
+    isEditing: boolean;
+    draft: string;
+    onDraftChange: (v: string) => void;
+    onCommit: (next: string) => void;
+    onCancel: () => void;
+    onStartEdit: () => void;
+    busy: boolean;
+    className: string;
+}) {
+    const inputRef = useRef<HTMLInputElement>(null);
+    useEffect(() => {
+        if (isEditing && inputRef.current) {
+            inputRef.current.focus();
+            // Select the stem (everything before the last dot) so the user can
+            // retype the name without extension first — Mac Finder behavior.
+            const dot = draft.lastIndexOf('.');
+            inputRef.current.setSelectionRange(0, dot > 0 ? dot : draft.length);
+        }
+        // Only run on transition into editing state; subsequent typing should
+        // not re-select. Empty deps array would lint, but exhaustive-deps wants
+        // `draft` — that's fine, the first render in edit mode is when this
+        // matters and `draft` only changes on user input afterward.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [isEditing]);
+    if (!isEditing) {
+        return (
+            <span
+                className={`truncate ${className} ${canRename ? 'cursor-text' : ''}`}
+                onDoubleClick={canRename ? onStartEdit : undefined}
+                title={canRename ? '双击重命名' : undefined}
+            >
+                {name}
+            </span>
+        );
+    }
+    return (
+        <input
+            ref={inputRef}
+            type="text"
+            value={draft}
+            disabled={busy}
+            onChange={(e) => onDraftChange(e.target.value)}
+            onKeyDown={(e) => {
+                // IME composition guard: in CJK input, Enter often confirms
+                // the candidate selection rather than submitting the form.
+                // `nativeEvent.isComposing` is the cross-browser hint that
+                // a composition is in progress; let the IME consume it.
+                if (e.nativeEvent.isComposing) return;
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    onCommit(draft);
+                } else if (e.key === 'Escape') {
+                    e.preventDefault();
+                    onCancel();
+                }
+            }}
+            onBlur={() => {
+                // Blur commits — matches Mac Finder. Escape (which cancels)
+                // dispatches before blur, so a cancelled edit reaches the
+                // cancel branch first and resets state; the subsequent blur
+                // sees `isEditing` already false and is a no-op via the
+                // outer ternary.
+                onCommit(draft);
+            }}
+            // Stop propagation so the editor input doesn't trigger overlay
+            // close-on-click-outside or grid-layout focus shifts.
+            onClick={(e) => e.stopPropagation()}
+            className={`min-w-0 flex-1 rounded-sm border border-[var(--accent)] bg-[var(--paper)] px-1 py-0 outline-none ${className}`}
+            style={{ width: `${Math.max(draft.length + 1, 6)}ch` }}
+        />
     );
 }
 
@@ -178,6 +279,9 @@ export default function FilePreviewModal({
     onSaved,
     onSave,
     onRevealFile,
+    workspacePath = null,
+    onRenamed,
+    initialEditMode = false,
     embedded = false,
     onFullscreen,
     onSwitchToBrowser,
@@ -208,12 +312,20 @@ export default function FilePreviewModal({
     const toastRef = useRef(toast);
     toastRef.current = toast;
 
-    const tabApi = useTabApiOptional();
-    const apiPost = tabApi?.apiPost;
+    const fileService = useWorkspaceFileService(workspacePath);
 
-    // Edit: Tab API OR explicit onSave prop.  Reveal: Tab API OR explicit onRevealFile prop.
-    const canEdit = !!(apiPost || onSave);
-    const canReveal = !!(apiPost || onRevealFile);
+    // Phase E (PRD 0.2.7): the legacy `apiPost('/agent/save-file')` fallback
+    // is removed — workspace edits go through Rust workspace_files
+    // exclusively. Edit is enabled when `workspacePath` is provided
+    // (fileService.saveFile path) OR an explicit `onSave` prop overrides
+    // (Settings panels editing `~/.myagents/agents/...`).
+    const canEdit = !!(workspacePath || onSave);
+    // Reveal: explicit `onRevealFile` prop OR `workspacePath` (modal asks
+    // fileService directly). Phase D.5 red-line: routes go through Rust
+    // workspace_files, never sidecar HTTP. Either path is acceptable, so
+    // Chat.tsx's split-view / fullscreen mounts don't need to wire
+    // onRevealFile manually — passing `workspacePath` is enough.
+    const canReveal = !!(onRevealFile || workspacePath);
 
     const isMarkdown = useMemo(() => isMarkdownFile(name), [name]);
     const monacoLanguage = useMemo(() => getMonacoLanguage(name), [name]);
@@ -223,8 +335,10 @@ export default function FilePreviewModal({
 
     // ─── State ───────────────────────────────────────────────────────────────
     // Markdown view-mode toggle (preview vs writable Monaco). Default to preview so opening
-    // a `.md` file shows the rendered version first; user toggles to edit.
-    const [mdViewMode, setMdViewMode] = useState<'preview' | 'edit'>('preview');
+    // a `.md` file shows the rendered version first; user toggles to edit. The
+    // 「新建笔记」 flow opts in to `initialEditMode` so a brand-new empty note
+    // opens directly in the editor without an extra click.
+    const [mdViewMode, setMdViewMode] = useState<'preview' | 'edit'>(initialEditMode ? 'edit' : 'preview');
     const [editContent, setEditContent] = useState(content);
     const [savedContent, setSavedContent] = useState(content); // Last saved baseline (for diff/dirty)
 
@@ -250,6 +364,20 @@ export default function FilePreviewModal({
         setSavedContent(content);
     }, [content, path, name]);
 
+    // Reset markdown view-mode + cancel any in-flight inline rename when the
+    // file identity changes. Modal is reused for split-view file switches
+    // (Chat.tsx mounts one instance and updates props); without these resets,
+    //   - opening a new note via 「新建笔记」 with `initialEditMode=true` while
+    //     the previous file was in 'preview' mode keeps the old mode (Codex
+    //     round-4 CRIT-2);
+    //   - a rename draft from file A could commit against file B if the user
+    //     switches files mid-rename.
+    useEffect(() => {
+        setMdViewMode(initialEditMode ? 'edit' : 'preview');
+        setIsEditingName(false);
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional: only path drives this; initialEditMode is read but does not retrigger
+    }, [path]);
+
     // Large files: force plaintext to skip tokenization
     const effectiveMonacoLanguage = useMemo(() => {
         if (size > LARGE_FILE_TOKENIZATION_THRESHOLD) return 'plaintext';
@@ -260,25 +388,26 @@ export default function FilePreviewModal({
     // Stable refs for save dependencies to avoid re-creating callbacks
     const onSaveRef = useRef(onSave);
     onSaveRef.current = onSave;
-    const apiPostRef = useRef(apiPost);
-    apiPostRef.current = apiPost;
+    const fileServiceRef = useRef(fileService);
+    fileServiceRef.current = fileService;
     const pathRef = useRef(path);
     pathRef.current = path;
     const onSavedRef = useRef(onSaved);
     onSavedRef.current = onSaved;
 
-    /** Core save function — saves the given content string */
+    /** Core save function — saves the given content string. Phase E (PRD 0.2.7):
+     *  workspace-relative paths go through `fileService.saveFile` (Rust
+     *  `cmd_workspace_save_file`); explicit `onSave` prop still takes
+     *  precedence for non-workspace surfaces (Settings panels editing
+     *  `~/.myagents/...` files via direct fs writes). */
     const executeSave = useCallback(async (contentToSave: string) => {
         if (onSaveRef.current) {
             await onSaveRef.current(contentToSave);
-        } else if (apiPostRef.current) {
-            const response = await apiPostRef.current<{ success: boolean; error?: string }>(
-                '/agent/save-file',
-                { path: pathRef.current, content: contentToSave }
-            );
-            if (!response.success) {
-                throw new Error(response.error ?? '保存失败');
-            }
+        } else if (fileServiceRef.current.isAvailable) {
+            await fileServiceRef.current.saveFile({
+                path: pathRef.current,
+                content: contentToSave,
+            });
         }
     }, []); // stable — all deps via refs
 
@@ -287,6 +416,41 @@ export default function FilePreviewModal({
     editContentRef.current = editContent;
     const savedContentRef = useRef(savedContent);
     savedContentRef.current = savedContent;
+
+    // ─── Inline rename ────────────────────────────────────────────────────────
+    // State + draft handling is set up here so the toolbar render path can
+    // reference it before the auto-save callbacks are defined. The async
+    // commit handler (which depends on `handleManualFlush`) lives further
+    // down — `handleRenameCommit` is the forward-declared ref filled in
+    // below; the toolbar reads it via `handleRenameCommitRef.current`.
+    const canRename = !!workspacePath;
+    const [isEditingName, setIsEditingName] = useState(false);
+    const [nameDraft, setNameDraft] = useState(name);
+    const [renameInFlight, setRenameInFlight] = useState(false);
+    // Synchronous mirror of `renameInFlight` — `setState` lags one render,
+    // so a synchronous double-fire (Enter then immediate blur) can both
+    // observe `renameInFlight === false` and trigger duplicate commits.
+    // The ref flips imperatively at the top of the commit body, blocking
+    // the second call.
+    const renameInFlightRef = useRef(false);
+    useEffect(() => {
+        if (!isEditingName) setNameDraft(name);
+    }, [name, isEditingName]);
+    const onRenamedRef = useRef(onRenamed);
+    onRenamedRef.current = onRenamed;
+    const handleRenameCommitRef = useRef<(next: string) => void>(() => {});
+    const handleRenameCommit = useCallback((next: string) => {
+        handleRenameCommitRef.current(next);
+    }, []);
+    const handleRenameCancel = useCallback(() => {
+        setIsEditingName(false);
+        setNameDraft(name);
+    }, [name]);
+    const handleStartRename = useCallback(() => {
+        if (!canRename) return;
+        setNameDraft(name);
+        setIsEditingName(true);
+    }, [canRename, name]);
 
     // ─── Auto-save for direct-edit code files ─────────────────────────────────
 
@@ -387,6 +551,74 @@ export default function FilePreviewModal({
         void doAutoSave(editContentRef.current);
     }, [doAutoSave]);
 
+    // Wire the actual rename commit logic now that `handleManualFlush` is
+    // defined. The toolbar reaches this through the ref-bouncer above so its
+    // closure doesn't capture the early-binding `handleManualFlush` undefined.
+    //
+    // Rename uses fileService.rename → Rust `cmd_workspace_rename` (validates
+    // Windows reserved names, path traversal, collision; rejects with error
+    // string). Available only when `workspacePath` is set — Settings panels
+    // editing `~/.myagents/agents/...` (which use the `onSave` prop) keep
+    // the filename as a static span.
+    useEffect(() => {
+        handleRenameCommitRef.current = async (next: string) => {
+            // Synchronous in-flight guard: Enter on the input followed
+            // immediately by blur (focus shift, click outside) can both
+            // fire `onCommit` before React has re-rendered with
+            // `renameInFlight=true`. The ref flip is imperative and
+            // observable on the same tick, blocking the second call.
+            if (renameInFlightRef.current) return;
+
+            const trimmed = next.trim();
+            if (!trimmed || trimmed === name) {
+                setIsEditingName(false);
+                setNameDraft(name);
+                return;
+            }
+            if (!canRename || !workspacePath) {
+                setIsEditingName(false);
+                return;
+            }
+            // Flush any pending autosave first — otherwise the in-flight save
+            // would write to the OLD path, then rename would move it, leaving
+            // the user's last keystrokes on the wrong file. `handleManualFlush`
+            // kicks the save (no return value); `inFlightPromiseRef` lets us
+            // await its completion before triggering rename.
+            renameInFlightRef.current = true;
+            setRenameInFlight(true);
+            try {
+                if (isDirectEdit && editContentRef.current !== savedContentRef.current) {
+                    handleManualFlush();
+                }
+                if (inFlightPromiseRef.current) {
+                    try { await inFlightPromiseRef.current; } catch { /* save errors already toast */ }
+                }
+                const { newPath } = await fileServiceRef.current.rename({
+                    oldPath: pathRef.current,
+                    newName: trimmed,
+                });
+                if (!isMountedRef.current) return;
+                // Optimistic: update local ref so any in-flight save targets
+                // the new path even before the parent's prop re-flows.
+                pathRef.current = newPath;
+                onRenamedRef.current?.(newPath, trimmed);
+                setIsEditingName(false);
+                setNameDraft(trimmed);
+            } catch (err) {
+                // Surface the Rust error string verbatim — it already reads
+                // "Target name already exists" / "Name contains invalid
+                // characters" / etc. Keep the editor open so the user can
+                // correct without losing the draft.
+                if (isMountedRef.current) {
+                    toastRef.current.error(err instanceof Error ? err.message : '重命名失败');
+                }
+            } finally {
+                renameInFlightRef.current = false;
+                if (isMountedRef.current) setRenameInFlight(false);
+            }
+        };
+    }, [name, canRename, workspacePath, isDirectEdit, handleManualFlush]);
+
     // Cleanup on unmount: clear timers and fire best-effort save if dirty
     useEffect(() => {
         return () => {
@@ -460,13 +692,16 @@ export default function FilePreviewModal({
         try {
             if (onRevealFile) {
                 await onRevealFile();
-            } else if (apiPost) {
-                await apiPost('/agent/open-in-finder', { path });
+            } else if (workspacePath) {
+                // No explicit override → modal handles it via the workspace
+                // file service. `pathRef.current` reflects the latest path
+                // (rename keeps it fresh).
+                await fileServiceRef.current.openInFinder({ path: pathRef.current });
             }
         } catch {
             toastRef.current.error('无法打开目录');
         }
-    }, [canReveal, onRevealFile, apiPost, path]);
+    }, [canReveal, onRevealFile, workspacePath]);
 
     // Markdown is in "edit" mode when user toggled the segment AND the file is editable.
     // Read-only markdown stays in preview regardless of toggle (the toggle is hidden anyway).
@@ -528,7 +763,7 @@ export default function FilePreviewModal({
             return (
                 <div className="h-full overflow-auto overscroll-contain p-6 bg-[var(--paper-elevated)]">
                     <div className="prose prose-stone mx-auto max-w-3xl dark:prose-invert">
-                        <Markdown raw preserveNewlines basePath={path ? path.substring(0, path.lastIndexOf('/')) : undefined}>{previewSource}</Markdown>
+                        <Markdown raw preserveNewlines basePath={path ? path.substring(0, path.lastIndexOf('/')) : undefined} workspacePath={workspacePath}>{previewSource}</Markdown>
                     </div>
                 </div>
             );
@@ -567,8 +802,18 @@ export default function FilePreviewModal({
                         <div className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-md bg-[var(--accent-warm-muted)]">
                             <FileText className="h-3.5 w-3.5 text-[var(--accent)]" />
                         </div>
-                        <span className="truncate text-[13px] font-medium text-[var(--ink)]">{name}</span>
-                        <span className="flex-shrink-0 text-[11px] text-[var(--ink-muted)]">{formatFileSize(size)}</span>
+                        <FilenameSlot
+                            name={name}
+                            canRename={canRename}
+                            isEditing={isEditingName}
+                            draft={nameDraft}
+                            onDraftChange={setNameDraft}
+                            onCommit={handleRenameCommit}
+                            onCancel={handleRenameCancel}
+                            onStartEdit={handleStartRename}
+                            busy={renameInFlight}
+                            className="text-[13px] font-medium text-[var(--ink)]"
+                        />
                         {isDirectEdit && <AutoSaveIndicator status={autoSaveStatus} />}
                     </div>
 
@@ -657,14 +902,33 @@ export default function FilePreviewModal({
                         </div>
                         <div className="min-w-0">
                             <div className="flex items-center gap-3">
-                                <span className="truncate text-[13px] font-semibold text-[var(--ink)]">{name}</span>
-                                <span className="flex-shrink-0 text-[11px] text-[var(--ink-muted)]">{formatFileSize(size)}</span>
+                                <FilenameSlot
+                                    name={name}
+                                    canRename={canRename}
+                                    isEditing={isEditingName}
+                                    draft={nameDraft}
+                                    onDraftChange={setNameDraft}
+                                    onCommit={handleRenameCommit}
+                                    onCancel={handleRenameCancel}
+                                    onStartEdit={handleStartRename}
+                                    busy={renameInFlight}
+                                    className="text-[13px] font-semibold text-[var(--ink)]"
+                                />
                                 {isDirectEdit && <AutoSaveIndicator status={autoSaveStatus} />}
                             </div>
                             <div className="flex items-center gap-1.5">
-                                <span className="max-w-[400px] truncate text-[11px] text-[var(--ink-muted)]" title={path}>
-                                    {shortenPathForDisplay(path)}
-                                </span>
+                                {/* Show the absolute path (workspace + relative) shortened with `~`
+                                    so users see "~/Documents/project/foo/bar.md" instead of just
+                                    "bar.md". Title attribute carries the full unshortened path. */}
+                                {(() => {
+                                    const sep = workspacePath?.includes('\\') ? '\\' : '/';
+                                    const absolute = workspacePath ? `${workspacePath}${sep}${path}` : path;
+                                    return (
+                                        <span className="max-w-[400px] truncate text-[11px] text-[var(--ink-muted)]" title={absolute}>
+                                            {shortenPathForDisplay(absolute)}
+                                        </span>
+                                    );
+                                })()}
                                 {canReveal && (
                                     <button
                                         type="button"

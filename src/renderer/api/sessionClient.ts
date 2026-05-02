@@ -39,6 +39,9 @@ export interface SessionMetadata {
      * an opaque string; use `isImSource()` for categorization.
      */
     source?: string;
+    /** User-pinned to the 收藏 filter view. Only `true` is persisted; absent
+     *  has identical meaning to false. */
+    favorite?: boolean;
     /** Preview of the last user message (truncated, for Task Center display) */
     lastMessagePreview?: string;
     /** How the title was set: default (first message truncation), auto (AI-generated), user (manually renamed) */
@@ -153,6 +156,10 @@ export async function updateSession(
     updates: {
         title?: string;
         titleSource?: 'default' | 'auto' | 'user';
+        /** true → pin to 收藏 view; false → unpin. Server only stores `true`,
+         *  so toggling off shrinks the on-disk metadata back to the absent
+         *  baseline. */
+        favorite?: boolean;
         // v0.1.69 snapshot fields — null clears, undefined leaves unchanged.
         // Server auto-stamps configSnapshotAt when any snapshot field is touched
         // and redacts providerEnvJson to '[redacted]' in the response (zero-trust).

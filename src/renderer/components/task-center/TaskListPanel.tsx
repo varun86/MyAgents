@@ -25,6 +25,7 @@ import { track } from '@/analytics';
 import CustomSelect, { type SelectOption } from '@/components/CustomSelect';
 import { useToast } from '@/components/Toast';
 import { useConfig } from '@/hooks/useConfig';
+import { listenWithCleanup } from '@/utils/tauriListen';
 import WorkspaceIcon from '@/components/launcher/WorkspaceIcon';
 import type { Task, TaskStatus } from '@/../shared/types/task';
 import { canAutoUpgrade, isBenignAlreadyLinked, upgradeLegacyCron, type LegacyCronRaw } from './legacyUpgrade';
@@ -232,24 +233,11 @@ export function TaskListPanel({ highlightTaskId, refreshKey, pendingIntent }: Pr
   // truth. Guarded on Tauri because `listen` is a Tauri-only import.
   useEffect(() => {
     if (!taskCenterAvailable()) return;
-    let unlisten: (() => void) | undefined;
-    let cancelled = false;
-    void (async () => {
-      const { listen } = await import('@tauri-apps/api/event');
-      if (cancelled) return;
-      const off = await listen('task:status-changed', () => {
-        void reload();
-      });
-      if (cancelled) {
-        off();
-      } else {
-        unlisten = off;
-      }
-    })();
-    return () => {
-      cancelled = true;
-      unlisten?.();
-    };
+    const ac = new AbortController();
+    void listenWithCleanup('task:status-changed', () => {
+      void reload();
+    }, ac.signal);
+    return () => ac.abort();
   }, [reload]);
 
   // ── Per-task action handlers. Shared by card and list views via callbacks.
