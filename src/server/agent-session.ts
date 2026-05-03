@@ -807,6 +807,51 @@ export function getOpenAiBridgeConfig(): OpenAiBridgeConfig {
     modelAliases: aliases,
   };
 }
+
+/**
+ * Run `fn` while temporarily preserving the active OpenAI bridge state. Whatever
+ * `fn` does to `currentOpenAiBridgeConfig` (typically via `buildClaudeSessionEnv`)
+ * is rolled back when `fn` returns or throws.
+ *
+ * Use case (Issue #124): one-shot SDK callers like `verifyProviderViaSdk` and
+ * `generateConversationTitle` build env for THEIR provider, which has the side
+ * effect of mutating `currentOpenAiBridgeConfig` to that provider. Without
+ * scoping, the active Chat session's loopback bridge gets routed to the
+ * one-shot caller's upstream — Chat's `/v1/messages` requests then carry the
+ * Chat model name to a foreign upstream and come back as 404 + `<synthetic>`
+ * `chat:agent-error`. Wrapping the one-shot in this helper guarantees the
+ * mutation is undone on exit.
+ *
+ * Concurrency: serialized via a mutex chain. Without serialization, parallel
+ * calls would each save the *current* (already-polluted) value and on exit
+ * restore each other's stale snapshots, leaking state past every scope's
+ * lifetime. Verify / title-gen / model-fetch are user-triggered and rare, so
+ * the queue is a non-issue; the safety it gives is what matters.
+ *
+ * In-window limitation: while `fn` is running, the active session still sees
+ * the one-shot caller's config because the bridge handler reads a single
+ * global. Bridge requests from Chat during the 30s verify window still
+ * misroute. Eliminating that requires per-request keyed bridge lookup
+ * (e.g. `x-api-key` → `Map<apiKey, BridgeConfig>`) — out of scope for this
+ * fix; the persistent post-completion pollution is what's resolved here.
+ */
+let bridgeConfigMutex: Promise<void> = Promise.resolve();
+export async function withScopedBridgeConfig<T>(fn: () => Promise<T>): Promise<T> {
+  const prev = bridgeConfigMutex;
+  let release!: () => void;
+  bridgeConfigMutex = new Promise<void>((resolve) => { release = resolve; });
+  try {
+    await prev;
+    const saved = currentOpenAiBridgeConfig;
+    try {
+      return await fn();
+    } finally {
+      currentOpenAiBridgeConfig = saved;
+    }
+  } finally {
+    release();
+  }
+}
 // SDK 是否已注册当前 sessionId。true 时后续 query 必须用 resume。
 // 仅由非 pre-warm 的 system_init 设为 true，仅由 sessionId 变更设为 false。
 // Pre-warm 永不修改此标志 — 从结构上消除超时/重试导致的状态错误。

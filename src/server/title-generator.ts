@@ -16,7 +16,7 @@ import { randomUUID } from 'crypto';
 import { homedir } from 'os';
 import { join } from 'path';
 import { query } from '@anthropic-ai/claude-agent-sdk';
-import { resolveClaudeCodeCli, buildClaudeSessionEnv, type ProviderEnv } from './agent-session';
+import { resolveClaudeCodeCli, buildClaudeSessionEnv, withScopedBridgeConfig, type ProviderEnv } from './agent-session';
 import { ClaudeCodeRuntime } from './runtimes/claude-code';
 import { CodexRuntime } from './runtimes/codex';
 import { GeminiRuntime } from './runtimes/gemini';
@@ -89,6 +89,17 @@ function cleanTitle(raw: string): string {
  * Returns cleaned title string on success, null on any failure (silent).
  */
 export async function generateTitle(
+  rounds: TitleRound[],
+  model: string,
+  providerEnv?: ProviderEnv,
+): Promise<string | null> {
+  // Issue #124: scope the bridge-config side effect so this one-shot title
+  // gen doesn't leave the active Chat session's bridge pointing at the
+  // title-gen provider. See `verifyProviderViaSdk` for full rationale.
+  return withScopedBridgeConfig(() => generateTitleInner(rounds, model, providerEnv));
+}
+
+async function generateTitleInner(
   rounds: TitleRound[],
   model: string,
   providerEnv?: ProviderEnv,
