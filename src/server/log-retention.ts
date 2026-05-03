@@ -108,7 +108,12 @@ const SOURCE_POLICIES: ReadonlyArray<SourcePolicy> = [
     maxAgeMs: 30 * DAY_MS,
     floorMs: 7 * DAY_MS,
     maxBytes: 2 * GB,
-    protectActiveFile: false,
+    // Code-review #124-followup (2026-05): a long-lived session whose log file
+    // mtime drifts past the floor would be unlinked under the budget while
+    // `AgentLogger`'s open WriteStream still pointed at it — broken writes
+    // on Windows / macOS, ghost writes on Linux. Flip `protectActiveFile` on
+    // and have callers pass the active log path in `activeFilePaths`.
+    protectActiveFile: true,
   },
 ];
 

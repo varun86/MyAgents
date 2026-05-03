@@ -87,6 +87,15 @@ export function getLogFilePath_(): string | null {
 }
 
 /**
+ * Returns the path of the per-session log file we're currently writing to,
+ * if any. Used by `log-retention` so the budget sweep never evicts a file
+ * we're holding an open `WriteStream` for. Null until the first append.
+ */
+export function getActiveSessionLogPath(): string | null {
+  return currentLogFilePath;
+}
+
+/**
  * Close the current log stream
  */
 export function closeLogger(): void {

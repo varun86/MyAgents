@@ -139,6 +139,18 @@ export function createBridgeHandler(config: BridgeConfig): BridgeHandler {
     try {
       upstream = await config.getUpstreamConfig(request);
     } catch (err) {
+      // PRD #124: distinguish "client routing error" (unknown token) from
+      // "configuration error". The former MUST be 400 so SDK clients see
+      // a clean rejection — wrapping a stale subprocess's late requests
+      // as 500 misleads upstream layers into retrying or surfacing as
+      // generic agent-error. We surface the unknown-token category here
+      // because it's the only error shape `getUpstreamConfig` throws by
+      // contract; anything else is genuinely a 500.
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.startsWith('Unknown bridge token') || msg.includes('missing token')) {
+        log(`[bridge] reject: ${msg}`);
+        return jsonError(400, 'invalid_request_error', msg);
+      }
       log(`[bridge] Failed to get upstream config: ${err}`);
       return jsonError(500, 'api_error', 'Bridge configuration error');
     }

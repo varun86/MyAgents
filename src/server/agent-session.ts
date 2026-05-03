@@ -829,12 +829,17 @@ function resolveActiveSessionUpstreamConfig(): UpstreamBridgeConfig {
 
 /**
  * Ensure the active session has a registered bridge token IFF its provider
- * is OpenAI-protocol. Idempotent — re-registers on every call so the
- * resolver always reflects the latest closure state (the resolver itself
- * reads `currentProviderEnv` / `currentModel` live, so registration
- * shape changes don't matter, but re-registering is cheap and defensive).
+ * is OpenAI-protocol. Caller MUST pass `freshToken: true` when starting a
+ * NEW SDK subprocess (so any in-flight late requests from an old subprocess
+ * find their stale token expired) and `freshToken: false` for in-place
+ * mid-flight re-syncs (provider switches before the abort fires).
+ *
+ * The resolver reads `currentProviderEnv` / `currentModel` live, so an
+ * existing token automatically reflects mid-session config changes. The
+ * fresh-token version is only needed when we're about to spawn a new
+ * subprocess that will see a (possibly different) URL.
  */
-function ensureActiveSessionBridgeRegistered(): void {
+function ensureActiveSessionBridgeRegistered(opts?: { freshToken?: boolean }): void {
   if (currentProviderEnv?.apiProtocol !== 'openai') {
     // Provider is not OpenAI-protocol — no bridge needed. If a stale token
     // is registered (e.g., from a previous OpenAI provider before a switch),
@@ -845,6 +850,14 @@ function ensureActiveSessionBridgeRegistered(): void {
     }
     return;
   }
+  if (opts?.freshToken && activeSessionBridgeToken) {
+    // Caller is about to spawn a new subprocess. Retire the old token so
+    // late requests from the dying subprocess get rejected (400 unknown
+    // token) instead of resolving to the new subprocess's config — that's
+    // the cross-pollination class.
+    unregisterBridgeInRegistry(activeSessionBridgeToken);
+    activeSessionBridgeToken = null;
+  }
   if (!activeSessionBridgeToken) {
     activeSessionBridgeToken = randomUUID();
   }
@@ -853,6 +866,17 @@ function ensureActiveSessionBridgeRegistered(): void {
     resolveActiveSessionUpstreamConfig,
     `session:${sessionId}`,
   );
+}
+
+/**
+ * Tear down the active session's bridge token. Called from the session
+ * `finally` path when the SDK subprocess exits, so the registry doesn't
+ * accumulate stale entries even when subprocesses don't restart cleanly.
+ */
+function unregisterActiveSessionBridge(): void {
+  if (!activeSessionBridgeToken) return;
+  unregisterBridgeInRegistry(activeSessionBridgeToken);
+  activeSessionBridgeToken = null;
 }
 
 /** Returns true if the active session has a registered OpenAI bridge token. */
@@ -6349,12 +6373,12 @@ async function startStreamingSession(preWarm = false): Promise<void> {
   // Sync enabled user-level skills as symlinks into project's .claude/skills/
   // Must happen before buildClaudeSessionEnv() so SDK sees them via settingSources: ['project']
   syncProjectUserConfig(agentDir);
-  // PRD #124: register the active session's bridge token (if provider is
-  // OpenAI-protocol) BEFORE building env, so the SDK subprocess starts up
-  // pointing at a registered route. The resolver reads currentProviderEnv +
-  // currentModel live, so mid-flight changes (setSessionModel, applySessionConfig)
-  // automatically take effect without re-registering.
-  ensureActiveSessionBridgeRegistered();
+  // PRD #124: register a FRESH bridge token for this SDK subprocess.
+  // `freshToken: true` retires the previous token (if any) so any late
+  // requests from the dying old subprocess get rejected with a 400
+  // "unknown bridge token" instead of resolving to the new subprocess's
+  // config (the cross-pollination class we're eliminating).
+  ensureActiveSessionBridgeRegistered({ freshToken: true });
   const env = buildClaudeSessionEnv(undefined, undefined, {
     bridgeToken: activeSessionBridgeToken ?? undefined,
   });
@@ -7988,6 +8012,12 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     const session = querySession;
     querySession = null;
     try { session?.close(); } catch { /* subprocess 可能已退出 */ }
+
+    // PRD #124: unregister the bridge token now that the SDK subprocess
+    // has exited. If the session restarts, `startStreamingSession` mints
+    // a fresh token (freshToken: true) so late requests from this dying
+    // subprocess find their old token gone and get rejected cleanly.
+    unregisterActiveSessionBridge();
 
     // sessionRegistered 已在 system_init handler 中设置，无需重复
 

@@ -39,6 +39,7 @@ import type { LogEntry } from '../renderer/types/log';
 import { LOGS_DIR, ensureLogsDir } from './logUtils';
 import { localDate } from '../shared/logTime';
 import { runLogRetentionSweep } from './log-retention';
+import { getActiveSessionLogPath } from './AgentLogger';
 
 // ── Tunables (Pattern 6 §6.3.5) ────────────────────────────────────────
 const FLUSH_INTERVAL_MS = 100;
@@ -116,9 +117,9 @@ function formatLogEntry(entry: LogEntry): string {
 }
 
 // ── Rotation / eviction ────────────────────────────────────────────────
-function rotateIfNeeded(addBytes: number): void {
-  if (!currentFilePath) return;
-  if (currentFileSize + addBytes <= PER_FILE_MAX_BYTES) return;
+function rotateIfNeeded(addBytes: number): boolean {
+  if (!currentFilePath) return false;
+  if (currentFileSize + addBytes <= PER_FILE_MAX_BYTES) return false;
   // Rotate: rename current to <name>.<timestamp>.log
   try {
     const ts = new Date().toISOString().replace(/[:]/g, '-');
@@ -130,8 +131,10 @@ function rotateIfNeeded(addBytes: number): void {
     renameSync(currentFilePath, rotatedPath);
   } catch {
     // If rotation fails, fall through — we'll keep appending.
+    return false;
   }
   currentFileSize = 0;
+  return true;
 }
 
 /**
@@ -141,6 +144,20 @@ function rotateIfNeeded(addBytes: number): void {
  */
 export function getActiveUnifiedLogPath(): string | null {
   return currentFilePath;
+}
+
+/**
+ * Returns ALL active log paths the budget sweep MUST not evict — currently
+ * the unified log we're appending to plus the per-session log file (when
+ * AgentLogger has one open). Used by `flushNow`'s on-rotation eager sweep
+ * so we don't accidentally unlink the file we're holding a WriteStream for.
+ */
+function getProtectedActivePaths(): ReadonlySet<string> {
+  const paths = new Set<string>();
+  if (currentFilePath) paths.add(currentFilePath);
+  const sessionPath = getActiveSessionLogPath();
+  if (sessionPath) paths.add(sessionPath);
+  return paths;
 }
 
 // ── Flusher ────────────────────────────────────────────────────────────
@@ -157,10 +174,11 @@ function flushNow(): void {
   let lines: string[] = queue.splice(0, queue.length);
   const payload = lines.join('');
   // payload is already newline-terminated per-line.
+  let didRotate = false;
   try {
     ensureLogsDir();
     const filePath = getLogFilePath();
-    rotateIfNeeded(payload.length);
+    didRotate = rotateIfNeeded(payload.length);
     // Use a single open/write/close per flush — far cheaper than per-entry
     // sync writes because we batch up to 1000 entries.
     const fd = openSync(filePath, 'a');
@@ -176,13 +194,14 @@ function flushNow(): void {
     dropped += lines.length;
     lines = [];
   }
-  // Eager directory-budget enforcement when we just hit the per-file rotation
-  // threshold — this is a strong signal that disk pressure is meaningful right
-  // now and the periodic 1-hour sweep would be late. Synchronous because
-  // sweeps are stat-only and fast (single-digit ms on a typical logs dir).
-  if (payload.length > 0 && currentFileSize >= PER_FILE_MAX_BYTES) {
+  // Eager directory-budget enforcement when we just rotated. `rotateIfNeeded`
+  // resets `currentFileSize` to 0 on rotation, so we MUST trigger off the
+  // rotation event itself rather than checking the post-write size — checking
+  // size would only fire on a single-flush > 50MB payload, which is essentially
+  // never. Sweeps are stat-only and fast.
+  if (didRotate) {
     runLogRetentionSweep({
-      activeFilePaths: currentFilePath ? new Set([currentFilePath]) : undefined,
+      activeFilePaths: getProtectedActivePaths(),
     });
   }
 }

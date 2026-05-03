@@ -280,6 +280,7 @@ import {
   setDeferredInitPhase,
 } from './readiness-state';
 import { appendUnifiedLogBatch, getRecentLogLines, getActiveUnifiedLogPath } from './UnifiedLogger';
+import { getActiveSessionLogPath } from './AgentLogger';
 import { runLogRetentionSweep, startPeriodicSweep } from './log-retention';
 import { createSseClient, getClients } from './sse';
 import { imEventBus } from './utils/im-event-bus';
@@ -593,6 +594,11 @@ const SYSTEM_SKILLS: readonly string[] = [
   // skill so existing users get the updated self-install SKILL.md after
   // the bundled CLI is removed.
   'agent-browser',
+  // v9: myagents-cli — global skill that exposes the entire `myagents`
+  // CLI surface (cron / task / mcp / model / agent / runtime / skill /
+  // plugin / widget / im / config) to every AI session in the product.
+  // Force-synced because SKILL.md must track CLI changes in lockstep.
+  'myagents-cli',
 ];
 
 /**
@@ -2134,6 +2140,9 @@ async function main() {
                 }
               }
             }
+            // Backward-compat with the pre-#119 pragmatic fix — see /cron/execute-sync above.
+            if (payload.model) effectiveModel = payload.model;
+            if (payload.providerEnv) effectiveProviderEnv = payload.providerEnv;
           } else if (intent === 'subscription') {
             effectiveProviderEnv = undefined;
             if (payload.model) effectiveModel = payload.model;
@@ -2141,12 +2150,16 @@ async function main() {
               effectiveRuntimeConfig = { ...effectiveRuntimeConfig, model: payload.model ?? effectiveRuntimeConfig.model };
             }
           } else if (intent === 'explicit') {
-            if (payload.providerEnv) {
-              effectiveProviderEnv = payload.providerEnv;
-            } else {
-              console.warn(`[cron] execute intent=explicit but payload.providerEnv is missing — degrading to subscription`);
-              effectiveProviderEnv = undefined;
+            if (!payload.providerEnv) {
+              console.error(`[cron] execute intent=explicit but payload.providerEnv is missing — refusing to run`);
+              clearCronTaskContext(currentSessionId);
+              resetInteractionScenario();
+              return jsonResponse({
+                success: false,
+                error: 'Cron task has explicit provider intent but no providerEnv — task data is malformed.',
+              }, 400);
             }
+            effectiveProviderEnv = payload.providerEnv;
             if (payload.model) effectiveModel = payload.model;
             if (effectiveRuntimeConfig) {
               effectiveRuntimeConfig = { ...effectiveRuntimeConfig, model: payload.model ?? effectiveRuntimeConfig.model };
@@ -2377,6 +2390,17 @@ async function main() {
               console.log(`[cron] execute-sync intent=followAgent session=${snapshotSessionId} runMode=${effectiveRunMode} snapshotLocked=${Boolean(sessionMeta.configSnapshotAt)} model=${effectiveModel ?? 'default'} runtime=${resolved.runtime}`);
             }
           }
+          // #119 followAgent backward-compat: pre-#119 the pragmatic fix
+          // (commit 502f89c3) re-applied payload.model + payload.providerEnv
+          // AFTER snapshot resolve so legacy crons that captured those at
+          // schedule time still won the model+provider-bundle race against
+          // a later-changed agent. We preserve that behavior here for any
+          // cron that deserialized as `followAgent` (legacy default) but
+          // still has explicit payload.* values — without it, those tasks
+          // regress to following the agent snapshot they explicitly tried
+          // to override.
+          if (payload.model) effectiveModel = payload.model;
+          if (payload.providerEnv) effectiveProviderEnv = payload.providerEnv;
         } else if (intent === 'subscription') {
           // Cron explicitly wants subscription — never inherit from agent.
           effectiveProviderEnv = undefined;
@@ -2387,20 +2411,26 @@ async function main() {
           console.log(`[cron] execute-sync intent=subscription runMode=${effectiveRunMode} model=${effectiveModel ?? 'default'} (snapshot bypassed)`);
         } else if (intent === 'explicit') {
           // Cron explicitly wants its captured provider — never inherit from agent.
-          // payload.providerEnv MUST be present for this intent to be meaningful;
-          // if it's missing (malformed task), defensively degrade to subscription
-          // rather than letting the snapshot resolver fill in an unrelated provider.
-          if (payload.providerEnv) {
-            effectiveProviderEnv = payload.providerEnv;
-          } else {
-            console.warn(`[cron] execute-sync intent=explicit but payload.providerEnv is missing — degrading to subscription to avoid misrouting`);
-            effectiveProviderEnv = undefined;
+          // payload.providerEnv MUST be present. A missing providerEnv with
+          // explicit intent is a malformed task — fail closed rather than
+          // silently routing the cron's model to a different upstream
+          // (subscription / agent snapshot). This is the #119 root cause:
+          // model and provider are an atomic routing bundle.
+          if (!payload.providerEnv) {
+            console.error(`[cron] execute-sync intent=explicit but payload.providerEnv is missing — refusing to run (would mismatch model+endpoint)`);
+            clearCronTaskContext(effectiveSessionId);
+            resetInteractionScenario();
+            return jsonResponse({
+              success: false,
+              error: 'Cron task has explicit provider intent but no providerEnv — task data is malformed. Re-create the task.',
+            }, 400);
           }
+          effectiveProviderEnv = payload.providerEnv;
           if (payload.model) effectiveModel = payload.model;
           if (effectiveRuntimeConfig) {
             effectiveRuntimeConfig = { ...effectiveRuntimeConfig, model: payload.model ?? effectiveRuntimeConfig.model };
           }
-          console.log(`[cron] execute-sync intent=explicit runMode=${effectiveRunMode} model=${effectiveModel ?? 'default'} provider=${effectiveProviderEnv?.baseUrl ?? 'subscription-fallback'}`);
+          console.log(`[cron] execute-sync intent=explicit runMode=${effectiveRunMode} model=${effectiveModel ?? 'default'} provider=${effectiveProviderEnv?.baseUrl}`);
         }
 
         // Permission mode override is intent-independent.
@@ -8081,17 +8111,24 @@ description: >
       // policy module covers age cutoff, byte budget, and the recent-data
       // floor across all sources. Per-session logs gained a byte budget
       // here for the first time.
-      const activeUnified = getActiveUnifiedLogPath();
-      runLogRetentionSweep({
-        activeFilePaths: activeUnified ? new Set([activeUnified]) : undefined,
-      });
+      //
+      // The active-file set protects BOTH the unified log we're appending
+      // to AND the per-session log file (if AgentLogger has one open) from
+      // budget eviction — without this, a long-lived session log past the
+      // 7-day floor could be unlinked while the WriteStream is still open.
+      const collectActivePaths = (): ReadonlySet<string> => {
+        const paths = new Set<string>();
+        const u = getActiveUnifiedLogPath();
+        if (u) paths.add(u);
+        const s = getActiveSessionLogPath();
+        if (s) paths.add(s);
+        return paths;
+      };
+      runLogRetentionSweep({ activeFilePaths: collectActivePaths() });
       // Hourly background sweep — bounds gradual growth without waiting
       // for the next 50MB rotation event. Active-file getter is invoked
       // at each sweep so day-rollovers are reflected.
-      startPeriodicSweep(() => {
-        const p = getActiveUnifiedLogPath();
-        return p ? new Set([p]) : new Set();
-      });
+      startPeriodicSweep(collectActivePaths);
       cleanupStalePlaywrightProfile();
 
       currentInitPhase = 'skill-seed';
