@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.2.8] - 2026-05-03
+
+### Added
+
+- **AI 小助理 inbox 加「历史」入口**：「设置 → AI 供应商」页顶部 AI 小助理区块右上角新增 历史 按钮，复用 Chat Tab 同款历史弹窗，点选历史会话后新开 Tab 加载，不需要先进一段对话才能找历史 (#120)。
+
+---
+
 ## [0.2.7] - 2026-05-03
 
 ### Added
