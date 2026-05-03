@@ -2087,6 +2087,13 @@ async function main() {
               }
             }
           }
+          // Issue #119: task-level model + providerEnv are an atomic routing bundle and
+          // must override snapshot together. Without re-applying payload.providerEnv after
+          // the snapshot resolve, model=task + endpoint=agent-snapshot mismatch produces
+          // upstream 400 + silent empty output. Mirrors the precedence applied in
+          // /cron/execute-sync below.
+          if (payload.model) effectiveModel = payload.model;
+          if (payload.providerEnv) effectiveProviderEnv = payload.providerEnv;
 
           // Cron tasks are unattended — "user didn't pick" must map to the
           // runtime's MAX permission (not its interactive default), or
@@ -2274,28 +2281,36 @@ async function main() {
 
         // Per-task override precedence (v0.1.69 cross-review fix):
         //
-        // Task-level `model` / `permissionMode` set at task creation time (via
-        // CLI `--model` / `--permissionMode` flags on `task create-direct` /
-        // `task create-from-alignment`) are explicit per-task intent — the user
-        // said "this task should run with this model regardless of what the
-        // session/agent defaults are". They must therefore win over both
+        // Task-level `model` / `permissionMode` / `providerEnv` set at task creation time
+        // (via CLI `--model` / `--permissionMode` flags on `task create-direct` /
+        // `task create-from-alignment`, or via the cron-create UI) are explicit per-task
+        // intent — the user said "this task should run with this model/provider regardless
+        // of what the session/agent defaults are". They must therefore win over both
         // (a) the agent default copied into a fresh new_session snapshot, and
         // (b) the historical session snapshot reused by single_session mode.
         //
-        // We apply on top of `effectiveModel` / `effectiveRuntimeConfig` rather
-        // than injecting into the snapshot, so the behavior is identical for
-        // both run modes and the snapshot itself stays a pure derivation of
-        // session history.
+        // We apply on top of `effectiveModel` / `effectiveProviderEnv` / `effectiveRuntimeConfig`
+        // rather than injecting into the snapshot, so the behavior is identical for both run
+        // modes and the snapshot itself stays a pure derivation of session history.
         //
-        // Without this block, the CLI surface accepts and validates overrides,
-        // `enrichTaskCreateResponse` echoes them back as "overridden" — but
-        // dispatch silently falls back to the snapshot value. That's the
-        // silent-data-loss bug cross-review flagged on 2026-04-22.
+        // Without this block, the CLI surface / cron UI accept and validate overrides,
+        // `enrichTaskCreateResponse` echoes them back as "overridden" — but dispatch
+        // silently falls back to the snapshot value. That's the silent-data-loss bug
+        // cross-review flagged on 2026-04-22.
+        //
+        // #119 (2026-05): the same silent-loss applied to `providerEnv` — the cron carried
+        // its own DeepSeek providerEnv but ran against an Agent configured for MIMO.
+        // Snapshot resolve overwrote `effectiveProviderEnv` with MIMO; only `payload.model`
+        // was reapplied below, leaving model=DeepSeek + endpoint=MIMO → 400 + silent empty
+        // output. Provider and model are an atomic routing bundle and must override together.
         if (payload.model) {
           effectiveModel = payload.model;
           if (effectiveRuntimeConfig) {
             effectiveRuntimeConfig = { ...effectiveRuntimeConfig, model: payload.model };
           }
+        }
+        if (payload.providerEnv) {
+          effectiveProviderEnv = payload.providerEnv;
         }
         if (payload.permissionMode) {
           effectiveRuntimeConfig = {
