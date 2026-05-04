@@ -15,7 +15,7 @@
 // the user-facing escape hatch when they want a stricter mode.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ChevronDown, ChevronRight, Settings2 } from 'lucide-react';
+import { ChevronDown, Settings2 } from 'lucide-react';
 import CustomSelect from '@/components/CustomSelect';
 import { useConfig } from '@/hooks/useConfig';
 import { useAvailableProviders } from '@/hooks/useAvailableProviders';
@@ -452,6 +452,7 @@ export function TaskAdvancedConfigEditor(props: Props) {
                 options={runtimeOptions}
                 onChange={(v) => setRuntime(v ? (v as RuntimeType) : undefined)}
                 placeholder="跟随 Agent 工作区"
+                size="md"
               />
             </FieldRow>
           )}
@@ -483,6 +484,7 @@ export function TaskAdvancedConfigEditor(props: Props) {
               options={permissionOptions}
               onChange={(v) => setPermissionMode(v ? v : undefined)}
               placeholder="跟随默认（最大权限）"
+              size="md"
             />
           </FieldRow>
 
@@ -725,13 +727,19 @@ function ModelPicker(props: {
     <div className="relative" ref={modelPickerRef}>
       <button
         type="button"
-        className="flex w-full items-center justify-between rounded-[var(--radius-md)] border border-[var(--line)] px-3 py-1.5 text-left text-[13px] text-[var(--ink)] transition-colors hover:border-[var(--line-strong)]"
+        // Match the CustomSelect `size="md"` shape used by the IM Bot
+        // delivery picker below (NotificationConfigEditor.tsx) so the three
+        // 高级配置 fields (Runtime / 权限模式 / 模型) read as one visual
+        // group: `rounded-lg`, `bg-[var(--paper)]`, `px-3 py-2.5 text-sm`,
+        // `border-[var(--line)]`, hover deepens the border. Down-arrow chevron
+        // (mirroring CustomSelect's affordance) is animated on open.
+        className="flex w-full items-center gap-2 rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2.5 text-left text-sm text-[var(--ink)] transition-colors hover:border-[var(--ink-subtle)]"
         onClick={() => setOpen(isOpen ? null : variant)}
       >
-        {closedLabel}
-        <ChevronRight
-          className={`h-3.5 w-3.5 shrink-0 text-[var(--ink-subtle)] transition-transform ${
-            isOpen ? 'rotate-90' : ''
+        <span className="min-w-0 flex-1 truncate">{closedLabel}</span>
+        <ChevronDown
+          className={`h-3.5 w-3.5 shrink-0 text-[var(--ink-muted)] transition-transform ${
+            isOpen ? 'rotate-180' : ''
           }`}
         />
       </button>
