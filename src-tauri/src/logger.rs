@@ -1,3 +1,10 @@
+// This module IS the unified logger — `ulog_*!` macros internally route
+// through the unified emit path which delegates to `log::*` for env_logger /
+// stdout compat. Calling `ulog_*!` from inside this file would recurse, so
+// raw `log::*` is intentional here. clippy.toml bans `log::*` everywhere
+// else; this file-level allow is the single legitimate exception.
+#![allow(clippy::disallowed_macros)]
+
 // Unified logger for Rust — Pattern 6 (Observability + Correlation IDs).
 //
 // Two usage modes (unchanged from v0.1.x — all existing call sites keep working):

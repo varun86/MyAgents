@@ -151,9 +151,15 @@ struct CreateCronRequest {
     model: Option<String>,
     permission_mode: Option<String>,
     provider_env: Option<TaskProviderEnv>,
+    /// PRD 0.2.9 — Per-cron provider id. Preferred over `provider_env` for
+    /// all new callers; sidecar live-resolves env on every tick. Mutually
+    /// exclusive with `provider_env` (an explicit-snapshot legacy path that
+    /// still works for tasks persisted in 0.2.8 and earlier).
+    provider_id: Option<String>,
     /// PRD #119: explicit routing intent. Frontend / IM Bot / CLI callers
     /// that know what they want should set this to `Subscription` or
     /// `Explicit`. Absent → `FollowAgent` (legacy snapshot semantics).
+    /// PRD 0.2.9 — when `provider_id` is set, intent is ignored.
     provider_intent: Option<ProviderIntent>,
     runtime: Option<String>,
     runtime_config: Option<serde_json::Value>,
@@ -309,6 +315,7 @@ async fn create_cron_handler(
         permission_mode: req.permission_mode.unwrap_or_default(),
         model: req.model,
         provider_env: req.provider_env,
+        provider_id: req.provider_id,
         provider_intent: req.provider_intent.unwrap_or_default(),
         runtime: req.runtime,
         runtime_config: req.runtime_config,
@@ -1814,9 +1821,15 @@ async fn ensure_cron_for_task(ta: &task::Task) -> Result<String, String> {
         permission_mode: desired_permission_mode,
         model: desired_model,
         provider_env: None,
-        // Task Center dispatch doesn't capture an explicit provider; fall
-        // back to FollowAgent so the cron tracks the workspace agent's
-        // current provider (PRD #119, legacy semantics for this path).
+        // PRD 0.2.9 — Task Center dispatch threads the Task's per-task
+        // `provider_id` through to the linked CronTask. Sidecar live-resolves
+        // env on every tick, so credential rotation propagates without a
+        // re-save. `None` keeps FollowAgent (snapshot tracking).
+        provider_id: ta.provider_id.clone(),
+        // PRD #119 — intent is now subordinate to provider_id; sidecar
+        // ignores intent when provider_id is set. We still emit `FollowAgent`
+        // as the intent for the `provider_id == None` path so legacy crons
+        // (without provider_id) keep their pre-0.2.9 semantics.
         provider_intent: ProviderIntent::FollowAgent,
         runtime: ta.runtime.clone(),
         runtime_config: ta.runtime_config.clone(),

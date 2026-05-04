@@ -1046,6 +1046,11 @@ function abortPersistentSession(): void {
     console.warn('[agent] Browser tools were used but storage state was not saved. Login state from this session may be lost.');
   }
 
+  // This is the ONLY legitimate `shouldAbortSession = true` site — it is
+  // the abort entry point and performs the full cleanup chain below
+  // (rescue pending, IM bus notify, generator wake). The lint ban exists
+  // so other code can't bypass this teardown by setting the flag directly.
+  // eslint-disable-next-line no-restricted-syntax
   shouldAbortSession = true;
   // Subprocess is about to die — rescue pending items so the recovery session
   // re-delivers them instead of losing them with the dead stdin buffer.
@@ -1138,7 +1143,7 @@ function resetTurnUsage(): void {
 }
 
 // ===== MCP Configuration =====
-import type { McpServerDefinition } from '../renderer/config/types';
+import type { McpServerDefinition } from '../shared/config-types';
 // SDK's in-process server instance type — what createSdkMcpServer() returns.
 // Imported as a type (no runtime cost) so we can annotate the buildSdkMcpServers
 // result map without relying on a module-level singleton.
@@ -6491,11 +6496,19 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     // to "" (sentinel for runtime max). Users who explicitly want a
     // stricter mode can pass `--permissionMode plan` via the cron tool.
     if (process.env.MYAGENTS_MANAGEMENT_PORT && !getImCronContext()) {
+      // PRD 0.2.9 — When the session's providerEnv came from the workspace
+      // agent (the common case), surface the providerId too so the cron
+      // tool can build live-resolve cron tasks. The agent lookup is local
+      // and synchronous; failure (e.g. no agent for this workspace) just
+      // leaves providerId undefined and the legacy providerEnv path runs.
+      const agentForProvider = findAgentByWorkspacePath(agentDir);
+      const sessionProviderId = (agentForProvider?.providerId as string | undefined) ?? undefined;
       setSessionCronContext({
         sessionId: sessionId,
         workspacePath: agentDir,
         model: currentModel,
         providerEnv: currentProviderEnv,
+        providerId: sessionProviderId,
       });
     }
 

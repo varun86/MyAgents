@@ -11,7 +11,12 @@
  */
 
 import type { createSseClient } from './sse';
-import { SSE_INSTANCE_ID } from './sse';
+// SSE_INSTANCE_ID imported from sse-instance (the leaf module), NOT from
+// sse.ts — pulling it from sse.ts would re-introduce the static cycle
+// logger → sse → logger (the latter via dynamic import in connect()).
+// Re-export from sse.ts is preserved for any external caller that
+// already imported it from there.
+import { SSE_INSTANCE_ID } from './sse-instance';
 import { appendUnifiedLog } from './UnifiedLogger';
 import type { LogEntry, LogLevel } from '../renderer/types/log';
 import { localTimestamp } from '../shared/logTime';

@@ -382,7 +382,7 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
           // explicitly reject below.
           const completionPromise = registerPendingDispatch(chatId, callbacks);
           try {
-            const resp = await fetch(`${rustBaseUrl}/api/im-bridge/message`, {
+            const resp = await cancellableFetch(`${rustBaseUrl}/api/im-bridge/message`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
@@ -589,7 +589,7 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
       media: {
         async fetchRemoteMedia(url: string) {
           try {
-            const resp = await fetch(url);
+            const resp = await cancellableFetch(url);
             if (!resp.ok) return null;
             const buf = Buffer.from(await resp.arrayBuffer());
             return { buffer: buf, contentType: resp.headers.get('content-type') || 'application/octet-stream' };

@@ -38,7 +38,7 @@ import type {
   TaskExecutionMode,
   TaskRunMode,
 } from '@/../shared/types/task';
-import type { RuntimeType } from '@/../shared/types/runtime';
+import type { RuntimeConfig, RuntimeType } from '@/../shared/types/runtime';
 import { ExecutionModeEditor } from './editors/ExecutionModeEditor';
 import { EndConditionsEditor, type EndConditionMode } from './editors/EndConditionsEditor';
 import { INPUT_CLS, toLocalDateTimeString } from './editors/controls';
@@ -149,9 +149,11 @@ export function DispatchTaskDialog({
     events: DEFAULT_EVENTS,
   });
 
-  // Advanced overrides (PRD 0.2.4 §需求 4) — undefined means "follow Agent".
+  // Advanced overrides (PRD 0.2.4 §需求 4 / PRD 0.2.9) — undefined means "follow Agent".
   const [advRuntime, setAdvRuntime] = useState<RuntimeType | undefined>(undefined);
+  const [advProviderId, setAdvProviderId] = useState<string | undefined>(undefined);
   const [advModel, setAdvModel] = useState<string | undefined>(undefined);
+  const [advRuntimeConfig, setAdvRuntimeConfig] = useState<RuntimeConfig | undefined>(undefined);
   const [advPermissionMode, setAdvPermissionMode] = useState<string | undefined>(undefined);
   const [advMcpEnabledServers, setAdvMcpEnabledServers] = useState<string[] | undefined>(undefined);
 
@@ -262,8 +264,17 @@ export function DispatchTaskDialog({
         cronExpression: isRecurring && advancedCron ? advancedCron : undefined,
         cronTimezone: isRecurring && advancedCron ? cronTimezone || undefined : undefined,
         // Advanced overrides — `undefined` is forwarded as "follow Agent".
+        // PRD 0.2.9 — providerId / model are paired (validated server-side),
+        // and external-runtime model lives on runtimeConfig.model.
         runtime: advRuntime,
+        providerId: advProviderId,
         model: advModel,
+        // RuntimeConfig (renderer/runtime.ts) and RuntimeConfigSnapshot (shared
+        // task DTO) are structurally compatible; the latter just adds an
+        // open-ended `[key: string]: unknown` index signature for
+        // forward-compat. Cast here to avoid leaking that index sig into
+        // the renderer's RuntimeConfig type.
+        runtimeConfig: advRuntimeConfig as Record<string, unknown> | undefined,
         permissionMode: advPermissionMode,
         mcpEnabledServers: advMcpEnabledServers,
         sourceThoughtId: thought?.id,
@@ -325,7 +336,9 @@ export function DispatchTaskDialog({
     toast,
     onDispatched,
     advRuntime,
+    advProviderId,
     advModel,
+    advRuntimeConfig,
     advPermissionMode,
     advMcpEnabledServers,
   ]);
@@ -402,13 +415,17 @@ export function DispatchTaskDialog({
                 </p>
               </div>
 
-              {/* 高级配置 — runtime / model / permission / MCP overrides */}
+              {/* 高级配置 — runtime / provider / model / permission / MCP overrides */}
               <TaskAdvancedConfigEditor
                 workspacePath={workspace?.path}
                 runtime={advRuntime}
                 setRuntime={setAdvRuntime}
+                providerId={advProviderId}
+                setProviderId={setAdvProviderId}
                 model={advModel}
                 setModel={setAdvModel}
+                runtimeConfig={advRuntimeConfig}
+                setRuntimeConfig={setAdvRuntimeConfig}
                 permissionMode={advPermissionMode}
                 setPermissionMode={setAdvPermissionMode}
                 mcpEnabledServers={advMcpEnabledServers}

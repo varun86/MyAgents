@@ -781,25 +781,26 @@ pub async fn cmd_thought_open_dir(
     fs::create_dir_all(&dir).map_err(|e| format!("mkdir thought dir: {}", e))?;
     let path = dir.to_string_lossy().to_string();
 
-    // OS openers are user-visible system commands (CLAUDE.md exception);
-    // skip `process_cmd` here and match task.rs:cmd_task_open_docs_dir.
+    // OS openers via process_cmd::new — see task.rs:cmd_task_open_docs_dir
+    // for rationale (CREATE_NO_WINDOW is a no-op for these GUI binaries,
+    // so wrapping is consistent without behavior change).
     #[cfg(target_os = "macos")]
     {
-        std::process::Command::new("open")
+        crate::process_cmd::new("open")
             .arg(&path)
             .spawn()
             .map_err(|e| format!("open finder: {}", e))?;
     }
     #[cfg(target_os = "windows")]
     {
-        std::process::Command::new("explorer")
+        crate::process_cmd::new("explorer")
             .arg(&path)
             .spawn()
             .map_err(|e| format!("open explorer: {}", e))?;
     }
     #[cfg(target_os = "linux")]
     {
-        std::process::Command::new("xdg-open")
+        crate::process_cmd::new("xdg-open")
             .arg(&path)
             .spawn()
             .map_err(|e| format!("xdg-open: {}", e))?;

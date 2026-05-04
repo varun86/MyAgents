@@ -184,7 +184,10 @@ function bumpDropped(event: string): void {
 // 🔧 Fix: Use globalThis to ensure single clients Set even if module is loaded twice
 // (Per ChatGPT's suggestion to prevent module double-loading issues)
 const CLIENTS_KEY = '__myagents_sse_clients__';
-export const SSE_INSTANCE_ID = Math.random().toString(16).slice(2);
+// SSE_INSTANCE_ID lives in sse-instance.ts (a leaf module) to break the
+// static cycle with logger.ts. Re-exported here so existing callers that
+// import it from './sse' keep working.
+export { SSE_INSTANCE_ID } from './sse-instance';
 
 const clients: Set<SseClient> =
   (globalThis as Record<string, unknown>)[CLIENTS_KEY] as Set<SseClient> ??

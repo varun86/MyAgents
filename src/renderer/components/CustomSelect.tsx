@@ -126,7 +126,13 @@ export default function CustomSelect({
                                 key={option.value}
                                 type="button"
                                 onClick={() => handleSelect(option.value)}
-                                className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition-colors ${
+                                // Item font size mirrors the trigger's: `size='md'`
+                                // → `text-sm` (14px) so options read at parity with
+                                // what the closed trigger shows. Default `size='sm'`
+                                // keeps the legacy `text-xs` (12px) for dense forms.
+                                className={`flex w-full items-center gap-2 px-3 py-1.5 text-left transition-colors ${
+                                    size === 'md' ? 'text-sm' : 'text-xs'
+                                } ${
                                     option.value === value
                                         ? 'text-[var(--accent-warm)]'
                                         : 'text-[var(--ink)] hover:bg-[var(--paper-inset)]'
@@ -155,7 +161,9 @@ export default function CustomSelect({
                                     setIsOpen(false);
                                     footerAction.onClick();
                                 }}
-                                className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+                                className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] ${
+                                    size === 'md' ? 'text-sm' : 'text-xs'
+                                }`}
                             >
                                 {footerAction.icon && (
                                     <span className="shrink-0">{footerAction.icon}</span>

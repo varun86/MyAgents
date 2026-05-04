@@ -78,7 +78,10 @@ const MarkdownLink = memo(function MarkdownLink({
     const hasSelection = selection && selection.toString().length > 0;
 
     if (!hasSelection && href) {
-      if (browserPanel && isExternalUrl(href) && !href.toLowerCase().startsWith('mailto:')) {
+      // Cmd (macOS) / Ctrl (Win/Linux) + click bypasses the embedded browser
+      // panel and opens directly in the system default browser.
+      const forceExternal = e.metaKey || e.ctrlKey;
+      if (!forceExternal && browserPanel && isExternalUrl(href) && !href.toLowerCase().startsWith('mailto:')) {
         // Route to embedded browser panel (exclude mailto: — those go to system email client)
         browserPanel.openUrl(href);
       } else {

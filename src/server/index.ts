@@ -83,7 +83,7 @@ import type { SessionSource } from './types/session';
 import { parseAgentFrontmatter, parseFullAgentContent, serializeAgentContent } from '../shared/agentCommands';
 import { scanAgents, readWorkspaceConfig, writeWorkspaceConfig, loadEnabledAgents, readAgentMeta, writeAgentMeta, findAgent } from './agents/agent-loader';
 import type { AgentFrontmatter, AgentMeta, AgentWorkspaceConfig } from '../shared/agentTypes';
-import type { McpServerDefinition } from '../renderer/config/types';
+import type { McpServerDefinition } from '../shared/config-types';
 import { ensureDirSync, ensureDir, isDirEntry } from './utils/fs-utils';
 import {
   setCronTaskContext,
@@ -266,7 +266,7 @@ import {
   updateSessionMetadata,
   getAttachmentPath,
 } from './SessionStore';
-import { findAgentByWorkspacePath, getAllMcpServers, getEffectiveMcpServers } from './utils/admin-config';
+import { findAgentByWorkspacePath, findProvider, getAllMcpServers, getEffectiveMcpServers, resolveProviderEnv } from './utils/admin-config';
 import { snapshotForOwnedSession } from './utils/session-snapshot';
 import { resolveSessionConfig } from './utils/resolve-session-config';
 import type { AgentConfig } from '../shared/types/agent';
@@ -388,6 +388,43 @@ function getRuntimeConfigPermissionMode(runtimeConfig?: RuntimeConfig | null): s
   return permissionMode ? permissionMode : undefined;
 }
 
+/**
+ * PRD 0.2.9: live-resolve a per-task `providerId` into the value
+ * `enqueueUserMessage` expects:
+ *
+ *   - api-type provider with apiKey      → ProviderEnv object
+ *   - subscription-type provider         → `'subscription'` sentinel (clears
+ *                                          the session's current providerEnv)
+ *   - provider missing / api-type w/o key → throws (caller surfaces 400)
+ *
+ * The `'subscription'` sentinel is the documented contract of
+ * `enqueueUserMessage` (agent-session.ts:5375-5383). Callers MUST forward
+ * the literal string when switching to subscription, not `undefined` —
+ * `undefined` means "keep current provider", which is the bug PRD 0.2.9 R1
+ * was tracking.
+ */
+function resolveCronProviderRouting(
+  providerId: string,
+): ProviderEnv | 'subscription' {
+  const provider = findProvider(providerId);
+  if (!provider) {
+    throw new Error(
+      `Provider '${providerId}' not found in config — task references a provider that has been deleted. Re-select a provider in 任务编辑 → 高级配置.`,
+    );
+  }
+  if (provider.type === 'subscription') {
+    return 'subscription';
+  }
+  const env = resolveProviderEnv(providerId);
+  if (!env) {
+    // Provider exists but has no apiKey configured.
+    throw new Error(
+      `Provider '${providerId}' has no API Key — open 设置 → 模型供应商 to configure it, or re-select a provider in 任务编辑 → 高级配置.`,
+    );
+  }
+  return env;
+}
+
 // Cron task execution payload
 type CronExecutePayload = {
   taskId: string;
@@ -410,12 +447,27 @@ type CronExecutePayload = {
     upstreamFormat?: 'chat_completions' | 'responses';
   };
   /**
-   * PRD #119: explicit routing intent. Controls how the handler resolves
-   * effective model + providerEnv:
+   * PRD 0.2.9: per-task provider id. When set, sidecar live-resolves the
+   * provider env via `resolveProviderEnv(providerId)` at each tick — this
+   * keeps API key rotation / subscription switches in sync without
+   * persisting credentials in the cron task. Mutually exclusive with
+   * `providerEnv` (legacy explicit-snapshot path).
+   *
+   * Resolution outcomes:
+   *   - provider not found / api-type with no apiKey → 400 (refuse to run,
+   *     caller marks Task as Blocked)
+   *   - subscription provider → effectiveProviderEnv = 'subscription'
+   *     (sentinel cleared on session)
+   *   - api provider → effectiveProviderEnv = ResolvedProviderEnv object
+   */
+  providerId?: string;
+  /**
+   * PRD #119 / 0.2.9: explicit routing intent. Controls how the handler
+   * resolves effective model + providerEnv when `providerId` is absent:
    *   - `'followAgent'` (default if absent) — snapshot-based, follows agent
-   *   - `'subscription'` — force `effectiveProviderEnv = undefined`
+   *   - `'subscription'` — force subscription clear
    *   - `'explicit'`     — force `effectiveProviderEnv = payload.providerEnv`
-   * Mirrors Rust's `cron_task::ProviderIntent`.
+   * Mirrors Rust's `cron_task::ProviderIntent`. New code prefers `providerId`.
    */
   providerIntent?: 'followAgent' | 'subscription' | 'explicit';
   /**
@@ -2112,12 +2164,36 @@ async function main() {
           // path operates on the current session's metadata. For Subscription
           // / Explicit intents we bypass the snapshot entirely and use the
           // payload's values directly.
+          // PRD 0.2.9: provider routing precedence:
+          //   1. payload.providerId (new) — live-resolve from config.json on
+          //      every tick. This is the path used by Task Center + the
+          //      collapsed Launcher/Chat/IM-cron writers (PRD 0.2.9 R7).
+          //   2. payload.providerIntent (legacy #119 path) — kept for in-flight
+          //      cron tasks persisted by 0.2.8 and earlier.
+          //   3. neither — followAgent (snapshot resolve from session meta).
           const intent = payload.providerIntent ?? 'followAgent';
           let effectiveModel = model;
-          let effectiveProviderEnv: typeof providerEnv = providerEnv;
+          let effectiveProviderEnv: ProviderEnv | 'subscription' | undefined = providerEnv;
           let effectiveRuntimeConfig = payload.runtimeConfig;
 
-          if (intent === 'followAgent') {
+          if (payload.providerId) {
+            // PRD 0.2.9 — Per-tick live-resolve. Throws on missing provider /
+            // missing apiKey; we surface as 400 and let Rust mark Task Blocked.
+            try {
+              effectiveProviderEnv = resolveCronProviderRouting(payload.providerId);
+            } catch (e) {
+              const errMsg = e instanceof Error ? e.message : String(e);
+              console.error(`[cron] execute: provider resolution failed for '${payload.providerId}': ${errMsg}`);
+              clearCronTaskContext(currentSessionId);
+              resetInteractionScenario();
+              return jsonResponse({ success: false, error: errMsg }, 400);
+            }
+            if (payload.model) effectiveModel = payload.model;
+            if (effectiveRuntimeConfig) {
+              effectiveRuntimeConfig = { ...effectiveRuntimeConfig, model: payload.model ?? effectiveRuntimeConfig.model };
+            }
+            console.log(`[cron] execute providerId=${payload.providerId} resolved=${effectiveProviderEnv === 'subscription' ? 'subscription' : (effectiveProviderEnv as ProviderEnv).baseUrl ?? 'anthropic'} model=${effectiveModel ?? 'default'}`);
+          } else if (intent === 'followAgent') {
             if (currentSessionId) {
               const sessionMeta = getSessionMetadata(currentSessionId);
               const agent = findAgentByWorkspacePath(agentDir) as AgentConfig | undefined;
@@ -2126,7 +2202,7 @@ async function main() {
                 if (resolved.model !== undefined) effectiveModel = resolved.model;
                 if (resolved.providerEnvJson) {
                   try {
-                    effectiveProviderEnv = JSON.parse(resolved.providerEnvJson);
+                    effectiveProviderEnv = JSON.parse(resolved.providerEnvJson) as ProviderEnv;
                   } catch (e) {
                     console.warn(`[cron] execute followAgent: failed to parse providerEnvJson for session ${currentSessionId}, falling back to task-frozen value`, e);
                   }
@@ -2144,7 +2220,11 @@ async function main() {
             if (payload.model) effectiveModel = payload.model;
             if (payload.providerEnv) effectiveProviderEnv = payload.providerEnv;
           } else if (intent === 'subscription') {
-            effectiveProviderEnv = undefined;
+            // PRD 0.2.9 R1 — pass the explicit 'subscription' sentinel (NOT
+            // undefined) so `enqueueUserMessage` clears the session's current
+            // providerEnv. Passing undefined here was the original bug:
+            // agent-session.ts:5381-5383 treats undefined as "keep current".
+            effectiveProviderEnv = 'subscription';
             if (payload.model) effectiveModel = payload.model;
             if (effectiveRuntimeConfig) {
               effectiveRuntimeConfig = { ...effectiveRuntimeConfig, model: payload.model ?? effectiveRuntimeConfig.model };
@@ -2263,17 +2343,30 @@ async function main() {
           // an accurate record of what config the run actually used. This
           // also lets the unified `resolveSessionConfig` path read back the
           // right values without intent-aware branching at read time.
-          const cronIntent = payload.providerIntent ?? 'followAgent';
-          if (cronIntent === 'subscription') {
-            cronSnapshot.providerId = undefined;
+          // PRD 0.2.9 — When `providerId` is set on the payload, the
+          // session metadata snapshot tracks it (so the resolved env can
+                  // be re-derived per tick by the runtime resolver), and
+          // pre-#119 fields are explicitly cleared. This precedence runs
+          // BEFORE the legacy intent path below so a corrupt payload
+          // carrying both `providerId` and `providerEnv` can't poison the
+          // snapshot with the latter (Codex P2.1 finding).
+          if (payload.providerId) {
+            cronSnapshot.providerId = payload.providerId;
             cronSnapshot.providerEnvJson = undefined;
             if (payload.model) cronSnapshot.model = payload.model;
-          } else if (cronIntent === 'explicit' && payload.providerEnv) {
-            cronSnapshot.providerId = undefined;
-            cronSnapshot.providerEnvJson = JSON.stringify(payload.providerEnv);
-            if (payload.model) cronSnapshot.model = payload.model;
+          } else {
+            const cronIntent = payload.providerIntent ?? 'followAgent';
+            if (cronIntent === 'subscription') {
+              cronSnapshot.providerId = undefined;
+              cronSnapshot.providerEnvJson = undefined;
+              if (payload.model) cronSnapshot.model = payload.model;
+            } else if (cronIntent === 'explicit' && payload.providerEnv) {
+              cronSnapshot.providerId = undefined;
+              cronSnapshot.providerEnvJson = JSON.stringify(payload.providerEnv);
+              if (payload.model) cronSnapshot.model = payload.model;
+            }
+            // FollowAgent (legacy): cronSnapshot keeps the agent's values verbatim.
           }
-          // FollowAgent (legacy): cronSnapshot keeps the agent's values verbatim.
           const overrideRuntime = payload.runtime ?? getActiveRuntimeType();
           if (overrideRuntime) cronSnapshot.runtime = overrideRuntime;
           // PRD 0.2.4 §需求 4 — stamp per-task MCP override into the new
@@ -2358,13 +2451,32 @@ async function main() {
         // permissionMode override is intent-independent: it overrides the
         // resolved value if payload.permissionMode is set, else falls back
         // to the resolver / runtime default.
+        // PRD 0.2.9: provider routing precedence — see /cron/execute above
+        // for the full design comment. providerId (new) > providerIntent
+        // (legacy #119) > followAgent (default).
         const intent = payload.providerIntent ?? 'followAgent';
 
         let effectiveModel = model;
-        let effectiveProviderEnv: typeof providerEnv = providerEnv;
+        let effectiveProviderEnv: ProviderEnv | 'subscription' | undefined = providerEnv;
         let effectiveRuntimeConfig = payload.runtimeConfig;
 
-        if (intent === 'followAgent') {
+        if (payload.providerId) {
+          // PRD 0.2.9 — Per-tick live-resolve.
+          try {
+            effectiveProviderEnv = resolveCronProviderRouting(payload.providerId);
+          } catch (e) {
+            const errMsg = e instanceof Error ? e.message : String(e);
+            console.error(`[cron] execute-sync: provider resolution failed for '${payload.providerId}': ${errMsg}`);
+            clearCronTaskContext(effectiveSessionId);
+            resetInteractionScenario();
+            return jsonResponse({ success: false, error: errMsg }, 400);
+          }
+          if (payload.model) effectiveModel = payload.model;
+          if (effectiveRuntimeConfig) {
+            effectiveRuntimeConfig = { ...effectiveRuntimeConfig, model: payload.model ?? effectiveRuntimeConfig.model };
+          }
+          console.log(`[cron] execute-sync providerId=${payload.providerId} resolved=${effectiveProviderEnv === 'subscription' ? 'subscription' : (effectiveProviderEnv as ProviderEnv).baseUrl ?? 'anthropic'} runMode=${effectiveRunMode} model=${effectiveModel ?? 'default'}`);
+        } else if (intent === 'followAgent') {
           // Legacy snapshot-based resolution.
           const snapshotSessionId = effectiveSessionId ?? getSessionId();
           if (snapshotSessionId) {
@@ -2375,7 +2487,7 @@ async function main() {
               if (resolved.model !== undefined) effectiveModel = resolved.model;
               if (resolved.providerEnvJson) {
                 try {
-                  effectiveProviderEnv = JSON.parse(resolved.providerEnvJson);
+                  effectiveProviderEnv = JSON.parse(resolved.providerEnvJson) as ProviderEnv;
                 } catch (e) {
                   console.warn(`[cron] execute-sync followAgent: failed to parse providerEnvJson for session ${snapshotSessionId}, falling back to task-frozen value`, e);
                 }
@@ -2402,8 +2514,9 @@ async function main() {
           if (payload.model) effectiveModel = payload.model;
           if (payload.providerEnv) effectiveProviderEnv = payload.providerEnv;
         } else if (intent === 'subscription') {
-          // Cron explicitly wants subscription — never inherit from agent.
-          effectiveProviderEnv = undefined;
+          // PRD 0.2.9 R1 — explicit 'subscription' sentinel, not undefined.
+          // See /cron/execute above for the full rationale.
+          effectiveProviderEnv = 'subscription';
           if (payload.model) effectiveModel = payload.model;
           if (effectiveRuntimeConfig) {
             effectiveRuntimeConfig = { ...effectiveRuntimeConfig, model: payload.model ?? effectiveRuntimeConfig.model };
@@ -2430,7 +2543,13 @@ async function main() {
           if (effectiveRuntimeConfig) {
             effectiveRuntimeConfig = { ...effectiveRuntimeConfig, model: payload.model ?? effectiveRuntimeConfig.model };
           }
-          console.log(`[cron] execute-sync intent=explicit runMode=${effectiveRunMode} model=${effectiveModel ?? 'default'} provider=${effectiveProviderEnv?.baseUrl}`);
+          // Type-narrow for the log: the explicit branch can only land on a
+          // ProviderEnv object (assigned just above from `payload.providerEnv`,
+          // which the early-return refuses to be undefined). Mirror the
+          // shape used at the providerId branch for consistency, including
+          // the `'anthropic'` fallback when `baseUrl` is omitted (subscription
+          // providers carry no baseUrl but use Anthropic's default endpoint).
+          console.log(`[cron] execute-sync intent=explicit runMode=${effectiveRunMode} model=${effectiveModel ?? 'default'} provider=${(effectiveProviderEnv as ProviderEnv | undefined)?.baseUrl ?? 'anthropic'}`);
         }
 
         // Permission mode override is intent-independent.
@@ -7177,6 +7296,13 @@ async function main() {
             const imCronModel = payloadRuntime === 'builtin'
               ? (payload.model ?? getSessionModel())
               : getRuntimeConfigModel(payloadRuntimeConfig);
+            // PRD 0.2.9 — Resolve providerId from the workspace agent so
+            // the IM cron tool can create live-resolve crons. Only meaningful
+            // for builtin runtime (external runtimes manage their own provider).
+            const imAgentForProvider = payloadRuntime === 'builtin'
+              ? findAgentByWorkspacePath(agentDir)
+              : null;
+            const imProviderId = (imAgentForProvider?.providerId as string | undefined) ?? undefined;
             setImCronContext({
               botId: payload.botId,
               chatId: payload.sourceId,
@@ -7186,6 +7312,8 @@ async function main() {
               permissionMode: payloadRuntime === 'builtin'
                 ? payload.permissionMode
                 : getRuntimeConfigPermissionMode(payloadRuntimeConfig),
+              // Legacy frozen env (kept for back-compat); sidecar prefers
+              // `providerId` when both are present.
               providerEnv: payloadRuntime === 'builtin' && payload.providerEnv ? {
                 baseUrl: payload.providerEnv.baseUrl,
                 apiKey: payload.providerEnv.apiKey,
@@ -7195,6 +7323,7 @@ async function main() {
                 maxOutputTokensParamName: payload.providerEnv.maxOutputTokensParamName,
                 upstreamFormat: payload.providerEnv.upstreamFormat,
               } : undefined,
+              providerId: imProviderId,
               runtime: payloadRuntime,
               runtimeConfig: payloadRuntime === 'builtin' ? undefined : payloadRuntimeConfig ?? undefined,
             });

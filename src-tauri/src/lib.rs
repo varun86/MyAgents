@@ -52,6 +52,10 @@ use std::sync::atomic::AtomicBool;
 use tauri::{Emitter, Listener, Manager};
 use tauri_plugin_autostart::MacosLauncher;
 
+// Note: lib.rs is the crate root, so `#[macro_export]` macros (ulog_info!,
+// ulog_error!, etc.) are already in scope here without `use`. Importing them
+// would cause E0255 "name defined multiple times".
+
 /// Check if CLI arguments indicate CLI mode (delegates to cli module).
 pub fn is_cli_mode(args: &[String]) -> bool {
     cli::is_cli_mode(args)
@@ -496,7 +500,7 @@ pub fn run() {
                         .map(|s| s.to_string())
                         .or_else(|| panic.downcast_ref::<String>().cloned())
                         .unwrap_or_else(|| "<non-string panic payload>".to_string());
-                    log::error!(
+                    ulog_error!(
                         "[sidecar] cleanup_stale_sidecars panicked: {} — barrier released so startup can proceed",
                         msg
                     );
@@ -547,7 +551,7 @@ pub fn run() {
 
             // Setup system tray
             if let Err(e) = tray::setup_tray(app) {
-                log::error!("[App] Failed to setup system tray: {}", e);
+                ulog_error!("[App] Failed to setup system tray: {}", e);
             }
 
             // Frontend confirms exit (from X button → ConfirmDialog → "退出" button).
@@ -560,7 +564,7 @@ pub fn run() {
             // why X-button close silently failed before.
             let app_handle_for_tray = app.handle().clone();
             app.listen("tray:confirm-exit", move |_| {
-                log::info!("[App] Frontend confirmed exit, delegating to run-loop cleanup");
+                ulog_info!("[App] Frontend confirmed exit, delegating to run-loop cleanup");
                 app_handle_for_tray.exit(0);
             });
 
@@ -642,7 +646,7 @@ pub fn run() {
                 use tauri::Manager;
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = window.set_decorations(false);
-                    log::info!("[App] Windows: Disabled system decorations for custom title bar");
+                    ulog_info!("[App] Windows: Disabled system decorations for custom title bar");
                 }
             }
 
@@ -654,8 +658,8 @@ pub fn run() {
             // Start management API (internal HTTP server for Bun→Rust IPC)
             tauri::async_runtime::spawn(async move {
                 match management_api::start_management_api().await {
-                    Ok(port) => log::info!("[App] Management API started on port {}", port),
-                    Err(e) => log::error!("[App] Failed to start management API: {}", e),
+                    Ok(port) => ulog_info!("[App] Management API started on port {}", port),
+                    Err(e) => ulog_error!("[App] Failed to start management API: {}", e),
                 }
             });
 
@@ -707,11 +711,11 @@ pub fn run() {
 
             // Auto-start IM Bot if previously enabled (3s delay)
             im::schedule_auto_start(app.handle().clone());
-            log::info!("[App] IM Bot auto-start scheduled");
+            ulog_info!("[App] IM Bot auto-start scheduled");
 
             // Auto-start Agent channels (4s delay, after IM bots)
             im::schedule_agent_auto_start(app.handle().clone());
-            log::info!("[App] Agent auto-start scheduled");
+            ulog_info!("[App] Agent auto-start scheduled");
 
             // Start Global Sidecar health monitor
             // Periodically checks if the Global Sidecar is alive and auto-restarts it
@@ -725,7 +729,7 @@ pub fn run() {
                     cleanup_done_for_monitor,
                 ).await;
             });
-            log::info!("[App] Global sidecar health monitor spawned");
+            ulog_info!("[App] Global sidecar health monitor spawned");
 
             // Start Session Sidecar health monitor (20s initial delay)
             let app_handle_for_session_monitor = app.handle().clone();
@@ -749,14 +753,14 @@ pub fn run() {
             ulog_info!("[App] Agent channel health monitor spawned");
 
             // Start background update check (5 second delay to let app initialize)
-            log::info!("[App] Setup complete, spawning background update check task...");
+            ulog_info!("[App] Setup complete, spawning background update check task...");
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                log::info!("[App] Background update task started, waiting 5 seconds...");
+                ulog_info!("[App] Background update task started, waiting 5 seconds...");
                 updater::check_update_on_startup(app_handle).await;
-                log::info!("[App] Background update task completed");
+                ulog_info!("[App] Background update task completed");
             });
-            log::info!("[App] Background update task spawned successfully");
+            ulog_info!("[App] Background update task spawned successfully");
 
             Ok(())
         })
@@ -766,7 +770,7 @@ pub fn run() {
                 tauri::WindowEvent::CloseRequested { api, .. } => {
                     // Check if minimize to tray is enabled
                     // Emit event to frontend to check config and decide
-                    log::info!("[App] Window close requested, emitting event to frontend");
+                    ulog_info!("[App] Window close requested, emitting event to frontend");
                     let _ = window.emit("window:close-requested", ());
                     // Prevent default close behavior - let frontend decide
                     api.prevent_close();
@@ -775,7 +779,7 @@ pub fn run() {
                 tauri::WindowEvent::Destroyed => {
                     use std::sync::atomic::Ordering::Relaxed;
                     if !cleanup_done_for_window.swap(true, Relaxed) {
-                        log::info!("[App] Window destroyed, cleaning up sidecars...");
+                        ulog_info!("[App] Window destroyed, cleaning up sidecars...");
                         im::signal_all_agents_shutdown(&agent_state_for_window);
                         im::signal_all_bots_shutdown(&im_state_for_window);
                         let _ = stop_all_sidecars(&sidecar_state_for_window);
@@ -803,7 +807,7 @@ pub fn run() {
                 // Only cleanup once (Relaxed is sufficient for simple flag)
                 use std::sync::atomic::Ordering::Relaxed;
                 if !cleanup_done_for_exit.swap(true, Relaxed) {
-                    log::info!("[App] Exit requested (Cmd+Q or Dock quit), cleaning up sidecars...");
+                    ulog_info!("[App] Exit requested (Cmd+Q or Dock quit), cleaning up sidecars...");
                     im::signal_all_agents_shutdown(&agent_state_for_exit);
                     im::signal_all_bots_shutdown(&im_state_for_exit);
                     let _ = stop_all_sidecars(&sidecar_state_for_exit);
@@ -820,7 +824,7 @@ pub fn run() {
             // This is triggered when user clicks the Dock icon while app is running but window is hidden
             #[cfg(target_os = "macos")]
             tauri::RunEvent::Reopen { .. } => {
-                log::info!("[App] Dock icon clicked (Reopen), showing main window");
+                ulog_info!("[App] Dock icon clicked (Reopen), showing main window");
                 use tauri::Manager;
                 if let Some(window) = _app_handle.get_webview_window("main") {
                     let _ = window.show();

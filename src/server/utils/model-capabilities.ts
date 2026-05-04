@@ -48,13 +48,13 @@ import { existsSync, readdirSync, readFileSync, statSync } from 'fs';
 import { resolve } from 'path';
 import { getHomeDirOrNull } from './platform';
 import { stripBom } from '../../shared/utils';
-// Static import over `require()` / dynamic import(): `types.ts` has zero
-// transitive imports (verified 2026-04) so this doesn't pull in React or any
-// renderer-only code at Sidecar load time. The alternative — native
-// `createRequire()(...)` — cannot resolve `.ts` extensions in dev mode
-// (`node --import tsx/esm` only shims the ESM loader, not require), which
-// would make PRESET_PROVIDERS silently empty and defeat the whole mechanism.
-import { PRESET_PROVIDERS } from '../../renderer/config/types';
+// PRESET_PROVIDERS now lives in src/shared/config-types (moved from
+// renderer/config/types in v0.2.9 to satisfy the dependency-cruiser
+// `sidecar-no-import-renderer` boundary rule). The historical concern
+// — that the source file might pull React / renderer-only deps into
+// the Sidecar bundle — is moot now that the file lives in shared/
+// where it has zero transitive deps by construction.
+import { PRESET_PROVIDERS } from '../../shared/config-types';
 
 export interface ModelCapability {
   contextLength?: number;

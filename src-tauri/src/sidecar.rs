@@ -224,6 +224,79 @@ const STARTUP_CLEANUP_PATTERNS: &[crate::process_cleanup::ProcessPattern] = &[
     crate::process_cleanup::ProcessPattern::new("nodejs", "/myagents/nodejs/"),
 ];
 
+// ===== Sidecar stderr classification =====
+//
+// Node.js writes to stderr from a few intentional informational paths
+// (startup beacon, log-retention sweep audit, sdk-shim warnings). The
+// pre-existing default of "stderr ⇒ ERROR" surfaced these as red lines in
+// the unified log and broke `grep ERROR` for monitoring. Recognise the
+// known prefixes and downgrade.
+//
+// NOTE on adding new entries: only demote messages that are unconditionally
+// non-actionable. If a prefix EVER signals a real problem, leave it on
+// ERROR — false negatives in this table are far worse than the noise.
+
+#[derive(Clone, Copy)]
+pub(crate) enum SidecarStderrLevel {
+    Info,
+    Warn,
+    Error,
+}
+
+pub(crate) fn classify_sidecar_stderr(line: &str) -> SidecarStderrLevel {
+    // Anchor the prefix match. `contains()` would silently demote any
+    // genuine ERROR line that happens to embed one of these brackets in a
+    // user-content echo (e.g., `Failed to validate '[log-retention]' user
+    // input`). Sidecar / bridge stderr lines from the producers below
+    // start with the prefix unconditionally — leading whitespace is the
+    // only natural variation, so trim before matching. Cross-review of
+    // dev/0.2.9 flagged the substring-match risk.
+    let head = line.trim_start();
+    // INFO: pure progress / audit output that just happens to land on
+    // stderr because the sidecar logger writes there before unified
+    // logging is wired up.
+    //   - `[startup]` startupBeacon, fired before stdout drain is hooked.
+    //   - `[log-retention]` daily / on-demand sweep audit (deleted N old
+    //     files, etc.) — see `src/server/log-retention.ts::safeStderr`.
+    if head.starts_with("[startup]") || head.starts_with("[log-retention]") {
+        return SidecarStderrLevel::Info;
+    }
+    // WARN: real warnings the sidecar emits via `console.warn`. The
+    // `[sdk-shim]` "not implemented in Bridge mode" lines warn that an
+    // openclaw plugin reached for an SDK method the bridge doesn't
+    // implement. They are expected (the shim is intentionally partial)
+    // but worth keeping visible at WARN level for plugin developers.
+    if head.starts_with("[sdk-shim]") {
+        return SidecarStderrLevel::Warn;
+    }
+    SidecarStderrLevel::Error
+}
+
+#[cfg(test)]
+mod stderr_classifier_tests {
+    use super::*;
+
+    #[test]
+    fn anchored_prefixes_demote_only_when_at_line_start() {
+        assert!(matches!(classify_sidecar_stderr("[startup] init"), SidecarStderrLevel::Info));
+        assert!(matches!(classify_sidecar_stderr("[log-retention] sweep done"), SidecarStderrLevel::Info));
+        assert!(matches!(classify_sidecar_stderr("[sdk-shim] foo() not implemented"), SidecarStderrLevel::Warn));
+        // Leading whitespace OK.
+        assert!(matches!(classify_sidecar_stderr("  [startup] foo"), SidecarStderrLevel::Info));
+        // Embedded prefix in a real error MUST stay ERROR.
+        assert!(matches!(
+            classify_sidecar_stderr("Error: failed to parse '[log-retention]' user input"),
+            SidecarStderrLevel::Error
+        ));
+        assert!(matches!(
+            classify_sidecar_stderr("uncaught: missing [sdk-shim] field in payload"),
+            SidecarStderrLevel::Error
+        ));
+        // Default = ERROR.
+        assert!(matches!(classify_sidecar_stderr("ReferenceError: x is not defined"), SidecarStderrLevel::Error));
+    }
+}
+
 // ===== Startup cleanup synchronization =====
 //
 // `cleanup_stale_sidecars` is now hoisted off the main thread (see
@@ -1301,13 +1374,12 @@ fn kill_process(child: &mut Child) -> std::io::Result<()> {
     }
     #[cfg(windows)]
     {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
         // taskkill /T kills the entire process tree (including SDK subprocess and MCP servers)
         // taskkill /F forces termination
-        let result = Command::new("taskkill")
+        // process_cmd::new applies CREATE_NO_WINDOW automatically, replacing
+        // the previous manual creation_flags() call.
+        let result = crate::process_cmd::new("taskkill")
             .args(["/T", "/F", "/PID", &pid.to_string()])
-            .creation_flags(CREATE_NO_WINDOW)
             .output();
         match result {
             Ok(output) => {
@@ -1971,17 +2043,24 @@ pub fn start_tab_sidecar<R: Runtime>(
         });
     }
 
-    // 启动线程捕获 stderr → 写入统一日志
+    // 启动线程捕获 stderr → 写入统一日志。
+    //
+    // 不是所有 sidecar stderr 都是 ERROR：Node.js 的 `console.warn` /
+    // 直接 `process.stderr.write` 在 sidecar 里有几处合法的 informational
+    // 用法，盲目标 ERROR 会让 unified log 出现假阳性（grep ERROR 拿到无关
+    // 噪音）。识别已知 informational/warn 前缀，按真实严重度落级。
     if let Some(stderr) = child.stderr.take() {
         let tab_id_clone = tab_id.to_string();
         thread::spawn(move || {
             let reader = BufReader::new(stderr);
             for line in reader.lines().flatten() {
-                // startupBeacon 故意通过 stderr 输出 startup 进度，降级为 INFO 避免日志噪音
-                if line.contains("[startup]") {
-                    ulog_info!("[bun-err][{}] {}", tab_id_clone, line);
-                } else {
-                    ulog_error!("[bun-err][{}] {}", tab_id_clone, line);
+                match classify_sidecar_stderr(&line) {
+                    SidecarStderrLevel::Info =>
+                        ulog_info!("[bun-err][{}] {}", tab_id_clone, line),
+                    SidecarStderrLevel::Warn =>
+                        ulog_warn!("[bun-err][{}] {}", tab_id_clone, line),
+                    SidecarStderrLevel::Error =>
+                        ulog_error!("[bun-err][{}] {}", tab_id_clone, line),
                 }
             }
         });
@@ -3003,10 +3082,13 @@ fn create_new_session_sidecar<R: Runtime>(
         thread::spawn(move || {
             let reader = BufReader::new(stderr);
             for line in reader.lines().flatten() {
-                if line.contains("[startup]") {
-                    ulog_info!("[bun-err][session:{}] {}", session_id_for_log, line);
-                } else {
-                    ulog_error!("[bun-err][session:{}] {}", session_id_for_log, line);
+                match classify_sidecar_stderr(&line) {
+                    SidecarStderrLevel::Info =>
+                        ulog_info!("[bun-err][session:{}] {}", session_id_for_log, line),
+                    SidecarStderrLevel::Warn =>
+                        ulog_warn!("[bun-err][session:{}] {}", session_id_for_log, line),
+                    SidecarStderrLevel::Error =>
+                        ulog_error!("[bun-err][session:{}] {}", session_id_for_log, line),
                 }
             }
         });
@@ -3815,8 +3897,15 @@ pub struct CronExecutePayload {
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider_env: Option<ProviderEnv>,
+    /// PRD 0.2.9: per-task provider id. When set, sidecar live-resolves the
+    /// provider env on every tick from `~/.myagents/config.json`. Mutually
+    /// exclusive with `provider_env` (legacy explicit-snapshot path).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_id: Option<String>,
     /// PRD #119: routing intent. `None` deserializes to FollowAgent on the
     /// receiver side (sidecar handler treats absent as legacy default).
+    /// PRD 0.2.9 prefers `provider_id` over this; intent is kept for
+    /// backward-compat with crons persisted in 0.2.8 and earlier.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider_intent: Option<crate::cron_task::ProviderIntent>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -4063,6 +4152,7 @@ pub async fn cmd_execute_cron_task(
     permissionMode: Option<String>,
     model: Option<String>,
     providerEnv: Option<ProviderEnv>,
+    providerId: Option<String>,
     providerIntent: Option<crate::cron_task::ProviderIntent>,
     runtime: Option<String>,
     runtimeConfig: Option<serde_json::Value>,
@@ -4079,6 +4169,7 @@ pub async fn cmd_execute_cron_task(
         permission_mode: permissionMode,
         model,
         provider_env: providerEnv,
+        provider_id: providerId,
         provider_intent: providerIntent,
         runtime,
         runtime_config: runtimeConfig,

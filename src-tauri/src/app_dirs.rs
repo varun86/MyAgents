@@ -21,6 +21,8 @@
 use std::fs;
 use std::path::PathBuf;
 
+use crate::{ulog_error, ulog_info, ulog_warn};
+
 /// Outcome of [`acquire_lock`] — encodes whether a prior MyAgents instance
 /// existed on this machine when we started.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,7 +95,7 @@ pub fn acquire_lock() -> LockAcquireResult {
                         // place. Treat as crash recovery.
                         LockAcquireResult::CrashRecovery
                     } else if is_myagents_process(old_pid) {
-                        log::warn!(
+                        ulog_warn!(
                             "[app-lock] Killing stale MyAgents instance (PID {}) before acquiring lock",
                             old_pid
                         );
@@ -114,9 +116,9 @@ pub fn acquire_lock() -> LockAcquireResult {
     // Write our PID
     let pid = std::process::id();
     if let Err(e) = fs::write(&lock_path, pid.to_string()) {
-        log::error!("[app-lock] Failed to write lock file: {}", e);
+        ulog_error!("[app-lock] Failed to write lock file: {}", e);
     } else {
-        log::info!("[app-lock] Lock acquired (PID {}, prior={:?})", pid, result);
+        ulog_info!("[app-lock] Lock acquired (PID {}, prior={:?})", pid, result);
     }
 
     result
@@ -133,7 +135,7 @@ pub fn release_lock() {
     match fs::read_to_string(&lock_path) {
         Ok(content) if content.trim() == current_pid => {
             let _ = fs::remove_file(&lock_path);
-            log::info!("[app-lock] Lock released (PID {})", current_pid);
+            ulog_info!("[app-lock] Lock released (PID {})", current_pid);
         }
         _ => {
             // Lock file doesn't exist or belongs to another instance — don't touch it

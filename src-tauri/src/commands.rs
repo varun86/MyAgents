@@ -1147,7 +1147,7 @@ pub fn cmd_sync_cli<R: Runtime>(
 // matching exclusion list in src/server/index.ts::seedBundledSkills
 // MUST be kept in sync (comment there points back here).
 
-const SYSTEM_SKILLS_VERSION: &str = "10";
+const SYSTEM_SKILLS_VERSION: &str = "11";
 
 /// Skills that ship with the app and MUST stay at the bundled version —
 /// the app's flows depend on them, users are not meant to customise.
@@ -1455,7 +1455,7 @@ pub async fn cmd_open_file(path: String) -> Result<(), String> {
 
     #[cfg(target_os = "macos")]
     {
-        std::process::Command::new("open")
+        crate::process_cmd::new("open")
             .arg(&safe_path)
             .spawn()
             .map_err(|e| format!("Failed to open {}: {}", safe_path, e))?;
@@ -1463,14 +1463,14 @@ pub async fn cmd_open_file(path: String) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         // Use explorer.exe instead of cmd /C start to avoid shell metacharacter injection
-        std::process::Command::new("explorer")
+        crate::process_cmd::new("explorer")
             .arg(&safe_path)
             .spawn()
             .map_err(|e| format!("Failed to open {}: {}", safe_path, e))?;
     }
     #[cfg(target_os = "linux")]
     {
-        std::process::Command::new("xdg-open")
+        crate::process_cmd::new("xdg-open")
             .arg(&safe_path)
             .spawn()
             .map_err(|e| format!("Failed to open {}: {}", safe_path, e))?;
@@ -1502,6 +1502,8 @@ pub async fn cmd_wecom_qr_generate() -> Result<WecomQrGenerateResult, String> {
         plat
     );
 
+    // External host (work.weixin.qq.com) — system proxy is wanted here.
+    #[allow(clippy::disallowed_methods)]
     let builder = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15));
     let client = crate::proxy_config::build_client_with_proxy(builder)?;
@@ -1556,6 +1558,8 @@ pub async fn cmd_wecom_qr_poll(scode: String, poll_index: Option<u32>) -> Result
         safe_scode
     );
 
+    // External host — system proxy wanted.
+    #[allow(clippy::disallowed_methods)]
     let builder = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10));
     let client = crate::proxy_config::build_client_with_proxy(builder)?;
@@ -1632,6 +1636,8 @@ pub async fn cmd_fetch_provider_models(
     let client = if is_localhost {
         crate::local_http::json_client(std::time::Duration::from_secs(15))
     } else {
+        // External host branch — system proxy wanted.
+        #[allow(clippy::disallowed_methods)]
         let builder = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(15));
         crate::proxy_config::build_client_with_proxy(builder)?

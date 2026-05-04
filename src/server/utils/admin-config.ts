@@ -21,8 +21,8 @@ import {
 import { resolve } from 'path';
 import { getHomeDirOrNull } from './platform';
 import { stripBom } from '../../shared/utils';
-import type { McpServerDefinition } from '../../renderer/config/types';
-import { PRESET_MCP_SERVERS, PRESET_PROVIDERS } from '../../renderer/config/types';
+import type { McpServerDefinition } from '../../shared/config-types';
+import { PRESET_MCP_SERVERS, PRESET_PROVIDERS } from '../../shared/config-types';
 import type { SessionMetadata } from '../types/session';
 import { ensureDirSync } from './fs-utils';
 import { withFileLock, FileBusyError } from './file-lock';
@@ -410,10 +410,13 @@ export function resolveProviderEnv(
   // Subscription providers don't use providerEnv (SDK uses built-in OAuth)
   if (provider.type === 'subscription') return undefined;
 
-  // Get API key from config
+  // Get API key from config. PRD 0.2.9 — also reject whitespace-only keys
+  // (Codex review): a value like `"  "` is truthy and would silently be
+  // sent to the upstream as the Authorization header, producing an opaque
+  // 401 instead of an actionable "no API key" error.
   const c = config ?? loadConfig();
   const apiKey = (c.providerApiKeys ?? {})[providerId];
-  if (!apiKey) return undefined;
+  if (!apiKey || !apiKey.trim()) return undefined;
 
   // Extract provider config fields (same shape as frontend Chat.tsx builds)
   const providerConfig = (provider.config ?? {}) as Record<string, unknown>;

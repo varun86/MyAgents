@@ -297,8 +297,26 @@ pub struct Task {
     /// Per-task model override. When `None`, the linked Agent's default
     /// model is used. Proxied into `CronTaskConfig.model` at cron-ensure
     /// time.
+    ///
+    /// PRD 0.2.9 invariant: when `provider_id` is set, `model` MUST also be
+    /// set (validated by `validate_task_provider_routing`). Storing
+    /// provider-without-model creates a half-state where execution would
+    /// silently route the picked provider's API to the agent's default
+    /// model — exactly the cross-provider misroute that #130 surfaced.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// PRD 0.2.9 — Per-task provider id override. When `None` the cron
+    /// follows the workspace agent (legacy snapshot semantics). When set,
+    /// the sidecar live-resolves env on every tick from
+    /// `~/.myagents/config.json`, so credential rotation propagates without
+    /// a re-save and credential copies never land in `tasks.jsonl` /
+    /// `cron_tasks.json`.
+    ///
+    /// Mutually exclusive with `runtime ∈ {claude-code, codex, gemini}`
+    /// (external runtimes manage their own provider) — enforced by
+    /// `validate_task_provider_routing`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_id: Option<String>,
     /// Per-task permission mode override (auto / plan / fullAgency / custom).
     /// When `None`, the linked Agent's default is used.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -430,6 +448,10 @@ pub struct TaskCreateDirectInput {
     // ── Execution overrides ──────────────────────────────────────────────
     #[serde(default)]
     pub model: Option<String>,
+    /// PRD 0.2.9 — Per-task provider id override. MUST be paired with
+    /// `model` (validated by `validate_task_provider_routing`).
+    #[serde(default)]
+    pub provider_id: Option<String>,
     #[serde(default)]
     pub permission_mode: Option<String>,
     #[serde(default)]
@@ -480,6 +502,10 @@ pub struct TaskCreateFromAlignmentInput {
     // That's exactly the silent-data-loss bug the cross-review flagged.
     #[serde(default)]
     pub model: Option<String>,
+    /// PRD 0.2.9 — Per-task provider id override. MUST be paired with
+    /// `model` (validated by `validate_task_provider_routing`).
+    #[serde(default)]
+    pub provider_id: Option<String>,
     #[serde(default)]
     pub permission_mode: Option<String>,
     #[serde(default)]
@@ -539,6 +565,24 @@ pub struct TaskUpdateInput {
     // ── Execution overrides ──────────────────────────────────────────────
     #[serde(default)]
     pub model: Option<String>,
+    /// PRD 0.2.9 — Per-task provider id override.
+    ///
+    /// On update semantics: `None` means "leave provider_id unchanged"
+    /// (Option-of-Option would be the principled choice but the surrounding
+    /// fields all use `None = no change` so we mirror that). To clear the
+    /// override, callers MUST send the JSON `{"providerId": null, "model":
+    /// null}` pair — `update` accepts the explicit `clear_overrides` flag
+    /// below for the no-ambiguity case. Validated by
+    /// `validate_task_provider_routing`.
+    #[serde(default)]
+    pub provider_id: Option<String>,
+    /// PRD 0.2.9 — Explicit "clear all builtin-runtime overrides" flag. When
+    /// true, `provider_id` and `model` are both reset to `None` regardless
+    /// of what the corresponding fields above carry. Lets the renderer's
+    /// "跟随 Agent" picker option round-trip cleanly without inventing a
+    /// double-Option serde shape.
+    #[serde(default)]
+    pub clear_provider_override: bool,
     #[serde(default)]
     pub permission_mode: Option<String>,
     #[serde(default)]
@@ -957,10 +1001,16 @@ impl TaskStore {
 
     // ---- Create ----
 
-    pub async fn create_direct(&self, input: TaskCreateDirectInput) -> Result<Task, String> {
+    pub async fn create_direct(&self, mut input: TaskCreateDirectInput) -> Result<Task, String> {
         // Validate workspace_path + name up front so we don't half-write.
         let workspace_path = canonicalize_workspace_path(&input.workspace_path)?;
         validate_task_name(&input.name)?;
+        // PRD 0.2.9 — Pin runtime='builtin' when provider_id is set with no
+        // explicit runtime (closes the "Agent runtime later flips to
+        // external" cross-talk hole). Idempotent.
+        pin_runtime_for_provider_id(&input.provider_id, &mut input.runtime);
+        // PRD 0.2.9 — Provider routing invariants (pairing + runtime-exclusion).
+        validate_task_provider_routing(&input.provider_id, &input.model, &input.runtime)?;
         // Cron expression validation at the boundary — same contract as
         // `update()`; ensures the scheduler never gets handed a malformed
         // expression that would make it die silently at first fire.
@@ -995,6 +1045,7 @@ impl TaskStore {
             cron_timezone: input.cron_timezone,
             dispatch_at: input.dispatch_at,
             model: input.model,
+            provider_id: input.provider_id,
             permission_mode: input.permission_mode,
             preselected_session_id: input.preselected_session_id,
             runtime: input.runtime,
@@ -1090,11 +1141,14 @@ impl TaskStore {
     /// path).
     pub async fn create_migrated(
         &self,
-        input: TaskCreateDirectInput,
+        mut input: TaskCreateDirectInput,
         initial_status: TaskStatus,
         message: String,
     ) -> Result<Task, String> {
         validate_task_name(&input.name)?;
+        // PRD 0.2.9 — Same pin+validate sequence as create_direct.
+        pin_runtime_for_provider_id(&input.provider_id, &mut input.runtime);
+        validate_task_provider_routing(&input.provider_id, &input.model, &input.runtime)?;
         if !matches!(
             initial_status,
             TaskStatus::Todo | TaskStatus::Running | TaskStatus::Done | TaskStatus::Stopped
@@ -1128,6 +1182,7 @@ impl TaskStore {
             cron_timezone: input.cron_timezone,
             dispatch_at: input.dispatch_at,
             model: input.model,
+            provider_id: input.provider_id,
             permission_mode: input.permission_mode,
             preselected_session_id: input.preselected_session_id,
             runtime: input.runtime,
@@ -1204,10 +1259,13 @@ impl TaskStore {
 
     pub async fn create_from_alignment(
         &self,
-        input: TaskCreateFromAlignmentInput,
+        mut input: TaskCreateFromAlignmentInput,
     ) -> Result<Task, String> {
         validate_task_name(&input.name)?;
         validate_safe_id(&input.alignment_session_id, "alignmentSessionId")?;
+        // PRD 0.2.9 — Same pin+validate sequence as create_direct.
+        pin_runtime_for_provider_id(&input.provider_id, &mut input.runtime);
+        validate_task_provider_routing(&input.provider_id, &input.model, &input.runtime)?;
         // The AI-discussion path (想法 → /task-alignment → create-from-alignment)
         // does not surface schedule fields in its input contract, yet the
         // `executionMode` is passed through unchanged. If we accept recurring /
@@ -1312,6 +1370,7 @@ impl TaskStore {
             // dropped every `--model` / `--permissionMode` flag passed to
             // `task create-from-alignment`.
             model: input.model,
+            provider_id: input.provider_id,
             permission_mode: input.permission_mode,
             preselected_session_id: None,
             runtime: input.runtime,
@@ -1469,6 +1528,16 @@ impl TaskStore {
                 TaskOpError::update_rejected_while_running(),
             ));
         }
+        // PRD 0.2.9 invariant 3 — reject contradictory clear-vs-set inputs at
+        // the input layer (rather than silently letting the merge order
+        // decide). Surfaces client bugs instead of swallowing them.
+        if input.clear_provider_override
+            && input.provider_id.as_deref().is_some_and(|s| !s.is_empty())
+        {
+            return Err(
+                "providerId 与 clearProviderOverride=true 冲突 — 调用方必须二选一".to_string(),
+            );
+        }
         let mut updated = existing.clone();
         if let Some(v) = input.name {
             validate_task_name(&v)?;
@@ -1506,6 +1575,18 @@ impl TaskStore {
         if let Some(v) = input.model {
             updated.model = if v.trim().is_empty() { None } else { Some(v) };
         }
+        if let Some(v) = input.provider_id {
+            updated.provider_id = if v.trim().is_empty() { None } else { Some(v) };
+        }
+        // PRD 0.2.9 — Explicit "follow Agent" reset: clears both provider_id
+        // and model atomically. Renderer's "跟随 Agent" picker option sends
+        // this flag rather than relying on an empty-string round-trip,
+        // which would only clear one field if the renderer accidentally
+        // omitted the other.
+        if input.clear_provider_override {
+            updated.provider_id = None;
+            updated.model = None;
+        }
         if let Some(v) = input.permission_mode {
             updated.permission_mode = if v.trim().is_empty() { None } else { Some(v) };
         }
@@ -1532,6 +1613,15 @@ impl TaskStore {
         if let Some(v) = input.notification {
             updated.notification = Some(v);
         }
+        // PRD 0.2.9 — Pin runtime='builtin' on the merged state when the
+        // post-merge shape has provider_id set without an explicit runtime.
+        // Mirrors the pin done in create_direct; closes the cross-talk hole.
+        pin_runtime_for_provider_id(&updated.provider_id, &mut updated.runtime);
+        // Provider routing invariants on merged state. Runs after pin so the
+        // external-exclusion rule fires correctly, and after all field merges
+        // (including clear_provider_override) so the rules see the actual
+        // post-update shape, not the input fragments.
+        validate_task_provider_routing(&updated.provider_id, &updated.model, &updated.runtime)?;
         updated.updated_at = now_ms();
 
         // Mode-transition hygiene: `run_mode` / `end_conditions` / the
@@ -1620,6 +1710,7 @@ impl TaskStore {
             || existing.cron_timezone != updated.cron_timezone
             || existing.dispatch_at != updated.dispatch_at;
         let exec_overrides_changed = existing.model != updated.model
+            || existing.provider_id != updated.provider_id
             || existing.permission_mode != updated.permission_mode
             || existing.mcp_enabled_servers != updated.mcp_enabled_servers;
         let notification_changed = existing.notification != updated.notification;
@@ -1711,6 +1802,21 @@ impl TaskStore {
                         "model".to_string(),
                         updated
                             .model
+                            .clone()
+                            .map(serde_json::Value::String)
+                            .unwrap_or(serde_json::Value::Null),
+                    );
+                }
+                if existing.provider_id != updated.provider_id {
+                    // PRD 0.2.9 — Project the per-task provider id into the
+                    // linked CronTask so the next dispatch tick uses the
+                    // up-to-date provider. `null` clears (= follow Agent),
+                    // a string sets it. Sidecar live-resolves env from this
+                    // provider id at every tick — no env snapshot lands here.
+                    patch.insert(
+                        "providerId".to_string(),
+                        updated
+                            .provider_id
                             .clone()
                             .map(serde_json::Value::String)
                             .unwrap_or(serde_json::Value::Null),
@@ -2245,6 +2351,87 @@ fn validate_task_name(name: &str) -> Result<(), String> {
         return Err("task name exceeds 120 chars".to_string());
     }
     Ok(())
+}
+
+/// PRD 0.2.9 — Validate the per-task provider routing invariants.
+///
+/// Three invariants enforced uniformly across all Task / CronTask write
+/// paths (`create_direct`, `create_from_alignment`, `update`,
+/// `create_migrated`, plus `CronTaskManager::create_task`):
+///
+///   1. **Pairing**: `provider_id.is_some()` ⇒ `model.is_some()`. Picking
+///      a provider without a model silently routes the chosen provider's
+///      API to the agent's default model — exactly the cross-provider
+///      misroute that #130 surfaced.
+///
+///   2. **External-runtime exclusion**: external runtimes (claude-code /
+///      codex / gemini) MUST NOT carry a builtin `provider_id`; they
+///      self-manage providers via their own CLI. A task with
+///      `runtime='codex' + provider_id='openai-...'` would either fail
+///      validation or, worse, get a model id that codex doesn't recognise.
+///
+///      `runtime: None` is treated as "force builtin" when `provider_id`
+///      is set — see invariant 3 below. This closes the codex-review
+///      finding "Agent runtime later switched to Codex/Gemini → task
+///      survives with `providerId+model` and silently ignores them at
+///      execute time" (Codex P1 #5 against PRD 0.2.9): with `provider_id`
+///      set, the only valid runtime is `'builtin'` or `None` AND we
+///      additionally pin runtime='builtin' on save (see callers).
+///
+///   3. **No contradictory clear**: `clear_provider_override == true`
+///      together with `provider_id == Some(_)` is rejected at the input
+///      layer. The Rust merge order (apply provider_id, then clear)
+///      makes "clear win", but accepting the contradictory shape silently
+///      hides client bugs. Callers must send one or the other.
+///
+/// `provider_id`-aware runtime materialization (the matching pin) lives at
+/// the call sites — see `create_direct` / `update`.
+fn validate_task_provider_routing(
+    provider_id: &Option<String>,
+    model: &Option<String>,
+    runtime: &Option<String>,
+) -> Result<(), String> {
+    if provider_id.is_some() && model.is_none() {
+        return Err(
+            "providerId 必须与 model 配对设置 — 选了 provider 后请同时选择该 provider 下的具体 model"
+                .to_string(),
+        );
+    }
+    if let Some(rt) = runtime.as_deref() {
+        let is_external = matches!(rt, "claude-code" | "codex" | "gemini");
+        if is_external && provider_id.is_some() {
+            return Err(format!(
+                "外部 runtime '{}' 自管 provider — 不允许同时指定 providerId（请在该 runtime 自身的设置中切换 provider）",
+                rt
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// PRD 0.2.9 — Materialize `runtime: Some("builtin")` whenever a
+/// `provider_id` is set with `runtime: None`. This closes the cross-talk
+/// hole flagged by Codex review (P1 #5):
+///
+///     - User saves task with `runtime: None, provider_id: 'openai-...'`
+///       (relying on Agent runtime = builtin).
+///     - Later: user changes Agent runtime to codex.
+///     - Without pinning, the task survives validation but its provider
+///       fields are silently ignored at execute time (codex branch reads
+///       only runtimeConfig.model).
+///     - Pinning `runtime: 'builtin'` makes the task fail validation at
+///       next save (provider_id + external runtime is invariant 2),
+///       AND keeps execution honoring the chosen provider regardless of
+///       Agent's later runtime switch — providerId IS the user's pinned
+///       intent for THIS task.
+///
+/// Idempotent: if `runtime` is already `Some(_)`, do nothing. Validator
+/// runs after this materialization, so any non-None+external case still
+/// surfaces as a "外部 runtime 不允许 providerId" error.
+fn pin_runtime_for_provider_id(provider_id: &Option<String>, runtime: &mut Option<String>) {
+    if provider_id.is_some() && runtime.is_none() {
+        *runtime = Some("builtin".to_string());
+    }
 }
 
 /// Resolve `~/.myagents/tasks/<id>/` and verify the resolved path stays inside
@@ -2917,26 +3104,28 @@ pub async fn cmd_task_open_docs_dir(
     fs::create_dir_all(&dir).map_err(|e| format!("mkdir task dir: {}", e))?;
     let path = dir.to_string_lossy().to_string();
 
-    // OS openers are user-visible system commands (CLAUDE.md exception);
-    // we skip `process_cmd` here and match commands.rs:cmd_open_file's
-    // pattern directly.
+    // OS openers via process_cmd::new — CREATE_NO_WINDOW is a no-op for
+    // GUI-subsystem binaries (open / explorer.exe / xdg-open) so the wrapper
+    // is functionally equivalent to raw Command::new here, but going through
+    // it preserves the single-mental-model rule from CLAUDE.md ("ALL child
+    // processes use process_cmd::new").
     #[cfg(target_os = "macos")]
     {
-        std::process::Command::new("open")
+        crate::process_cmd::new("open")
             .arg(&path)
             .spawn()
             .map_err(|e| format!("open finder: {}", e))?;
     }
     #[cfg(target_os = "windows")]
     {
-        std::process::Command::new("explorer")
+        crate::process_cmd::new("explorer")
             .arg(&path)
             .spawn()
             .map_err(|e| format!("open explorer: {}", e))?;
     }
     #[cfg(target_os = "linux")]
     {
-        std::process::Command::new("xdg-open")
+        crate::process_cmd::new("xdg-open")
             .arg(&path)
             .spawn()
             .map_err(|e| format!("xdg-open: {}", e))?;
@@ -3091,6 +3280,7 @@ mod tests {
             cron_timezone: None,
             dispatch_at: None,
             model: None,
+            provider_id: None,
             permission_mode: None,
             preselected_session_id: None,
             runtime: None,
@@ -3375,6 +3565,8 @@ mod tests {
                 cron_timezone: None,
                 dispatch_at: None,
                 model: None,
+                provider_id: None,
+                clear_provider_override: false,
                 permission_mode: None,
                 preselected_session_id: None,
                 runtime: None,
@@ -3431,6 +3623,89 @@ mod tests {
         assert!(task_docs_dir("").is_err());
         // Valid UUID-ish id works
         assert!(task_docs_dir("abc-123_ok").is_ok());
+    }
+
+    /// PRD 0.2.9 — verify the provider-routing validator enforces both
+    /// invariants (pairing + external-runtime exclusion) and accepts the
+    /// "follow Agent" empty state plus the legacy `model`-only shape.
+    #[test]
+    fn validate_task_provider_routing_enforces_pairing_and_runtime_exclusion() {
+        // 1. Empty (= follow Agent) — accepted.
+        assert!(validate_task_provider_routing(&None, &None, &None).is_ok());
+
+        // 2. Pair (provider + model) on builtin runtime — accepted.
+        assert!(validate_task_provider_routing(
+            &Some("openai-x".into()),
+            &Some("gpt-4o".into()),
+            &Some("builtin".into()),
+        )
+        .is_ok());
+
+        // 3. providerId without model — rejected (cross-provider misroute risk).
+        let err = validate_task_provider_routing(
+            &Some("openai-x".into()),
+            &None,
+            &None,
+        )
+        .unwrap_err();
+        assert!(err.contains("providerId"), "got: {}", err);
+        assert!(err.contains("model"), "got: {}", err);
+
+        // 4. External runtime + providerId — rejected (codex / cc / gemini
+        //    self-manage providers).
+        for rt in ["claude-code", "codex", "gemini"] {
+            let err = validate_task_provider_routing(
+                &Some("openai-x".into()),
+                &Some("gpt-4o".into()),
+                &Some(rt.to_string()),
+            )
+            .unwrap_err();
+            assert!(err.contains(rt), "got: {}", err);
+        }
+
+        // 5. Legacy `model`-only (pre-0.2.9 task) — accepted as FollowAgent.
+        assert!(validate_task_provider_routing(
+            &None,
+            &Some("legacy-model".into()),
+            &None,
+        )
+        .is_ok());
+
+        // 6. External runtime without provider override — accepted (the
+        //    common case for codex/gemini/cc tasks).
+        assert!(validate_task_provider_routing(
+            &None,
+            &None,
+            &Some("codex".into()),
+        )
+        .is_ok());
+    }
+
+    /// PRD 0.2.9 — verify `pin_runtime_for_provider_id` materialises
+    /// `runtime: 'builtin'` when `provider_id` is set with no explicit
+    /// runtime. Closes the cross-talk hole flagged by Codex review.
+    #[test]
+    fn pin_runtime_for_provider_id_materialises_builtin() {
+        // 1. provider_id set, runtime None → pin to builtin.
+        let mut rt: Option<String> = None;
+        pin_runtime_for_provider_id(&Some("openai-x".into()), &mut rt);
+        assert_eq!(rt, Some("builtin".into()));
+
+        // 2. provider_id None, runtime None → no change.
+        let mut rt2: Option<String> = None;
+        pin_runtime_for_provider_id(&None, &mut rt2);
+        assert_eq!(rt2, None);
+
+        // 3. provider_id set, runtime already set → no change (idempotent).
+        let mut rt3: Option<String> = Some("builtin".into());
+        pin_runtime_for_provider_id(&Some("openai-x".into()), &mut rt3);
+        assert_eq!(rt3, Some("builtin".into()));
+
+        // 4. provider_id set, runtime explicitly external → no change here
+        //    (validator catches the conflict afterward).
+        let mut rt4: Option<String> = Some("codex".into());
+        pin_runtime_for_provider_id(&Some("openai-x".into()), &mut rt4);
+        assert_eq!(rt4, Some("codex".into()));
     }
 
     #[tokio::test]

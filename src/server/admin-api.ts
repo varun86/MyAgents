@@ -10,8 +10,8 @@
  *   6. Return result
  */
 
-import type { McpServerDefinition } from '../renderer/config/types';
-import { PRESET_PROVIDERS } from '../renderer/config/types';
+import type { McpServerDefinition } from '../shared/config-types';
+import { PRESET_PROVIDERS } from '../shared/config-types';
 import { SDK_RESERVED_MCP_NAMES } from './agent-session';
 import {
   loadConfig,

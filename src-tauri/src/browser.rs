@@ -98,14 +98,19 @@ const BROWSER_INIT_SCRIPT: &str = r#"
 /// validated as http/https/mailto by the caller — we don't want to hand
 /// arbitrary schemes (`file:`, `javascript:`, etc.) to the system opener.
 fn spawn_external_open(url: &str) {
-    // OS openers are user-visible system commands (CLAUDE.md exception);
-    // skip `process_cmd` here and match the pattern used by thought.rs/task.rs.
+    // All three platform arms route through process_cmd::new for the
+    // single-mental-model rule. The Windows arm in particular benefits —
+    // `cmd /C start` is a console-subsystem binary, so CREATE_NO_WINDOW
+    // (set inside process_cmd::new) actually suppresses a brief CMD window
+    // flash that the previous raw Command::new spawn would have produced.
+    // macOS `open` and Linux `xdg-open` are unaffected (CREATE_NO_WINDOW
+    // is Windows-only).
     #[cfg(target_os = "macos")]
-    let res = std::process::Command::new("open").arg(url).spawn();
+    let res = crate::process_cmd::new("open").arg(url).spawn();
     #[cfg(target_os = "windows")]
-    let res = std::process::Command::new("cmd").args(["/C", "start", "", url]).spawn();
+    let res = crate::process_cmd::new("cmd").args(["/C", "start", "", url]).spawn();
     #[cfg(target_os = "linux")]
-    let res = std::process::Command::new("xdg-open").arg(url).spawn();
+    let res = crate::process_cmd::new("xdg-open").arg(url).spawn();
 
     if let Err(e) = res {
         ulog_info!("[browser] spawn_external_open failed for {}: {}", url, e);
