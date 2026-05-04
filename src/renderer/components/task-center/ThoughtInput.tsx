@@ -78,10 +78,10 @@ const VARIANTS: Record<ThoughtInputVariant, {
     pxPerLine: 22,           // 14px × 1.6 line-height ≈ 22.4
     verticalPaddingPx: 12,
     textareaClass: 'text-[14px] leading-relaxed',
-    // Border / shadow / radius track the launcher variant so the Task
-    // Center input reads as the same affordance as the Launcher 想法
-    // input — only inner metrics (font size, padding) stay compact.
-    cardClass: 'rounded-2xl shadow-md',
+    // Resting `shadow-xs` so the input reads as quietly elevated above
+    // the thought stream below; lifts to `shadow-sm` on hover / focus to
+    // signal the active write surface. Same idiom as SettingsHelperInbox.
+    cardClass: 'rounded-2xl shadow-xs hover:shadow-sm focus-within:shadow-sm transition-shadow duration-150',
     focusClass: '',
     outerPaddingClass: '',
     innerPaddingClass: 'px-3 pt-3',
@@ -428,7 +428,7 @@ export const ThoughtInput = forwardRef<ThoughtInputHandle, Props>(function Thoug
     <div className="w-full">
       <div
         ref={cardRef}
-        className={`relative flex flex-col border border-[var(--line)] bg-[var(--paper-elevated)] transition-colors ${theme.focusClass} ${theme.cardClass}`}
+        className={`relative flex flex-col border border-[var(--line)] bg-[var(--paper-elevated)] ${theme.focusClass} ${theme.cardClass}`}
       >
         {/* Mirror layer: same text as the textarea but with coloured `#tag`
             runs. Must match the textarea's font metrics so the highlighted
