@@ -3815,8 +3815,15 @@ pub struct CronExecutePayload {
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider_env: Option<ProviderEnv>,
+    /// PRD 0.2.9: per-task provider id. When set, sidecar live-resolves the
+    /// provider env on every tick from `~/.myagents/config.json`. Mutually
+    /// exclusive with `provider_env` (legacy explicit-snapshot path).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_id: Option<String>,
     /// PRD #119: routing intent. `None` deserializes to FollowAgent on the
     /// receiver side (sidecar handler treats absent as legacy default).
+    /// PRD 0.2.9 prefers `provider_id` over this; intent is kept for
+    /// backward-compat with crons persisted in 0.2.8 and earlier.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider_intent: Option<crate::cron_task::ProviderIntent>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -4063,6 +4070,7 @@ pub async fn cmd_execute_cron_task(
     permissionMode: Option<String>,
     model: Option<String>,
     providerEnv: Option<ProviderEnv>,
+    providerId: Option<String>,
     providerIntent: Option<crate::cron_task::ProviderIntent>,
     runtime: Option<String>,
     runtimeConfig: Option<serde_json::Value>,
@@ -4079,6 +4087,7 @@ pub async fn cmd_execute_cron_task(
         permission_mode: permissionMode,
         model,
         provider_env: providerEnv,
+        provider_id: providerId,
         provider_intent: providerIntent,
         runtime,
         runtime_config: runtimeConfig,

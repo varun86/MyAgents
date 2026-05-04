@@ -6491,11 +6491,19 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     // to "" (sentinel for runtime max). Users who explicitly want a
     // stricter mode can pass `--permissionMode plan` via the cron tool.
     if (process.env.MYAGENTS_MANAGEMENT_PORT && !getImCronContext()) {
+      // PRD 0.2.9 — When the session's providerEnv came from the workspace
+      // agent (the common case), surface the providerId too so the cron
+      // tool can build live-resolve cron tasks. The agent lookup is local
+      // and synchronous; failure (e.g. no agent for this workspace) just
+      // leaves providerId undefined and the legacy providerEnv path runs.
+      const agentForProvider = findAgentByWorkspacePath(agentDir);
+      const sessionProviderId = (agentForProvider?.providerId as string | undefined) ?? undefined;
       setSessionCronContext({
         sessionId: sessionId,
         workspacePath: agentDir,
         model: currentModel,
         providerEnv: currentProviderEnv,
+        providerId: sessionProviderId,
       });
     }
 
