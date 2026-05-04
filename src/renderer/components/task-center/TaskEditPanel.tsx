@@ -57,7 +57,7 @@ import {
   SECTION_GAP,
   usePanelKeys,
 } from './editors/PanelChrome';
-import type { RuntimeType } from '@/../shared/types/runtime';
+import type { RuntimeConfig, RuntimeType } from '@/../shared/types/runtime';
 import { extractErrorMessage } from './errors';
 
 /** Which section/field the edit panel should scroll to + focus on open.
@@ -93,9 +93,13 @@ interface Draft {
   maxExecutions: string;
   aiCanExit: boolean;
   notification: NotificationConfig;
-  // Advanced overrides — `undefined` means "follow Agent". (PRD 0.2.4 §需求 4)
+  // Advanced overrides — `undefined` means "follow Agent". (PRD 0.2.4 §需求 4 / 0.2.9)
   runtime: RuntimeType | undefined;
+  /** PRD 0.2.9 — Per-task provider id; paired with `model`. */
+  providerId: string | undefined;
   model: string | undefined;
+  /** PRD 0.2.9 — External-runtime config (model/permissionMode for codex/CC/gemini). */
+  runtimeConfig: RuntimeConfig | undefined;
   permissionMode: string | undefined;
   mcpEnabledServers: string[] | undefined;
 }
@@ -129,9 +133,13 @@ function taskToDraft(task: Task, taskMd: string, verifyMd: string): Draft {
     aiCanExit: ec?.aiCanExit ?? true,
     notification: task.notification ?? { desktop: true },
     runtime: task.runtime,
+    // PRD 0.2.9 — Per-task provider id (paired with `model`).
+    providerId: task.providerId && task.providerId.length > 0 ? task.providerId : undefined,
     // Empty string from disk = "no override"; surface as undefined so the
     // advanced editor's "跟随 Agent" sentinel is respected.
     model: task.model && task.model.length > 0 ? task.model : undefined,
+    // PRD 0.2.9 — Runtime config (external-runtime model/permission overrides).
+    runtimeConfig: task.runtimeConfig as RuntimeConfig | undefined,
     permissionMode:
       task.permissionMode && task.permissionMode.length > 0
         ? task.permissionMode
@@ -430,14 +438,41 @@ export function TaskEditPanel({
     // Execution overrides — diff against the persisted Task. Sending an
     // empty string clears (Rust `update()` treats `Some("")` as
     // `permission_mode = None`); sending undefined leaves the field untouched.
+    //
+    // PRD 0.2.9 — providerId + model are paired. If user clears them both
+    // ("跟随 Agent" sentinel), use the explicit `clearProviderOverride`
+    // flag so atomicity is server-enforced (Rust validator catches half-state).
+    const initialProviderId = task.providerId ?? '';
+    const initialModel = task.model ?? '';
+    const draftProviderId = draft.providerId ?? '';
     const draftModel = draft.model ?? '';
-    if (draftModel !== (task.model ?? '')) payload.model = draftModel;
+    const providerOrModelChanged =
+      initialProviderId !== draftProviderId || initialModel !== draftModel;
+    if (providerOrModelChanged) {
+      const goingToFollow = !draftProviderId && !draftModel;
+      if (goingToFollow) {
+        payload.clearProviderOverride = true;
+      } else {
+        if (initialModel !== draftModel) payload.model = draftModel;
+        if (initialProviderId !== draftProviderId) payload.providerId = draftProviderId;
+      }
+    }
     const draftPermissionMode = draft.permissionMode ?? '';
     if (draftPermissionMode !== (task.permissionMode ?? '')) {
       payload.permissionMode = draftPermissionMode;
     }
     if ((draft.runtime ?? '') !== (task.runtime ?? '')) {
       payload.runtime = draft.runtime;
+    }
+    // PRD 0.2.9 — runtimeConfig diff (external-runtime model/permission).
+    // The Rust `update` path replaces wholesale; compare by JSON shape so
+    // we only forward when actually changed.
+    const initialRuntimeConfig = JSON.stringify(task.runtimeConfig ?? null);
+    const nextRuntimeConfig = JSON.stringify(draft.runtimeConfig ?? null);
+    if (initialRuntimeConfig !== nextRuntimeConfig) {
+      // RuntimeConfig vs RuntimeConfigSnapshot — structurally compatible,
+      // see DispatchTaskDialog for the cast rationale.
+      payload.runtimeConfig = draft.runtimeConfig as Record<string, unknown> | undefined;
     }
     // mcpEnabledServers diff. Send an actual array when there's a change;
     // mapping "follow Agent" (draft = undefined) → `[]` since Rust's
@@ -666,14 +701,18 @@ export function TaskEditPanel({
 
         <div className={SECTION_DIVIDER} />
 
-        {/* 高级配置 — runtime / model / permission / MCP overrides */}
+        {/* 高级配置 — runtime / provider / model / permission / MCP overrides (PRD 0.2.9) */}
         <FormSection icon={Settings2} title="高级配置">
           <TaskAdvancedConfigEditor
             workspacePath={task.workspacePath}
             runtime={draft.runtime}
             setRuntime={(v) => setDraft((d) => ({ ...d, runtime: v }))}
+            providerId={draft.providerId}
+            setProviderId={(v) => setDraft((d) => ({ ...d, providerId: v }))}
             model={draft.model}
             setModel={(v) => setDraft((d) => ({ ...d, model: v }))}
+            runtimeConfig={draft.runtimeConfig}
+            setRuntimeConfig={(v) => setDraft((d) => ({ ...d, runtimeConfig: v }))}
             permissionMode={draft.permissionMode}
             setPermissionMode={(v) => setDraft((d) => ({ ...d, permissionMode: v }))}
             mcpEnabledServers={draft.mcpEnabledServers}
