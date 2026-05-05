@@ -706,9 +706,9 @@ pub fn create_agent_state() -> ManagedAgents {
 pub fn signal_all_agents_shutdown(agent_state: &ManagedAgents) {
     if let Ok(agents) = agent_state.try_lock() {
         for (agent_id, instance) in agents.iter() {
-            log::info!("[agent] Signaling shutdown for agent {}", agent_id);
+            ulog_info!("[agent] Signaling shutdown for agent {}", agent_id);
             for (channel_id, ch) in &instance.channels {
-                log::info!("[agent] Shutting down channel {} of agent {}", channel_id, agent_id);
+                ulog_info!("[agent] Shutting down channel {} of agent {}", channel_id, agent_id);
                 let _ = ch.bot_instance.shutdown_tx.send(true);
                 ch.bot_instance.poll_handle.abort();
                 ch.bot_instance.process_handle.abort();
@@ -723,7 +723,7 @@ pub fn signal_all_agents_shutdown(agent_state: &ManagedAgents) {
             }
         }
     } else {
-        log::warn!("[agent] Could not acquire lock for shutdown signal, agents may linger");
+        ulog_warn!("[agent] Could not acquire lock for shutdown signal, agents may linger");
     }
 }
 
@@ -737,7 +737,7 @@ pub fn create_im_bot_state() -> ManagedImBots {
 pub fn signal_all_bots_shutdown(im_state: &ManagedImBots) {
     if let Ok(bots) = im_state.try_lock() {
         for (bot_id, instance) in bots.iter() {
-            log::info!("[im] Signaling shutdown for bot {}", bot_id);
+            ulog_info!("[im] Signaling shutdown for bot {}", bot_id);
             let _ = instance.shutdown_tx.send(true);
             instance.poll_handle.abort();
             instance.process_handle.abort();
@@ -748,7 +748,7 @@ pub fn signal_all_bots_shutdown(im_state: &ManagedImBots) {
             }
         }
     } else {
-        log::warn!("[im] Could not acquire lock for shutdown signal, IM bots may linger");
+        ulog_warn!("[im] Could not acquire lock for shutdown signal, IM bots may linger");
     }
 }
 
@@ -6708,9 +6708,9 @@ pub async fn cmd_delete_agent(
         let agent_data_dir = home.join(".myagents").join("agents").join(&aid);
         if agent_data_dir.exists() {
             if let Err(e) = std::fs::remove_dir_all(&agent_data_dir) {
-                log::warn!("[agent] Failed to remove agent data dir {:?}: {}", agent_data_dir, e);
+                ulog_warn!("[agent] Failed to remove agent data dir {:?}: {}", agent_data_dir, e);
             } else {
-                log::info!("[agent] Removed agent data dir {:?}", agent_data_dir);
+                ulog_info!("[agent] Removed agent data dir {:?}", agent_data_dir);
             }
         }
 

@@ -1257,7 +1257,12 @@ export async function sessionHasPersistentOwners(sessionId: string): Promise<boo
  * @param aiCanExit - Whether AI can exit the task
  * @param permissionMode - Permission mode ('auto' | 'always_ask' | 'always_allow')
  * @param model - Optional model to use
- * @param providerEnv - Optional provider environment (API key, base URL)
+ * @param providerEnv - DEPRECATED legacy snapshot env (PRD 0.2.9). New
+ *   callers should pass `providerId` instead so the sidecar live-resolves
+ *   credentials at every tick.
+ * @param providerId - PRD 0.2.9 — Per-task provider id. When set, sidecar
+ *   reads provider config from disk on every tick (no credential snapshot
+ *   in the call chain).
  */
 export async function executeCronTask(
     workspacePath: string,
@@ -1270,7 +1275,8 @@ export async function executeCronTask(
     model?: string,
     providerEnv?: ProviderEnv,
     runtime?: RuntimeType,
-    runtimeConfig?: RuntimeConfig
+    runtimeConfig?: RuntimeConfig,
+    providerId?: string,
 ): Promise<CronExecuteResponse> {
     if (!isTauri()) {
         return { success: false, error: 'Not in Tauri environment' };
@@ -1287,6 +1293,7 @@ export async function executeCronTask(
             permissionMode: permissionMode ?? null,
             model: model ?? null,
             providerEnv: providerEnv ?? null,
+            providerId: providerId ?? null,
             runtime: runtime ?? null,
             runtimeConfig: runtimeConfig ?? null,
         });

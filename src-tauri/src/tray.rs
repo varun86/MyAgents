@@ -11,6 +11,8 @@ use tauri::{
 #[cfg(target_os = "macos")]
 use tauri::image::Image;
 
+use crate::{ulog_debug, ulog_error, ulog_info, ulog_warn};
+
 /// Menu item IDs for tray right-click menu
 const MENU_OPEN: &str = "open";
 const MENU_SETTINGS: &str = "settings";
@@ -36,7 +38,7 @@ pub fn setup_tray<R: Runtime>(app: &tauri::App<R>) -> Result<(), Box<dyn std::er
         // Load template icon from embedded bytes (22x22 for best menu bar appearance)
         let icon_bytes = include_bytes!("../icons/trayIconTemplate@2x.png");
         Image::from_bytes(icon_bytes).unwrap_or_else(|_| {
-            log::warn!("[Tray] Failed to load template icon, using default");
+            ulog_warn!("[Tray] Failed to load template icon, using default");
             app.default_window_icon().unwrap().clone()
         })
     };
@@ -59,19 +61,19 @@ pub fn setup_tray<R: Runtime>(app: &tauri::App<R>) -> Result<(), Box<dyn std::er
         .on_menu_event(move |app, event| {
             match event.id().as_ref() {
                 MENU_OPEN => {
-                    log::info!("[Tray] Open menu clicked");
+                    ulog_info!("[Tray] Open menu clicked");
                     show_main_window(app);
                 }
                 MENU_SETTINGS => {
-                    log::info!("[Tray] Settings menu clicked");
+                    ulog_info!("[Tray] Settings menu clicked");
                     show_main_window(app);
                     // Emit event to navigate to settings
                     if let Err(e) = app.emit("tray:open-settings", ()) {
-                        log::error!("[Tray] Failed to emit settings event: {}", e);
+                        ulog_error!("[Tray] Failed to emit settings event: {}", e);
                     }
                 }
                 MENU_EXIT => {
-                    log::info!("[Tray] Exit menu clicked");
+                    ulog_info!("[Tray] Exit menu clicked");
                     app.exit(0);
                 }
                 _ => {}
@@ -85,14 +87,14 @@ pub fn setup_tray<R: Runtime>(app: &tauri::App<R>) -> Result<(), Box<dyn std::er
                 ..
             } = event
             {
-                log::info!("[Tray] Tray icon left-clicked");
+                ulog_info!("[Tray] Tray icon left-clicked");
                 let app = tray.app_handle();
                 show_main_window(app);
             }
         })
         .build(app)?;
 
-    log::info!("[Tray] System tray initialized successfully");
+    ulog_info!("[Tray] System tray initialized successfully");
     Ok(())
 }
 
@@ -109,7 +111,7 @@ fn show_main_window<R: Runtime>(app: &tauri::AppHandle<R>) {
 #[allow(dead_code)]
 pub fn hide_to_tray<R: Runtime>(app: &tauri::AppHandle<R>) -> bool {
     if let Some(window) = app.get_webview_window("main") {
-        log::info!("[Tray] Hiding window to tray");
+        ulog_info!("[Tray] Hiding window to tray");
         let _ = window.hide();
         return true;
     }
@@ -134,7 +136,7 @@ pub fn should_minimize_to_tray() -> bool {
         if let Ok(content) = fs::read_to_string(&config_path) {
             if let Ok(config) = serde_json::from_str::<PartialAppConfig>(&content) {
                 if let Some(minimize) = config.minimize_to_tray {
-                    log::debug!("[Tray] minimizeToTray from config: {}", minimize);
+                    ulog_debug!("[Tray] minimizeToTray from config: {}", minimize);
                     return minimize;
                 }
             }
@@ -142,6 +144,6 @@ pub fn should_minimize_to_tray() -> bool {
     }
 
     // Default to false (close app instead of minimize to tray)
-    log::debug!("[Tray] minimizeToTray not configured, using default: false");
+    ulog_debug!("[Tray] minimizeToTray not configured, using default: false");
     false
 }

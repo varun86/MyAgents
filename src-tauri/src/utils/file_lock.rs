@@ -132,8 +132,7 @@ fn is_pid_alive(_pid: i32) -> Option<bool> {
 ///   to age-only stale detection.
 #[cfg(target_os = "macos")]
 fn get_pid_start_time_ms(pid: i32) -> Option<u64> {
-    use std::process::Command;
-    let out = Command::new("ps")
+    let out = crate::process_cmd::new("ps")
         .args(["-p", &pid.to_string(), "-o", "lstart="])
         .output()
         .ok()?;

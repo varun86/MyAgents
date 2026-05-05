@@ -77,6 +77,7 @@ pub fn run(args: &[String]) -> i32 {
     // process_cmd applies CREATE_NO_WINDOW on Windows, but CLI mode NEEDS the
     // console for user-visible stdout/stderr output. Same exception category as
     // OS opener commands (open/explorer/xdg-open) documented in CLAUDE.md.
+    #[allow(clippy::disallowed_methods)] // see comment above — CLI needs console
     let mut cmd = Command::new(&node_path);
     cmd.arg(&cli_script);
     cmd.args(args);

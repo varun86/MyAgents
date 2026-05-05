@@ -1,4 +1,4 @@
-import { AlertCircle, ChevronDown, ChevronUp, Loader, Paperclip, Plus, Send, Square, X, FileText, AtSign, Wrench, Timer, Settings2, Unlock } from 'lucide-react';
+import { AlertCircle, ChevronUp, Loader, Paperclip, Plus, Send, Square, X, FileText, AtSign, Wrench, Timer, Settings2, Unlock } from 'lucide-react';
 import { memo, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState, forwardRef } from 'react';
 
 import Tip from '@/components/Tip';
@@ -221,18 +221,6 @@ interface SimpleChatInputProps {
   mode?: 'chat' | 'launcher';
   /** Optional ReactNode rendered at the start of the toolbar (e.g., workspace selector in launcher) */
   toolbarPrefix?: React.ReactNode;
-  /**
-   * Controlled expand/collapse state. When provided, the component stops
-   * managing its own `isExpanded` useState and reflects this value —
-   * `onExpandedChange` fires on toggle. Used by Launcher to share the
-   * expand state between SimpleChatInput and ThoughtInput so the user's
-   * "I want more room" intent survives 任务 ↔ 想法 mode toggles.
-   *
-   * Undefined = uncontrolled (component owns the state internally). Chat
-   * tabs use uncontrolled.
-   */
-  isExpanded?: boolean;
-  onExpandedChange?: (next: boolean) => void;
   // Agent Runtime (v0.1.59)
   runtime?: RuntimeType;
   runtimeDetections?: RuntimeDetections;
@@ -260,8 +248,9 @@ const BUILTIN_FALLBACK_SLASH_COMMANDS: SlashCommand[] = [
 ];
 
 const LINE_HEIGHT = 26; // px per line (text-base 16px * leading-relaxed 1.625 = 26px)
-const MAX_LINES_COLLAPSED = 3;
-const MAX_LINES_EXPANDED = 12;
+// Auto-grow ceiling. Past this row count the textarea scrolls internally;
+// before it, the resize effect below tracks scrollHeight on every keystroke.
+const MAX_LINES = 9;
 // Launcher shows the input as the page's primary affordance — an extra row
 // (3 vs 2) reduces visual compression and signals "there's room to write a
 // full thought", matching the spacious Launcher layout. Chat tabs keep the
@@ -359,8 +348,6 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   queuedMessages = [],
   onCancelQueued,
   onForceExecuteQueued,
-  isExpanded: controlledExpanded,
-  onExpandedChange,
   workspacePath = null,
 }, ref) {
   const isLauncherMode = mode === 'launcher';
@@ -438,29 +425,6 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   const modeBtnRef = useRef<HTMLButtonElement>(null);
   const toolBtnRef = useRef<HTMLButtonElement>(null);
   const modelBtnRef = useRef<HTMLButtonElement>(null);
-  // Expand/collapse — uncontrolled by default, controlled when caller
-  // supplies `isExpanded` (e.g. Launcher lifts the state so SimpleChatInput
-  // and ThoughtInput share the user's "I want more room" intent across
-  // mode switches). The `setIsExpanded` helper below normalizes the two
-  // paths so the rest of the component can just call it.
-  const [internalExpanded, setInternalExpanded] = useState(false);
-  const isExpandedControlled = controlledExpanded !== undefined;
-  const isExpanded = isExpandedControlled ? controlledExpanded : internalExpanded;
-  const setIsExpanded = useCallback(
-    (next: boolean | ((prev: boolean) => boolean)) => {
-      const resolved = typeof next === 'function' ? next(isExpanded) : next;
-      if (isExpandedControlled) {
-        onExpandedChange?.(resolved);
-      } else {
-        setInternalExpanded(resolved);
-      }
-    },
-    [isExpanded, isExpandedControlled, onExpandedChange],
-  );
-  // Tracks the last committed `isExpanded` so the auto-resize effect can
-  // distinguish a typing-driven resize from an expand/collapse toggle —
-  // they need different transition baselines (see the effect below).
-  const prevExpandedRef = useRef(isExpanded);
 
   // Image attachments - moved up for processDroppedFiles to use
   const [images, setImages] = useState<ImageAttachment[]>([]);
@@ -571,7 +535,8 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
     // eslint-disable-next-line react-hooks/exhaustive-deps -- textareaRef is stable
   }, []);
 
-  // Auto-resize textarea based on content
+  // Auto-resize textarea based on content. Grows from `effectiveMinLines`
+  // up to `MAX_LINES`; past the ceiling the textarea scrolls internally.
   useEffect(() => {
     const textarea = textareaRef.current;
     if (!textarea) return;
@@ -583,46 +548,21 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
     // resize once after commit.
     if (isComposingRef.current) return;
 
-    const wasExpanded = prevExpandedRef.current;
-    prevExpandedRef.current = isExpanded;
-
-    if (isExpanded) {
-      textarea.style.height = `${LINE_HEIGHT * MAX_LINES_EXPANDED}px`;
-      return;
-    }
+    // Skip when the textarea is in a `display:none` subtree (Launcher hides
+    // the inactive 对话/想法 mode this way). `scrollHeight` reads as 0 there
+    // and would clamp `style.height` to `minHeight`, then no later effect
+    // would re-fire on reveal — so the user would see the wrong height
+    // until the next keystroke. Leaving the previously-correct height
+    // untouched preserves it across the hidden interval.
+    if (textarea.offsetParent === null) return;
 
     const minHeight = LINE_HEIGHT * effectiveMinLines;
-    const maxHeight = LINE_HEIGHT * Math.max(MAX_LINES_COLLAPSED, effectiveMinLines);
-
-    if (wasExpanded) {
-      // Expand → Collapse: measure the natural content height without
-      // letting `height: auto` leak into the CSS transition baseline.
-      // If we wrote 'auto' then the final px value in the same tick, the
-      // browser would resolve `auto` to scrollHeight during the forced
-      // layout read, commit that as the baseline, and the transition would
-      // snap instead of animate (which is what made collapse feel abrupt).
-      // Save/restore the current explicit height, then commit the target
-      // in the next frame so the transition animates from the pre-collapse
-      // height to the content-fit height.
-      const saved = textarea.style.height;
-      textarea.style.height = 'auto';
-      const scrollHeight = textarea.scrollHeight;
-      textarea.style.height = saved;
-      const target = Math.max(minHeight, Math.min(scrollHeight, maxHeight));
-      const rafId = requestAnimationFrame(() => {
-        textarea.style.height = `${target}px`;
-      });
-      return () => cancelAnimationFrame(rafId);
-    }
-
-    // Typing path — measured and target heights are usually identical
-    // (±1 line), so the in-place write doesn't produce visible animation
-    // and keystrokes stay snappy.
+    const maxHeight = LINE_HEIGHT * MAX_LINES;
     textarea.style.height = 'auto';
     const scrollHeight = textarea.scrollHeight;
     textarea.style.height = `${Math.max(minHeight, Math.min(scrollHeight, maxHeight))}px`;
     // eslint-disable-next-line react-hooks/exhaustive-deps -- textareaRef is stable
-  }, [inputValue, isExpanded, resizeBump]);
+  }, [inputValue, resizeBump]);
 
   // IME composition handlers (Bug #123). Set the ref BEFORE the auto-resize
   // effect can run for the in-progress composition, and bump `resizeBump`
@@ -1636,8 +1576,6 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   // eslint-disable-next-line react-hooks/exhaustive-deps -- textareaRef is a stable ref
   }, [slashPosition, inputValue, slashSearchQuery, handleSkillSelect]);
 
-  const toggleExpand = () => setIsExpanded((prev) => !prev);
-
   return (
     <>
     <div className={isLauncherMode
@@ -1759,18 +1697,21 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                   : '输入消息，使用 @ 引用文件，/ 使用技能...'
               }
               rows={effectiveMinLines}
-              className="block w-full resize-none bg-transparent pr-8 text-base leading-relaxed text-[var(--ink)] outline-none placeholder:text-[var(--ink-muted)]"
+              className="block w-full resize-none bg-transparent text-base leading-relaxed text-[var(--ink)] outline-none placeholder:text-[var(--ink-muted)]"
               style={{
                 minHeight: `${LINE_HEIGHT * effectiveMinLines}px`,
-                maxHeight: `${LINE_HEIGHT * (isExpanded ? MAX_LINES_EXPANDED : Math.max(MAX_LINES_COLLAPSED, effectiveMinLines))}px`,
+                maxHeight: `${LINE_HEIGHT * MAX_LINES}px`,
                 overflowY: 'auto',
-                // Explicit property list + `height` so collapse animates
-                // symmetrically to expand (WebKit textareas sometimes drop the
-                // transition on shrink when only `max-height` is listed).
-                transitionProperty: 'max-height, height, min-height',
+                // The auto-resize effect imperatively writes `style.height`
+                // each keystroke; this transition smooths the visible
+                // growth/shrink. List both `height` and `min-height` so
+                // shrink animates symmetrically to grow (WebKit textareas
+                // can drop the transition on shrink when only `height` is
+                // listed).
+                transitionProperty: 'height, min-height',
                 transitionDuration: '220ms',
                 transitionTimingFunction: 'cubic-bezier(0.22, 1, 0.36, 1)',
-                willChange: 'max-height',
+                willChange: 'height',
               }}
             />
 
@@ -1932,20 +1873,6 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                 onSelect={handleSlashSelect}
               />
             </Popover>
-
-            {/* Expand/Collapse button - larger click area */}
-            <button
-              type="button"
-              onClick={toggleExpand}
-              className="absolute right-2 top-1.5 rounded-lg p-2 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
-              title={isExpanded ? '收起' : '展开'}
-            >
-              {isExpanded ? (
-                <ChevronDown className="h-4 w-4" />
-              ) : (
-                <ChevronUp className="h-4 w-4" />
-              )}
-            </button>
           </div>
           </div>
 

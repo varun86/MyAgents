@@ -31,6 +31,7 @@ use std::process::Command;
 /// On other platforms: Equivalent to `Command::new(program)`.
 pub fn new<S: AsRef<OsStr>>(program: S) -> Command {
     #[allow(unused_mut)] // mut needed on Windows for creation_flags()
+    #[allow(clippy::disallowed_methods)] // this IS the wrapper — see clippy.toml
     let mut cmd = Command::new(program);
 
     #[cfg(target_os = "windows")]

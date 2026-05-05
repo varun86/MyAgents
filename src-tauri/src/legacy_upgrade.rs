@@ -230,6 +230,13 @@ pub async fn upgrade_legacy_cron(
         cron_timezone,
         dispatch_at,
         model: cron.model.clone(),
+        // PRD 0.2.9 — Legacy crons store credential snapshots in
+        // `provider_env` rather than the new `provider_id` indirection. We
+        // intentionally drop them here: the upgraded Task will resolve the
+        // provider via the agent workspace at execute time (FollowAgent
+        // semantics), which preserves "what the user thinks runs" without
+        // copying secrets into the new tasks.jsonl.
+        provider_id: None,
         permission_mode: Some(cron.permission_mode.clone()),
         preselected_session_id: Some(cron.session_id.clone()),
         runtime: cron.runtime.clone(),

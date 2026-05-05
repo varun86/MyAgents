@@ -129,13 +129,6 @@ export default memo(function BrandSection({
     // Keeps "user closed launcher mid-edit → no orphan cron" the default.
     const [showCronSettings, setShowCronSettings] = useState(false);
     const [stagedCron, setStagedCron] = useState<CronSettingsResult | null>(null);
-    // Lifted "expand" state — shared between SimpleChatInput and
-    // ThoughtInput. The user's intent ("I want more writing room") is
-    // mode-agnostic: expanding in 对话 should persist into 想法 and vice
-    // versa. Combined with grid-overlap layout this makes the card
-    // footprint identical in both modes even when expanded (expanded
-    // textarea = 12 lines × 26 = 312 px, both sides match).
-    const [inputExpanded, setInputExpanded] = useState(false);
     // Bumped after each successful thoughtCreate so the Recent Thoughts strip
     // re-fetches and the just-saved note slides in as the first chip.
     const [thoughtRefreshKey, setThoughtRefreshKey] = useState(0);
@@ -448,58 +441,17 @@ export default memo(function BrandSection({
                 vertically (PRD §4.2). */}
             <div className="w-full max-w-[640px] pb-[12vh]">
                 <div className="relative w-full">
-                    {/* STRUCTURAL STABILITY — not pixel matching.
-                     *
-                     * Previous attempts tried to pixel-align the two inputs
-                     * (padding, shadow, font, growth policy) so their
-                     * rendered heights would match. That's brittle: any
-                     * future change to either input (a new toolbar button,
-                     * a different placeholder, a browser WebKit quirk in
-                     * scrollHeight measurement) reintroduces a delta and
-                     * the MyAgents title above re-centers.
-                     *
-                     * Structural guarantee instead: both inputs render as
-                     * siblings in the SAME CSS grid cell (`*:col-start-1
-                     * *:row-start-1`). The cell's height is `max(heights)`
-                     * regardless of which is visible. We switch display
-                     * with `invisible` + `pointer-events-none` + `inert`
-                     * — all three occupy the cell, only one is visible and
-                     * interactive. Toggle 对话 ↔ 想法 is now a pure
-                     * visibility flip; the container height never changes,
-                     * so the flex-1 justify-center parent can't re-center.
-                     *
-                     * Side benefit: drafts on BOTH inputs survive mode
-                     * switches (SimpleChatInput's text + images, ThoughtInput's
-                     * text + caret position) because nothing unmounts.
+                    {/* Both inputs stay mounted so each mode's draft (text +
+                     * caret + images for SimpleChatInput) survives the
+                     * switch — conditional render would unmount and drop
+                     * them. The inactive one is taken out of layout via
+                     * `hidden` (display:none) so only the active mode
+                     * contributes to the wrapper height; cards in 对话 vs
+                     * 想法 size to their own content independently.
                      */}
-                    {/* Center-axis growth compensation. Without this, the
-                     *  flex-1 brand block above absorbs all of the input's
-                     *  height growth → input bottom is anchored by `pb-[12vh]`
-                     *  → input grows entirely upward. The user sees "the
-                     *  input snaps to the top, then the bottom expands down"
-                     *  even though the textarea height transitions smoothly.
-                     *
-                     *  Counter the layout shift by translating the input
-                     *  wrapper DOWN by half the growth (`g/2`). Combined
-                     *  with the layout's natural top-shift of `g`, the net
-                     *  effect is: top moves up by `g/2`, bottom moves down
-                     *  by `g/2` — symmetric center-axis growth.
-                     *
-                     *  Hardcoded `117` = (MAX_LINES_EXPANDED - LAUNCHER_MIN_LINES)
-                     *  * LINE_HEIGHT / 2 = (12 - 3) * 26 / 2. If the
-                     *  SimpleChatInput / ThoughtInput growth changes, update
-                     *  this constant in lockstep. Same easing + duration
-                     *  as the textarea's own height transition so they
-                     *  stay in phase. */}
-                    <div
-                        className="grid *:col-start-1 *:row-start-1"
-                        style={{
-                            transform: `translateY(${inputExpanded ? 117 : 0}px)`,
-                            transition: 'transform 220ms cubic-bezier(0.22, 1, 0.36, 1)',
-                        }}
-                    >
+                    <div className="grid *:col-start-1 *:row-start-1">
                         <div
-                            className={mode === 'thought' ? 'invisible pointer-events-none' : ''}
+                            className={mode === 'thought' ? 'hidden' : ''}
                             aria-hidden={mode === 'thought'}
                             inert={mode === 'thought'}
                         >
@@ -508,8 +460,6 @@ export default memo(function BrandSection({
                                 mode="launcher"
                                 onSend={handleSend}
                                 isLoading={!!isStarting}
-                                isExpanded={inputExpanded}
-                                onExpandedChange={setInputExpanded}
                                 provider={provider}
                                 providers={providers}
                                 selectedModel={selectedModel}
@@ -542,7 +492,7 @@ export default memo(function BrandSection({
                         </div>
                         {modeSegmentEnabled && (
                             <div
-                                className={mode === 'thought' ? '' : 'invisible pointer-events-none'}
+                                className={mode === 'thought' ? '' : 'hidden'}
                                 aria-hidden={mode !== 'thought'}
                                 inert={mode !== 'thought'}
                             >
@@ -551,17 +501,8 @@ export default memo(function BrandSection({
                                     existingTags={tagCandidates}
                                     onCreated={handleThoughtCreated}
                                     variant="launcher"
-                                    // Expanded follows the lifted state —
-                                    // collapsed = 3 lines (matches
-                                    // SimpleChatInput MAX_LINES_COLLAPSED),
-                                    // expanded = 12 lines (matches
-                                    // MAX_LINES_EXPANDED). So whichever
-                                    // mode the user is in, the card
-                                    // footprint matches exactly.
                                     minLines={3}
-                                    maxLines={inputExpanded ? 12 : 3}
-                                    isExpanded={inputExpanded}
-                                    onExpandedChange={setInputExpanded}
+                                    maxLines={9}
                                 />
                             </div>
                         )}

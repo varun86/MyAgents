@@ -126,8 +126,28 @@ export interface Task {
   cronTimezone?: string;
   /** Dedicated "when to fire" timestamp (ms) for `scheduled` mode. Decouples from `endConditions.deadline`. */
   dispatchAt?: number;
-  /** Per-task model override. When absent, the Agent's default model is used. */
+  /** Per-task model override. When absent, the Agent's default model is used.
+   *
+   *  PRD 0.2.9 pairing rule (asymmetric, by design): setting `providerId`
+   *  REQUIRES `model` — the validator rejects provider-without-model so a
+   *  user that picked a specific provider can't end up routing the Agent's
+   *  default model name to the wrong upstream. The reverse is allowed:
+   *  setting `model` alone means "use the Agent's currently-resolved
+   *  provider but override the model id" — the renderer's grouped picker
+   *  writes a `(providerId, model)` pair atomically; the model-only form
+   *  is reachable only via the CLI / management API for legacy / advanced
+   *  use. */
   model?: string;
+  /** PRD 0.2.9 — Per-task provider id override. When absent, the cron follows
+   *  the workspace agent. When set, the sidecar live-resolves the provider
+   *  env from `~/.myagents/config.json` on every tick, so credential
+   *  rotation propagates without re-saving the task and no credential
+   *  copies land in `~/.myagents/tasks/...jsonl`.
+   *
+   *  Mutually exclusive with external runtime (`runtime ∈ {claude-code,
+   *  codex, gemini}`) — those runtimes manage their own provider; the Rust
+   *  validator rejects the combination. */
+  providerId?: string;
   /** Per-task permission mode (auto / plan / fullAgency / …). Defaults to
    *  the **runtime maximum** (e.g. SDK builtin → `bypassPermissions`) rather
    *  than the Agent's default — see PRD 0.2.4 §需求 4 (4b note). */
@@ -203,6 +223,8 @@ export interface TaskCreateDirectInput {
   dispatchAt?: number;
   /** Per-task model override. */
   model?: string;
+  /** PRD 0.2.9 — Per-task provider id override. MUST be paired with `model`. */
+  providerId?: string;
   /** Per-task permission mode override. */
   permissionMode?: string;
   /** For `single-session` run mode: id of a pre-existing SDK session to continue. */
@@ -232,6 +254,8 @@ export interface TaskCreateFromAlignmentInput {
   endConditions?: EndConditions;
   /** Per-task model override. Omit to inherit the Agent workspace default. */
   model?: string;
+  /** PRD 0.2.9 — Per-task provider id override. MUST be paired with `model`. */
+  providerId?: string;
   /** Per-task permission mode override. Runtime-specific values — see `myagents runtime describe <runtime>`. */
   permissionMode?: string;
   runtime?: RuntimeType;
@@ -261,12 +285,24 @@ export interface TaskUpdateInput {
   dispatchAt?: number;
   /** Per-task model override. Empty string clears. */
   model?: string;
+  /** PRD 0.2.9 — Per-task provider id override. Empty string clears. */
+  providerId?: string;
+  /** PRD 0.2.9 — Atomic "follow Agent" reset: clears providerId AND model
+   *  in one update. Lets the renderer's "跟随 Agent" picker option round-trip
+   *  cleanly without inventing a double-Option JSON shape. Pure boolean — no
+   *  pairing risk if only one of (providerId, model) is omitted. */
+  clearProviderOverride?: boolean;
   /** Per-task permission mode override. Empty string clears. */
   permissionMode?: string;
   /** For `single-session` run mode: id of a pre-existing SDK session to continue. */
   preselectedSessionId?: string;
   runtime?: RuntimeType;
   runtimeConfig?: RuntimeConfigSnapshot;
+  /** PRD #131 — Atomic clear of `runtime` + `runtimeConfig`. The
+   *  renderer's "跟随 Agent" runtime option sends this flag because
+   *  `runtime: undefined` deserializes to `None` server-side which the
+   *  apply path leaves untouched. Symmetric with `clearProviderOverride`. */
+  clearRuntimeOverride?: boolean;
   /** Per-task MCP enable list override. Empty array clears (= follow
    *  Agent); a populated array snapshots the chosen server ids. Rust
    *  `update_task` normalises an empty vec → None on persistence. */

@@ -3,12 +3,14 @@
  *
  * Simplified local copy of the Feishu plugin's FeishuStreamingSession,
  * adapted for the Plugin Bridge environment:
- *   - Uses plain `fetch` instead of `fetchWithSsrFGuard`
+ *   - Uses cancellableFetch (default 30s timeout, parent-signal aware)
  *   - Uses raw HTTP API calls instead of @larksuiteoapi/node-sdk Client
  *   - Inlines the FeishuDomain type
  *
  * Core flow: create card → send message → update content → close streaming
  */
+
+import { cancellableFetch } from '../utils/cancellation';
 
 type FeishuDomain = 'feishu' | 'lark' | (string & {});
 type Credentials = { appId: string; appSecret: string; domain?: FeishuDomain };
@@ -48,7 +50,7 @@ async function getToken(creds: Credentials): Promise<string> {
     return cached.token;
   }
 
-  const resp = await fetch(`${resolveApiBase(creds.domain)}/auth/v3/tenant_access_token/internal`, {
+  const resp = await cancellableFetch(`${resolveApiBase(creds.domain)}/auth/v3/tenant_access_token/internal`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ app_id: creds.appId, app_secret: creds.appSecret }),
@@ -148,7 +150,7 @@ export class FeishuStreamingSession {
     }
 
     // 1. Create card entity
-    const createResp = await fetch(`${apiBase}/cardkit/v1/cards`, {
+    const createResp = await cancellableFetch(`${apiBase}/cardkit/v1/cards`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${token}`,
@@ -175,7 +177,7 @@ export class FeishuStreamingSession {
 
     if (options?.replyToMessageId) {
       // Reply mode
-      const replyResp = await fetch(`${apiBase}/im/v1/messages/${options.replyToMessageId}/reply`, {
+      const replyResp = await cancellableFetch(`${apiBase}/im/v1/messages/${options.replyToMessageId}/reply`, {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${token}`,
@@ -201,7 +203,7 @@ export class FeishuStreamingSession {
       if (options?.rootId) {
         createBody.root_id = options.rootId;
       }
-      const msgResp = await fetch(`${apiBase}/im/v1/messages?receive_id_type=${receiveIdType}`, {
+      const msgResp = await cancellableFetch(`${apiBase}/im/v1/messages?receive_id_type=${receiveIdType}`, {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${token}`,
@@ -228,7 +230,7 @@ export class FeishuStreamingSession {
     const apiBase = resolveApiBase(this.creds.domain);
     this.state.sequence += 1;
     try {
-      const resp = await fetch(
+      const resp = await cancellableFetch(
         `${apiBase}/cardkit/v1/cards/${this.state.cardId}/elements/content/content`,
         {
           method: 'PUT',
@@ -293,7 +295,7 @@ export class FeishuStreamingSession {
     // Close streaming mode
     this.state.sequence += 1;
     try {
-      const resp = await fetch(`${apiBase}/cardkit/v1/cards/${this.state.cardId}/settings`, {
+      const resp = await cancellableFetch(`${apiBase}/cardkit/v1/cards/${this.state.cardId}/settings`, {
         method: 'PATCH',
         headers: {
           Authorization: `Bearer ${await getToken(this.creds)}`,

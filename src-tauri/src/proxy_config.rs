@@ -19,7 +19,7 @@ use serde::Deserialize;
 use std::fs;
 use std::process::Command;
 
-use crate::{ulog_info, ulog_error, ulog_debug};
+use crate::{ulog_debug, ulog_error, ulog_info, ulog_warn};
 
 /// Default proxy protocol (when not specified in config)
 const DEFAULT_PROXY_PROTOCOL: &str = "http";
@@ -84,7 +84,7 @@ pub fn read_proxy_settings() -> Option<ProxySettings> {
             return None;
         }
         Err(e) => {
-            log::warn!(
+            ulog_warn!(
                 "[proxy_config] Failed to read config file {:?}: {}. \
                  Check file permissions.",
                 config_path, e
@@ -100,7 +100,7 @@ pub fn read_proxy_settings() -> Option<ProxySettings> {
     let config: PartialAppConfig = match serde_json::from_str(content) {
         Ok(c) => c,
         Err(e) => {
-            log::error!(
+            ulog_error!(
                 "[proxy_config] Invalid JSON in {:?}: {}. \
                  Please check the configuration file format.",
                 config_path, e
@@ -202,7 +202,7 @@ pub fn build_client_with_proxy(
 ) -> Result<reqwest::Client, String> {
     let final_builder = if let Some(proxy_settings) = read_proxy_settings() {
         let proxy_url = get_proxy_url(&proxy_settings)?;
-        log::info!("[proxy_config] Using proxy for external requests: {}", proxy_url);
+        ulog_info!("[proxy_config] Using proxy for external requests: {}", proxy_url);
 
         // Configure proxy but exclude localhost and all loopback addresses
         // Comprehensive NO_PROXY list for maximum compatibility:
@@ -219,7 +219,7 @@ pub fn build_client_with_proxy(
         // Let reqwest use its default proxy detection (env vars + macOS system proxy).
         // This ensures the app respects system-level proxy (Clash TUN, global proxy, etc.)
         // just like other normal applications.
-        log::info!("[proxy_config] No proxy configured, inheriting system network behavior");
+        ulog_info!("[proxy_config] No proxy configured, inheriting system network behavior");
         builder
     };
 

@@ -20,7 +20,7 @@ import {
   useRef,
   useState,
 } from 'react';
-import { ChevronDown, ChevronUp, Hash, PenLine } from 'lucide-react';
+import { Hash, PenLine } from 'lucide-react';
 import { thoughtCreate } from '@/api/taskCenter';
 import { track } from '@/analytics';
 import Tip from '@/components/Tip';
@@ -40,14 +40,12 @@ export interface ThoughtInputHandle {
   focus: () => void;
 }
 
-// Visual variants. The `compact` variant is the Task Center thought stream
-// card (14px text, tighter padding, no shadow). The `launcher` variant
-// mirrors SimpleChatInput's launcher-mode card exactly — 16px text,
-// `rounded-2xl`, `shadow-md`, `px-4` padding — so that when BrandSection
-// toggles 任务 ↔ 想法 the user sees the same input frame, just with a
-// different inner behaviour. Without this, the two inputs look visibly
-// different (font size, radius, shadow) and the page feels like it swaps
-// controls instead of changing modes.
+// Visual variants. Both variants share the outer card frame (radius,
+// shadow, border) so the Task Center input and the Launcher 想法 input
+// read as the same affordance. They diverge only on inner metrics —
+// `compact` (Task Center) keeps 14px text + tighter padding so it sits
+// quietly above the thought stream; `launcher` uses 16px text + roomier
+// padding to match SimpleChatInput's launcher-mode card byte-for-byte.
 type ThoughtInputVariant = 'compact' | 'launcher';
 
 const VARIANTS: Record<ThoughtInputVariant, {
@@ -80,8 +78,11 @@ const VARIANTS: Record<ThoughtInputVariant, {
     pxPerLine: 22,           // 14px × 1.6 line-height ≈ 22.4
     verticalPaddingPx: 12,
     textareaClass: 'text-[14px] leading-relaxed',
-    cardClass: 'rounded-[var(--radius-lg)]',
-    focusClass: 'focus-within:border-[var(--line-strong)]',
+    // Resting `shadow-xs` so the input reads as quietly elevated above
+    // the thought stream below; lifts to `shadow-sm` on hover / focus to
+    // signal the active write surface. Same idiom as SettingsHelperInbox.
+    cardClass: 'rounded-2xl shadow-xs hover:shadow-sm focus-within:shadow-sm transition-shadow duration-150',
+    focusClass: '',
     outerPaddingClass: '',
     innerPaddingClass: 'px-3 pt-3',
     toolbarPaddingClass: 'px-2 pb-2 pt-1',
@@ -110,15 +111,11 @@ const VARIANTS: Record<ThoughtInputVariant, {
  * forgets the mirror), text wraps at a different character and the
  * textarea's caret floats into "mystery whitespace" after the last
  * visible mirror glyph (regression scenario from cross-review M9).
- *
- * Pulled out into a function so both call sites pass the same `theme`
- * + `showExpandToggle` and end up with byte-equivalent output.
  */
 function MIRROR_TEXTAREA_SHARED_CLASS(
   theme: (typeof VARIANTS)[ThoughtInputVariant],
-  showExpandToggle: boolean,
 ): string {
-  return `${theme.innerPaddingClass} ${theme.textareaClass}${showExpandToggle ? ' pr-10' : ''}`;
+  return `${theme.innerPaddingClass} ${theme.textareaClass}`;
 }
 
 /**
@@ -160,18 +157,8 @@ interface Props {
   /**
    * Maximum row count the textarea can auto-grow to before internal
    * scroll kicks in. Defaults to 8 for the compact Task Center stream.
-   *
-   * Launcher 想法 mode **MUST** pass `maxLines === minLines` (3) so the
-   * textarea height is frozen at the starting value. SimpleChatInput's
-   * launcher variant is hard-capped at `MAX_LINES_COLLAPSED = 3`; if
-   * ThoughtInput were allowed to auto-grow past that, any thought
-   * draft crossing 3 lines would make the 想法 card taller than the
-   * 对话 card and — because both inputs stay mounted via `hidden` and
-   * the textarea's `style.height` survives across mode switches —
-   * toggling modes would visibly jump the MyAgents title / slogan
-   * (reported after 0.1.70). Layout-freezing the ceiling is the
-   * structural guarantee; the user can still scroll longer drafts
-   * internally via the textarea's own `overflow-y-auto`.
+   * Launcher 想法 mode passes 12 to match SimpleChatInput's `MAX_LINES`,
+   * so the two inputs share the same content-driven ceiling.
    */
   maxLines?: number;
   /**
@@ -180,17 +167,6 @@ interface Props {
    * the Chat input (same radius / shadow / text size / padding).
    */
   variant?: ThoughtInputVariant;
-  /**
-   * Controlled expand/collapse state — when supplied, renders a
-   * `ChevronUp`/`ChevronDown` toggle pinned to the textarea's top-right
-   * (matching SimpleChatInput's launcher-variant affordance). Launcher
-   * lifts the expand state to its parent so this input and the Chat
-   * input share it: expanding in one mode persists into the other.
-   * Omit entirely for Task Center and other surfaces that don't want
-   * the expand affordance.
-   */
-  isExpanded?: boolean;
-  onExpandedChange?: (next: boolean) => void;
 }
 
 export const ThoughtInput = forwardRef<ThoughtInputHandle, Props>(function ThoughtInput({
@@ -205,10 +181,7 @@ export const ThoughtInput = forwardRef<ThoughtInputHandle, Props>(function Thoug
   minLines = 2,
   maxLines = 8,
   variant = 'compact',
-  isExpanded,
-  onExpandedChange,
 }, ref) {
-  const showExpandToggle = isExpanded !== undefined && onExpandedChange !== undefined;
   const theme = VARIANTS[variant];
   // Layout invariant: effective max >= min. Caller-supplied maxLines
   // below minLines would produce a weird "negative growth room" state;
@@ -227,6 +200,12 @@ export const ThoughtInput = forwardRef<ThoughtInputHandle, Props>(function Thoug
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const overlayInnerRef = useRef<HTMLDivElement>(null);
   const cardRef = useRef<HTMLDivElement>(null);
+  // Bug #123 mirror: SimpleChatInput skips style writes during IME
+  // composition because WebKit + WeChat 输入法 voice input duplicates
+  // candidate text when the textarea is restyled mid-composition. Same
+  // hazard applies here — both inputs share the launcher 想法 surface.
+  const isComposingRef = useRef(false);
+  const [resizeBump, setResizeBump] = useState(0);
 
   // Imperative focus — exposed through the forwarded ref so parents can
   // drive focus on mode/tab switches. Matches SimpleChatInputHandle.
@@ -286,26 +265,35 @@ export const ThoughtInput = forwardRef<ThoughtInputHandle, Props>(function Thoug
     syncScroll();
   }, [value, syncScroll]);
 
-  // Auto-grow the textarea with content. Floor = 2 rows (idle state stays
-  // compact); ceiling = 8 rows (~2 idle + 6 extra, per product spec). Past
-  // the ceiling the textarea scrolls internally and the mirror overlay
-  // tracks via `syncScroll`. We measure `scrollHeight` which includes
-  // padding but not border — clamp via CSS values instead of px math so
-  // font-size changes stay in sync without recomputing constants here.
+  // Auto-grow the textarea with content. Floor = `minLines`; ceiling =
+  // `maxLines` (compact: 8, launcher: 9). Past the ceiling the textarea
+  // scrolls internally and the mirror overlay tracks via `syncScroll`.
   useLayoutEffect(() => {
     const ta = textareaRef.current;
     if (!ta) return;
-    if (isExpanded === true) {
-      ta.style.height = `${textareaMaxHeightPx}px`;
-      return;
-    }
+    // Bug #123 — same IME guard SimpleChatInput uses. The post-
+    // compositionend handler bumps `resizeBump` so we catch up after commit.
+    if (isComposingRef.current) return;
+    // Skip when the textarea is in a `display:none` subtree (Launcher hides
+    // the inactive 对话/想法 mode this way). `scrollHeight` reads as 0 there
+    // and the reset-to-0 below would lock the height to `minLines` until
+    // the user types again. Preserve the last visible height instead.
+    if (ta.offsetParent === null) return;
     // Reset to 0 before reading scrollHeight so a shrinking value also
     // triggers a recompute (otherwise the textarea is stuck at its tallest
     // historical height).
     ta.style.height = '0px';
     const next = Math.min(ta.scrollHeight, textareaMaxHeightPx);
     ta.style.height = `${Math.max(next, textareaMinHeightPx)}px`;
-  }, [value, textareaMinHeightPx, textareaMaxHeightPx, isExpanded]);
+  }, [value, textareaMinHeightPx, textareaMaxHeightPx, resizeBump]);
+
+  const handleCompositionStart = useCallback(() => {
+    isComposingRef.current = true;
+  }, []);
+  const handleCompositionEnd = useCallback(() => {
+    isComposingRef.current = false;
+    setResizeBump((b) => b + 1);
+  }, []);
 
   // Consume any pending caret position after React flushes `setValue` to
   // the DOM — safer than `requestAnimationFrame`, which can run before
@@ -440,7 +428,7 @@ export const ThoughtInput = forwardRef<ThoughtInputHandle, Props>(function Thoug
     <div className="w-full">
       <div
         ref={cardRef}
-        className={`relative flex flex-col border border-[var(--line)] bg-[var(--paper-elevated)] transition-colors ${theme.focusClass} ${theme.cardClass}`}
+        className={`relative flex flex-col border border-[var(--line)] bg-[var(--paper-elevated)] ${theme.focusClass} ${theme.cardClass}`}
       >
         {/* Mirror layer: same text as the textarea but with coloured `#tag`
             runs. Must match the textarea's font metrics so the highlighted
@@ -460,22 +448,21 @@ export const ThoughtInput = forwardRef<ThoughtInputHandle, Props>(function Thoug
                 clip box so the inner text-rendering area exactly matches
                 the textarea's bounding box. Without this layer the inner
                 used the full clip-box width while the textarea used
-                (clip-box - outer-padding); any additional textarea-only
-                padding (notably `pr-10` for the expand-toggle in
-                launcher mode) made the two layers wrap at different
-                characters and the caret would float into "mystery"
-                whitespace after the visible mirror text. */}
+                (clip-box - outer-padding); any future textarea-only
+                padding addition would have to be added here too or the
+                two layers wrap at different characters and the caret
+                floats into "mystery" whitespace after the visible mirror
+                text. */}
             <div className={theme.outerPaddingClass}>
               <div
                 ref={overlayInnerRef}
                 // `MIRROR_TEXTAREA_SHARED_CLASS` carries every Tailwind/
                 // CSS-token decision that affects glyph layout — padding
-                // inside the box, font size, line-height, conditional
-                // `pr-10` for the expand toggle. The textarea below
-                // applies the EXACT same class (plus its own appearance/
-                // background overrides) so any future style change here
-                // hits both layers in lockstep.
-                className={`${MIRROR_TEXTAREA_SHARED_CLASS(theme, showExpandToggle)} text-[var(--ink)]`}
+                // inside the box, font size, line-height. The textarea
+                // below applies the EXACT same class (plus its own
+                // appearance/background overrides) so any future style
+                // change here hits both layers in lockstep.
+                className={`${MIRROR_TEXTAREA_SHARED_CLASS(theme)} text-[var(--ink)]`}
                 style={{
                   ...MIRROR_TEXTAREA_SHARED_STYLE,
                   willChange: 'transform', // mirror translateY(-scrollTop) GPU hint
@@ -505,6 +492,8 @@ export const ThoughtInput = forwardRef<ThoughtInputHandle, Props>(function Thoug
             onClick={handleSelect}
             onKeyDown={handleKeyDown}
             onScroll={syncScroll}
+            onCompositionStart={handleCompositionStart}
+            onCompositionEnd={handleCompositionEnd}
             placeholder={placeholder}
             // Height is driven by the `useLayoutEffect` above (2-row
             // minimum, 8-row max, internal scroll past that). We don't
@@ -534,52 +523,30 @@ export const ThoughtInput = forwardRef<ThoughtInputHandle, Props>(function Thoug
             // round 3 identified. `block` collapses the descender gap
             // so the card footprint is truly textarea.height + wrappers.
             //
-            // `pr-10` when an expand toggle is rendered reserves the
-            // click area so content can't overlap the toggle button
-            // (matches SimpleChatInput's `pr-8` but one size larger to
-            // accommodate the toggle's larger hit box).
             // Textarea-specific classes (block layout, transparency to let
             // the mirror layer show through, caret/placeholder colour) +
             // `MIRROR_TEXTAREA_SHARED_CLASS` so geometry stays pinned to
             // the mirror. Editing the geometry props here without also
             // updating the shared helper would re-create the wrap-mismatch
             // / caret-floating-on-mystery-whitespace bug.
-            className={`block relative w-full resize-none overflow-y-auto bg-transparent text-transparent caret-[var(--ink)] placeholder:text-[var(--ink-muted)] placeholder:[-webkit-text-fill-color:var(--ink-muted)] focus:outline-none ${MIRROR_TEXTAREA_SHARED_CLASS(theme, showExpandToggle)}`}
+            className={`block relative w-full resize-none overflow-y-auto bg-transparent text-transparent caret-[var(--ink)] placeholder:text-[var(--ink-muted)] placeholder:[-webkit-text-fill-color:var(--ink-muted)] focus:outline-none ${MIRROR_TEXTAREA_SHARED_CLASS(theme)}`}
             style={{
               ...MIRROR_TEXTAREA_SHARED_STYLE,
               WebkitTextFillColor: 'transparent',
               minHeight: `${textareaMinHeightPx}px`,
               maxHeight: `${textareaMaxHeightPx}px`,
-              // Animate the expand/collapse toggle (launcher's "想法" mode
-              // grows from 3 → 12 lines when the user hits the chevron).
-              // Mirrors SimpleChatInput's pattern so both inputs feel like
-              // the same affordance — explicit property list + `height` so
-              // collapse animates symmetrically (WebKit textareas sometimes
-              // drop the transition on shrink when only `max-height` is
-              // listed). The `useLayoutEffect` above writes `style.height`
-              // imperatively; the final declared value wins and the
-              // transition runs from previous baseline → target.
+              // The `useLayoutEffect` above writes `style.height`
+              // imperatively each keystroke; this transition smooths the
+              // visible growth/shrink. Explicit property list + `height`
+              // so shrink animates symmetrically to grow (WebKit textareas
+              // sometimes drop the transition on shrink when only one of
+              // `min-height` / `height` is listed).
               transitionProperty: 'min-height, max-height, height',
               transitionDuration: '220ms',
               transitionTimingFunction: 'cubic-bezier(0.22, 1, 0.36, 1)',
-              willChange: 'max-height',
+              willChange: 'height',
             }}
           />
-          {showExpandToggle && (
-            // Absolute-positioned toggle in the textarea's top-right —
-            // mirrors SimpleChatInput's expand button exactly
-            // (`absolute right-2 top-1.5`, `p-2`, ChevronUp/ChevronDown).
-            // Sharing position + icons makes the two inputs feel like
-            // the same affordance swapped under the hood.
-            <button
-              type="button"
-              onClick={() => onExpandedChange?.(!isExpanded)}
-              className="absolute right-2 top-1.5 rounded-lg p-2 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
-              title={isExpanded ? '收起' : '展开'}
-            >
-              {isExpanded ? <ChevronDown className="h-4 w-4" /> : <ChevronUp className="h-4 w-4" />}
-            </button>
-          )}
         </div>
 
         {/* Tag autocomplete — Escape dismissal is owned by the textarea's

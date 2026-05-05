@@ -11,6 +11,7 @@ description: >-
   （→ widget readme）、"看下我有啥任务/定时/Runtime/版本"（→ list / status / version）、"改下应用设置"（→ config）。
   即使用户没说"用 MyAgents 做"几个字，只要意图能映射到上述能力之一，就该走这个 skill。
   反向边界：纯业务任务（写代码、查资料、读文件）不归这里；用户自己会话里给 AI 排任务用 im-cron MCP，不是这里。
+author: MyAgents
 ---
 
 # myagents-cli — MyAgents 产品能力的 CLI 入口

@@ -357,12 +357,37 @@ pub struct CronTask {
     /// Model to use for execution
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    /// Provider environment (API key, base URL)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Provider environment (API key, base URL).
+    ///
+    /// PRD 0.2.9 — DEPRECATED. Read-only legacy field: deserialization
+    /// honored so 0.2.8 `cron_tasks.json` still loads and the in-memory
+    /// CronTask still routes correctly via the `Explicit` intent path. But
+    /// `skip_serializing` ensures we **never write this back to disk** —
+    /// so on the next `save_to_disk()` (any field edit) the credential
+    /// copy disappears and the cron either runs subscription/follow or the
+    /// user re-picks a provider. PRD 0.2.9 R2 invariant: zero credential
+    /// copies in `~/.myagents/cron_tasks.json`.
+    #[serde(default, skip_serializing)]
     pub provider_env: Option<TaskProviderEnv>,
+    /// PRD 0.2.9 — Per-task provider id (live-resolution intent).
+    ///
+    /// Replaces `provider_env` as the canonical persistence shape. When set,
+    /// the sidecar calls `resolveProviderEnv(providerId)` at every tick from
+    /// `~/.myagents/config.json`, so:
+    ///   * API key rotation propagates instantly (no need to re-save tasks)
+    ///   * Provider deletion fails the next tick with a clear error
+    ///   * No credential copies in `cron_tasks.json`
+    ///
+    /// `None` retains the FollowAgent / legacy snapshot semantics. See
+    /// `tech_docs/task_provider_routing.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_id: Option<String>,
     /// Routing intent for this cron — see `ProviderIntent` for full design.
     /// Defaults to `FollowAgent` (legacy snapshot behavior) so pre-#119 tasks
     /// keep their existing semantics across upgrade.
+    /// PRD 0.2.9 — when `provider_id` is set, the sidecar ignores this field
+    /// (live-resolution path takes precedence). Retained so 0.2.8 cron tasks
+    /// still resolve correctly.
     #[serde(default)]
     pub provider_intent: ProviderIntent,
     /// Agent runtime snapshot for external Runtime tasks.
@@ -441,13 +466,22 @@ pub struct CronTaskConfig {
     pub permission_mode: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// PRD 0.2.9 — DEPRECATED. New callers SHOULD pass `provider_id` instead;
+    /// retained for the legacy IM-Bot / heartbeat paths that still build a
+    /// frozen env at schedule time. See `provider_id` below.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider_env: Option<TaskProviderEnv>,
+    /// PRD 0.2.9 — Per-task provider id (live-resolution intent). Preferred
+    /// over `provider_env` for all new callers. `None` keeps FollowAgent /
+    /// legacy snapshot semantics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_id: Option<String>,
     /// Provider routing intent (PRD #119). Callers without explicit intent —
     /// legacy IM Bot path, Task Center dispatch — leave this as
     /// `FollowAgent` (the serde default) and keep snapshot semantics.
     /// Frontend cron creation paths set this to `Subscription` or `Explicit`
     /// based on what the user picked when scheduling.
+    /// PRD 0.2.9 — when `provider_id` is set, the sidecar ignores this field.
     #[serde(default)]
     pub provider_intent: ProviderIntent,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -886,7 +920,27 @@ impl CronTaskManager {
         // Try whole-store deserialization first (fast path)
         match serde_json::from_str::<CronTaskStore>(&content) {
             Ok(store) => {
-                return store.tasks.into_iter().map(|t| (t.id.clone(), t)).collect();
+                let result: HashMap<String, CronTask> = store
+                    .tasks
+                    .into_iter()
+                    .map(|t| (t.id.clone(), t))
+                    .collect();
+                // PRD 0.2.9 R9 — Count tasks still carrying the deprecated
+                // `provider_env` snapshot (apiKey + baseUrl frozen at create
+                // time). The sidecar live-resolves provider_id on every tick
+                // for new tasks; legacy ones still work via the legacy
+                // `Explicit` intent path until the user re-saves them.
+                let legacy_count = result
+                    .values()
+                    .filter(|t| t.provider_env.is_some() && t.provider_id.is_none())
+                    .count();
+                if legacy_count > 0 {
+                    ulog_info!(
+                        "[CronTask] {} legacy task(s) still carry frozen provider_env (PRD 0.2.9). They run via legacy Explicit intent until re-saved. Edit & save once in 任务编辑 to migrate to live-resolve.",
+                        legacy_count
+                    );
+                }
+                return result;
             }
             Err(e) => {
                 ulog_warn!("[CronTask] Whole-store parse failed ({}), trying per-task fallback", e);
@@ -1900,10 +1954,36 @@ impl CronTaskManager {
     }
 
     /// Create a new cron task (does not start it)
-    pub async fn create_task(&self, config: CronTaskConfig) -> Result<CronTask, String> {
+    pub async fn create_task(&self, mut config: CronTaskConfig) -> Result<CronTask, String> {
         // Validate minimum interval (5 minutes, matches frontend MIN_CRON_INTERVAL)
         if config.interval_minutes < 5 {
             return Err("Interval must be at least 5 minutes".to_string());
+        }
+
+        // PRD 0.2.9 — Apply the same provider-routing invariants as the
+        // Task layer (`task::validate_task_provider_routing`). All callers
+        // of this function (frontend cron creation paths, IM cron tool,
+        // ensure_cron_for_task projection) flow through here, so this is
+        // the choke point that prevents IM-bot / CLI / direct-Tauri
+        // callers from persisting half-state CronTasks. Mirrors the pin
+        // semantics: provider_id with no runtime → pin builtin.
+        if config.provider_id.is_some() && config.runtime.is_none() {
+            config.runtime = Some("builtin".to_string());
+        }
+        if config.provider_id.is_some() && config.model.is_none() {
+            return Err(
+                "providerId 必须与 model 配对设置（CronTask 创建路径校验）".to_string(),
+            );
+        }
+        if let Some(rt) = config.runtime.as_deref() {
+            if matches!(rt, "claude-code" | "codex" | "gemini")
+                && config.provider_id.is_some()
+            {
+                return Err(format!(
+                    "外部 runtime '{}' 不允许同时指定 providerId（CronTask 创建路径校验）",
+                    rt
+                ));
+            }
         }
 
         let task = CronTask {
@@ -1924,6 +2004,7 @@ impl CronTaskManager {
             permission_mode: config.permission_mode,
             model: config.model,
             provider_env: config.provider_env,
+            provider_id: config.provider_id,
             provider_intent: config.provider_intent,
             runtime: config.runtime,
             runtime_config: config.runtime_config,
@@ -2075,8 +2156,14 @@ impl CronTaskManager {
         }
 
         let mut tasks = self.tasks.write().await;
-        let task = tasks.get_mut(task_id)
-            .ok_or_else(|| format!("Task not found: {}", task_id))?;
+        // Apply patches to a CLONE so a late-stage validation failure
+        // (PRD 0.2.9 invariants below) doesn't leave the in-memory store
+        // half-patched — found during cross-review of dev/0.2.9.
+        let mut task: CronTask = tasks
+            .get(task_id)
+            .ok_or_else(|| format!("Task not found: {}", task_id))?
+            .clone();
+        let task = &mut task;
 
         // Apply allowed patches
         if let Some(name) = patch.get("name").and_then(|v| v.as_str()) {
@@ -2174,8 +2261,47 @@ impl CronTaskManager {
                 task.model = Some(s.to_string());
             }
         }
+        // PRD 0.2.9 — Project per-task provider id from Task → CronTask. Two
+        // states (mirrors model semantics):
+        //   null     → clear (= follow Agent)
+        //   "id"     → set the per-task override
+        // The sidecar live-resolves env from this id on every tick, so we
+        // never write a credential snapshot to disk here.
+        if let Some(provider_id) = patch.get("providerId") {
+            if provider_id.is_null() {
+                task.provider_id = None;
+            } else if let Some(s) = provider_id.as_str() {
+                task.provider_id = if s.is_empty() {
+                    None
+                } else {
+                    Some(s.to_string())
+                };
+            }
+        }
+
         if let Some(pm) = patch.get("permissionMode").and_then(|v| v.as_str()) {
             task.permission_mode = pm.to_string();
+        }
+        // PRD #131 / Codex-review #1 — runtime + runtimeConfig projection
+        // from Task → CronTask. Same two-state semantics as model/providerId:
+        //   null     → clear (= follow Agent runtime)
+        //   string   → set the per-task runtime override (builtin / codex / …)
+        // Without these, an existing recurring task whose runtime was
+        // edited in the Task panel kept executing on the original runtime
+        // forever — Task and CronTask drifted out of sync.
+        if let Some(runtime_val) = patch.get("runtime") {
+            if runtime_val.is_null() {
+                task.runtime = None;
+            } else if let Some(s) = runtime_val.as_str() {
+                task.runtime = if s.is_empty() { None } else { Some(s.to_string()) };
+            }
+        }
+        if let Some(rc_val) = patch.get("runtimeConfig") {
+            if rc_val.is_null() {
+                task.runtime_config = None;
+            } else {
+                task.runtime_config = Some(rc_val.clone());
+            }
         }
         // PRD 0.2.4 §需求 4 — Task → CronTask projection of MCP override.
         // Two-state semantics (mirrors `task.rs::update`):
@@ -2198,6 +2324,36 @@ impl CronTaskManager {
             task.delivery = None;
         }
 
+        // PRD 0.2.9 — Re-run the create-time invariants on the merged state.
+        // The sibling `create_task` choke point gates the create path, but
+        // this `update_task_fields` path (used by `/api/cron/update` and the
+        // CLI / IM patch flows) was missing the same gate, so a patch like
+        // `{"providerId": "openai-x"}` against an existing CronTask with
+        // `runtime: Some("codex")` would silently land — exactly the half-
+        // state the validator is designed to refuse. Found by CC review on
+        // dev/0.2.9. Same pin-runtime semantics: provider_id with no runtime
+        // → pin builtin so a later Agent runtime flip doesn't cross-talk.
+        // Patches were applied to a CLONE above, so a validation failure
+        // here aborts cleanly without touching the in-memory store.
+        if task.provider_id.is_some() && task.runtime.is_none() {
+            task.runtime = Some("builtin".to_string());
+        }
+        if task.provider_id.is_some() && task.model.is_none() {
+            return Err(
+                "providerId 必须与 model 配对设置（CronTask 更新路径校验）".to_string(),
+            );
+        }
+        if let Some(rt) = task.runtime.as_deref() {
+            if matches!(rt, "claude-code" | "codex" | "gemini")
+                && task.provider_id.is_some()
+            {
+                return Err(format!(
+                    "外部 runtime '{}' 不允许同时指定 providerId（CronTask 更新路径校验）",
+                    rt
+                ));
+            }
+        }
+
         task.updated_at = Utc::now();
         // Detect schedule-shape change so we know whether to restart the
         // scheduler (even shape-unchanged edits still go through this path
@@ -2206,6 +2362,8 @@ impl CronTaskManager {
             || task.interval_minutes != prev_interval
             || task.end_conditions != prev_end_conditions;
         let updated = task.clone();
+        // Commit the validated clone back to the map.
+        tasks.insert(task_id.to_string(), updated.clone());
         drop(tasks);
         self.save_to_disk().await?;
         ulog_info!("[CronTask] Updated task fields: {}", task_id);
@@ -2835,6 +2993,10 @@ async fn execute_task_directly(
         ai_can_exit: Some(task.end_conditions.ai_can_exit),
         permission_mode: Some(task.permission_mode.clone()),
         model: task.model.clone(),
+        // PRD 0.2.9: legacy snapshot path — only forwarded for tasks persisted
+        // in 0.2.8 or earlier (when `provider_env` was the persistence shape).
+        // New crons have `provider_env: None` and `provider_id: Some(_)`; the
+        // sidecar prefers `provider_id` and live-resolves on every tick.
         provider_env: task.provider_env.as_ref().map(|env| ProviderEnv {
             base_url: env.base_url.clone(),
             api_key: env.api_key.clone(),
@@ -2843,6 +3005,7 @@ async fn execute_task_directly(
             max_output_tokens_param_name: env.max_output_tokens_param_name.clone(),
             upstream_format: env.upstream_format.clone(),
         }),
+        provider_id: task.provider_id.clone(),
         // PRD #119: forward routing intent so the sidecar handler can
         // either honor the snapshot path (FollowAgent / legacy) or
         // short-circuit to task-owned values (Subscription / Explicit).
@@ -2880,6 +3043,51 @@ async fn execute_task_directly(
     }));
 
     ulog_info!("[CronTask] execute_cron_task completed for task {}, task_success={}", task.id, result.success);
+
+    // PRD 0.2.9 — Provider-resolution failure should permanently Block the
+    // linked Task, not just record `last_run_ok=false`. The sidecar surfaces
+    // these via `success:false` + an error string starting with
+    // "Provider 'X'" (set in src/server/index.ts::resolveCronProviderRouting):
+    //   - "Provider 'X' not found in config" — provider deleted
+    //   - "Provider 'X' has no API Key" — credential removed
+    // Both are deterministic per-tick failures: re-running on the next tick
+    // will fail the same way until the user re-picks a provider. Mark the
+    // Task as Blocked so the UI surfaces the actionable error and the
+    // scheduler stops retrying. Mirrors the build_dispatch_prompt failure
+    // path above.
+    if !result.success {
+        let err_msg = result.error.clone().unwrap_or_default();
+        let is_provider_resolution_failure = err_msg.starts_with("Provider '")
+            && (err_msg.contains("not found in config")
+                || err_msg.contains("has no API Key"));
+        if is_provider_resolution_failure {
+            if let Some(ta_id) = task.task_id.as_ref() {
+                ulog_error!(
+                    "[CronTask] task {} provider resolution failed: {} — blocking linked Task {}",
+                    task.id,
+                    err_msg,
+                    ta_id
+                );
+                if let Some(ta_store) = crate::task::get_task_store() {
+                    let _ = ta_store
+                        .update_status(crate::task::TaskUpdateStatusInput {
+                            id: ta_id.clone(),
+                            status: crate::task::TaskStatus::Blocked,
+                            message: Some(err_msg.clone()),
+                            actor: crate::task::TransitionActor::System,
+                            source: Some(crate::task::TransitionSource::Crash),
+                        })
+                        .await;
+                }
+            }
+            // Stop the underlying CronTask too so the scheduler doesn't keep
+            // retrying every interval. The user's UI action (re-pick provider
+            // → save) will rebuild and restart it via ensure_cron_for_task.
+            let _ = get_cron_task_manager()
+                .stop_task(&task.id, Some(format!("provider unavailable: {}", err_msg)))
+                .await;
+        }
+    }
 
     // Send notification if enabled
     if task.notify_enabled {

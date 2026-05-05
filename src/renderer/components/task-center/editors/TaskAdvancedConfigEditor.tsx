@@ -14,18 +14,24 @@
 // (see `src/server/index.ts` `/cron/execute`); the field surfaced here is
 // the user-facing escape hatch when they want a stricter mode.
 
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ChevronDown, Settings2 } from 'lucide-react';
 import CustomSelect from '@/components/CustomSelect';
 import { useConfig } from '@/hooks/useConfig';
+import { useAvailableProviders } from '@/hooks/useAvailableProviders';
+import { isProviderAvailable } from '@/config/services/providerService';
 import {
+  CC_MODELS,
   RUNTIME_DISPLAY_NAMES,
   VALID_RUNTIMES,
   getRuntimePermissionModes,
+  type RuntimeModelInfo,
   type RuntimeType,
 } from '@/../shared/types/runtime';
 import type { McpServerDefinition } from '@/config/types';
+import type { RuntimeConfig } from '@/../shared/types/runtime';
 import { getAllMcpServersFromConfig } from '@/config/services/mcpService';
+import { apiGetJson } from '@/api/apiFetch';
 
 // "跟随" sentinel: an empty-string value selected from <CustomSelect>
 // translates back to `undefined` on the wrapper level. Using `''` rather
@@ -40,11 +46,21 @@ interface Props {
    *  project so callers don't need to thread it through separately. */
   workspacePath?: string;
 
-  // ─── Runtime / model / permission mode ───────────────────────────────
+  // ─── Runtime / provider / model / permission mode ────────────────────
   runtime?: RuntimeType;
   setRuntime: (v: RuntimeType | undefined) => void;
+  /** PRD 0.2.9 — Per-task provider id override. MUST be paired with
+   *  `model`; the picker writes both atomically. `undefined` = follow Agent. */
+  providerId?: string;
+  setProviderId: (v: string | undefined) => void;
   model?: string;
   setModel: (v: string | undefined) => void;
+  /** PRD 0.2.9 — External-runtime model override (claude-code / codex /
+   *  gemini). Stored on `runtimeConfig.model` rather than `model` because
+   *  external-runtime ids never collide with builtin provider model ids
+   *  and the cron exec path reads them from runtimeConfig. */
+  runtimeConfig?: RuntimeConfig;
+  setRuntimeConfig: (v: RuntimeConfig | undefined) => void;
   permissionMode?: string;
   setPermissionMode: (v: string | undefined) => void;
 
@@ -59,8 +75,12 @@ export function TaskAdvancedConfigEditor(props: Props) {
     workspacePath,
     runtime,
     setRuntime: setRuntimeRaw,
+    providerId,
+    setProviderId,
     model,
     setModel,
+    runtimeConfig,
+    setRuntimeConfig,
     permissionMode,
     setPermissionMode,
     mcpEnabledServers,
@@ -72,12 +92,24 @@ export function TaskAdvancedConfigEditor(props: Props) {
   // doesn't hide what the user previously configured).
   const hasAnyOverride =
     runtime !== undefined
+    || (providerId && providerId.length > 0)
     || (model && model.length > 0)
+    || (runtimeConfig?.model && runtimeConfig.model.length > 0)
     || (permissionMode && permissionMode.length > 0)
     || mcpEnabledServers !== undefined;
   const [open, setOpen] = useState<boolean>(hasAnyOverride);
+  // PRD 0.2.9 — Grouped builtin model picker popup state. We render a
+  // popup-style grouped list (provider name → models) instead of a flat
+  // <CustomSelect> so the UX matches Chat / Agent settings exactly. The
+  // ref is used to outside-click-close the popup.
+  const [modelPickerOpen, setModelPickerOpen] = useState<'builtin' | 'external' | null>(null);
+  const modelPickerRef = useRef<HTMLDivElement | null>(null);
 
-  const { config, projects, providers } = useConfig();
+  const { config, projects, providers, apiKeys, providerVerifyStatus } = useConfig();
+  // PRD 0.2.9 — All credentialed providers (cross-provider list, mirrors
+  // Chat's WorkspaceBasicsSection). Pre-#130 the picker showed only the
+  // workspace's single bound provider; that's the bug this PRD fixes.
+  const availableProviders = useAvailableProviders();
 
   // Resolve the workspace's Agent — source of truth for the runtime / model
   // / permission / MCP defaults that the task inherits when the user picks
@@ -138,18 +170,42 @@ export function TaskAdvancedConfigEditor(props: Props) {
         if (permissionMode !== undefined) setPermissionMode(undefined);
       }
       if (nextEffective !== 'builtin') {
+        // PRD 0.2.9 — Builtin-runtime fields (providerId / model / MCP)
+        // are meaningless for external runtimes; the Rust validator will
+        // reject any persisted combination of (runtime∈external + providerId).
+        // Clear them up front so the user doesn't see stale values that
+        // wouldn't actually take effect. `runtimeConfig.model` is preserved
+        // (it stores the external-runtime model), and the model field on
+        // task is independent.
+        if (providerId !== undefined) setProviderId(undefined);
         if (model !== undefined) setModel(undefined);
         if (mcpEnabledServers !== undefined) setMcpEnabledServers(undefined);
+      } else {
+        // Switching back TO builtin — clear any external runtime model that
+        // may be lingering on `runtimeConfig` (would be ignored by builtin
+        // path but visually misleads).
+        if (runtimeConfig?.model) {
+          const next: RuntimeConfig = { ...runtimeConfig, model: undefined };
+          // Collapse to undefined when no fields remain, matching the
+          // round-trip semantics of "no override".
+          const hasAny = next.permissionMode !== undefined
+            || (next.additionalArgs && next.additionalArgs.length > 0);
+          setRuntimeConfig(hasAny ? next : undefined);
+        }
       }
     },
     [
       setRuntimeRaw,
+      setProviderId,
       setModel,
       setPermissionMode,
       setMcpEnabledServers,
+      setRuntimeConfig,
+      providerId,
       model,
       permissionMode,
       mcpEnabledServers,
+      runtimeConfig,
       agentRuntime,
       effectiveRuntime,
     ],
@@ -170,31 +226,35 @@ export function TaskAdvancedConfigEditor(props: Props) {
     || workspaceProject?.name
     || '';
 
-  // Resolve the workspace's provider — mirrors WorkspaceBasicsSection's
-  // precedence exactly so the "current model" hint here matches the model
-  // shown in Agent settings (PRD 0.2.4 cross-review user feedback):
+  // PRD 0.2.9 — Workspace-default provider lookup (used only for the
+  // "跟随 Agent (当前 X)" hint label, NOT to constrain the picker). The
+  // picker itself lists ALL credentialed providers via
+  // `availableProviders` above. Precedence mirrors WorkspaceBasicsSection:
   //   agent.providerId → project.providerId → null
-  //
-  // We deliberately DO NOT fall back to `config.defaultProviderId` for
-  // display — that would surface a model the user never picked for this
-  // workspace. For legacy projects with no provider at all, the picker
-  // shows the "未配置 provider" empty state instead of a misleading
-  // global default.
   const workspaceProvider = useMemo(() => {
-    const providerId =
+    const wsProviderId =
       workspaceAgent?.providerId
       ?? workspaceProject?.providerId
       ?? null;
-    if (!providerId) return null;
-    return providers.find((p) => p.id === providerId) ?? null;
+    if (!wsProviderId) return null;
+    return providers.find((p) => p.id === wsProviderId) ?? null;
   }, [workspaceAgent, workspaceProject, providers]);
 
-  // "Current model" display — same precedence + display rule as
-  // WorkspaceBasicsSection so the hint here reads identically to Agent
-  // settings (e.g. "Kimi K2.6", not the raw model id "moonshotai/Kimi-K2.6"):
-  //   1. effectiveModel = agent.model ?? project.model
-  //   2. modelName: if effectiveModel is in provider.models → modelName;
-  //                 else effectiveModel itself; else provider.primaryModel.
+  // The currently-picked provider for THIS task — when `providerId` is set,
+  // resolve to a Provider object (may be undefined if the provider has been
+  // deleted from config since the task was saved). Read from the FULL
+  // provider list (not `availableProviders`) so a provider whose API key
+  // was just removed still surfaces — see R8 stale-provider UX below.
+  const pickedProvider = useMemo(() => {
+    if (!providerId) return null;
+    return providers.find((p) => p.id === providerId) ?? null;
+  }, [providerId, providers]);
+  const pickedProviderAvailable = pickedProvider
+    ? isProviderAvailable(pickedProvider, apiKeys, providerVerifyStatus)
+    : true;
+
+  // "Current model" display label for the "跟随 Agent" sentinel, so the
+  // user always knows what "follow" actually resolves to.
   const workspaceEffectiveModelId =
     workspaceAgent?.model || workspaceProject?.model || '';
   const workspaceDefaultModelLabel = (() => {
@@ -207,28 +267,71 @@ export function TaskAdvancedConfigEditor(props: Props) {
     return workspaceProvider?.primaryModel || '';
   })();
 
-  const modelOptions = useMemo(() => {
-    if (!workspaceProvider) return [{ value: FOLLOW_VALUE, label: '跟随 Agent 工作区' }];
-    const opts = [
-      {
-        value: FOLLOW_VALUE,
-        label: workspaceDefaultModelLabel
-          ? `跟随 Agent（当前 ${workspaceDefaultModelLabel}）`
-          : '跟随 Agent 工作区',
-      },
-      ...workspaceProvider.models.map((m) => ({
-        value: m.model,
-        label: m.modelName ? `${m.modelName} · ${m.model}` : m.model,
-      })),
-    ];
-    // Surface a previously-set model that isn't in the catalogue (legacy /
-    // hand-typed) so the user can see and clear it without it silently
-    // appearing as "跟随 Agent" in the dropdown.
-    if (model && !workspaceProvider.models.some((m) => m.model === model)) {
-      opts.push({ value: model, label: `其他：${model}` });
+  // Picked-model display label (when the task carries an explicit override).
+  const pickedModelLabel = useMemo(() => {
+    if (!providerId || !model) return null;
+    const provider = pickedProvider;
+    const hit = provider?.models?.find((m) => m.model === model);
+    return hit?.modelName || model;
+  }, [providerId, model, pickedProvider]);
+
+  // PRD 0.2.9 R5 — External runtime model list (claude-code/codex/gemini).
+  // Static for CC; dynamic for Codex/Gemini (queried from the CLI). Mirrors
+  // Chat.tsx:721-738. Empty list while the fetch is in flight is fine —
+  // the picker just shows "跟随 Agent 当前模型" alone.
+  const [codexModels, setCodexModels] = useState<RuntimeModelInfo[]>([]);
+  const [geminiModels, setGeminiModels] = useState<RuntimeModelInfo[]>([]);
+  useEffect(() => {
+    if (!multiAgentRuntimeEnabled || effectiveRuntime !== 'codex') return;
+    let cancelled = false;
+    apiGetJson<{ models?: RuntimeModelInfo[] }>(`/api/runtime/models?type=codex`)
+      .then((res) => { if (!cancelled && res?.models?.length) setCodexModels(res.models); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [multiAgentRuntimeEnabled, effectiveRuntime]);
+  useEffect(() => {
+    if (!multiAgentRuntimeEnabled || effectiveRuntime !== 'gemini') return;
+    let cancelled = false;
+    apiGetJson<{ models?: RuntimeModelInfo[] }>(`/api/runtime/models?type=gemini`)
+      .then((res) => { if (!cancelled && res?.models?.length) setGeminiModels(res.models); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [multiAgentRuntimeEnabled, effectiveRuntime]);
+  const externalRuntimeModels: RuntimeModelInfo[] = useMemo(() => {
+    if (effectiveRuntime === 'claude-code') return CC_MODELS;
+    if (effectiveRuntime === 'codex') return codexModels;
+    if (effectiveRuntime === 'gemini') return geminiModels;
+    return [];
+  }, [effectiveRuntime, codexModels, geminiModels]);
+
+  // PRD 0.2.9 — Pair-write helpers. Selecting a provider's model writes
+  // BOTH `providerId` and `model` atomically; selecting "跟随 Agent" uses
+  // the explicit clear flag (handled at the caller level via
+  // `setProviderId(undefined) + setModel(undefined)`) so nothing stays
+  // half-set.
+  const selectBuiltinFollow = useCallback(() => {
+    setProviderId(undefined);
+    setModel(undefined);
+    setModelPickerOpen(null);
+  }, [setProviderId, setModel]);
+  const selectBuiltinModel = useCallback((pid: string, mid: string) => {
+    setProviderId(pid);
+    setModel(mid);
+    setModelPickerOpen(null);
+  }, [setProviderId, setModel]);
+  const selectExternalFollow = useCallback(() => {
+    if (runtimeConfig?.model) {
+      const next: RuntimeConfig = { ...runtimeConfig, model: undefined };
+      const hasAny = next.permissionMode !== undefined
+        || (next.additionalArgs && next.additionalArgs.length > 0);
+      setRuntimeConfig(hasAny ? next : undefined);
     }
-    return opts;
-  }, [workspaceProvider, workspaceDefaultModelLabel, model]);
+    setModelPickerOpen(null);
+  }, [runtimeConfig, setRuntimeConfig]);
+  const selectExternalModel = useCallback((mid: string) => {
+    setRuntimeConfig({ ...(runtimeConfig ?? {}), model: mid });
+    setModelPickerOpen(null);
+  }, [runtimeConfig, setRuntimeConfig]);
 
   // MCP catalogue — single source of truth via the shared
   // `getAllMcpServersFromConfig` helper (preset + custom merge, platform
@@ -349,21 +452,20 @@ export function TaskAdvancedConfigEditor(props: Props) {
                 options={runtimeOptions}
                 onChange={(v) => setRuntime(v ? (v as RuntimeType) : undefined)}
                 placeholder="跟随 Agent 工作区"
+                size="md"
               />
             </FieldRow>
           )}
 
-          {/* External runtime notice — when the effective runtime is not
-              builtin, the Model / Permission / MCP sub-fields are hidden
-              because external runtimes (Claude Code CLI / Codex / Gemini)
-              manage those concerns through their own CLI flags. Mirrors
-              the WorkspaceBasicsSection treatment of the same situation
-              so the two surfaces feel consistent. */}
+          {/* External runtime notice — Model / MCP fields are managed by the
+              runtime itself (Claude Code / Codex / Gemini); only model and
+              permission can be overridden per-task. Mirrors
+              WorkspaceBasicsSection's treatment of the same situation. */}
           {!isBuiltin && (
             <p className="rounded-[var(--radius-md)] bg-[var(--accent-warm-subtle)] px-3.5 py-2.5 text-[12px] leading-relaxed text-[var(--ink-muted)]">
               当前任务的运行环境为
               <span className="mx-1 font-medium text-[var(--ink-secondary)]">{effectiveRuntimeLabel}</span>
-              ，模型 / MCP 工具由 {effectiveRuntimeLabel} 自身管理。下方权限模式为该 runtime 的可选项，可单独覆盖。
+              ，MCP 工具由 {effectiveRuntimeLabel} 自身管理。下方模型 / 权限模式为该 runtime 的可选项，可单独覆盖。
             </p>
           )}
 
@@ -382,32 +484,50 @@ export function TaskAdvancedConfigEditor(props: Props) {
               options={permissionOptions}
               onChange={(v) => setPermissionMode(v ? v : undefined)}
               placeholder="跟随默认（最大权限）"
+              size="md"
             />
           </FieldRow>
 
-          {/* Model — only meaningful when builtin runtime is effective.
-              External runtimes resolve their own model from the runtime
-              process; the picker pulls models from the workspace's
-              provider (cross-provider override is out of scope for v0.2.4). */}
-          {isBuiltin && (
-            <FieldRow
-              label="模型"
-              hint="不选择时跟随 Agent 当前模型；选择后强制使用该模型"
-            >
-              {workspaceProvider ? (
-                <CustomSelect
-                  value={model ?? FOLLOW_VALUE}
-                  options={modelOptions}
-                  onChange={(v) => setModel(v ? v : undefined)}
-                  placeholder="跟随 Agent 工作区"
-                />
-              ) : (
-                <div className="rounded-[var(--radius-md)] border border-dashed border-[var(--line)] px-3 py-2 text-[12px] text-[var(--ink-muted)]">
-                  工作区未配置 provider — 请先在工作区设置中选择一个 provider 才能在此覆盖模型
-                </div>
-              )}
-            </FieldRow>
-          )}
+          {/* PRD 0.2.9 — Model picker, two variants (builtin / external).
+              Both render as a popup-grouped list to match Chat / Agent
+              settings UX. The builtin variant uses `useAvailableProviders`
+              (cross-provider) — issue #130 fix. The external variant
+              reads `runtimeModels` (CC_MODELS / codexModels / geminiModels)
+              and writes `runtimeConfig.model`. */}
+          <FieldRow
+            label="模型"
+            hint={
+              isBuiltin
+                ? '不选择时跟随 Agent 当前模型；选择 provider + model 后强制使用'
+                : `不选择时跟随 Agent 当前模型；选择后将传入 ${effectiveRuntimeLabel}`
+            }
+          >
+            <ModelPicker
+              isBuiltin={isBuiltin}
+              open={modelPickerOpen}
+              setOpen={setModelPickerOpen}
+              modelPickerRef={modelPickerRef}
+              // Builtin
+              availableProviders={availableProviders}
+              providers={providers}
+              providerId={providerId}
+              model={model}
+              workspaceDefaultModelLabel={workspaceDefaultModelLabel}
+              pickedProvider={pickedProvider}
+              pickedProviderAvailable={pickedProviderAvailable}
+              pickedModelLabel={pickedModelLabel}
+              onSelectBuiltinFollow={selectBuiltinFollow}
+              onSelectBuiltinModel={selectBuiltinModel}
+              // External
+              effectiveRuntime={effectiveRuntime}
+              effectiveRuntimeLabel={effectiveRuntimeLabel}
+              externalRuntimeModels={externalRuntimeModels}
+              externalSelectedModel={runtimeConfig?.model}
+              onSelectExternalFollow={selectExternalFollow}
+              onSelectExternalModel={selectExternalModel}
+            />
+          </FieldRow>
+
 
           {/* MCP enable list — builtin only. Hint + reset action share a
               single bottom row: status text on the left, "恢复跟随 Agent"
@@ -495,6 +615,258 @@ function FieldRow({
         <p className="mt-1.5 text-[12px] leading-snug text-[var(--ink-muted)]">
           {hint}
         </p>
+      )}
+    </div>
+  );
+}
+
+/**
+ * PRD 0.2.9 — Two-mode grouped model picker. Displays as a button that
+ * opens a popup; the popup renders either a provider-grouped list (builtin
+ * runtime) or a flat external-runtime list. Mirrors the WorkspaceBasicsSection
+ * popup UX so the two surfaces feel identical.
+ *
+ * Stale-provider UX (R8): when `providerId` references a provider that has
+ * lost credentials (or been deleted entirely), the closed-button label still
+ * shows the saved selection with a ⚠ marker, so users see what's wrong
+ * before opening the picker.
+ */
+function ModelPicker(props: {
+  isBuiltin: boolean;
+  open: 'builtin' | 'external' | null;
+  setOpen: (next: 'builtin' | 'external' | null) => void;
+  modelPickerRef: React.MutableRefObject<HTMLDivElement | null>;
+  // Builtin
+  availableProviders: ReturnType<typeof useAvailableProviders>;
+  providers: ReturnType<typeof useConfig>['providers'];
+  providerId?: string;
+  model?: string;
+  workspaceDefaultModelLabel: string;
+  pickedProvider: ReturnType<typeof useConfig>['providers'][number] | null;
+  pickedProviderAvailable: boolean;
+  pickedModelLabel: string | null;
+  onSelectBuiltinFollow: () => void;
+  onSelectBuiltinModel: (providerId: string, model: string) => void;
+  // External
+  effectiveRuntime: RuntimeType;
+  effectiveRuntimeLabel: string;
+  externalRuntimeModels: RuntimeModelInfo[];
+  externalSelectedModel?: string;
+  onSelectExternalFollow: () => void;
+  onSelectExternalModel: (model: string) => void;
+}) {
+  const {
+    isBuiltin,
+    open,
+    setOpen,
+    modelPickerRef,
+    availableProviders,
+    providers,
+    providerId,
+    model,
+    workspaceDefaultModelLabel,
+    pickedProvider,
+    pickedProviderAvailable,
+    pickedModelLabel,
+    onSelectBuiltinFollow,
+    onSelectBuiltinModel,
+    effectiveRuntime,
+    externalRuntimeModels,
+    externalSelectedModel,
+    onSelectExternalFollow,
+    onSelectExternalModel,
+  } = props;
+
+  const variant: 'builtin' | 'external' = isBuiltin ? 'builtin' : 'external';
+  const isOpen = open === variant;
+
+  // Closed-button label. PRD 0.2.9 — "跟随 Agent" is a real selected state
+  // (not a placeholder), so render it in `text-[var(--ink)]` to match the
+  // Runtime / 权限模式 selects above. CustomSelect treats the empty-string
+  // value as a selected option (FOLLOW_VALUE) and gets ink color via its
+  // `selectedOption ? text-[var(--ink)] : text-[var(--ink-muted)]` branch
+  // (CustomSelect.tsx:94); we mirror that here so the three 高级配置
+  // fields read as a uniform group.
+  let closedLabel: React.ReactNode;
+  if (isBuiltin) {
+    if (providerId && model) {
+      const providerName = pickedProvider?.name || providerId;
+      const modelName = pickedModelLabel || model;
+      closedLabel = (
+        <span className="flex min-w-0 items-center gap-2">
+          <span className="truncate">{providerName} / {modelName}</span>
+          {!pickedProviderAvailable && (
+            <span
+              className="shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium text-[var(--warning)]"
+              title="该 provider 已删除 API Key 或不可用，请重新选择"
+            >
+              ⚠ 暂不可用
+            </span>
+          )}
+        </span>
+      );
+    } else {
+      closedLabel = (
+        <span className="truncate">
+          {workspaceDefaultModelLabel
+            ? `跟随 Agent（当前 ${workspaceDefaultModelLabel}）`
+            : '跟随 Agent 工作区'}
+        </span>
+      );
+    }
+  } else {
+    if (externalSelectedModel) {
+      const hit = externalRuntimeModels.find((m) => m.value === externalSelectedModel);
+      closedLabel = (
+        <span className="truncate">
+          {hit?.displayName || externalSelectedModel}
+        </span>
+      );
+    } else {
+      closedLabel = (
+        <span className="truncate">跟随 Agent 当前模型</span>
+      );
+    }
+  }
+
+  return (
+    <div className="relative" ref={modelPickerRef}>
+      <button
+        type="button"
+        // Match the CustomSelect `size="md"` shape used by the IM Bot
+        // delivery picker below (NotificationConfigEditor.tsx) so the three
+        // 高级配置 fields (Runtime / 权限模式 / 模型) read as one visual
+        // group: `rounded-lg`, `bg-[var(--paper)]`, `px-3 py-2.5 text-sm`,
+        // `border-[var(--line)]`, hover deepens the border. Down-arrow chevron
+        // (mirroring CustomSelect's affordance) is animated on open.
+        className="flex w-full items-center gap-2 rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2.5 text-left text-sm text-[var(--ink)] transition-colors hover:border-[var(--ink-subtle)]"
+        onClick={() => setOpen(isOpen ? null : variant)}
+      >
+        <span className="min-w-0 flex-1 truncate">{closedLabel}</span>
+        <ChevronDown
+          className={`h-3.5 w-3.5 shrink-0 text-[var(--ink-muted)] transition-transform ${
+            isOpen ? 'rotate-180' : ''
+          }`}
+        />
+      </button>
+
+      {isOpen && (
+        <>
+          <div
+            className="fixed inset-0 z-40"
+            onMouseDown={(e) => {
+              if (e.target === e.currentTarget) setOpen(null);
+            }}
+          />
+          <div className="absolute left-0 top-full z-50 mt-1 max-h-[320px] w-full overflow-y-auto overscroll-contain rounded-[var(--radius-md)] border border-[var(--line)] bg-[var(--paper-elevated)] p-2 shadow-lg">
+            {variant === 'builtin' ? (
+              <>
+                <button
+                  type="button"
+                  className={`flex w-full items-center rounded-[var(--radius-sm)] px-3 py-1.5 text-left text-sm transition-colors ${
+                    !providerId
+                      ? 'bg-[var(--accent-warm-muted)] text-[var(--accent-warm)]'
+                      : 'text-[var(--ink)] hover:bg-[var(--hover-bg)]'
+                  }`}
+                  onClick={onSelectBuiltinFollow}
+                >
+                  {workspaceDefaultModelLabel
+                    ? `跟随 Agent（当前 ${workspaceDefaultModelLabel}）`
+                    : '跟随 Agent 工作区'}
+                </button>
+                {availableProviders.length === 0 ? (
+                  <div className="px-3 py-3 text-[12px] leading-relaxed text-[var(--ink-muted)]">
+                    还没有可用的供应商 — 请先到「设置 → 模型供应商」添加 API Key 或完成订阅登录。
+                  </div>
+                ) : (
+                  availableProviders.map((p) => (
+                    <div key={p.id} className="mt-1">
+                      <div className="px-2 py-1 text-[11px] font-medium text-[var(--ink-muted)]">
+                        {p.name}
+                      </div>
+                      {p.models?.map((m) => (
+                        <button
+                          type="button"
+                          key={`${p.id}:${m.model}`}
+                          className={`flex w-full items-center rounded-[var(--radius-sm)] px-3 py-1.5 text-left text-sm transition-colors ${
+                            providerId === p.id && model === m.model
+                              ? 'bg-[var(--accent-warm-muted)] text-[var(--accent-warm)]'
+                              : 'text-[var(--ink)] hover:bg-[var(--hover-bg)]'
+                          }`}
+                          onClick={() => onSelectBuiltinModel(p.id, m.model)}
+                        >
+                          {m.modelName || m.model}
+                        </button>
+                      ))}
+                    </div>
+                  ))
+                )}
+                {/* PRD 0.2.9 R8 — Stale-provider rescue. If the saved provider
+                    is uncredentialed (or fully removed from config), surface
+                    the row inside the picker too so the user can spot it
+                    and pick a fresh one. Skipped when the saved provider
+                    is in the available list (then it's already shown). */}
+                {providerId
+                  && !availableProviders.some((p) => p.id === providerId)
+                  && (() => {
+                    const p = providers.find((q) => q.id === providerId);
+                    const providerLabel = p?.name ?? providerId;
+                    const modelLabel = (p?.models?.find((mm) => mm.model === model)?.modelName)
+                      || model
+                      || '';
+                    return (
+                      <div className="mt-2 rounded-[var(--radius-sm)] border border-dashed border-[var(--warning)]/50 bg-[var(--warning-subtle)]/40 px-3 py-2 text-[12px] leading-relaxed text-[var(--ink-muted)]">
+                        <div className="font-medium text-[var(--ink)]">
+                          ⚠ 当前选中：{providerLabel}{modelLabel ? ` / ${modelLabel}` : ''}
+                        </div>
+                        <div className="mt-1">
+                          {p
+                            ? '该 provider 缺少 API Key — 请先在「设置 → 模型供应商」配置，或在上方挑选其它 provider。'
+                            : '该 provider 已从配置中删除 — 请在上方挑选可用 provider。'}
+                        </div>
+                      </div>
+                    );
+                  })()}
+              </>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  className={`flex w-full items-center rounded-[var(--radius-sm)] px-3 py-1.5 text-left text-sm transition-colors ${
+                    !externalSelectedModel
+                      ? 'bg-[var(--accent-warm-muted)] text-[var(--accent-warm)]'
+                      : 'text-[var(--ink)] hover:bg-[var(--hover-bg)]'
+                  }`}
+                  onClick={onSelectExternalFollow}
+                >
+                  跟随 Agent 当前模型
+                </button>
+                {externalRuntimeModels.length === 0 ? (
+                  <div className="px-3 py-3 text-[12px] leading-relaxed text-[var(--ink-muted)]">
+                    {effectiveRuntime === 'codex' || effectiveRuntime === 'gemini'
+                      ? '正在向 CLI 查询模型列表…'
+                      : '该 runtime 暂未提供模型列表。'}
+                  </div>
+                ) : (
+                  externalRuntimeModels.map((m) => (
+                    <button
+                      type="button"
+                      key={m.value}
+                      className={`flex w-full items-center rounded-[var(--radius-sm)] px-3 py-1.5 text-left text-sm transition-colors ${
+                        externalSelectedModel === m.value
+                          ? 'bg-[var(--accent-warm-muted)] text-[var(--accent-warm)]'
+                          : 'text-[var(--ink)] hover:bg-[var(--hover-bg)]'
+                      }`}
+                      onClick={() => onSelectExternalModel(m.value)}
+                    >
+                      {m.displayName || m.value}
+                    </button>
+                  ))
+                )}
+              </>
+            )}
+          </div>
+        </>
       )}
     </div>
   );
