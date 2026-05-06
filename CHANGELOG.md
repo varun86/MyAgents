@@ -20,13 +20,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **Workspace 内 symlink 不再能指向外部敏感文件被打开**：`cmd_workspace_open_in_finder` / `cmd_workspace_open_with_default` 之前用 lexical 解析，`leak → ~/.ssh/id_rsa` 这类工作区里的 symlink 能通过校验、然后被系统 `open` 跟随打开。改用 canonicalize 两端的 `resolve_existing_inside_workspace`，逃逸 symlink 在 prefix check 阶段就被拒（"escapes workspace root via symlink"）。两个 Rust 测试覆盖：恶意 symlink 必须被拒、合法工作区内 symlink 仍能 resolve。
 - **Widget Bash auto-allow regex 拒绝换行**：`myagents widget …` 命令的自动放行 regex 用了 `\s`，JS 里 `\s` 包括 `\n`，导致 `myagents widget readme\nrm` 之类的"两行命令"能命中正则被自动放行（shell 当两行执行）。改成 `[ \t]`，禁掉所有线终结符；20-case 对抗表全部通过。
+- **切完模型立即发消息不会用旧模型跑**：`setSessionModel` 是 fire-and-forget（同步更新 `currentModel`、异步 IPC 给 SDK subprocess），`applySessionConfig` 在 `newModel === currentModel` 时短路、跳过自己的 setModel，结果用户的第一个 turn 在 SDK 还没 ack 新 model 时就被 yield 出去——首 turn 跑在旧 model 上。新增 `pendingSetModelPromise` 跟踪 in-flight setModel；`applySessionConfig` 入口 await，保证 yield message 时 SDK 已经在新 model 上。
 
 ### Changed
 
 - **Generative-UI 走 CLI 统一双 runtime**：删 `widget_read_me` builtin MCP，builtin SDK + 三个外部 runtime（Claude Code / Codex / Gemini）都通过 `myagents widget readme <module>` CLI 加载设计契约。新增 `buildWidgetSection()` 在 desktop 场景下注入 widget 引导（content-based trigger："你的解释画图比文字更清楚就画图"），共享 `WIDGET_TRIGGER_GUIDANCE` 常量保证系统 prompt 与 README 不漂移。Builtin MCP 数量从 6 降为 5。
 
+---
 
+## [0.2.9] - 2026-05-05
 
 ### Added
 
