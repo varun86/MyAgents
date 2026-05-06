@@ -47,6 +47,7 @@ import { broadcast } from './sse';
 import { getCronTaskContext, CRON_TASK_EXIT_TEXT } from './tools/cron-tools';
 import { getImMediaContext } from './tools/im-media-tool';
 import { buildReadMeContent } from './tools/generative-ui-tool';
+import { WIDGET_TRIGGER_GUIDANCE } from './system-prompt-cli-tools';
 import { assertSafeFilePath } from './utils/safe-file-path';
 import {
   VALID_RUNTIMES,
@@ -2114,21 +2115,15 @@ EXAMPLES
 const README_WIDGET = `myagents widget — Generative UI widget design guidelines
 
 WHAT
-  Returns the MyAgents widget design system (color palette, component specs,
-  layout rules) and the output format you MUST use to embed an interactive
-  widget in a chat reply. Widgets render inline in the conversation — charts,
-  SVG diagrams, interactive explainers, dashboards.
+  Returns the MyAgents widget design system (color palette, component specs, layout rules) and the output format you MUST use to embed an interactive widget in a chat reply. Widgets render inline in the conversation — charts, SVG diagrams, interactive explainers, dashboards.
 
 WHEN TO CALL
-  Before outputting your first <generative-ui-widget> tag in a desktop chat
-  response, when the user asks to visualize / chart / draw / build an
-  interactive explainer. Skip it for simple text answers, code snippets, and
-  static markdown tables.
+  Before outputting your first <generative-ui-widget> tag in a desktop chat reply. Reach for a widget whenever ${WIDGET_TRIGGER_GUIDANCE}
 
 WHEN NOT TO CALL
-  - User explicitly asks for plain text / code / markdown
+  - One-line answers, chitchat
+  - User explicitly asked for plain text / code / markdown
   - IM bot sessions (widgets only render in the desktop client)
-  - Simple answers that don't benefit from visual layout
 
 COMMAND
   myagents widget readme <module1> [<module2> ...]
@@ -2145,8 +2140,7 @@ EXAMPLES
   myagents widget readme chart interactive
   myagents widget readme dashboard
 
-The output begins with the required <generative-ui-widget> output format
-contract; do not skip reading it.`;
+The output begins with the required <generative-ui-widget> output format contract; do not skip reading it.`;
 
 export function handleReadme(payload: { topic?: string; modules?: string[] }): AdminResponse {
   const topic = (payload.topic ?? '').toLowerCase();

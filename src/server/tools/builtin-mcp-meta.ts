@@ -28,9 +28,9 @@
 import { registerBuiltinMcpMeta } from './builtin-mcp-registry';
 
 // --- Context-injected builtins ---
-// (cron-tools, im-cron, im-media, generative-ui) — not user-toggleable;
-// buildSdkMcpServers() conditionally includes them based on sidecar
-// context. Only `server` is needed; configure/validate don't apply.
+// (cron-tools, im-cron, im-media) — not user-toggleable; buildSdkMcpServers()
+// conditionally includes them based on sidecar context. Only `server` is
+// needed; configure/validate don't apply.
 
 registerBuiltinMcpMeta({
   id: 'cron-tools',
@@ -53,14 +53,6 @@ registerBuiltinMcpMeta({
   load: async () => {
     const m = await import('./im-media-tool');
     return { server: await m.createImMediaToolServer() };
-  },
-});
-
-registerBuiltinMcpMeta({
-  id: 'generative-ui',
-  load: async () => {
-    const m = await import('./generative-ui-tool');
-    return { server: await m.createGenerativeUiServer() };
   },
 });
 

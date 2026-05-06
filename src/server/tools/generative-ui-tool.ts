@@ -1,22 +1,24 @@
-// Generative UI MCP Tool — AI generates interactive HTML widgets inline in chat
-// Context-injected MCP server (same pattern as im-cron: always present for desktop sessions)
+// Generative UI design guideline content — AI generates interactive HTML
+// widgets inline in chat by emitting <generative-ui-widget> tags in its text
+// response. The frontend parses tags from the chat:message-chunk stream and
+// renders the inner HTML in a sandboxed iframe.
 //
-// Architecture:
-//   1. widget_read_me MCP tool — On-demand design guideline loader (per-module)
-//      Returns design system + instructions to output <generative-ui-widget> tags in text
-//   2. AI outputs <generative-ui-widget title="...">HTML</generative-ui-widget> tags in regular text response
-//   3. Frontend parses tags from chat:message-chunk stream → renders in sandbox iframe
+// Loader contract:
+//   Both runtimes (builtin Claude Agent SDK and external CLIs) reach this
+//   content through `myagents widget readme <module>` invoked via their shell
+//   tool. The CLI command POSTs to `readme/widget` (admin-api.ts), which calls
+//   `buildReadMeContent()` below to assemble the modules.
 //
 // Why text tags instead of MCP tool_use:
 //   Agent SDK buffers MCP tool input_json_delta until tool execution completes,
-//   preventing real-time streaming. Text output (chat:message-chunk) streams token-by-token.
+//   preventing real-time streaming. Text output (chat:message-chunk) streams
+//   token-by-token, so widget HTML can render progressively as the AI writes.
 
-// SDK + zod loaded lazily inside createGenerativeUiServer() via dynamic
-// import — see builtin-mcp-meta.ts for registration. buildReadMeContent()
-// uses only string ops so staying at top level is cost-free.
+// This file is content-only — pure string ops, no SDK / zod imports. It's
+// statically imported by admin-api.ts (handleReadme) which is on the hot path.
 
 // ===================================================================
-// Design Guideline Sections (loaded on-demand by widget_read_me)
+// Design Guideline Sections (loaded on-demand by `myagents widget readme`)
 // ===================================================================
 
 const SECTION_CORE = `# Widget Design System — Core
@@ -305,14 +307,16 @@ export function buildReadMeContent(modules: string[]): string {
 }
 
 // ===================================================================
-// Output Format Section (prepended to all widget_read_me responses)
-// Teaches the AI to output <generative-ui-widget> tags in text instead of tool calls
+// Output Format Section (prepended to all `myagents widget readme` responses)
+// Teaches the AI how to output <generative-ui-widget> tags. Trigger judgment
+// (when to widget at all) lives in the system prompt — see SECTION_WIDGET in
+// system-prompt-cli-tools.ts — not here.
 // ===================================================================
 
 const SECTION_OUTPUT_FORMAT = `# How to Output Widgets
 
 ## Output format
-To create a widget, output a \`<generative-ui-widget>\` tag directly in your text response (NOT as a tool call).
+To create a widget, output a \`<generative-ui-widget>\` tag directly in your text response.
 The frontend will detect the tag, extract the HTML, and render it in a sandboxed iframe inline in the conversation.
 
 \`\`\`
@@ -334,6 +338,7 @@ More explanatory text here...
 \`\`\`
 
 ## Rules
+- The opening \`<generative-ui-widget>\` tag MUST start a new line (leading indent allowed). The frontend parser anchors on line-start; mid-line tags are treated as literal text.
 - Content inside is a self-contained HTML fragment — NO <!DOCTYPE>, <html>, <head>, <body>
 - Structure for streaming: <style> first (short) → content HTML → <script> last
 - All explanatory text goes OUTSIDE the <generative-ui-widget> tags (in normal markdown)
@@ -343,62 +348,7 @@ More explanatory text here...
 - Pre-styled form elements: bare <input>, <button>, <select>, <textarea> are automatically styled. Use class="primary" for accent buttons.
 - Layout utility classes available: .flex, .grid, .grid-2, .grid-3, .gap-3, .gap-4, .p-3, .p-4, .rounded, .rounded-lg, .border, .bg-elevated, .stat-card, .stat-value, .stat-label
 
-## When to use — route on the verb, not the noun
-- "Show me / visualize / chart / graph / plot" → use <generative-ui-widget>
-- Data visualization: charts, graphs, trend lines, comparisons (Chart.js)
-- Architecture/flow diagrams: system architecture, data flow, process flows (SVG)
-- Interactive explainers: calculators, converters, sliders, live demos
-- Structured displays: timelines, org charts, cards, dashboards
-
-## When NOT to use
-- Simple text answers → regular text
-- Code snippets → code blocks
-- Static tables → Markdown tables
-- "Show me the ERD / database schema" → Mermaid in code block
-- Content the user explicitly asks as text/code`;
-
-// ===================================================================
-// Tool Description
-// ===================================================================
-
-const READ_ME_DESCRIPTION = `Load the design guidelines for creating interactive visual widgets.
-You MUST call this before outputting any <generative-ui-widget> tags. It returns the design system (color palette, component specs, layout rules) and output format instructions.
-
-Available modules:
-- chart: Chart.js patterns, data colors, legends, dashboard layouts
-- diagram: SVG flowcharts, architecture diagrams, connector styling
-- interactive: Sliders, calculators, comparison cards, data records
-- dashboard: Combines chart + interactive (multi-chart layouts with controls)
-- art: SVG illustration, visual metaphors
-
-Call with the module(s) most relevant to your planned widget. You can request multiple at once.`;
-
-// ===================================================================
-// MCP Server
-// ===================================================================
-
-export async function createGenerativeUiServer() {
-  const { createSdkMcpServer, tool } = await import('@anthropic-ai/claude-agent-sdk');
-  const { z } = await import('zod/v4');
-  return createSdkMcpServer({
-    name: 'generative-ui',
-    version: '1.0.0',
-    tools: [
-      tool(
-        'widget_read_me',
-        READ_ME_DESCRIPTION,
-        {
-          modules: z.array(z.string()).describe(
-            'Design guideline modules to load. One or more of: chart, diagram, interactive, dashboard, art.'
-          ),
-        },
-        async (args) => {
-          const content = buildReadMeContent(args.modules);
-          return {
-            content: [{ type: 'text', text: content }],
-          };
-        }
-      ),
-    ],
-  });
-}
+## Format-only fallbacks
+- ER / database schema → Mermaid in a fenced code block (the chat renderer handles it)
+- Static data dumps → markdown table
+- Code → fenced code block`;

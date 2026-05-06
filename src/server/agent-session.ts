@@ -30,7 +30,7 @@ import { startSocksBridge, stopSocksBridge, isSocksBridgeRunning } from './utils
 // `workspace:files-changed:<eventKey>`) instead.
 import { resolveAuthHeaders, onTokenChange, startTokenRefreshScheduler } from './mcp-oauth';
 // Side-effect imports: each registers itself in the builtin MCP registry
-// gemini-image / edge-tts / generative-ui registered in builtin-mcp-meta.ts.
+// gemini-image / edge-tts registered in builtin-mcp-meta.ts.
 
 import type { ToolInput } from '../renderer/types/chat';
 import { parsePartialJson } from '../shared/parsePartialJson';
@@ -1909,12 +1909,6 @@ function checkMcpToolPermission(toolName: string): { allowed: true } | { allowed
     return { allowed: false, reason: '定时任务管理 API 不可用' };
   }
 
-  // Special case: generative-ui is a built-in MCP server for desktop sessions
-  // Context-injected (not in user's MCP list), always allowed when injected
-  if (serverId === 'generative-ui') {
-    return { allowed: true };
-  }
-
   // Case 1: MCP not set (null) - allow all (backward compatible)
   if (currentMcpServers === null) {
     return { allowed: true };
@@ -1992,7 +1986,7 @@ export function pinMcpPackageVersions(args: string[]): string[] {
  * Convert McpServerDefinition to SDK mcpServers format.
  *
  * Three MCP injection patterns:
- * 1. Context-injected (cron-tools, im-cron, im-media, generative-ui) — always present based on
+ * 1. Context-injected (cron-tools, im-cron, im-media) — always present based on
  *    sidecar context, invisible in Settings UI, not user-toggled.
  * 2. Builtin registry (command='__builtin__') — in-process servers, user-toggled via Settings,
  *    registered as META in `./tools/builtin-mcp-meta.ts`. Adding a new one:
@@ -2080,16 +2074,6 @@ async function buildSdkMcpServers(): Promise<Record<string, McpServerEntry>> {
   if (bridgeToolsCtx && bridgeServer) {
     result['im-bridge-tools'] = bridgeServer;
     console.log(`[agent] Added im-bridge-tools MCP server for plugin ${bridgeToolsCtx.pluginId}`);
-  }
-
-  // Add Generative UI tool for desktop sessions (not IM/Cron — they can't render widgets)
-  // Use currentScenario (consistent with system-prompt.ts generativeUiEnabled check)
-  if (currentScenario.type === 'desktop') {
-    const s = await loadBuiltinServer('generative-ui');
-    if (s) {
-      result['generative-ui'] = s;
-      console.log('[agent] Added generative-ui MCP server');
-    }
   }
 
   // --- Pattern 2: Builtin registry MCPs (in-process, user-toggled) ---
@@ -2295,8 +2279,8 @@ async function buildSdkMcpServers(): Promise<Record<string, McpServerEntry>> {
  * Sorted-key fingerprint of an MCP server map (id list).
  * Identity comparison only — env/args/url changes for user-configured MCPs
  * already trigger restart via mcpConfigFingerprint() + setMcpServers().
- * This is for context-injected MCPs (im-media, im-bridge-tools, generative-ui)
- * whose presence flips on/off as IM context becomes available.
+ * This is for context-injected MCPs (im-media, im-bridge-tools) whose
+ * presence flips on/off as IM context becomes available.
  */
 function mcpKeyFingerprint(servers: Record<string, unknown>): string {
   return Object.keys(servers).sort().join(',');
@@ -6714,7 +6698,6 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           playwrightStorageEnabled: (currentMcpServers ?? []).some(
             s => s.id === 'playwright' && (s.args ?? []).some((a: string) => /^--caps=.*\bstorage\b/.test(a))
           ),
-          generativeUiEnabled: currentScenario.type === 'desktop',
           // agent-session.ts is the builtin Claude Agent SDK path by definition.
           runtime: 'builtin',
         }),
@@ -6776,14 +6759,38 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           };
         }
 
-        // Special case: built-in trusted MCP servers (cron-tools, im-cron, generative-ui)
+        // Special case: built-in trusted MCP servers (cron-tools, im-cron)
         // When allowed by checkMcpToolPermission, skip user confirmation entirely
-        if (toolName.startsWith('mcp__cron-tools__') || toolName.startsWith('mcp__im-cron__') || toolName.startsWith('mcp__generative-ui__')) {
+        if (toolName.startsWith('mcp__cron-tools__') || toolName.startsWith('mcp__im-cron__')) {
           console.log(`[permission] built-in tool auto-allowed: ${toolName}`);
           return {
             behavior: 'allow' as const,
             updatedInput: input as Record<string, unknown>
           };
+        }
+
+        // Auto-allow `myagents widget …` Bash invocations. Loading the widget
+        // design contract used to be an MCP tool (widget_read_me, auto-allowed
+        // via mcp__generative-ui__ trust prefix) — that path is gone, so the
+        // AI now goes through Bash. Without this carve-out, every fresh
+        // desktop session that decides to render a widget would eat one user
+        // permission click before the design guidelines load. The CLI is
+        // MyAgents-managed and the readme path is pure-read.
+        //
+        // Strict regex: `myagents widget [readme|list|<module>] [<module>...]`
+        // with module names limited to `[a-z][a-z0-9-]*`. No semicolons,
+        // pipes, redirects, command substitution, or whitespace tricks — so
+        // shell injection like `myagents widget readme; rm -rf /` cannot
+        // smuggle through.
+        if (toolName === 'Bash') {
+          const cmd = ((input as Record<string, unknown>)?.command as string | undefined)?.trim() ?? '';
+          if (/^myagents\s+widget(?:\s+(?:readme|list))?(?:\s+[a-z][a-z0-9-]*)*\s*$/.test(cmd)) {
+            console.log(`[permission] myagents widget readme auto-allowed: ${cmd}`);
+            return {
+              behavior: 'allow' as const,
+              updatedInput: input as Record<string, unknown>
+            };
+          }
         }
 
         // Headless IM fast-path: IM bridges (Telegram/Dingtalk builtin + all OpenClaw plugins

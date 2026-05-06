@@ -71,7 +71,7 @@ MyAgents 是基于 Tauri v2 的桌面 AI Agent 客户端，提供 Claude Agent S
 │  │  └─────────────┴───────────────┴──────────┴──────────────┘     │        │
 │  │                                                                 │        │
 │  │  Builtin MCP (META/INSTANCE 懒加载):                            │        │
-│  │   cron-tools / im-cron / im-media / generative-ui /             │        │
+│  │   cron-tools / im-cron / im-media /                             │        │
 │  │   gemini-image / edge-tts                                       │        │
 │  │                                                                 │        │
 │  │  External MCP via npx + 预置原生二进制 (cuse)                   │        │

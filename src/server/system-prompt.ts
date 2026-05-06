@@ -11,7 +11,7 @@
  */
 
 import type { RuntimeType } from '../shared/types/runtime';
-import { buildCliToolsAppend } from './system-prompt-cli-tools';
+import { buildCliToolsAppend, buildWidgetSection } from './system-prompt-cli-tools';
 
 // ===== Scenario types =====
 
@@ -70,13 +70,6 @@ You will periodically receive heartbeat messages (a user message wrapped in tags
 When you receive one, follow its instructions.
 </myagents-heartbeat-instructions>`;
 
-const TMPL_GENERATIVE_UI = `<myagents-generative-ui>
-你可以在对话中生成交互式可视化内容（图表、架构图、流程图、交互式工具等）。
-流程：先调用 widget_read_me 工具加载设计指南和输出格式说明，然后按照指南在文本中使用 <generative-ui-widget> 标签输出可视化内容。
-当用户的请求适合用可视化形式呈现时，主动使用，而不是只输出纯文本描述。
-不要对简单的文本回答或普通代码展示使用此功能。
-</myagents-generative-ui>`;
-
 const TMPL_BROWSER_STORAGE_STATE = `<myagents-browser-storage-instructions>
 当你在浏览器中执行了登录操作或用户帮你完成了登录（输入账号密码、OAuth 授权、扫码登录等），必须在登录成功后**立即**调用 browser_storage_state 工具将登录状态保存到 ~/.myagents/browser-storage-state.json，然后再继续执行后续任务。这样即使后续任务中断或会话异常终止，登录态也不会丢失，后续对话可以复用。
 </myagents-browser-storage-instructions>`;
@@ -101,20 +94,22 @@ function renderTemplate(template: string, vars: Record<string, string>): string 
 export interface SystemPromptOptions {
   /** Whether Playwright MCP with storage capability is enabled in this session */
   playwrightStorageEnabled?: boolean;
-  /** Whether Generative UI (widget_read_me + <widget> tags) is enabled in this session */
-  generativeUiEnabled?: boolean;
   /**
    * Current runtime driving this session, used to render a runtime-accurate
    * identity line in L1. Defaults to 'builtin' (Claude Agent SDK) if omitted.
    */
   runtime?: RuntimeType;
   /**
-   * Append the `myagents` CLI capability hints (cron / IM media / widget) to
-   * the prompt. Only set by external-runtime session paths — builtin SDK
-   * sessions reach those capabilities through their dedicated MCP servers
-   * (cron-tools / im-media / generative-ui) and MUST NOT have this appendix,
-   * to avoid (a) token waste and (b) confusing the AI with two paths to the
-   * same capability. See prd_0.1.67.
+   * Append the `myagents` CLI capability hints (cron / IM media) to the
+   * prompt. Only set by external-runtime session paths — builtin SDK sessions
+   * reach those capabilities through their dedicated MCP servers (cron-tools
+   * / im-cron / im-media) and MUST NOT have this appendix, to avoid (a) token
+   * waste and (b) confusing the AI with two paths to the same capability.
+   * See prd_0.1.67.
+   *
+   * Note: generative-UI widget guidance is universal across runtimes (no MCP
+   * equivalent — the CLI is the only path) and is emitted unconditionally for
+   * desktop scenarios via `buildWidgetSection()`.
    */
   cliToolsEnabled?: boolean;
 }
@@ -158,10 +153,11 @@ export function buildSystemPromptAppend(scenario: InteractionScenario, options?:
     parts.push(TMPL_HEARTBEAT);
   }
 
-  // L3: Generative UI instruction (desktop sessions with widget_read_me tool + <widget> tags)
-  if (options?.generativeUiEnabled) {
-    parts.push(TMPL_GENERATIVE_UI);
-  }
+  // L3: Generative UI widget guidance — universal across runtimes for desktop
+  // scenarios. Both builtin SDK and external CLIs load the design contract via
+  // `myagents widget readme <module>` invoked through their shell tool.
+  const widgetSection = buildWidgetSection(scenario);
+  if (widgetSection) parts.push(widgetSection);
 
   // L3: Browser storage state save instruction (when Playwright with --caps=storage is active)
   if (options?.playwrightStorageEnabled) {
@@ -169,8 +165,8 @@ export function buildSystemPromptAppend(scenario: InteractionScenario, options?:
   }
 
   // L4: CLI-backed capability hints (external runtimes only)
-  // — bridges MyAgents-specific capabilities (cron / IM media / generative UI)
-  //   to runtimes that can't see the in-process SDK MCP servers.
+  // — bridges MyAgents-specific capabilities (cron / IM media) to runtimes
+  //   that can't see the in-process SDK MCP servers.
   if (options?.cliToolsEnabled) {
     const cliTools = buildCliToolsAppend(scenario);
     if (cliTools) parts.push(cliTools);

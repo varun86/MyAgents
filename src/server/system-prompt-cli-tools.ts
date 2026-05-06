@@ -1,34 +1,20 @@
 /**
- * CLI-backed capability hints for external runtimes (v0.1.67)
+ * CLI-backed capability hints injected into the system prompt.
  *
- * Background
+ * Each section teaches the AI about a MyAgents-specific capability surfaced
+ * through the `myagents` CLI rather than as an MCP tool. The brief lives here;
+ * the AI fetches full docs on demand via `myagents <topic> readme`.
+ *
+ * Two scopes
  * ----------
- * The builtin Claude Agent SDK runtime exposes MyAgents-specific capabilities
- * (cron scheduling, IM media sending, generative-UI widgets) as in-process
- * `SdkMcpServerConfig` tools — only the builtin runtime can see them. External
- * runtimes (Claude Code CLI / Codex CLI / Gemini CLI) speak plain JSON-RPC or
- * NDJSON over stdio; they can't consume those in-process MCP servers.
- *
- * Rather than re-implement every capability as a standalone stdio MCP server
- * (doubling the surface area to maintain), v0.1.67 exposes them through the
- * `myagents` CLI — which all three external runtimes can already invoke via
- * their native shell tool — and teaches the AI about them through this module.
- *
- * Progressive disclosure
- * ----------------------
- * We pre-inject only the *brief* description + trigger conditions + "fetch the
- * full docs via `myagents X readme`". The full usage is pulled on demand so
- * tokens aren't wasted on unused capabilities. This matches how the builtin
- * runtime uses `widget_read_me` — the AI calls a meta tool to load detail only
- * when it decides to use the feature.
- *
- * Scope gating
- * ------------
- * ONLY external runtimes call `buildCliToolsAppend()`. The builtin path keeps
- * using its existing MCP servers and NEVER gets this appendix (confirmed by
- * the `cliToolsEnabled` flag in `buildSystemPromptAppend` — see
- * `system-prompt.ts`). This keeps builtin behaviour byte-identical to v0.1.66,
- * zero regression risk.
+ * - `buildCliToolsAppend(scenario)` — sections that ONLY external runtimes
+ *   (Claude Code / Codex / Gemini CLI) need, because the builtin SDK has
+ *   equivalent in-process MCP servers (cron-tools, im-cron, im-media). Gated
+ *   by `cliToolsEnabled` in `buildSystemPromptAppend`.
+ * - `buildWidgetSection(scenario)` — generative-UI widget guidance. Universal:
+ *   both builtin SDK and external runtimes load the design contract through
+ *   `myagents widget readme <module>` via their shell tool. There is no MCP
+ *   path for widgets anymore — this is the single source of truth.
  */
 
 import type { InteractionScenario } from './system-prompt';
@@ -98,46 +84,37 @@ the user explicitly wants.
 Full docs and supported formats: run \`myagents im readme\`.
 </myagents-cli-im-media>`;
 
-const SECTION_WIDGET = `<myagents-cli-widget>
-For desktop chat replies that benefit from an interactive visual (chart,
-diagram, dashboard, interactive explainer, SVG illustration), you can embed a
-\`<generative-ui-widget>\` tag directly in your text response. MyAgents renders
-the HTML inside the tag as a sandboxed interactive widget inline in the
-conversation.
+/**
+ * Single source of truth for the widget trigger rule. Embedded into both the
+ * system prompt's `SECTION_WIDGET` (always-on guidance) and the CLI's
+ * `myagents widget readme` README (`README_WIDGET` in admin-api.ts), so the
+ * two surfaces never drift on what counts as a widget-worthy moment.
+ */
+export const WIDGET_TRIGGER_GUIDANCE = `your explanation reads better as a picture than as prose: data, comparison, trends, flows, steps, structure, hierarchy, timelines, relationships, tunable concepts, visual metaphors. Route on the content, not on whether the user said "visualize" — if drawing is clearer, draw.`;
 
-Trigger: the user asks to visualize / chart / draw / diagram / compare / build
-an interactive explainer — or any request where a visual answer is clearly
-better than text.
+const SECTION_WIDGET = `<myagents-generative-ui>
+You can embed a <generative-ui-widget> tag in your reply to a desktop user. The HTML inside renders inline as an interactive component — a peer of markdown tables and code blocks, just another medium for landing a point.
 
-DO NOT use this for: simple text answers, code snippets (use fenced blocks),
-static tables (use markdown tables), or ER/schema diagrams (Mermaid in a code
-block is better).
+Use it whenever ${WIDGET_TRIGGER_GUIDANCE}
 
-Before outputting your first widget in a session, load the design guidelines
-and output format contract:
+Skip it for: one-line answers, chitchat, content the user explicitly asked as plain text or code, IM bot sessions (widgets only render in desktop chat).
 
-  myagents widget readme <module> [<module> ...]
+Before your first widget in a session, run \`myagents widget readme <module> [<module> ...]\` via your shell tool (e.g. Bash) to load the design contract. Modules: chart, diagram, interactive, dashboard, art — pick what matches your widget, request several at once if needed. Skip if already pulled this session.
+</myagents-generative-ui>`;
 
-Modules: \`chart\` \`diagram\` \`interactive\` \`dashboard\` \`art\`. Pick the one(s)
-that match your planned widget and request them together. The output includes
-the mandatory \`<generative-ui-widget>\` tag format plus color palette, layout
-classes, and streaming rules. Running this lookup is cheap — do it whenever
-you're about to build a widget and don't already have the guidelines in
-context.
-</myagents-cli-widget>`;
-
-// ===== Main entry =====
+// ===== Main entries =====
 
 /**
- * Build the CLI-tools system-prompt appendix for a given interaction scenario.
+ * Build the external-runtime CLI-tools appendix.
  *
  * Conditional stacking:
  *   - cron CRUD         always (every scenario can benefit from scheduling)
  *   - cron self-exit    only when scenario.type === 'cron' && aiCanExit
  *   - IM media          only in 'im' / 'agent-channel' scenarios
- *   - generative UI     only in 'desktop' / 'cron' scenarios (widgets need a
- *                       desktop chat to render; cron tasks can still produce
- *                       widgets when the user later views the session history)
+ *
+ * Note: generative-UI widget guidance is NOT included here — it is universal
+ * across runtimes and emitted separately by `buildWidgetSection()` from
+ * `buildSystemPromptAppend()`.
  *
  * Returns an empty string when nothing applies (defensive; not expected in
  * practice since cron is always emitted).
@@ -158,14 +135,21 @@ export function buildCliToolsAppend(scenario: InteractionScenario): string {
     parts.push(SECTION_IM_MEDIA);
   }
 
-  // Generative UI widget — desktop only, matching the builtin path's gate in
-  // agent-session.ts (`generativeUiEnabled: currentScenario.type === 'desktop'`).
-  // Cron tasks run headless and their output isn't rendered in a live chat
-  // view that can host a widget iframe, so there's no point teaching the AI
-  // to emit widget tags from a cron context.
-  if (scenario.type === 'desktop') {
-    parts.push(SECTION_WIDGET);
-  }
-
   return parts.join('\n\n');
+}
+
+/**
+ * Build the generative-UI widget guidance section.
+ *
+ * Universal across runtimes — emitted for every desktop scenario regardless of
+ * whether the session is driven by the builtin Claude Agent SDK or an external
+ * CLI. Both paths reach the design contract through `myagents widget readme
+ * <module>` invoked via their shell tool.
+ *
+ * Cron tasks run headless and their output isn't rendered in a live chat view
+ * that can host a widget iframe, so widgets are gated to desktop scenarios
+ * only.
+ */
+export function buildWidgetSection(scenario: InteractionScenario): string {
+  return scenario.type === 'desktop' ? SECTION_WIDGET : '';
 }

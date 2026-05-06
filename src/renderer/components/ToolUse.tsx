@@ -91,20 +91,6 @@ export default function ToolUse({ tool: rawTool }: ToolUseProps) {
     case 'NotebookEdit':
       return <NotebookEditTool tool={tool} />;
     default: {
-      // Generative UI: widget_read_me shows a brief summary
-      if (tool.name === 'mcp__generative-ui__widget_read_me') {
-        const modules = (tool.parsedInput as Record<string, unknown> | undefined)?.modules;
-        const modList = Array.isArray(modules) ? (modules as string[]).join(', ') : '';
-        const summaryText = tool.result
-          ? `已加载 ${modList || '可视化'} 设计指南`
-          : `正在加载 ${modList || '可视化'} 设计指南...`;
-        const collapsedContent = (
-          <div className="text-sm text-[var(--ink-muted)]">
-            <span className="font-medium">{summaryText}</span>
-          </div>
-        );
-        return <CollapsibleTool collapsedContent={collapsedContent} expandedContent={null} />;
-      }
       // Route gemini-image MCP tools to custom component
       if (tool.name.startsWith('mcp__gemini-image__')) {
         return <GeminiImageTool tool={tool} />;
