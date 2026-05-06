@@ -6778,13 +6778,16 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         // MyAgents-managed and the readme path is pure-read.
         //
         // Strict regex: `myagents widget [readme|list|<module>] [<module>...]`
-        // with module names limited to `[a-z][a-z0-9-]*`. No semicolons,
-        // pipes, redirects, command substitution, or whitespace tricks — so
-        // shell injection like `myagents widget readme; rm -rf /` cannot
-        // smuggle through.
+        // with module names limited to `[a-z][a-z0-9-]*`. Whitespace separators
+        // are restricted to space + tab — `\s` would also match `\n`/`\r`,
+        // letting `myagents widget readme\nrm` slip through (shell executes
+        // it as two lines, second line being any PATH binary whose name
+        // happens to fit module-name shape: `rm`, `bash`, `docker rm`,
+        // `shutdown now`, …). Non-whitespace shell metachars (`;`, `|`,
+        // `&&`, `>`, `$(`, backticks, …) already fail the `[a-z0-9-]` class.
         if (toolName === 'Bash') {
           const cmd = ((input as Record<string, unknown>)?.command as string | undefined)?.trim() ?? '';
-          if (/^myagents\s+widget(?:\s+(?:readme|list))?(?:\s+[a-z][a-z0-9-]*)*\s*$/.test(cmd)) {
+          if (/^myagents[ \t]+widget(?:[ \t]+(?:readme|list))?(?:[ \t]+[a-z][a-z0-9-]*)*[ \t]*$/.test(cmd)) {
             console.log(`[permission] myagents widget readme auto-allowed: ${cmd}`);
             return {
               behavior: 'allow' as const,
