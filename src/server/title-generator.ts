@@ -17,6 +17,7 @@ import { homedir } from 'os';
 import { join } from 'path';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { resolveClaudeCodeCli, buildClaudeSessionEnv, startOneShotBridge, type ProviderEnv } from './agent-session';
+import { applyContextWindowSuffix } from './utils/model-capabilities';
 import { ClaudeCodeRuntime } from './runtimes/claude-code';
 import { CodexRuntime } from './runtimes/codex';
 import { GeminiRuntime } from './runtimes/gemini';
@@ -150,7 +151,9 @@ async function generateTitleInner(
         includePartialMessages: false,
         persistSession: false,
         mcpServers: {},
-        ...(model ? { model } : {}),
+        // Wrap with [1m] when contextLength ≥1M so SDK uses the 1M path even for
+        // a one-shot title-gen subprocess. SDK strips the suffix before the wire.
+        ...(model ? { model: applyContextWindowSuffix(model) } : {}),
       },
     });
 

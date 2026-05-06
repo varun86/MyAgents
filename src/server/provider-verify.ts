@@ -10,6 +10,7 @@ import { existsSync, readFileSync } from 'fs';
 import { execSync } from 'child_process';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { resolveClaudeCodeCli, buildClaudeSessionEnv, startOneShotBridge } from './agent-session';
+import { applyContextWindowSuffix } from './utils/model-capabilities';
 import { ensureDirSync } from './utils/fs-utils';
 import { getLastBridgeError } from './openai-bridge';
 // Subscription types (keep in sync with src/renderer/types/subscription.ts)
@@ -148,7 +149,8 @@ async function verifyViaSdk(
         includePartialMessages: true,
         persistSession: false,
         mcpServers: {},
-        ...(opts.model ? { model: opts.model } : {}),
+        // Wrap with [1m] when contextLength ≥1M; SDK strips the suffix before the wire.
+        ...(opts.model ? { model: applyContextWindowSuffix(opts.model) } : {}),
       },
     });
     let timeoutId: ReturnType<typeof setTimeout> | undefined;

@@ -7,7 +7,7 @@ import { registerBridge as registerBridgeInRegistry, unregisterBridge as unregis
 import { getScriptDir, getBundledNodeDir, getSystemNodeDirs, getBundledRuntimePath, getSystemNpxPaths, findExistingPath } from './utils/runtime';
 import { getCrossPlatformEnv, isSkillBlockedOnPlatform } from './utils/platform';
 import { ensureDirSync, isDirEntry } from './utils/fs-utils';
-import { lookupModelContextLength, modelSupportsModality } from './utils/model-capabilities';
+import { applyContextWindowSuffix, lookupModelContextLength, modelSupportsModality } from './utils/model-capabilities';
 import { processImage, resizeToolImageContent, classifyImageError } from './utils/imageResize';
 import { writeBase64FilesToAgentDir } from './utils/workspace-files';
 import { ensureGitignorePattern } from './utils/gitignore';
@@ -1641,8 +1641,13 @@ export function setSessionModel(model: string): void {
   // Without this, changing model during pre-warm creates a desync:
   //   currentModel is updated but SDK subprocess keeps the old model,
   //   and applySessionConfig() on first message sees no diff → skips the SDK call.
+  // setModel() on the live SDK subprocess updates `userSpecifiedModel` which
+  // feeds into getContextWindowForModel() on every following turn — so the
+  // [1m] tag MUST be applied here too, otherwise switching to a 1M model
+  // mid-session keeps the live SDK on the 200K path until the deferred restart
+  // below respawns the subprocess.
   if (querySession) {
-    querySession.setModel(model).catch(err => {
+    querySession.setModel(applyContextWindowSuffix(model)).catch(err => {
       console.error('[agent] failed to apply model to running session:', err);
     });
   }
@@ -3604,19 +3609,28 @@ export function buildClaudeSessionEnv(
   // Hoisted above the OpenAI early return so both protocol paths benefit.
   const aliases = effectiveProviderEnv?.modelAliases;
   if (aliases) {
+    // _MODEL is what SDK feeds into getContextWindowForModel(); for 1M-window
+    // alias targets we MUST tag it with [1m] so the SDK takes the 1M path.
+    // _MODEL_NAME stays clean — it's used as a display-label fallback in the
+    // SDK /model picker (modelOptions.ts:85) and would surface the suffix to
+    // users. SDK strips [1m] before the wire (normalizeModelStringForAPI),
+    // so the upstream API never sees it.
+    const sonnetWrapped = applyContextWindowSuffix(aliases.sonnet);
+    const opusWrapped = applyContextWindowSuffix(aliases.opus);
+    const haikuWrapped = applyContextWindowSuffix(aliases.haiku);
     if (aliases.sonnet) {
-      env.ANTHROPIC_DEFAULT_SONNET_MODEL = aliases.sonnet;
-      env.ANTHROPIC_DEFAULT_SONNET_MODEL_NAME = aliases.sonnet; // SDK 0.2.84: display name in supportedModels()
+      env.ANTHROPIC_DEFAULT_SONNET_MODEL = sonnetWrapped!;
+      env.ANTHROPIC_DEFAULT_SONNET_MODEL_NAME = aliases.sonnet;
     }
     if (aliases.opus) {
-      env.ANTHROPIC_DEFAULT_OPUS_MODEL = aliases.opus;
+      env.ANTHROPIC_DEFAULT_OPUS_MODEL = opusWrapped!;
       env.ANTHROPIC_DEFAULT_OPUS_MODEL_NAME = aliases.opus;
     }
     if (aliases.haiku) {
-      env.ANTHROPIC_DEFAULT_HAIKU_MODEL = aliases.haiku;
+      env.ANTHROPIC_DEFAULT_HAIKU_MODEL = haikuWrapped!;
       env.ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME = aliases.haiku;
     }
-    console.log(`[env] Model aliases set: sonnet=${aliases.sonnet ?? '(none)'}, opus=${aliases.opus ?? '(none)'}, haiku=${aliases.haiku ?? '(none)'}`);
+    console.log(`[env] Model aliases set: sonnet=${sonnetWrapped ?? '(none)'}, opus=${opusWrapped ?? '(none)'}, haiku=${haikuWrapped ?? '(none)'}`);
   }
 
   // ── Auto-compact effective window ──
@@ -5348,10 +5362,13 @@ async function applySessionConfig(newModel?: string, newPermissionMode?: Permiss
     }
   }
 
-  // Apply model change if different
+  // Apply model change if different. Same wrap rationale as setSessionModel():
+  // setModel() on the live SDK subprocess updates the model fed into
+  // getContextWindowForModel() on subsequent turns, so 1M-window models need
+  // the [1m] tag here too.
   if (newModel && newModel !== currentModel) {
     try {
-      await querySession.setModel(newModel);
+      await querySession.setModel(applyContextWindowSuffix(newModel));
       currentModel = newModel;
       console.log(`[agent] runtime model switched to: ${newModel}`);
     } catch (error) {
@@ -6671,7 +6688,12 @@ async function startStreamingSession(preWarm = false): Promise<void> {
       // via setPermissionMode('bypassPermissions'). Without this flag at query creation time,
       // the SDK silently ignores the mode switch and keeps calling canUseTool.
       allowDangerouslySkipPermissions: true,
-      model: currentModel, // Use currently selected model
+      // applyContextWindowSuffix appends [1m] when the registered contextLength
+      // is ≥1_000_000 — without it, SDK getContextWindowForModel() falls back
+      // to 200K for non-Anthropic models and /context, auto-compact, attachment
+      // trimming all use the wrong ceiling. SDK strips the suffix back out
+      // before the wire (normalizeModelStringForAPI in model.ts:616).
+      model: applyContextWindowSuffix(currentModel),
       pathToClaudeCodeExecutable: resolveClaudeCodeCli(),
       env,
       stderr: (message: string) => {
@@ -6707,8 +6729,22 @@ async function startStreamingSession(preWarm = false): Promise<void> {
       mcpServers: sdkMcpServersInitial,
       // Sub-agents: inject custom agent definitions if configured
       // When agents are injected, ensure 'Task' tool is in allowedTools so the model can delegate
+      // Each sub-agent's `model` runs through applyContextWindowSuffix so a sub-agent
+      // pinned to a 1M model gets the [1m] tag independently of the main session's
+      // model (the parent could be on a 200K model, the sub-agent on a 1M one,
+      // or vice versa). The original currentAgentDefinitions is left untouched
+      // so agentsFingerprint() and downstream config consumers see clean names.
       ...(currentAgentDefinitions && Object.keys(currentAgentDefinitions).length > 0
-        ? { agents: currentAgentDefinitions, allowedTools: ['Task'] } : {}),
+        ? {
+            agents: Object.fromEntries(
+              Object.entries(currentAgentDefinitions).map(([name, a]) => [
+                name,
+                a.model ? { ...a, model: applyContextWindowSuffix(a.model) } : a,
+              ])
+            ),
+            allowedTools: ['Task'],
+          }
+        : {}),
       // disallowedTools: group chat deny list + IM-incompatible UI-interaction tools
       // Uses SDK disallowedTools because canUseTool is skipped in bypassPermissions mode
       ...(disallowedToolsList.length > 0 ? { disallowedTools: disallowedToolsList } : {}),

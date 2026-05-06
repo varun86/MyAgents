@@ -307,6 +307,61 @@ export function lookupModelCapability(modelId: string | undefined | null): Model
 }
 
 /**
+ * Threshold above which we tag a model with `[1m]`. Picked at 1_000_000 to
+ * cover the cluster of "≈1M context" models we ship as presets:
+ * `claude-sonnet-4-6` / `claude-opus-4-6` / `deepseek-v4-pro` are exactly 1M;
+ * Gemini 2.5/3.x are 1_048_576 (2^20); GPT-5.4 is 1_050_000. All of them want
+ * the SDK's 1M code path. Models in the 200K–256K band (Kimi, GLM, MiniMax)
+ * stay unwrapped — SDK's 200K default + `CLAUDE_CODE_AUTO_COMPACT_WINDOW`
+ * downshift handle them correctly without lying about the window.
+ */
+const CONTEXT_WINDOW_1M_THRESHOLD = 1_000_000;
+
+/**
+ * Wrap a model id with `[1m]` suffix iff its registry contextLength is at
+ * least 1_000_000. This is the trigger Claude Agent SDK uses to take the
+ * 1M-context code path: `getContextWindowForModel` checks `has1mContext`
+ * which is `/\[1m\]/i.test(model)`. Without the suffix, SDK falls back to
+ * MODEL_CONTEXT_WINDOW_DEFAULT (200K) for every non-Anthropic model
+ * regardless of any env var — `CLAUDE_CODE_AUTO_COMPACT_WINDOW` only
+ * `Math.min`'s the window down, never up.
+ *
+ * The wrapped value MUST only flow into SDK ingress points:
+ *   - `query({ model })` SDK option
+ *   - `query({ agents: { ...{ model } } })` sub-agent definitions
+ *   - `querySession.setModel()` runtime model switch
+ *   - `ANTHROPIC_DEFAULT_{SONNET,OPUS,HAIKU}_MODEL` env (alias resolution)
+ *
+ * It MUST NOT flow into:
+ *   - bridge `modelOverride` (forwarded verbatim to upstream OpenAI-compat API)
+ *   - `ANTHROPIC_DEFAULT_*_MODEL_NAME` env (SDK uses this as a display label
+ *     fallback — wrapping would surface the suffix in the SDK `/model` picker)
+ *   - persisted config / cron-context / IM-business state (user-visible)
+ *
+ * Wire-format safety: SDK strips `[1m]` via `normalizeModelStringForAPI()`
+ * before every `messages.create` call, so the suffix never leaks to the
+ * upstream HTTP body.
+ *
+ * Returns the model unchanged when:
+ *   - input is empty / undefined / null → returns `undefined` (avoids
+ *     overwriting an existing SDK option with an empty model id)
+ *   - already contains `[1m]` anywhere (case-insensitive) — matches SDK's
+ *     own `has1mContext` semantics, so user-typed pre-wrapped values are
+ *     respected even if registry has a lower ctx; also defends against
+ *     pathological double-wrap on partially-tagged ids
+ *   - registry has no entry, or contextLength < CONTEXT_WINDOW_1M_THRESHOLD;
+ *     `>=` naturally rejects `undefined` / `NaN` / negative without an
+ *     explicit `Number.isFinite` guard
+ */
+export function applyContextWindowSuffix(model: string | undefined | null): string | undefined {
+  if (!model) return undefined;
+  if (/\[1m\]/i.test(model)) return model;
+  const ctx = lookupModelContextLength(model);
+  if (!(typeof ctx === 'number' && ctx >= CONTEXT_WINDOW_1M_THRESHOLD)) return model;
+  return `${model}[1m]`;
+}
+
+/**
  * Whether the model accepts a given input modality.
  *
  * Returns `true` for unknown / unregistered models — the optimistic default
