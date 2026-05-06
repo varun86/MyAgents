@@ -7611,10 +7611,10 @@ async function main() {
             //
             // Position note: called BEFORE setInteractionScenario so the pre-warm's
             // current scenario (typically 'desktop' until the first IM message) is
-            // preserved in the diff. Removing scenario-bound MCPs (e.g. generative-ui)
-            // mid-session would leave the SDK's frozen systemPrompt referencing tools
-            // that no longer exist. This pass is purely additive for the IM-context
-            // tools the AI is about to need; scenario alignment is a separate concern.
+            // preserved in the diff. Removing scenario-bound MCPs mid-session would
+            // leave the SDK's frozen systemPrompt referencing tools that no longer
+            // exist. This pass is purely additive for the IM-context tools the AI
+            // is about to need; scenario alignment is a separate concern.
             //
             // Builtin runtime only — external runtimes (CC/Codex) manage their own MCP set.
             if (!shouldUseExternalRuntime()) {

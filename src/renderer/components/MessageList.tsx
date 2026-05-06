@@ -234,20 +234,52 @@ const MessageList = memo(function MessageList({
     scrollToBottom('auto');
   }, [sessionId, allMessages.length, scrollToBottom]);
 
-  // Tab inactive → active recovery. While inactive, the host wraps us in
-  // content-visibility: hidden; Virtuoso's ResizeObserver may have fired with
-  // bogus geometry and shifted internal scroll/index state, even though we
-  // gate handleAtBottomChange below to keep followEnabledRef intact. On
-  // re-activation, if we were still in follow mode, re-pin to bottom so any
-  // drift from hidden-layout measurements is corrected before paint.
-  const wasInactiveRef = useRef(!isActive);
+  // Tab inactive ↔ active follow-state preservation.
+  //
+  // While inactive, the host wraps us in `content-visibility: hidden`. WebKit
+  // skips descendant layout, so Virtuoso's ResizeObserver and internal bottom-
+  // detection math can fire with zero/stale geometry. The `guardedAtBottomChange`
+  // below catches the common case (atBottom callback fired while !isActive), but
+  // there are timing windows around the inactive↔active transition itself where a
+  // queued callback can race with the React re-render and slip through with the
+  // wrong closure. Once `followEnabledRef` flips to `false`, the previous "skip
+  // recovery if not following" guard would silently drop us out of follow mode
+  // permanently for this stream — exactly the user-reported bug.
+  //
+  // Pit-of-success fix: snapshot the live follow state at the precise moment the
+  // tab goes inactive (when measurements are still trustworthy and the user's
+  // intent is unambiguous), then on re-activation restore the snapshot and re-pin
+  // to bottom if the snapshot says we were following. This makes recovery
+  // independent of whatever happens to `followEnabledRef` during the hidden
+  // window — even if a stale observer flips it, the snapshot is authoritative.
+  // 'force' is normalized to `true` because force is a transient programmatic
+  // state; restoring it would re-enter `force` with no scrollToBottom call to
+  // back it up, defeating the auto-degrade timer.
+  const inactiveSnapshotRef = useRef<boolean | 'force' | null>(null);
   useLayoutEffect(() => {
-    const wasInactive = wasInactiveRef.current;
-    wasInactiveRef.current = !isActive;
-    if (!isActive || !wasInactive) return;
-    if (followEnabledRef.current === false) return;
-    if (allMessages.length === 0) return;
-    scrollToBottom('auto');
+    if (!isActive) {
+      if (inactiveSnapshotRef.current === null) {
+        const cur = followEnabledRef.current;
+        inactiveSnapshotRef.current = cur === 'force' ? true : cur;
+      }
+      return;
+    }
+    const snap = inactiveSnapshotRef.current;
+    if (snap === null) return; // initial mount or no inactive transition recorded
+    inactiveSnapshotRef.current = null;
+    // Restore from snapshot regardless of branch — both directions need to overwrite
+    // whatever the live ref currently says. If `snap === false` we restore `false`
+    // explicitly: a stale atBottom(true) callback during the hidden window could
+    // have flipped the live ref to `true`, which would silently re-engage follow
+    // mode against the user's actual intent (they had scrolled up before leaving).
+    followEnabledRef.current = snap;
+    // User had scrolled up before switching away — respect that, leave scroll alone.
+    if (snap === false) return;
+    // User was at bottom before switching away. Re-pin to actual scroll bottom.
+    // scrollToBottom() flips the ref to 'force' + arms grace/auto-degrade timer.
+    if (allMessages.length > 0) {
+      scrollToBottom('auto');
+    }
   }, [isActive, allMessages.length, scrollToBottom, followEnabledRef]);
 
   // Gate Virtuoso's atBottomStateChange while the tab is hidden.

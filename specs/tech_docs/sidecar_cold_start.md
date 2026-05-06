@@ -71,7 +71,7 @@
 
 ### Builtin MCP 懒加载架构
 
-6 个 in-process MCP（cron-tools / im-cron / im-media / generative-ui / gemini-image / edge-tts）通过 `src/server/tools/builtin-mcp-meta.ts` 集中登记 META，运行时按需 `getBuiltinMcpInstance(id)` 加载。
+5 个 in-process MCP（cron-tools / im-cron / im-media / gemini-image / edge-tts）通过 `src/server/tools/builtin-mcp-meta.ts` 集中登记 META，运行时按需 `getBuiltinMcpInstance(id)` 加载。
 
 - 首次加载付 100-400ms（SDK + zod）
 - 后续 0ms 缓存

@@ -102,7 +102,7 @@ SDK 子进程（AI Bash 工具）看到的 PATH 优先级：
 
 ### 内置 in-process MCP（懒加载）
 
-6 个内置 MCP（cron-tools / im-cron / im-media / generative-ui / gemini-image / edge-tts）通过 `src/server/tools/builtin-mcp-meta.ts` 的 META 登记 + `createXxxServer()` 工厂懒加载，**不在** Sidecar 冷启动时创建。见 `ARCHITECTURE.md §Builtin MCP 懒加载架构`。
+5 个内置 MCP（cron-tools / im-cron / im-media / gemini-image / edge-tts）通过 `src/server/tools/builtin-mcp-meta.ts` 的 META 登记 + `createXxxServer()` 工厂懒加载，**不在** Sidecar 冷启动时创建。见 `ARCHITECTURE.md §Builtin MCP 懒加载架构`。
 
 ## 生产构建流程
 

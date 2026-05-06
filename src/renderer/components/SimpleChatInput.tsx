@@ -2332,14 +2332,24 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                 })()}
               </Popover>
 
-              {/* Button states: system task (disabled send) → stopping (disabled spinner) → AI responding (stop) → normal (send) */}
-              {systemStatus ? (
-                // System task running (e.g., compacting, api_retry) - not interruptible
+              {/* Button states:
+                  - genuinely-uninterruptible system task (compacting…) → disabled Send
+                  - stop in progress → disabled spinner
+                  - AI responding OR api_retry backoff → Stop (interruptible — abort
+                    wakes the SDK from its retry sleep cleanly; user shouldn't be
+                    forced to wait through up to 10 exponentially-spaced retries)
+                  - idle → Send
+                  api_retry is split out of the systemStatus branch deliberately:
+                  the original "any systemStatus → not interruptible" lumped retry
+                  in with compacting, but unlike compacting, retry has no in-flight
+                  SDK state to corrupt. */}
+              {systemStatus && !systemStatus.startsWith('api_retry:') ? (
+                // System task running (e.g., compacting) - not interruptible
                 <button
                   type="button"
                   disabled
                   className="rounded-lg bg-[var(--ink-muted)]/15 p-2 text-[var(--ink-muted)]/60"
-                  title={systemStatus.startsWith('api_retry:') ? 'API 请求重试中，请稍等' : '正在执行系统任务，请稍等'}
+                  title="正在执行系统任务，请稍等"
                 >
                   <Send className="h-4 w-4" />
                 </button>
@@ -2353,13 +2363,18 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                 >
                   <Loader className="h-4 w-4 animate-spin" />
                 </button>
-              ) : isLoading ? (
-                // AI responding - can be stopped
+              ) : isLoading || systemStatus?.startsWith('api_retry:') ? (
+                // AI responding OR api_retry backoff - both can be stopped.
+                // The `||` is double-coverage: in normal flow isLoading stays
+                // true throughout the retry loop (no message-complete fires
+                // until the turn ends), but if some future state machine path
+                // flips isLoading false during retry, the systemStatus check
+                // still keeps the stop button reachable.
                 <button
                   type="button"
                   onClick={onStop}
                   className="rounded-lg bg-[var(--error)] p-2 text-white transition-colors hover:brightness-110"
-                  title="停止"
+                  title={systemStatus?.startsWith('api_retry:') ? '停止重试' : '停止'}
                 >
                   <Square className="h-4 w-4" />
                 </button>

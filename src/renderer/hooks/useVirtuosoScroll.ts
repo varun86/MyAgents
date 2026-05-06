@@ -80,10 +80,19 @@ export function useVirtuosoScroll(): VirtuosoScrollControls {
 
     // behavior='smooth' (default) for user-triggered bottom jumps; 'auto' for session-switch
     // pins where an instant, pre-paint jump is required (no visible scroll animation).
+    //
+    // align: 'end' is REQUIRED here. Virtuoso's `scrollToIndex` defaults to align:'start',
+    // which puts the LAST item's TOP at the viewport TOP. For a tall streaming assistant
+    // turn (multiple tool calls accumulated into one item), this lands the user partway
+    // through the message — not at the scroll bottom. align:'end' aligns the last item's
+    // BOTTOM to the viewport bottom, which (combined with the 280px footer spacer in
+    // MessageList) is the actual scroll bottom. Cross-checked against react-virtuoso's
+    // own internal followOutput path: it uses `{ align: 'end', index: 'LAST' }` — see the
+    // bundled source's `function f(y) { _(i, { align: 'end', behavior: y, index: 'LAST' }) }`.
     const scrollToBottom = useCallback((behavior: 'smooth' | 'auto' = 'smooth') => {
         followEnabledRef.current = 'force';
         graceUntilRef.current = Date.now() + PROGRAMMATIC_SCROLL_GRACE_MS;
-        virtuosoRef.current?.scrollToIndex({ index: 'LAST', behavior });
+        virtuosoRef.current?.scrollToIndex({ index: 'LAST', align: 'end', behavior });
         clearForceDegradeTimer();
         forceDegradeTimerRef.current = setTimeout(() => {
             forceDegradeTimerRef.current = null;

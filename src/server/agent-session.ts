@@ -7,7 +7,7 @@ import { registerBridge as registerBridgeInRegistry, unregisterBridge as unregis
 import { getScriptDir, getBundledNodeDir, getSystemNodeDirs, getBundledRuntimePath, getSystemNpxPaths, findExistingPath } from './utils/runtime';
 import { getCrossPlatformEnv, isSkillBlockedOnPlatform } from './utils/platform';
 import { ensureDirSync, isDirEntry } from './utils/fs-utils';
-import { lookupModelContextLength, modelSupportsModality } from './utils/model-capabilities';
+import { applyContextWindowSuffix, lookupModelContextLength, modelSupportsModality } from './utils/model-capabilities';
 import { processImage, resizeToolImageContent, classifyImageError } from './utils/imageResize';
 import { writeBase64FilesToAgentDir } from './utils/workspace-files';
 import { ensureGitignorePattern } from './utils/gitignore';
@@ -30,7 +30,7 @@ import { startSocksBridge, stopSocksBridge, isSocksBridgeRunning } from './utils
 // `workspace:files-changed:<eventKey>`) instead.
 import { resolveAuthHeaders, onTokenChange, startTokenRefreshScheduler } from './mcp-oauth';
 // Side-effect imports: each registers itself in the builtin MCP registry
-// gemini-image / edge-tts / generative-ui registered in builtin-mcp-meta.ts.
+// gemini-image / edge-tts registered in builtin-mcp-meta.ts.
 
 import type { ToolInput } from '../renderer/types/chat';
 import { parsePartialJson } from '../shared/parsePartialJson';
@@ -1630,6 +1630,70 @@ export function setSessionPermissionMode(mode: PermissionMode): void {
   broadcast('chat:permission-mode-changed', { permissionMode: mode });
 }
 
+/**
+ * In-flight `querySession.setModel()` promise — set by every SDK-side model
+ * dispatch (`setSessionModel`'s fire-and-forget path AND `applySessionConfig`'s
+ * awaited path), cleared when the promise settles.
+ *
+ * Why this exists (Codex adversarial review 2026-05-07):
+ *
+ * The race had three actors that update `currentModel` and call SDK setModel:
+ *
+ *   1. `setSessionModel(M2)` — UI model picker. Sync update of `currentModel`,
+ *      fire-and-forget `querySession.setModel(M2[1m]).catch(...)`. Returns
+ *      before the SDK subprocess has actually swapped.
+ *
+ *   2. `applySessionConfig({ model: M2 })` — runs on every send. Short-circuits
+ *      at `newModel === currentModel`, skipping its own setModel call.
+ *
+ *   3. `enqueueUserMessage` — yields the user's message to the SDK subprocess.
+ *
+ * Without coordination, the user-visible flow "click M2, immediately click
+ * Send" is: (1) sync-updates currentModel + dispatches setModel async →
+ * (2) sees newModel === currentModel and short-circuits → (3) yields the
+ * message — all before the SDK subprocess has processed (1)'s setModel IPC.
+ * The first turn runs on the OLD model.
+ *
+ * Fix: every SDK-side dispatch goes through `dispatchSetModelToSdk()` which
+ * registers the promise here. `applySessionConfig` awaits this promise at
+ * its very top — even when it's about to short-circuit — so by the time
+ * we yield the user's message the SDK is guaranteed to be on the requested
+ * model. The promise self-clears on settle (only if not overwritten by a
+ * newer dispatch in between).
+ */
+let pendingSetModelPromise: Promise<void> | null = null;
+
+/**
+ * Send a model change to the live SDK subprocess and register the in-flight
+ * promise on `pendingSetModelPromise`. Idempotent against `querySession`
+ * being null (returns a resolved promise — fresh subprocess will read
+ * `currentModel` at spawn).
+ *
+ * Caller is responsible for updating `currentModel` itself; this helper
+ * only handles the SDK-IPC side. The split is deliberate: `setSessionModel`
+ * needs to update `currentModel` synchronously (so any concurrent reader
+ * sees the new value), but the IPC is fire-and-forget; `applySessionConfig`
+ * needs to await before updating `currentModel` (so a failed setModel
+ * doesn't leave currentModel ahead of SDK reality).
+ */
+function dispatchSetModelToSdk(model: string): Promise<void> {
+  if (!querySession) return Promise.resolve();
+  const session = querySession;
+  const wrapped = applyContextWindowSuffix(model);
+  const promise = session.setModel(wrapped).catch(err => {
+    console.error('[agent] failed to apply model to running session:', err);
+  });
+  pendingSetModelPromise = promise;
+  // Self-clear on settle. Guard against a newer dispatch having already
+  // overwritten us — that newer dispatch's own settle will do its own clear.
+  promise.finally(() => {
+    if (pendingSetModelPromise === promise) {
+      pendingSetModelPromise = null;
+    }
+  });
+  return promise;
+}
+
 export function setSessionModel(model: string): void {
   if (model === currentModel) return;
 
@@ -1641,11 +1705,16 @@ export function setSessionModel(model: string): void {
   // Without this, changing model during pre-warm creates a desync:
   //   currentModel is updated but SDK subprocess keeps the old model,
   //   and applySessionConfig() on first message sees no diff → skips the SDK call.
-  if (querySession) {
-    querySession.setModel(model).catch(err => {
-      console.error('[agent] failed to apply model to running session:', err);
-    });
-  }
+  // setModel() on the live SDK subprocess updates `userSpecifiedModel` which
+  // feeds into getContextWindowForModel() on every following turn — so the
+  // [1m] tag MUST be applied here too, otherwise switching to a 1M model
+  // mid-session keeps the live SDK on the 200K path until the deferred restart
+  // below respawns the subprocess.
+  //
+  // Fire-and-forget at this seam (UI-driven, no await available), but
+  // `dispatchSetModelToSdk` registers `pendingSetModelPromise` so the next
+  // `applySessionConfig` awaits before yielding the user's message.
+  void dispatchSetModelToSdk(model);
 
   // CLAUDE_CODE_AUTO_COMPACT_WINDOW is baked into the subprocess env at spawn
   // time and cannot be updated on a live process — `querySession.setModel()`
@@ -1832,20 +1901,23 @@ function schedulePreWarm(): void {
       schedulePreWarm();
       return;
     }
-    // No active session to restart — clear any leftover reasons (e.g. reason was
-    // scheduled during a failed startup and the session never came up).
-    drainDeferredRestart();
 
     if (isSessionActive()) {
-      // Session still cleaning up — RETRY instead of calling startStreamingSession().
-      // We must NOT call startStreamingSession() here because it would await
-      // sessionTerminationPromise and become a "stale awaiter" — waking up minutes later
-      // when the promise resolves for a completely different reason (rewind, provider change),
-      // starting an unwanted session with stale config and corrupting shared state.
-      // Retry ensures we only start when the session is truly idle.
+      // Session still cleaning up OR a fresh `startStreamingSession()` is mid-spawn
+      // (`isProcessing=true` but `querySession` not yet assigned). RETRY instead of
+      // calling startStreamingSession() — that would become a "stale awaiter" on
+      // sessionTerminationPromise and wake later for an unrelated reason. Don't drain
+      // pendingConfigRestart here either: a setter that ran during the spawn window
+      // (e.g. `setSessionProviderEnv` at the `isProcessing && !querySession` branch)
+      // may have legitimately latched a reason that needs to apply against the
+      // spawning subprocess once `querySession` is set on the next timer fire.
       schedulePreWarm();
       return;
     }
+    // Truly idle — no session and not spawning. Clear any leftover reasons (e.g.
+    // scheduled during a failed startup where the session never came up) so the
+    // fresh pre-warm doesn't carry stale ghosts.
+    drainDeferredRestart();
     console.log('[agent] pre-warming SDK subprocess + MCP servers');
     startStreamingSession(true).catch((error) => {
       console.error('[agent] pre-warm failed:', error);
@@ -1899,12 +1971,6 @@ function checkMcpToolPermission(toolName: string): { allowed: true } | { allowed
       return { allowed: true };
     }
     return { allowed: false, reason: '定时任务管理 API 不可用' };
-  }
-
-  // Special case: generative-ui is a built-in MCP server for desktop sessions
-  // Context-injected (not in user's MCP list), always allowed when injected
-  if (serverId === 'generative-ui') {
-    return { allowed: true };
   }
 
   // Case 1: MCP not set (null) - allow all (backward compatible)
@@ -1984,7 +2050,7 @@ export function pinMcpPackageVersions(args: string[]): string[] {
  * Convert McpServerDefinition to SDK mcpServers format.
  *
  * Three MCP injection patterns:
- * 1. Context-injected (cron-tools, im-cron, im-media, generative-ui) — always present based on
+ * 1. Context-injected (cron-tools, im-cron, im-media) — always present based on
  *    sidecar context, invisible in Settings UI, not user-toggled.
  * 2. Builtin registry (command='__builtin__') — in-process servers, user-toggled via Settings,
  *    registered as META in `./tools/builtin-mcp-meta.ts`. Adding a new one:
@@ -2072,16 +2138,6 @@ async function buildSdkMcpServers(): Promise<Record<string, McpServerEntry>> {
   if (bridgeToolsCtx && bridgeServer) {
     result['im-bridge-tools'] = bridgeServer;
     console.log(`[agent] Added im-bridge-tools MCP server for plugin ${bridgeToolsCtx.pluginId}`);
-  }
-
-  // Add Generative UI tool for desktop sessions (not IM/Cron — they can't render widgets)
-  // Use currentScenario (consistent with system-prompt.ts generativeUiEnabled check)
-  if (currentScenario.type === 'desktop') {
-    const s = await loadBuiltinServer('generative-ui');
-    if (s) {
-      result['generative-ui'] = s;
-      console.log('[agent] Added generative-ui MCP server');
-    }
   }
 
   // --- Pattern 2: Builtin registry MCPs (in-process, user-toggled) ---
@@ -2287,8 +2343,8 @@ async function buildSdkMcpServers(): Promise<Record<string, McpServerEntry>> {
  * Sorted-key fingerprint of an MCP server map (id list).
  * Identity comparison only — env/args/url changes for user-configured MCPs
  * already trigger restart via mcpConfigFingerprint() + setMcpServers().
- * This is for context-injected MCPs (im-media, im-bridge-tools, generative-ui)
- * whose presence flips on/off as IM context becomes available.
+ * This is for context-injected MCPs (im-media, im-bridge-tools) whose
+ * presence flips on/off as IM context becomes available.
  */
 function mcpKeyFingerprint(servers: Record<string, unknown>): string {
   return Object.keys(servers).sort().join(',');
@@ -3601,19 +3657,28 @@ export function buildClaudeSessionEnv(
   // Hoisted above the OpenAI early return so both protocol paths benefit.
   const aliases = effectiveProviderEnv?.modelAliases;
   if (aliases) {
+    // _MODEL is what SDK feeds into getContextWindowForModel(); for 1M-window
+    // alias targets we MUST tag it with [1m] so the SDK takes the 1M path.
+    // _MODEL_NAME stays clean — it's used as a display-label fallback in the
+    // SDK /model picker (modelOptions.ts:85) and would surface the suffix to
+    // users. SDK strips [1m] before the wire (normalizeModelStringForAPI),
+    // so the upstream API never sees it.
+    const sonnetWrapped = applyContextWindowSuffix(aliases.sonnet);
+    const opusWrapped = applyContextWindowSuffix(aliases.opus);
+    const haikuWrapped = applyContextWindowSuffix(aliases.haiku);
     if (aliases.sonnet) {
-      env.ANTHROPIC_DEFAULT_SONNET_MODEL = aliases.sonnet;
-      env.ANTHROPIC_DEFAULT_SONNET_MODEL_NAME = aliases.sonnet; // SDK 0.2.84: display name in supportedModels()
+      env.ANTHROPIC_DEFAULT_SONNET_MODEL = sonnetWrapped!;
+      env.ANTHROPIC_DEFAULT_SONNET_MODEL_NAME = aliases.sonnet;
     }
     if (aliases.opus) {
-      env.ANTHROPIC_DEFAULT_OPUS_MODEL = aliases.opus;
+      env.ANTHROPIC_DEFAULT_OPUS_MODEL = opusWrapped!;
       env.ANTHROPIC_DEFAULT_OPUS_MODEL_NAME = aliases.opus;
     }
     if (aliases.haiku) {
-      env.ANTHROPIC_DEFAULT_HAIKU_MODEL = aliases.haiku;
+      env.ANTHROPIC_DEFAULT_HAIKU_MODEL = haikuWrapped!;
       env.ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME = aliases.haiku;
     }
-    console.log(`[env] Model aliases set: sonnet=${aliases.sonnet ?? '(none)'}, opus=${aliases.opus ?? '(none)'}, haiku=${aliases.haiku ?? '(none)'}`);
+    console.log(`[env] Model aliases set: sonnet=${sonnetWrapped ?? '(none)'}, opus=${opusWrapped ?? '(none)'}, haiku=${haikuWrapped ?? '(none)'}`);
   }
 
   // ── Auto-compact effective window ──
@@ -5345,10 +5410,31 @@ async function applySessionConfig(newModel?: string, newPermissionMode?: Permiss
     }
   }
 
-  // Apply model change if different
+  // Drain any in-flight setModel from a prior `setSessionModel(...)` BEFORE
+  // we look at the short-circuit. Without this, the "click M2 in the model
+  // picker, immediately click Send" sequence races: setSessionModel updated
+  // `currentModel` synchronously and fired setModel without awaiting, so the
+  // short-circuit `newModel === currentModel` returns true before the SDK
+  // subprocess has swapped — the next SDK turn runs on the OLD model. Awaiting
+  // the registered promise gives the SDK time to ack. (Codex review 2026-05-07.)
+  if (pendingSetModelPromise) {
+    try {
+      await pendingSetModelPromise;
+    } catch {
+      // dispatchSetModelToSdk already logged; we still want to proceed —
+      // a stale setModel failure doesn't block the rest of config sync.
+    }
+  }
+
+  // Apply model change if different. Same wrap rationale as setSessionModel():
+  // setModel() on the live SDK subprocess updates the model fed into
+  // getContextWindowForModel() on subsequent turns, so 1M-window models need
+  // the [1m] tag here too. Routed through dispatchSetModelToSdk so any later
+  // applySessionConfig invocation that runs concurrently also drains via
+  // pendingSetModelPromise.
   if (newModel && newModel !== currentModel) {
     try {
-      await querySession.setModel(newModel);
+      await dispatchSetModelToSdk(newModel);
       currentModel = newModel;
       console.log(`[agent] runtime model switched to: ${newModel}`);
     } catch (error) {
@@ -6404,6 +6490,27 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     return;
   }
 
+  // The fresh subprocess about to spawn reads the latest currentModel /
+  // currentMcpServers / currentAgentDefinitions / currentProviderEnv via
+  // `buildClaudeSessionEnv()` + `buildSdkMcpServers()` below — every entry in
+  // `pendingConfigRestart` is satisfied at spawn by definition. Drain the latch
+  // (and cancel any orphaned preWarmTimer scheduled by a predecessor's finally
+  // block) so a stale timer firing ~500ms later doesn't apply a "batched config
+  // restart" against *this* freshly-configured subprocess and silently kill an
+  // in-flight direct user message. Mirrors `forceRestartActiveSessionForMcp`
+  // (search "we drive restart"): when *this* call is the legitimate restart,
+  // any latched reason is by construction redundant. Reasons added AFTER this
+  // point (e.g. config edits during spawn / first turn) latch normally and
+  // drain at the next pre-warm timer or turn-complete handler.
+  if (hasDeferredRestart()) {
+    const reasons = drainDeferredRestart();
+    console.log(`[agent] ${preWarm ? 'pre-warm' : 'start'} session: dropping satisfied deferred reasons (${reasons})`);
+  }
+  if (preWarmTimer) {
+    clearTimeout(preWarmTimer);
+    preWarmTimer = null;
+  }
+
   isPreWarming = preWarm;
   // Sync enabled user-level skills as symlinks into project's .claude/skills/
   // Must happen before buildClaudeSessionEnv() so SDK sees them via settingSources: ['project']
@@ -6647,7 +6754,12 @@ async function startStreamingSession(preWarm = false): Promise<void> {
       // via setPermissionMode('bypassPermissions'). Without this flag at query creation time,
       // the SDK silently ignores the mode switch and keeps calling canUseTool.
       allowDangerouslySkipPermissions: true,
-      model: currentModel, // Use currently selected model
+      // applyContextWindowSuffix appends [1m] when the registered contextLength
+      // is ≥1_000_000 — without it, SDK getContextWindowForModel() falls back
+      // to 200K for non-Anthropic models and /context, auto-compact, attachment
+      // trimming all use the wrong ceiling. SDK strips the suffix back out
+      // before the wire (normalizeModelStringForAPI in model.ts:616).
+      model: applyContextWindowSuffix(currentModel),
       pathToClaudeCodeExecutable: resolveClaudeCodeCli(),
       env,
       stderr: (message: string) => {
@@ -6668,7 +6780,6 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           playwrightStorageEnabled: (currentMcpServers ?? []).some(
             s => s.id === 'playwright' && (s.args ?? []).some((a: string) => /^--caps=.*\bstorage\b/.test(a))
           ),
-          generativeUiEnabled: currentScenario.type === 'desktop',
           // agent-session.ts is the builtin Claude Agent SDK path by definition.
           runtime: 'builtin',
         }),
@@ -6683,8 +6794,22 @@ async function startStreamingSession(preWarm = false): Promise<void> {
       mcpServers: sdkMcpServersInitial,
       // Sub-agents: inject custom agent definitions if configured
       // When agents are injected, ensure 'Task' tool is in allowedTools so the model can delegate
+      // Each sub-agent's `model` runs through applyContextWindowSuffix so a sub-agent
+      // pinned to a 1M model gets the [1m] tag independently of the main session's
+      // model (the parent could be on a 200K model, the sub-agent on a 1M one,
+      // or vice versa). The original currentAgentDefinitions is left untouched
+      // so agentsFingerprint() and downstream config consumers see clean names.
       ...(currentAgentDefinitions && Object.keys(currentAgentDefinitions).length > 0
-        ? { agents: currentAgentDefinitions, allowedTools: ['Task'] } : {}),
+        ? {
+            agents: Object.fromEntries(
+              Object.entries(currentAgentDefinitions).map(([name, a]) => [
+                name,
+                a.model ? { ...a, model: applyContextWindowSuffix(a.model) } : a,
+              ])
+            ),
+            allowedTools: ['Task'],
+          }
+        : {}),
       // disallowedTools: group chat deny list + IM-incompatible UI-interaction tools
       // Uses SDK disallowedTools because canUseTool is skipped in bypassPermissions mode
       ...(disallowedToolsList.length > 0 ? { disallowedTools: disallowedToolsList } : {}),
@@ -6716,14 +6841,41 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           };
         }
 
-        // Special case: built-in trusted MCP servers (cron-tools, im-cron, generative-ui)
+        // Special case: built-in trusted MCP servers (cron-tools, im-cron)
         // When allowed by checkMcpToolPermission, skip user confirmation entirely
-        if (toolName.startsWith('mcp__cron-tools__') || toolName.startsWith('mcp__im-cron__') || toolName.startsWith('mcp__generative-ui__')) {
+        if (toolName.startsWith('mcp__cron-tools__') || toolName.startsWith('mcp__im-cron__')) {
           console.log(`[permission] built-in tool auto-allowed: ${toolName}`);
           return {
             behavior: 'allow' as const,
             updatedInput: input as Record<string, unknown>
           };
+        }
+
+        // Auto-allow `myagents widget …` Bash invocations. Loading the widget
+        // design contract used to be an MCP tool (widget_read_me, auto-allowed
+        // via mcp__generative-ui__ trust prefix) — that path is gone, so the
+        // AI now goes through Bash. Without this carve-out, every fresh
+        // desktop session that decides to render a widget would eat one user
+        // permission click before the design guidelines load. The CLI is
+        // MyAgents-managed and the readme path is pure-read.
+        //
+        // Strict regex: `myagents widget [readme|list|<module>] [<module>...]`
+        // with module names limited to `[a-z][a-z0-9-]*`. Whitespace separators
+        // are restricted to space + tab — `\s` would also match `\n`/`\r`,
+        // letting `myagents widget readme\nrm` slip through (shell executes
+        // it as two lines, second line being any PATH binary whose name
+        // happens to fit module-name shape: `rm`, `bash`, `docker rm`,
+        // `shutdown now`, …). Non-whitespace shell metachars (`;`, `|`,
+        // `&&`, `>`, `$(`, backticks, …) already fail the `[a-z0-9-]` class.
+        if (toolName === 'Bash') {
+          const cmd = ((input as Record<string, unknown>)?.command as string | undefined)?.trim() ?? '';
+          if (/^myagents[ \t]+widget(?:[ \t]+(?:readme|list))?(?:[ \t]+[a-z][a-z0-9-]*)*[ \t]*$/.test(cmd)) {
+            console.log(`[permission] myagents widget readme auto-allowed: ${cmd}`);
+            return {
+              behavior: 'allow' as const,
+              updatedInput: input as Record<string, unknown>
+            };
+          }
         }
 
         // Headless IM fast-path: IM bridges (Telegram/Dingtalk builtin + all OpenClaw plugins

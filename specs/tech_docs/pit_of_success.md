@@ -375,7 +375,7 @@ v0.2.0 Windows 版的 IM Bot 全部启动失败就是这个 trap：`find_tsx_run
 <a id="builtin-mcp"></a>
 ## Builtin MCP 懒加载架构
 
-**Problem.** 6 个 in-process 内置 MCP（cron-tools / im-cron / im-media / generative-ui / gemini-image / edge-tts）顶层 import `@anthropic-ai/claude-agent-sdk`（~900KB）+ `zod/v4`（~470KB）+ per-tool schema 构造 → Sidecar 冷启动每次付 ~500-1000ms zod schema 构造税，即使用户压根没启用这个 MCP。
+**Problem.** 5 个 in-process 内置 MCP（cron-tools / im-cron / im-media / gemini-image / edge-tts）顶层 import `@anthropic-ai/claude-agent-sdk`（~900KB）+ `zod/v4`（~470KB）+ per-tool schema 构造 → Sidecar 冷启动每次付 ~500-1000ms zod schema 构造税，即使用户压根没启用这个 MCP。
 
 **Architecture: 两层 META / INSTANCE**
 

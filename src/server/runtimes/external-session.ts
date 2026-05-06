@@ -847,12 +847,15 @@ async function _doStartExternalSession(options: {
   // Pass the current runtime so L1 identity text reports the correct CLI
   // (e.g. "Google Gemini CLI" instead of the builtin default).
   //
-  // cliToolsEnabled: true — external runtimes can't see the builtin `im-cron` /
-  // `im-media` / `generative-ui` SDK MCP servers, so we teach the AI about
-  // their `myagents` CLI equivalents via a progressive-disclosure appendix.
-  // The builtin path at agent-session.ts keeps cliToolsEnabled off and
-  // continues to use the in-process MCP servers — no behaviour change. See
+  // cliToolsEnabled: true — external runtimes can't see the builtin `im-cron`
+  // / `im-media` SDK MCP servers, so we teach the AI about their `myagents`
+  // CLI equivalents via a progressive-disclosure appendix. The builtin path
+  // at agent-session.ts keeps cliToolsEnabled off and continues to use the
+  // in-process MCP servers — no behaviour change. See
   // prd_0.1.67_external_runtime_cli_skill.md.
+  //
+  // Generative-UI widget guidance is universal (no MCP equivalent) and is
+  // injected unconditionally for desktop scenarios via buildWidgetSection().
   const baseSystemPrompt = buildSystemPromptAppend(options.scenario, {
     runtime: runtimeType,
     cliToolsEnabled: true,

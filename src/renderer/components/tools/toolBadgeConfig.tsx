@@ -35,7 +35,6 @@ const INTERNAL_MCP_NAMES: Record<string, string> = {
   'cron-tools': '定时任务',
   'im-media': 'IM 媒体',
   'im-bridge-tools': '插件工具',
-  'generative-ui': '可视化',
 };
 
 /** Called by Chat.tsx when MCP server list changes */
@@ -362,21 +361,6 @@ export function getToolBadgeConfig(toolName: string): ToolBadgeConfig {
       };
     // Default - Blue (fallback for unknown tools like MCP tools, server_tool_use)
     default:
-      // Generative UI tools - Amber/Warm
-      if (toolName.startsWith('mcp__generative-ui__')) {
-        return {
-          icon: <Sparkles className="size-2.5" />,
-          colors: {
-            border: 'border-amber-200/60 dark:border-amber-500/30',
-            bg: 'bg-amber-50/80 dark:bg-amber-500/10',
-            text: 'text-amber-600 dark:text-amber-400',
-            hoverBg: 'hover:bg-amber-100/80 dark:hover:bg-amber-500/20',
-            chevron: 'text-amber-400 dark:text-amber-500',
-            iconColor: 'text-amber-500 dark:text-amber-400'
-          }
-        };
-      }
-
       // Gemini Image tools - Purple
       if (toolName.startsWith('mcp__gemini-image__')) {
         return {
@@ -723,11 +707,6 @@ export function getToolExpandedLabel(tool: ToolUseSimple): string {
         const toolAction = parts.length >= 3 ? parts.slice(2).join('__') : '';
 
         // Special cases with richer labels
-        if (tool.name === 'mcp__generative-ui__widget_read_me') {
-          const modules = (tool.parsedInput as Record<string, unknown> | undefined)?.modules;
-          const modList = Array.isArray(modules) ? modules.join(', ') : '';
-          return modList ? `加载设计指南 (${modList})` : '加载设计指南';
-        }
         if (serverId === 'gemini-image') {
           return toolAction === 'edit_image' ? '编辑图片' : '生成图片';
         }

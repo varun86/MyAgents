@@ -32,25 +32,43 @@ export type Segment = TextSegment | WidgetSegment;
 const TAG_NAME = 'generative-ui-widget';
 
 // Match opening tag: <generative-ui-widget> or <generative-ui-widget title="xxx">
-// Title is optional — captured if present (group 1), empty string if absent
+// Title is optional — captured if present (group 1), empty string if absent.
+//
+// Lookbehind `(?<=^|\n)` requires the tag to appear at line start (after
+// optional indent). The widget output contract (see generative-ui-tool.ts
+// SECTION_OUTPUT_FORMAT) puts the opening tag on its own line, so this is safe.
+// Without it, mid-line mentions of the tag in prose ("outputting any
+// <generative-ui-widget> tags") get matched and swallow the rest of the message
+// as an "unclosed widget".
 const WIDGET_OPEN_RE = new RegExp(
-  `<${TAG_NAME}(?:\\s+[^>]*?title\\s*=\\s*["']([^"']+)["'][^>]*|\\s*)>`, 'i'
+  `(?<=^|\\n)[ \\t]*<${TAG_NAME}(?:\\s+[^>]*?title\\s*=\\s*["']([^"']+)["'][^>]*|\\s*)>`, 'i'
+);
+// Used to bound the close-tag search inside an already-opened widget. Requires
+// an actual `\n` before the tag (not just substring start, which `^` would
+// match), so the very first char after the parent's opening tag isn't
+// mistaken for "next widget".
+const NEXT_WIDGET_OPEN_RE = new RegExp(
+  `\\n[ \\t]*<${TAG_NAME}(?:\\s+[^>]*?title\\s*=\\s*["']([^"']+)["'][^>]*|\\s*)>`, 'i'
 );
 // Match closing tag
 const WIDGET_CLOSE_STR = `</${TAG_NAME}>`;
 
 /**
- * Strip code fences (``` blocks) from text before scanning for widget tags.
- * Returns text with code fence contents replaced by placeholder.
- * This prevents false-positive widget tag detection inside code examples.
+ * Mask code regions (fenced blocks AND inline code spans) before scanning for
+ * widget tags. Without inline-code masking, a literal mention like
+ * `` `<generative-ui-widget>` `` matches the open regex and the parser then
+ * treats everything up to a (non-existent) closing tag as widget HTML.
+ * Same-length NUL placeholder preserves character indices for downstream slicing.
  */
-function maskCodeFences(text: string): { masked: string; fences: Array<{ start: number; end: number }> } {
-  const fences: Array<{ start: number; end: number }> = [];
-  const masked = text.replace(/```[\s\S]*?```/g, (match, offset: number) => {
-    fences.push({ start: offset, end: offset + match.length });
-    return '\x00'.repeat(match.length); // Same-length placeholder preserves indices
-  });
-  return { masked, fences };
+function maskCodeRegions(text: string): { masked: string } {
+  let masked = text;
+  // Fenced first — protects ` characters inside ``` blocks from inline pass.
+  masked = masked.replace(/```[\s\S]*?```/g, (match) => '\x00'.repeat(match.length));
+  // Inline code spans — N backticks open, same N close. Single-line only
+  // (multi-line inline code is legal per CommonMark but vanishingly rare for
+  // tag mentions). Backreference `\1` ensures the closer length matches.
+  masked = masked.replace(/(`+)[^\n]*?\1/g, (match) => '\x00'.repeat(match.length));
+  return { masked };
 }
 
 /**
@@ -60,13 +78,12 @@ function maskCodeFences(text: string): { masked: string; fences: Array<{ start: 
  * Tags inside code fences (```) are ignored.
  */
 export function parseWidgetTags(text: string): Segment[] {
-  const { masked } = maskCodeFences(text);
   const segments: Segment[] = [];
   let remaining = text;
-  let maskedRemaining = masked;
+  let maskedRemaining = maskCodeRegions(text).masked;
 
   while (remaining.length > 0) {
-    // Search in masked text (code fences replaced) to avoid false positives
+    // Search in masked text (code regions replaced) to avoid false positives
     const openMatch = WIDGET_OPEN_RE.exec(maskedRemaining);
 
     if (!openMatch) {
@@ -85,12 +102,18 @@ export function parseWidgetTags(text: string): Segment[] {
     const title = openMatch[1] || '';
     const afterOpenIdx = openMatch.index + openMatch[0].length;
     const afterOpen = remaining.slice(afterOpenIdx);
+    const afterOpenMasked = maskedRemaining.slice(afterOpenIdx);
 
-    // Look for closing tag — use lastIndexOf for robustness
-    // (prevents premature close if widget HTML contains the closing tag string in JS/comments)
-    const closeLower = afterOpen.toLowerCase();
+    // Bound the close-tag search by the next widget's opening tag (if any).
+    // `lastIndexOf` within the bounded range preserves the original safety
+    // (a literal close-tag string inside widget JS doesn't trigger premature
+    // close) while still supporting multiple widgets in one message — which
+    // the contract explicitly allows (see SECTION_OUTPUT_FORMAT rules).
+    const nextOpenMatch = NEXT_WIDGET_OPEN_RE.exec(afterOpenMasked);
+    const searchEnd = nextOpenMatch ? nextOpenMatch.index : afterOpen.length;
+
     const closeStr = WIDGET_CLOSE_STR.toLowerCase();
-    const closeIdx = closeLower.lastIndexOf(closeStr);
+    const closeIdx = afterOpen.slice(0, searchEnd).toLowerCase().lastIndexOf(closeStr);
 
     if (closeIdx !== -1) {
       const widgetCode = afterOpen.slice(0, closeIdx);
@@ -102,7 +125,10 @@ export function parseWidgetTags(text: string): Segment[] {
       });
       const afterClose = afterOpenIdx + closeIdx + WIDGET_CLOSE_STR.length;
       remaining = remaining.slice(afterClose);
-      maskedRemaining = masked.slice(afterClose);
+      // Slice the running masked window, NOT the original masked text — the
+      // two would only agree when starting at offset 0, so reusing the
+      // original drifts the mask window after the first close.
+      maskedRemaining = maskedRemaining.slice(afterClose);
     } else {
       // Partial widget (still streaming)
       segments.push({
@@ -122,6 +148,6 @@ export function parseWidgetTags(text: string): Segment[] {
  * Quick check: does the text contain any widget tags (outside code fences)?
  */
 export function hasWidgetTags(text: string): boolean {
-  const { masked } = maskCodeFences(text);
+  const { masked } = maskCodeRegions(text);
   return WIDGET_OPEN_RE.test(masked);
 }
