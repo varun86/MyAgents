@@ -253,7 +253,7 @@ const ProcessRow = memo(function ProcessRow({
                             {subLabel}
                         </span>
                     )}
-                    {summaryNode && <span className="shrink-0">{summaryNode}</span>}
+                    {summaryNode && <span className="shrink-0 text-xs leading-none">{summaryNode}</span>}
                 </div>
 
                 {/* Chevron */}
