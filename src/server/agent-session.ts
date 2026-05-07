@@ -7178,10 +7178,40 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           //    --query is intentionally NOT in the allowlist — it carries arbitrary
           //    user text (the search string) which can hold shell metachars. That
           //    form falls through to the normal user-confirm / IM fast-path.
-          //    `thought create` is mutating + carries quoted free-form content,
-          //    so it's never auto-allowed (mirrors `cron add` / `im send-media`).
           if (/^myagents[ \t]+thought[ \t]+list(?:[ \t]+(?:--tag[ \t]+[a-z0-9][a-z0-9-]{0,31}|--limit[ \t]+\d{1,4}|--json))*[ \t]*$/.test(cmd)) {
             console.log(`[permission] myagents thought list auto-allowed: ${cmd}`);
+            return {
+              behavior: 'allow' as const,
+              updatedInput: input as Record<string, unknown>
+            };
+          }
+
+          // 5. Thought capture: `myagents thought create '<content>'`
+          //    Mutating, but the side effect is bounded — append-only into the
+          //    user's thought inbox, no filesystem / network surface, fully
+          //    reversible from the inbox UI. Filing was already gated by the
+          //    SECTION_THOUGHT prompt which only fires on explicit "记一下 /
+          //    note this down" intent, so by the time we see this command the
+          //    user has *asked* for capture; making them click "Allow" again
+          //    is friction that defeats the inbox-capture promise.
+          //
+          //    Safety constraints baked into the regex:
+          //    - REQUIRES single quotes around content (`'...'`). bash single
+          //      quotes don't interpolate `$(…)`, backticks, or `\`, so the
+          //      content is a literal argv string. Double-quoted forms FAIL
+          //      the regex and fall through to user-confirm — a defense in
+          //      depth in case the AI ignores SECTION_THOUGHT's "use single
+          //      quotes" rule and a prompt-injected user payload tries to
+          //      smuggle `$(rm -rf /)` (Codex review concern).
+          //    - `[^']` excludes embedded `'` (bash single-quoted strings
+          //      can't contain a literal `'` anyway, so any extra `'` would
+          //      end the literal early — refuse the form rather than misread).
+          //    - `--tag` is intentionally not in the allowlist: the CLI's
+          //      `thought create` doesn't accept `--tag` (tags are derived
+          //      from inline `#xxx` in the content), and the prompt no
+          //      longer advertises it after issue-148-followup review.
+          if (/^myagents[ \t]+thought[ \t]+create[ \t]+'[^']*'[ \t]*$/.test(cmd)) {
+            console.log(`[permission] myagents thought create auto-allowed: ${cmd}`);
             return {
               behavior: 'allow' as const,
               updatedInput: input as Record<string, unknown>
