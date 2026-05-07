@@ -594,6 +594,14 @@ let isStreamingMessage = false;
 // Post-interrupt turn-completion signal: resolves when for-await loop receives a `result` message.
 // Used by interruptCurrentResponse() to verify the SDK subprocess actually stopped after interrupt().
 let postInterruptTurnEndResolve: (() => void) | null = null;
+// Count of MCP tool_use blocks emitted by the model in the current turn that
+// haven't seen their matching tool_result yet. Read by the post-interrupt
+// force-close path to disambiguate diagnostics: >0 strongly suggests a hung
+// MCP tool (the SDK subprocess is blocked on client.callTool()), 0 suggests
+// the model is still generating output (thinking / text). Updated by the
+// stream-event handlers in startStreamingSession; reset to 0 on each new
+// turn (and on session restart) so values never leak across turns.
+let inFlightToolCount = 0;
 let isApiRetrying = false;  // Track api_retry state to clear when streaming resumes
 const messages: MessageWire[] = [];
 // Pattern 3 §3.2.4 — incremental persistence cursor.
@@ -6065,7 +6073,15 @@ export async function interruptCurrentResponse(reason: CancelReason = 'user'): P
     // the user sees "no response" until the 10-minute watchdog fires.
     //
     // Fix: wait up to 3 seconds for the for-await loop to receive a `result` message
-    // (turn completion). If it doesn't arrive, the MCP tool is likely hung — force-close.
+    // (turn completion). If it doesn't arrive, force-close. The diagnostic message
+    // distinguishes two phases the model could be in when the user pressed Stop:
+    //   - inFlightToolCount > 0  → an MCP tool_use is awaiting tool_result, very
+    //     likely the SDK subprocess is blocked on client.callTool() (hung tool).
+    //   - inFlightToolCount === 0 → no tool in flight; the model is mid-generation
+    //     (thinking / text streaming) and 3s wasn't enough for the SDK to wind
+    //     down. NOT a hung tool — calling it one in the log misleads anyone
+    //     grepping for tool issues. This was the misdiagnosis observed on
+    //     2026-05-07 when stop was pressed during a thinking block.
     if (interrupted && querySession) {
       const turnEnded = new Promise<void>(resolve => {
         postInterruptTurnEndResolve = resolve;
@@ -6076,10 +6092,12 @@ export async function interruptCurrentResponse(reason: CancelReason = 'user'): P
       try {
         await Promise.race([turnEnded, postInterruptTimeout]);
       } catch {
-        // Turn didn't complete within 3s — MCP tool likely hung, force-close
         postInterruptTurnEndResolve = null;
         if (querySession) {
-          console.warn('[agent] Force-closing: turn did not complete 3s after interrupt (hung MCP tool?)');
+          const phase = inFlightToolCount > 0
+            ? `hung MCP tool likely (${inFlightToolCount} tool_use awaiting result)`
+            : 'model still generating (no tool in flight)';
+          console.warn(`[agent] Force-closing: turn did not complete 3s after interrupt — ${phase}`);
           // Rescue pending items BEFORE close: see rescuePendingToQueue() doc.
           rescuePendingToQueue();
           const session = querySession;
@@ -7101,7 +7119,11 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     // Heartbeat (15s ping) keeps the SSE alive, so Rust's 60s read_timeout
     // never fires. Without this watchdog, the session hangs indefinitely.
     // Unified 10-minute timeout for both API hang and MCP tool hang.
-    let pendingTools = 0;
+    //
+    // `inFlightToolCount` is module-level so the post-interrupt force-close
+    // path can read it. Reset here so a new turn starts at 0 even if a
+    // prior turn ended via abort/restart without clearing it.
+    inFlightToolCount = 0;
     let lastSdkEventAt = Date.now();
     const API_WATCHDOG_INTERVAL_MS = 30_000;
     const WATCHDOG_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes — unified for API and MCP tools
@@ -7115,7 +7137,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
 
       if (noRecentSdkEvents) {
         watchdogFired = true;
-        const toolInfo = pendingTools > 0 ? `（${pendingTools} 个工具执行中）` : '';
+        const toolInfo = inFlightToolCount > 0 ? `（${inFlightToolCount} 个工具执行中）` : '';
         console.error(`[agent] Watchdog: no SDK event for ${WATCHDOG_TIMEOUT_MS / 1000}s${toolInfo} — aborting`);
         broadcast('chat:agent-error', {
           message: `响应超时（10 分钟无活动${toolInfo}），已自动终止。请重试。`
@@ -7473,7 +7495,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
               // so the frontend splits streaming before adding new content.
               handleToolUseStart(toolPayload);
               broadcast('chat:tool-use-start', toolPayload);
-              pendingTools++;
+              inFlightToolCount++;
             }
           } else if (streamEvent.content_block.type === 'server_tool_use') {
             // Server-side tool use (e.g., 智谱 GLM-4.7's webReader, analyze_image)
@@ -7691,7 +7713,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
                   toolUseId: toolResultBlock.tool_use_id,
                   content: stripped ? PLAYWRIGHT_RESULT_SENTINEL : contentStr
                 });
-                pendingTools = Math.max(0, pendingTools - 1);
+                inFlightToolCount = Math.max(0, inFlightToolCount - 1);
               }
               handleToolResultComplete(toolResultBlock.tool_use_id, contentStr);
             }
@@ -7827,7 +7849,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
                   content: stripped ? PLAYWRIGHT_RESULT_SENTINEL : contentStr,
                   isError: toolResultBlock.is_error || false
                 });
-                pendingTools = Math.max(0, pendingTools - 1);
+                inFlightToolCount = Math.max(0, inFlightToolCount - 1);
               }
               handleToolResultComplete(
                 toolResultBlock.tool_use_id,
@@ -7873,7 +7895,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         }
       } else if (sdkMessage.type === 'result') {
         // Turn complete — reset watchdog state for next turn
-        pendingTools = 0;
+        inFlightToolCount = 0;
         watchdogFired = false;
         // Signal post-interrupt verification (if waiting)
         if (postInterruptTurnEndResolve) {
