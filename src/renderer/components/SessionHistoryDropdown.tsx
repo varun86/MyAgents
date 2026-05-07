@@ -14,6 +14,7 @@ import type { AgentStatusMap } from '@/hooks/useAgentStatuses';
 import { extractPlatformDisplay } from '@/utils/taskCenterUtils';
 import type { SessionTag } from '@/hooks/useTaskCenterData';
 
+import ConfirmDialog from './ConfirmDialog';
 import SessionStatsModal from './SessionStatsModal';
 import SessionTagBadge from './SessionTagBadge';
 import Tip from './Tip';
@@ -50,7 +51,11 @@ export default function SessionHistoryDropdown({
     const [cronTasks, setCronTasks] = useState<CronTaskFetchState>(null);
     const [statsSession, setStatsSession] = useState<{ id: string; title: string } | null>(null);
     // Track pending delete to show confirmation UI
-    const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
+    // Pending delete carries the session title so the confirm dialog can show
+    // a recognizable label even after the row scrolls out / the user blurs.
+    // Keeping `id` separate from `title` (vs. just `id`) lets us survive the
+    // window where `setSessions` mutates the list mid-confirm.
+    const [pendingDelete, setPendingDelete] = useState<{ id: string; title: string } | null>(null);
     // Track delete error for user feedback
     const [deleteError, setDeleteError] = useState<string | null>(null);
 
@@ -173,7 +178,7 @@ export default function SessionHistoryDropdown({
             setAgentStatuses({});
             setBackgroundSessionIds([]);
             setStatsSession(null);
-            setPendingDeleteId(null);
+            setPendingDelete(null);
             setDeleteError(null);
         };
     }, [isOpen, agentDir]);
@@ -231,18 +236,27 @@ export default function SessionHistoryDropdown({
         onClose();
     }, [onClose]);
 
-    const handleDeleteClick = (e: React.MouseEvent, sessionId: string) => {
+    const handleDeleteClick = (e: React.MouseEvent, session: SessionMetadata) => {
         e.stopPropagation();
         e.preventDefault();
         setDeleteError(null); // Clear any previous error
-        setPendingDeleteId(sessionId);
+        // Show centered ConfirmDialog (matches launcher RecentTasks UX). The
+        // previous inline ✓ / ✗ overlay was buggy: its wrapper div carried both
+        // `pointer-events-none` (the always-on hover-mask base) and
+        // `pointer-events-auto` (the pending-delete override), and Tailwind's
+        // CSS-source ordering made `none` win regardless of class-string
+        // order, so the "确认" button rendered visible but was unclickable.
+        // Routing through ConfirmDialog (modal portal, no parent
+        // `pointer-events-none`) sidesteps the class-collision and lines this
+        // surface up with the launcher's session-delete confirm.
+        setPendingDelete({ id: session.id, title: session.title || '此对话' });
     };
 
     const handleConfirmDelete = async () => {
-        if (!pendingDeleteId) return;
-        const sessionId = pendingDeleteId;
+        if (!pendingDelete) return;
+        const sessionId = pendingDelete.id;
         const isDeletingCurrentSession = sessionId === currentSessionId;
-        setPendingDeleteId(null);
+        setPendingDelete(null);
         setDeleteError(null);
 
         try {
@@ -270,7 +284,7 @@ export default function SessionHistoryDropdown({
     };
 
     const handleCancelDelete = () => {
-        setPendingDeleteId(null);
+        setPendingDelete(null);
     };
 
     const handleShowStats = (e: React.MouseEvent, session: SessionMetadata) => {
@@ -461,7 +475,6 @@ export default function SessionHistoryDropdown({
                             const hasStats = stats && (stats.messageCount > 0 || stats.totalInputTokens > 0);
                             const totalTokens = (stats?.totalInputTokens ?? 0) + (stats?.totalOutputTokens ?? 0);
 
-                            const isPendingDelete = pendingDeleteId === session.id;
                             const cronProtected = tags.some(t => t.type === 'cron');
                             return (
                                 <div
@@ -513,90 +526,69 @@ export default function SessionHistoryDropdown({
                                         </div>
                                     </div>
 
-                                    {/* Hover/pending overlay — gradient mask + action buttons.
-                                     *  Pending-delete forces the overlay visible so the user
-                                     *  doesn't lose track of the confirmation prompt when the
-                                     *  cursor moves out. */}
-                                    <div
-                                        className={`pointer-events-none absolute inset-y-0 right-0 flex items-center transition-opacity ${
-                                            isPendingDelete
-                                                ? 'pointer-events-auto opacity-100'
-                                                : 'opacity-0 group-hover:pointer-events-auto group-hover:opacity-100'
-                                        }`}
-                                    >
+                                    {/* Hover overlay — gradient mask + action buttons. Confirm-delete
+                                     *  is now a centered modal (ConfirmDialog at the bottom of this
+                                     *  component), so the overlay only handles the per-row action
+                                     *  toolbar. The previous inline ✓/✗ branch was bug-prone — its
+                                     *  wrapper carried both `pointer-events-none` (the always-on
+                                     *  base) and `pointer-events-auto` (the pending-delete override),
+                                     *  and Tailwind's CSS-source ordering let `none` win, leaving
+                                     *  the "确认" button visible-but-unclickable. */}
+                                    <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:opacity-100">
                                         <div className="h-full w-10 bg-gradient-to-r from-transparent to-[var(--paper-inset)]" />
                                         <div className="flex h-full items-center gap-1 bg-[var(--paper-inset)] pr-3">
-                                            {isPendingDelete ? (
-                                                <>
+                                            <Tip label={session.favorite ? '取消收藏' : '收藏'} position="bottom">
+                                                <button
+                                                    aria-label={session.favorite ? '取消收藏' : '收藏'}
+                                                    className={`flex h-7 w-7 items-center justify-center rounded-md transition-colors hover:bg-[var(--paper)] ${
+                                                        session.favorite
+                                                            ? 'text-[var(--accent)]'
+                                                            : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
+                                                    }`}
+                                                    onClick={(e) => { void handleToggleFavorite(e, session); }}
+                                                >
+                                                    <Star className="h-3.5 w-3.5" fill={session.favorite ? 'currentColor' : 'none'} />
+                                                </button>
+                                            </Tip>
+                                            <Tip label="导出对话内容为 md 文件" position="bottom">
+                                                <button
+                                                    aria-label="导出"
+                                                    className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper)] hover:text-[var(--ink)]"
+                                                    onClick={(e) => { void handleExport(e, session); }}
+                                                    disabled={exportingId === session.id}
+                                                >
+                                                    <Download className="h-3.5 w-3.5" />
+                                                </button>
+                                            </Tip>
+                                            <Tip label="查看统计" position="bottom">
+                                                <button
+                                                    aria-label="查看统计"
+                                                    className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper)] hover:text-[var(--ink)]"
+                                                    onClick={(e) => handleShowStats(e, session)}
+                                                >
+                                                    <BarChart2 className="h-3.5 w-3.5" />
+                                                </button>
+                                            </Tip>
+                                            {cronProtected ? (
+                                                <Tip label="请先停止循环任务后再删除" position="bottom">
                                                     <button
-                                                        className="flex h-6 items-center justify-center rounded bg-[var(--error)] px-2 text-xs font-medium text-white transition-colors hover:bg-[var(--error)]/80"
-                                                        onClick={(e) => { e.stopPropagation(); handleConfirmDelete(); }}
+                                                        aria-label="删除（请先停止循环任务）"
+                                                        className="flex h-7 w-7 cursor-not-allowed items-center justify-center rounded-md text-[var(--ink-muted)] opacity-40"
+                                                        disabled
                                                     >
-                                                        确认
+                                                        <Trash2 className="h-3.5 w-3.5" />
                                                     </button>
-                                                    <button
-                                                        className="flex h-6 items-center justify-center rounded bg-[var(--paper)] px-2 text-xs font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--line)]"
-                                                        onClick={(e) => { e.stopPropagation(); handleCancelDelete(); }}
-                                                    >
-                                                        取消
-                                                    </button>
-                                                </>
+                                                </Tip>
                                             ) : (
-                                                <>
-                                                    <Tip label={session.favorite ? '取消收藏' : '收藏'} position="bottom">
-                                                        <button
-                                                            aria-label={session.favorite ? '取消收藏' : '收藏'}
-                                                            className={`flex h-7 w-7 items-center justify-center rounded-md transition-colors hover:bg-[var(--paper)] ${
-                                                                session.favorite
-                                                                    ? 'text-[var(--accent)]'
-                                                                    : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
-                                                            }`}
-                                                            onClick={(e) => { void handleToggleFavorite(e, session); }}
-                                                        >
-                                                            <Star className="h-3.5 w-3.5" fill={session.favorite ? 'currentColor' : 'none'} />
-                                                        </button>
-                                                    </Tip>
-                                                    <Tip label="导出对话内容为 md 文件" position="bottom">
-                                                        <button
-                                                            aria-label="导出"
-                                                            className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper)] hover:text-[var(--ink)]"
-                                                            onClick={(e) => { void handleExport(e, session); }}
-                                                            disabled={exportingId === session.id}
-                                                        >
-                                                            <Download className="h-3.5 w-3.5" />
-                                                        </button>
-                                                    </Tip>
-                                                    <Tip label="查看统计" position="bottom">
-                                                        <button
-                                                            aria-label="查看统计"
-                                                            className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper)] hover:text-[var(--ink)]"
-                                                            onClick={(e) => handleShowStats(e, session)}
-                                                        >
-                                                            <BarChart2 className="h-3.5 w-3.5" />
-                                                        </button>
-                                                    </Tip>
-                                                    {cronProtected ? (
-                                                        <Tip label="请先停止循环任务后再删除" position="bottom">
-                                                            <button
-                                                                aria-label="删除（请先停止循环任务）"
-                                                                className="flex h-7 w-7 cursor-not-allowed items-center justify-center rounded-md text-[var(--ink-muted)] opacity-40"
-                                                                disabled
-                                                            >
-                                                                <Trash2 className="h-3.5 w-3.5" />
-                                                            </button>
-                                                        </Tip>
-                                                    ) : (
-                                                        <Tip label="删除" position="bottom">
-                                                            <button
-                                                                aria-label="删除"
-                                                                className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--ink-muted)] transition-colors hover:bg-[var(--error-bg)] hover:text-[var(--error)]"
-                                                                onClick={(e) => handleDeleteClick(e, session.id)}
-                                                            >
-                                                                <Trash2 className="h-3.5 w-3.5" />
-                                                            </button>
-                                                        </Tip>
-                                                    )}
-                                                </>
+                                                <Tip label="删除" position="bottom">
+                                                    <button
+                                                        aria-label="删除"
+                                                        className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--ink-muted)] transition-colors hover:bg-[var(--error-bg)] hover:text-[var(--error)]"
+                                                        onClick={(e) => handleDeleteClick(e, session)}
+                                                    >
+                                                        <Trash2 className="h-3.5 w-3.5" />
+                                                    </button>
+                                                </Tip>
                                             )}
                                         </div>
                                     </div>
@@ -606,6 +598,18 @@ export default function SessionHistoryDropdown({
                     )}
                 </div>
             </Popover>
+
+            {/* Centered confirm dialog — mirrors launcher RecentTasks UX */}
+            {pendingDelete && (
+                <ConfirmDialog
+                    title="删除对话"
+                    message={`确定要删除「${pendingDelete.title}」吗？此操作不可撤销。`}
+                    confirmText="删除"
+                    confirmVariant="danger"
+                    onConfirm={handleConfirmDelete}
+                    onCancel={handleCancelDelete}
+                />
+            )}
 
             {/* Stats Modal — portal to document root to escape stacking context */}
             {statsSession && createPortal(

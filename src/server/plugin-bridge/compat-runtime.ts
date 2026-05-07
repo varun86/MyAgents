@@ -244,6 +244,93 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
     },
 
     channel: {
+      // ===== Runtime contexts registry =====
+      // Required by ChannelRuntimeSurface contract (openclaw 2026.3.22+).
+      // Plugins (e.g. weixin@2.4.2) and openclaw's task-scoped wrapper
+      // (createTaskScopedChannelRuntime) call register/get/watch on this.
+      // Faithful port of openclaw's createChannelRuntimeContextRegistry
+      // (src/plugins/runtime/channel-runtime-contexts.ts) — token-based
+      // disposal so a stale lease cannot delete a replacement entry, plus
+      // string trim/normalization and abort-already-fired handling.
+      runtimeContexts: (() => {
+        type NormalizedKey = { channelId: string; accountId?: string; capability: string };
+        type Stored = { token: symbol; context: unknown; normalizedKey: NormalizedKey };
+        type WatcherFilter = { channelId?: string; accountId?: string; capability?: string };
+        type Event = { type: 'registered' | 'unregistered'; key: NormalizedKey; context?: unknown };
+        type Watcher = { filter: WatcherFilter; onEvent: (event: Event) => void };
+
+        const store = new Map<string, Stored>();
+        const watchers = new Set<Watcher>();
+        const norm = (v: string | null | undefined): string => (typeof v === 'string' ? v.trim() : '');
+        const buildKey = (p: { channelId: string; accountId?: string | null; capability: string }) => {
+          const channelId = norm(p.channelId);
+          const capability = norm(p.capability);
+          const accountId = norm(p.accountId);
+          if (!channelId || !capability) return null;
+          return {
+            mapKey: `${channelId} ${accountId} ${capability}`,
+            normalizedKey: { channelId, capability, ...(accountId ? { accountId } : {}) } as NormalizedKey,
+          };
+        };
+        const matchesFilter = (filter: WatcherFilter, key: NormalizedKey): boolean => {
+          if (filter.channelId && filter.channelId !== key.channelId) return false;
+          if (filter.accountId !== undefined && filter.accountId !== (key.accountId ?? '')) return false;
+          if (filter.capability && filter.capability !== key.capability) return false;
+          return true;
+        };
+        const emit = (event: Event) => {
+          for (const w of watchers) {
+            if (!matchesFilter(w.filter, event.key)) continue;
+            try { w.onEvent(event); }
+            catch (err) {
+              console.error(`[compat-runtime] runtime context watcher failed during ${event.type} channel=${event.key.channelId} capability=${event.key.capability}: ${err instanceof Error ? err.message : String(err)}`);
+            }
+          }
+        };
+
+        return {
+          register(p: { channelId: string; accountId?: string | null; capability: string; context: unknown; abortSignal?: AbortSignal }) {
+            const normalized = buildKey(p);
+            if (!normalized) return { dispose: () => {} };
+            if (p.abortSignal?.aborted) return { dispose: () => {} };
+            const token = Symbol(normalized.mapKey);
+            let disposed = false;
+            const dispose = () => {
+              if (disposed) return;
+              disposed = true;
+              const current = store.get(normalized.mapKey);
+              if (!current || current.token !== token) return;
+              store.delete(normalized.mapKey);
+              emit({ type: 'unregistered', key: normalized.normalizedKey });
+            };
+            p.abortSignal?.addEventListener('abort', dispose, { once: true });
+            if (p.abortSignal?.aborted) {
+              dispose();
+              return { dispose };
+            }
+            store.set(normalized.mapKey, { token, context: p.context, normalizedKey: normalized.normalizedKey });
+            if (disposed) return { dispose };
+            emit({ type: 'registered', key: normalized.normalizedKey, context: p.context });
+            return { dispose };
+          },
+          get<T = unknown>(p: { channelId: string; accountId?: string | null; capability: string }): T | undefined {
+            const normalized = buildKey(p);
+            if (!normalized) return undefined;
+            return store.get(normalized.mapKey)?.context as T | undefined;
+          },
+          watch(p: { channelId?: string; accountId?: string | null; capability?: string; onEvent: (event: Event) => void }) {
+            const filter: WatcherFilter = {
+              ...(p.channelId?.trim() ? { channelId: p.channelId.trim() } : {}),
+              ...(p.accountId != null ? { accountId: String(p.accountId).trim() } : {}),
+              ...(p.capability?.trim() ? { capability: p.capability.trim() } : {}),
+            };
+            const watcher: Watcher = { filter, onEvent: p.onEvent };
+            watchers.add(watcher);
+            return () => { watchers.delete(watcher); };
+          },
+        };
+      })(),
+
       // ===== Activity tracking =====
       // No-op — MyAgents doesn't need OpenClaw activity tracking.
       activity: {

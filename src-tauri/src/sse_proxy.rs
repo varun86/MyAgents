@@ -326,6 +326,21 @@ async fn connect_sse(
                     // O(1) amortised drain.
                     buffer.drain(..pos + sep_len);
 
+                    // Re-check `running` BEFORE emitting. Without this fence,
+                    // a stop_sse_proxy() call that fires between `stream.next()`
+                    // resolving and the inner emit loop running would still
+                    // dispatch the buffered events. The renderer side will
+                    // already have called `unlisten()` for those event names,
+                    // so each emit produces a "Couldn't find callback id N"
+                    // warning on the JS console (12+ such warnings observed
+                    // in the 2026-05-07 logs across tab-close events).
+                    // Dropping the events here is safe: the renderer treats
+                    // a closed-tab SSE stream as terminated, and the
+                    // sidecar persists state independently of SSE delivery.
+                    if !running.load(Ordering::SeqCst) {
+                        break;
+                    }
+
                     // Parse and emit SSE event with Tab prefix
                     if let Some((event_name, data)) = parse_sse_event(&event_str) {
                         // Log critical state-changing events

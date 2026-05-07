@@ -3855,7 +3855,12 @@ async fn recover_running_tasks(handle: &AppHandle) {
         return;
     }
 
-    ulog_info!("[CronTask] Recovering {} task(s)...", tasks_to_recover.len());
+    // Phrased as "reattaching" rather than "recovering" so the log line
+    // doesn't read like a crash-recovery event — every boot reattaches all
+    // persisted Running tasks to a fresh Sidecar, which is the normal
+    // happy path, not error remediation. (cron:task-recovered / cron:recovery-summary
+    // event names retained for frontend compatibility.)
+    ulog_info!("[CronTask] Reattaching {} scheduled task(s) (status=Running)...", tasks_to_recover.len());
 
     let mut recovered_count = 0u32;
     let mut failed_tasks: Vec<CronRecoveryFailedTask> = vec![];
@@ -3864,7 +3869,7 @@ async fn recover_running_tasks(handle: &AppHandle) {
         match try_recover_single_task(handle, task).await {
             Ok(port) => {
                 recovered_count += 1;
-                ulog_info!("[CronTask] Recovered task {} on port {}", task.id, port);
+                ulog_info!("[CronTask] Reattached task {} on port {}", task.id, port);
 
                 // Emit task-recovered event for frontend
                 let _ = handle.emit("cron:task-recovered", CronTaskRecoveredPayload {
@@ -3878,7 +3883,7 @@ async fn recover_running_tasks(handle: &AppHandle) {
                 });
             }
             Err(e) => {
-                ulog_error!("[CronTask] Failed to recover task {}: {}", task.id, e);
+                ulog_error!("[CronTask] Failed to reattach task {}: {}", task.id, e);
                 failed_tasks.push(CronRecoveryFailedTask {
                     task_id: task.id.clone(),
                     workspace_path: task.workspace_path.clone(),
@@ -3892,7 +3897,7 @@ async fn recover_running_tasks(handle: &AppHandle) {
     let failed_count = failed_tasks.len() as u32;
 
     ulog_info!(
-        "[CronTask] Recovery complete: {}/{} tasks recovered, {} failed",
+        "[CronTask] Reattach complete: {}/{} tasks reattached, {} failed",
         recovered_count, total, failed_count
     );
 
@@ -3909,7 +3914,7 @@ async fn recover_running_tasks(handle: &AppHandle) {
 /// Returns the Sidecar port on success
 async fn try_recover_single_task(handle: &AppHandle, task: &CronTask) -> Result<u16, String> {
     ulog_info!(
-        "[CronTask] Recovering task {} for workspace {}",
+        "[CronTask] Reattaching task {} for workspace {}",
         task.id, task.workspace_path
     );
 

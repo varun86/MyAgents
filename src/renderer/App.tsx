@@ -1320,6 +1320,8 @@ export default function App() {
       }
 
       const oldSessionId = currentTab.sessionId;
+      // Capture narrowed agentDir post-guard for use across await boundaries.
+      const tabAgentDir: string = currentTab.agentDir;
 
       try {
         // Step 1: Add Tab as owner to the cron task's Sidecar FIRST
@@ -1335,6 +1337,14 @@ export default function App() {
         }
 
         // Step 3: Update UI state (TabProvider will reconnect SSE to new Sidecar)
+        //
+        // Race-defensive: same reasoning as Scenario 4's setTabs — the
+        // `await releaseSessionSidecar(oldSessionId, …)` above may trigger a
+        // `session:sidecar-terminal` whose listener resets this tab to
+        // launcher view before our setTabs runs. Explicit `view: 'chat'`,
+        // `agentDir`, and `title` make this setTabs the authoritative final
+        // state. (Same workspace as before — currentTab.agentDir captured
+        // pre-await is stable across the switch.)
         setTabs((prev) =>
           prev.map((t) =>
             t.id === tabId
@@ -1342,6 +1352,9 @@ export default function App() {
                 ...t,
                 sessionId,
                 joinedExistingSidecar: !result.isNew,
+                view: 'chat',
+                agentDir: tabAgentDir,
+                title: currentTab.title || getFolderName(tabAgentDir),
               }
               : t
           )
@@ -1424,6 +1437,9 @@ export default function App() {
     }
 
     const oldSessionId = currentTabForScenario4.sessionId;
+    // Capture narrowed agentDir post-guard. TS loses the narrowing across the
+    // many `await` boundaries below, so we re-narrow once here.
+    const tabAgentDir: string = currentTabForScenario4.agentDir;
 
     try {
       // First, cancel any background completion on the TARGET session (user reconnecting)
@@ -1498,10 +1514,35 @@ export default function App() {
       }
 
       // Update UI state - TabProvider will detect sessionId change and call loadSession()
+      //
+      // Race-defensive set: explicitly carry `view: 'chat'`, `agentDir`, and
+      // `title` because the `await releaseSessionSidecar(oldSessionId, …)`
+      // above may have caused Rust to drop the old sidecar (when the Tab
+      // was its last owner — common for IM-bot sessions opened in a desktop
+      // tab whose heartbeat owner has already moved on). That drop fires
+      // `session:sidecar-terminal` for `oldSessionId`, whose listener
+      // (`applyTerminalSessionToTabs`) sees a tab still pointing at the old
+      // id (we haven't called this setTabs yet) and resets it to launcher
+      // (sets view='launcher', sessionId=null, agentDir=null, title='New Tab').
+      // If we only patched `sessionId` here the launcher fields would
+      // linger via `...t` and the user would land on launcher with the new
+      // sessionId attached — exactly the "click history → bounced to
+      // launcher" symptom. Explicit fields make this setTabs the source of
+      // truth for the post-switch tab state. (The proper title arrives
+      // shortly via TabProvider.loadSession → updateTabTitle; preserving
+      // the pre-switch title here avoids a transient "New Tab" flash for
+      // sessions whose stored title is empty.)
       setTabs((prev) =>
         prev.map((t) =>
           t.id === tabId
-            ? { ...t, sessionId, joinedExistingSidecar: joinedExisting }
+            ? {
+              ...t,
+              sessionId,
+              joinedExistingSidecar: joinedExisting,
+              view: 'chat',
+              agentDir: tabAgentDir,
+              title: currentTabForScenario4.title || getFolderName(tabAgentDir),
+            }
             : t
         )
       );

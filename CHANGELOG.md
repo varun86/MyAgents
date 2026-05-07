@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.2.11] - 2026-05-08
+
+> 重点修复：微信 bot 升级到 2.4.2 后能正常启动；切到 IM bot 历史会话不再被弹回 Launcher；订阅版 Sonnet 4.6 不再撞 1M 限额；流式输出中"取消排队消息"真的能取消。同时把定时任务 / 退出 cron / IM 发图统一到 `myagents` CLI，让外部 runtime（Codex / Gemini / Claude Code CLI）也能用。
+
+### Added
+
+- **说一声「记一下…」AI 直接落库**：在桌面 / IM bot / agent 渠道里，用户说「记一下周五要准备演讲」「帮我记…」「note this down」「remember this」，AI 会调 `myagents thought create` 把内容存进收件箱，而不只是嘴上回复"好的我记住了"。触发器严格区分"明确请求记录" vs "顺嘴提到的想法"——FYI / 偏好 / 头脑风暴等不会误存。
+
+### Changed
+
+- **定时任务 / cron 退出 / IM 发图统一走 CLI**：之前这三类能力是 builtin Claude Agent SDK 专属的内置 MCP 工具，外部 runtime（Codex CLI / Gemini CLI / Claude Code CLI）用不了。现在改为通过 `myagents` CLI 提供，所有 runtime 行为一致。同时 cron 增加跨 workspace 隔离——一个 workspace 里创建的定时任务不能被另一个 workspace 的会话删除 / 修改 / 立即执行。
+
+### Fixed
+
+- **微信 bot 升级到 2.4.2 后能启动**：插件升级后要求宿主在 startup 时提供新的 `channelRuntime` 接口，0.2.10 之前的 bridge 没注入这个字段，启动直接报"host too old or plugin SDK contract violated"。修复后微信 bot 重新可用，企业微信 / 飞书 / QQ bot 不受影响。
+- **切到历史 IM bot 会话不再回弹 Launcher**：在桌面 workspace 里点历史下拉里某个 IM bot session 时，过去会因竞态被弹回 Launcher 视图——sessionId 已切到新会话，但视图、agent 目录、标题没跟上。现在切换流程把这几项原子写入。
+- **流式输出中点 × 取消排队消息真的能取消**：AI 还在输出时用户用"深入讲讲"等快捷动作把消息塞进队列，再点 × 取消——之前内部已同步把消息丢进 SDK，× 只删 UI，AI 仍然会回。现在排队消息延后到 AI 当前轮结束才下发，期间取消即真取消（IM bot 上的取消请求若失败会如实返回 409 而非假装成功）。
+- **订阅版 Sonnet 4.6 不再撞 1M 限额**：`Anthropic（订阅）`预设里 sonnet-4-6 之前被标为 1M 上下文，但订阅默认只给 200K，结果发消息直接报 `Extra usage is required for 1M context`。校正回 200K，订阅用户开箱即用；想用 1M 的可以自定义 provider 显式启用。
+- **删除会话时确认按钮无响应**：会话历史里点删除，确认按钮不触发任何事件——改用统一确认弹窗组件。
+- **行动模式下 AI 调用 `myagents thought create` 不再弹权限框**：AI 用单引号包裹内容（防 shell 注入）调 thought create，过去仍要用户点一次"允许"才能落库。现在符合"单引号、无尾随 shell 元字符"形式直接放行；双引号 / 不带引号等任何不安全形式仍会拦截。
+
+---
+
 ## [0.2.10] - 2026-05-07
 
 > 重点修复：1M 上下文模型真正按 1M 用、上游 API 抖动期间能手动停止、切模型 / 切供应商后立即发消息不再丢或跑错配置；安全侧补一个工作区内 symlink 逃逸的口子。
