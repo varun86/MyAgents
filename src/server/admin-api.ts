@@ -1498,12 +1498,26 @@ Use "myagents <group> --help" for details on a specific group.`,
 // Version
 // ---------------------------------------------------------------------------
 
+// Compile-time injected by esbuild (scripts/esbuild-bundle.mjs `define`).
+// In dev (`npm run server` via tsx, no esbuild), the identifier is undefined
+// at runtime — the `?? process.env.…` chain below reaches the env fallback.
+declare const __MYAGENTS_VERSION__: string | undefined;
+
 export function handleVersion(): AdminResponse {
-  // npm_package_version is set by npm/bun when launched via npm scripts;
-  // MYAGENTS_VERSION can be injected by the build system as a fallback.
-  const version = process.env.npm_package_version
+  // Resolution order:
+  //   1. esbuild-injected `__MYAGENTS_VERSION__` (production sidecar bundle).
+  //   2. `npm_package_version` (set by npm in dev when launched via scripts).
+  //   3. `MYAGENTS_VERSION` env override (build system / tests).
+  //   4. 'dev' sentinel — visibly NOT a release version, so anyone reading
+  //      `myagents version` knows they're on an un-stamped build instead of
+  //      seeing a stale hardcoded number that lies about which build is
+  //      installed (issue #149: users had no way to tell whether the dmg they
+  //      reinstalled actually contained the patched CLI/sidecar — the old
+  //      hardcoded '0.1.70' fallback shipped in every release).
+  const version = (typeof __MYAGENTS_VERSION__ !== 'undefined' ? __MYAGENTS_VERSION__ : undefined)
+    ?? process.env.npm_package_version
     ?? process.env.MYAGENTS_VERSION
-    ?? '0.1.70';
+    ?? 'dev';
   return { success: true, data: { version } };
 }
 
