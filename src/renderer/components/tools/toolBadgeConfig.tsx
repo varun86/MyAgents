@@ -810,8 +810,9 @@ export function getToolSummaryNode(tool: ToolUseSimple): ReactNode | null {
       const added = countLines(newStr);
       const removed = countLines(oldStr);
       return (
-        <span className="inline-flex items-baseline gap-1 text-xs font-mono leading-snug">
+        <span className="text-xs font-mono whitespace-nowrap">
           <span className="text-[var(--success)]">+{added}</span>
+          {' '}
           <span className="text-[var(--error)]">-{removed}</span>
         </span>
       );
@@ -820,7 +821,7 @@ export function getToolSummaryNode(tool: ToolUseSimple): ReactNode | null {
       const content = getStringProp(tool.parsedInput, 'content');
       if (content === undefined) return null;
       return (
-        <span className="text-xs font-mono leading-snug text-[var(--success)]">
+        <span className="text-xs font-mono text-[var(--success)]">
           +{countLines(content)}
         </span>
       );
@@ -830,7 +831,7 @@ export function getToolSummaryNode(tool: ToolUseSimple): ReactNode | null {
       if (!stats) return null;
       const filesPart = stats.files > 0 ? ` in ${stats.files} ${stats.files === 1 ? 'file' : 'files'}` : '';
       return (
-        <span className="text-xs font-mono leading-snug text-[var(--ink-muted)]">
+        <span className="text-xs font-mono text-[var(--ink-muted)]">
           {stats.matches} {stats.matches === 1 ? 'match' : 'matches'}{filesPart}
         </span>
       );
@@ -839,7 +840,7 @@ export function getToolSummaryNode(tool: ToolUseSimple): ReactNode | null {
       const stats = parseGlobStats(tool.result);
       if (!stats) return null;
       return (
-        <span className="text-xs font-mono leading-snug text-[var(--ink-muted)]">
+        <span className="text-xs font-mono text-[var(--ink-muted)]">
           {stats.files} {stats.files === 1 ? 'file' : 'files'}
         </span>
       );

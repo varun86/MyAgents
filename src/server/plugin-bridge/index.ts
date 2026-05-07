@@ -220,7 +220,7 @@ let getCapturedCommandsFn: (() => import('./compat-api').CapturedCommand[]) | nu
 /** OpenClaw-format config (channels.{brand}.{...}), set during loadPlugin() */
 let loadedOpenclawConfig: Record<string, unknown> = {};
 /** Compat runtime — created in loadPlugin(), shared with gateway ctx for startAccount/restart */
-let loadedRuntime: unknown = null;
+let loadedRuntime: ReturnType<typeof createCompatRuntime> | null = null;
 /** Current resolved account — shared by sendText/sendMedia closures, updated by /restart-gateway */
 let currentAccount: Record<string, unknown> = {};
 /**
@@ -582,6 +582,12 @@ async function loadPlugin() {
       abortSignal: abortController.signal,
       log: console,
       runtime,
+      // Required by openclaw plugins >=2026.3.22. Weixin@2.4.2 strictly throws
+      // when missing and reads channel-surface fields directly (channelRuntime.media.*,
+      // channelRuntime.routing.*, ...). Wecom diverges from the spec and expects
+      // PluginRuntime shape (target.core.channel.text.chunkText). Dual-shape object
+      // satisfies both: spread of channel surface + a `channel` self-reference.
+      channelRuntime: { ...runtime.channel, channel: runtime.channel },
       cfg: openclawCfg,
       getStatus: () => status,
       setStatus: (s: Record<string, unknown>) => { status = s; },
@@ -1212,15 +1218,23 @@ const server = honoServe({
         // 5. Start gateway with new account
         const startAccount = capturedPlugin.gateway?.startAccount;
         if (typeof startAccount === 'function') {
+          // QR-restart path runs after loadPlugin() completed → loadedRuntime
+          // is always set. Bail loudly if not — a missing channelRuntime would
+          // resurrect the original "host too old" startup failure on weixin.
+          if (!loadedRuntime) {
+            return Response.json({ ok: false, error: 'Bridge runtime not initialized; cannot restart gateway' }, { status: 500 });
+          }
           const newAbort = new AbortController();
           let status: Record<string, unknown> = { running: false, connected: false };
           const restartAccountId = (account.accountId as string) || qrAccountId || 'default';
+          const channelSurface = loadedRuntime.channel;
           const ctx = {
             account,
             accountId: restartAccountId,
             abortSignal: newAbort.signal,
             log: console,
             runtime: loadedRuntime,
+            channelRuntime: { ...channelSurface, channel: channelSurface },
             cfg: loadedOpenclawConfig,
             getStatus: () => status,
             setStatus: (s: Record<string, unknown>) => { status = s; },

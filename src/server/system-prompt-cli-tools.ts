@@ -7,10 +7,14 @@
  *
  * Two scopes
  * ----------
- * - `buildCliToolsAppend(scenario)` — sections that ONLY external runtimes
- *   (Claude Code / Codex / Gemini CLI) need, because the builtin SDK has
- *   equivalent in-process MCP servers (cron-tools, im-cron, im-media). Gated
- *   by `cliToolsEnabled` in `buildSystemPromptAppend`.
+ * - `buildCliToolsAppend(scenario)` — MyAgents-CLI capability hints
+ *   (cron CRUD, cron self-exit, IM media send, thought capture). Universal
+ *   across runtimes (builtin Claude Agent SDK + Codex / Gemini / Claude Code
+ *   CLI) since v0.2.11 dropped the corresponding in-process MCP servers
+ *   (`cron-tools`, `im-cron`, `im-media`) and unified on the CLI. Gated by
+ *   `cliToolsEnabled` in `buildSystemPromptAppend` (set true on all current
+ *   runtime paths; the flag is retained for theoretical future runtimes
+ *   that might not need the appendix).
  * - `buildWidgetSection(scenario)` — generative-UI widget guidance. Universal:
  *   both builtin SDK and external runtimes load the design contract through
  *   `myagents widget readme <module>` via their shell tool. There is no MCP
@@ -84,6 +88,29 @@ the user explicitly wants.
 Full docs and supported formats: run \`myagents im readme\`.
 </myagents-cli-im-media>`;
 
+const SECTION_THOUGHT = `<myagents-cli-thought>
+The user can ask you to file a passing idea or note into their MyAgents
+thought inbox. Capture it ONLY when the user explicitly asks you to
+save / remember / note specific content for later:
+
+  "记一下" / "帮我记" / "帮我记一下" / "记个想法" / "记下来"
+  "note this down" / "remember this" / "save this for later"
+
+Do NOT infer filing intent from background context, FYI remarks, user
+preferences, brainstorming, or unsolicited ideas — those go into the
+discussion, not the inbox. The trigger is the user's explicit ask to
+record, not the presence of recordable content.
+
+  myagents thought list [--tag X] [--limit N] [--json]   # browse
+  myagents thought create '<content>'                    # capture
+
+For \`create\`, ALWAYS wrap the content in single quotes ('...'), not
+double quotes. The user's content is shell data and may contain
+\`$(...)\`, backticks, or \`\\\`; double quotes let bash interpolate
+those, single quotes don't. Tag inline with \`#xxx\` inside the content
+itself — there's no separate --tag flag on create.
+</myagents-cli-thought>`;
+
 /**
  * Single source of truth for the widget trigger rule. Embedded into both the
  * system prompt's `SECTION_WIDGET` (always-on guidance) and the CLI's
@@ -111,6 +138,10 @@ Before your first widget in a session, run \`myagents widget readme <module> [<m
  *   - cron CRUD         always (every scenario can benefit from scheduling)
  *   - cron self-exit    only when scenario.type === 'cron' && aiCanExit
  *   - IM media          only in 'im' / 'agent-channel' scenarios
+ *   - thought capture   in 'desktop' / 'im' / 'agent-channel' scenarios.
+ *                       Excluded from cron because cron runs headless against
+ *                       a fixed prompt — there's no live user there to file
+ *                       an idea on behalf of.
  *
  * Note: generative-UI widget guidance is NOT included here — it is universal
  * across runtimes and emitted separately by `buildWidgetSection()` from
@@ -133,6 +164,13 @@ export function buildCliToolsAppend(scenario: InteractionScenario): string {
   // IM media — IM / agent-channel scenarios only
   if (scenario.type === 'im' || scenario.type === 'agent-channel') {
     parts.push(SECTION_IM_MEDIA);
+  }
+
+  // Thought capture — interactive scenarios where there's a live user
+  // surfacing ideas. Cron runs are headless against a fixed prompt; no
+  // human user to capture for, so the section is suppressed there.
+  if (scenario.type === 'desktop' || scenario.type === 'im' || scenario.type === 'agent-channel') {
+    parts.push(SECTION_THOUGHT);
   }
 
   return parts.join('\n\n');

@@ -15,9 +15,8 @@ import { ensureGitignorePattern } from './utils/gitignore';
 // these modules. The actual SDK server objects are created on-demand via
 // `getBuiltinMcpInstance()` in buildSdkMcpServers() below. See
 // ./tools/builtin-mcp-meta.ts for META registrations.
-import { getCronTaskContext, clearCronTaskContext } from './tools/cron-tools';
+import { clearCronTaskContext } from './tools/cron-tools';
 import { getImCronContext, setSessionCronContext, clearSessionCronContext } from './tools/im-cron-tool';
-import { getImMediaContext } from './tools/im-media-tool';
 import { getImBridgeToolsContext, getImBridgeToolServer } from './tools/im-bridge-tools';
 import { getBuiltinMcpInstance } from './tools/builtin-mcp-registry';
 // Side-effect import — registers META (ids + lazy factories) at cold start.
@@ -92,6 +91,27 @@ const PROXY_NO_PROXY_VAL = 'localhost,localhost.localdomain,127.0.0.1,127.0.0.0/
  * Source: claude-code/src/main.tsx (isClaudeInChromeMCPServer, isComputerUseMCPServer)
  */
 export const SDK_RESERVED_MCP_NAMES = ['claude-in-chrome', 'computer-use'];
+
+/**
+ * MyAgents-reserved MCP server ids — names used by context-injected builtins
+ * that are managed by the sidecar, not user-toggleable. User MCPs configured
+ * with these ids are silently dropped at SDK build time so they cannot
+ * (a) overwrite the legitimate builtin in `result[server.id]`, or
+ * (b) inherit the auto-trust granted to these names by `canUseTool`.
+ *
+ * MUST stay in sync with `getActiveContextInjectedBuiltinIds()` and Pattern 1
+ * of `buildSdkMcpServers()`. If a new context-injected builtin lands, register
+ * its id here too. See issue #148 for the original drift.
+ *
+ * v0.2.11 — `cron-tools`, `im-cron`, and `im-media` were retired in favour of
+ * `myagents` CLI commands + system prompt guidance (single CLI surface usable
+ * across builtin / Codex / Gemini / Claude Code runtimes). Only `im-bridge-tools`
+ * remains a context-injected MCP because its tool surface is a runtime-dynamic
+ * passthrough of OpenClaw plugin tools — no fixed schema to teach via prompt.
+ */
+export const MYAGENTS_CONTEXT_INJECTED_MCP_IDS = [
+  'im-bridge-tools',
+] as const;
 
 // ===== Inherited Proxy Env Snapshot =====
 // Capture system proxy state at sidecar startup (before any setProxyConfig call).
@@ -594,6 +614,22 @@ let isStreamingMessage = false;
 // Post-interrupt turn-completion signal: resolves when for-await loop receives a `result` message.
 // Used by interruptCurrentResponse() to verify the SDK subprocess actually stopped after interrupt().
 let postInterruptTurnEndResolve: (() => void) | null = null;
+// Count of MCP tool_use blocks emitted by the model in the current turn that
+// haven't seen their matching tool_result yet. Read by the post-interrupt
+// force-close path to disambiguate diagnostics: >0 strongly suggests a hung
+// MCP tool (the SDK subprocess is blocked on client.callTool()), 0 suggests
+// the model is still generating output (thinking / text). Updated by the
+// stream-event handlers in startStreamingSession; reset to 0 on each new
+// turn (and on session restart) so values never leak across turns.
+let inFlightToolCount = 0;
+// (v0.2.11 cross-bugfix #142 review-fix-2 #1) True from the moment
+// promotePendingMidTurnItem shifts an item out of pendingMidTurnQueue
+// until the generator's `item.resolve()` after yield. Plugs the gap
+// where pendingMidTurnQueue is empty + isStreamingMessage hasn't yet
+// flipped to true (await persistMessagesToStorage in turn-start setup) —
+// without this, isSessionBusy returns false in the gap and a fresh
+// enqueue would take the direct-send path, opening a new ordering bug.
+let promotedItemInFlight = false;
 let isApiRetrying = false;  // Track api_retry state to clear when streaming resumes
 const messages: MessageWire[] = [];
 // Pattern 3 §3.2.4 — incremental persistence cursor.
@@ -982,18 +1018,29 @@ export function getStreamingAssistantId(): string | null {
   return null;
 }
 
-// Mid-turn injection: messages yielded to SDK but not yet consumed by the AI.
-// queue:started is deferred until a content block boundary (thinking/tool_use/text start)
-// signals the AI has processed the injected message. NOT flushed during text_delta/thinking_delta
-// (continuous streaming within a block) to avoid splitting old content mid-stream.
+// Mid-turn deferred yield buffer (v0.2.11 cross-bugfix #142):
+//
+// Holds queued messages that arrived while a prior turn was still streaming.
+// The generator BUFFERS them here instead of yielding them to SDK — yield is
+// deferred until handleMessageComplete/Stopped/Error promotes them via
+// promotePendingMidTurnItem(). This is what makes mid-turn cancel actually
+// cancel: SDK has not received the message, so removing the entry truly
+// suppresses delivery.
+//
+// Earlier design ("yield-and-ready") yielded immediately and used this queue
+// as a UI-side buffer for delayed `messages[]` push and `queue:started`
+// broadcast at content block boundaries. That left cancel as a no-op
+// against SDK — the JSON line had already been written to subprocess stdin
+// and there is no SDK API to "ignore" a queued user message. The 2026-05-07
+// log evidence: yield happened within 1ms of enqueue, far less than any
+// user could click ×.
 const pendingMidTurnQueue: Array<{
   queueId: string;
   userMessage: Pick<MessageWire, 'id' | 'role' | 'content' | 'timestamp' | 'attachments'>;
-  // Retained for hard-kill recovery. Pending items have already been yielded to SDK
-  // stdin — SDK owns them. But if the subprocess is about to die (abortPersistentSession
-  // or interruptCurrentResponse hard-kill escalation), the SDK will never consume them.
-  // rescuePendingToQueue() moves this back to messageQueue front so the recovery
-  // session re-delivers it. See forceExecuteQueueItem pending branch.
+  // Re-delivered to generator by promotePendingMidTurnItem() at turn-end,
+  // OR rescued to messageQueue front by rescuePendingToQueue() if the SDK
+  // subprocess is about to die. The latter is now a simple move (not a
+  // deduplication concern) because SDK never received the message.
   sourceItem: MessageQueueItem;
 }> = [];
 
@@ -1001,14 +1048,54 @@ const pendingMidTurnQueue: Array<{
  * Rescue pending mid-turn items back to messageQueue front when the SDK subprocess
  * is about to die (abortPersistentSession or interruptCurrentResponse hard-kill).
  *
- * Why: pending items have been yielded to SDK stdin. If the subprocess dies before
- * consuming them, they are lost — the user's text vanishes. Moving them back to
- * messageQueue lets the recovery session (started by schedulePreWarm in the safety
- * net) re-deliver them to the fresh subprocess.
+ * (v0.2.11) With deferred-yield design, pending items have NOT been yielded to
+ * SDK — they live entirely in this Node process. So rescue is no longer a
+ * "subprocess death recovery" measure but simply a queue-merge: pending items
+ * become the front of messageQueue so the recovery session re-delivers them
+ * (no deduplication needed because SDK never saw them).
  *
- * Must NOT be called when SDK stays alive (e.g. interrupt ACK without close) —
- * double-delivery would occur: once via stdin buffer, once via messageQueue.
+ * Safe to call regardless of whether SDK stays alive — the deduplication
+ * concern from the old design (double-delivery via stdin buffer + messageQueue)
+ * no longer exists.
  */
+/**
+ * (v0.2.11 cross-bugfix #142 review-fix #3) Cancellation checkpoint set.
+ *
+ * Holds queueIds whose owner asked for cancellation AFTER the item was
+ * already promoted out of pendingMidTurnQueue — i.e. messageResolver
+ * had already resolved with the item, generator was running its
+ * turn-start setup (push messages → await persistMessagesToStorage)
+ * but had not yet broadcast queue:started. The generator consults this
+ * set in a checkpoint after the persist-await, and if a match is found,
+ * rolls back the turn-start (splice messages[]) and re-enters the
+ * while loop without yielding to SDK.
+ *
+ * Only added by cancelQueueItem (queueId path). cancelImRequest does
+ * NOT add to this set — see review-fix-2 #3 for rationale (would leak
+ * stale requestIds and false-cancel recycled IM ids). The generator
+ * checkpoint defensively also matches against item.requestId in case a
+ * future caller adds requestId tracking; today that branch is dead.
+ *
+ * (v0.2.11 review-fix-5 medium #1) Bounded by `CANCEL_INFLIGHT_CAP` —
+ * a cancel that misses both queues marks an id that may never reach the
+ * generator checkpoint (item never existed, or already in flight via
+ * another path). Without a cap, repeated mis-clicks leak strings.
+ * Set iteration order is insertion order, so dropping `values().next()`
+ * evicts the oldest entry — a fine FIFO eviction policy.
+ *
+ * Cleared lazily by the generator on consumption (the matching id is
+ * removed when the cancellation fires).
+ */
+const cancelledInflightIds = new Set<string>();
+const CANCEL_INFLIGHT_CAP = 100;
+function markInflightCancel(id: string): void {
+  if (cancelledInflightIds.size >= CANCEL_INFLIGHT_CAP) {
+    const oldest = cancelledInflightIds.values().next().value;
+    if (oldest !== undefined) cancelledInflightIds.delete(oldest);
+  }
+  cancelledInflightIds.add(id);
+}
+
 function rescuePendingToQueue(): void {
   if (pendingMidTurnQueue.length === 0) return;
   console.log(`[agent] Rescuing ${pendingMidTurnQueue.length} pending mid-turn message(s) → messageQueue front`);
@@ -1020,22 +1107,72 @@ function rescuePendingToQueue(): void {
 }
 
 /**
- * Flush deferred mid-turn user messages: push to messages[] and broadcast queue:started.
- * Called at content block boundaries (thinking/tool_use/text start) and turn end
- * (handleMessageComplete/handleMessageStopped). NOT called from text_delta/thinking_delta
- * to avoid splitting old text mid-stream.
+ * Promote the FIRST deferred mid-turn user message back into the delivery
+ * queue once the prior turn has ended. Called from handleMessageComplete /
+ * Stopped / Error after `isStreamingMessage` has been flipped to false.
+ *
+ * The promoted item is re-delivered via `wakeGenerator()` — the generator
+ * is currently parked at `await waitForMessage()`, so the resolver fires
+ * synchronously and the next iteration sees the item with isStreamingMessage
+ * already false, falling through to the normal turn-start path (push to
+ * messages[], broadcast queue:started, beginTurnAbort, yield to SDK).
+ *
+ * Only one item is promoted per turn boundary because each promoted item
+ * starts a fresh turn — subsequent pending items wait for the next
+ * turn-end. This matches the user-observable behaviour of "queued messages
+ * are processed one by one in order" without the race-doomed shortcut of
+ * yielding everything to SDK upfront.
+ *
+ * Replaces the old `flushPendingMidTurnQueue()` which pushed pending items
+ * straight to `messages[]` while the SDK still owned the turn — that was
+ * cosmetic only (SDK didn't actually process them until turn-end) and
+ * required mid-turn cancel to be a no-op against SDK's already-yielded
+ * input.
  */
-function flushPendingMidTurnQueue(): void {
+function promotePendingMidTurnItem(): void {
   if (pendingMidTurnQueue.length === 0) return;
-  for (const pending of pendingMidTurnQueue) {
-    messages.push(pending.userMessage as MessageWire);
-    broadcast('queue:started', {
-      queueId: pending.queueId,
-      userMessage: pending.userMessage,
-      midTurnBreak: true,
-    });
-  }
-  pendingMidTurnQueue.length = 0;
+  // (v0.2.11 cross-bugfix #142 review-fix #1) DEFER promote to next tick.
+  //
+  // Why: handleMessageComplete is called from inside the SDK result handler.
+  // After it returns, the result handler can synchronously decide to
+  // resetSession() / recoverFromStaleSession() / setSessionModel() which
+  // call abortPersistentSession() — that flips shouldAbortSession=true and
+  // wakes the generator with null (so it returns). If we promote
+  // synchronously HERE, we resolve messageResolver with our pending item
+  // BEFORE the abort can fire, leaving the item in generator's closure
+  // (already-resumed but not yet yielded). The subsequent abort can't
+  // rescue it (rescuePendingToQueue only sees pendingMidTurnQueue, not
+  // generator's local item) and the item lands on a dying SDK subprocess.
+  //
+  // setTimeout(0) lets the synchronous result-handler tail run first,
+  // including any abort decision. If abort fired, we observe
+  // shouldAbortSession=true and skip — pending stays in
+  // pendingMidTurnQueue OR has already been moved to messageQueue by
+  // rescuePendingToQueue. Either way the item is preserved.
+  setTimeout(() => {
+    if (shouldAbortSession) {
+      console.log(`[agent] Promote skipped — session aborted in deferred-promote gap (${pendingMidTurnQueue.length} pending)`);
+      return;
+    }
+    if (pendingMidTurnQueue.length === 0) return;
+    // (v0.2.11 review-fix-3 medium #1) If the generator has already exited
+    // (no parked messageResolver), don't set the in-flight flag — there's
+    // no consumer to clear it later. wakeGenerator's else-branch would
+    // push to messageQueue, but a recovery session generator handles that
+    // case naturally; we don't need promotedItemInFlight in that flow.
+    if (!messageResolver) {
+      console.log('[agent] Promote skipped — generator not parked (already exited or busy); pending stays for recovery generator');
+      return;
+    }
+    const pending = pendingMidTurnQueue.shift()!;
+    // Mark promotion in-flight so isSessionBusy stays true through the
+    // generator's persist-await window. Cleared by the generator after
+    // item.resolve() (post-yield), on cancel-checkpoint rollback, and
+    // defensively in abortPersistentSession.
+    promotedItemInFlight = true;
+    console.log(`[agent] Promoting deferred mid-turn message: queueId=${pending.queueId} (pending remaining=${pendingMidTurnQueue.length})`);
+    wakeGenerator(pending.sourceItem);
+  }, 0);
 }
 
 /** 中止持久 session：唤醒所有被阻塞的 Promise */
@@ -1052,6 +1189,23 @@ function abortPersistentSession(): void {
   // so other code can't bypass this teardown by setting the flag directly.
   // eslint-disable-next-line no-restricted-syntax
   shouldAbortSession = true;
+  // (v0.2.11 review-fix-4) DO NOT clear cancelledInflightIds here —
+  // doing so eats the cancel-wins signal in the cancel→abort race window:
+  // user cancels (mark added) → config restart calls abortPersistentSession
+  // → clear → generator checkpoint sees inflightCancel=false and takes
+  // the pure-abort restore branch, re-delivering a cancelled message via
+  // messageQueue. Earlier draft cleared the set to prevent "recycled id
+  // matches stale mark" — that risk is now zero because cancelledInflightIds
+  // only contains queueIds (randomUUID, never reused), since
+  // cancelImRequest no longer adds requestIds (review-fix-2 #3).
+  // The set is consumed lazily by the generator's checkpoint and stays
+  // bounded by the rate of cancel calls (one entry per cancel, removed
+  // when the matching item flows through the checkpoint).
+  // (v0.2.11 review-fix-3 medium #1) Defensive clear of in-flight flag.
+  // In case a promote setTimeout already shifted a pending item and set
+  // this flag but the generator is mid-flight (or never received it),
+  // abort fully resets the busy state. Recovery session starts clean.
+  promotedItemInFlight = false;
   // Subprocess is about to die — rescue pending items so the recovery session
   // re-delivers them instead of losing them with the dead stdin buffer.
   rescuePendingToQueue();
@@ -1933,6 +2087,38 @@ export function getAgents(): Record<string, AgentDefinition> | null {
 }
 
 /**
+ * Predicate for each MyAgents-reserved context-injected builtin MCP id.
+ * Returns true when the corresponding sidecar context is set, mirroring the
+ * inclusion conditions in `buildSdkMcpServers()` Pattern 1.
+ *
+ * The `Record<typeof MYAGENTS_CONTEXT_INJECTED_MCP_IDS[number], …>` shape
+ * makes TypeScript enforce 1:1 alignment between the reserved id list and
+ * the predicates: adding a new reserved id without a predicate (or vice
+ * versa) is a compile error. This is the pit-of-success against the drift
+ * that caused issue #148.
+ *
+ * Background: builtin MCPs are injected into the SDK based on sidecar context
+ * (IM bot / cron task / bridge plugin), but `checkMcpToolPermission()` used to
+ * compare tool names against `currentMcpServers` only — which never contains
+ * context-injected MCPs. Result: SDK said "tool ready", permission gate said
+ * "未启用". The fix routes the permission gate through this single map.
+ */
+const CONTEXT_INJECTED_BUILTIN_PREDICATES: Record<
+  typeof MYAGENTS_CONTEXT_INJECTED_MCP_IDS[number],
+  () => boolean
+> = {
+  'im-bridge-tools': () => Boolean(getImBridgeToolsContext()) && Boolean(getImBridgeToolServer()),
+};
+
+function getActiveContextInjectedBuiltinIds(): Set<string> {
+  const ids = new Set<string>();
+  for (const id of MYAGENTS_CONTEXT_INJECTED_MCP_IDS) {
+    if (CONTEXT_INJECTED_BUILTIN_PREDICATES[id]()) ids.add(id);
+  }
+  return ids;
+}
+
+/**
  * Check if an MCP tool is allowed based on user's MCP settings
  *
  * MCP tool naming convention: mcp__<server-id>__<tool-name>
@@ -1953,24 +2139,23 @@ function checkMcpToolPermission(toolName: string): { allowed: true } | { allowed
   }
   const serverId = parts[1];
 
-  // Special case: cron-tools is a built-in MCP server for cron task management
-  // Always allow when we're in a cron task context (regardless of user's MCP settings)
-  if (serverId === 'cron-tools') {
-    const cronContext = getCronTaskContext();
-    if (cronContext.taskId) {
-      return { allowed: true };
-    }
-    // Not in cron context - this tool shouldn't be available
-    return { allowed: false, reason: '定时任务工具只能在定时任务执行期间使用' };
+  // Context-injected builtin MCPs (currently only `im-bridge-tools`) are not
+  // in `currentMcpServers` — they're injected by sidecar context, not user
+  // toggles. Allow them when the corresponding context is active. Mirrors
+  // buildSdkMcpServers() Pattern 1.
+  const activeBuiltins = getActiveContextInjectedBuiltinIds();
+  if (activeBuiltins.has(serverId)) {
+    return { allowed: true };
   }
-
-  // Special case: im-cron is a built-in MCP server for scheduled tasks (all sessions)
-  // Always allowed when management API is available (tool checks context internally)
-  if (serverId === 'im-cron') {
-    if (process.env.MYAGENTS_MANAGEMENT_PORT) {
-      return { allowed: true };
-    }
-    return { allowed: false, reason: '定时任务管理 API 不可用' };
+  // For ids in MYAGENTS_CONTEXT_INJECTED_MCP_IDS but NOT currently active,
+  // reject with a context-specific message instead of the generic "未启用".
+  // Driven by the reserved-id list so it can never drift from Pattern 1.
+  // Retired MCP names (`cron-tools` / `im-cron` / `im-media`) intentionally
+  // fall through to the regular user-MCP check below — they were dropped
+  // from the reserved list in v0.2.11, so user MCPs may now legitimately
+  // claim those names.
+  if (serverId === 'im-bridge-tools') {
+    return { allowed: false, reason: 'IM Bridge 工具仅在 IM Bridge 插件会话中可用' };
   }
 
   // Case 1: MCP not set (null) - allow all (backward compatible)
@@ -2050,8 +2235,14 @@ export function pinMcpPackageVersions(args: string[]): string[] {
  * Convert McpServerDefinition to SDK mcpServers format.
  *
  * Three MCP injection patterns:
- * 1. Context-injected (cron-tools, im-cron, im-media) — always present based on
- *    sidecar context, invisible in Settings UI, not user-toggled.
+ * 1. Context-injected (im-bridge-tools) — always present based on sidecar
+ *    context, invisible in Settings UI, not user-toggled. Used for the
+ *    OpenClaw plugin bridge which exposes a runtime-dynamic tool surface.
+ *    Other historical context-injected MCPs (`cron-tools`, `im-cron`,
+ *    `im-media`) were retired in v0.2.11 — the AI now reaches those
+ *    capabilities through the `myagents` CLI + system prompt guidance,
+ *    so the same surface is available across builtin / Codex / Gemini /
+ *    Claude Code runtimes.
  * 2. Builtin registry (command='__builtin__') — in-process servers, user-toggled via Settings,
  *    registered as META in `./tools/builtin-mcp-meta.ts`. Adding a new one:
  *      (a) add `registerBuiltinMcpMeta({ id, load })` block in builtin-mcp-meta.ts, and
@@ -2080,59 +2271,25 @@ async function buildSdkMcpServers(): Promise<Record<string, McpServerEntry>> {
       console.warn(`[agent] MCP "${s.id}" skipped: conflicts with SDK reserved name. Rename to avoid this.`);
       return false;
     }
+    // Reserve MyAgents context-injected builtin ids: a user MCP with the same id
+    // would otherwise overwrite the builtin in result[id] and inherit its
+    // auto-trust in canUseTool — see issue #148.
+    if ((MYAGENTS_CONTEXT_INJECTED_MCP_IDS as readonly string[]).includes(normalized)) {
+      console.warn(`[agent] MCP "${s.id}" skipped: id is reserved by MyAgents (context-injected builtin). Rename to avoid this.`);
+      return false;
+    }
     return true;
   });
   if (isDebugMode) console.log(`[agent] MCP servers: ${servers.map(s => s.id).join(', ') || 'none'}`);
 
   const result: Record<string, McpServerEntry> = {};
 
-  // Helper — lazy-load a builtin MCP's server object via the META registry.
-  // Returns null if the id isn't registered (shouldn't happen for ids we hard-code,
-  // but defensive). First call for a given id triggers SDK+zod+schema construction
-  // (~100-300ms); subsequent calls in this Sidecar's lifetime are cached no-ops.
-  const loadBuiltinServer = async (id: string) => {
-    const entryPromise = getBuiltinMcpInstance(id);
-    if (!entryPromise) {
-      console.warn(`[agent] Builtin MCP '${id}' not registered in META — skipping`);
-      return null;
-    }
-    const entry = await entryPromise;
-    return entry.server as McpSdkServerConfigWithInstance;
-  };
-
   // --- Pattern 1: Context-injected MCPs (always present based on sidecar context) ---
-  const cronContext = getCronTaskContext();
-  if (cronContext.taskId) {
-    const s = await loadBuiltinServer('cron-tools');
-    if (s) {
-      result['cron-tools'] = s;
-      console.log(`[agent] Added cron-tools MCP server for task ${cronContext.taskId}`);
-    }
-  }
-
-  // Add cron tool for ALL sessions when management API is available
-  // IM sessions use imCronContext (with delivery), regular sessions use sessionCronContext
-  if (process.env.MYAGENTS_MANAGEMENT_PORT) {
-    const s = await loadBuiltinServer('im-cron');
-    if (s) {
-      result['im-cron'] = s;
-      const imCronCtx = getImCronContext();
-      console.log(`[agent] Added im-cron MCP server${imCronCtx ? ` for bot ${imCronCtx.botId}` : ' (session mode)'}`);
-    }
-  }
-
-  // Add IM media tool if we're in an IM context with management API available
-  const imMediaCtx = getImMediaContext();
-  if (imMediaCtx && process.env.MYAGENTS_MANAGEMENT_PORT) {
-    const s = await loadBuiltinServer('im-media');
-    if (s) {
-      result['im-media'] = s;
-      console.log(`[agent] Added im-media MCP server for bot ${imMediaCtx.botId}`);
-    }
-  }
-
-  // Add Bridge tools if we're in an IM context with a plugin bridge that has tools
-  // Dynamic server is created from actual plugin tool definitions — transparent passthrough
+  // Add Bridge tools if we're in an IM context with a plugin bridge that has tools.
+  // Dynamic server is created from actual plugin tool definitions — transparent
+  // passthrough. This is the only remaining Pattern 1 MCP after the v0.2.11 cron
+  // / im-cron / im-media → CLI migration: bridge plugins expose runtime-dynamic
+  // tool surfaces that can't be expressed as a static prompt + CLI.
   const bridgeToolsCtx = getImBridgeToolsContext();
   const bridgeServer = getImBridgeToolServer();
   if (bridgeToolsCtx && bridgeServer) {
@@ -3946,9 +4103,12 @@ function ensureAssistantMessage(): MessageWire {
   if (lastMessage && lastMessage.role === 'assistant' && isStreamingMessage) {
     return lastMessage;
   }
-  // Safety net: flush any remaining pending mid-turn messages before creating
-  // a new assistant. Primary flush happens in start handlers and handleMessageComplete().
-  flushPendingMidTurnQueue();
+  // (v0.2.11 cross-bugfix) The previous `flushPendingMidTurnQueue()` call here
+  // was a safety net that pushed pending user messages onto messages[] when
+  // a new assistant block started mid-turn. With deferred yielding, the SDK
+  // never sees pending mid-turn messages until the prior turn ends, so this
+  // safety net would push a user message that the SDK isn't actually about
+  // to respond to — which is exactly the misleading UI behaviour we removed.
   const assistant: MessageWire = {
     id: String(messageSequence++),
     role: 'assistant',
@@ -4041,7 +4201,9 @@ function appendTextChunk(chunk: string): void {
 }
 
 function handleThinkingStart(index: number): void {
-  flushPendingMidTurnQueue();
+  // No mid-turn flush here: deferred-yield design means pending mid-turn
+  // messages haven't been sent to SDK yet, so a thinking block starting now
+  // is the prior turn's content — not a response to a queued message.
   const message = ensureAssistantMessage();
   const contentArray = ensureContentArray(message);
   contentArray.push({
@@ -4070,7 +4232,7 @@ function handleToolUseStart(tool: {
   streamIndex: number;
   thought_signature?: string;
 }): void {
-  flushPendingMidTurnQueue();
+  // No mid-turn flush: see handleThinkingStart for rationale.
   const message = ensureAssistantMessage();
   const contentArray = ensureContentArray(message);
   contentArray.push({
@@ -4104,7 +4266,7 @@ function handleServerToolUseStart(tool: {
   input: Record<string, unknown>;
   streamIndex: number;
 }): void {
-  flushPendingMidTurnQueue();
+  // No mid-turn flush: see handleThinkingStart for rationale.
   const message = ensureAssistantMessage();
   const contentArray = ensureContentArray(message);
   contentArray.push({
@@ -4307,9 +4469,13 @@ function handleToolResultComplete(toolUseId: string, content: string, isError?: 
 }
 
 function handleMessageComplete(): void {
-  // Flush pending mid-turn messages BEFORE marking streaming as done.
-  flushPendingMidTurnQueue();
   isStreamingMessage = false;
+  // (v0.2.11 cross-bugfix) Promote one deferred mid-turn message back into
+  // the delivery queue. MUST run after isStreamingMessage = false so that
+  // when the generator wakes from waitForMessage() it takes the normal
+  // turn-start path (push to messages[], broadcast queue:started, yield)
+  // rather than re-buffering into pendingMidTurnQueue.
+  promotePendingMidTurnItem();
   // Pattern 1 follow-up: turn finished cleanly — drop the registration
   // without aborting. The next turn will register a fresh controller.
   if (sessionId) endTurnAbort(sessionId);
@@ -4366,7 +4532,10 @@ function handleMessageComplete(): void {
   // With mid-turn injection, the generator is always at waitForMessage() after yield
   // (no waitForTurnComplete gate). Queued messages are delivered via wakeGenerator()
   // at enqueue time, so the generator drains them naturally. No need to dequeue here.
-  if (messageQueue.length === 0) {
+  // (v0.2.11 cross-bugfix #142 review-fix #4) Also gate on pendingMidTurnQueue.length
+  // so waitForSessionIdle() doesn't claim idle while a deferred mid-turn message is
+  // about to be promoted into the next turn.
+  if (messageQueue.length === 0 && pendingMidTurnQueue.length === 0) {
     setSessionState('idle');
   }
 
@@ -4388,9 +4557,10 @@ function handleMessageComplete(): void {
 }
 
 function handleMessageStopped(): void {
-  // Flush pending mid-turn messages before marking done (same as handleMessageComplete).
-  flushPendingMidTurnQueue();
   isStreamingMessage = false;
+  // (v0.2.11 cross-bugfix) Promote next deferred mid-turn item — same
+  // ordering as handleMessageComplete (must follow the flag flip).
+  promotePendingMidTurnItem();
   // Pattern 1 follow-up: turn ended (interrupted). Drop the registration.
   // If interruptCurrentResponse drove the stop it already abort()ed the
   // controller; this endTurn is the idempotent cleanup of the slot.
@@ -4414,8 +4584,9 @@ function handleMessageStopped(): void {
   clearCronTaskContext();
 
 
-  // Only transition to idle if no queued messages waiting (same logic as handleMessageComplete)
-  if (messageQueue.length === 0) {
+  // Only transition to idle if no queued messages waiting (same logic as handleMessageComplete).
+  // (v0.2.11 cross-bugfix #142 review-fix #4) Includes pendingMidTurnQueue.
+  if (messageQueue.length === 0 && pendingMidTurnQueue.length === 0) {
     setSessionState('idle');
   }
   const lastMessage = messages[messages.length - 1];
@@ -4440,9 +4611,12 @@ function handleMessageStopped(): void {
 }
 
 function handleMessageError(error: string): void {
-  // Flush pending mid-turn messages before marking done (same as handleMessageComplete).
-  flushPendingMidTurnQueue();
   isStreamingMessage = false;
+  // (v0.2.11 cross-bugfix) Promote next deferred mid-turn item — same
+  // ordering as handleMessageComplete (must follow the flag flip). Promoting
+  // even on error is desirable: the user's queued follow-up should still
+  // be delivered to the (recovered) session, not silently dropped.
+  promotePendingMidTurnItem();
   // Pattern 1 follow-up: turn ended due to error. Abort the turn signal so
   // any in-flight tool fetches release immediately rather than waiting on
   // their own per-call timeouts. Ignored if no turn is registered.
@@ -5481,9 +5655,25 @@ export async function enqueueUserMessage(
     return { queued: false };
   }
 
-  // Session is "busy" if AI is streaming OR there are pending messages in the queue.
-  // This prevents config changes and turn-usage resets during the brief gap between turns.
-  const isSessionBusy = isTurnInFlight() || shouldAbortSession || isInterruptingResponse || messageQueue.length > 0;
+  // Session is "busy" if AI is streaming OR there are pending messages in
+  // any of the three queues. This prevents config changes and turn-usage
+  // resets during the brief gap between turns.
+  //
+  // (v0.2.11 cross-bugfix #142 review-fix #2) MUST include pendingMidTurnQueue.
+  // Window: turn ends → handleMessageComplete promotes first pending to
+  // generator → generator runs `messages.push() → await persistMessagesToStorage()`
+  // BEFORE flipping isStreamingMessage=true. During the await, isTurnInFlight
+  // is false, messageQueue is empty, but pendingMidTurnQueue may still hold
+  // items. A new enqueue arriving in this window would take the direct-send
+  // path (wasQueued=false), then later be picked up by the generator and
+  // re-trigger mid-turn defer — semantically the user's expected ordering
+  // (queued items run first) would break.
+  const isSessionBusy = isTurnInFlight()
+    || shouldAbortSession
+    || isInterruptingResponse
+    || messageQueue.length > 0
+    || pendingMidTurnQueue.length > 0
+    || promotedItemInFlight;
 
   // Reset turn usage tracking — only for direct (non-queued) messages.
   // For queued messages, this is done in messageGenerator when the item is yielded,
@@ -6065,7 +6255,15 @@ export async function interruptCurrentResponse(reason: CancelReason = 'user'): P
     // the user sees "no response" until the 10-minute watchdog fires.
     //
     // Fix: wait up to 3 seconds for the for-await loop to receive a `result` message
-    // (turn completion). If it doesn't arrive, the MCP tool is likely hung — force-close.
+    // (turn completion). If it doesn't arrive, force-close. The diagnostic message
+    // distinguishes two phases the model could be in when the user pressed Stop:
+    //   - inFlightToolCount > 0  → an MCP tool_use is awaiting tool_result, very
+    //     likely the SDK subprocess is blocked on client.callTool() (hung tool).
+    //   - inFlightToolCount === 0 → no tool in flight; the model is mid-generation
+    //     (thinking / text streaming) and 3s wasn't enough for the SDK to wind
+    //     down. NOT a hung tool — calling it one in the log misleads anyone
+    //     grepping for tool issues. This was the misdiagnosis observed on
+    //     2026-05-07 when stop was pressed during a thinking block.
     if (interrupted && querySession) {
       const turnEnded = new Promise<void>(resolve => {
         postInterruptTurnEndResolve = resolve;
@@ -6076,10 +6274,12 @@ export async function interruptCurrentResponse(reason: CancelReason = 'user'): P
       try {
         await Promise.race([turnEnded, postInterruptTimeout]);
       } catch {
-        // Turn didn't complete within 3s — MCP tool likely hung, force-close
         postInterruptTurnEndResolve = null;
         if (querySession) {
-          console.warn('[agent] Force-closing: turn did not complete 3s after interrupt (hung MCP tool?)');
+          const phase = inFlightToolCount > 0
+            ? `hung MCP tool likely (${inFlightToolCount} tool_use awaiting result)`
+            : 'model still generating (no tool in flight)';
+          console.warn(`[agent] Force-closing: turn did not complete 3s after interrupt — ${phase}`);
           // Rescue pending items BEFORE close: see rescuePendingToQueue() doc.
           rescuePendingToQueue();
           const session = querySession;
@@ -6121,18 +6321,20 @@ export async function cancelImRequest(
     console.log(`[agent] cancelImRequest requestId=${requestId} mode=queued`);
     return { aborted: true, mode: 'queued' };
   }
-  // Try pendingMidTurnQueue (already yielded to SDK stdin, but unconsumed)
+  // (v0.2.11 cross-bugfix #142) Try pendingMidTurnQueue — buffered by the
+  // generator awaiting turn-end, NOT yet yielded to SDK. Removing the entry
+  // is a real cancel; promote-on-turn-end will skip it.
   const pmIdx = pendingMidTurnQueue.findIndex(p => p.sourceItem.requestId === requestId);
   if (pmIdx >= 0) {
     const [removed] = pendingMidTurnQueue.splice(pmIdx, 1);
+    removed.sourceItem.resolve();
     broadcast('queue:cancelled', { queueId: removed.queueId });
-    console.log(`[agent] cancelImRequest requestId=${requestId} mode=pending-mid-turn`);
-    // Note: SDK has already received the message via stdin; we can't unsend it.
-    // The pending-queue removal prevents `queue:started` and messages[] insertion.
-    // If this was the active turn driver, also issue interrupt.
-    if (pendingRequestIds[0] === requestId && isTurnInFlight()) {
-      await interruptCurrentResponse(reason);
-    }
+    console.log(`[agent] cancelImRequest requestId=${requestId} mode=pending-mid-turn (deferred yield — SDK never received it)`);
+    // No interrupt needed: this requestId is not the active turn driver
+    // (the active driver lives at pendingRequestIds[0] and is handled by
+    // the running branch below). With deferred-yield, a pending mid-turn
+    // entry by definition hasn't been pushed to pendingRequestIds yet
+    // either, so there is no head-position case to handle here.
     return { aborted: true, mode: 'queued' };
   }
   // Active turn? (queue head matches)
@@ -6141,6 +6343,17 @@ export async function cancelImRequest(
     await interruptCurrentResponse(reason);
     return { aborted: true, mode: 'running' };
   }
+  // (v0.2.11 cross-bugfix #142 review-fix-2 #3) IM cancel returns 'unknown'
+  // here rather than marking inflight. Earlier draft added requestId to
+  // cancelledInflightIds for any registry-known requestId, but the consume
+  // path (generator pre-yield checkpoint) only fires on queued items, so
+  // unknown-but-registered requestIds (already-completed, registry not yet
+  // unregistered, or direct-send not yet at queue point) would leak into
+  // the set permanently. If an IM client recycles a requestId, the
+  // recycled message would get falsely cancelled at its first checkpoint.
+  // The actual user-facing race window for IM cancel-during-promote is
+  // narrow and a one-off "cancel failed" UI message is preferable to a
+  // silent false-cancel of a different message later.
   return { aborted: false, mode: 'unknown' };
 }
 
@@ -6151,13 +6364,48 @@ export async function cancelImRequest(
 export function cancelQueueItem(queueId: string): string | null {
   const index = messageQueue.findIndex(item => item.id === queueId);
   if (index === -1) {
-    // 消息可能已被 wakeGenerator 直接投递 → 在 pendingMidTurnQueue 中（已 yield 给 SDK stdin）。
-    // SDK 已收到无法撤回，但从 pending 队列移除可防止 queue:started 触发和 messages[] 污染。
+    // (v0.2.11 cross-bugfix #142) Pending mid-turn (deferred-yield buffer).
+    // Was directly delivered to generator via wakeGenerator's fast-path
+    // while the prior turn was streaming, then BUFFERED by the generator
+    // awaiting turn-end (NOT yielded to SDK). Splicing here is now a real
+    // cancel: promotePendingMidTurnItem at next turn-end won't see this
+    // entry, so SDK will never receive the message.
     const pmIdx = pendingMidTurnQueue.findIndex(p => p.queueId === queueId);
-    if (pmIdx === -1) return null;
+    if (pmIdx === -1) {
+      // (v0.2.11 cross-bugfix #142 review-fix #3) Promote-then-cancel race.
+      // The item was already shifted out of pendingMidTurnQueue by
+      // promotePendingMidTurnItem, and the generator may currently be in
+      // turn-start setup (push messages → await persistMessagesToStorage →
+      // broadcast queue:started → push pendingRequest → yield). Mark the
+      // queueId so the generator's pre-yield checkpoint catches it and
+      // rolls back without yielding to SDK.
+      //
+      // A spurious mark for a never-existed queueId is harmless — it sits
+      // in the set unused. The set is cleared on session abort (defensive)
+      // and consumed by the generator on cancellation match.
+      markInflightCancel(queueId);
+      broadcast('queue:cancelled', { queueId });
+      console.log(`[agent] Queue item ${queueId} marked cancelled-inflight (already promoted; generator pre-yield checkpoint will catch it)`);
+      return null;
+    }
     const [removed] = pendingMidTurnQueue.splice(pmIdx, 1);
+    // Resolve the sourceItem promise so any awaiter unblocks. wasQueued
+    // items have a no-op resolve, but stay symmetric with the messageQueue
+    // branch below in case a future enqueue path uses a real awaiter.
+    removed.sourceItem.resolve();
     broadcast('queue:cancelled', { queueId });
-    console.log(`[agent] Queue item ${queueId} cancelled from pendingMidTurnQueue (already yielded to SDK, AI may still respond)`);
+    console.log(`[agent] Queue item ${queueId} cancelled from pendingMidTurnQueue (deferred yield — SDK never received it)`);
+    // (v0.2.11 review-fix-2 #4) handleMessageComplete may have skipped the
+    // idle transition because pendingMidTurnQueue had this item. Now that
+    // we've removed it, drop to idle if no other work remains.
+    if (
+      messageQueue.length === 0
+      && pendingMidTurnQueue.length === 0
+      && !isTurnInFlight()
+      && !promotedItemInFlight
+    ) {
+      setSessionState('idle');
+    }
     return typeof removed.userMessage.content === 'string' ? removed.userMessage.content : '';
   }
 
@@ -6172,27 +6420,35 @@ export function cancelQueueItem(queueId: string): string | null {
 }
 
 /**
- * Force-execute a queued message: move it to front of queue and interrupt current response.
+ * Force-execute a queued message: move it to front of its queue and
+ * interrupt the current turn so it runs immediately when the turn winds
+ * down.
+ *
+ * (v0.2.11 cross-bugfix #142) Two queues to handle:
+ *   - messageQueue: not yet consumed by generator. Move to messageQueue[0].
+ *   - pendingMidTurnQueue: deferred-yield buffer (NOT yielded to SDK).
+ *     Move to pendingMidTurnQueue[0] so the next promote picks it up.
+ *
+ * Either way, interruptCurrentResponse fires the prior turn's wind-down →
+ * handleMessageComplete/Stopped → promotePendingMidTurnItem (or
+ * generator's next waitForMessage drain of messageQueue) wakes the
+ * generator with our target as the next message.
  */
 export async function forceExecuteQueueItem(queueId: string): Promise<boolean> {
-  const index = messageQueue.findIndex(item => item.id === queueId);
+  const mqIdx = messageQueue.findIndex(item => item.id === queueId);
+  const pmIdx = mqIdx === -1
+    ? pendingMidTurnQueue.findIndex(p => p.queueId === queueId)
+    : -1;
 
-  // 消息可能已被 wakeGenerator 直接投递给 generator（跳过 messageQueue），
-  // 此时它在 pendingMidTurnQueue 中（已 yield 给 SDK stdin，等待 AI 消费）。
-  //
-  // 两种情况的 force-execute 都走 interruptCurrentResponse：
-  //   - 响应式路径：SDK ACK interrupt → 处理当前 turn 的剩余内容 → 消费下一条
-  //     stdin 输入（即 pending 项）→ AI 回应
-  //   - 硬杀路径：interrupt 超时 → session.close() 前 rescuePendingToQueue() 把
-  //     pending 项搬回 messageQueue 队首 → 新 session pre-warm 起来后接手
-  const inPendingMidTurn = index === -1 && pendingMidTurnQueue.some(p => p.queueId === queueId);
+  if (mqIdx === -1 && pmIdx === -1) return false;
 
-  if (index === -1 && !inPendingMidTurn) return false;
-
-  // Move to front of queue (only if still in messageQueue)
-  if (index > 0) {
-    const [item] = messageQueue.splice(index, 1);
+  // Move target to front of its queue so it's first when the turn ends.
+  if (mqIdx > 0) {
+    const [item] = messageQueue.splice(mqIdx, 1);
     messageQueue.unshift(item);
+  } else if (pmIdx > 0) {
+    const [pending] = pendingMidTurnQueue.splice(pmIdx, 1);
+    pendingMidTurnQueue.unshift(pending);
   }
 
   if (isSessionActive()) {
@@ -6782,6 +7038,11 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           ),
           // agent-session.ts is the builtin Claude Agent SDK path by definition.
           runtime: 'builtin',
+          // Universal CLI capability surface (cron / IM media). Was external-runtime
+          // only when builtin still had `cron-tools` / `im-cron` / `im-media` MCPs;
+          // those got dropped in favour of `myagents` CLI calls so builtin needs the
+          // same prompt now. Single CLI, single source of truth across all runtimes.
+          cliToolsEnabled: true,
         }),
       },
       cwd: agentDir,
@@ -6841,9 +7102,19 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           };
         }
 
-        // Special case: built-in trusted MCP servers (cron-tools, im-cron)
-        // When allowed by checkMcpToolPermission, skip user confirmation entirely
-        if (toolName.startsWith('mcp__cron-tools__') || toolName.startsWith('mcp__im-cron__')) {
+        // Trust prefix for context-injected builtin MCPs: skip user confirmation
+        // entirely. These MCPs are injected by sidecar context (cron task / IM
+        // bot / bridge plugin) and are MyAgents-managed, not third-party. In IM
+        // sessions there is no UI to confirm against anyway, so blocking on
+        // confirmation would deadlock the call. The reserved id list in
+        // MYAGENTS_CONTEXT_INJECTED_MCP_IDS guarantees no user MCP can take
+        // the same name (filtered out in buildSdkMcpServers), so this auto-allow
+        // can't be hijacked.
+        const parts = toolName.split('__');
+        if (
+          parts.length >= 3 &&
+          (MYAGENTS_CONTEXT_INJECTED_MCP_IDS as readonly string[]).includes(parts[1])
+        ) {
           console.log(`[permission] built-in tool auto-allowed: ${toolName}`);
           return {
             behavior: 'allow' as const,
@@ -6851,26 +7122,96 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           };
         }
 
-        // Auto-allow `myagents widget …` Bash invocations. Loading the widget
-        // design contract used to be an MCP tool (widget_read_me, auto-allowed
-        // via mcp__generative-ui__ trust prefix) — that path is gone, so the
-        // AI now goes through Bash. Without this carve-out, every fresh
-        // desktop session that decides to render a widget would eat one user
-        // permission click before the design guidelines load. The CLI is
-        // MyAgents-managed and the readme path is pure-read.
+        // Auto-allow read-only `myagents` CLI Bash invocations. After the v0.2.11
+        // cron / im-cron / im-media → CLI migration, the AI reaches MyAgents'
+        // own scheduling / IM / widget surface through `myagents <group> …`
+        // instead of MCP tools. Read-only forms (no quoted arg, no shell-injection
+        // surface) are auto-allowed so the AI doesn't burn a permission prompt
+        // on `myagents cron list` or `myagents im channels`. Mutating commands
+        // (`cron add`, `cron exit`, `cron remove`, `im send-media`, `im wake`)
+        // are NOT in this allowlist — they go through the normal canUseTool
+        // prompt in desktop mode, and through the headless fast-path below in
+        // IM / cron mode.
         //
-        // Strict regex: `myagents widget [readme|list|<module>] [<module>...]`
-        // with module names limited to `[a-z][a-z0-9-]*`. Whitespace separators
-        // are restricted to space + tab — `\s` would also match `\n`/`\r`,
-        // letting `myagents widget readme\nrm` slip through (shell executes
-        // it as two lines, second line being any PATH binary whose name
-        // happens to fit module-name shape: `rm`, `bash`, `docker rm`,
-        // `shutdown now`, …). Non-whitespace shell metachars (`;`, `|`,
-        // `&&`, `>`, `$(`, backticks, …) already fail the `[a-z0-9-]` class.
+        // Whitespace separators are restricted to space + tab — `\s` would also
+        // match `\n`/`\r`, letting `myagents widget readme\nrm` slip through
+        // (shell executes the second line as any PATH binary whose name happens
+        // to fit the trailing token shape). Non-whitespace shell metachars
+        // (`;`, `|`, `&&`, `>`, `$(`, backticks, …) already fail the strict
+        // character classes used inside the patterns.
         if (toolName === 'Bash') {
           const cmd = ((input as Record<string, unknown>)?.command as string | undefined)?.trim() ?? '';
+
+          // 1. Widget design contract: `myagents widget [readme|list|<module>] [<module>...]`
+          //    — module names limited to `[a-z][a-z0-9-]*`.
           if (/^myagents[ \t]+widget(?:[ \t]+(?:readme|list))?(?:[ \t]+[a-z][a-z0-9-]*)*[ \t]*$/.test(cmd)) {
             console.log(`[permission] myagents widget readme auto-allowed: ${cmd}`);
+            return {
+              behavior: 'allow' as const,
+              updatedInput: input as Record<string, unknown>
+            };
+          }
+
+          // 2. Cron / IM read-only surface (zero-arg listings + readme):
+          //    `myagents cron list|status|readme [--json]`
+          //    `myagents im channels|readme [--json]`
+          if (/^myagents[ \t]+(?:cron[ \t]+(?:list|status|readme)|im[ \t]+(?:channels|readme))(?:[ \t]+--json)?[ \t]*$/.test(cmd)) {
+            console.log(`[permission] myagents readonly CLI auto-allowed: ${cmd}`);
+            return {
+              behavior: 'allow' as const,
+              updatedInput: input as Record<string, unknown>
+            };
+          }
+
+          // 3. Cron run history: `myagents cron runs <taskId> [--limit N] [--full] [--json]`
+          //    — taskId is an opaque slug-style id (alphanumerics + dash/underscore,
+          //    bounded length); --limit takes a small integer. Order-agnostic flags.
+          if (/^myagents[ \t]+cron[ \t]+runs[ \t]+[a-zA-Z0-9_-]{1,64}(?:[ \t]+(?:--limit[ \t]+\d{1,4}|--full|--json))*[ \t]*$/.test(cmd)) {
+            console.log(`[permission] myagents cron runs auto-allowed: ${cmd}`);
+            return {
+              behavior: 'allow' as const,
+              updatedInput: input as Record<string, unknown>
+            };
+          }
+
+          // 4. Thought inbox browse: `myagents thought list [--tag <slug>] [--limit N] [--json]`.
+          //    --query is intentionally NOT in the allowlist — it carries arbitrary
+          //    user text (the search string) which can hold shell metachars. That
+          //    form falls through to the normal user-confirm / IM fast-path.
+          if (/^myagents[ \t]+thought[ \t]+list(?:[ \t]+(?:--tag[ \t]+[a-z0-9][a-z0-9-]{0,31}|--limit[ \t]+\d{1,4}|--json))*[ \t]*$/.test(cmd)) {
+            console.log(`[permission] myagents thought list auto-allowed: ${cmd}`);
+            return {
+              behavior: 'allow' as const,
+              updatedInput: input as Record<string, unknown>
+            };
+          }
+
+          // 5. Thought capture: `myagents thought create '<content>'`
+          //    Mutating, but the side effect is bounded — append-only into the
+          //    user's thought inbox, no filesystem / network surface, fully
+          //    reversible from the inbox UI. Filing was already gated by the
+          //    SECTION_THOUGHT prompt which only fires on explicit "记一下 /
+          //    note this down" intent, so by the time we see this command the
+          //    user has *asked* for capture; making them click "Allow" again
+          //    is friction that defeats the inbox-capture promise.
+          //
+          //    Safety constraints baked into the regex:
+          //    - REQUIRES single quotes around content (`'...'`). bash single
+          //      quotes don't interpolate `$(…)`, backticks, or `\`, so the
+          //      content is a literal argv string. Double-quoted forms FAIL
+          //      the regex and fall through to user-confirm — a defense in
+          //      depth in case the AI ignores SECTION_THOUGHT's "use single
+          //      quotes" rule and a prompt-injected user payload tries to
+          //      smuggle `$(rm -rf /)` (Codex review concern).
+          //    - `[^']` excludes embedded `'` (bash single-quoted strings
+          //      can't contain a literal `'` anyway, so any extra `'` would
+          //      end the literal early — refuse the form rather than misread).
+          //    - `--tag` is intentionally not in the allowlist: the CLI's
+          //      `thought create` doesn't accept `--tag` (tags are derived
+          //      from inline `#xxx` in the content), and the prompt no
+          //      longer advertises it after issue-148-followup review.
+          if (/^myagents[ \t]+thought[ \t]+create[ \t]+'[^']*'[ \t]*$/.test(cmd)) {
+            console.log(`[permission] myagents thought create auto-allowed: ${cmd}`);
             return {
               behavior: 'allow' as const,
               updatedInput: input as Record<string, unknown>
@@ -7101,7 +7442,11 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     // Heartbeat (15s ping) keeps the SSE alive, so Rust's 60s read_timeout
     // never fires. Without this watchdog, the session hangs indefinitely.
     // Unified 10-minute timeout for both API hang and MCP tool hang.
-    let pendingTools = 0;
+    //
+    // `inFlightToolCount` is module-level so the post-interrupt force-close
+    // path can read it. Reset here so a new turn starts at 0 even if a
+    // prior turn ended via abort/restart without clearing it.
+    inFlightToolCount = 0;
     let lastSdkEventAt = Date.now();
     const API_WATCHDOG_INTERVAL_MS = 30_000;
     const WATCHDOG_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes — unified for API and MCP tools
@@ -7115,7 +7460,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
 
       if (noRecentSdkEvents) {
         watchdogFired = true;
-        const toolInfo = pendingTools > 0 ? `（${pendingTools} 个工具执行中）` : '';
+        const toolInfo = inFlightToolCount > 0 ? `（${inFlightToolCount} 个工具执行中）` : '';
         console.error(`[agent] Watchdog: no SDK event for ${WATCHDOG_TIMEOUT_MS / 1000}s${toolInfo} — aborting`);
         broadcast('chat:agent-error', {
           message: `响应超时（10 分钟无活动${toolInfo}），已自动终止。请重试。`
@@ -7425,13 +7770,10 @@ async function startStreamingSession(preWarm = false): Promise<void> {
               }
             }
           }
-          // IM stream: track text block indices (non-subagent only, cross-turn guard)
-          // Flush pending mid-turn queue at non-subagent text content_block_start.
-          // thinking/tool_use/server_tool_use are covered by their start handlers.
-          // Subagent text blocks are skipped (they operate within a parent tool context).
-          if (streamEvent.content_block.type === 'text' && !sdkMessage.parent_tool_use_id) {
-            flushPendingMidTurnQueue();
-          }
+          // (v0.2.11 cross-bugfix) Removed mid-turn flush here. With deferred
+          // yield, pending mid-turn messages aren't sent to SDK until after
+          // the prior turn ends, so a text content_block_start is part of
+          // the prior turn's output, not a response to a queued follow-up.
           // Pattern B: forward non-subagent block-start activity to event bus.
           if (!sdkMessage.parent_tool_use_id) {
             if (streamEvent.content_block.type === 'text') {
@@ -7473,7 +7815,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
               // so the frontend splits streaming before adding new content.
               handleToolUseStart(toolPayload);
               broadcast('chat:tool-use-start', toolPayload);
-              pendingTools++;
+              inFlightToolCount++;
             }
           } else if (streamEvent.content_block.type === 'server_tool_use') {
             // Server-side tool use (e.g., 智谱 GLM-4.7's webReader, analyze_image)
@@ -7691,7 +8033,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
                   toolUseId: toolResultBlock.tool_use_id,
                   content: stripped ? PLAYWRIGHT_RESULT_SENTINEL : contentStr
                 });
-                pendingTools = Math.max(0, pendingTools - 1);
+                inFlightToolCount = Math.max(0, inFlightToolCount - 1);
               }
               handleToolResultComplete(toolResultBlock.tool_use_id, contentStr);
             }
@@ -7827,7 +8169,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
                   content: stripped ? PLAYWRIGHT_RESULT_SENTINEL : contentStr,
                   isError: toolResultBlock.is_error || false
                 });
-                pendingTools = Math.max(0, pendingTools - 1);
+                inFlightToolCount = Math.max(0, inFlightToolCount - 1);
               }
               handleToolResultComplete(
                 toolResultBlock.tool_use_id,
@@ -7873,7 +8215,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         }
       } else if (sdkMessage.type === 'result') {
         // Turn complete — reset watchdog state for next turn
-        pendingTools = 0;
+        inFlightToolCount = 0;
         watchdogFired = false;
         // Signal post-interrupt verification (if waiting)
         if (postInterruptTurnEndResolve) {
@@ -8405,11 +8747,31 @@ async function startStreamingSession(preWarm = false): Promise<void> {
 }
 
 async function* messageGenerator(): AsyncGenerator<SDKUserMessage> {
-  // Yield-and-ready 模式：generator yield 后立即回到 waitForMessage，有新消息即再次 yield。
-  // SDK 的 for-await 立即写入 stdin pipe，subprocess 在 tool call / thinking 间隙读取。
-  // 不再等待 turn 完成（waitForTurnComplete），实现 mid-turn 消息注入。
-  // 唯一退出信号：waitForMessage() 返回 null（由 abortPersistentSession 触发）。
-  console.log('[messageGenerator] Started (persistent mode, mid-turn injection enabled)');
+  // Defer-mid-turn-yield 模式（v0.2.11 cross-bugfix #142）：
+  //
+  // Earlier ("yield-and-ready") immediately yielded the next queued user
+  // message to SDK stdin even while the prior turn was still streaming.
+  // That made cancel race-doomed: enqueue → wakeGenerator → yield happened
+  // synchronously within ~1ms, far less than any user could click ×.
+  // Once a message is yielded, SDK has written the JSON line to the
+  // subprocess stdin and there is NO API to "ignore this user message" —
+  // the cancel only deletes the UI bubble while the SDK keeps the input.
+  //
+  // Now: when isStreamingMessage is true, we BUFFER the queued item in
+  // `pendingMidTurnQueue` and return to waitForMessage() instead of
+  // yielding. The buffered item is promoted back into the delivery queue
+  // by `promotePendingMidTurnItem()` from handleMessageComplete /
+  // Stopped / Error — at which point isStreamingMessage is false and the
+  // generator falls through to the normal turn-start path. Cancel from
+  // pendingMidTurnQueue is now a real cancel (SDK never saw the message).
+  //
+  // Observed in 2026-05-07 logs: SDK takes ~35s from yield-time to LLM
+  // dispatch (it queues stdin until turn-end anyway), so deferring yield
+  // until turn-end loses no functional capability — the LLM was never
+  // going to process the new message during the ongoing turn.
+  //
+  // Exit signal: waitForMessage() returns null (via abortPersistentSession).
+  console.log('[messageGenerator] Started (persistent mode, mid-turn defer enabled)');
 
   while (true) {
     // 等待队列中的消息（事件驱动，无轮询）
@@ -8417,6 +8779,38 @@ async function* messageGenerator(): AsyncGenerator<SDKUserMessage> {
     if (!item) {
       console.log('[messageGenerator] Received null — exiting (abort or session end)');
       return; // generator return → SDK endInput() → stdin EOF → subprocess 退出
+    }
+
+    // Mid-turn defer: a queued message arriving while the prior turn is
+    // still streaming gets buffered, NOT yielded. The promote-on-turn-end
+    // path will re-deliver it via wakeGenerator after isStreamingMessage
+    // flips to false. Note this only applies to wasQueued items — direct-
+    // send items (wasQueued=false) only arrive when no turn is in flight,
+    // so they always fall through to normal yield.
+    if (isStreamingMessage && item.wasQueued) {
+      const userMessage: MessageWire = {
+        id: String(messageSequence++),
+        role: 'user',
+        content: item.messageText,
+        timestamp: new Date().toISOString(),
+        attachments: item.attachments,
+      };
+      pendingMidTurnQueue.push({
+        queueId: item.id,
+        userMessage: {
+          id: userMessage.id,
+          role: userMessage.role,
+          content: userMessage.content,
+          timestamp: userMessage.timestamp,
+          attachments: userMessage.attachments,
+        },
+        sourceItem: item,
+      });
+      console.log(`[messageGenerator] Deferring mid-turn message, queueId=${item.id} requestId=${item.requestId ?? '-'} (will yield at turn-end)`);
+      // Loop back to waitForMessage(). The pending item stays put until
+      // promotePendingMidTurnItem() re-delivers it after the current turn
+      // ends — or until cancelQueueItem / cancelImRequest splices it out.
+      continue;
     }
 
     // Transition from pre-warm to active when processing a queued message.
@@ -8441,7 +8835,9 @@ async function* messageGenerator(): AsyncGenerator<SDKUserMessage> {
       console.log(`[agent] pre-warm → active (from queued message), sessionRegistered=${sessionRegistered}`);
     }
 
-    // 排队消息的延迟渲染
+    // Normal turn start: push user message to messages[], persist, broadcast.
+    // (Mid-turn injection no longer takes a separate code path — by the time
+    // we reach here the prior turn ended and isStreamingMessage was reset.)
     if (item.wasQueued) {
       const userMessage: MessageWire = {
         id: String(messageSequence++),
@@ -8450,76 +8846,103 @@ async function* messageGenerator(): AsyncGenerator<SDKUserMessage> {
         timestamp: new Date().toISOString(),
         attachments: item.attachments,
       };
+      messages.push(userMessage);
+      await persistMessagesToStorage();
 
-      const isMidTurn = isStreamingMessage;
-      if (!isMidTurn) {
-        // Normal turn start: push to messages, persist, broadcast immediately
-        messages.push(userMessage);
-        await persistMessagesToStorage();
-        resetTurnUsage();
-        currentTurnStartTime = Date.now();
-        // Pattern 1 follow-up: register a fresh turn-scoped AbortController.
-        // Tool fetches and other in-flight async work in our Node process pull
-        // this signal as their parent via `getCurrentTurnSignal()`. On stop
-        // (interruptCurrentResponse) we abort it; on success we drop it via
-        // endTurn() inside handleMessageComplete/Stopped/Error.
-        if (sessionId) beginTurnAbort(sessionId);
-        // Pattern 6 (SDK turn boundary): stamp `turnId` ambient so all
-        // logs emitted between now and handleMessageComplete()/Stopped/
-        // handleAbort carry it. Ambient (not ALS) because the persistent
-        // messageGenerator yields back into SDK code outside our wrapper
-        // function, so call-stack ALS would lose the frame on resume.
-        // Cleared in handleMessageComplete()/handleMessageStopped()/
-        // handleAbort() below.
-        const turnId = randomUUID().replace(/-/g, '').slice(0, 8);
-        // Pattern 6 (cross-owner contamination fix): key the ambient slot by
-        // sessionId so two concurrent turns on different owners (Tab/IM/Cron)
-        // can each carry their own turnId without clobbering each other.
-        setAmbientLogContext(sessionId, { turnId, sessionId });
-        broadcast('queue:started', {
-          queueId: item.id,
-          userMessage: {
-            id: userMessage.id,
-            role: userMessage.role,
-            content: userMessage.content,
-            timestamp: userMessage.timestamp,
-            attachments: userMessage.attachments,
-          },
-        });
-      } else {
-        // Mid-turn injection: defer BOTH the messages[] push AND queue:started broadcast.
-        // The user message must NOT be in messages[] while old content is still streaming,
-        // because ensureAssistantMessage() checks the last message's role — a premature
-        // user message at the end would cause it to create a new assistant and flush,
-        // splitting the OLD text stream at the wrong point (text_delta from the current
-        // response would trigger the flush, not a genuine new response from the AI).
-        // The message is pushed to messages[] when the turn ends (handleMessageComplete/
-        // handleMessageStopped flush).
-        pendingMidTurnQueue.push({
-          queueId: item.id,
-          userMessage: {
-            id: userMessage.id,
-            role: userMessage.role,
-            content: userMessage.content,
-            timestamp: userMessage.timestamp,
-            attachments: userMessage.attachments,
-          },
-          sourceItem: item,
-        });
+      // (v0.2.11 cross-bugfix #142 review-fix #3) Pre-broadcast cancel
+      // checkpoint. The persist-await above is the longest gap between
+      // promote and yield (tens of ms — file lock + JSONL write); a
+      // cancellation arriving in this window won't find the item in
+      // messageQueue or pendingMidTurnQueue (already shifted) and would
+      // otherwise reach SDK. Catch it here BEFORE we broadcast
+      // queue:started: rolling back is clean because nothing user-visible
+      // has hit the wire yet.
+      const inflightCancel = cancelledInflightIds.has(item.id)
+        || (item.requestId !== undefined && cancelledInflightIds.has(item.requestId));
+      // (v0.2.11 review-fix-3 high) Cancel WINS over abort. If the user
+      // explicitly cancelled this queueId, we already broadcast
+      // queue:cancelled to the frontend (and a UI bubble is gone). Even
+      // if abortPersistentSession ran in the same window and would
+      // otherwise restore the item to messageQueue for recovery, we MUST
+      // skip restore — otherwise the recovery session would re-deliver a
+      // message the user explicitly cancelled, and the UI shows
+      // "cancelled" while the AI still answers it. Only treat
+      // shouldAbortSession as a restore-trigger when there is NO
+      // cancellation intent.
+      const sessionAborted = shouldAbortSession;
+      if (inflightCancel || sessionAborted) {
+        cancelledInflightIds.delete(item.id);
+        if (item.requestId !== undefined) cancelledInflightIds.delete(item.requestId);
+        // Splice the just-pushed user message out of messages[]. Re-persist
+        // fire-and-forget so the on-disk record stays consistent.
+        const idx = messages.findIndex(m => m.id === userMessage.id);
+        if (idx >= 0) messages.splice(idx, 1);
+        void persistMessagesToStorage().catch(() => { /* ignored — same as elsewhere */ });
+        item.resolve();
+        promotedItemInFlight = false;
+        if (inflightCancel) {
+          // Cancel-wins path: do NOT restore to messageQueue, do NOT
+          // re-broadcast queue:cancelled (cancelQueueItem already did).
+          console.log(`[messageGenerator] Cancellation caught at pre-broadcast checkpoint, queueId=${item.id} requestId=${item.requestId ?? '-'}${sessionAborted ? ' (abort also pending — cancel takes precedence)' : ''}`);
+          // (v0.2.11 review-fix-2 #4) Drop to idle if all queues empty.
+          if (
+            messageQueue.length === 0
+            && pendingMidTurnQueue.length === 0
+            && !isTurnInFlight()
+          ) {
+            setSessionState('idle');
+          }
+          // If abort is also pending, exit generator now (no point trying
+          // to promote the next pending — it'll be rescued shortly).
+          if (sessionAborted) return;
+          // Otherwise try the next pending item.
+          promotePendingMidTurnItem();
+          continue;
+        }
+        // Pure abort path (no inflight cancel mark): preserve the user's
+        // text for the recovery session.
+        messageQueue.unshift(item);
+        console.warn(`[messageGenerator] Session abort detected at pre-broadcast checkpoint, restoring queueId=${item.id} to messageQueue and exiting generator`);
+        return; // exit generator → SDK closes via endInput
       }
+
+      resetTurnUsage();
+      currentTurnStartTime = Date.now();
+      // Pattern 1 follow-up: register a fresh turn-scoped AbortController.
+      // Tool fetches and other in-flight async work in our Node process pull
+      // this signal as their parent via `getCurrentTurnSignal()`. On stop
+      // (interruptCurrentResponse) we abort it; on success we drop it via
+      // endTurn() inside handleMessageComplete/Stopped/Error.
+      if (sessionId) beginTurnAbort(sessionId);
+      // Pattern 6 (SDK turn boundary): stamp `turnId` ambient so all
+      // logs emitted between now and handleMessageComplete()/Stopped/
+      // handleAbort carry it. Ambient (not ALS) because the persistent
+      // messageGenerator yields back into SDK code outside our wrapper
+      // function, so call-stack ALS would lose the frame on resume.
+      // Cleared in handleMessageComplete()/handleMessageStopped()/
+      // handleAbort() below.
+      const turnId = randomUUID().replace(/-/g, '').slice(0, 8);
+      // Pattern 6 (cross-owner contamination fix): key the ambient slot by
+      // sessionId so two concurrent turns on different owners (Tab/IM/Cron)
+      // can each carry their own turnId without clobbering each other.
+      setAmbientLogContext(sessionId, { turnId, sessionId });
+      broadcast('queue:started', {
+        queueId: item.id,
+        userMessage: {
+          id: userMessage.id,
+          role: userMessage.role,
+          content: userMessage.content,
+          timestamp: userMessage.timestamp,
+          attachments: userMessage.attachments,
+        },
+      });
     }
 
-    // Yield 消息到 SDK stdin
-    const isMidTurnInjection = isStreamingMessage;
-    if (!isMidTurnInjection) {
-      isStreamingMessage = true;
-    }
+    isStreamingMessage = true;
     // Pattern B+G: push this user message's requestId onto the FIFO queue.
     // SDK output continues to be tagged with the queue HEAD until the SDK
     // emits a `result` boundary, at which point handleMessageComplete pops
-    // the head and the next pending request becomes head. This preserves
-    // attribution under mid-turn injection: yielding B mid-A-turn doesn't
-    // misattribute A's continuation to B.
+    // the head and the next pending request becomes head.
     pushPendingRequest(item.requestId);
 
     // Modality re-check at dequeue. The earlier filter in enqueueUserMessage
@@ -8533,7 +8956,7 @@ async function* messageGenerator(): AsyncGenerator<SDKUserMessage> {
     // common case; we only rewrite content here when modality drifted.
     const yieldedMessage = stripUnsupportedModalityBlocks(item.message, currentModel);
 
-    console.log(`[messageGenerator] Yielding message, wasQueued=${item.wasQueued}, midTurn=${isMidTurnInjection}, requestId=${item.requestId ?? '-'}`);
+    console.log(`[messageGenerator] Yielding message, wasQueued=${item.wasQueued}, requestId=${item.requestId ?? '-'}`);
     yield {
       type: 'user' as const,
       message: yieldedMessage,
@@ -8541,7 +8964,10 @@ async function* messageGenerator(): AsyncGenerator<SDKUserMessage> {
       session_id: getSessionId()
     };
     item.resolve();
-    // Mid-turn injection: 不等 turn 完成，立即准备 yield 下一条。
-    // SDK 的 for-await 会立即写入 stdin pipe，subprocess 在断点处读取。
+    // (v0.2.11 cross-bugfix #142 review-fix-2 #1) Promotion is fully
+    // committed once the SDK has the message. Clear the in-flight flag so
+    // a fresh enqueue arriving now follows the normal busy-vs-direct
+    // routing (busy via isStreamingMessage now true).
+    promotedItemInFlight = false;
   }
 }
