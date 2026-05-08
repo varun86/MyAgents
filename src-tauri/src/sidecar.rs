@@ -4516,12 +4516,9 @@ pub async fn cmd_propagate_proxy(
 
 // ─── Agent Runtime resolution (v0.1.59) ───
 
-/// Strip UTF-8 BOM (U+FEFF) from the beginning of a string.
-/// Windows editors (Notepad, etc.) commonly inject BOM into UTF-8 files.
-/// serde_json::from_str cannot handle BOM — it causes parse failures.
-fn strip_bom(content: &str) -> &str {
-    content.strip_prefix('\u{FEFF}').unwrap_or(content)
-}
+// BOM-stripping moved to crate::utils::bom (issue #170 #6) so all JSON-
+// reading sites share a single helper.
+use crate::utils::bom::strip_bom;
 
 /// Look up the `runtime` field from the agent config in ~/.myagents/config.json
 /// matching the given workspace path. Returns None for "builtin" (the default).

@@ -22,6 +22,7 @@ use tokio::sync::RwLock;
 use tokio::time::Duration;
 use uuid::Uuid;
 
+use crate::utils::bom::strip_bom;
 use crate::{ulog_debug, ulog_error, ulog_info, ulog_warn};
 use crate::sidecar::{
     execute_cron_task, CronExecutePayload, ManagedSidecarManager, ProviderEnv,
@@ -1054,8 +1055,13 @@ impl CronTaskManager {
             }
         };
 
+        // Tolerate UTF-8 BOM if the user manually edited cron_tasks.json with
+        // a Windows editor — without strip_bom we'd take the per-task fallback
+        // path below for nothing (issue #170 #6).
+        let content_no_bom = strip_bom(&content);
+
         // Try whole-store deserialization first (fast path)
-        match serde_json::from_str::<CronTaskStore>(&content) {
+        match serde_json::from_str::<CronTaskStore>(content_no_bom) {
             Ok(store) => {
                 let result: HashMap<String, CronTask> = store
                     .tasks
@@ -1085,7 +1091,7 @@ impl CronTaskManager {
         }
 
         // Fallback: parse as raw JSON value, then deserialize tasks individually
-        let raw: serde_json::Value = match serde_json::from_str(&content) {
+        let raw: serde_json::Value = match serde_json::from_str(content_no_bom) {
             Ok(v) => v,
             Err(e) => {
                 ulog_warn!("[CronTask] Failed to parse cron tasks as JSON at all: {}", e);
