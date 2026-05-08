@@ -9,9 +9,12 @@
 //! looked like data loss. MyAgents itself never writes BOM (`serde_json::to_string_pretty`
 //! produces clean UTF-8), so the fix is read-side: strip BOM before parsing.
 //!
-//! Use this helper at every JSON-reader site whose source file might be
-//! externally edited (`config.json`, `cron_tasks.json`, `sessions.json`).
-//! App-internal-only files (search index, app caches) don't need it.
+//! Use this helper at every JSON-reader site whose **source file** might be
+//! externally edited (`config.json`, `cron_tasks.json`, `sessions.json`) — the
+//! rule is keyed on the data source, not the consumer. The search indexer and
+//! IM memory-update task also read `sessions.json` directly and so must
+//! `strip_bom()` too. Pure app-internal files (Tantivy index segments,
+//! ephemeral caches) don't need it.
 
 /// Strip a leading UTF-8 BOM (U+FEFF) from a string slice. Returns the input
 /// unchanged when no BOM is present (zero allocations either way).
