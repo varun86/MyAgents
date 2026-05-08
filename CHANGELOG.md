@@ -9,20 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.2.12] - 2026-05-09
 
-> 重点修复：定时任务的标准 5 字段 cron 表达式能正常解析并执行；Chinese-tuned 模型输出的全角星号能正确渲染为粗体；Windows 上 Codex / Claude Code / Gemini 三个外部 runtime 不再永久挂起；多 Tab 同账号切换不会互相错杀；流式输出中段插队消息不再被 SDK 静默丢弃；删除会话弹窗不再被历史菜单遮挡；F5 / Cmd+R 不再误退到 launcher。
+> 0.2.11 残留问题集中修复：定时任务能跑、Windows 用户能用、AI 中文输出不走样、对话细节回到正轨。
 
 ### Fixed
 
-- **标准 5 字段 cron 表达式不再被吞（issue #166）**：`0 21 * * 0`（每周日 21:00）这类 Unix 风格 cron 之前在 Rust 层报 `Days of Week must be greater than or equal to 1`——`cron` crate 的 day-of-week 用 1-7 编号（Quartz 风格，Sun=1），但 normalizer 直接把 Unix 的 0 喂了进去；任务状态显示 running、`executionCount` 永远是 0、用户完全无感知。修复后正确把 Unix 0-7 翻译成 cron crate 的 1-7（Sunday 7→1 兼容、`1-5` 这类 Mon-Fri 范围相应平移到 `2-6`），同时把 6 字段输入的解释从 `min hour dom month dow year` 改回 cron crate 原生的 `sec min hour dom month dow`（之前 6 字段会被错误地多 prepend 一个 `0`）。新增 4 条覆盖 singleton / range / list / step / 命名日的单测。
-- **DeepSeek / MiniMax 等中文模型输出的 `＊＊` 不再以原文显示（issue #167）**：CommonMark 只识别 ASCII `*`，Chinese-tuned 模型输出全角星号 `＊＊P1＊＊`（U+FF0A）时直接以原文显示——粗体没了、表格也散了。`markdownPreprocess` 在协议保护代码块和 GFM 表格之后、其它格式 fix 之前，把成对的 `＊＊...＊＊` / `＊...＊` / `＿＿...＿＿` / `～～...～～` 翻译成对应 ASCII 标记。只翻译成对模式——单独出现的 `＊`（如名字打码 `张＊三`）保持不变；代码块 / 行内代码内的全角符号原样保留。新增 8 条单测覆盖典型场景与边界（含表格行内多 bold、代码块内不转换）。
-- **多 Tab 共用同一会话时不再互相错杀（issue #169）**：之前 Tab A 打开 session X、Tab B 也打开 session X 后，Sidecar 的 `session_activations` 里两条记录都带 `tab_id`，触发"同一 tab_id 不应出现在多条 activation 上"的不变量违规；切换会话时旧 tab_id 没及时清，导致路由错乱。修复后切换会话前先把 `tab_id` 从其它 activation 上清掉，新增 7 条单测覆盖自留、task_id / port 保留、stale 清理等场景。
-- **Windows 外部 runtime 不再永久挂在 JSON-RPC `initialize`（issue #170 #3 #5）**：Codex / Claude Code / Gemini CLI 在 Windows 上启动后永远收不到第一个响应——根因是 `detached: true` 配合 `stdio: 'pipe'` 在 Windows 下父进程读不到子进程 stdout（Node 文档明确建议 detached 时用 `stdio:'ignore'` 或文件描述符）。POSIX 需要 detached 是为了进程组语义让 `process.kill(-pid)` 工作，Windows 没有进程组、`taskkill /F /T /PID` 不依赖 detached——所以改为 `detached: process.platform !== 'win32'`，三个 runtime 同步修复。同时给 cmd.exe wrap 路径默认 `windowsHide: true`，消除 MCP warmup / runtime detect / queryModels 等所有 spawn 处的 console flash。
-- **`.cmd` shim 参数中含引号或空格时不再被吃掉（issue #170 部分）**：`codex -c project_doc_fallback_filenames=["CLAUDE.md"]` 这类带结构化参数在 Windows 下走 `shell:true` 时被 cmd.exe + .cmd shim 双层 MSVCRT 解析吃掉内层引号，TOML 语义直接散架。改为手工按 cross-spawn 算法做 backslash + ^-escape 包装到 `cmd.exe /d /s /c "<escaped>"`，配合 `windowsVerbatimArguments`；MCP warmup 也从裸 `child_process.spawn` 切换到这个 wrapper。同时修复 Git Bash 路径 ENOENT 不再被 SDK env 接管。
-- **手动编辑过的 config.json / cron_tasks.json / sessions.json 不再因 BOM 静默 fallback（issue #170 #6）**：Windows 编辑器（Notepad / 部分 PowerShell 重定向）保存 UTF-8 时会插 U+FEFF BOM，`serde_json::from_str` 不容忍 BOM 直接报"expected value at line 1 column 1"，MyAgents 静默 fallback 到 `.bak`——看起来像数据丢失。新增共享 `utils::bom::strip_bom`，在所有 user-editable JSON 读取点（config_io / cron_task / im 健康检查 / im 启动加载 / im 内存自动更新 / im 可用 provider / 搜索索引 / 文件 watcher / proxy / tray / lib boot）统一处理。含 4 条单测。
-- **流式输出中段插队的消息不再被 SDK 当作未读消息扔掉（issue #142 后续）**：用户在 AI 流式输出中按 ⏎ 发新消息时，过去走 turn-end fallback 队列——SDK 不知道这条要"立刻接进当前 turn 的 user 序列"，要么被丢、要么时序错乱。重写 agent-session 的注入路径：用 SDK 的 `--replay-user-messages` 信号 + `inFlightToCliId` lockstep 槽，把队列消息立即 yield 给 CLI 并等待 replay 事件回执后才确认；abort 时通过 `pendingMidTurnQueue` rescue 路径把未送达的消息回收。
-- **删除会话确认弹窗不再被历史菜单挡住**：在历史下拉里点删除，确认按钮位于历史 popover 的 FloatingPortal（z-50，body 级）下方，被遮挡且不响应。修复让 ConfirmDialog 自身 `createPortal` 到 `document.body`，z-[300] 在根 stacking context 直接竞争，所有调用方自动受益。
-- **F5 / Cmd+R 不再把当前 Tab 的 Sidecar 杀回 launcher**：浏览器默认 reload 行为会让 webview 重载、kill 掉 Tab 的所有连接，用户毫无预警地丢失上下文。在 App 顶层全局拦截 F5 / Ctrl+R / Cmd+R 的 keydown 并 preventDefault。
-- **Plugin Bridge 兼容新版 OpenClaw account-helpers 接口（issue #171）**：插件升级后调用了 host 没实现的 `account-helpers` 子集，bridge 启动直接报 "host too old or plugin SDK contract violated"。补齐 173 行 shim，配合 SHIM_COMPAT_VERSION 同步 bump（`bridge.rs` / `compat-runtime.ts` / `sdk-shim/package.json` 三处对齐到 `2026.5.9`）。
+- **定时任务真的会执行（issue #166）**：`0 21 * * 0`（每周日 21 点）这类标准 cron 表达式之前会卡在 running 状态、永远不触发，用户完全无感知。
+- **AI 中文输出的加粗和表格不再走样（issue #167）**：DeepSeek / MiniMax 等中文模型输出的全角星号 `＊＊文字＊＊` 现在能正确渲染为粗体。
+- **Windows 外部 runtime 解封（issue #170）**：Codex / Claude Code / Gemini 在 Windows 启动后永久挂起的问题修复；调用外部 runtime 和 MCP 时也不再频繁弹出黑色控制台窗口；带引号或特殊字符的参数（如 Codex 的 TOML 配置）能正确传入。
+- **手动编辑过的配置文件不再丢数据（issue #170）**：用 Notepad 等工具保存的 `config.json` / `cron_tasks.json` / `sessions.json`（带 UTF-8 BOM）之前会被静默丢弃回退到备份，看起来像数据丢失。
+- **AI 输出过程中追加消息更及时**：AI 还在输出时按 ⏎ 追加的新消息能立即进入当前轮处理，不再等本轮完整结束。
+- **同账号开多 Tab 不互相错杀（issue #169）**：两个 Tab 打开同一会话时切换不再产生路由错乱。
+- **删除对话的确认按钮不再被历史菜单挡住**。
+- **F5 / Cmd+R 不再误退到 launcher**，当前 Tab 上下文不会丢失。
+- **微信 / 飞书 / 钉钉 bot 跟上 OpenClaw 升级（issue #171）**：插件升级后启动报「host too old or plugin SDK contract violated」的问题修复。
 
 ---
 
