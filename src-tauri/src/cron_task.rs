@@ -51,17 +51,72 @@ pub fn validate_cron_expression(expr: &str, tz: Option<&str>) -> Result<(), Stri
     next_cron_fire_time(expr, tz).map(|_| ())
 }
 
+/// Translate a Unix-style day-of-week field (0-7, Sun=0 or Sun=7) into the
+/// `cron` crate's day-of-week numbering (1-7, Sun=1, Sat=7 — Quartz semantics).
+///
+/// Why: `cron` v0.15 rejects `0` for DOW with "Days of Week must be greater than
+/// or equal to 1", and even when numeric DOW values parse, they're shifted vs.
+/// the Unix convention the rest of the app uses (frontend `CronExpressionInput`,
+/// CLI scheduling, AI tool calls all generate Unix-style cron). Without this
+/// translation, `0 21 * * 0` (every Sunday) is rejected outright, and
+/// `0 8 * * 1-5` (Mon-Fri in Unix) silently fires Sun-Thu in cron-crate land.
+///
+/// Handles wildcards (`*`, `?`), single values, ranges (`a-b`), lists
+/// (`a,b,c`), steps (`a/b`, `*/b`), and named days (`SUN`-`SAT`, passed through
+/// unchanged because the crate already accepts them). Step values are
+/// preserved as-is — `*/2` means the same days under both numberings.
+fn translate_unix_dow_to_crate_dow(dow: &str) -> String {
+    fn shift_unix(s: &str) -> String {
+        match s.parse::<u32>() {
+            Ok(0) | Ok(7) => "1".to_string(),  // Sunday (Unix 0 or 7 → crate 1)
+            Ok(n @ 1..=6) => (n + 1).to_string(),
+            _ => s.to_string(),  // wildcard, name, or out-of-range — pass through
+        }
+    }
+    fn translate_base(s: &str) -> String {
+        // Range "a-b" → translate both endpoints. The two "all days" combos
+        // that wrap (0-7, 1-7 in Unix) collapse to `*` to avoid the post-shift
+        // result being an invalid range like `2-1`.
+        if let Some((start, end)) = s.split_once('-') {
+            if (start, end) == ("0", "7") || (start, end) == ("1", "7") {
+                return "*".to_string();
+            }
+            return format!("{}-{}", shift_unix(start), shift_unix(end));
+        }
+        shift_unix(s)
+    }
+    fn translate_token(token: &str) -> String {
+        // Step "a/b" or "*/b" — translate base, leave step untouched
+        if let Some((base, step)) = token.split_once('/') {
+            return format!("{}/{}", translate_base(base), step);
+        }
+        translate_base(token)
+    }
+    dow.split(',').map(translate_token).collect::<Vec<_>>().join(",")
+}
+
 /// Parse a cron expression and compute the next fire time as a wall-clock UTC timestamp.
-/// Accepts standard 5-field cron expressions (min hour dom month dow) and
-/// converts to the 7-field format required by the `cron` crate (sec min hour dom month dow year).
+///
+/// Input dialect: standard Unix 5-field (`min hour dom month dow`, Sun=0 or 7)
+/// — the format used by every UI surface and `crontab(5)`. We convert to the
+/// `cron` crate's native 7-field format (`sec min hour dom month dow year`,
+/// Sun=1) by prepending seconds, appending year, and translating DOW.
+///
+/// 6-field and 7-field inputs are passed through with minimal massaging,
+/// assuming the caller is using the cron crate's native dialect (Quartz-style,
+/// 1=Sun). We don't translate DOW for those — power users typing 6/7 fields
+/// know what they're doing.
 fn next_cron_fire_time(expr: &str, tz: Option<&str>) -> Result<DateTime<Utc>, String> {
-    // Normalize: 5-field → 7-field by prepending "0 " (seconds) and appending " *" (year)
     let expr7 = {
         let fields: Vec<&str> = expr.trim().split_whitespace().collect();
         match fields.len() {
-            5 => format!("0 {} *", expr.trim()),
-            6 => format!("0 {}", expr.trim()),  // already has year
-            7 => expr.trim().to_string(),         // already full 7-field
+            5 => {
+                // Unix 5-field: translate DOW (the 5th field) from Unix to crate semantics.
+                let dow_translated = translate_unix_dow_to_crate_dow(fields[4]);
+                format!("0 {} {} {} {} {} *", fields[0], fields[1], fields[2], fields[3], dow_translated)
+            }
+            6 => format!("{} *", expr.trim()),     // crate-native 6-field (sec min hour dom month dow) — append year
+            7 => expr.trim().to_string(),            // already full 7-field
             _ => return Err(format!("Invalid cron expression '{}': expected 5-7 fields, got {}", expr, fields.len())),
         }
     };
@@ -3968,4 +4023,74 @@ async fn try_recover_single_task(handle: &AppHandle, task: &CronTask) -> Result<
     ulog_info!("[CronTask] Scheduler started for task {}", task.id);
 
     Ok(result.port)
+}
+
+#[cfg(test)]
+mod cron_dialect_tests {
+    use super::*;
+
+    /// Fingerprint cases for `translate_unix_dow_to_crate_dow` — encodes the
+    /// Unix→crate mapping that the rest of the app relies on.
+    #[test]
+    fn translate_dow_handles_singletons_ranges_lists_steps_names() {
+        // Singletons
+        assert_eq!(translate_unix_dow_to_crate_dow("0"), "1");   // Sunday
+        assert_eq!(translate_unix_dow_to_crate_dow("7"), "1");   // Sunday alias
+        assert_eq!(translate_unix_dow_to_crate_dow("1"), "2");   // Monday
+        assert_eq!(translate_unix_dow_to_crate_dow("6"), "7");   // Saturday
+        // Wildcards
+        assert_eq!(translate_unix_dow_to_crate_dow("*"), "*");
+        assert_eq!(translate_unix_dow_to_crate_dow("?"), "?");
+        // Ranges
+        assert_eq!(translate_unix_dow_to_crate_dow("1-5"), "2-6");   // Mon-Fri
+        assert_eq!(translate_unix_dow_to_crate_dow("0-6"), "1-7");   // all days, Unix Sun=0 form
+        assert_eq!(translate_unix_dow_to_crate_dow("0-7"), "*");     // wraps → all days
+        assert_eq!(translate_unix_dow_to_crate_dow("1-7"), "*");     // wraps → all days
+        // Lists
+        assert_eq!(translate_unix_dow_to_crate_dow("0,3,5"), "1,4,6");
+        assert_eq!(translate_unix_dow_to_crate_dow("1,3,5"), "2,4,6");
+        // Step values — semantically same days under both numberings
+        assert_eq!(translate_unix_dow_to_crate_dow("*/2"), "*/2");
+        assert_eq!(translate_unix_dow_to_crate_dow("0/2"), "1/2");
+        assert_eq!(translate_unix_dow_to_crate_dow("1-5/2"), "2-6/2");
+        // Named days pass through unchanged (cron crate already accepts them)
+        assert_eq!(translate_unix_dow_to_crate_dow("SUN"), "SUN");
+        assert_eq!(translate_unix_dow_to_crate_dow("MON-FRI"), "MON-FRI");
+    }
+
+    /// Issue #166 regression — `0 21 * * 0` (every Sunday 21:00) must parse,
+    /// and the next fire time must land on a Sunday at 21:00.
+    #[test]
+    fn issue_166_unix_sunday_cron_parses_and_fires_on_sunday() {
+        // Validation succeeds (was failing with "Days of Week must be greater than or equal to 1")
+        assert!(validate_cron_expression("0 21 * * 0", Some("UTC")).is_ok());
+        assert!(validate_cron_expression("0 21 * * 7", Some("UTC")).is_ok());
+
+        // Next fire is on a Sunday
+        let next = next_cron_fire_time("0 21 * * 0", Some("UTC")).unwrap();
+        assert_eq!(next.format("%A").to_string(), "Sunday");
+        assert_eq!(next.format("%H:%M").to_string(), "21:00");
+    }
+
+    /// Issue #166 broader pattern — `1-5` (frontend "weekdays") must mean
+    /// Mon-Fri, not Sun-Thu. Regression for the silent-mis-fire bug.
+    #[test]
+    fn weekdays_range_means_monday_through_friday() {
+        let next = next_cron_fire_time("0 8 * * 1-5", Some("UTC")).unwrap();
+        let weekday = next.format("%A").to_string();
+        assert!(
+            matches!(weekday.as_str(), "Monday" | "Tuesday" | "Wednesday" | "Thursday" | "Friday"),
+            "weekday cron should fire Mon-Fri, got {}",
+            weekday
+        );
+    }
+
+    /// 6-field input is treated as the cron crate's native sec-min-hour-dom-month-dow
+    /// (no year). Previously the year wildcard was missing and the format!
+    /// prepended `0` instead, producing 7 fields with everything off by one.
+    #[test]
+    fn six_field_cron_appends_year_wildcard() {
+        // 6-field: sec=0, min=0, hour=21, dom=*, month=*, dow=1 (Sun in crate semantics)
+        assert!(validate_cron_expression("0 0 21 * * 1", Some("UTC")).is_ok());
+    }
 }

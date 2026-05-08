@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.2.12] - 2026-05-08
+
+> 重点修复：定时任务的标准 5 字段 cron 表达式（`0 21 * * 0` 这类）能正常解析并执行；Chinese-tuned 模型（DeepSeek / MiniMax 等）输出的全角星号能正确渲染为粗体。
+
+### Fixed
+
+- **标准 5 字段 cron 表达式不再被吞（issue #166）**：`0 21 * * 0`（每周日 21:00）这类 Unix 风格 cron 之前在 Rust 层报 `Days of Week must be greater than or equal to 1`——`cron` crate 的 day-of-week 用 1-7 编号（Quartz 风格，Sun=1），但 normalizer 直接把 Unix 的 0 喂了进去；任务状态显示 running、`executionCount` 永远是 0、用户完全无感知。修复后正确把 Unix 0-7 翻译成 cron crate 的 1-7（Sunday 7→1 兼容、`1-5` 这类 Mon-Fri 范围相应平移到 `2-6`），同时把 6 字段输入的解释从 `min hour dom month dow year` 改回 cron crate 原生的 `sec min hour dom month dow`（之前 6 字段会被错误地多 prepend 一个 `0`）。新增 4 条覆盖 singleton / range / list / step / 命名日的单测。
+- **DeepSeek / MiniMax 等中文模型输出的 `＊＊` 不再以原文显示（issue #167）**：CommonMark 只识别 ASCII `*`，Chinese-tuned 模型输出全角星号 `＊＊P1＊＊`（U+FF0A）时直接以原文显示——粗体没了、表格也散了。`markdownPreprocess` 在协议保护代码块和 GFM 表格之后、其它格式 fix 之前，把成对的 `＊＊...＊＊` / `＊...＊` / `＿＿...＿＿` / `～～...～～` 翻译成对应 ASCII 标记。只翻译成对模式——单独出现的 `＊`（如名字打码 `张＊三`）保持不变；代码块 / 行内代码内的全角符号原样保留。新增 8 条单测覆盖典型场景与边界（含表格行内多 bold、代码块内不转换）。
+
+---
+
 ## [0.2.11] - 2026-05-08
 
 > 重点修复：微信 bot 升级到 2.4.2 后能正常启动；切到 IM bot 历史会话不再被弹回 Launcher；订阅版 Sonnet 4.6 不再撞 1M 限额；流式输出中"取消排队消息"真的能取消。同时把定时任务 / 退出 cron / IM 发图统一到 `myagents` CLI，让外部 runtime（Codex / Gemini / Claude Code CLI）也能用。
