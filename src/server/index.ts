@@ -7784,12 +7784,39 @@ async function main() {
               return jsonResponse({ success: false, error: ccResult.error ?? 'Failed to send via external runtime' }, 503);
             }
           } else {
+            // PRD 0.2.14 Q4·A — handover-aware permission mode resolution.
+            // After a desktop session is handed over to this channel, the
+            // session carries a `configSnapshotAt` from its desktop creation.
+            // In that case the user's intent is "the desktop session's mode
+            // wins" (the desktop session is the authoritative state), so we
+            // ignore the live Agent values that Rust passed in payload.
+            // Pure IM-origin sessions never have a snapshot, so this branch
+            // is a no-op for them and behavior matches v0.2.13.
+            let resolvedPermissionMode: PermissionMode = (payload.permissionMode as PermissionMode) ?? 'plan';
+            let resolvedModel: string | undefined = payload.model ?? undefined;
+            let resolvedProviderEnv: ProviderEnv | undefined = payload.providerEnv ?? undefined;
+            const sidForSnapshot = getSessionId();
+            const snapshotMeta = sidForSnapshot ? getSessionMetadata(sidForSnapshot) : null;
+            if (snapshotMeta?.configSnapshotAt) {
+              if (snapshotMeta.permissionMode) {
+                resolvedPermissionMode = snapshotMeta.permissionMode as PermissionMode;
+              }
+              if (snapshotMeta.model) {
+                resolvedModel = snapshotMeta.model;
+              }
+              if (snapshotMeta.providerEnvJson) {
+                try {
+                  resolvedProviderEnv = JSON.parse(snapshotMeta.providerEnvJson) as ProviderEnv;
+                } catch { /* malformed snapshot — fall back to live */ }
+              }
+            }
+
             const result = await enqueueUserMessage(
               finalMessage,
               payload.images,
-              (payload.permissionMode as PermissionMode) ?? 'plan',
-              payload.model ?? undefined,
-              payload.providerEnv ?? undefined,
+              resolvedPermissionMode,
+              resolvedModel,
+              resolvedProviderEnv,
               metadata,
               payload.requestId,
             );

@@ -51,6 +51,7 @@ import { getCurrentRuntimeType, isExternalRuntime } from './runtimes/factory';
 import type { ImagePayload } from './runtimes/types';
 import { imEventBus, type ImEventType } from './utils/im-event-bus';
 import { imRequestRegistry } from './utils/im-request-registry';
+import { mirrorIfChannelBound, type MirrorImage } from './utils/im-mirror';
 
 // Module-level debug mode check (avoids repeated environment variable access)
 const isDebugMode = process.env.DEBUG === '1' || process.env.NODE_ENV === 'development';
@@ -660,8 +661,87 @@ type InFlightMetadata = {
   messageText: string;
   attachments?: MessageWire['attachments'];
   requestId?: string;
+  /** PRD 0.2.14 — propagated from `enqueueUserMessage(metadata)` so the
+   *  delayed-resolve push sites (queued_command replay / queue:started
+   *  fallback) can decide whether this user message should mirror to a
+   *  bound IM channel. Only `'desktop'` triggers mirror. */
+  source?: SessionSource;
+  /** PRD 0.2.14 — base64 image payloads forwarded for mirror purposes.
+   *  Lives alongside `attachments` (which is on-disk paths) because the
+   *  Sidecar→management-API mirror call needs raw bytes inline. PNG/JPG
+   *  only at the call site; non-image payloads must not be queued here. */
+  mirrorImages?: MirrorImage[];
 };
 let inFlightMetadata: InFlightMetadata | null = null;
+
+// ===== Desktop → IM mirror state (PRD 0.2.14 Phase C) =====
+//
+// `currentTurnMirrorEnabled` is set when a desktop user message is finalized
+// (any of three push sites in this file) and cleared when the AI turn ends or
+// is aborted. While it's true, `content_block_stop` for text blocks fires a
+// mirror call with the accumulated block text.
+//
+// `pendingTextBlockTexts` accumulates `text_delta` per stream index so we
+// can ship a complete block text at content_block_stop. Cleared with the
+// flag at turn boundaries.
+let currentTurnMirrorEnabled = false;
+let currentTurnMirrorSessionId: string | null = null;
+const pendingTextBlockTexts: Map<number, string> = new Map();
+
+function clearMirrorState(): void {
+  currentTurnMirrorEnabled = false;
+  currentTurnMirrorSessionId = null;
+  pendingTextBlockTexts.clear();
+}
+
+function maybeAccumulateMirrorChunk(index: number, chunk: string): void {
+  if (!currentTurnMirrorEnabled) return;
+  const prev = pendingTextBlockTexts.get(index) ?? '';
+  pendingTextBlockTexts.set(index, prev + chunk);
+}
+
+/** Fire-and-forget user-side mirror. Caller decides whether to invoke based on
+ *  metadata.source — this helper is the single source of formatting + transport. */
+function fireDesktopUserMirror(content: string, images: MirrorImage[] | undefined): void {
+  // Only fire if there's a chance an IM channel is bound. Rust silently
+  // no-ops if not, but skipping the round-trip when content is trivially
+  // empty avoids needless network chatter.
+  if (!content && (!images || images.length === 0)) return;
+  currentTurnMirrorEnabled = true;
+  currentTurnMirrorSessionId = sessionId;
+  void mirrorIfChannelBound({
+    sessionId,
+    role: 'user',
+    text: content,
+    images,
+  });
+}
+
+/** Fire-and-forget assistant text-block mirror. Called from content_block_stop.
+ *  The session id captured at user-message time guards against turn boundary
+ *  drift (resetSession during a streaming turn). */
+function fireDesktopAssistantBlockMirror(text: string): void {
+  if (!text) return;
+  if (!currentTurnMirrorEnabled) return;
+  const sid = currentTurnMirrorSessionId ?? sessionId;
+  void mirrorIfChannelBound({
+    sessionId: sid,
+    role: 'assistant',
+    text,
+  });
+}
+
+/** Convert ImagePayload[] to MirrorImage[] keeping only PNG/JPG (Q5 lockdown). */
+function toMirrorImages(images: ImagePayload[] | undefined): MirrorImage[] | undefined {
+  if (!images || images.length === 0) return undefined;
+  const out: MirrorImage[] = [];
+  for (const img of images) {
+    const mime = img.mimeType.toLowerCase();
+    if (mime !== 'image/png' && mime !== 'image/jpeg' && mime !== 'image/jpg') continue;
+    out.push({ mimeType: img.mimeType, dataBase64: img.data });
+  }
+  return out.length > 0 ? out : undefined;
+}
 let isApiRetrying = false;  // Track api_retry state to clear when streaming resumes
 const messages: MessageWire[] = [];
 // Pattern 3 §3.2.4 — incremental persistence cursor.
@@ -1191,6 +1271,7 @@ async function handleQueuedCommandReplay(
     timestamp: new Date().toISOString(),
     attachments: meta?.attachments,
     sdkUuid: sdkMessage.uuid,
+    metadata: meta?.source ? { source: meta.source } : undefined,
   };
   messages.push(userMessage);
   if (sdkMessage.uuid) {
@@ -1198,6 +1279,11 @@ async function handleQueuedCommandReplay(
     liveSessionUuids.add(sdkMessage.uuid);
   }
   await persistMessagesToStorage();
+
+  // PRD 0.2.14 — desktop → IM mirror (queued mid-turn replay path).
+  if (meta?.source === 'desktop') {
+    fireDesktopUserMirror(userMessage.content as string, meta.mirrorImages);
+  }
 
   console.log(`[agent] queued_command replay consumed by AI: queueId=${queueId}`);
   broadcast('queue:started', {
@@ -4538,8 +4624,13 @@ function handleMessageComplete(): void {
         content: meta.messageText,
         timestamp: new Date().toISOString(),
         attachments: meta.attachments,
+        metadata: meta.source ? { source: meta.source } : undefined,
       };
       messages.push(userMessage);
+      // PRD 0.2.14 — desktop → IM mirror (queue:started fallback path).
+      if (meta.source === 'desktop') {
+        fireDesktopUserMirror(meta.messageText, meta.mirrorImages);
+      }
       console.log(`[agent] queue:started fallback at turn-end (no mid-turn replay), queueId=${stale}`);
       broadcast('queue:started', {
         queueId: stale,
@@ -4596,6 +4687,9 @@ function handleMessageComplete(): void {
     imRequestRegistry.setStatus(completedReq, 'completed');
     imRequestRegistry.unregister(completedReq);
   }
+  // PRD 0.2.14 — desktop turn ended; release mirror state so the next
+  // (possibly IM-driven) turn doesn't accidentally mirror through here.
+  clearMirrorState();
   // 跨回合状态清理（持久 session 下多回合共享同一个 for-await 循环）
   // SDK 的 stream event index 是 per-message 的，不同回合的 index 可能冲突
   streamIndexToToolId.clear();
@@ -4699,6 +4793,8 @@ function handleMessageStopped(): void {
     imRequestRegistry.setStatus(stoppedReq, 'completed');
     imRequestRegistry.unregister(stoppedReq);
   }
+  // PRD 0.2.14 — desktop turn stopped; release mirror state.
+  clearMirrorState();
   // 跨回合状态清理（与 handleMessageComplete 保持一致）
   streamIndexToToolId.clear();
   streamIndexToBlockType.clear();
@@ -4761,6 +4857,8 @@ function handleMessageError(error: string): void {
     imRequestRegistry.setStatus(failedReq, 'failed');
     imRequestRegistry.unregister(failedReq);
   }
+  // PRD 0.2.14 — desktop turn errored out; release mirror state.
+  clearMirrorState();
   setSessionState('idle');
 
   // Don't persist expected termination signals as errors
@@ -6221,6 +6319,8 @@ export async function enqueueUserMessage(
         messageText: trimmed,
         attachments: savedAttachments.length > 0 ? savedAttachments : undefined,
         requestId,
+        source: metadata?.source,
+        mirrorImages: toMirrorImages(images),
       };
       wakeGenerator(queueItem);
       console.log(`[agent] Message queued mid-turn (in-flight to CLI): queueId=${queueId} requestId=${requestId ?? '-'} text="${trimmed.slice(0, 50)}"`);
@@ -6284,6 +6384,17 @@ export async function enqueueUserMessage(
 
   // Persist messages to disk after adding user message
   await persistMessagesToStorage();
+
+  // PRD 0.2.14 — desktop → IM mirror (direct-send path, single push site).
+  // Q1·C: mirror the full user text + PNG/JPG attachments. Rust silently
+  // no-ops if no channel binding exists for this session.
+  if (metadata?.source === 'desktop') {
+    fireDesktopUserMirror(trimmed, toMirrorImages(images));
+  } else {
+    // New non-desktop turn — make sure stale mirror state from a prior
+    // desktop turn doesn't bleed into this AI response.
+    clearMirrorState();
+  }
 
   const queueItem: MessageQueueItem = {
     id: queueId,
@@ -8007,6 +8118,9 @@ async function startStreamingSession(preWarm = false): Promise<void> {
                   currentTurnHasOutput = true;
                   // IM stream: forward non-subagent text delta to event bus (Pattern B)
                   emitImEvent('delta', streamEvent.delta.text);
+                  // PRD 0.2.14 — accumulate per-block text for desktop→IM mirror
+                  // (no-op when current turn isn't desktop-driven).
+                  maybeAccumulateMirrorChunk(streamEvent.index, streamEvent.delta.text);
                 } else {
                   console.log(`[agent] Filtered decorative text from stream (${decorativeCheck.reason})`);
                 }
@@ -8237,6 +8351,14 @@ async function startStreamingSession(preWarm = false): Promise<void> {
             if (imTextBlockIndices.has(streamEvent.index)) {
               emitImEvent('block-end', '');
               imTextBlockIndices.delete(streamEvent.index);
+            }
+            // PRD 0.2.14 — desktop turn AI text block done → mirror to bound channel.
+            // Q1·C: one mirror call per text block, with accumulated body. No-op
+            // when the turn isn't desktop-driven (currentTurnMirrorEnabled=false).
+            const mirroredBlockText = pendingTextBlockTexts.get(streamEvent.index);
+            if (mirroredBlockText !== undefined) {
+              pendingTextBlockTexts.delete(streamEvent.index);
+              fireDesktopAssistantBlockMirror(mirroredBlockText);
             }
           }
         }
