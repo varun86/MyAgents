@@ -191,7 +191,11 @@ const ProcessRow = memo(function ProcessRow({
         mainLabel = getToolMainLabel(block.tool);
         subLabel = toolLabel !== mainLabel ? toolLabel : '';
 
-        if (isToolActive) {
+        if (isToolActive || isTaskRunning) {
+            // (issue #175) Same pit-of-success treatment as the green dot
+            // above: parallel Task/Agent dispatches that aren't the last
+            // block also need the spinner so the icon stays coherent with
+            // the dot and the detail panel's "Agent is running" badge.
             icon = <Loader2 className="size-4 animate-spin" />;
         } else if (block.tool.isFailed) {
             icon = <XCircle className="size-4 text-[var(--error)]" />;
@@ -213,8 +217,17 @@ const ProcessRow = memo(function ProcessRow({
                 className={`flex w-full items-center gap-3 px-4 py-2.5 text-left transition-colors ${hasContent ? 'cursor-pointer hover:bg-[var(--hover-bg)]' : 'cursor-default'
                     }`}
             >
-                {/* Left indicator dot - smaller */}
-                <div className={`flex size-1.5 shrink-0 rounded-full ${isBlockActive
+                {/* Left indicator dot - smaller.
+                 *  (issue #175) For parallel Task/Agent tool dispatches, all
+                 *  but the last block fail `isLastBlock`, so the legacy
+                 *  `isBlockActive` (which requires last+streaming) leaves
+                 *  earlier still-running tasks showing a grey dot while the
+                 *  expanded TaskTool detail still says "Agent is running".
+                 *  Fall back to the tool's own isLoading/!result state for
+                 *  Task/Agent so each parallel task's indicator reflects its
+                 *  own truth — same predicate TaskTool.tsx uses for its
+                 *  internal "执行中" badge. */}
+                <div className={`flex size-1.5 shrink-0 rounded-full ${(isBlockActive || isTaskRunning)
                     ? 'bg-[var(--success)] animate-pulse'
                     : block.isFailed || block.tool?.isFailed
                         ? 'bg-[var(--error)]'
