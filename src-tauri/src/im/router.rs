@@ -566,6 +566,46 @@ impl SessionRouter {
         }
     }
 
+    // ===== Surface handover helpers (PRD 0.2.14) =====
+
+    /// True if a peer_session entry exists for the given session_key.
+    /// Used by `cmd_session_new_with_surface_migration` to find which channel
+    /// owns a session_key without exposing the full HashMap.
+    pub fn has_peer_session(&self, session_key: &str) -> bool {
+        self.peer_sessions.contains_key(session_key)
+    }
+
+    /// Snapshot a peer_session for read-only inspection (e.g. capture
+    /// `prior_session_id` before we overwrite the entry during handover).
+    pub fn peer_session_snapshot(&self, session_key: &str) -> Option<PeerSession> {
+        self.peer_sessions.get(session_key).cloned()
+    }
+
+    /// Insert-or-replace a peer_session — used by handover to redirect a
+    /// channel binding to a new session_id. Caller is responsible for
+    /// SidecarOwner accounting (release old, ensure new) — this method only
+    /// touches the router's HashMap.
+    pub fn upsert_peer_session(&mut self, ps: PeerSession) {
+        self.peer_sessions.insert(ps.session_key.clone(), ps);
+    }
+
+    /// Pick the most-recently-active peer_session_key in this channel.
+    /// Used as the handover target — preserves "talk to the same chat,
+    /// different session backend" semantics.
+    pub fn most_recent_peer_session_key(&self) -> Option<String> {
+        self.peer_sessions
+            .values()
+            .max_by_key(|ps| ps.last_active)
+            .map(|ps| ps.session_key.clone())
+    }
+
+    /// Iterate over the channel's peer_sessions (read-only). Used by the
+    /// mirror endpoint (`/api/im/mirror`) to find which channel binds a given
+    /// session_id without exposing the full HashMap.
+    pub fn peer_sessions_iter(&self) -> impl Iterator<Item = &PeerSession> {
+        self.peer_sessions.values()
+    }
+
     /// Get active peer session info (for health state)
     pub fn active_sessions(&self) -> Vec<super::types::ImActiveSession> {
         self.peer_sessions

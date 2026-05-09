@@ -11,6 +11,8 @@ import DirectoryPanel, { type DirectoryPanelHandle } from '@/components/Director
 import DropZoneOverlay from '@/components/DropZoneOverlay';
 import MessageList from '@/components/MessageList';
 import SessionHistoryDropdown from '@/components/SessionHistoryDropdown';
+import SessionSurfaceTags from '@/components/SessionSurfaceTags';
+import HandoverPopover from '@/components/HandoverPopover';
 import { FileActionProvider } from '@/context/FileActionContext';
 import SimpleChatInput, { type ImageAttachment, type SimpleChatInputHandle } from '@/components/SimpleChatInput';
 import QueryNavigator from '@/components/chat/QueryNavigator';
@@ -23,6 +25,8 @@ import WorkspaceConfigPanel, { type Tab as WorkspaceTab } from '@/components/Wor
 import CronTaskSettingsModal from '@/components/cron/CronTaskSettingsModal';
 import { useTabState, useTabActive } from '@/context/TabContext';
 import { useVirtuosoScroll } from '@/hooks/useVirtuosoScroll';
+import { useAgentStatuses } from '@/hooks/useAgentStatuses';
+import { useSessionSurfaces } from '@/hooks/useSessionSurfaces';
 import { useConfig } from '@/hooks/useConfig';
 import { useFileDropZone } from '@/hooks/useFileDropZone';
 import { useTauriFileDrop } from '@/hooks/useTauriFileDrop';
@@ -2650,10 +2654,77 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     }
   }, [onSwitchSession, loadSession]);
 
+  // Surface tags (PRD 0.2.14): pull agent status snapshot for the channel pill.
+  // Single 5s polling instance per Chat tab — SessionHistoryDropdown maintains
+  // its own (only mounted when open) so they don't share, but the cost is low.
+  const { statuses: agentStatuses } = useAgentStatuses(true);
+  const surfaces = useSessionSurfaces(sessionId, agentStatuses, cronState.task);
+
+  // Handover-button visibility predicate (Q10 lockdown):
+  //   - session is currently NOT bound to any channel
+  //   - session was not originally created from an IM source (sessionMeta.source)
+  //   - workspace's Agent has at least one online channel to hand off to
+  //   - not a background-completing session
+  const availableHandoverChannels = useMemo(() => {
+    if (!currentAgent) return [];
+    const out: { agentId: string; agentName: string; channelId: string; channelType: string; channelName: string; sessionKey: string; platformLabel: string }[] = [];
+    const status = agentStatuses[currentAgent.id];
+    if (!status) return out;
+    for (const ch of status.channels) {
+      if (ch.status !== 'online') continue;
+      out.push({
+        agentId: status.agentId,
+        agentName: status.agentName,
+        channelId: ch.channelId,
+        channelType: ch.channelType,
+        channelName: ch.name || ch.botUsername || ch.channelType,
+        // sessionKey is computed server-side; UI doesn't need it for the candidate list
+        sessionKey: '',
+        platformLabel: ch.botUsername ? `${ch.botUsername}` : ch.channelType,
+      });
+    }
+    return out;
+  }, [currentAgent, agentStatuses]);
+
+  const isImOriginSession = sessionMeta?.source ? isImSource(sessionMeta.source) : false;
+  const canHandover = !surfaces.channel
+    && !isImOriginSession
+    && availableHandoverChannels.length > 0;
+
+  // Phase B: handover popover anchor
+  const [handoverAnchorEl, setHandoverAnchorEl] = useState<HTMLElement | null>(null);
+  const handleHandoverClick = useCallback((anchor: HTMLElement) => {
+    setHandoverAnchorEl(anchor);
+  }, []);
+
   // Internal handler for starting a new session
   // If AI is running, App.tsx handles it via background completion (returns true).
   // If AI is idle, falls back to resetSession (reuses Sidecar).
+  // PRD 0.2.14: when current session is IM-channel-bound, migrate the binding
+  // to the new session so the IM channel keeps routing here (matches IM `/new`).
   const handleNewSession = useCallback(async () => {
+    const boundChannel = surfaces.channel;
+    if (boundChannel && sessionId) {
+      try {
+        const { migrateChannelToNewSession } = await import('@/api/sessionHandoverClient');
+        const newSessionId = await migrateChannelToNewSession({
+          oldSessionId: sessionId,
+          sessionKey: boundChannel.sessionKey,
+        });
+        // Reuse the Sidecar (resetSession path), but tell the caller that a
+        // new session id is in place. App.tsx's onNewSession / TabProvider
+        // detects the change via sessionId effect and reconnects.
+        if (newSessionId) {
+          console.log(`[Chat] Channel-bound new conversation: ${sessionId.slice(0, 8)} → ${newSessionId.slice(0, 8)}`);
+          await resetSession();
+          return;
+        }
+      } catch (err) {
+        console.error('[Chat] Channel surface migration failed, falling back to plain reset:', err);
+        toastRef.current.error('Channel 重绑失败，已就地重置');
+      }
+    }
+
     if (onNewSession) {
       const handled = await onNewSession();
       if (handled) {
@@ -2671,7 +2742,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     } else {
       console.error('[Chat] Failed to start new session');
     }
-  }, [onNewSession, resetSession]);
+  }, [onNewSession, resetSession, surfaces.channel, sessionId]);
 
   return (
     <div className="relative flex h-full flex-row overflow-hidden overscroll-none bg-[var(--paper-elevated)] text-[var(--ink)]">
@@ -2711,6 +2782,13 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
                 />
               </>
             )}
+            {/* Surface tags (channel/cron pill) + handover button (PRD 0.2.14) */}
+            <SessionSurfaceTags
+              channel={surfaces.channel}
+              cron={surfaces.cron}
+              onHandoverClick={handleHandoverClick}
+              canHandover={canHandover}
+            />
           </div>
           <div className="flex shrink-0 items-center gap-1">
             {/* New Session button - before History */}
@@ -2746,6 +2824,16 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
               onClose={() => setShowHistory(false)}
               triggerRef={historyBtnRef}
             />
+            {/* Handover popover (PRD 0.2.14) — triggered by 📤 in surface tag area */}
+            {handoverAnchorEl && sessionId && agentDir && (
+              <HandoverPopover
+                sessionId={sessionId}
+                workspacePath={agentDir}
+                candidates={availableHandoverChannels}
+                anchorEl={handoverAnchorEl}
+                onClose={() => setHandoverAnchorEl(null)}
+              />
+            )}
             {/* Dev-only buttons - controlled by config.showDevTools */}
             {config.showDevTools && (
               <>

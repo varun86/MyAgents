@@ -8,6 +8,7 @@ pub mod dingtalk;
 pub mod event_consumer;
 pub mod feishu;
 pub mod group_history;
+pub mod handover;
 pub mod health;
 pub mod heartbeat;
 pub mod memory_update;

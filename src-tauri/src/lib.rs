@@ -320,6 +320,9 @@ pub fn run() {
             im::cmd_update_agent_config,
             im::cmd_create_agent,
             im::cmd_delete_agent,
+            // Session ↔ channel surface handover (PRD 0.2.14)
+            im::handover::cmd_session_new_with_surface_migration,
+            im::handover::cmd_handover_session_to_channel,
             // WeCom QR code commands (public API, not plugin gateway)
             commands::cmd_wecom_qr_generate,
             commands::cmd_wecom_qr_poll,
