@@ -1068,11 +1068,21 @@ export default function TabProvider({
                         clearSessionActive();
                         setIsLoading(false);
                         setSystemStatus(null);
-                    } else if (payload.sessionState === 'running' && !isStreamingRef.current) {
-                        // Session is running but we haven't received any streaming events yet.
-                        // This happens when a Tab connects mid-flight (e.g., IM session in progress)
-                        // and receives a replayed chat:status → "running" from the SSE last-value cache.
-                        // Set isLoading so the UI shows the loading state instead of action buttons.
+                    } else if (
+                        (payload.sessionState === 'running' || payload.sessionState === 'starting')
+                        && !isStreamingRef.current
+                    ) {
+                        // Session is busy (subprocess starting up or actively
+                        // processing) but we haven't received any streaming
+                        // events yet. This happens when a Tab connects
+                        // mid-flight (e.g., IM session in progress) and
+                        // receives a replayed chat:status from the SSE
+                        // last-value cache, or during the (issue #174)
+                        // startup-timeout window where the SDK subprocess is
+                        // alive but system_init hasn't arrived. Set isLoading
+                        // so the UI shows the loading state instead of action
+                        // buttons; the 'starting' branch lets MessageList
+                        // render a distinct "AI 启动中" hint.
                         setIsLoading(true);
                     }
                 }

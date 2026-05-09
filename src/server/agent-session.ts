@@ -360,7 +360,13 @@ export function syncProjectUserConfig(projectDir: string): void {
   }
 }
 
-type SessionState = 'idle' | 'running' | 'error';
+// (issue #174) `starting` separates "subprocess launched, awaiting system_init"
+// from "AI actively processing a turn". Without it, the 60s→600s adaptive
+// startup-timeout window looks identical to a normal busy turn in the UI:
+// user can't tell if the SDK is stuck in MCP handshake / first-time workspace
+// init or doing real work, and after up to 10 minutes the only signal is the
+// timeout-error toast. `starting` → `running` when system_init arrives.
+type SessionState = 'idle' | 'starting' | 'running' | 'error';
 
 // Permission mode types - UI values
 export type PermissionMode = 'auto' | 'plan' | 'fullAgency' | 'custom';
@@ -2641,11 +2647,19 @@ function getPermissionRules(mode: PermissionMode): PermissionRules {
 const sessionAlwaysAllowed = new Set<string>();
 
 // Pending permission requests waiting for user response
+//
+// No wall-clock timeout — matches Claude Code (the CLI reference) which never
+// times out user-facing prompts. The user's mental model is "AI is waiting for
+// me," so the modal must survive arbitrary AFK time. Cleanup happens on the
+// real boundaries: SDK abort signal (onAbort handler), session reset/switch/
+// fork (clearSessionPermissions), or sidecar process exit. The 10-minute
+// hard timeout was removed in v0.2.14 — its only original purpose (PRD #131
+// "Unknown request" desync) is already covered by the abort-driven `:expired`
+// broadcast.
 const pendingPermissions = new Map<string, {
   resolve: (decision: 'allow' | 'deny') => void;
   toolName: string;
   input: unknown;
-  timer: ReturnType<typeof setTimeout>;  // Timer reference for cleanup
 }>();
 
 // AskUserQuestion types - import from shared
@@ -2656,25 +2670,25 @@ export type { AskUserQuestionInput, AskUserQuestion, AskUserQuestionOption } fro
 import type { ExitPlanModeAllowedPrompt } from '../shared/types/planMode';
 export type { ExitPlanModeRequest, EnterPlanModeRequest, ExitPlanModeAllowedPrompt } from '../shared/types/planMode';
 
-// Pending AskUserQuestion requests waiting for user response
+// Pending AskUserQuestion requests waiting for user response.
+// See pendingPermissions comment — no wall-clock timeout (v0.2.14).
 const pendingAskUserQuestions = new Map<string, {
   resolve: (answers: Record<string, string> | null) => void;
   input: AskUserQuestionInput;
-  timer: ReturnType<typeof setTimeout>;
 }>();
 
-// Pending ExitPlanMode requests waiting for user approval
+// Pending ExitPlanMode requests waiting for user approval.
+// See pendingPermissions comment — no wall-clock timeout (v0.2.14).
 const pendingExitPlanMode = new Map<string, {
   resolve: (approved: boolean) => void;
   plan?: string;
   allowedPrompts?: ExitPlanModeAllowedPrompt[];
-  timer: ReturnType<typeof setTimeout>;
 }>();
 
-// Pending EnterPlanMode requests waiting for user approval
+// Pending EnterPlanMode requests waiting for user approval.
+// See pendingPermissions comment — no wall-clock timeout (v0.2.14).
 const pendingEnterPlanMode = new Map<string, {
   resolve: (approved: boolean) => void;
-  timer: ReturnType<typeof setTimeout>;
 }>();
 
 /**
@@ -2732,24 +2746,10 @@ async function handleAskUserQuestion(
     previewFormat: 'html',
   });
 
-  // Wait for user response or abort
+  // Wait for user response or abort. No wall-clock timeout — see the
+  // pendingAskUserQuestions Map declaration for why.
   return new Promise((resolve, reject) => {
-    // Timeout after 10 minutes (user needs time to think)
-    const timer = setTimeout(() => {
-      if (pendingAskUserQuestions.has(requestId)) {
-        cleanup();
-        console.warn('[AskUserQuestion] Timed out after 10 minutes');
-        // PRD #131 — broadcast lifecycle expiry so the frontend modal
-        // gets cleared. Without this, the user could still click Submit
-        // / Cancel after timeout, hitting the "Unknown request" path on
-        // the backend (issue #131 Bug 3 desync).
-        broadcast('ask-user-question:expired', { requestId, reason: 'timeout' });
-        resolve(null);
-      }
-    }, 10 * 60 * 1000);
-
     const cleanup = () => {
-      clearTimeout(timer);
       pendingAskUserQuestions.delete(requestId);
       signal?.removeEventListener('abort', onAbort);
     };
@@ -2777,7 +2777,7 @@ async function handleAskUserQuestion(
     // Listen for SDK abort signal
     signal?.addEventListener('abort', onAbort);
 
-    pendingAskUserQuestions.set(requestId, { resolve, input: questionInput, timer });
+    pendingAskUserQuestions.set(requestId, { resolve, input: questionInput });
   });
 }
 
@@ -2796,8 +2796,6 @@ export function handleAskUserQuestionResponse(
     return false;
   }
 
-  // Clear the timeout timer to prevent memory leak
-  clearTimeout(pending.timer);
   pendingAskUserQuestions.delete(requestId);
 
   if (answers === null) {
@@ -2835,19 +2833,9 @@ async function handleExitPlanMode(
 
   broadcast('exit-plan-mode:request', { requestId, plan, allowedPrompts });
 
+  // No wall-clock timeout — see pendingExitPlanMode Map declaration.
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      if (pendingExitPlanMode.has(requestId)) {
-        cleanup();
-        console.warn('[ExitPlanMode] Timed out after 10 minutes');
-        // PRD #131 — see handleAskUserQuestion for rationale.
-        broadcast('exit-plan-mode:expired', { requestId, reason: 'timeout' });
-        resolve(false);
-      }
-    }, 10 * 60 * 1000);
-
     const cleanup = () => {
-      clearTimeout(timer);
       pendingExitPlanMode.delete(requestId);
       signal?.removeEventListener('abort', onAbort);
     };
@@ -2864,7 +2852,7 @@ async function handleExitPlanMode(
     };
 
     signal?.addEventListener('abort', onAbort);
-    pendingExitPlanMode.set(requestId, { resolve, plan, allowedPrompts, timer });
+    pendingExitPlanMode.set(requestId, { resolve, plan, allowedPrompts });
   });
 }
 
@@ -2878,7 +2866,6 @@ export function handleExitPlanModeResponse(requestId: string, approved: boolean)
     console.warn(`[ExitPlanMode] Unknown request: ${requestId}`);
     return false;
   }
-  clearTimeout(pending.timer);
   pendingExitPlanMode.delete(requestId);
   // Restore currentPermissionMode so applySessionConfig won't override SDK's internal state
   if (approved && prePlanPermissionMode) {
@@ -2910,19 +2897,9 @@ async function handleEnterPlanMode(
 
   broadcast('enter-plan-mode:request', { requestId });
 
+  // No wall-clock timeout — see pendingEnterPlanMode Map declaration.
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      if (pendingEnterPlanMode.has(requestId)) {
-        cleanup();
-        console.warn('[EnterPlanMode] Timed out after 10 minutes');
-        // PRD #131 — see handleAskUserQuestion for rationale.
-        broadcast('enter-plan-mode:expired', { requestId, reason: 'timeout' });
-        resolve(false);
-      }
-    }, 10 * 60 * 1000);
-
     const cleanup = () => {
-      clearTimeout(timer);
       pendingEnterPlanMode.delete(requestId);
       signal?.removeEventListener('abort', onAbort);
     };
@@ -2939,7 +2916,7 @@ async function handleEnterPlanMode(
     };
 
     signal?.addEventListener('abort', onAbort);
-    pendingEnterPlanMode.set(requestId, { resolve, timer });
+    pendingEnterPlanMode.set(requestId, { resolve });
   });
 }
 
@@ -2953,7 +2930,6 @@ export function handleEnterPlanModeResponse(requestId: string, approved: boolean
     console.warn(`[EnterPlanMode] Unknown request: ${requestId}`);
     return false;
   }
-  clearTimeout(pending.timer);
   pendingEnterPlanMode.delete(requestId);
   // Sync currentPermissionMode so applySessionConfig won't override SDK's plan mode
   if (approved) {
@@ -3046,19 +3022,10 @@ async function checkToolPermission(
   // Forward to IM event bus (subscribers route per-requestId for interactive approval cards)
   emitImEvent('permission-request', JSON.stringify({ requestId, toolName, input: inputPreview }));
 
-  // Wait for user response or abort
+  // Wait for user response or abort. No wall-clock timeout — see the
+  // pendingPermissions Map declaration for why.
   return new Promise((resolve, reject) => {
-    // Timer is declared before cleanup (same pattern as handleAskUserQuestion) so cleanup can clear it
-    const timer = setTimeout(() => {
-      if (pendingPermissions.has(requestId)) {
-        cleanup();
-        console.warn(`[permission] ${toolName}: timed out after 10 minutes, denying`);
-        resolve('deny');
-      }
-    }, 10 * 60 * 1000);
-
     const cleanup = () => {
-      clearTimeout(timer);
       pendingPermissions.delete(requestId);
       signal?.removeEventListener('abort', onAbort);
     };
@@ -3074,7 +3041,7 @@ async function checkToolPermission(
     // Listen for SDK abort signal
     signal?.addEventListener('abort', onAbort);
 
-    pendingPermissions.set(requestId, { resolve, toolName, input, timer });
+    pendingPermissions.set(requestId, { resolve, toolName, input });
   });
 }
 
@@ -3093,8 +3060,6 @@ export function handlePermissionResponse(
     return false;
   }
 
-  // Clear the timeout timer to prevent memory leak
-  clearTimeout(pending.timer);
   pendingPermissions.delete(requestId);
 
   if (decision === 'deny') {
@@ -3117,7 +3082,6 @@ export function handlePermissionResponse(
     for (const [otherId, otherPending] of pendingPermissions) {
       if (otherPending.toolName === pending.toolName) {
         console.log(`[permission] ${otherPending.toolName}: cascade auto-approved (requestId=${otherId})`);
-        clearTimeout(otherPending.timer);
         pendingPermissions.delete(otherId);
         otherPending.resolve('allow');
       }
@@ -3128,50 +3092,75 @@ export function handlePermissionResponse(
 }
 
 /**
- * Clear session permission state (call when session ends).
+ * Drain every pending interactive request map.
  *
- * Pattern 1 cleanup contract: every pending request map holds (timer, resolve).
- * If we just `.clear()` the maps, the timers fire later (logging stale state)
- * and the resolve callbacks never run — leaving the SDK / tool turn waiting
- * forever for a decision that will never come. We must:
- *   1. clearTimeout each entry's timer
- *   2. resolve each waiter with a "denied / cancelled" outcome
- *      (deny for permission-style, null/false for question/plan-mode —
- *       matches the timeout fallback paths above)
+ * Why this exists (v0.2.14 — Codex review): once the per-entry 10-minute
+ * timeout was removed, only two paths cleaned up pending entries — the
+ * SDK abort signal (`onAbort` in each handler, broadcasts `:expired` and
+ * rejects) and `clearSessionPermissions`. The SDK abort path covers
+ * "session was cleanly torn down by interrupt()", but it does NOT cover:
+ *   1. SDK subprocess crash / error before `signal.abort` fires
+ *      (the runStreamingSession `finally` block runs this drain).
+ *   2. UI-triggered `resetSession` that clears via `clearSessionPermissions`
+ *      while the renderer still has history visible — `chat:init`'s
+ *      `clearInteractiveState` is gated on `historyMessages.length === 0`
+ *      (TabProvider.tsx:973), so a non-empty history would leave the modal
+ *      painted with no backend entry to respond to → "Unknown request"
+ *      desync (PRD #131).
  *
- * Called from session reset / switch / fork / rewind paths.
+ * Mirrors `external-session.ts::drainPendingInteractiveRequestsAsExpired`.
+ * For Ask/ExitPlan/EnterPlan we broadcast the matching `:expired` event so
+ * the frontend modal clears even when the chat:init guard skips the
+ * unconditional clear. For permission requests we skip the broadcast —
+ * there is no `permission:expired` channel; pendingPermission is cleared
+ * via the chat:init / clearInteractiveState path on SSE reconnect, and
+ * adding a new SSE event type just for cross-coverage is out of scope.
+ *
+ * `reason` is forwarded into the `:expired` payload so future telemetry /
+ * UX messaging can distinguish reset-driven vs crash-driven expiry. The
+ * frontend currently ignores it.
  */
-export function clearSessionPermissions(): void {
-  // Permission requests: resolve with 'deny' so any awaiting tool call
-  // surfaces as denied (the same behaviour as the per-entry 10-min timeout).
+function drainPendingInteractiveRequests(reason: 'reset' | 'session-end'): void {
+  // Permission: resolve with 'deny' so any awaiting tool call surfaces as
+  // denied. No `:expired` broadcast (see helper docstring).
   for (const [, p] of pendingPermissions) {
-    clearTimeout(p.timer);
     try { p.resolve('deny'); } catch { /* swallow — never propagate from cleanup */ }
   }
   pendingPermissions.clear();
 
-  // Ask-user-question: resolve with null (matches timeout path) → tool sees
-  // "user did not answer" and degrades gracefully.
-  for (const [, q] of pendingAskUserQuestions) {
-    clearTimeout(q.timer);
+  // Ask-user-question: broadcast :expired then resolve(null). Order matters
+  // only for tests — the tool turn is going away regardless.
+  for (const [requestId, q] of pendingAskUserQuestions) {
+    try { broadcast('ask-user-question:expired', { requestId, reason }); } catch { /* swallow */ }
     try { q.resolve(null); } catch { /* swallow */ }
   }
   pendingAskUserQuestions.clear();
 
-  // Plan-mode entries resolve with `false` (mirrors the per-entry timeout
-  // semantics — request was not approved).
-  for (const [, p] of pendingExitPlanMode) {
-    clearTimeout(p.timer);
+  // Plan-mode entries resolve with `false` (request was not approved).
+  for (const [requestId, p] of pendingExitPlanMode) {
+    try { broadcast('exit-plan-mode:expired', { requestId, reason }); } catch { /* swallow */ }
     try { p.resolve(false); } catch { /* swallow */ }
   }
   pendingExitPlanMode.clear();
 
-  for (const [, p] of pendingEnterPlanMode) {
-    clearTimeout(p.timer);
+  for (const [requestId, p] of pendingEnterPlanMode) {
+    try { broadcast('enter-plan-mode:expired', { requestId, reason }); } catch { /* swallow */ }
     try { p.resolve(false); } catch { /* swallow */ }
   }
   pendingEnterPlanMode.clear();
+}
 
+/**
+ * Clear session permission state on user-initiated session reset.
+ *
+ * Only call site: `resetSession()` (this file, ~L5298). Fork / switch /
+ * rewind paths rely on `abortPersistentSession()` → SDK `interrupt()` →
+ * canUseTool `signal.abort` → per-handler `onAbort` cleanup, which is the
+ * canonical SDK-driven teardown path. (CC review noted the prior JSDoc's
+ * "switch/fork/rewind" claim was untrue.)
+ */
+export function clearSessionPermissions(): void {
+  drainPendingInteractiveRequests('reset');
   sessionAlwaysAllowed.clear();
   prePlanPermissionMode = null;
 }
@@ -6022,7 +6011,13 @@ export async function enqueueUserMessage(
     clearTimeout(preWarmTimer);
     preWarmTimer = null;
   }
-  setSessionState('running');
+  // (issue #174) Use 'starting' if the SDK subprocess hasn't confirmed
+  // system_init yet — this enqueue path runs both when pre-warm already
+  // booted (systemInitInfo set → 'running') and when no pre-warm exists or
+  // pre-warm is still bootstrapping (→ 'starting'). The UI distinguishes
+  // these so users see "AI 启动中" instead of a generic thinking spinner
+  // during the (up to 10-minute) startup timeout window.
+  setSessionState(systemInitInfo ? 'running' : 'starting');
 
   // Save images to disk and create attachment records
   const savedAttachments: MessageWire['attachments'] = [];
@@ -6394,6 +6389,37 @@ export async function waitForSessionIdle(
 
 export async function interruptCurrentResponse(reason: CancelReason = 'user'): Promise<boolean> {
   if (!isTurnInFlight()) {
+    // (issue #174) Stop pressed during 'starting': the SDK subprocess is
+    // alive but system_init hasn't arrived (the for-await loop sees no
+    // assistant content yet, so isTurnInFlight is false). Without this
+    // branch the user's Stop button is a no-op for the up-to-10-minute
+    // startup-timeout window. Tear the subprocess down via the canonical
+    // abort path — same teardown the startup-timeout firer uses.
+    if (sessionState === 'starting') {
+      console.log(`[agent] Stop pressed during startup (reason=${reason}) — aborting persistent session`);
+      // Drain BEFORE abort so the cold-start path's queued first-message
+      // (enqueued by enqueueUserMessage just before the deferred
+      // startStreamingSession scheduled via setTimeout(0)) doesn't survive
+      // into a recovery session and silently re-execute. abortPersistentSession
+      // calls rescuePendingToQueue which only moves pendingMidTurnQueue items
+      // (empty during startup) — it doesn't touch messageQueue. Order
+      // matters: drain here, then abort sets shouldAbortSession so the
+      // pre-launch guard inside startStreamingSession bails out cleanly.
+      drainQueueWithCancellation();
+      abortPersistentSession();
+      // Cold-start race: if the deferred startStreamingSession setTimeout(0)
+      // hasn't fired yet, querySession is null and isProcessing is false,
+      // so the for-await finally block — the only path that flips
+      // sessionState back to 'idle' — will never run. Force the transition
+      // here so the UI returns to a sendable state immediately. (When a
+      // subprocess IS alive, abortPersistentSession's interrupt() drives
+      // the for-await loop to terminate and the existing finally block
+      // handles the idle transition; we'd be racing it, so skip.)
+      if (!querySession && !isProcessing) {
+        setSessionState('idle');
+      }
+      return true;
+    }
     // No active turn, but there might be orphaned queued messages.
     // Drain them and notify the frontend so the UI can recover.
     if (messageQueue.length > 0) {
@@ -6938,6 +6964,24 @@ export async function forkSession(assistantMessageId: string): Promise<{
 async function startStreamingSession(preWarm = false): Promise<void> {
   await awaitSessionTermination(10_000, 'startStreamingSession');
 
+  // (issue #174) Cold-start abort race: enqueueUserMessage schedules this
+  // function via setTimeout(0) after pushing to messageQueue. If the user
+  // presses Stop before the timer fires, interruptCurrentResponse's
+  // 'starting' branch sets shouldAbortSession=true and drains messageQueue —
+  // but the unconditional `shouldAbortSession = false` reset further down
+  // in this function would silently re-arm the launch. Bail out here
+  // instead. Pre-warm doesn't enter this race (it's not user-driven) so
+  // the guard is gated on !preWarm.
+  if (shouldAbortSession && !preWarm) {
+    console.log('[agent] startStreamingSession: aborted pre-launch by stop during starting');
+    shouldAbortSession = false;
+    drainQueueWithCancellation();
+    if (sessionState === 'starting') {
+      setSessionState('idle');
+    }
+    return;
+  }
+
   if (isProcessing || querySession) {
     return;
   }
@@ -6997,9 +7041,13 @@ async function startStreamingSession(preWarm = false): Promise<void> {
   streamIndexToBlockType.clear();
   imTextBlockIndices.clear();
 
-  // Don't broadcast 'running' during pre-warm — session is invisible to frontend
+  // (issue #174) Broadcast 'starting' (not 'running') here: the SDK subprocess
+  // has just been launched and system_init hasn't arrived yet. The for-await
+  // loop below transitions to 'running' once system_init lands. Pre-warm stays
+  // 'idle' as before — pre-warmed sessions are invisible to the UI until the
+  // first user message lifts them into the active path.
   if (!preWarm) {
-    setSessionState('running');
+    setSessionState('starting');
   }
 
   let resolveTermination: () => void;
@@ -7585,6 +7633,19 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         ? { resume: resumeFrom, ...(rewindResumeAt ? { resumeSessionAt: rewindResumeAt } : {}) }
         : { sessionId: effectiveSdkSessionId };
 
+    // (issue #174) Second pre-launch abort guard. Between the first guard
+    // (right after awaitSessionTermination) and here, several async calls
+    // run — buildSdkMcpServers, sdkGetSessionMessages, env/agent loading.
+    // A user Stop pressed in that window sets shouldAbortSession=true and
+    // drains messageQueue; without this second check we'd still spawn the
+    // SDK subprocess for nothing. Throwing keeps the surrounding try/catch +
+    // finally cleanup path single-source-of-truth — the catch below logs
+    // the abort sentinel without retrying, the finally restores state.
+    if (shouldAbortSession && !preWarm) {
+      console.log('[agent] startStreamingSession: aborted just before query() by stop during starting');
+      throw new Error('STARTUP_ABORTED_BY_STOP');
+    }
+
     try {
       querySession = query({
         prompt: promptGen,
@@ -7766,6 +7827,12 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         // Buffer system_init during pre-warm; replay when first user message arrives
         if (!isPreWarming) {
           sessionRegistered = true;  // SDK 确认注册，后续必须 resume
+          // (issue #174) Subprocess is now ready — graduate 'starting' to
+          // 'running' so the UI swaps the "AI 启动中" hint for the normal
+          // thinking indicator. Skip on pre-warm (state is 'idle' anyway).
+          if (sessionState === 'starting') {
+            setSessionState('running');
+          }
           broadcast('chat:system-init', { info: systemInitInfo, sessionId, runtime: 'builtin' });
         } else {
           // Pre-warm 不设 sessionRegistered — 这是核心设计约束
@@ -8786,6 +8853,17 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     }
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
+    // (issue #174) Pre-launch abort sentinel — clean exit, not a real error.
+    // Skip the loud session-error log + the all-recovery branches below;
+    // jump straight to finally for state cleanup. shouldAbortSession is
+    // already true (set by interruptCurrentResponse), and the finally block
+    // will run setSessionState('idle') / unregister bridge / resolve
+    // sessionTerminationPromise. Without this short-circuit the message
+    // would reach console.error and look like a real failure.
+    if (errorMessage === 'STARTUP_ABORTED_BY_STOP') {
+      console.log('[agent] session start aborted pre-launch by user stop');
+      return;
+    }
     const errorStack = error instanceof Error ? error.stack : String(error);
     console.error('[agent] session error:', errorMessage);
     console.error('[agent] session error stack:', errorStack);
@@ -8952,6 +9030,17 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     // a fresh token (freshToken: true) so late requests from this dying
     // subprocess find their old token gone and get rejected cleanly.
     unregisterActiveSessionBridge();
+
+    // (v0.2.14 — Codex review) Drain pending interactive requests on every
+    // SDK exit shape. The per-handler `onAbort` covers the canonical
+    // SDK-driven `interrupt()` path, but unexpected exits (subprocess
+    // crash, transport error in `for await`, abortPersistentSession races
+    // where signal.abort doesn't propagate before close) would otherwise
+    // leak Map entries — `getPendingInteractiveRequests` then replays
+    // ghost cards to newly connecting SSE clients. Pre-warm sessions can't
+    // hold pending entries (they never serve a turn), but draining is
+    // idempotent so the wasPreWarming branch is harmless.
+    drainPendingInteractiveRequests('session-end');
 
     // sessionRegistered 已在 system_init handler 中设置，无需重复
 

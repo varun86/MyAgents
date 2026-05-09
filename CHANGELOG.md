@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.2.14] - 2026-05-10
+
+> AI 等用户决策的弹窗不再因为离开太久而消失。
+
+### Fixed
+
+- **AskUserQuestion / Plan 确认 / 权限请求弹窗不再 10 分钟后自动消失**：之前 AI 抛出选择题、计划确认或权限请求时，如果用户离开电脑超过 10 分钟回来，弹窗已经被静默清掉、AI 那边按"用户拒绝/未答"继续往下走——用户的体感是"刚才那个选择去哪了？"。Mac 睡眠唤醒时尤其明显，`setTimeout` 在唤醒瞬间就触发。修复后弹窗会一直停留直到用户回应（对齐 Claude Code CLI 行为），清理交给现有的 SDK abort 信号、`clearSessionPermissions`、SDK subprocess 退出三条路径处理。
+
+### Internal
+
+- 抽 `drainPendingInteractiveRequests` 统一 helper 处理四类 pending request 的 drain（permission / AskUserQuestion / ExitPlanMode / EnterPlanMode），mirror `external-session.ts` 已有的 drain 模式。`runStreamingSession` 的 finally 路径现在也会 drain，覆盖 SDK subprocess 异常退出导致 pending 条目泄漏的边缘情况。
+- 同步 `specs/tech_docs/sdk_canUseTool_guide.md` 的 Map 形态示例和超时表，避免后续 AI 看着旧文档把 timer 重新加回来。
+
+---
+
 ## [0.2.13] - 2026-05-09
 
 > 0.2.12 紧急修复：消息显示两遍、多 Agent 状态错位、关闭 tab 后回切丢失 AI 回复。

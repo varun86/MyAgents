@@ -25,7 +25,11 @@ import type { ExitPlanModeRequest, EnterPlanModeRequest } from '../../shared/typ
 import type { TerminalReason } from '../../shared/terminalReason';
 import type { SessionMetadata } from '@/api/sessionClient';
 
-export type SessionState = 'idle' | 'running' | 'stopping' | 'error';
+// (issue #174) 'starting' = SDK subprocess launched, awaiting system_init.
+// Distinct from 'running' (= AI actively processing a turn) so the UI can
+// surface a "AI 启动中" hint instead of the generic thinking spinner during
+// the up-to-10-minute startup-timeout window.
+export type SessionState = 'idle' | 'starting' | 'running' | 'stopping' | 'error';
 
 /**
  * Tab state - all the state that belongs to a single Tab

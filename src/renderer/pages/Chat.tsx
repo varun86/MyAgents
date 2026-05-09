@@ -1033,18 +1033,26 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialMessage, isActive, sessionId, isConnected]);
 
-  // Close startup overlay when the AI actually starts processing — not when
-  // sendMessage returns. `sessionState === 'running'` is the authoritative
-  // "AI is working on a turn" signal (set by chat:status running, broadcast
-  // by the runtime once prewarm is done). `streamingMessage` covers the case
-  // where status events were missed but content has arrived. `agentError`
-  // covers async send failures: sendMessage is fire-and-forget so the
-  // autoSend try/catch can't observe backend rejection / network errors —
-  // those land on agentError instead, and the user needs to see the error
-  // banner immediately rather than wait out the 30s safety timeout.
+  // Close startup overlay as soon as the backend has acknowledged the request
+  // — either by transitioning to 'starting' (subprocess launched, system_init
+  // pending) or 'running' (turn actively processing). (issue #174) Including
+  // 'starting' is required because the overlay is z-30 and covers the input
+  // (z-20); leaving it up during 'starting' would hide both the new Stop
+  // button and the MessageList "AI 启动中…" hint, defeating the whole point
+  // of the new state. `streamingMessage` covers the case where status events
+  // were missed but content has arrived. `agentError` covers async send
+  // failures: sendMessage is fire-and-forget so autoSend's try/catch can't
+  // observe backend rejection / network errors — they land on agentError
+  // instead, and the user needs to see the error banner immediately rather
+  // than wait out the 30s safety timeout.
   useEffect(() => {
     if (!showStartupOverlay) return;
-    if (sessionState === 'running' || streamingMessage || agentError) {
+    if (
+      sessionState === 'running'
+      || sessionState === 'starting'
+      || streamingMessage
+      || agentError
+    ) {
       setShowStartupOverlay(false);
     }
   }, [showStartupOverlay, sessionState, streamingMessage, agentError]);
@@ -2022,8 +2030,11 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       return false;  // Signal SimpleChatInput NOT to clear the input
     }
 
-    // Queue limit: max 5 queued messages
-    const isAiBusy = isLoading || sessionState === 'running';
+    // Queue limit: max 5 queued messages.
+    // (issue #174) 'starting' is also busy — SDK subprocess is launching but
+    // hasn't sent system_init yet. Including it prevents the queue cap from
+    // being bypassed while the user keeps typing during the startup window.
+    const isAiBusy = isLoading || sessionState === 'running' || sessionState === 'starting';
     if (isAiBusy && queuedMessages.length >= 5) {
       toastRef.current.warning('最多排队 5 条消息');
       return false;
@@ -2931,7 +2942,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
               onExitPlanModeApprove={handleExitPlanModeApprove}
               onExitPlanModeReject={handleExitPlanModeReject}
               systemStatus={rewindStatus || systemStatus}
-              isStreaming={isLoading || sessionState === 'running'}
+              isStreaming={isLoading || sessionState === 'running' || sessionState === 'starting'}
+              sessionState={sessionState}
               onRewind={isExternalRuntime ? undefined : handleRewind}
               onRetry={handleRetry}
               onFork={isExternalRuntime ? undefined : handleFork}
@@ -2970,7 +2982,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             onSend={handleSendMessage}
             onStop={handleStop}
             active={isActive}
-            isLoading={isLoading || sessionState === 'running'}
+            isLoading={isLoading || sessionState === 'running' || sessionState === 'starting'}
             sessionState={sessionState}
             systemStatus={systemStatus}
             agentDir={agentDir}
