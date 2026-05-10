@@ -1978,7 +1978,18 @@ async function main() {
         try {
           const providerLabel = typeof providerEnv === 'object' ? providerEnv?.baseUrl ?? 'anthropic' : (providerEnv ?? 'anthropic');
           console.log(`[chat] send text="${text.slice(0, 200)}" images=${images.length} mode=${permissionMode} model=${model ?? 'default'} baseUrl=${providerLabel}`);
-          const result = await enqueueUserMessage(text, images, permissionMode, model, providerEnv);
+          // PRD 0.2.14 — tag desktop-origin messages so the desktop→IM mirror
+          // (im-mirror.ts) can opt this turn into channel fan-out. Without
+          // this, agent-session.ts sees `metadata?.source === undefined` and
+          // skips the mirror call.
+          const result = await enqueueUserMessage(
+            text,
+            images,
+            permissionMode,
+            model,
+            providerEnv,
+            { source: 'desktop' as SessionSource },
+          );
           if (result.error) {
             return jsonResponse({ success: false, error: result.error }, 429);
           }
