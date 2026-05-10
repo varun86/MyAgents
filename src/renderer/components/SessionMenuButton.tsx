@@ -23,6 +23,7 @@ import { createPortal } from 'react-dom';
 import {
     BarChart2,
     Download,
+    Gauge,
     Loader2,
     MessageSquare,
     MoreHorizontal,
@@ -74,6 +75,15 @@ export interface SessionMenuButtonProps {
     canRename: boolean;
     /** Open the inline title editor — sourced from a SessionTitleEditor ref. */
     onOpenRename: () => void;
+    /**
+     * Send the SDK `/context` slash command on behalf of the user so the
+     * `/context` output (real token-window distribution) lands in the chat
+     * stream. Only wired by the caller when the active runtime is `builtin`
+     * — external runtimes (Claude Code CLI / Codex / Gemini) don't share
+     * this command surface, so the menu item should hide entirely there.
+     * The menu omits the row when this prop is undefined.
+     */
+    onShowContext?: () => void;
     /** Caller persists the change and updates sessionMeta optimistically. */
     onFavoriteChanged?: (next: boolean, updated: SessionMetadata | null) => void;
     /** Called after a successful delete so caller can reset to a new session. */
@@ -97,6 +107,7 @@ export default function SessionMenuButton({
     favorite,
     canRename,
     onOpenRename,
+    onShowContext,
     onFavoriteChanged,
     onDeleted,
     onNewSessionKeepingBinding,
@@ -170,6 +181,12 @@ export default function SessionMenuButton({
         setStatsTarget({ id: sessionId, title: sessionTitle || '此对话' });
         closeAll();
     }, [sessionId, sessionTitle, closeAll]);
+
+    const handleShowContext = useCallback(() => {
+        if (!onShowContext) return;
+        closeAll();
+        onShowContext();
+    }, [onShowContext, closeAll]);
 
     const handleDeleteClick = useCallback(() => {
         if (cronProtected) return;
@@ -288,6 +305,13 @@ export default function SessionMenuButton({
                     onClick={() => { void handleExport(); }}
                     disabled={exporting}
                 />
+                {onShowContext && (
+                    <MenuItem
+                        icon={<Gauge className="h-3.5 w-3.5" />}
+                        label="上下文 Token 消耗详情"
+                        onClick={handleShowContext}
+                    />
+                )}
                 <MenuItem
                     icon={<BarChart2 className="h-3.5 w-3.5" />}
                     label="查看消耗统计"

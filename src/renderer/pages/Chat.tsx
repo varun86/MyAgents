@@ -2821,6 +2821,10 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
                 // gate above). Mirror that condition here so the menu's
                 // 重命名 row reflects whether the editor exists to open.
                 canRename={!!sessionTitle && sessionTitle !== 'New Tab' && sessionTitle !== 'New Chat'}
+                // `/context` is a builtin SDK slash command — external runtimes
+                // (Claude Code CLI / Codex / Gemini) don't share this surface,
+                // so we omit the callback and let the menu hide the row entirely.
+                onShowContext={isExternalRuntime ? undefined : () => { void handleSendMessageRef.current('/context'); }}
                 onOpenRename={() => titleEditorRef.current?.openRename()}
                 onFavoriteChanged={(_, updated) => { if (updated) setSessionMeta(updated); }}
                 onDeleted={handleNewSession}
