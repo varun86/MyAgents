@@ -14,7 +14,7 @@ use tokio::net::TcpListener;
 use crate::cron_task::{
     self, CronDelivery, CronSchedule, CronTask, CronTaskConfig, ProviderIntent, TaskProviderEnv,
 };
-use crate::{ulog_info, ulog_warn, ulog_error};
+use crate::{ulog_debug, ulog_info, ulog_warn, ulog_error};
 use crate::im::{self, ManagedImBots, ManagedAgents};
 use crate::im::adapter::{ImAdapter, ImStreamAdapter};
 use crate::im::bridge;
@@ -2093,9 +2093,30 @@ async fn mirror_to_channel_handler(
     }
 
     // ----- Optional images (PNG/JPG only, 5MB cap each) -----
+    //
+    // Pre-decode size guard (review-by-codex M2): a 50MB base64 string
+    // decodes to ~37.5MB binary which is rejected by `MIRROR_IMAGE_MAX_BYTES`
+    // — but only AFTER we've already done the expensive `base64::decode`
+    // allocation. Cap on the *encoded* length first so an attacker can't
+    // amplify ~7x memory before being rejected.
+    //
+    // Formula: padded base64 inflates to `4 * ceil(bytes / 3)` chars.
+    // MUST stay byte-for-byte equivalent to the Node-side
+    // `MIRROR_IMAGE_MAX_BASE64_CHARS` in agent-session.ts:toMirrorImages
+    // — otherwise the boundary 5 MiB image is accepted on one side and
+    // rejected on the other (review-by-codex F4).
+    const MIRROR_IMAGE_MAX_BASE64_LEN: usize =
+        ((MIRROR_IMAGE_MAX_BYTES + 2) / 3) * 4 + 64;
+
     let mut sent_images = 0usize;
     let mut skipped_images = 0usize;
     if let Some(images) = req.images {
+        // Capture total before consuming — needed so the break-on-error
+        // path below can attribute the remaining unprocessed images to
+        // `skipped_images` (review-by-codex F5). Without this, an early
+        // break leaves the response's `imagesSkipped` undercounting and
+        // hides "we silently dropped half the upload" from observability.
+        let total_images = images.len();
         for (idx, img) in images.into_iter().enumerate() {
             // Whitelist MIME — the spec said PNG/JPG only.
             let (ext, ok_mime) = match img.mime_type.as_str() {
@@ -2104,6 +2125,16 @@ async fn mirror_to_channel_handler(
                 _ => ("bin", false),
             };
             if !ok_mime {
+                skipped_images += 1;
+                continue;
+            }
+            // Cheap encoded-size check BEFORE the decode allocation.
+            if img.data_base64.len() > MIRROR_IMAGE_MAX_BASE64_LEN {
+                ulog_debug!(
+                    "[mirror] skip oversize image[{}] base64Len={}",
+                    idx,
+                    img.data_base64.len()
+                );
                 skipped_images += 1;
                 continue;
             }
@@ -2132,13 +2163,26 @@ async fn mirror_to_channel_handler(
             {
                 Ok(_) => sent_images += 1,
                 Err(e) => {
+                    let remaining = total_images.saturating_sub(idx + 1);
                     ulog_warn!(
-                        "[mirror] send_photo[{}] failed channel={}: {}",
+                        "[mirror] send_photo[{}] failed channel={}: {} — aborting, attributing {} remaining as skipped",
                         idx,
                         channel_id,
-                        e
+                        e,
+                        remaining,
                     );
-                    skipped_images += 1;
+                    skipped_images += 1 + remaining;
+                    // Break-on-transport-error (review-by-codex M4):
+                    // adapter.send_photo failures are dominated by transport-
+                    // class problems (network drop, expired auth, rate limit).
+                    // Continuing the loop hammers the same dead leg N more
+                    // times; better to surface what we sent and let the caller
+                    // (or user) retry. Format-class errors are already
+                    // filtered upstream by MIME whitelist + size cap, so
+                    // here the failure is almost always transport. Remaining
+                    // images counted into `skipped_images` so the response's
+                    // `imagesSkipped` field stays observability-accurate.
+                    break;
                 }
             }
         }

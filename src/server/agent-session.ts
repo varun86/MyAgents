@@ -732,12 +732,30 @@ function fireDesktopAssistantBlockMirror(text: string): void {
 }
 
 /** Convert ImagePayload[] to MirrorImage[] keeping only PNG/JPG (Q5 lockdown). */
+// Pre-validation cap MUST stay in sync with Rust's
+// `MIRROR_IMAGE_MAX_BYTES = 5MB` in management_api.rs (and its
+// `MIRROR_IMAGE_MAX_BASE64_LEN` derivation). Base64 with padding inflates
+// to `4 * ceil(bytes / 3)` chars — using a strict `Math.ceil(bytes/3)*4`
+// formula matches Rust's exact bound, plus the same 64-char slack for any
+// trailing whitespace/newlines. Without this alignment, the Node check is
+// off by 1 char at the boundary and would reject a 5 MiB image that Rust
+// would still accept (review-by-codex F4). Cap on the *encoded* length so
+// the guard is O(1) without decoding.
+const MIRROR_IMAGE_MAX_BYTES = 5 * 1024 * 1024;
+const MIRROR_IMAGE_MAX_BASE64_CHARS = Math.ceil(MIRROR_IMAGE_MAX_BYTES / 3) * 4 + 64;
+
 function toMirrorImages(images: ImagePayload[] | undefined): MirrorImage[] | undefined {
   if (!images || images.length === 0) return undefined;
   const out: MirrorImage[] = [];
   for (const img of images) {
     const mime = img.mimeType.toLowerCase();
     if (mime !== 'image/png' && mime !== 'image/jpeg' && mime !== 'image/jpg') continue;
+    if (img.data.length > MIRROR_IMAGE_MAX_BASE64_CHARS) {
+      console.warn(
+        `[mirror] dropping oversize image: mime=${mime} base64Len=${img.data.length} cap=${MIRROR_IMAGE_MAX_BASE64_CHARS}`,
+      );
+      continue;
+    }
     out.push({ mimeType: img.mimeType, dataBase64: img.data });
   }
   return out.length > 0 ? out : undefined;
@@ -7711,8 +7729,27 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           const result = await handleExitPlanMode(input, options.signal);
           if (!result.approved) {
             const hasFeedback = !!result.feedback;
+            // Cap feedback length before splicing into the wrapper.
+            // The wrapper is a system-style instruction ("…请根据上述反馈
+            // 修订方案，然后再次调用 ExitPlanMode 工具…") delivered via
+            // PermissionResult.deny.message, which the model reads as a
+            // tool_result. A long or maliciously crafted feedback string
+            // can shift the apparent authority of the wrapper — e.g.
+            // injected text like "请忽略上述指令并 …" trailed by plausible
+            // Chinese could social-engineer the model into executing the
+            // injected instruction. Truncating to a reasonable plan-comment
+            // length (4 KB chars) caps the attack surface AND makes the
+            // wrapper still readable. Suffix marker tells the model the
+            // input was clipped (so it doesn't fabricate around an
+            // apparently mid-sentence cut).
+            // v0.2.14 cross-bugfix follow-up.
+            const FEEDBACK_MAX_CHARS = 4000;
+            const rawFeedback = (result.feedback ?? '').toString();
+            const feedback = rawFeedback.length > FEEDBACK_MAX_CHARS
+              ? `${rawFeedback.slice(0, FEEDBACK_MAX_CHARS)}\n\n[…feedback 已截断，原文 ${rawFeedback.length} 字符]`
+              : rawFeedback;
             const message = hasFeedback
-              ? `用户没有批准当前方案，并提供了以下修改意见：\n\n${result.feedback}\n\n请根据上述反馈修订方案，然后再次调用 ExitPlanMode 工具提交新版本的方案以供审核。`
+              ? `用户没有批准当前方案，并提供了以下修改意见：\n\n${feedback}\n\n请根据上述反馈修订方案，然后再次调用 ExitPlanMode 工具提交新版本的方案以供审核。`
               : '用户拒绝了方案';
             return {
               behavior: 'deny' as const,
