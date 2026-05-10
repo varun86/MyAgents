@@ -2777,8 +2777,12 @@ const pendingAskUserQuestions = new Map<string, {
 
 // Pending ExitPlanMode requests waiting for user approval.
 // See pendingPermissions comment — no wall-clock timeout (v0.2.14).
+// `feedback` carries the user's optional 「修改意见」 — when present on a
+// rejection, canUseTool sends it back to the model via deny.message so the
+// AI can revise the plan in the same turn (issue #182).
+type ExitPlanModeResolution = { approved: boolean; feedback?: string };
 const pendingExitPlanMode = new Map<string, {
-  resolve: (approved: boolean) => void;
+  resolve: (result: ExitPlanModeResolution) => void;
   plan?: string;
   allowedPrompts?: ExitPlanModeAllowedPrompt[];
 }>();
@@ -2908,12 +2912,15 @@ export function handleAskUserQuestionResponse(
 }
 
 /**
- * Handle ExitPlanMode tool - AI submits a plan for user review
+ * Handle ExitPlanMode tool - AI submits a plan for user review.
+ * Returns {approved, feedback?}: feedback is the user's optional rejection
+ * comment, used by canUseTool to construct a deny message routed back to
+ * the model so it can revise the plan in the same turn (issue #182).
  */
 async function handleExitPlanMode(
   input: unknown,
   signal?: AbortSignal
-): Promise<boolean> {
+): Promise<ExitPlanModeResolution> {
   console.log('[ExitPlanMode] Requesting user approval');
 
   const obj = (input && typeof input === 'object' ? input : {}) as Record<string, unknown>;
@@ -2955,10 +2962,17 @@ async function handleExitPlanMode(
 }
 
 /**
- * Handle user's ExitPlanMode response from frontend
+ * Handle user's ExitPlanMode response from frontend.
+ * `feedback` is forwarded only on rejection (issue #182): when set, the
+ * model receives it as the deny message and continues the same turn to
+ * revise the plan; when empty, behavior matches the legacy reject path.
  */
-export function handleExitPlanModeResponse(requestId: string, approved: boolean): boolean {
-  console.debug(`[ExitPlanMode] handleResponse: requestId=${requestId}, approved=${approved}`);
+export function handleExitPlanModeResponse(
+  requestId: string,
+  approved: boolean,
+  feedback?: string,
+): boolean {
+  console.debug(`[ExitPlanMode] handleResponse: requestId=${requestId}, approved=${approved}, hasFeedback=${!!feedback}`);
   const pending = pendingExitPlanMode.get(requestId);
   if (!pending) {
     console.warn(`[ExitPlanMode] Unknown request: ${requestId}`);
@@ -2973,7 +2987,8 @@ export function handleExitPlanModeResponse(requestId: string, approved: boolean)
     // Notify frontend that mode changed (plan → auto/custom/etc.)
     broadcast('chat:permission-mode-changed', { permissionMode: currentPermissionMode });
   }
-  pending.resolve(approved);
+  const trimmed = feedback?.trim();
+  pending.resolve({ approved, feedback: !approved && trimmed ? trimmed : undefined });
   return true;
 }
 
@@ -3234,10 +3249,10 @@ function drainPendingInteractiveRequests(reason: 'reset' | 'session-end'): void 
   }
   pendingAskUserQuestions.clear();
 
-  // Plan-mode entries resolve with `false` (request was not approved).
+  // Plan-mode entries resolve with `{approved: false}` (request was not approved).
   for (const [requestId, p] of pendingExitPlanMode) {
     try { broadcast('exit-plan-mode:expired', { requestId, reason }); } catch { /* swallow */ }
-    try { p.resolve(false); } catch { /* swallow */ }
+    try { p.resolve({ approved: false }); } catch { /* swallow */ }
   }
   pendingExitPlanMode.clear();
 
@@ -7676,18 +7691,33 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         }
 
         // Special handling for ExitPlanMode - user reviews the plan.
-        // PRD #131 — `interrupt: true` so the AI stops the turn after the
-        // user rejects. Previously the AI interpreted the deny as "try
-        // again" and kept calling tools (TodoWrite, Read, Edit, even another
-        // ExitPlanMode), defeating the user's intent.
+        //
+        // Two reject modes (issue #182):
+        // - User submits empty feedback → legacy behavior: deny + interrupt:true.
+        //   The AI stops the turn (same as PRD #131 — without interrupt the
+        //   model would treat the deny as "try again" and keep calling tools).
+        // - User submits modification feedback → deny + interrupt:false +
+        //   message=<wrapped feedback>. The model receives the feedback as the
+        //   tool_result and is *explicitly instructed* to revise the plan and
+        //   call ExitPlanMode again, so the user can iterate on the plan card
+        //   without resending from the input box.
+        //
+        // The wrapper instruction matters: PermissionResult.deny.message is
+        // an unstructured string with no protocol meaning by itself — without
+        // the wrapper the model can drift to plain-text reply or unrelated
+        // tool calls (review-by-codex fabrication concern).
         if (toolName === 'ExitPlanMode') {
           console.log('[canUseTool] ExitPlanMode detected, requesting user approval');
-          const approved = await handleExitPlanMode(input, options.signal);
-          if (!approved) {
+          const result = await handleExitPlanMode(input, options.signal);
+          if (!result.approved) {
+            const hasFeedback = !!result.feedback;
+            const message = hasFeedback
+              ? `用户没有批准当前方案，并提供了以下修改意见：\n\n${result.feedback}\n\n请根据上述反馈修订方案，然后再次调用 ExitPlanMode 工具提交新版本的方案以供审核。`
+              : '用户拒绝了方案';
             return {
               behavior: 'deny' as const,
-              message: '用户拒绝了方案',
-              interrupt: true,
+              message,
+              interrupt: !hasFeedback,
             };
           }
           return {

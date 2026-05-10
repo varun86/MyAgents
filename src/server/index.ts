@@ -4999,12 +4999,21 @@ async function main() {
           return jsonResponse({ success: false, error: String(error) }, 500);
         }
       }
-      // POST /api/exit-plan-mode/respond - Handle user's approval/rejection of ExitPlanMode
+      // POST /api/exit-plan-mode/respond - Handle user's approval/rejection of ExitPlanMode.
+      // `feedback` (optional, issue #182): user's modification comment used as
+      // deny.message when rejecting, so the AI revises the plan in the same turn.
       if (pathname === '/api/exit-plan-mode/respond' && request.method === 'POST') {
         try {
-          const payload = await request.json() as { requestId: string; approved: boolean };
+          const raw = await request.json() as Record<string, unknown>;
+          // Runtime validation — typed `as ExitPlanModeResponse` cast accepts
+          // truthy strings like `approved: "false"` which would silently
+          // approve the plan (review-by-codex finding). Validate explicitly.
+          if (typeof raw?.requestId !== 'string' || typeof raw?.approved !== 'boolean'
+              || (raw.feedback !== undefined && typeof raw.feedback !== 'string')) {
+            return jsonResponse({ success: false, error: 'invalid payload' }, 400);
+          }
           const { handleExitPlanModeResponse } = await import('./agent-session');
-          const success = handleExitPlanModeResponse(payload.requestId, payload.approved);
+          const success = handleExitPlanModeResponse(raw.requestId, raw.approved, raw.feedback as string | undefined);
           return jsonResponse({ success });
         } catch (error) {
           console.error('[api/exit-plan-mode] Error:', error);

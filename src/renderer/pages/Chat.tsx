@@ -1,4 +1,4 @@
-import { AlertTriangle, ArrowLeft, Bot, Globe, History, Loader2, Plus, PanelRightOpen, TerminalSquare, X } from 'lucide-react';
+import { AlertTriangle, ArrowLeft, Globe, History, Loader2, Plus, PanelRightOpen, RotateCcw, TerminalSquare, X } from 'lucide-react';
 import { forwardRef, lazy, Suspense, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
 
 import { track } from '@/analytics';
@@ -2443,13 +2443,15 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     void respondAskUserQuestion(null);
   }, [respondAskUserQuestion]);
 
-  const handleExitPlanModeApprove = useCallback(() => {
-    void respondExitPlanMode(true);
+  const handleExitPlanModeApprove = useCallback(async () => {
+    const ok = await respondExitPlanMode(true);
+    if (!ok) toastRef.current.error('提交失败，请重试');
     // Mode restore is handled by the useEffect below reacting to resolved='approved'
   }, [respondExitPlanMode]);
 
-  const handleExitPlanModeReject = useCallback(() => {
-    void respondExitPlanMode(false);
+  const handleExitPlanModeReject = useCallback(async (feedback?: string) => {
+    const ok = await respondExitPlanMode(false, feedback);
+    if (!ok) toastRef.current.error('提交失败，请重试');
   }, [respondExitPlanMode]);
 
   // React to plan mode changes: auto-approved by SDK, or user-approved via card
@@ -2564,20 +2566,10 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   }, [rewindTarget, apiPost, setMessages, setIsLoading, pauseAutoScroll]);
 
   // Retry = rewind to before user message + auto-resend
-  // Uses refs for messagesRef/toastRef/handleSendMessageRef — deps are all stable → reference stable
-  const handleRetry = useCallback((assistantMessageId: string) => {
-    const msgs = messagesRef.current;
-    const aIdx = msgs.findIndex(m => m.id === assistantMessageId);
-    if (aIdx < 0) return;
-
-    // Find the nearest real user message before this assistant message
-    // (skip synthetic task-notification messages which are injected as role='user')
-    let userMsg: typeof msgs[number] | null = null;
-    for (let i = aIdx - 1; i >= 0; i--) {
-      if (msgs[i].role === 'user' && !msgs[i].id.startsWith('task-notification-')) { userMsg = msgs[i]; break; }
-    }
-    if (!userMsg) return;
-
+  // Rewind to before the given user message and re-send its content.
+  // Shared by per-assistant retry (handleRetry) and banner-level retry
+  // (handleRetryLastUserMessage). Uses refs throughout so deps stay stable.
+  const performRetryFromUserMessage = useCallback((userMsg: typeof messagesRef.current[number]) => {
     const content = typeof userMsg.content === 'string' ? userMsg.content : '';
     const attachments = userMsg.attachments;
     const userMessageId = userMsg.id;
@@ -2629,6 +2621,35 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
         }
       });
   }, [apiPost, setMessages, setIsLoading, pauseAutoScroll]); // all stable — refs handle the rest
+
+  // Uses refs for messagesRef/toastRef/handleSendMessageRef — deps are all stable → reference stable
+  const handleRetry = useCallback((assistantMessageId: string) => {
+    const msgs = messagesRef.current;
+    const aIdx = msgs.findIndex(m => m.id === assistantMessageId);
+    if (aIdx < 0) return;
+
+    // Find the nearest real user message before this assistant message
+    // (skip synthetic task-notification messages which are injected as role='user')
+    let userMsg: typeof msgs[number] | null = null;
+    for (let i = aIdx - 1; i >= 0; i--) {
+      if (msgs[i].role === 'user' && !msgs[i].id.startsWith('task-notification-')) { userMsg = msgs[i]; break; }
+    }
+    if (!userMsg) return;
+    performRetryFromUserMessage(userMsg);
+  }, [performRetryFromUserMessage]);
+
+  // Banner-level retry: find the last real user message in the session and rewind+resend it.
+  // Used by the agentError banner's 「重新发送」 button (issue #183).
+  const handleRetryLastUserMessage = useCallback(() => {
+    const msgs = messagesRef.current;
+    let userMsg: typeof msgs[number] | null = null;
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      if (msgs[i].role === 'user' && !msgs[i].id.startsWith('task-notification-')) { userMsg = msgs[i]; break; }
+    }
+    if (!userMsg) return;
+    setAgentError(null);
+    performRetryFromUserMessage(userMsg);
+  }, [performRetryFromUserMessage, setAgentError]);
 
   // Fork = create a new independent session branch at a specific assistant message
   const handleFork = useCallback((assistantMessageId: string) => {
@@ -2937,55 +2958,49 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             onNewSession={handleNewSession}
           />
 
-          {agentError && (
+          {agentError && (() => {
+            // Find the last real user message — drives both the oversized-image
+            // rewind hint and the banner-level "重新发送" button (issue #183).
+            const msgs = messagesRef.current;
+            let lastUserMsg: typeof msgs[number] | null = null;
+            for (let i = msgs.length - 1; i >= 0; i--) {
+              if (msgs[i].role === 'user' && !msgs[i].id.startsWith('task-notification-')) { lastUserMsg = msgs[i]; break; }
+            }
+            const canRetry = !!lastUserMsg && !isLoading;
+            return (
             <div className="relative z-10 flex-shrink-0 border-b border-[var(--line)] bg-[var(--paper-inset)] px-4 py-2 text-[11px] text-[var(--ink)]">
               <div className="mx-auto flex max-w-3xl items-start gap-2">
                 <AlertTriangle className="mt-0.5 h-4 w-4 flex-shrink-0 text-[var(--accent)]" />
                 <div className="flex-1">
-                  <span className="font-semibold text-[var(--ink)]">Agent error: </span>
+                  <span className="font-semibold text-[var(--ink)]">AI 调用失败：</span>
                   <span className="text-[var(--ink-muted)]">{agentError}</span>
                   {/* Oversized image hint: detect API 400 about image dimensions and offer rewind.
                       Pattern synced with backend (agent-session.ts shouldResetSessionAfterError).
                       Known API error: "...image dimensions exceed max allowed size: 8000 pixels" */}
-                  {/image.*exceed.*max allowed size/i.test(agentError) && (() => {
-                    const msgs = messagesRef.current;
-                    let lastUserMsg = null;
-                    for (let i = msgs.length - 1; i >= 0; i--) {
-                      if (msgs[i].role === 'user' && !msgs[i].id.startsWith('task-notification-')) { lastUserMsg = msgs[i]; break; }
-                    }
-                    if (!lastUserMsg) return null;
-                    return (
-                      <div className="mt-1">
-                        <span className="text-[var(--ink-muted)]">工具截图超过模型处理限制，</span>
-                        <button
-                          type="button"
-                          onClick={() => { setAgentError(null); handleRewind(lastUserMsg!.id); }}
-                          className="text-[var(--accent)] underline underline-offset-2 hover:text-[var(--accent-hover)]"
-                        >
-                          点击时间回溯到之前
-                        </button>
-                      </div>
-                    );
-                  })()}
+                  {lastUserMsg && /image.*exceed.*max allowed size/i.test(agentError) && (
+                    <div className="mt-1">
+                      <span className="text-[var(--ink-muted)]">工具截图超过模型处理限制，</span>
+                      <button
+                        type="button"
+                        onClick={() => { setAgentError(null); handleRewind(lastUserMsg!.id); }}
+                        className="text-[var(--accent)] underline underline-offset-2 hover:text-[var(--accent-hover)]"
+                      >
+                        点击时间回溯到之前
+                      </button>
+                    </div>
+                  )}
                 </div>
                 <div className="flex flex-shrink-0 items-center gap-1.5">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const providerName = currentProvider?.name || currentProvider?.id || '未知';
-                      const model = selectedModel || currentProvider?.primaryModel || '未知';
-                      const workspace = agentDir || '未知';
-                      const desc = `我在使用 AI 对话时遇到了报错，请帮我查询日志诊断问题并引导我解决：\n\n**报错信息**: ${agentError}\n**供应商**: ${providerName}\n**模型**: ${model}\n**工作区**: ${workspace}`;
-                      setAgentError(null);
-                      window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.LAUNCH_BUG_REPORT, {
-                        detail: { description: desc, appVersion: '' },
-                      }));
-                    }}
-                    className="flex items-center gap-1 rounded-md px-2 py-0.5 text-[10px] font-medium text-[var(--accent-warm)] transition-colors hover:bg-[var(--accent-warm-subtle)]"
-                  >
-                    <Bot className="h-3 w-3" />
-                    召唤小助理
-                  </button>
+                  {canRetry && (
+                    <button
+                      type="button"
+                      onClick={handleRetryLastUserMessage}
+                      className="flex items-center gap-1 rounded-md px-2 py-0.5 text-[10px] font-medium text-[var(--accent)] transition-colors hover:bg-[var(--accent-warm-subtle)]"
+                    >
+                      <RotateCcw className="h-3 w-3" />
+                      重新发送
+                    </button>
+                  )}
                   <button
                     type="button"
                     onClick={() => setAgentError(null)}
@@ -2997,7 +3012,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
                 </div>
               </div>
             </div>
-          )}
+            );
+          })()}
           {/* Unified Logs Panel - fullscreen modal displaying logs */}
           <UnifiedLogsPanel
             sseLogs={unifiedLogs}

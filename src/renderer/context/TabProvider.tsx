@@ -669,7 +669,17 @@ export default function TabProvider({
         pendingChunksRef.current = [];
 
         setStreamingMessage(prev => {
-            if (!prev || prev.role !== 'assistant' || !isStreamingRef.current) return prev;
+            // `!prev` is the authoritative "message already finalised" check —
+            // moveStreamingToHistory() returns null from its updater, so any
+            // stale RAF firing afterwards sees prev=null and bails. Do NOT
+            // also gate on `isStreamingRef.current`: that flag is cleared by
+            // ANY chat:status idle event (clearSessionActive), and a runtime
+            // that races idle ahead of chat:message-complete (e.g. a sidecar
+            // bug or out-of-order SSE) would here clear pendingChunksRef
+            // synchronously above and then throw the merged text away in
+            // this updater — silently dropping every chunk that hadn't yet
+            // RAF-flushed. v0.2.14 cross-bugfix.
+            if (!prev || prev.role !== 'assistant') return prev;
             if (typeof prev.content === 'string') {
                 return { ...prev, content: prev.content + merged };
             }
@@ -3314,15 +3324,32 @@ export default function TabProvider({
         }
     }, [pendingAskUserQuestion, postJson]);
 
-    // Respond to ExitPlanMode request (keep card visible with resolved status)
-    const respondExitPlanMode = useCallback(async (approved: boolean) => {
-        if (!pendingExitPlanMode) return;
+    // Respond to ExitPlanMode request (keep card visible with resolved status).
+    // `feedback` (issue #182): user's 「修改意见」 — only meaningful on reject.
+    //
+    // Returns `true` on success and `false` on failure (network error or
+    // `{success:false}` body). We do an optimistic state flip before the POST
+    // for UI responsiveness, then roll back on failure so the user can retry
+    // their feedback — review-by-codex caught that without the rollback the
+    // card would lock into "已拒绝" while the SDK's pendingExitPlanMode entry
+    // hung waiting for a response that never arrives.
+    const respondExitPlanMode = useCallback(async (approved: boolean, feedback?: string): Promise<boolean> => {
+        if (!pendingExitPlanMode) return false;
+        const snapshot = pendingExitPlanMode;
         const requestId = pendingExitPlanMode.requestId;
         setPendingExitPlanMode(prev => prev ? { ...prev, resolved: approved ? 'approved' : 'rejected' } : null);
         try {
-            await postJson('/api/exit-plan-mode/respond', { requestId, approved });
+            const res = await postJson<{ success?: boolean }>('/api/exit-plan-mode/respond', { requestId, approved, feedback });
+            if (res && res.success === false) {
+                console.error('[TabProvider] ExitPlanMode response rejected by backend');
+                setPendingExitPlanMode(prev => prev && prev.requestId === requestId ? { ...snapshot } : prev);
+                return false;
+            }
+            return true;
         } catch (error) {
             console.error('[TabProvider] Failed to send ExitPlanMode response:', error);
+            setPendingExitPlanMode(prev => prev && prev.requestId === requestId ? { ...snapshot } : prev);
+            return false;
         }
     }, [pendingExitPlanMode, postJson]);
 

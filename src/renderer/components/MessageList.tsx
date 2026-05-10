@@ -54,7 +54,7 @@ interface MessageListProps {
   onAskUserQuestionCancel?: (requestId: string) => void;
   pendingExitPlanMode?: ExitPlanModeRequest | null;
   onExitPlanModeApprove?: () => void;
-  onExitPlanModeReject?: () => void;
+  onExitPlanModeReject?: (feedback?: string) => void;
   systemStatus?: string | null;
   isStreaming?: boolean;
   /**
@@ -212,7 +212,7 @@ const MessageList = memo(function MessageList({
     if (!pendingExitPlanMode || !onExitPlanModeApprove || !onExitPlanModeReject) return undefined;
     return (
       <div className="py-2">
-        <ExitPlanModePrompt request={pendingExitPlanMode} onApprove={onExitPlanModeApprove} onReject={onExitPlanModeReject} />
+        <ExitPlanModePrompt key={pendingExitPlanMode.requestId} request={pendingExitPlanMode} onApprove={onExitPlanModeApprove} onReject={onExitPlanModeReject} />
       </div>
     );
   }, [pendingExitPlanMode, onExitPlanModeApprove, onExitPlanModeReject]);

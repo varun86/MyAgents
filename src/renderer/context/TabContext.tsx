@@ -153,8 +153,12 @@ export interface TabContextValue extends TabState {
     // AskUserQuestion handling
     respondAskUserQuestion: (answers: Record<string, string> | null) => Promise<void>;
 
-    // PlanMode handling
-    respondExitPlanMode: (approved: boolean) => Promise<void>;
+    // PlanMode handling.
+    // `feedback` (issue #182): user's optional 「修改意见」 forwarded only on
+    // rejection; lets the AI revise the plan in the same turn.
+    // Returns true on success, false if the backend rejected the response or
+    // the network failed — caller should toast and let the user retry.
+    respondExitPlanMode: (approved: boolean, feedback?: string) => Promise<boolean>;
 
     // Queue actions
     cancelQueuedMessage: (queueId: string) => Promise<string | null>;
@@ -215,7 +219,7 @@ const defaultContextValue: TabContextValue = {
     apiDelete: async () => { throw new Error('Not in TabProvider'); },
     respondPermission: async () => { },
     respondAskUserQuestion: async () => { },
-    respondExitPlanMode: async () => { },
+    respondExitPlanMode: async () => false,
     cancelQueuedMessage: async () => null,
     forceExecuteQueuedMessage: async () => false,
     onCronTaskExitRequested: { current: null },
