@@ -28,7 +28,6 @@ import {
     MessageSquare,
     MoreHorizontal,
     Pencil,
-    Plus,
     Star,
     Trash2,
 } from 'lucide-react';
@@ -88,13 +87,6 @@ export interface SessionMenuButtonProps {
     onFavoriteChanged?: (next: boolean, updated: SessionMetadata | null) => void;
     /** Called after a successful delete so caller can reset to a new session. */
     onDeleted: () => void;
-    /**
-     * Migrate the current channel binding to a new session id, then reset
-     * the tab onto the new session — only invoked when `boundChannel` is set
-     * (the menu hides this affordance otherwise). Caller owns the existing
-     * `cmd_session_new_with_surface_migration` + `resetSession` plumbing.
-     */
-    onNewSessionKeepingBinding: () => Promise<void>;
 }
 
 export default function SessionMenuButton({
@@ -110,7 +102,6 @@ export default function SessionMenuButton({
     onShowContext,
     onFavoriteChanged,
     onDeleted,
-    onNewSessionKeepingBinding,
 }: SessionMenuButtonProps) {
     const toast = useToast();
     const triggerRef = useRef<HTMLButtonElement | null>(null);
@@ -126,7 +117,6 @@ export default function SessionMenuButton({
     const [exporting, setExporting] = useState(false);
     const [favoriteInFlight, setFavoriteInFlight] = useState(false);
     const [handoverPendingChannelId, setHandoverPendingChannelId] = useState<string | null>(null);
-    const [newSessionPending, setNewSessionPending] = useState(false);
 
     const closeAll = useCallback(() => {
         setOpen(false);
@@ -236,17 +226,6 @@ export default function SessionMenuButton({
         }
     }, [handoverPendingChannelId, sessionId, workspacePath, toast, closeAll]);
 
-    const handleNewSessionKeepingBinding = useCallback(async () => {
-        if (newSessionPending) return;
-        setNewSessionPending(true);
-        try {
-            await onNewSessionKeepingBinding();
-            closeAll();
-        } finally {
-            setNewSessionPending(false);
-        }
-    }, [newSessionPending, onNewSessionKeepingBinding, closeAll]);
-
     // Show the bot menu item when we either have channels to bind to OR the
     // session is already bound — otherwise a session bound to a transiently
     // offline channel loses the entire submenu (including "新会话") while the
@@ -305,18 +284,18 @@ export default function SessionMenuButton({
                     onClick={() => { void handleExport(); }}
                     disabled={exporting}
                 />
+                <MenuItem
+                    icon={<BarChart2 className="h-3.5 w-3.5" />}
+                    label="会话 Token 消耗统计"
+                    onClick={handleShowStats}
+                />
                 {onShowContext && (
                     <MenuItem
                         icon={<Gauge className="h-3.5 w-3.5" />}
-                        label="上下文 Token 消耗详情"
+                        label="上下文 Token 使用详情"
                         onClick={handleShowContext}
                     />
                 )}
-                <MenuItem
-                    icon={<BarChart2 className="h-3.5 w-3.5" />}
-                    label="查看消耗统计"
-                    onClick={handleShowStats}
-                />
                 {showBotItem && (
                     <MenuItem
                         ref={botMenuItemRef}
@@ -364,12 +343,23 @@ export default function SessionMenuButton({
                 >
                     {boundChannel ? (
                         <>
-                            <div className="flex items-center gap-1.5 px-3 py-2 text-[12px]">
+                            {/* Bound row mirrors the candidate-row layout
+                             *  (`<platform> · <bot>`) with a trailing
+                             *  "已绑定" tag instead of a click target — same
+                             *  visual rhythm as the unselected options, just
+                             *  in the selected state. */}
+                            <div
+                                aria-disabled
+                                className="flex w-full cursor-default items-center gap-2 px-3 py-2 text-left text-[12px]"
+                            >
                                 <span className="inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--success)]" />
-                                <span className="font-medium text-[var(--ink)]">已绑定</span>
-                                <span className="text-[var(--ink-subtle)]">·</span>
+                                <span className="shrink-0 font-medium text-[var(--ink)]">{boundChannel.platformLabel}</span>
+                                <span className="shrink-0 text-[var(--ink-subtle)]">·</span>
                                 <span className="min-w-0 flex-1 truncate text-[var(--ink-muted)]">
-                                    {boundChannel.platformLabel} / {boundChannel.channelName}
+                                    {boundChannel.channelName}
+                                </span>
+                                <span className="shrink-0 rounded-sm bg-[var(--paper-inset)] px-1.5 py-0.5 text-[10px] text-[var(--ink-muted)]">
+                                    已绑定
                                 </span>
                             </div>
                             {otherChannels.length > 0 && (
@@ -389,18 +379,6 @@ export default function SessionMenuButton({
                                     ))}
                                 </>
                             )}
-                            <div className="my-1 border-t border-[var(--line-subtle)]" />
-                            <button
-                                type="button"
-                                disabled={newSessionPending}
-                                onClick={() => { void handleNewSessionKeepingBinding(); }}
-                                className="flex w-full items-center gap-2 px-3 py-2 text-left text-[12px] text-[var(--ink)] transition-colors hover:bg-[var(--hover-bg)] disabled:cursor-not-allowed disabled:opacity-50"
-                            >
-                                {newSessionPending
-                                    ? <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-[var(--ink-muted)]" />
-                                    : <Plus className="h-3.5 w-3.5 shrink-0 text-[var(--ink-muted)]" />}
-                                <span>新会话</span>
-                            </button>
                         </>
                     ) : (
                         availableChannels.map((c) => (
@@ -505,7 +483,7 @@ function ChannelMenuItem({ candidate, pending, disabled, onClick }: ChannelMenuI
             <span className="shrink-0 font-medium text-[var(--ink)]">{candidate.platformLabel}</span>
             <span className="shrink-0 text-[var(--ink-subtle)]">·</span>
             <span className="min-w-0 flex-1 truncate text-[var(--ink-muted)]">
-                {candidate.agentName} / {candidate.channelName}
+                {candidate.channelName}
             </span>
             {pending && <Loader2 className="h-3 w-3 shrink-0 animate-spin text-[var(--ink-muted)]" />}
         </button>

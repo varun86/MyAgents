@@ -42,7 +42,7 @@ import CronTaskDetailPanel from '@/components/CronTaskDetailPanel';
 import type { CronSettingsResult } from '@/components/cron/CronTaskSettingsModal';
 import { isTauriEnvironment } from '@/utils/browserMock';
 import { isDebugMode } from '@/utils/debug';
-import { isImSource } from '@/utils/taskCenterUtils';
+import { isImSource, getChannelTypeLabel } from '@/utils/taskCenterUtils';
 import { type PermissionMode, type McpServerDefinition, getEffectiveModelAliases } from '@/config/types';
 import { syncMcpServerNames } from '@/components/tools/toolBadgeConfig';
 import {
@@ -2693,10 +2693,13 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
         agentName: status.agentName,
         channelId: ch.channelId,
         channelType: ch.channelType,
-        channelName: ch.name || ch.botUsername || ch.channelType,
+        // Prefer botUsername (e.g. `feishu_mino`) so the menu reads as
+        // `<localized platform> · <bot identity>` instead of falling back to
+        // the human-friendly Agent name (which would duplicate the agent dir).
+        channelName: ch.botUsername || ch.name || ch.channelType,
         // sessionKey is computed server-side; UI doesn't need it for the candidate list
         sessionKey: '',
-        platformLabel: ch.botUsername ? `${ch.botUsername}` : ch.channelType,
+        platformLabel: getChannelTypeLabel(ch.channelType),
       });
     }
     return out;
@@ -2828,7 +2831,6 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
                 onOpenRename={() => titleEditorRef.current?.openRename()}
                 onFavoriteChanged={(_, updated) => { if (updated) setSessionMeta(updated); }}
                 onDeleted={handleNewSession}
-                onNewSessionKeepingBinding={newSessionKeepingBinding}
               />
             )}
           </div>
