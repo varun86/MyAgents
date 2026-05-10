@@ -233,8 +233,10 @@ fn read_notification_prefs() -> NotificationPrefs {
         notification_sound: Option<bool>,
     }
 
-    let parsed: Option<PartialAppConfig> = dirs::home_dir()
-        .and_then(|home| std::fs::read_to_string(home.join(".myagents").join("config.json")).ok())
+    // Use the project-canonical data-dir helper rather than `dirs::home_dir()`
+    // so future dev/prod isolation in `app_dirs.rs` reaches us automatically.
+    let parsed: Option<PartialAppConfig> = crate::app_dirs::myagents_data_dir()
+        .and_then(|dir| std::fs::read_to_string(dir.join("config.json")).ok())
         .and_then(|content| serde_json::from_str(strip_bom(&content)).ok());
 
     NotificationPrefs {

@@ -2771,32 +2771,36 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                     </button>
                                 </div>
 
-                                {/* Notification Sound */}
-                                <div className="mt-4 flex items-center justify-between">
-                                    <div className="flex-1 pr-4">
-                                        <p className="text-sm font-medium text-[var(--ink)]">通知提醒声音</p>
-                                        <p className="text-xs text-[var(--ink-muted)]">
-                                            系统通知弹出时播放声音
-                                        </p>
-                                    </div>
-                                    <button
-                                        onClick={() => {
-                                            updateConfig({ notificationSound: !config.notificationSound });
-                                            toast.success(config.notificationSound ? '已关闭通知声音' : '已开启通知声音');
-                                        }}
-                                        className={`relative h-6 w-11 shrink-0 cursor-pointer rounded-full transition-colors ${
-                                            config.notificationSound
-                                                ? 'bg-[var(--accent)]'
-                                                : 'bg-[var(--line-strong)]'
-                                        }`}
-                                    >
-                                        <span
-                                            className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-[var(--toggle-thumb)] shadow transition-transform ${
-                                                config.notificationSound ? 'translate-x-5' : 'translate-x-0'
+                                {/* Notification Sound — only meaningful when master notification toggle is on,
+                                     so hide it entirely when osNotifications is off (avoids the
+                                     "I toggled this and nothing happens" UX trap). */}
+                                {config.osNotifications && (
+                                    <div className="mt-4 flex items-center justify-between">
+                                        <div className="flex-1 pr-4">
+                                            <p className="text-sm font-medium text-[var(--ink)]">通知提醒声音</p>
+                                            <p className="text-xs text-[var(--ink-muted)]">
+                                                系统通知弹出时播放声音
+                                            </p>
+                                        </div>
+                                        <button
+                                            onClick={() => {
+                                                updateConfig({ notificationSound: !config.notificationSound });
+                                                toast.success(config.notificationSound ? '已关闭通知声音' : '已开启通知声音');
+                                            }}
+                                            className={`relative h-6 w-11 shrink-0 cursor-pointer rounded-full transition-colors ${
+                                                config.notificationSound
+                                                    ? 'bg-[var(--accent)]'
+                                                    : 'bg-[var(--line-strong)]'
                                             }`}
-                                        />
-                                    </button>
-                                </div>
+                                        >
+                                            <span
+                                                className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-[var(--toggle-thumb)] shadow transition-transform ${
+                                                    config.notificationSound ? 'translate-x-5' : 'translate-x-0'
+                                                }`}
+                                            />
+                                        </button>
+                                    </div>
+                                )}
                             </div>
 
                             {/* Network Proxy Settings */}
