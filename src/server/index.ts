@@ -5024,9 +5024,17 @@ async function main() {
       // POST /api/enter-plan-mode/respond - Handle user's approval/rejection of EnterPlanMode
       if (pathname === '/api/enter-plan-mode/respond' && request.method === 'POST') {
         try {
-          const payload = await request.json() as { requestId: string; approved: boolean };
+          const raw = await request.json() as Record<string, unknown>;
+          // Runtime validation — match the exit-plan-mode endpoint's defense
+          // (review-by-cc finding: parallel endpoint had unsafe cast). A
+          // payload like `{requestId:"x", approved:"false"}` would otherwise
+          // pass the cast and `approved` would be the truthy string,
+          // silently entering plan mode against user intent.
+          if (typeof raw?.requestId !== 'string' || typeof raw?.approved !== 'boolean') {
+            return jsonResponse({ success: false, error: 'invalid payload' }, 400);
+          }
           const { handleEnterPlanModeResponse } = await import('./agent-session');
-          const success = handleEnterPlanModeResponse(payload.requestId, payload.approved);
+          const success = handleEnterPlanModeResponse(raw.requestId, raw.approved);
           return jsonResponse({ success });
         } catch (error) {
           console.error('[api/enter-plan-mode] Error:', error);
