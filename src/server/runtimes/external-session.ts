@@ -127,6 +127,13 @@ let isPrewarmingSession = false;
 // Set by sendExternalMessage when it pre-broadcasts the user message for instant display.
 // Consumed by _doStartExternalSession / Case 3 to reuse the message (skip duplicate broadcast).
 let earlyBroadcastedUserMsg: SessionMessage | null = null;
+// Issue #188 — Serializes desktop /chat/send dispatches so concurrent sends
+// don't race through waitForExternalSessionIdle and double-write to the
+// persistent runtime stdin / clobber the shared earlyBroadcastedUserMsg.
+// Chained onto by enqueueExternalSendForDesktop. Cron / IM callers keep their
+// existing direct sendExternalMessage await semantics (they're already
+// serialized at the caller level by single-flight cron/heartbeat loops).
+let externalDesktopSendTail: Promise<unknown> = Promise.resolve();
 // Deferred runtimeSessionId: set when session_init fires before metadata exists (pre-warm).
 // Consumed by registerSessionMetadataIfNew to patch runtimeSessionId onto newly created metadata.
 // Includes forSessionId to prevent cross-session contamination if session switches between set and consume.
@@ -1076,6 +1083,7 @@ export async function sendExternalMessage(
   _permissionMode?: string,
   _model?: string,
   context?: ExternalSendContext,
+  preBroadcasted?: SessionMessage,
 ): Promise<{ queued: boolean; error?: string }> {
   const hasImages = images && images.length > 0;
 
@@ -1085,13 +1093,23 @@ export async function sendExternalMessage(
   // Downstream code (Case 1/2/3) also calls broadcast('chat:message-replay')
   // for the same message — we set earlyBroadcastedUserMsg so they can skip
   // the redundant broadcast while still recording for persistence.
-  const earlyUserMsg: SessionMessage = {
-    id: `user-${Date.now()}`,
-    role: 'user',
-    content: text,
-    timestamp: new Date().toISOString(),
-  };
-  broadcast('chat:message-replay', { message: earlyUserMsg });
+  //
+  // Issue #188 — when the caller (enqueueExternalSendForDesktop) has already
+  // broadcast the bubble synchronously so the renderer sees it immediately,
+  // adopt that SessionMessage here instead of re-broadcasting. Without this,
+  // the user's bubble would flash twice with different IDs.
+  let earlyUserMsg: SessionMessage;
+  if (preBroadcasted) {
+    earlyUserMsg = preBroadcasted;
+  } else {
+    earlyUserMsg = {
+      id: `user-${Date.now()}`,
+      role: 'user',
+      content: text,
+      timestamp: new Date().toISOString(),
+    };
+    broadcast('chat:message-replay', { message: earlyUserMsg });
+  }
   earlyBroadcastedUserMsg = earlyUserMsg;
 
   // If a pre-warm (or other concurrent start) is still bringing the process
@@ -1111,8 +1129,17 @@ export async function sendExternalMessage(
   // !== 0` means a previous user turn kicked off and hasn't finished. On
   // crash, session_complete resets currentTurnStartTime via
   // resetTurnAccumulators(), so this gate doesn't spuriously trip.
+  //
+  // Issue #188 — if the busy turn doesn't settle within the cap, do NOT fall
+  // through to Case 3 and dispatch into a still-running runtime. That used to
+  // silently drop the message (or interleave with the active turn). Return a
+  // queue-style error so the caller can surface it to the user.
   if (!turnCompleted && currentTurnStartTime !== 0 && activeProcess && !activeProcess.exited) {
-    await waitForExternalSessionIdle(5 * 60 * 1000, 100);
+    const settled = await waitForExternalSessionIdle(5 * 60 * 1000, 100);
+    if (!settled) {
+      earlyBroadcastedUserMsg = null;
+      return { queued: false, error: '上一个回合超过 5 分钟未完成，消息未发送，请稍后重试。' };
+    }
   }
 
   // Pattern B — set the active IM trace ID *after* the previous turn has
@@ -1227,6 +1254,50 @@ export async function sendExternalMessage(
   } catch (err) {
     return { queued: false, error: err instanceof Error ? err.message : String(err) };
   }
+}
+
+/**
+ * Desktop /chat/send entry — fire-and-forget dispatch with proper serialization.
+ *
+ * Issue #188:
+ *   sendExternalMessage internally awaits waitForExternalSessionIdle(5*60s)
+ *   to serialize against an in-flight turn. The Rust SSE proxy's overall HTTP
+ *   timeout is 120s, so directly awaiting sendExternalMessage from the HTTP
+ *   handler made the request die with the proxy's generic "操作超时" error,
+ *   which the renderer surfaced as "AI 调用失败：网络错误". This helper
+ *   decouples the HTTP response from runtime dispatch:
+ *
+ *   1. Broadcast the user-message bubble synchronously so the renderer shows
+ *      it the moment the user clicks send (regardless of queue depth).
+ *   2. Chain the actual sendExternalMessage onto a module-level promise tail
+ *      so concurrent desktop sends serialize against each other. Without this
+ *      tail, multiple sends would all wake from the same turnCompleted gate
+ *      simultaneously, overwrite earlyBroadcastedUserMsg, and double-write
+ *      to the persistent-runtime stdin.
+ *   3. Return the dispatch promise. Callers should fire-and-forget and
+ *      surface failures via chat:agent-error since the HTTP response is
+ *      already on its way back to the renderer.
+ */
+export function enqueueExternalSendForDesktop(
+  text: string,
+  images: ImagePayload[] | undefined,
+  permissionMode: string | undefined,
+  model: string | undefined,
+  context: ExternalSendContext,
+): Promise<{ queued: boolean; error?: string }> {
+  const userMsg: SessionMessage = {
+    id: `user-${Date.now()}`,
+    role: 'user',
+    content: text,
+    timestamp: new Date().toISOString(),
+  };
+  broadcast('chat:message-replay', { message: userMsg });
+
+  const task = externalDesktopSendTail.then(() =>
+    sendExternalMessage(text, images, permissionMode, model, context, userMsg)
+  );
+  externalDesktopSendTail = task.catch(() => undefined);
+  return task;
 }
 
 /**

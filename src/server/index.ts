@@ -535,7 +535,7 @@ import {
 import { appendUnifiedLogBatch, getRecentLogLines, getActiveUnifiedLogPath } from './UnifiedLogger';
 import { getActiveSessionLogPath } from './AgentLogger';
 import { runLogRetentionSweep, startPeriodicSweep } from './log-retention';
-import { createSseClient, getClients } from './sse';
+import { broadcast, createSseClient, getClients } from './sse';
 import { imEventBus } from './utils/im-event-bus';
 import { imRequestRegistry } from './utils/im-request-registry';
 import type { CancelReason } from './utils/cancellation';
@@ -555,6 +555,7 @@ import { registerBridgeSeedFn } from './bridge-cache';
 import {
   shouldUseExternalRuntime,
   sendExternalMessage,
+  enqueueExternalSendForDesktop,
   respondExternalPermission,
   respondExternalAskUserQuestion,
   hasPendingExternalAskUserQuestion,
@@ -1953,25 +1954,50 @@ async function main() {
 
         // ─── External Runtime branch (v0.1.59) ───
         if (shouldUseExternalRuntime()) {
-          try {
-            const runtimeType = getActiveRuntimeType();
-            console.log(`[chat] send via ${runtimeType}: text="${text.slice(0, 200)}"`);
+          const runtimeType = getActiveRuntimeType();
+          console.log(`[chat] send via ${runtimeType}: text="${text.slice(0, 200)}"`);
 
-            // Unified send: sendExternalMessage handles both first message and follow-ups.
-            // CC's -p mode exits after each turn; sendExternalMessage detects this
-            // and spawns a new process with --resume for multi-turn continuity.
-            const result = await sendExternalMessage(
-              text, images, permissionMode, model ?? undefined,
-              // Pass session context for first-time start
-              { sessionId: getSessionId(), workspacePath: agentDir, scenario: { type: 'desktop' as const }, permissionMode, model: model ?? undefined },
-            );
-            return jsonResponse({ success: result.queued, error: result.error });
-          } catch (error) {
-            return jsonResponse(
-              { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
-              500
-            );
-          }
+          // Issue #188 — Fire-and-forget dispatch via enqueueExternalSendForDesktop.
+          //
+          // sendExternalMessage internally serializes against in-flight turns
+          // by awaiting waitForExternalSessionIdle(5 * 60 * 1000). That wait
+          // exceeds the Rust SSE proxy's HTTP_PROXY_TIMEOUT_SECS=120s cap, so
+          // if a long Codex/Gemini turn is mid-flight the HTTP request dies
+          // at 120s and the renderer surfaces it as "AI 调用失败：网络错误"
+          // even though the sidecar is healthy.
+          //
+          // enqueueExternalSendForDesktop synchronously broadcasts the user
+          // bubble so the renderer shows it immediately, then chains the
+          // wait+dispatch onto a module-level tail so concurrent desktop
+          // sends serialize cleanly (otherwise they'd all wake from the same
+          // turnCompleted gate and race to write to the persistent runtime).
+          // Errors that previously came back over HTTP now broadcast via
+          // chat:agent-error — the renderer already routes that event to the
+          // same agentError state the HTTP .then(response.error) branch used.
+          //
+          // Note: cron/IM internal callers still `await` sendExternalMessage
+          // directly (they're inside the sidecar event loop, no 120s ceiling,
+          // and already single-flighted at the caller level).
+          const sendCtx = {
+            sessionId: getSessionId(),
+            workspacePath: agentDir,
+            scenario: { type: 'desktop' as const },
+            permissionMode,
+            model: model ?? undefined,
+          };
+          void enqueueExternalSendForDesktop(text, images, permissionMode, model ?? undefined, sendCtx)
+            .then((result) => {
+              if (!result.queued && result.error) {
+                console.error(`[chat] external send failed: ${result.error}`);
+                broadcast('chat:agent-error', { message: result.error });
+              }
+            })
+            .catch((err) => {
+              const msg = err instanceof Error ? err.message : String(err);
+              console.error(`[chat] external send threw: ${msg}`);
+              broadcast('chat:agent-error', { message: msg });
+            });
+          return jsonResponse({ success: true, queued: true });
         }
 
         // ─── Builtin Runtime (existing path) ───
