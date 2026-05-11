@@ -10,7 +10,9 @@ import { killWithEscalation } from './utils/kill-with-escalation';
 import { buildSystemPromptAppend } from '../system-prompt';
 import type { InteractionScenario } from '../system-prompt';
 import type { AgentRuntime, RuntimeProcess, UnifiedEvent, ImagePayload } from './types';
+import type { ToolAttachment } from '../../shared/types/tool-attachment';
 import { StaleRuntimeSessionError } from './types';
+import { awaitInFlightSaves, rebuildAttachmentRegistryFromBlocks } from './tool-attachments';
 import type { AskUserQuestionInput } from '../../shared/types/askUserQuestion';
 import { getExternalRuntime, getCurrentRuntimeType, isExternalRuntime } from './factory';
 import { resolveCodexWorkspaceInstructions } from './workspace-instructions';
@@ -83,6 +85,9 @@ interface PersistContentBlock {
       status?: string;
     };
     streamIndex: number;
+    // PRD 0.2.15 — rich-media attachments. Persisted with the tool block so
+    // history replay can re-render images without re-running the tool.
+    attachments?: ToolAttachment[];
   };
   thinking?: string;
   thinkingStartedAt?: number;
@@ -510,6 +515,25 @@ export function restoreExternalSessionState(
 
   // Load existing messages for correct incremental save (or clear stale in-memory state)
   allSessionMessages = hasExistingMessages ? data!.messages : [];
+
+  // PRD 0.2.15 Review F2 — repopulate the external-path attachment registry
+  // from persisted ContentBlock[] so /api/attachment/tool/... can still resolve
+  // Codex savedPath attachments after a sidecar restart / Handover. Without
+  // this rebuild, history replay shows broken images for any savedPath that
+  // didn't land in our trusted root.
+  if (hasExistingMessages) {
+    for (const msg of allSessionMessages) {
+      if (msg.role !== 'assistant' || typeof msg.content !== 'string') continue;
+      try {
+        const blocks = JSON.parse(msg.content);
+        if (Array.isArray(blocks)) {
+          rebuildAttachmentRegistryFromBlocks(sessionId, blocks, msg.id);
+        }
+      } catch {
+        // Plain-text assistant messages have no blocks — fine.
+      }
+    }
+  }
   lastPersistedRuntimeUsageTotals = restoreRuntimeUsageTotals(
     currentRuntimeType,
     allSessionMessages,
@@ -1599,6 +1623,13 @@ async function persistTurnResult(): Promise<void> {
     const turnDurationMs = currentTurnStartTime ? Date.now() - currentTurnStartTime : undefined;
     flushAllPending();
 
+    // PRD 0.2.15 Review A4 fix — drain in-flight attachment saves so the
+    // placeholder attachments embedded in currentContentBlocks get patched
+    // BEFORE we snapshot to disk. Without this await, large/slow saves land
+    // their `tool_attachment_update` after `currentContentBlocks = []` reset
+    // and the disk JSON keeps the "生成中" placeholder forever.
+    await awaitInFlightSaves();
+
     const usageData = buildPersistedTurnUsage();
     const turnToolCount = currentContentBlocks.filter(b => b.type === 'tool_use').length;
     const runtimeType = getCurrentRuntimeType();
@@ -1793,12 +1824,15 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
       break;
 
     case 'tool_result':
-      // Update the matching tool_use block's result
+      // Update the matching tool_use block's result + attachments (PRD 0.2.15)
       for (let i = currentContentBlocks.length - 1; i >= 0; i--) {
         if (currentContentBlocks[i].type === 'tool_use' && currentContentBlocks[i].tool?.id === event.toolUseId) {
           currentContentBlocks[i].tool!.result = event.content;
           currentContentBlocks[i].tool!.isError = event.isError ?? false;
           currentContentBlocks[i].tool!.resultMeta = event.metadata;
+          if (event.attachments && event.attachments.length > 0) {
+            currentContentBlocks[i].tool!.attachments = event.attachments;
+          }
           break;
         }
       }
@@ -1807,6 +1841,7 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
         content: event.content,
         isError: event.isError ?? false,
         metadata: event.metadata,
+        attachments: event.attachments,
       });
       // Emit complete immediately — external runtimes deliver tool results as a single event
       // (no streaming delta). Frontend needs this to clear tool loading spinner + trigger file refresh.
@@ -1815,9 +1850,33 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
         content: event.content,
         isError: event.isError ?? false,
         metadata: event.metadata,
+        attachments: event.attachments,
       });
       resetWatchdog();
       break;
+
+    case 'tool_attachment_update': {
+      // Async fulfillment of a placeholder attachment (PRD 0.2.15 §4.7.1).
+      // Find the persisted tool block and replace the matching placeholder in-place,
+      // then broadcast the same shape so the frontend can patch the rendered gallery.
+      for (let i = currentContentBlocks.length - 1; i >= 0; i--) {
+        const block = currentContentBlocks[i];
+        if (block.type === 'tool_use' && block.tool?.id === event.toolUseId && block.tool.attachments) {
+          const idx = block.tool.attachments.findIndex(a => a.pendingId === event.pendingId);
+          if (idx >= 0) {
+            block.tool.attachments[idx] = event.attachment;
+          }
+          break;
+        }
+      }
+      broadcast('chat:tool-attachment-update', {
+        toolUseId: event.toolUseId,
+        pendingId: event.pendingId,
+        attachment: event.attachment,
+      });
+      resetWatchdog();
+      break;
+    }
 
     case 'permission_request':
       // AskUserQuestion carries a structured payload (questions/options/previews) and

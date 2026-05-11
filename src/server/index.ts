@@ -2,6 +2,8 @@ import { appendFileSync, cpSync, existsSync, lstatSync, mkdirSync, readdirSync, 
 import { copyFile as copyFileAsync, readdir as readdirAsync, rm, stat } from 'fs/promises';
 import { spawn as subprocessSpawn } from './utils/subprocess';
 import { fileResponse, sniffMime } from './utils/file-response';
+import { lookupExternalAttachment } from './runtimes/tool-attachments';
+import { getToolAttachmentRoot, validateExternalReadPathNode } from './utils/path-safety';
 import { serve as honoServe } from '@hono/node-server';
 import { createWriteStream } from 'node:fs';
 import { pipeline } from 'node:stream/promises';
@@ -1817,6 +1819,82 @@ async function main() {
           headers['Retry-After'] = '1';
         }
         return new Response(JSON.stringify(gate.body), { status: gate.status, headers });
+      }
+
+      // Tool attachment endpoint (PRD 0.2.15) — rich-media tool outputs (image/audio/pdf/file).
+      // URL shape: GET /api/attachment/tool/<sessionId>/<turnId>/<filename>
+      //
+      // Resolution:
+      //   1. Look up the external-path registry (Codex savedPath, dynamic URLs after fetch).
+      //      Hit → serve that real path.
+      //   2. Miss → fall back to the trusted attachment root <home>/.myagents/generated/
+      //      tool-attachments/<s>/<t>/<f> (where base64 / URL downloads land).
+      //
+      // Security: the registry only holds paths registered by saveToolAttachment, which
+      // pre-validated them via validateExternalReadPathNode (system/credential blacklist).
+      // The trusted-root fallback is by construction inside the MyAgents-owned tree.
+      if (pathname.startsWith('/api/attachment/tool/') && request.method === 'GET') {
+        // Codex review EP1: decodeURIComponent throws URIError on malformed
+        // %xx escapes — wrap explicitly so we return 400 (with CORS) instead
+        // of crashing the request and leaving the renderer with an opaque error.
+        let rest: string;
+        try {
+          rest = decodeURIComponent(pathname.slice('/api/attachment/tool/'.length));
+        } catch {
+          return new Response('Bad Request', {
+            status: 400,
+            headers: { 'Access-Control-Allow-Origin': '*' },
+          });
+        }
+        const segs = rest.split('/').filter(Boolean);
+        if (segs.length !== 3) {
+          return new Response('Bad Request', {
+            status: 400,
+            headers: { 'Access-Control-Allow-Origin': '*' },
+          });
+        }
+        const [sid, tid, fname] = segs;
+        // Guard against `..` / `/` / `\` / control chars in any segment.
+        const hasUnsafeChar = (s: string): boolean => {
+          if (s.includes('..')) return true;
+          for (let i = 0; i < s.length; i++) {
+            const code = s.charCodeAt(i);
+            if (code < 0x20) return true;
+            if (s[i] === '/' || s[i] === '\\') return true;
+          }
+          return false;
+        };
+        if (segs.some(hasUnsafeChar)) {
+          return new Response('Forbidden', {
+            status: 403,
+            headers: { 'Access-Control-Allow-Origin': '*' },
+          });
+        }
+        let realPath = lookupExternalAttachment(sid, tid, fname);
+        if (!realPath) {
+          // Fall back to the trusted root for base64/URL-downloaded attachments.
+          realPath = join(getToolAttachmentRoot(), sid, tid, fname);
+        }
+        // Defense-in-depth: blacklist check (paths in registry have already passed,
+        // but if a session-resume rebuild ever fed in a bad path we'd refuse here).
+        const check = validateExternalReadPathNode(realPath);
+        if (!check.ok) {
+          return new Response('Forbidden', {
+            status: 403,
+            headers: { 'Access-Control-Allow-Origin': '*' },
+          });
+        }
+        const fileResp = await fileResponse(check.canonical, {
+          contentType: sniffMime(check.canonical),
+          headers: {
+            'Cache-Control': 'public, max-age=31536000, immutable',
+            'Access-Control-Allow-Origin': '*',
+          },
+        });
+        return fileResp ?? new Response('Not Found', {
+          status: 404,
+          headers: { 'Access-Control-Allow-Origin': '*' },
+        });
       }
 
       // Browser dev-mode fallback for attachment files.
