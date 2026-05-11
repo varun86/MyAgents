@@ -7446,8 +7446,36 @@ async function startStreamingSession(preWarm = false): Promise<void> {
       }
     }
 
+    // Effective `resumeSessionAt` for the SDK call.
+    //
+    // Non-fork: rewindResumeAt is the only source — rewindSession set it to
+    // the previous assistant's sdkUuid (a UUID present in the SDK's own
+    // session JSONL).
+    //
+    // Fork-mode: two candidate anchors coexist —
+    //   forkResumeAt   = where the user originally clicked "fork" (an
+    //                    assistant sdkUuid in the source session's JSONL,
+    //                    written into newSession.forkFrom.messageUuid by
+    //                    forkSession()).
+    //   rewindResumeAt = where the user just rewound to inside the fork
+    //                    (also a source-session sdkUuid, because fork's
+    //                    local messages[] is a copy of source's messages
+    //                    with sdkUuids preserved verbatim — see
+    //                    forkSession()'s message slice).
+    // The SDK call shape is `query({ resume: <source>, forkSession: true,
+    // sessionId: <fork-sid>, resumeSessionAt: <anchor> })`; SDK loads
+    // source's JSONL and slices at the anchor's index. Either candidate
+    // resolves against source, so the rewind anchor is honored without
+    // changing the SDK contract — and when both are set, the rewind one
+    // is the truer expression of what the user wants the fork to contain
+    // (otherwise the rewind would be cosmetic UI truncation while the
+    // SDK still seeds the full fork-point context).
+    const effectiveResumeAt = forkMode
+      ? (rewindResumeAt ?? forkResumeAt)
+      : rewindResumeAt;
+
     const mcpStatus = currentMcpServers === null ? 'auto' : currentMcpServers.length === 0 ? 'disabled' : `enabled(${currentMcpServers.length})`;
-    console.log(`[agent] starting query with model: ${currentModel ?? 'default'}, permissionMode: ${currentPermissionMode} -> SDK: ${sdkPermissionMode}, MCP: ${mcpStatus}, ${resumeFrom ? `resume: ${resumeFrom}` : `sessionId: ${effectiveSdkSessionId}`}${rewindResumeAt ? `, resumeSessionAt: ${rewindResumeAt}` : ''}${forkMode ? `, FORK mode (resumeAt: ${forkResumeAt})` : ''}`);
+    console.log(`[agent] starting query with model: ${currentModel ?? 'default'}, permissionMode: ${currentPermissionMode} -> SDK: ${sdkPermissionMode}, MCP: ${mcpStatus}, ${resumeFrom ? `resume: ${resumeFrom}` : `sessionId: ${effectiveSdkSessionId}`}${effectiveResumeAt ? `, resumeSessionAt: ${effectiveResumeAt}` : ''}${forkMode ? `, FORK mode (forkPoint: ${forkResumeAt}${rewindResumeAt && rewindResumeAt !== forkResumeAt ? `, rewind→${rewindResumeAt}` : ''})` : ''}`);
 
     const promptGen = messageGenerator();
 
@@ -7935,9 +7963,9 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     // Resume：传 resume 恢复对话上下文
     // Fork：resume + forkSession + sessionId + resumeSessionAt（三者组合）
     const sessionOption = forkMode
-      ? { resume: resumeFrom!, forkSession: true, sessionId: effectiveSdkSessionId, ...(forkResumeAt ? { resumeSessionAt: forkResumeAt } : {}) }
+      ? { resume: resumeFrom!, forkSession: true, sessionId: effectiveSdkSessionId, ...(effectiveResumeAt ? { resumeSessionAt: effectiveResumeAt } : {}) }
       : resumeFrom
-        ? { resume: resumeFrom, ...(rewindResumeAt ? { resumeSessionAt: rewindResumeAt } : {}) }
+        ? { resume: resumeFrom, ...(effectiveResumeAt ? { resumeSessionAt: effectiveResumeAt } : {}) }
         : { sessionId: effectiveSdkSessionId };
 
     // (issue #174) Second pre-launch abort guard. Between the first guard
