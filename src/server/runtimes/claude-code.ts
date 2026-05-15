@@ -424,9 +424,13 @@ export class ClaudeCodeRuntime implements AgentRuntime {
     // Windows uses `taskkill /F /T /PID` which works regardless of detached.
     // `windowsHide: true` suppresses the console window flash from cmd.exe
     // wrapping the .cmd shim.
+    // Issue #194 — pass envPolicy and pin PWD to workspacePath for terminal
+    // parity (same fix applied to Codex runtime).
+    const ccEnv = augmentedProcessEnv(options.envPolicy);
+    ccEnv.PWD = options.workspacePath;
     const proc = spawn([resolveCommand('claude'), ...args], {
       cwd: options.workspacePath,
-      env: augmentedProcessEnv(),
+      env: ccEnv,
       stdout: 'pipe',
       stderr: 'pipe',
       stdin: 'pipe',

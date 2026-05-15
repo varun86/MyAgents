@@ -712,7 +712,9 @@ export class GeminiRuntime implements AgentRuntime {
     );
 
     // 3. Spawn gemini --acp with the system prompt env var (if we have a file).
-    const spawnEnv: Record<string, string | undefined> = { ...augmentedProcessEnv() };
+    // Issue #194 — honor agent.runtimeConfig.envPolicy (proxy: myagents/terminal/direct).
+    const spawnEnv: Record<string, string | undefined> = { ...augmentedProcessEnv(options.envPolicy) };
+    spawnEnv.PWD = options.workspacePath;
     if (promptFile) {
       spawnEnv.GEMINI_SYSTEM_MD = promptFile;
     }

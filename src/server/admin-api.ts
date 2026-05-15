@@ -37,6 +37,11 @@ import { readLoopbackJson } from './utils/loopback-response';
 // route — anything slower means the backend is wedged, in which case we'd
 // rather surface a CLI error than hang the user's terminal indefinitely.
 const ADMIN_LOOPBACK_TIMEOUT_MS = 10_000;
+
+// Long-running sidecar operations need their own budget. Anchored to the
+// sidecar's internal `FETCH_TIMEOUT_MS` (300s for tarball download) plus a
+// 30s buffer so the inner timeout always wins. Used by skill install routes.
+const SKILL_INSTALL_LOOPBACK_TIMEOUT_MS = 330_000;
 import { existsSync , writeFileSync, unlinkSync } from 'fs';
 import { ensureDirSync } from './utils/fs-utils';
 import { resolve } from 'path';
@@ -141,6 +146,7 @@ async function sidecarSelf(
   path: string,
   method: 'GET' | 'POST' | 'DELETE' | 'PUT' = 'GET',
   body?: Record<string, unknown>,
+  opts?: { timeoutMs?: number },
 ): Promise<{ status: number; json: Record<string, unknown> }> {
   const sidecarPort = getSidecarPort();
   if (!sidecarPort) {
@@ -155,7 +161,9 @@ async function sidecarSelf(
     options.body = JSON.stringify(body);
   }
   try {
-    const resp = await cancellableFetch(url, options, { timeoutMs: ADMIN_LOOPBACK_TIMEOUT_MS });
+    const resp = await cancellableFetch(url, options, {
+      timeoutMs: opts?.timeoutMs ?? ADMIN_LOOPBACK_TIMEOUT_MS,
+    });
     // Issue #114 — defensive read via shared helper. Map to this caller's
     // legacy {status, json} shape (sidecarSelf has callers that branch on
     // status code, so we preserve that envelope rather than collapsing to
@@ -2549,7 +2557,7 @@ export async function handleSkillAdd(payload: {
   const probe = await sidecarSelf('/api/skill/install-from-url', 'POST', {
     url: payload.url,
     scope,
-  });
+  }, { timeoutMs: SKILL_INSTALL_LOOPBACK_TIMEOUT_MS });
   if (!probe.json.success) {
     return { success: false, error: String(probe.json.error ?? 'Install probe failed') };
   }
@@ -2608,7 +2616,7 @@ export async function handleSkillAdd(payload: {
         folderNames: plugin.skills.map(s => s.suggestedFolderName),
         overwrite: payload.force ? conflicts : [],
       },
-    });
+    }, { timeoutMs: SKILL_INSTALL_LOOPBACK_TIMEOUT_MS });
     if (!commit.json.success) {
       return { success: false, error: String(commit.json.error ?? 'Install failed') };
     }
@@ -2654,7 +2662,7 @@ export async function handleSkillAdd(payload: {
         folderNames: wanted.map(c => c.suggestedFolderName),
         overwrite: payload.force ? conflicts : [],
       },
-    });
+    }, { timeoutMs: SKILL_INSTALL_LOOPBACK_TIMEOUT_MS });
     if (!commit.json.success) {
       return { success: false, error: String(commit.json.error ?? 'Install failed') };
     }
@@ -2687,7 +2695,7 @@ export async function handleSkillAdd(payload: {
         folderNames: [preview.skill.suggestedFolderName],
         overwrite: [preview.skill.suggestedFolderName],
       },
-    });
+    }, { timeoutMs: SKILL_INSTALL_LOOPBACK_TIMEOUT_MS });
     if (!commit.json.success) {
       return { success: false, error: String(commit.json.error ?? 'Install failed') };
     }
@@ -2926,6 +2934,114 @@ export async function handleRuntimeDescribe(payload: {
       defaultPermissionMode,
     } satisfies RuntimeDescribeResult,
   };
+}
+
+/**
+ * Run a one-shot runtime diagnostic — spawns a short-lived runtime process,
+ * collects what it sees (auth, features, MCP, apps, effective env), and
+ * returns the structured snapshot. Used by `myagents diagnose runtime <type>`
+ * (issue #194) and the in-app "诊断" button.
+ *
+ * Codex: spawns `codex app-server`, no thread created.
+ * Claude Code / Gemini / builtin: not yet implemented — returns
+ * `unsupported` so the CLI can show a clear "not yet supported" message
+ * without crashing.
+ */
+export async function handleRuntimeDiagnose(payload: {
+  runtime?: string;
+  workspacePath?: string;
+}): Promise<AdminResponse> {
+  const runtimeArg = payload.runtime;
+  if (!runtimeArg) {
+    return {
+      success: false,
+      error: 'Missing required argument: runtime',
+      recoveryHint: {
+        recoveryCommand: 'myagents runtime list',
+        message: 'See valid runtime names.',
+      },
+    };
+  }
+  if (!isValidRuntimeType(runtimeArg)) {
+    return {
+      success: false,
+      error: `Unknown runtime: '${runtimeArg}'. Valid: ${VALID_RUNTIMES.join(', ')}.`,
+    };
+  }
+
+  // Codex is the only runtime with diagnostic RPCs today. Claude Code's
+  // -p mode doesn't expose an equivalent surface (it's one-shot per turn);
+  // Gemini's ACP has session-scoped state but no "list features / apps".
+  if (runtimeArg !== 'codex') {
+    return {
+      success: false,
+      error: `Diagnostic not yet implemented for runtime '${runtimeArg}'. Only 'codex' is currently supported.`,
+      data: { runtime: runtimeArg, supported: false },
+    };
+  }
+
+  let detection: RuntimeDetection = { installed: false };
+  try {
+    detection = await raceWithTimeout(
+      getExternalRuntime(runtimeArg).detect(),
+      RUNTIME_DETECT_TIMEOUT_MS,
+      { installed: false },
+    );
+  } catch { /* falls through to installed:false */ }
+
+  if (!detection.installed) {
+    return {
+      success: false,
+      error: `Codex CLI not installed. ${hintForMissingRuntime('codex')}`,
+      data: { runtime: 'codex', installed: false },
+    };
+  }
+
+  // Resolve the agent's envPolicy so the diagnostic reflects the same proxy
+  // policy the real session would use (Codex review #3 catch — without this,
+  // CLI diagnose silently reports the legacy `myagents` view even when the
+  // agent is configured to inherit terminal or skip proxy entirely).
+  let envPolicy: import('../shared/types/runtime').RuntimeEnvPolicy | undefined;
+  if (payload.workspacePath) {
+    const agent = findAgentByWorkspacePath(payload.workspacePath);
+    const raw = (agent?.runtimeConfig as Record<string, unknown> | undefined)?.envPolicy;
+    if (raw && typeof raw === 'object') {
+      envPolicy = raw as import('../shared/types/runtime').RuntimeEnvPolicy;
+    }
+  }
+
+  try {
+    const rt = getExternalRuntime('codex');
+    // Type-check the optional method — only CodexRuntime implements it today.
+    if (typeof (rt as { runStandaloneDiagnostics?: unknown }).runStandaloneDiagnostics !== 'function') {
+      return {
+        success: false,
+        error: 'Codex runtime adapter does not expose runStandaloneDiagnostics. Build is out of date.',
+      };
+    }
+    const diagnose = (rt as unknown as {
+      runStandaloneDiagnostics: (
+        wp?: string,
+        policy?: import('../shared/types/runtime').RuntimeEnvPolicy,
+      ) => Promise<unknown>;
+    }).runStandaloneDiagnostics;
+    const diagnostics = await diagnose(payload.workspacePath, envPolicy);
+    return {
+      success: true,
+      data: {
+        runtime: 'codex',
+        installed: true,
+        version: detection.version,
+        diagnostics,
+      },
+    };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return {
+      success: false,
+      error: `Codex diagnostic failed: ${msg}`,
+    };
+  }
 }
 
 /**

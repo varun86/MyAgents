@@ -124,12 +124,15 @@ myagents agent runtime-status                           # 看所有 Agent 的实
 myagents runtime list                                   # 4 个 runtime（builtin/claude-code/codex/gemini）的装机情况 + 版本
 myagents runtime list --json                            # 机读：installed/version/path
 myagents runtime describe <runtime>                     # 某 runtime 的 model 清单 + permissionMode 枚举
+myagents runtime diagnose codex [--workspacePath PATH]  # Codex 的 auth/features/MCP/apps/effective-env 快照（issue #194）
+myagents diagnose runtime codex                         # 同上的 sugar 写法
 ```
 
 **何时用：**
 - 在跑 `task create-direct --runtime X --model Y --permissionMode Z` **之前**先 `runtime describe X` 把合法值查清楚——`--help` 只列 flag，值靠这俩命令现场查，不会因为文档漂移而错
 - "我装了哪些 Agent CLI" → `runtime list`
 - 用户问"codex 支持什么 model" → `runtime describe codex`
+- 「@oai/artifact-tool 我从终端能调用、MyAgents 里就不行」/「Codex MCP 在 MyAgents 里看不到」/「Codex 是不是用错代理了」→ `runtime diagnose codex`。它 spawn 一个临时 codex app-server，跑 `getAuthStatus` / `experimentalFeature/list` / `mcpServerStatus/list` / `app/list` 四个 RPC，把 Codex 自己看到的状态原样吐出来，省得猜。effectiveEnv 节里能看到 MyAgents 注入的代理是不是真到了子进程，feature flag 是不是真生效。
 
 每个外部 runtime 有自己的动态 model 清单（Codex/Gemini 会 spawn CLI 查）和自己的 permissionMode 枚举（`suggest` / `auto-edit` / `full-auto` ≠ 内置的 `auto` / `plan` / `fullAgency`）——别混。
 

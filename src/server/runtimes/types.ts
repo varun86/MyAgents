@@ -1,7 +1,7 @@
 // AgentRuntime abstraction types (v0.1.59)
 // Defines the interface that all runtime implementations must satisfy
 
-import type { RuntimeType, RuntimeModelInfo, RuntimePermissionMode, RuntimeDetection } from '../../shared/types/runtime';
+import type { RuntimeType, RuntimeModelInfo, RuntimePermissionMode, RuntimeDetection, RuntimeDiagnostics, RuntimeEnvPolicy } from '../../shared/types/runtime';
 import type { InteractionScenario } from '../system-prompt';
 import type { ModelUsageEntry } from '../types/session';
 import type { ToolAttachment } from '../../shared/types/tool-attachment';
@@ -31,6 +31,13 @@ export interface SessionStartOptions {
   disallowedTools?: string[];
   scenario: InteractionScenario;
   additionalArgs?: string[];
+  /**
+   * Per-session env policy (issue #194). Resolved by the caller from
+   * `agent.runtimeConfig.envPolicy`. When omitted, runtime adapters default
+   * to `{ proxy: 'myagents' }` — the legacy MyAgents-overrides-everything
+   * behaviour, preserving backwards compat.
+   */
+  envPolicy?: RuntimeEnvPolicy;
 }
 
 /**
@@ -135,6 +142,13 @@ export type UnifiedEvent =
   }
   | { kind: 'model_update'; model: string }
   | { kind: 'log'; level: 'info' | 'warn' | 'error'; message: string }
+
+  // === Runtime diagnostics (issue #194) ===
+  // External-runtime self-report (auth state, feature flags, MCP/apps the
+  // runtime sees, effective env). Emitted shortly after session_init.
+  // session_init's `tools: []` was the previous diagnostic surface — vestigial
+  // for external runtimes; this event is the real signal.
+  | { kind: 'runtime_diagnostics'; diagnostics: RuntimeDiagnostics }
 
   // === Message replay (for session resume) ===
   | { kind: 'message_replay'; message: { id: string; role: string; content: unknown; timestamp?: string } }

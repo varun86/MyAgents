@@ -170,6 +170,7 @@ Commands:
   status    Show app running state
   version   Show app version
   reload    Hot-reload configuration
+  diagnose  Diagnose external runtime state (auth, features, MCP, apps, env)
 
 Global flags:
   --help      Show help for any command
@@ -195,6 +196,8 @@ Examples:
   myagents cron list
   myagents runtime list                       # see installed runtimes + install hints
   myagents runtime describe codex             # models + permission modes
+  myagents runtime diagnose codex             # auth / features / MCP / apps / env snapshot (issue #194)
+  myagents diagnose runtime codex             # alias for runtime diagnose
   myagents agent show <agent-id>              # effective defaults for a workspace
   myagents task list
   myagents task get <taskId>            # returns metadata + docs paths
@@ -465,6 +468,15 @@ function printResult(group: string, action: string, result: Record<string, unkno
     printRuntimeDescribe(result.data as Record<string, unknown>);
     return;
   }
+  if (group === 'runtime' && action === 'diagnose') {
+    printRuntimeDiagnose(result.data as Record<string, unknown>);
+    return;
+  }
+  if (group === 'diagnose') {
+    // `myagents diagnose runtime <type>` — sugar for `runtime diagnose`.
+    printRuntimeDiagnose(result.data as Record<string, unknown>);
+    return;
+  }
   if (group === 'status') {
     printStatus(result.data as Record<string, unknown>);
     return;
@@ -660,6 +672,118 @@ function printRuntimeDescribe(data: Record<string, unknown>): void {
     console.log('');
     console.log(`Note: ${String(note)}`);
   }
+}
+
+/**
+ * Format `myagents diagnose runtime <type>` output.
+ *
+ * Five sections: header (runtime + version + installed state) + auth + features
+ * + mcpServers + apps + effectiveEnv. Each section reports `unsupported` or an
+ * `error` string when the underlying RPC didn't complete. Designed for paste-
+ * to-issue triage of issue #194 / future runtime-divergence reports.
+ */
+function printRuntimeDiagnose(data: Record<string, unknown>): void {
+  if (!data) {
+    console.log('(no diagnostic data)');
+    return;
+  }
+  const runtime = String(data.runtime ?? '');
+  const version = String(data.version ?? '');
+  console.log(`Runtime: ${runtime}${version ? `  (${version})` : ''}`);
+
+  const diag = (data.diagnostics ?? {}) as Record<string, unknown>;
+  const status = (diag.status ?? {}) as Record<string, unknown>;
+
+  const renderStatus = (s: unknown): string => {
+    if (s === 'ok') return 'ok';
+    if (s === 'unsupported') return 'unsupported by this runtime';
+    if (s && typeof s === 'object' && 'error' in (s as Record<string, unknown>)) {
+      return `error: ${String((s as { error: unknown }).error)}`;
+    }
+    return '(not reported)';
+  };
+
+  // Auth
+  console.log('');
+  console.log(`Auth [${renderStatus(status.auth)}]`);
+  const auth = diag.auth as Record<string, unknown> | undefined;
+  if (auth) {
+    console.log(`  method: ${auth.authMethod ?? '(null)'}`);
+    if (auth.requiresLogin) console.log('  requiresLogin: true');
+    if (auth.details) console.log(`  details: ${auth.details}`);
+  }
+
+  // Features
+  console.log('');
+  console.log(`Feature flags [${renderStatus(status.features)}]`);
+  const features = (diag.features as Array<Record<string, unknown>>) ?? [];
+  if (features.length === 0) {
+    if (status.features === 'ok') console.log('  (none enabled / all at default)');
+  } else {
+    for (const f of features) {
+      const name = String(f.name ?? '');
+      const enabled = f.enabled ? 'on ' : 'off';
+      const def = f.defaultEnabled ? 'default-on ' : 'default-off';
+      const stage = f.stage ? ` (${String(f.stage)})` : '';
+      console.log(`  ${enabled}  ${name.padEnd(38)}  ${def}${stage}`);
+    }
+  }
+
+  // MCP servers
+  console.log('');
+  console.log(`MCP servers [${renderStatus(status.mcpServers)}]`);
+  const mcp = (diag.mcpServers as Array<Record<string, unknown>>) ?? [];
+  if (mcp.length === 0) {
+    if (status.mcpServers === 'ok') console.log('  (none)');
+  } else {
+    for (const s of mcp) {
+      const name = String(s.name ?? '');
+      const tools = Number(s.toolCount ?? 0);
+      const resources = Number(s.resourceCount ?? 0);
+      const authStatus = s.authStatus ? ` auth=${String(s.authStatus)}` : '';
+      console.log(`  ${name.padEnd(28)} tools=${tools} resources=${resources}${authStatus}`);
+    }
+  }
+
+  // Apps — THE diagnostic for issue #194
+  console.log('');
+  console.log(`Apps [${renderStatus(status.apps)}]`);
+  const apps = (diag.apps as Array<Record<string, unknown>>) ?? [];
+  if (apps.length === 0) {
+    if (status.apps === 'ok') console.log('  (none — app discovery returned an empty list)');
+  } else {
+    for (const a of apps) {
+      const id = String(a.id ?? '');
+      const enabled = a.isEnabled ? 'enabled ' : 'disabled';
+      const accessible = a.isAccessible ? 'accessible' : 'NOT accessible';
+      const needs = a.needsAuth ? ' needs-auth' : '';
+      console.log(`  ${enabled}  ${accessible.padEnd(15)}  ${id}${needs}`);
+    }
+  }
+
+  // Effective env
+  console.log('');
+  console.log('Effective env (sanitized):');
+  const env = (diag.effectiveEnv ?? {}) as Record<string, unknown>;
+  console.log(`  cwd: ${env.cwd ?? '(unknown)'}`);
+  const proxy = (env.proxy ?? {}) as Record<string, unknown>;
+  console.log(`  HTTP_PROXY:  ${proxy.http ?? '(unset)'}`);
+  console.log(`  HTTPS_PROXY: ${proxy.https ?? '(unset)'}`);
+  console.log(`  ALL_PROXY:   ${proxy.all ?? '(unset)'}`);
+  console.log(`  NO_PROXY:    ${proxy.no ?? '(unset)'}`);
+  console.log(`  proxyPolicy: ${env.proxyPolicy ?? 'myagents'}`);
+  console.log(`  MYAGENTS_PROXY_INJECTED: ${env.myagentsProxyInjected ? 'yes' : 'no'}`);
+  const pathHead = (env.pathHead as string[]) ?? [];
+  if (pathHead.length > 0) {
+    console.log(`  PATH (first ${pathHead.length}): ${pathHead.join(' : ')}`);
+  }
+  console.log(`  has OPENAI_API_KEY:     ${env.hasOpenaiApiKey ? 'yes' : 'no'}`);
+  console.log(`  has ANTHROPIC_API_KEY:  ${env.hasAnthropicApiKey ? 'yes' : 'no'}`);
+  console.log(`  has CODEX_HOME:         ${env.hasCodexHome ? 'yes' : 'no'}`);
+  console.log(`  has XDG_CONFIG_HOME:    ${env.hasXdgConfigHome ? 'yes' : 'no'}`);
+
+  console.log('');
+  console.log(`Collected at: ${diag.timestamp ?? '(unknown)'}`);
 }
 
 /**
@@ -1378,6 +1502,11 @@ async function main(): Promise<void> {
 }
 
 function buildRoute(group: string, action: string, rest: string[]): string {
+  // `diagnose runtime <type>` sugar maps to `runtime/diagnose` so handlers
+  // and admin routes stay singular (issue #194).
+  if (group === 'diagnose' && action === 'runtime') {
+    return 'diagnose/runtime';
+  }
   // Handle nested commands like "agent channel list/add/remove"
   if (group === 'agent' && action === 'channel') {
     const channelAction = rest[0] || 'list';
@@ -1530,7 +1659,18 @@ function buildRequestBody(
   if (group === 'runtime') {
     if (action === 'list') return {};
     if (action === 'describe') return { runtime: requirePositional(rest[0] ?? (flags.runtime as string | undefined), 'runtime', 'runtime describe', 'runtime') };
+    if (action === 'diagnose') return {
+      runtime: requirePositional(rest[0] ?? (flags.runtime as string | undefined), 'runtime', 'runtime diagnose', 'runtime'),
+      workspacePath: flags.workspacePath,
+    };
     return {};
+  }
+  // Sugar form: `myagents diagnose runtime <type>` (issue #194).
+  if (group === 'diagnose' && action === 'runtime') {
+    return {
+      runtime: requirePositional(rest[0] ?? (flags.runtime as string | undefined), 'runtime', 'diagnose runtime', 'runtime'),
+      workspacePath: flags.workspacePath,
+    };
   }
 
   // Cron commands

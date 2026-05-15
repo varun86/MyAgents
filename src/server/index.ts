@@ -582,6 +582,7 @@ import {
   getExternalSessionPermissionMode,
   prewarmExternalSession,
   awaitExternalSessionStarting,
+  popLastUserMessageForRetry,
 } from './runtimes/external-session';
 import type { ImagePayload } from './runtimes/types';
 import { VALID_RUNTIMES, resolveCronPermissionMode } from '../shared/types/runtime';
@@ -1202,6 +1203,8 @@ async function routeAdminApi(pathname: string, payload: Record<string, unknown>)
   if (route === 'agent/channel/remove') return api.handleAgentChannelRemove(payload as Parameters<typeof api.handleAgentChannelRemove>[0]);
   if (route === 'runtime/list') return await api.handleRuntimeList();
   if (route === 'runtime/describe') return await api.handleRuntimeDescribe(payload as Parameters<typeof api.handleRuntimeDescribe>[0]);
+  if (route === 'runtime/diagnose') return await api.handleRuntimeDiagnose(payload as Parameters<typeof api.handleRuntimeDiagnose>[0]);
+  if (route === 'diagnose/runtime') return await api.handleRuntimeDiagnose(payload as Parameters<typeof api.handleRuntimeDiagnose>[0]);
 
   // Agent runtime status
   if (route === 'agent/runtime-status') return await api.handleAgentRuntimeStatus();
@@ -2276,6 +2279,25 @@ async function main() {
           return jsonResponse({ success: false, error: 'Missing userMessageId' }, 400);
         }
         const result = await rewindSession(userMessageId);
+        return jsonResponse(result);
+      }
+
+      // External-runtime retry: truncate the failed user turn from
+      // allSessionMessages and return its content for re-send. Builtin uses
+      // /chat/rewind which has SDK resume-anchor + file-checkpoint semantics;
+      // external runtimes don't have those, but a "drop the tail + resend"
+      // semantic is still sound when the previous turn never produced an
+      // assistant message (model capacity, network error, etc.). Issue #192.
+      if (pathname === '/chat/external-retry' && request.method === 'POST') {
+        if (!shouldUseExternalRuntime()) {
+          return jsonResponse({ success: false, error: 'external-retry is only for external runtimes; builtin uses /chat/rewind' }, 400);
+        }
+        const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+        const userMessageId = typeof body.userMessageId === 'string' ? body.userMessageId : '';
+        if (!userMessageId) {
+          return jsonResponse({ success: false, error: 'Missing userMessageId' }, 400);
+        }
+        const result = await popLastUserMessageForRetry(userMessageId);
         return jsonResponse(result);
       }
 

@@ -113,6 +113,24 @@ let detectedUserPath: string | null = null;
 let warmupInFlight: Promise<void> | null = null;
 
 /**
+ * Proxy env vars captured from the user's interactive shell during warmup
+ * (issue #194). When the user runs `codex` / `claude` directly in terminal,
+ * THESE are the values their CLI subprocess inherits. RuntimeEnvPolicy
+ * `proxy: 'terminal'` will substitute these into the external-runtime spawn
+ * env so MyAgents behaves consistently with terminal invocations.
+ *
+ * Each key's value is `null` while warmup hasn't completed, an empty string
+ * `''` if the user's shell has the var explicitly unset, or the value otherwise.
+ * `''` is intentionally distinct from null: it means "we asked, user said no".
+ */
+const TERMINAL_PROXY_KEYS = [
+  'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY',
+  'http_proxy', 'https_proxy', 'all_proxy', 'no_proxy',
+] as const;
+type TerminalProxyEnv = Partial<Record<typeof TERMINAL_PROXY_KEYS[number], string>>;
+let detectedTerminalProxyEnv: TerminalProxyEnv | null = null;
+
+/**
  * Synchronous PATH getter. Non-blocking by design:
  *   - First call returns the fallback PATH immediately
  *   - If background warmup has completed, returns fallback + detected user PATH
@@ -195,8 +213,23 @@ export function warmupShellPath(): Promise<void> {
 
     warmupInFlight = new Promise<void>((resolve) => {
         const shell = process.env.SHELL || '/bin/zsh';
-        const marker = `__MYAGENTS_PATH_${process.pid}__`;
-        const cmd = `echo "${marker}\${PATH}${marker}"`;
+        const pathMarker = `__MYAGENTS_PATH_${process.pid}__`;
+        const proxyMarker = `__MYAGENTS_PROXY_${process.pid}__`;
+        // Compose one shell invocation that captures BOTH the user's PATH and
+        // their proxy-related env vars (issue #194). Cheaper than two shell
+        // spawns; each var emitted between dedicated markers so we can parse
+        // them out regardless of MOTD / p10k banner noise. `${VAR:-}` ensures
+        // unset vars still produce empty output rather than aborting the echo.
+        //
+        // CRITICAL: each proxy line MUST be wrapped in `echo "..."` — without
+        // it, `__MARKER__KEY=VALUE__MARKER__` parses as a shell *assignment*,
+        // not output, so the entire proxy capture silently produces nothing
+        // (Codex review #1 catch — would have made `proxy: 'terminal'` behave
+        // identically to `direct` for everyone).
+        const proxyEcho = TERMINAL_PROXY_KEYS
+            .map(k => `echo "${proxyMarker}${k}=\${${k}:-}${proxyMarker}"`)
+            .join(';');
+        const cmd = `echo "${pathMarker}\${PATH}${pathMarker}";${proxyEcho}`;
 
         // -i interactive + -l login → sources both .zprofile and .zshrc (where
         // NVM/fnm/pnpm typically live). Marker isolates $PATH from noisy output
@@ -218,17 +251,41 @@ export function warmupShellPath(): Promise<void> {
                         );
                         return;
                     }
-                    const match = stdout.match(new RegExp(`${marker}(.+?)${marker}`));
-                    if (match && match[1].length > 10) {
-                        detectedUserPath = match[1];
+                    const pathMatch = stdout.match(new RegExp(`${pathMarker}(.+?)${pathMarker}`));
+                    if (pathMatch && pathMatch[1].length > 10) {
+                        detectedUserPath = pathMatch[1];
                         cachedPath = `${buildFallbackPath()}${PATH_SEPARATOR}${detectedUserPath}`;
                         console.log('[shell] Detected user PATH via interactive shell');
+                    }
+                    // Parse proxy env vars — each `${proxyMarker}KEY=VALUE${proxyMarker}`.
+                    // Capture both case spellings; both can coexist in user rc files.
+                    const captured: TerminalProxyEnv = {};
+                    const proxyRe = new RegExp(`${proxyMarker}([A-Z_a-z]+)=([^]*?)${proxyMarker}`, 'g');
+                    let m: RegExpExecArray | null;
+                    while ((m = proxyRe.exec(stdout)) !== null) {
+                        const key = m[1] as typeof TERMINAL_PROXY_KEYS[number];
+                        if (TERMINAL_PROXY_KEYS.includes(key)) {
+                            captured[key] = m[2]; // empty string means "user has no value set"
+                        }
+                    }
+                    detectedTerminalProxyEnv = captured;
+                    const present = (Object.entries(captured) as Array<[string, string]>)
+                        .filter(([_, v]) => v.length > 0)
+                        .map(([k]) => k);
+                    if (present.length > 0) {
+                        console.log(`[shell] Detected terminal proxy env: ${present.join(', ')}`);
+                    } else {
+                        console.log('[shell] No terminal-shell proxy env detected (user has none)');
                     }
                 } finally {
                     // Make sure we don't leave warmupInFlight dangling; future
                     // sync callers still work off the fallback even if detection
                     // produced nothing useful.
                     detectedUserPath = detectedUserPath ?? '';
+                    // Empty-object fallback so getDetectedTerminalProxy() never
+                    // returns null after warmup, distinguishing "not yet warmed"
+                    // from "warmed, user has nothing".
+                    detectedTerminalProxyEnv = detectedTerminalProxyEnv ?? {};
                     warmupInFlight = null;
                     resolve();
                 }
@@ -236,4 +293,20 @@ export function warmupShellPath(): Promise<void> {
         );
     });
     return warmupInFlight;
+}
+
+/**
+ * Return the proxy env vars detected from the user's interactive shell during
+ * `warmupShellPath()` (issue #194).
+ *
+ * Return value semantics:
+ *  - `null`: warmup hasn't run yet. Caller should treat as "no info".
+ *  - `{}`: warmup ran but user has no proxy env set. Distinct from null —
+ *     caller can safely strip MyAgents-injected proxy vars from the subprocess
+ *     env in this case (terminal-parity = unset).
+ *  - `{ HTTP_PROXY: '…', … }`: real values to inject into subprocess env.
+ *     Always check both upper- and lower-case keys when applying.
+ */
+export function getDetectedTerminalProxyEnv(): TerminalProxyEnv | null {
+    return detectedTerminalProxyEnv;
 }

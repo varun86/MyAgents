@@ -323,6 +323,65 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
               </p>
             );
           })()}
+
+          {/* Issue #194 — proxy policy for external runtime subprocess.
+              Only relevant when the agent runs an external CLI (Codex / CC /
+              Gemini), so hidden for builtin. */}
+          {currentRuntime !== 'builtin' && agent && (() => {
+            // Read current policy; default to 'myagents' for backwards compat.
+            // runtimeConfig is on AgentConfig as a free-form record — keep the
+            // narrow `as` cast so we don't expand its public schema unnecessarily.
+            const rc = (agent.runtimeConfig as Record<string, unknown> | undefined) ?? {};
+            const envPolicy = (rc.envPolicy as { proxy?: 'myagents' | 'terminal' | 'direct' } | undefined) ?? {};
+            const proxyMode: 'myagents' | 'terminal' | 'direct' = envPolicy.proxy ?? 'myagents';
+
+            const onSelect = (next: 'myagents' | 'terminal' | 'direct') => {
+              const nextRc = {
+                ...rc,
+                envPolicy: { ...(envPolicy as object), proxy: next },
+              };
+              void patchAgentConfig(agent.id, { runtimeConfig: nextRc } as Partial<Omit<AgentConfig, 'id'>>);
+            };
+
+            const radio = (
+              value: 'myagents' | 'terminal' | 'direct',
+              label: string,
+              hint: string,
+            ) => (
+              <label
+                key={value}
+                className={`flex cursor-pointer items-start gap-2 rounded-lg border px-3 py-2 text-xs leading-relaxed transition-colors ${
+                  proxyMode === value
+                    ? 'border-[var(--accent-warm)] bg-[var(--accent-warm-subtle)]'
+                    : 'border-[var(--line)] hover:border-[var(--line-strong)]'
+                }`}
+              >
+                <input
+                  type="radio"
+                  name={`proxy-policy-${agent.id}`}
+                  value={value}
+                  checked={proxyMode === value}
+                  onChange={() => onSelect(value)}
+                  className="mt-0.5 shrink-0"
+                />
+                <div className="min-w-0">
+                  <div className="font-medium text-[var(--ink)]">{label}</div>
+                  <div className="text-[var(--ink-muted)]">{hint}</div>
+                </div>
+              </label>
+            );
+
+            return (
+              <div className="flex items-start gap-3">
+                <label className="w-14 shrink-0 pt-2 text-sm text-[var(--ink-muted)]">代理</label>
+                <div className="flex-1 grid grid-cols-1 gap-2 sm:grid-cols-3">
+                  {radio('myagents', 'MyAgents 代理', '使用 MyAgents 设置里的代理（默认）')}
+                  {radio('terminal', '跟随终端', '继承终端 shell 的 HTTP_PROXY 等环境变量')}
+                  {radio('direct', '直连', '不注入任何代理，依赖系统/Clash TUN')}
+                </div>
+              </div>
+            );
+          })()}
         </>
       )}
 

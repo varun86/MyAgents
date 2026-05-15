@@ -824,6 +824,44 @@ export function getLastExternalAssistantText(): string {
 }
 
 /**
+ * Resolve the agent's envPolicy from disk (issue #194). Returns `undefined` when
+ * the agent has none set — the runtime adapter then defaults to the legacy
+ * `{ proxy: 'myagents' }` behaviour. Best-effort: any error reading config is
+ * swallowed and returns undefined, so the start path can't break on a malformed
+ * agent.json.
+ */
+async function resolveAgentEnvPolicy(
+  workspacePath: string,
+): Promise<import('../../shared/types/runtime').RuntimeEnvPolicy | undefined> {
+  try {
+    const { findAgentByWorkspacePath } = await import('../utils/admin-config');
+    const agent = findAgentByWorkspacePath(workspacePath);
+    const raw = (agent?.runtimeConfig as Record<string, unknown> | undefined)?.envPolicy;
+    if (!raw || typeof raw !== 'object') return undefined;
+    // Validate proxy field against the explicit allowlist. A malformed value
+    // (e.g. `proxy: 'inherit'` from a typo, or `proxy: true` from a wrong UI
+    // wire) must NOT fall through to the env-utils branch that strips proxy
+    // vars — that would degrade the user from 'myagents' (safe) to 'direct'
+    // (silently breaks proxy-dependent traffic). Codex review #5 catch:
+    // unknown strings used to fall through to the 'terminal' arm after the
+    // env stripped MyAgents' proxy.
+    const policyObj = raw as Record<string, unknown>;
+    const proxyRaw = policyObj.proxy;
+    const proxy: 'myagents' | 'terminal' | 'direct' | undefined =
+      proxyRaw === 'myagents' || proxyRaw === 'terminal' || proxyRaw === 'direct'
+        ? proxyRaw
+        : undefined;
+    if (proxyRaw !== undefined && proxy === undefined) {
+      console.warn(`[external-session] Ignoring invalid envPolicy.proxy=${JSON.stringify(proxyRaw)} for ${workspacePath} — defaulting to 'myagents'`);
+    }
+    return { proxy };
+  } catch (err) {
+    console.warn(`[external-session] resolveAgentEnvPolicy(${workspacePath}) failed:`, err instanceof Error ? err.message : String(err));
+  }
+  return undefined;
+}
+
+/**
  * Start an external runtime session.
  * Called instead of the builtin startStreamingSession() when runtime is external.
  */
@@ -836,6 +874,8 @@ export async function startExternalSession(options: {
   permissionMode?: string;
   scenario: InteractionScenario;
   resumeSessionId?: string;
+  /** Issue #194 — per-agent env policy (proxy: myagents/terminal/direct). */
+  envPolicy?: import('../../shared/types/runtime').RuntimeEnvPolicy;
 }): Promise<void> {
   // Concurrency guard — wait for any in-flight start to finish
   if (startingPromise) {
@@ -868,11 +908,18 @@ async function _doStartExternalSession(options: {
   permissionMode?: string;
   scenario: InteractionScenario;
   resumeSessionId?: string;
+  envPolicy?: import('../../shared/types/runtime').RuntimeEnvPolicy;
 }): Promise<void> {
 
   const runtimeType = getCurrentRuntimeType();
   const runtime = getExternalRuntime(runtimeType);
   activeRuntime = runtime;
+
+  // Issue #194 — resolve agent envPolicy from disk if caller didn't pass it
+  // explicitly. Most call sites (sendExternalMessage, prewarm) don't have
+  // access to the agent config, so doing it here avoids N copies of the lookup.
+  const resolvedEnvPolicy = options.envPolicy
+    ?? await resolveAgentEnvPolicy(options.workspacePath);
 
   // Build system prompt using MyAgents' three-layer architecture.
   // Pass the current runtime so L1 identity text reports the correct CLI
@@ -1002,6 +1049,7 @@ async function _doStartExternalSession(options: {
         permissionMode: options.permissionMode,
         scenario: options.scenario,
         resumeSessionId: resumeId,
+        envPolicy: resolvedEnvPolicy,
       },
       handleUnifiedEvent,
     );
@@ -1505,6 +1553,60 @@ export function isExternalSessionActive(): boolean {
 }
 
 /**
+ * Truncate `allSessionMessages` at the given user message id and persist the
+ * truncation. Returns the popped user message's content + attachments so the
+ * caller can re-send.
+ *
+ * External-runtime equivalent of builtin `rewindSession()`. Used by the
+ * retry button when the previous turn failed (e.g. model capacity). External
+ * runtimes don't support /chat/rewind because there's no SDK resume anchor /
+ * file checkpoint to roll back, but a "drop the failed user turn + resend"
+ * semantic is still sound: the failed turn never produced an assistant
+ * message (persistTurnResult only fires on subtype=success), so the local
+ * history just has a dangling user message at the tail.
+ *
+ * Caller is responsible for invoking sendExternalMessage with the returned
+ * content. We don't do the resend here so the existing send path's
+ * MCP/agents/model wiring stays the single source of truth.
+ *
+ * Refuses if a turn is currently in flight — the user must abort first.
+ */
+export async function popLastUserMessageForRetry(userMessageId: string): Promise<{
+  success: boolean;
+  error?: string;
+  content?: string;
+  attachments?: SessionMessage['attachments'];
+}> {
+  if (!lastSessionId) {
+    return { success: false, error: 'No active external session' };
+  }
+  if (isExternalSessionActive()) {
+    return { success: false, error: 'Cannot retry while a turn is in progress' };
+  }
+  const targetIndex = allSessionMessages.findIndex(
+    m => m.id === userMessageId && m.role === 'user',
+  );
+  if (targetIndex < 0) {
+    return { success: false, error: 'Message not found' };
+  }
+  const target = allSessionMessages[targetIndex];
+  const content = typeof target.content === 'string' ? target.content : '';
+  const attachments = target.attachments;
+
+  // Truncate (drops the failed user msg + any partial assistant blocks left
+  // behind from a half-finalized turn). saveSessionMessages already detects
+  // `messages.length < existingCount` and rewrites the JSONL.
+  allSessionMessages.length = targetIndex;
+  try {
+    await saveSessionMessages(lastSessionId, allSessionMessages);
+  } catch (err) {
+    console.error('[external-session] popLastUserMessageForRetry: failed to persist truncation:', err);
+    return { success: false, error: 'Failed to persist truncation' };
+  }
+  return { success: true, content, attachments };
+}
+
+/**
  * Pre-warm an external runtime process so the first user message skips the
  * cold-start cost (spawn + `initialize` + `session/new` + prompt-file write).
  *
@@ -1998,6 +2100,14 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
       }
       break;
 
+    case 'runtime_diagnostics':
+      // Issue #194: runtime's self-report (auth, features, MCP, apps, effective env).
+      // Sidecar log keeps a snapshot for unified-log triage; renderer renders the
+      // diagnostic strip / details panel.
+      console.log(`[external-session] runtime_diagnostics: runtime=${event.diagnostics.runtime} features=${event.diagnostics.features?.length ?? 0} mcp=${event.diagnostics.mcpServers?.length ?? 0} apps=${event.diagnostics.apps?.length ?? 0} auth=${event.diagnostics.auth?.authMethod ?? 'none'}`);
+      broadcast('chat:runtime-diagnostics', event.diagnostics);
+      break;
+
     case 'status_change': {
       // Map runtime states to frontend session states (match builtin runtime behavior)
       const stateMap: Record<string, string> = { running: 'running', error: 'error', waiting_permission: 'running' };
@@ -2124,8 +2234,25 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
     case 'log':
       if (event.level === 'error') {
         console.error(`[external-runtime] ${event.message}`);
+      } else if (event.level === 'warn') {
+        console.warn(`[external-runtime] ${event.message}`);
       } else {
         console.log(`[external-runtime] ${event.message}`);
+      }
+      // Issue #194: surface warn/error to the renderer so the user sees them
+      // in the chat log panel rather than only the unified log. Info-level is
+      // log-only — it's high-volume runtime noise (turn/tool lifecycle).
+      // Shape MUST match LogEntry (src/renderer/types/log.ts) — the renderer's
+      // `chat:log` handler discriminates on `source in data` and drops anything
+      // without it. `source: 'bun'` is correct: the sidecar is the writer.
+      if (event.level === 'warn' || event.level === 'error') {
+        broadcast('chat:log', {
+          source: 'bun',
+          level: event.level,
+          message: event.message,
+          timestamp: new Date().toISOString(),
+          runtime: getCurrentRuntimeType(),
+        });
       }
       break;
 

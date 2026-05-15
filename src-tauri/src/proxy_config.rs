@@ -163,6 +163,14 @@ pub fn apply_to_subprocess(cmd: &mut Command) -> bool {
                 cmd.env("https_proxy", &proxy_url);
                 cmd.env("NO_PROXY", LOCALHOST_NO_PROXY);
                 cmd.env("no_proxy", LOCALHOST_NO_PROXY);
+                // Issue #194 — `ALL_PROXY` (curl-style "use proxy for everything")
+                // takes precedence over HTTP_PROXY/HTTPS_PROXY in many HTTP stacks
+                // (reqwest, openssl, curl). If the launching env has an inherited
+                // `ALL_PROXY` (Tauri started from a shell that exported it), it
+                // would shadow the proxy we injected here, sending traffic via
+                // the wrong upstream. Strip both casings.
+                cmd.env_remove("ALL_PROXY");
+                cmd.env_remove("all_proxy");
                 // Flag so TypeScript can distinguish explicit injection from inherited system env
                 cmd.env("MYAGENTS_PROXY_INJECTED", "1");
                 true

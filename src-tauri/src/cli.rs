@@ -23,6 +23,10 @@ use std::process::{Command, Stdio};
 const CLI_COMMANDS: &[&str] = &[
     "mcp", "model", "agent", "runtime", "config", "status", "reload", "version",
     "cron", "plugin", "skill", "task", "thought", "im", "widget",
+    // Issue #194 — `myagents diagnose runtime <type>` sugar. Without this, the
+    // packaged Tauri binary launches the GUI when invoked with just `diagnose ...`.
+    // `runtime diagnose <type>` still works via the "runtime" entry above.
+    "diagnose",
 ];
 
 /// Check if the given args indicate CLI mode.
