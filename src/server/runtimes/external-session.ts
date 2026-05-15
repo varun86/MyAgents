@@ -2075,13 +2075,63 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
       }
       break;
 
-    case 'runtime_diagnostics':
+    case 'runtime_diagnostics': {
       // Issue #194: runtime's self-report (auth, features, MCP, apps, effective env).
       // Sidecar log keeps a snapshot for unified-log triage; renderer renders the
       // diagnostic strip / details panel.
       console.log(`[external-session] runtime_diagnostics: runtime=${event.diagnostics.runtime} features=${event.diagnostics.features?.length ?? 0} mcp=${event.diagnostics.mcpServers?.length ?? 0} apps=${event.diagnostics.apps?.length ?? 0} auth=${event.diagnostics.auth?.authMethod ?? 'none'}`);
       broadcast('chat:runtime-diagnostics', event.diagnostics);
+
+      // Banner v2 only renders BLOCKING issues (auth.requiresLogin + total
+      // RPC failure). Non-blocking signals — app/list 403, individual MCP
+      // server failure, feature-flag query error — used to show up in the
+      // yellow banner too; users (rightly) complained about chronic noise
+      // from transient Codex backend hiccups. Route them through chat:log
+      // instead so the Logs panel shows them but the chat header stays
+      // clean. Sidecar console / unified log still has the full snapshot.
+      const d = event.diagnostics;
+      const emitDiagnosticLog = (level: 'warn' | 'error', message: string): void => {
+        broadcast('chat:log', {
+          source: 'bun',
+          level,
+          message,
+          timestamp: new Date().toISOString(),
+          runtime: getCurrentRuntimeType(),
+        });
+      };
+      const errOf = (s: typeof d.status.auth): string | null =>
+        s && typeof s === 'object' && 'error' in s ? String(s.error) : null;
+      const authErr = errOf(d.status.auth);
+      const appsErr = errOf(d.status.apps);
+      const mcpErr = errOf(d.status.mcpServers);
+      const featErr = errOf(d.status.features);
+      // `error` for ones the banner would have considered "warn-tier" in v1;
+      // `warn` for purely informational. Severity here drives Logs panel
+      // sort/filter — it isn't what makes the banner appear.
+      if (authErr) emitDiagnosticLog('error', `[codex-diag] auth status query failed: ${authErr.slice(0, 200)}`);
+      if (appsErr) emitDiagnosticLog('warn', `[codex-diag] app/list failed: ${appsErr.slice(0, 200)}`);
+      if (mcpErr) emitDiagnosticLog('warn', `[codex-diag] mcpServerStatus/list failed: ${mcpErr.slice(0, 200)}`);
+      if (featErr) emitDiagnosticLog('warn', `[codex-diag] experimentalFeature/list failed: ${featErr.slice(0, 200)}`);
+      if (d.apps) {
+        const inaccessible = d.apps.filter(a => a.isEnabled && !a.isAccessible);
+        if (inaccessible.length > 0) {
+          emitDiagnosticLog(
+            'warn',
+            `[codex-diag] ${inaccessible.length} app(s) enabled but not accessible: ${inaccessible.map(a => a.id).slice(0, 5).join(', ')}`,
+          );
+        }
+      }
+      if (d.mcpServers) {
+        const failed = d.mcpServers.filter(s => s.state === 'failed');
+        if (failed.length > 0) {
+          emitDiagnosticLog(
+            'warn',
+            `[codex-diag] MCP server(s) in failed state: ${failed.map(s => s.name).join(', ')}`,
+          );
+        }
+      }
       break;
+    }
 
     case 'status_change': {
       // Map runtime states to frontend session states (match builtin runtime behavior)
