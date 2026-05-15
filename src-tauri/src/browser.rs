@@ -97,7 +97,11 @@ const BROWSER_INIT_SCRIPT: &str = r#"
 /// Spawn the OS default-browser opener for a URL. URL must already be
 /// validated as http/https/mailto by the caller — we don't want to hand
 /// arbitrary schemes (`file:`, `javascript:`, etc.) to the system opener.
-fn spawn_external_open(url: &str) {
+///
+/// `pub(crate)` so the main-window navigation handler (`lib.rs::setup`) can
+/// reuse the same exec path when it intercepts an external-frame navigation
+/// and reroutes it to the OS default browser.
+pub(crate) fn spawn_external_open(url: &str) {
     // All three platform arms route through process_cmd::new for the
     // single-mental-model rule. The Windows arm in particular benefits —
     // `cmd /C start` is a console-subsystem binary, so CREATE_NO_WINDOW
