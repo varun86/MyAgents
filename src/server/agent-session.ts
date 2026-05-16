@@ -40,6 +40,7 @@ import { snapshotForImSession, snapshotForOwnedSession } from './utils/session-s
 import { findAgentByWorkspacePath } from './utils/admin-config';
 import type { AgentConfig } from '../shared/types/agent';
 import { broadcast } from './sse';
+import { getEnabledPluginSdkConfigs } from './plugins/store';
 import { seedBridgeThoughtSignatures } from './bridge-cache';
 import { initLogger, appendLog, getLogLines as getLogLinesFromLogger } from './AgentLogger';
 import { setAmbientLogContext, clearAmbientLogContextField } from './logger-context';
@@ -517,7 +518,8 @@ type RestartReason =
   | 'provider'     // setSessionProviderEnv — provider env (baseUrl, apiKey, etc.) changed
   | 'proxy'        // triggerProxyRestart — HTTP proxy changed via Settings
   | 'oauth'        // MCP OAuth token acquired/refreshed
-  | 'model-window'; // setSessionModel — contextLength crossed a boundary, need to reinject CLAUDE_CODE_AUTO_COMPACT_WINDOW
+  | 'model-window' // setSessionModel — contextLength crossed a boundary, need to reinject CLAUDE_CODE_AUTO_COMPACT_WINDOW
+  | 'plugins';     // PRD 0.2.17 — Claude plugin install / uninstall / toggle
 
 // Deferred config restart: config changes during an active turn / pre-warm
 // stage set a reason in this set instead of aborting immediately. Two consumers
@@ -2187,6 +2189,21 @@ function providerEnvEqual(a: ProviderEnv | undefined, b: ProviderEnv | undefined
  * `setAgents`) before invoking this. Active turns are respected via the same
  * deferred-restart mechanism; idle sessions abort immediately.
  */
+/**
+ * PRD 0.2.17 — public entrypoint for the plugins admin API. Called after
+ * any install / uninstall / toggle write so the next SDK session picks up
+ * the refreshed plugin list. Composes with the existing deferred-restart
+ * pipeline (no new abort path) and respects the external-runtime guard
+ * inside schedulePreWarm. We intentionally do NOT short-circuit no-op
+ * toggles via a fingerprint comparison: the restart cost on an idle
+ * sidecar is ~1s and the comparison's own cost (lstat + isPluginRootDir
+ * walk on every enabled plugin) is not negligible. See review notes
+ * (Codex AI-specific findings) for the analysis.
+ */
+export function schedulePluginDeferredRestart(): void {
+  forceReloadActiveSession('plugins');
+}
+
 export function forceReloadActiveSession(reason: RestartReason = 'mcp'): void {
   if (querySession) {
     if (isProcessing && !isPreWarming) {
@@ -7601,6 +7618,18 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         askUserQuestion: { previewFormat: 'html' as const },
       },
       mcpServers: sdkMcpServersInitial,
+      // PRD 0.2.17 — Claude plugin injection. SDK accepts
+      // `plugins: [{ type: 'local', path }]`; it then scans each path for
+      // .claude-plugin/plugin.json and wires up the contained
+      // skills / agents / hooks / .mcp.json / .lsp.json automatically.
+      // MyAgents only hands it the enabled set — getEnabledPluginSdkConfigs
+      // already filters to entries that exist on disk as valid plugin roots.
+      // Field omitted entirely when no plugins are enabled so empty-array
+      // noise doesn't show up in SDK debug output.
+      ...((): { plugins?: { type: 'local'; path: string }[] } => {
+        const pluginCfgs = getEnabledPluginSdkConfigs();
+        return pluginCfgs.length > 0 ? { plugins: pluginCfgs } : {};
+      })(),
       // (v0.2.12) Enable --replay-user-messages so CLI emits SDKUserMessageReplay
       // (isReplay=true) when it drains a mid-turn queued_command attachment from
       // its commandQueue into the model's context. We use this signal to know

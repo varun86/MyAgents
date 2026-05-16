@@ -81,6 +81,29 @@ import { sanitizeFolderName, isWindowsReservedName } from '../shared/utils';
 import { resolveSkillUrl } from './skills/url-resolver';
 import { fetchSkillZip, TarballFetchError } from './skills/tarball-fetcher';
 import { analyseTree, buildInstallPayload, writeSkillFiles, type SkillCandidate } from './skills/installer';
+import {
+  installPlugin,
+  uninstallPlugin,
+  togglePlugin,
+  listInstalledPlugins,
+  getPluginDetail,
+  PluginStoreError,
+} from './plugins/store';
+
+/**
+ * Lazy bridge to agent-session.schedulePluginDeferredRestart — the latter
+ * lives in a module index.ts cannot statically import (circular dep with
+ * MCP / agent wiring). Dynamic import is cached after first call so the
+ * cost is only paid once per process.
+ */
+async function schedulePluginRestartLazy(): Promise<void> {
+  try {
+    const mod = await import('./agent-session');
+    mod.schedulePluginDeferredRestart();
+  } catch (err) {
+    console.warn('[plugins] schedulePluginRestartLazy failed (non-fatal):', err);
+  }
+}
 import type { SessionSource } from './types/session';
 import { parseAgentFrontmatter, parseFullAgentContent, serializeAgentContent } from '../shared/agentCommands';
 import { scanAgents, readWorkspaceConfig, writeWorkspaceConfig, loadEnabledAgents, readAgentMeta, writeAgentMeta, findAgent } from './agents/agent-loader';
@@ -1015,6 +1038,33 @@ function seedBundledSkills(): void {
 }
 
 /**
+ * Ensure the ~/.myagents/plugins/ directory tree exists for Claude Plugin
+ * support (PRD 0.2.17). Unlike skills, plugins are never seeded by the app —
+ * the user installs them via UI/CLI, and the directories below merely have
+ * to exist so first-install doesn't have to MkDir-A-Path twice.
+ *
+ *   ~/.myagents/plugins/                  plugin install root
+ *   ~/.myagents/plugins/data/             ${CLAUDE_PLUGIN_DATA} parent
+ *
+ * Idempotent. Called at sidecar startup alongside seedBundledSkills.
+ */
+function ensurePluginsDirs(): void {
+  try {
+    const homeDir = getHomeDirOrNull();
+    if (!homeDir) {
+      console.warn('[plugins] HOME not resolvable — skipping ensurePluginsDirs');
+      return;
+    }
+    const root = join(homeDir, '.myagents', 'plugins');
+    const dataRoot = join(root, 'data');
+    ensureDirSync(root);
+    ensureDirSync(dataRoot);
+  } catch (err) {
+    console.warn('[plugins] ensurePluginsDirs failed (non-fatal):', err);
+  }
+}
+
+/**
  * Clean up stale Playwright MCP profile lock files left by a crashed Chromium.
  *
  * Independent of the agent-browser bundle removal — this exists because
@@ -1240,10 +1290,28 @@ async function routeAdminApi(pathname: string, payload: Record<string, unknown>)
     });
   }
 
-  // Plugin commands
+  // OpenClaw Channel Plugin commands (npm-packaged IM channel adapters)
   if (route === 'plugin/list') return await api.handlePluginList();
   if (route === 'plugin/install') return await api.handlePluginInstall(payload as Parameters<typeof api.handlePluginInstall>[0]);
   if (route === 'plugin/remove') return await api.handlePluginUninstall(payload as Parameters<typeof api.handlePluginUninstall>[0]);
+
+  // Claude Plugin commands (PRD 0.2.17) — Anthropic-spec plugin directories
+  // containing skills/agents/MCP/hooks. Different concept from the OpenClaw
+  // channel plugins above; namespaced as `cc-plugin` to avoid collision.
+  if (route === 'cc-plugin/list') return await api.handleCcPluginList();
+  if (route === 'cc-plugin/show') return await api.handleCcPluginShow(payload as Parameters<typeof api.handleCcPluginShow>[0]);
+  if (route === 'cc-plugin/install') return await api.handleCcPluginInstall(payload as Parameters<typeof api.handleCcPluginInstall>[0]);
+  if (route === 'cc-plugin/uninstall') return await api.handleCcPluginUninstall(payload as Parameters<typeof api.handleCcPluginUninstall>[0]);
+  if (route === 'cc-plugin/enable') return await api.handleCcPluginToggle({
+    id: payload.id as string | undefined,
+    name: payload.name as string | undefined,
+    enabled: true,
+  });
+  if (route === 'cc-plugin/disable') return await api.handleCcPluginToggle({
+    id: payload.id as string | undefined,
+    name: payload.name as string | undefined,
+    enabled: false,
+  });
 
   // Skill commands
   if (route === 'skill/list') return await api.handleSkillList();
@@ -6816,6 +6884,125 @@ async function main() {
         }
       }
 
+      // ============= CLAUDE PLUGINS API (PRD 0.2.17) =============
+      //
+      // Plugin endpoints follow the "fixed names before wildcards" red-line
+      // (CLAUDE.md): /list, /install, /uninstall, /toggle, /detail all
+      // collapse to a single keyword segment so there's no `/:id` wildcard
+      // collision. Detail-by-id intentionally uses a query parameter for the
+      // same reason — keeps route matching unambiguous.
+
+      // GET /api/plugin/list - list installed plugins with status
+      if (pathname === '/api/cc-plugin/list' && request.method === 'GET') {
+        try {
+          const items = listInstalledPlugins();
+          return jsonResponse({ success: true, plugins: items });
+        } catch (error) {
+          console.error('[api/plugin/list] Error:', error);
+          return jsonResponse(
+            { success: false, error: error instanceof Error ? error.message : 'List failed' },
+            500,
+          );
+        }
+      }
+
+      // GET /api/plugin/detail?id=<plugin-id> - full manifest + component inventory
+      if (pathname === '/api/cc-plugin/detail' && request.method === 'GET') {
+        const id = url.searchParams.get('id');
+        if (!id) return jsonResponse({ success: false, error: 'id 参数必填' }, 400);
+        try {
+          const item = getPluginDetail(id);
+          if (!item) return jsonResponse({ success: false, error: '插件未安装' }, 404);
+          return jsonResponse({ success: true, plugin: item });
+        } catch (error) {
+          console.error('[api/plugin/detail] Error:', error);
+          return jsonResponse(
+            { success: false, error: error instanceof Error ? error.message : 'Detail failed' },
+            500,
+          );
+        }
+      }
+
+      // POST /api/plugin/install - install from URL/path; broadcasts progress
+      if (pathname === '/api/cc-plugin/install' && request.method === 'POST') {
+        let installId: string | undefined;
+        try {
+          const body = (await request.json()) as { sourceUrl?: string; installId?: string };
+          if (!body.sourceUrl || typeof body.sourceUrl !== 'string') {
+            return jsonResponse({ success: false, error: 'sourceUrl 参数必填' }, 400);
+          }
+          installId = body.installId || crypto.randomUUID();
+          const finalId = installId;
+          broadcast('plugin:install-progress', {
+            installId: finalId,
+            phase: 'fetching',
+            message: body.sourceUrl,
+          });
+          const { entry } = await installPlugin(body.sourceUrl, {
+            onProgress: (phase, message) => {
+              broadcast('plugin:install-progress', { installId: finalId, phase, message });
+            },
+          });
+          broadcast('plugin:install-progress', { installId: finalId, phase: 'done' });
+          broadcast('plugins:changed', { reason: 'install' });
+          await schedulePluginRestartLazy();
+          return jsonResponse({ success: true, entry, installId: finalId });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'Install failed';
+          const status = error instanceof PluginStoreError ? error.statusCode : 500;
+          if (installId) {
+            broadcast('plugin:install-progress', { installId, phase: 'failed', error: message });
+          }
+          if (status >= 500) {
+            console.error('[api/plugin/install] Error:', error);
+          }
+          return jsonResponse({ success: false, error: message }, status);
+        }
+      }
+
+      // POST /api/plugin/uninstall - body { id, purgeData? }
+      if (pathname === '/api/cc-plugin/uninstall' && request.method === 'POST') {
+        try {
+          const body = (await request.json()) as { id?: string; purgeData?: boolean };
+          if (!body.id || typeof body.id !== 'string') {
+            return jsonResponse({ success: false, error: 'id 参数必填' }, 400);
+          }
+          const { removed, warning } = await uninstallPlugin(body.id, { purgeData: !!body.purgeData });
+          broadcast('plugins:changed', { reason: 'uninstall' });
+          await schedulePluginRestartLazy();
+          return jsonResponse({ success: true, removed, ...(warning ? { warning } : {}) });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'Uninstall failed';
+          const status = error instanceof PluginStoreError ? error.statusCode : 500;
+          console.error('[api/plugin/uninstall] Error:', error);
+          return jsonResponse({ success: false, error: message }, status);
+        }
+      }
+
+      // POST /api/plugin/toggle - body { id, enabled }
+      if (pathname === '/api/cc-plugin/toggle' && request.method === 'POST') {
+        try {
+          const body = (await request.json()) as { id?: string; enabled?: boolean };
+          if (!body.id || typeof body.id !== 'string') {
+            return jsonResponse({ success: false, error: 'id 参数必填' }, 400);
+          }
+          if (typeof body.enabled !== 'boolean') {
+            return jsonResponse({ success: false, error: 'enabled 参数必填 (boolean)' }, 400);
+          }
+          const { entry, enabled } = await togglePlugin(body.id, body.enabled);
+          broadcast('plugins:changed', { reason: 'toggle' });
+          await schedulePluginRestartLazy();
+          return jsonResponse({ success: true, entry, enabled });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'Toggle failed';
+          const status = error instanceof PluginStoreError ? error.statusCode : 500;
+          if (status >= 500) {
+            console.error('[api/plugin/toggle] Error:', error);
+          }
+          return jsonResponse({ success: false, error: message }, status);
+        }
+      }
+
       // ============= COMMANDS MANAGEMENT API =============
       // GET /api/command-items - List all commands
       // Supports ?agentDir= for listing commands from a specific workspace (e.g. from Launcher)
@@ -8947,6 +9134,8 @@ description: >
       setDeferredInitPhase(currentInitPhase);
       seedBundledSkills();
       console.log('[startup] seedBundledSkills done');
+
+      ensurePluginsDirs();
 
       currentInitPhase = 'socks-bridge';
       setDeferredInitPhase(currentInitPhase);

@@ -15,6 +15,7 @@ import CustomSelect from '@/components/CustomSelect';
 import { UnifiedLogsPanel } from '@/components/UnifiedLogsPanel';
 import GlobalSkillsPanel from '@/components/GlobalSkillsPanel';
 import GlobalAgentsPanel from '@/components/GlobalAgentsPanel';
+import GlobalPluginsPanel from '@/components/GlobalPluginsPanel';
 import CronTaskDebugPanel from '@/components/dev/CronTaskDebugPanel';
 import { BotPlatformRegistry } from '@/components/ImSettings';
 import { WorkspaceSelectDialog } from '@/components/AgentSettings';
@@ -77,7 +78,7 @@ function parsePositiveInt(value: string): number | undefined {
 }
 
 // Settings sub-sections
-type SettingsSection = 'general' | 'providers' | 'mcp' | 'skills' | 'sub-agents' | 'agent' | 'usage-stats' | 'about';
+type SettingsSection = 'general' | 'providers' | 'mcp' | 'skills' | 'sub-agents' | 'plugins' | 'agent' | 'usage-stats' | 'about';
 
 import type { SubscriptionStatusWithVerify } from '@/types/subscription';
 
@@ -168,7 +169,7 @@ interface SettingsProps {
     onRestartAndUpdate?: () => void;
 }
 
-const VALID_SECTIONS: SettingsSection[] = ['general', 'providers', 'mcp', 'skills', 'sub-agents', 'agent', 'usage-stats', 'about'];
+const VALID_SECTIONS: SettingsSection[] = ['general', 'providers', 'mcp', 'skills', 'sub-agents', 'plugins', 'agent', 'usage-stats', 'about'];
 
 // Memoized component for model tag list to avoid recreating presetModelIds on every render
 /** Default args for Playwright MCP: persistent profile mode (preserves login state, single-session) */
@@ -2264,6 +2265,15 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                         技能 Skills
                     </button>
                     <button
+                        onClick={() => setActiveSection('plugins')}
+                        className={`w-full rounded-lg px-3 py-2.5 text-left text-base font-medium transition-colors ${activeSection === 'plugins'
+                            ? 'settings-nav-active bg-[var(--hover-bg)] text-[var(--ink)]'
+                            : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
+                            }`}
+                    >
+                        插件 Plugins
+                    </button>
+                    <button
                         onClick={() => setActiveSection('mcp')}
                         className={`w-full rounded-lg px-3 py-2.5 text-left text-base font-medium transition-colors ${activeSection === 'mcp'
                             ? 'settings-nav-active bg-[var(--hover-bg)] text-[var(--ink)]'
@@ -2324,6 +2334,16 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                         {!skillsInDetail && (
                             <GlobalAgentsPanel onDetailChange={setAgentsInDetail} initialSelect={initialSelect} />
                         )}
+                    </div>
+                )}
+
+                {/* Plugins section (PRD 0.2.17) — independent tab. Plugins are
+                  * version-pinned packages of skills/agents/MCP/hooks; the SDK
+                  * does the actual component loading once we hand it the path
+                  * via Options.plugins. */}
+                {activeSection === 'plugins' && (
+                    <div className="mx-auto max-w-4xl px-8 py-8">
+                        <GlobalPluginsPanel />
                     </div>
                 )}
 
@@ -2629,7 +2649,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                 )}
 
                 {/* Other sections use narrower layout */}
-                <div className={`mx-auto max-w-xl px-8 py-8 ${['skills', 'agents', 'providers', 'mcp'].includes(activeSection) ? 'hidden' : ''}`}>
+                <div className={`mx-auto max-w-xl px-8 py-8 ${['skills', 'agents', 'plugins', 'providers', 'mcp'].includes(activeSection) ? 'hidden' : ''}`}>
 
                     {activeSection === 'general' && (
                         <div className="space-y-6">

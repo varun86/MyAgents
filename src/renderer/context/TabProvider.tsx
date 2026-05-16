@@ -2293,6 +2293,19 @@ export default function TabProvider({
                 break;
             }
 
+            // PRD 0.2.17 — plugin lifecycle. The Settings page's GlobalPluginsPanel
+            // listens to the dispatched DOM events; we re-broadcast via window so
+            // multiple Tab subscribers (renderer instances of the same panel)
+            // converge on the same refresh trigger.
+            case 'plugin:install-progress': {
+                window.dispatchEvent(new CustomEvent('myagents:plugin-install-progress', { detail: data }));
+                break;
+            }
+            case 'plugins:changed': {
+                window.dispatchEvent(new CustomEvent('myagents:plugins-changed', { detail: data }));
+                break;
+            }
+
             // (Phase E PRD 0.2.7: `workspace:files-changed` SSE handler
             // removed. The Rust workspace_files watcher emits a Tauri event
             // — `workspace:files-changed:<eventKey>` — that DirectoryPanel

@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.2.17] - 2026-05-16
+
+> 接入 Anthropic Claude Plugin 协议：用户能从 GitHub URL / 直链 zip / 本地路径一键安装单个插件（自带 skills + agents + MCP + hooks 的目录），在设置页独立 Plugins Tab 启停。运行时由 Claude Agent SDK 自动展开组件，MyAgents 只管目录生命周期 + 启停状态。
+
+### Added
+
+- **设置页新增「插件 Plugins」Tab**：与技能 / 工具 MCP / 聊天机器人并列。列表显示插件名 / 版本 / 描述 / 状态（启用/禁用/⚠ 异常），点开看 manifest + 组件清单（skills/agents/hooks/MCP/LSP/monitors 数量）。右上角「安装插件」弹窗支持 `owner/repo`、完整 GitHub URL、直链 `.zip`、`file:///` 本地目录四种来源。
+- **CLI `myagents cc-plugin` 子命令族**：`list / install / uninstall / enable / disable / show`。区别于已有的 `myagents plugin`（OpenClaw IM 渠道插件），`cc-plugin` 专管 Claude 协议插件。`myagents cc-plugin install anthropics/example-plugin` 一键装，`myagents cc-plugin disable foo` 立即禁用。
+- **SDK Options.plugins 注入**：builtin runtime 在每次构建 `query()` 选项时把启用的插件路径透传给 SDK，由 SDK 自动加载插件内 skills/agents/MCP/hooks。新安装/启停后通过现有 `scheduleDeferredRestart` + `schedulePreWarm` 柔性接入（500ms 防抖），不影响进行中的对话。
+- **`~/.myagents/plugins/` 目录管理**：每个插件落到 `~/.myagents/plugins/<name>/`，跨版本可写数据存 `~/.myagents/plugins/data/<id>/`（对应 SDK 的 `${CLAUDE_PLUGIN_DATA}`）。启动时幂等创建目录。
+- **插件安装 SSE 进度**：抓取 → 解压 → 校验 → 写盘 四阶段进度通过 SSE 实时回显，UI 弹窗显示当前 phase 和短文本。
+
+### Safety
+
+- 安装弹窗显式警告"插件以你的用户权限运行任意代码 / 启动 MCP 进程 / 触发 hook 脚本"
+- 复用现有 SSRF 防护（拒 loopback / RFC1918 / 169.254 / IPv6 ULA）、zip-slip 防护
+- 写盘前 `lstatSync` 双探防断 symlink（Node v24 `cpSync` 异常红线）
+- HTTPS-only（`file://` 例外，仅本地路径放行）
+- 拒绝 `marketplace.json`（v0.2.17 暂不支持，给出友好提示"请提供单个插件子目录链接"）和多插件根（要求用户用 `/tree/<ref>/<sub/path>` 形式指向单一插件）
+- AppConfig 写盘走 `withConfigLock` 防 race
+
+### Architecture
+
+- 新增 `src/server/plugins/` 模块（url-resolver / fetcher / installer / manifest / store），全部复用 `src/server/skills/tarball-fetcher.ts` 的 SSRF + 体积限制 + 解压逻辑。
+- 新增 SSE 事件 `plugin:install-progress` + `plugins:changed`（已注册到 `SSE_EVENT_PRIORITIES` critical + `JSON_EVENTS` 白名单）
+- 新增 RestartReason `'plugins'`，agent-session 暴露 `schedulePluginDeferredRestart()` 给 admin API 调用
+- 外部 Runtime（Claude Code CLI / Codex / Gemini）路径不注入插件——它们各自管理自己的插件体系，UI 在外部 Runtime 下提示用 CLI 内的 `/plugin` 命令
+
+### Excluded (v0.2.18+)
+
+- Marketplace 协议（`.claude-plugin/marketplace.json` + `/plugin marketplace add` 等价）
+- Project scope（仓库级 `.claude/settings.json::enabledPlugins`）
+- `userConfig` 弹窗采集 + Keychain 敏感存储
+- 版本升级（本期：卸载 + 重新安装即可）
+- npm / git-subdir 源类型
+- Orphan 7-day GC
+- 透传 `extraKnownMarketplaces` 直接读 `~/.claude/`（方案 C）
+
+---
+
 ## [0.2.16] - 2026-05-16
 
 > 全局快捷键 + 想法归档两个常用快捷动作；Codex Runtime 的「为什么不工作」终于看得见；订阅验证、IM 群消息、工作区文件树几条体验断点修齐。

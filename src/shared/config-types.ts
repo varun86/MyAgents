@@ -391,6 +391,20 @@ export interface AppConfig {
   // ===== Agent Configuration (v0.1.41) =====
   agents?: import('./types/agent').AgentConfig[];
 
+  // ===== Claude Plugin Configuration (PRD 0.2.17) =====
+  /** Installed Claude plugins. Each entry's installPath points at a directory
+   *  under ~/.myagents/plugins/<name>/ containing .claude-plugin/plugin.json.
+   *  Disk is the source of truth; this is the index. */
+  plugins?: import('./types/plugin').PluginEntry[];
+  /** Enable map keyed by PluginEntry.id ("<name>@local"). Missing key = disabled.
+   *  Format matches Claude Code's settings.json::enabledPlugins for forward
+   *  compatibility with future marketplace support. */
+  enabledPlugins?: Record<string, boolean>;
+  /** Reserved for future plugin.json::userConfig values (v0.2.18+). v0.2.17
+   *  does not collect these via UI but the field is persisted so power users
+   *  can hand-edit and survive upgrades. */
+  pluginConfigs?: Record<string, { options?: Record<string, unknown> }>;
+
   // ===== IM Bot Configuration (legacy) =====
   /** @deprecated Migrated to imBotConfigs[]. Only used for migration. */
   imBotConfig?: import('./types/im').ImBotConfig;
