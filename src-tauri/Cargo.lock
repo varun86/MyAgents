@@ -3095,7 +3095,7 @@ checksum = "2195bf6aa996a481483b29d62a7663eed3fe39600c460e323f8ff41e90bdd89b"
 
 [[package]]
 name = "myagents"
-version = "0.2.15"
+version = "0.2.16"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -3112,6 +3112,7 @@ dependencies = [
  "nix 0.29.0",
  "notify-debouncer-full",
  "objc2",
+ "objc2-app-kit",
  "objc2-foundation",
  "objc2-web-kit",
  "portable-pty",

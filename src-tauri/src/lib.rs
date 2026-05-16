@@ -15,6 +15,8 @@ pub mod logger;
 pub mod legacy_upgrade;
 #[cfg(target_os = "macos")]
 mod macos_arrow_filter;
+#[cfg(target_os = "macos")]
+mod macos_traffic_light;
 pub mod management_api;
 pub mod process_cleanup;
 pub mod process_cmd;
@@ -51,7 +53,7 @@ use sidecar::{
 };
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use tauri::{Emitter, Listener, LogicalPosition, Manager, Url, WebviewUrl, WebviewWindowBuilder};
+use tauri::{Emitter, Listener, Manager, Url, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_autostart::MacosLauncher;
 
 // Note: lib.rs is the crate root, so `#[macro_export]` macros (ulog_info!,
@@ -561,36 +563,65 @@ pub fn run() {
                 false
             });
 
-            // Platform-specific window chrome — replicates the original
-            // tauri.conf.json fields. macOS uses the Overlay title bar style
-            // (custom titlebar + native traffic lights at LogicalPosition).
-            // Windows handles decorations later in setup (see "Windows: Remove
-            // system decorations" block below); the builder runs uniformly.
+            // Platform-specific window chrome — macOS uses the Overlay title
+            // bar style (custom titlebar + native traffic lights).
             //
-            // Traffic light Y must align to the custom titlebar's vertical
-            // centerline. The titlebar is `h-11` (44px) in
-            // `src/renderer/components/CustomTitleBar.tsx`; traffic lights are
-            // ~13px tall on macOS. Centering math: Y_top = (44 - 13) / 2 ≈ 15.
-            // We use 14 (matching X) — that lands icon-center at ~Y=20, within
-            // 2px of the titlebar's 22px geometric center, visually centered.
+            // We INTENTIONALLY do NOT call `.traffic_light_position(...)` on
+            // this builder. In Tauri 2.10.x `WebviewWindowBuilder::traffic_light_position`
+            // only mutates `webview_builder.webview_attributes` (consumed by
+            // `wry::WryWebViewParent::drawRect` override) — the parallel call
+            // on the underlying TAO `WindowBuilder` is missing. The original
+            // `tauri.conf.json` `trafficLightPosition` path went through BOTH
+            // (config → `tao::window.with_traffic_light_inset` + wry), and
+            // the TAO/window-level call is the one that reliably positions
+            // the NSWindow chrome buttons. Going through only wry's
+            // `drawRect` override is unreliable in our
+            // `Overlay + hidden_title + fullSizeContentView` setup —
+            // empirically the buttons stay at OS defaults and we get visible
+            // misalignment with the custom titlebar.
             //
-            // History: the original `tauri.conf.json` shipped with Y=20 since
-            // the OSS init in c8dfef81 (2026-01-26) — icons sat ~4-5px below
-            // the tab content the whole time. c3ef3c7f migrated the value
-            // verbatim into this builder (no regression introduced by the
-            // migration; pre-existing miscenter caught later).
+            // Instead, after `.build()` below we apply the inset directly via
+            // AppKit (`macos_traffic_light::apply_inset`) — same algorithm
+            // as wry/tao internal `inset_traffic_lights`, called on the
+            // already-constructed NSWindow so we hit the chrome-positioning
+            // path that worked in v0.2.15 (where config set both).
+            //
+            // History: v0.2.15 main used `tauri.conf.json
+            // trafficLightPosition: {x:14, y:20}` — visually correct.
+            // c3ef3c7f migrated to programmatic builder w/ same values —
+            // visually broken. 0c74c61c misdiagnosed as a 4px miscenter and
+            // changed Y to 14 — still broken (different symptom, same root
+            // cause). This block removes the broken builder call; the
+            // post-build call below restores the v0.2.15 behaviour.
             #[cfg(target_os = "macos")]
             let main_window_builder = main_window_builder
                 .hidden_title(true)
-                .title_bar_style(tauri::TitleBarStyle::Overlay)
-                .traffic_light_position(LogicalPosition::new(14.0, 14.0));
+                .title_bar_style(tauri::TitleBarStyle::Overlay);
 
-            main_window_builder
+            let main_window = main_window_builder
                 .build()
                 .map_err(|e| {
                     ulog_error!("[App] Failed to build main window: {}", e);
                     e
                 })?;
+
+            // Restore v0.2.15 traffic light placement via direct AppKit (see
+            // long-form rationale above). x=14, y=20 are the historical
+            // values from `tauri.conf.json`. Failure here is non-fatal —
+            // window starts with default macOS button positions instead.
+            //
+            // The post-build `apply_inset` only fires once. `install_inset_persistence`
+            // adds a `WindowEvent::Resized` / `ScaleFactorChanged` listener
+            // that re-applies on layout transitions (fullscreen toggle,
+            // maximize, Retina display change). Without it the buttons jump
+            // back to macOS defaults on any layout event.
+            #[cfg(target_os = "macos")]
+            {
+                if let Err(e) = macos_traffic_light::apply_inset(&main_window, 14.0, 20.0) {
+                    ulog_warn!("[main-window] traffic light inset failed: {}", e);
+                }
+                macos_traffic_light::install_inset_persistence(&main_window, 14.0, 20.0);
+            }
 
             // macOS WKWebView function-key tofu workaround. Must run AFTER
             // the main window is built so the WryWebView ObjC class is
