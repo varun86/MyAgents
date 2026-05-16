@@ -109,12 +109,111 @@ export interface RuntimePermissionMode {
 }
 
 /**
+ * Proxy policy for external-runtime subprocess env (issue #194).
+ *
+ * - `myagents` (default, legacy) — MyAgents unconditionally injects its own
+ *    `proxySettings` into the runtime's env, overriding whatever the parent
+ *    shell or system has configured. Best for "MyAgents proxy is THE proxy"
+ *    setups.
+ * - `terminal` — Drop MyAgents-injected proxy vars; restore whatever proxy
+ *    the user's interactive shell would export (HTTP_PROXY / HTTPS_PROXY /
+ *    ALL_PROXY / NO_PROXY, lowercase + UPPERCASE). Best for "I run codex /
+ *    claude from terminal and want MyAgents to behave the same."
+ * - `direct` — Strip all proxy vars. Best when system-level proxy (Clash
+ *    TUN, transparent proxy) handles routing.
+ */
+export type RuntimeProxyPolicy = 'myagents' | 'terminal';
+
+/**
+ * Per-agent env policy for external-runtime subprocesses (issue #194).
+ *
+ * Today only `proxy` matters; the structure is extensible because the same
+ * dimension (override vs inherit) is likely to apply to other env surfaces
+ * (locale, XDG, custom Codex-specific env) as needs surface.
+ *
+ * Historical note: 0.2.16 dev shipped a third `'direct'` literal that stripped
+ * every proxy var (for users on Clash TUN / VPN). It was removed before
+ * 0.2.16 release — the UI was confusing and `'terminal'` already covers the
+ * case (a user on TUN typically has no proxy var set in their shell, so
+ * `terminal` mode = no proxy injected = same result). Disk values of
+ * `'direct'` on existing installs fall through `resolveAgentEnvPolicy`'s
+ * validator and default to `'myagents'`; users who relied on stripping
+ * MyAgents proxy can pick `terminal` from the UI.
+ */
+export interface RuntimeEnvPolicy {
+  proxy?: RuntimeProxyPolicy;
+}
+
+/**
  * Runtime-specific configuration stored in AgentConfig
  */
 export interface RuntimeConfig {
   model?: string;            // Runtime-specific model selection
   permissionMode?: string;   // Runtime-specific permission mode
   additionalArgs?: string[]; // Extra CLI arguments
+  /**
+   * Issue #194 — per-agent env policy. When omitted, runtime treats it as
+   * `{ proxy: 'myagents' }` (the legacy behaviour) for backwards compat.
+   */
+  envPolicy?: RuntimeEnvPolicy;
+}
+
+/**
+ * Field families on RuntimeConfig grouped by "are they portable across
+ * runtimes". Used by `buildRuntimeChangePatch` and the startup migration to
+ * decide what to scrub when `agent.runtime` changes.
+ *
+ *  - **NOT portable**: model / permissionMode / additionalArgs — model lists
+ *    and permission vocabularies are wholly disjoint between Codex (`gpt-*`,
+ *    `suggest/auto-edit/full-auto`), Claude Code (`sonnet/opus/haiku`,
+ *    `default/acceptEdits/bypassPermissions`), and Gemini (`gemini-*`,
+ *    `default/autoEdit/yolo/plan`). Carrying a value from one runtime to
+ *    another guarantees the new runtime either rejects it (Codex CLI:
+ *    "model is not supported when using ChatGPT account") or silently
+ *    falls back to defaults — both worse than starting clean.
+ *  - **Portable**: envPolicy — per-agent network routing choice that has
+ *    nothing to do with which CLI is in use.
+ *
+ * The split lives here (single source of truth) so the migration and the
+ * write-time helper can't drift.
+ */
+export const RUNTIME_CONFIG_PER_RUNTIME_FIELDS = [
+  'model',
+  'permissionMode',
+  'additionalArgs',
+] as const satisfies readonly (keyof RuntimeConfig)[];
+
+/**
+ * Build the `{ runtime, runtimeConfig }` patch to apply when an agent's
+ * runtime is being changed. Centralizes the "drop non-portable fields"
+ * policy so every callsite (in-chat switch, Settings panel, Launcher
+ * selector, `myagents agent set runtime <v>` CLI) behaves identically.
+ *
+ * Returns `runtimeConfig: undefined` instead of `{}` when scrubbing empties
+ * the object so the caller's atomic-merge logic doesn't persist a noise
+ * `runtimeConfig: {}` entry.
+ *
+ * Cross-bugfix for issue #194 follow-up: pre-existing bug class where Gemini's
+ * persisted `runtimeConfig.model` would leak into Codex sessions after a
+ * runtime switch. Activated by commit `8020803e` (May 2) when
+ * persistInputOption.ts started correctly writing external-runtime model to
+ * `runtimeConfig.model` (previously it was wrongly going to `agent.model`,
+ * masking the bug). See commit message of the migration commit for the full
+ * archaeology.
+ */
+export function buildRuntimeChangePatch(
+  currentRuntimeConfig: RuntimeConfig | undefined,
+  newRuntime: RuntimeType,
+): { runtime: RuntimeType; runtimeConfig: RuntimeConfig | undefined } {
+  if (!currentRuntimeConfig) {
+    return { runtime: newRuntime, runtimeConfig: undefined };
+  }
+  const next: RuntimeConfig = { ...currentRuntimeConfig };
+  for (const k of RUNTIME_CONFIG_PER_RUNTIME_FIELDS) {
+    delete next[k];
+  }
+  const hasFields = Object.keys(next).length > 0;
+  return { runtime: newRuntime, runtimeConfig: hasFields ? next : undefined };
 }
 
 /**
@@ -329,6 +428,139 @@ export function getMaxPermissionForRuntime(runtime: RuntimeType): string {
     case 'gemini':      return 'yolo';
     default:            return 'fullAgency';
   }
+}
+
+// ─── Runtime diagnostics (issue #194) ───
+//
+// Diagnostic snapshot collected at session start for external runtimes (Codex /
+// Claude Code / Gemini). Renderer surfaces this to make 「为什么我看不到 X 工具？」
+// debuggable without grepping unified log. Codex fills all four sections via
+// RPC after thread/start; other runtimes contribute the subset they expose.
+//
+// IMPORTANT — privacy: never put secrets (API keys, OAuth tokens, full proxy URL
+// with embedded credentials) into this payload. It's sent over SSE to the
+// renderer and persisted in chat history. Use boolean presence for sensitive
+// env vars (e.g. `hasOpenaiApiKey: true`) not the value.
+
+/**
+ * Auth state as reported by the runtime CLI itself.
+ *
+ * `authMethod` mirrors Codex's `AuthMode` (`apiKey` / `chatGptToken` / ...) or
+ * CC's keychain/OAuth labels. `null` means runtime hasn't told us (e.g. Codex
+ * `getAuthStatus` returned null) — distinct from "not authenticated".
+ */
+export interface RuntimeAuthStatus {
+  authMethod: string | null;
+  /** True when this account needs to complete sign-in before tools work. */
+  requiresLogin?: boolean;
+  /** Free-form display text, runtime-specific. */
+  details?: string;
+}
+
+/**
+ * Single feature flag as reported by the runtime. For Codex: `[features]` table
+ * in config.toml + experimentalFeature/list RPC. `defaultEnabled` differs from
+ * `enabled` when the user explicitly toggled it (e.g. `artifact = true` in a
+ * stage-`underDevelopment` flag).
+ */
+export interface RuntimeFeatureFlag {
+  name: string;
+  enabled: boolean;
+  defaultEnabled: boolean;
+  /** Codex: 'beta' | 'underDevelopment' | 'stable' | 'deprecated' | 'removed'. */
+  stage?: string;
+}
+
+/**
+ * One MCP server as the runtime sees it. `state` follows Codex's
+ * `McpServerStartupState`; CC uses its own labels. `authStatus` is a runtime-
+ * defined string (e.g. 'oauth-required', 'authenticated').
+ */
+export interface RuntimeMcpServerInfo {
+  name: string;
+  toolCount: number;
+  resourceCount?: number;
+  state?: string;
+  authStatus?: string;
+}
+
+/**
+ * One "App" / connector / plugin the runtime sees. Codex's `app/list` populates
+ * this (artifact-tool, github, computer-use, etc.). `isAccessible: false` is
+ * the most actionable signal for issue #194 — it tells the user the runtime
+ * tried to discover the app and couldn't (auth / network / discovery error).
+ */
+export interface RuntimeAppInfo {
+  id: string;
+  name?: string;
+  description?: string;
+  isAccessible?: boolean;
+  isEnabled?: boolean;
+  needsAuth?: boolean;
+  installUrl?: string | null;
+}
+
+/**
+ * Per-call status. `'ok'` = runtime returned a payload. `'unsupported'` = the
+ * runtime doesn't have the corresponding RPC (e.g. CC has no app/list).
+ * `{ error }` = the RPC was tried and failed; carries a short reason.
+ */
+export type RuntimeDiagnosticsCallStatus =
+  | 'ok'
+  | 'unsupported'
+  | { error: string };
+
+export interface RuntimeDiagnosticsStatus {
+  auth?: RuntimeDiagnosticsCallStatus;
+  features?: RuntimeDiagnosticsCallStatus;
+  mcpServers?: RuntimeDiagnosticsCallStatus;
+  apps?: RuntimeDiagnosticsCallStatus;
+}
+
+/**
+ * Effective env snapshot for the runtime subprocess. Sanitised for display:
+ *  - `proxy.http/https/all` are URLs without embedded credentials.
+ *  - `pathHead` is the first 5 entries of PATH (full PATH is logged, not shown).
+ *  - sensitive vars surface only as `has<NAME>: boolean` presence checks.
+ *
+ * `proxyPolicy` is filled in Phase 2 when RuntimeEnvPolicy lands; today it's
+ * always `'myagents'` (the legacy behaviour).
+ */
+export interface RuntimeEffectiveEnv {
+  cwd: string;
+  proxy?: {
+    http?: string;
+    https?: string;
+    all?: string;
+    no?: string;
+  } | null;
+  proxyPolicy?: RuntimeProxyPolicy;
+  /** First few PATH entries for visibility (full PATH would be too noisy). */
+  pathHead?: string[];
+  /** True when MYAGENTS_PROXY_INJECTED=1 reached the runtime. */
+  myagentsProxyInjected?: boolean;
+  /** Presence-only flags for sensitive env vars. */
+  hasOpenaiApiKey?: boolean;
+  hasAnthropicApiKey?: boolean;
+  hasCodexHome?: boolean;
+  hasXdgConfigHome?: boolean;
+}
+
+/**
+ * Combined runtime diagnostics payload. Delivered as a UnifiedEvent
+ * (`runtime_diagnostics`) shortly after session_init; consumed by the renderer
+ * to show "what the runtime sees" in a Chat header strip / details panel.
+ */
+export interface RuntimeDiagnostics {
+  runtime: RuntimeType;
+  effectiveEnv: RuntimeEffectiveEnv;
+  auth?: RuntimeAuthStatus;
+  features?: RuntimeFeatureFlag[];
+  mcpServers?: RuntimeMcpServerInfo[];
+  apps?: RuntimeAppInfo[];
+  status: RuntimeDiagnosticsStatus;
+  /** ISO-8601 UTC string. */
+  timestamp: string;
 }
 
 /**

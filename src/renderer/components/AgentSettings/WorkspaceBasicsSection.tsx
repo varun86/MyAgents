@@ -16,6 +16,7 @@ import { ALL_WORKSPACE_ICON_IDS, DEFAULT_WORKSPACE_ICON } from '@/assets/workspa
 import WorkspaceIcon from '../launcher/WorkspaceIcon';
 import RuntimeSelector from '../RuntimeSelector';
 import type { RuntimeType, RuntimeDetections } from '../../../shared/types/runtime';
+import { buildRuntimeChangePatch } from '../../../shared/types/runtime';
 import { invoke } from '@tauri-apps/api/core';
 import { useToast } from '@/components/Toast';
 
@@ -82,7 +83,11 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
   const handleRuntimeChange = useCallback(async (runtime: RuntimeType) => {
     if (!agent) return;
     try {
-      await patchAgentConfig(agent.id, { runtime });
+      // buildRuntimeChangePatch scrubs cross-runtime non-portable fields
+      // (model / permissionMode / additionalArgs) — see its doc in
+      // shared/types/runtime.ts. Keep all 4 runtime-change callsites
+      // funneling through this single helper.
+      await patchAgentConfig(agent.id, buildRuntimeChangePatch(agent.runtimeConfig, runtime));
       refreshConfig();
       const label = runtime === 'claude-code' ? 'Claude Code'
         : runtime === 'codex' ? 'Codex'
@@ -321,6 +326,69 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
                 无论您在 MyAgents 客户端或通过绑定的聊天机器人与 AI 对话,均将直接调用本机已安装的 {runtimeLabel} 来执行,效果等同于在终端中使用。
                 因此供应商配置、支持的模型、MCP 工具、权限规则等均由 {runtimeLabel} 自身管理,如需调整请在其设置中修改。
               </p>
+            );
+          })()}
+
+          {/* Issue #194 — proxy policy for external runtime subprocess.
+              Only relevant when the agent runs an external CLI (Codex / CC /
+              Gemini), so hidden for builtin. */}
+          {currentRuntime !== 'builtin' && agent && (() => {
+            // Read current policy; default to 'myagents' for backwards compat.
+            // runtimeConfig is on AgentConfig as a free-form record — keep the
+            // narrow `as` cast so we don't expand its public schema unnecessarily.
+            // Legacy disk values (the removed `'direct'` from 0.2.16 dev) fall
+            // through the literal narrowing and read as default `'myagents'`,
+            // matching the server-side `resolveAgentEnvPolicy` validator.
+            const rc = (agent.runtimeConfig as Record<string, unknown> | undefined) ?? {};
+            const rawPolicy = (rc.envPolicy as { proxy?: unknown } | undefined)?.proxy;
+            const proxyMode: 'myagents' | 'terminal' =
+              rawPolicy === 'terminal' ? 'terminal' : 'myagents';
+
+            const onSelect = (next: 'myagents' | 'terminal') => {
+              const prevEnvPolicy = (rc.envPolicy as Record<string, unknown> | undefined) ?? {};
+              const nextRc = {
+                ...rc,
+                envPolicy: { ...prevEnvPolicy, proxy: next },
+              };
+              void patchAgentConfig(agent.id, { runtimeConfig: nextRc } as Partial<Omit<AgentConfig, 'id'>>);
+            };
+
+            const radio = (
+              value: 'myagents' | 'terminal',
+              label: string,
+              hint: string,
+            ) => (
+              <label
+                key={value}
+                className={`flex cursor-pointer items-start gap-2 rounded-lg border px-3 py-2 text-xs leading-relaxed transition-colors ${
+                  proxyMode === value
+                    ? 'border-[var(--accent-warm)] bg-[var(--accent-warm-subtle)]'
+                    : 'border-[var(--line)] hover:border-[var(--line-strong)]'
+                }`}
+              >
+                <input
+                  type="radio"
+                  name={`proxy-policy-${agent.id}`}
+                  value={value}
+                  checked={proxyMode === value}
+                  onChange={() => onSelect(value)}
+                  className="mt-0.5 shrink-0"
+                />
+                <div className="min-w-0">
+                  <div className="font-medium text-[var(--ink)]">{label}</div>
+                  <div className="text-[var(--ink-muted)]">{hint}</div>
+                </div>
+              </label>
+            );
+
+            return (
+              <div className="flex items-start gap-3">
+                <label className="w-14 shrink-0 pt-2 text-sm text-[var(--ink-muted)]">网络代理</label>
+                <div className="flex-1 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                  {radio('myagents', 'MyAgents 代理', '使用 MyAgents 设置里的代理（默认）')}
+                  {radio('terminal', '跟随终端', '等同于在你电脑的终端里手动启动——继承 shell 里 export 的代理变量')}
+                </div>
+              </div>
             );
           })()}
         </>

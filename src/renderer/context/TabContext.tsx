@@ -18,6 +18,7 @@ import type { Message } from '@/types/chat';
 import type { LogEntry } from '@/types/log';
 import type { QueuedMessageInfo } from '@/types/queue';
 import type { SystemInitInfo } from '../../shared/types/system';
+import type { RuntimeDiagnostics } from '../../shared/types/runtime';
 import type { PermissionMode } from '@/config/types';
 import type { PermissionRequest } from '@/components/PermissionPrompt';
 import type { AskUserQuestionRequest } from '../../shared/types/askUserQuestion';
@@ -63,6 +64,14 @@ export interface TabState {
     logs: string[];
     unifiedLogs: LogEntry[];
     systemInitInfo: SystemInitInfo | null;
+    /**
+     * Issue #194 — external-runtime self-report (auth / features / MCP / apps /
+     * effective env). Populated when an external runtime emits the
+     * `runtime_diagnostics` UnifiedEvent (Codex today; Claude Code / Gemini later).
+     * Null for builtin runtime, and null until the first diagnostic snapshot
+     * arrives after session start.
+     */
+    runtimeDiagnostics: RuntimeDiagnostics | null;
     agentError: string | null;
     systemStatus: string | null;  // SDK system status (e.g., 'compacting')
     /**
@@ -205,6 +214,7 @@ const defaultContextValue: TabContextValue = {
     logs: [],
     unifiedLogs: [],
     systemInitInfo: null,
+    runtimeDiagnostics: null,
     agentError: null,
     systemStatus: null,
     lastTerminalReason: null,

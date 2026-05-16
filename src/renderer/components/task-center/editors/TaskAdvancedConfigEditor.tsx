@@ -25,6 +25,8 @@ import {
   RUNTIME_DISPLAY_NAMES,
   VALID_RUNTIMES,
   getRuntimePermissionModes,
+  buildRuntimeChangePatch,
+  RUNTIME_CONFIG_PER_RUNTIME_FIELDS,
   type RuntimeModelInfo,
   type RuntimeType,
 } from '@/../shared/types/runtime';
@@ -151,47 +153,58 @@ export function TaskAdvancedConfigEditor(props: Props) {
   const agentRuntimeLabel = RUNTIME_DISPLAY_NAMES[agentRuntime] ?? agentRuntime;
   const effectiveRuntimeLabel = RUNTIME_DISPLAY_NAMES[effectiveRuntime] ?? effectiveRuntime;
 
-  // Wrap `setRuntime` to clear runtime-specific stale fields on switch:
-  //   - Model / MCP only apply to the builtin SDK (external runtimes
-  //     self-manage), so we drop those when switching off builtin.
-  //   - PermissionMode strings are runtime-specific (builtin uses
-  //     `auto`/`plan`/`fullAgency`; CC uses `default`/`acceptEdits`/…;
-  //     Codex uses `suggest`/`auto-edit`/…). Carrying a permissionMode
-  //     across a runtime switch leaves a value the new runtime can't
-  //     interpret — clear so the user reselects from the right list.
-  // Compares the NEW effective runtime to the OLD one so a no-op toggle
-  // (override → "follow Agent" but Agent is the same kind) doesn't
-  // gratuitously clear good values.
+  // Wrap `setRuntime` to clear runtime-specific stale fields on switch.
+  //
+  // Two layers of fields care about cross-runtime drift:
+  //
+  //   1. **Task-level fields** (task.providerId / task.model / task.permissionMode /
+  //      task.mcpEnabledServers) — providerId/model/MCP are builtin-only
+  //      (Rust validator rejects them on external runtimes); permissionMode
+  //      vocabulary differs per runtime so it must clear on any switch.
+  //
+  //   2. **Per-task runtimeConfig** (runtimeConfig.model / .permissionMode /
+  //      .additionalArgs) — same bug class as agent-level Bug B (issue #194
+  //      follow-up). Earlier version of this handler only cleared
+  //      `runtimeConfig.model` when switching back to builtin, leaving the
+  //      external→external case (codex → gemini) leaking `gpt-5.5` into a
+  //      Gemini task. Codex CLI then rejects with "model is not supported".
+  //
+  // The runtimeConfig scrub now reuses `buildRuntimeChangePatch` so it's in
+  // lockstep with the agent-level confirmRuntimeChange / Settings /
+  // Launcher / `myagents agent set runtime` paths.
+  //
+  // No-op guard: when the new effective runtime equals the old one (e.g. the
+  // user toggles override → "follow Agent" but Agent is the same kind),
+  // bail before any scrub so we don't gratuitously clear values the user
+  // already picked for the same runtime.
   const setRuntime = useCallback(
     (next: RuntimeType | undefined) => {
       setRuntimeRaw(next);
       const nextEffective: RuntimeType = next ?? agentRuntime;
-      if (nextEffective !== effectiveRuntime) {
-        if (permissionMode !== undefined) setPermissionMode(undefined);
+      if (nextEffective === effectiveRuntime) return;
+
+      // Task-level permissionMode (independent of runtimeConfig).
+      if (permissionMode !== undefined) setPermissionMode(undefined);
+
+      // Per-task runtimeConfig scrub — same policy as agent-level.
+      // Only call setter when there's actually something to remove, so a
+      // runtimeConfig containing ONLY envPolicy doesn't get pointlessly
+      // re-allocated on every runtime toggle.
+      const hasScrubbableFields = RUNTIME_CONFIG_PER_RUNTIME_FIELDS.some((k) => {
+        const v = runtimeConfig?.[k];
+        return Array.isArray(v) ? v.length > 0 : v !== undefined;
+      });
+      if (hasScrubbableFields) {
+        const scrubbed = buildRuntimeChangePatch(runtimeConfig, nextEffective).runtimeConfig;
+        setRuntimeConfig(scrubbed);
       }
+
+      // Task-level builtin-only fields — only relevant when switching TO an
+      // external runtime (Rust validator rejects them otherwise).
       if (nextEffective !== 'builtin') {
-        // PRD 0.2.9 — Builtin-runtime fields (providerId / model / MCP)
-        // are meaningless for external runtimes; the Rust validator will
-        // reject any persisted combination of (runtime∈external + providerId).
-        // Clear them up front so the user doesn't see stale values that
-        // wouldn't actually take effect. `runtimeConfig.model` is preserved
-        // (it stores the external-runtime model), and the model field on
-        // task is independent.
         if (providerId !== undefined) setProviderId(undefined);
         if (model !== undefined) setModel(undefined);
         if (mcpEnabledServers !== undefined) setMcpEnabledServers(undefined);
-      } else {
-        // Switching back TO builtin — clear any external runtime model that
-        // may be lingering on `runtimeConfig` (would be ignored by builtin
-        // path but visually misleads).
-        if (runtimeConfig?.model) {
-          const next: RuntimeConfig = { ...runtimeConfig, model: undefined };
-          // Collapse to undefined when no fields remain, matching the
-          // round-trip semantics of "no override".
-          const hasAny = next.permissionMode !== undefined
-            || (next.additionalArgs && next.additionalArgs.length > 0);
-          setRuntimeConfig(hasAny ? next : undefined);
-        }
       }
     },
     [

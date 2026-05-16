@@ -26,6 +26,7 @@ import { TabContext, TabApiContext, TabActiveContext, type SessionState, type Ta
 import type { Message, ContentBlock, ToolUseSimple, ToolInput, TaskStats, SubagentToolCall } from '@/types/chat';
 import type { ToolUse } from '@/types/stream';
 import type { SystemInitInfo } from '../../shared/types/system';
+import type { RuntimeDiagnostics } from '../../shared/types/runtime';
 import type { TerminalReason } from '../../shared/terminalReason';
 import type { LogEntry } from '@/types/log';
 import { parsePartialJson } from '@/utils/parsePartialJson';
@@ -363,6 +364,10 @@ export default function TabProvider({
     const [logs, setLogs] = useState<string[]>([]);
     const [unifiedLogs, setUnifiedLogs] = useState<LogEntry[]>([]);
     const [systemInitInfo, setSystemInitInfo] = useState<SystemInitInfo | null>(null);
+    // Issue #194 — runtime diagnostics snapshot for external runtimes (Codex
+    // today; Claude Code / Gemini later). Replaces the previously-hardcoded
+    // `systemInitInfo.tools: []` signal with a real diagnostic surface.
+    const [runtimeDiagnostics, setRuntimeDiagnostics] = useState<RuntimeDiagnostics | null>(null);
     const [agentError, setAgentError] = useState<string | null>(null);
     const [systemStatus, setSystemStatus] = useState<string | null>(null);  // e.g., 'compacting'
     const [lastTerminalReason, setLastTerminalReason] = useState<TerminalReason | null>(null);
@@ -531,6 +536,10 @@ export default function TabProvider({
         setUnifiedLogs([]);
         setLogs([]);
         setSessionMeta(null);
+        // Issue #194 (Codex review #6) — clear runtime diagnostics on reset so
+        // a stale Codex banner from the previous session doesn't leak into a
+        // new one (or a Tab that just switched to builtin runtime).
+        setRuntimeDiagnostics(null);
         clearInteractiveState();
         // Reset auto-title state for new conversation
         autoTitleAttemptedRef.current = false;
@@ -1832,6 +1841,17 @@ export default function TabProvider({
                 break;
             }
 
+            case 'chat:runtime-diagnostics': {
+                // Issue #194 — external-runtime self-report (auth/features/MCP/apps/effective env).
+                // Replaces the meaningless hardcoded `systemInitInfo.tools: []` as the actual
+                // signal users / debuggers should look at. UI components subscribe via context.
+                const diag = data as RuntimeDiagnostics | null;
+                if (diag && typeof diag === 'object' && 'runtime' in diag) {
+                    setRuntimeDiagnostics(diag);
+                }
+                break;
+            }
+
             case 'chat:log': {
                 // Handle both legacy string format and new LogEntry format
                 if (typeof data === 'string') {
@@ -3028,6 +3048,11 @@ export default function TabProvider({
             setSystemStatus(null);
             setAgentError(null);
             setLastTerminalReason(null);
+            // Issue #194 — clear runtime diagnostics when loading a different
+            // session; the runtime adapter will re-emit `runtime_diagnostics`
+            // for the new session if it's external. Avoids showing previous
+            // session's "X tools unreachable" warning on an unrelated session.
+            setRuntimeDiagnostics(null);
             clearInteractiveState();
             // Update current session ID to reflect the loaded session.
             // Ref is updated synchronously so that any in-flight async handler
@@ -3491,6 +3516,7 @@ export default function TabProvider({
         logs,
         unifiedLogs,
         systemInitInfo,
+        runtimeDiagnostics,
         agentError,
         systemStatus,
         lastTerminalReason,
@@ -3531,7 +3557,7 @@ export default function TabProvider({
         onCronTaskExitRequested: onCronTaskExitRequestedRef,
     }), [
         tabId, agentDir, currentSessionId, messages, historyMessages, streamingMessage, firstItemIndex, hasMoreBefore, isLoading, isSessionLoading, sessionState, sessionRuntime, sessionMeta,
-        logs, unifiedLogs, systemInitInfo, agentError, systemStatus, lastTerminalReason, pendingPermission, pendingAskUserQuestion, pendingExitPlanMode, pendingEnterPlanMode, toolCompleteCount, queuedMessages, isConnected,
+        logs, unifiedLogs, systemInitInfo, runtimeDiagnostics, agentError, systemStatus, lastTerminalReason, pendingPermission, pendingAskUserQuestion, pendingExitPlanMode, pendingEnterPlanMode, toolCompleteCount, queuedMessages, isConnected,
         setMessages, appendLog, appendUnifiedLog, clearUnifiedLogs, sendMessage, stopResponse, loadSession, loadOlderMessages, resetSession, adoptMigratedSession,
         apiGetJson, postJson, apiPutJson, apiDeleteJson, respondPermission, respondAskUserQuestion, respondExitPlanMode, cancelQueuedMessage, forceExecuteQueuedMessage
     ]);

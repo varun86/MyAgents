@@ -103,6 +103,15 @@ export const CUSTOM_EVENTS = {
      * Launcher's 历史对话 list.
      */
     OPEN_SESSION_IN_NEW_TAB: 'open-session-in-new-tab',
+    /**
+     * Fired from the global link context menu (LinkContextMenuProvider) when the
+     * user picks "预览（内置浏览器）" on an external link. Payload:
+     * `{ url: string }`. The currently active Chat tab listens; if its split
+     * BrowserPanel is available, it calls `preventDefault()` to claim the
+     * action. The dispatcher checks `defaultPrevented` and falls back to
+     * `openExternal()` (system browser) when no Chat tab handled it.
+     */
+    OPEN_IN_BROWSER_PANEL: 'open-in-browser-panel',
     // CONFIG_CHANGED removed — ConfigProvider shares state via Context, no DOM event bridge needed
     // Note: CRON_TASK_STOPPED event removed
     // With Session-centric Sidecar (Owner model), stopping a cron task only releases

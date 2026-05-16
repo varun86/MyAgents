@@ -10,6 +10,7 @@ import {
   thoughtOpenDir,
   thoughtMerge,
   thoughtDelete,
+  thoughtSetArchived,
   taskCenterAvailable,
 } from '@/api/taskCenter';
 import { SearchPill } from './SearchPill';
@@ -52,6 +53,9 @@ export function ThoughtPanel({
   const [query, setQuery] = useState('');
   const [activeTag, setActiveTag] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  // v0.2.16: archive view filter. Default 'active' — archived thoughts
+  // are soft-hidden from the panel until the user flips this toggle.
+  const [viewMode, setViewMode] = useState<'active' | 'archived'>('active');
   // `searchFocused` opens the tag-cloud panel below the search pill when
   // the user has focused the input without typing anything yet — gives
   // them a shortcut to "oh, pick a tag" vs. "type a search". Set on
@@ -73,7 +77,7 @@ export function ThoughtPanel({
   const reload = useCallback(async () => {
     setLoading(true);
     try {
-      const list = await thoughtList({});
+      const list = await thoughtList({ archived: viewMode });
       setThoughts(list);
       // Drop any phantom ids from the current selection — a thought that
       // was selected before reload but no longer exists (e.g. deleted in
@@ -97,7 +101,7 @@ export function ThoughtPanel({
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [viewMode]);
 
   useEffect(() => {
     void reload();
@@ -121,15 +125,32 @@ export function ThoughtPanel({
         setThoughts((prev) => prev.filter((x) => x.id !== prevId));
         setSelectedIds((s) => {
           if (!s.has(prevId)) return s;
-          const next = new Set(s);
-          next.delete(prevId);
-          return next;
+          const ns = new Set(s);
+          ns.delete(prevId);
+          return ns;
         });
-      } else {
-        setThoughts((prev) => prev.map((x) => (x.id === prevId ? next : x)));
+        return;
       }
+      // If the card's new archived state no longer matches the panel's
+      // view mode (e.g. user just archived a card while looking at
+      // active list), drop it from the current view rather than leaving
+      // a stale row behind. Search / merge / unrelated edits don't trip
+      // this — only archive/unarchive does.
+      const fitsView =
+        viewMode === 'archived' ? next.archived === true : next.archived !== true;
+      if (!fitsView) {
+        setThoughts((prev) => prev.filter((x) => x.id !== prevId));
+        setSelectedIds((s) => {
+          if (!s.has(prevId)) return s;
+          const ns = new Set(s);
+          ns.delete(prevId);
+          return ns;
+        });
+        return;
+      }
+      setThoughts((prev) => prev.map((x) => (x.id === prevId ? next : x)));
     },
-    [],
+    [viewMode],
   );
 
   const enterSelectMode = useCallback((seedId?: string) => {
@@ -271,6 +292,46 @@ export function ThoughtPanel({
       setBulkBusy(false);
     }
   }, [bulkBusy, selectedIds, toast, filtered]);
+
+  // Bulk archive / unarchive — flips every selected thought to the
+  // opposite of the current view mode (active view → archive; archived
+  // view → unarchive). Like handleBulkDelete, runs in parallel; we collect
+  // failures so a single bad write doesn't strand the rest. v0.2.16.
+  const handleBulkArchive = useCallback(async () => {
+    if (bulkBusy) return;
+    const ids = Array.from(selectedIds);
+    if (ids.length === 0) return;
+    const targetArchived = viewMode !== 'archived';
+    setBulkBusy(true);
+    try {
+      const results = await Promise.allSettled(
+        ids.map((id) => thoughtSetArchived(id, targetArchived)),
+      );
+      let failures = 0;
+      const succeeded: string[] = [];
+      results.forEach((r, i) => {
+        if (r.status === 'fulfilled') succeeded.push(ids[i]);
+        else failures += 1;
+      });
+      // Drop succeeded rows from the current view — they now belong to
+      // the opposite view mode.
+      if (succeeded.length > 0) {
+        setThoughts((prev) => prev.filter((t) => !succeeded.includes(t.id)));
+      }
+      setSelectedIds(new Set());
+      setSelectMode(false);
+      const verb = targetArchived ? '归档' : '取消归档';
+      if (failures === 0) {
+        toast.success(`已${verb} ${succeeded.length} 条想法`);
+      } else if (succeeded.length === 0) {
+        toast.error(`${verb}失败`);
+      } else {
+        toast.error(`已${verb} ${succeeded.length} 条，${failures} 条失败`);
+      }
+    } finally {
+      setBulkBusy(false);
+    }
+  }, [bulkBusy, selectedIds, viewMode, toast]);
 
   const handleBulkDelete = useCallback(async () => {
     if (bulkBusy) return;
@@ -449,10 +510,37 @@ export function ThoughtPanel({
         </div>
       </div>
 
-      {/* Input — new thought */}
+      {/* Input — new thought. Always visible regardless of viewMode (active
+          vs. archived); the toggle below the input only filters the list, it
+          shouldn't gate "create a new thought". v0.2.16 design correction:
+          previously this was wrapped in `viewMode === 'active'`, which made
+          users in the archived tab unable to write a new thought without
+          flipping back first.
+          Behaviour when creating from archived view:
+            • new thought is always active (Thought.archived defaults to false)
+            • optimistic prepend into `thoughts` would create a card that
+              vanishes on next reload (the archived list doesn't contain it),
+              so we instead flip viewMode → 'active' and clear filters; the
+              `useEffect([reload, ...])` re-fetches the active list and the
+              freshly created thought lands at the top as expected. */}
       <div className="p-3">
         <ThoughtInput
-          onCreated={(t) => setThoughts((prev) => [t, ...prev])}
+          onCreated={(t) => {
+            if (viewMode === 'archived') {
+              // Switching view will trigger reload() (via useCallback dep on
+              // viewMode). Drop search/tag filters too so the new thought
+              // — which may not match them — is guaranteed visible.
+              setViewMode('active');
+              setActiveTag(null);
+              setQuery('');
+              // Seed the active list with the new thought so the user sees
+              // it even before the reload fetch returns. reload() will
+              // overwrite with authoritative data right after.
+              setThoughts([t]);
+            } else {
+              setThoughts((prev) => [t, ...prev]);
+            }
+          }}
           existingTags={tagCandidates}
           autoFocus={autoFocusInput}
           minLines={3}
@@ -489,9 +577,44 @@ export function ThoughtPanel({
             想法 <span className="text-[var(--ink-muted)]/60">({thoughts.length})</span>
           </span>
         )}
-        {/* Right slot — reserved for future actions. Empty placeholder keeps
-            the row height stable as we add buttons here later. */}
-        <div />
+        {/* Right slot — v0.2.16: archive view toggle. Segmented control
+            with two pills (活跃 / 已归档) sharing one pill background.
+            Selecting a segment changes the panel's data source via
+            `viewMode`. No per-segment count by user request (PRD §2.1). */}
+        <div className="flex items-center gap-0.5 rounded-full bg-[var(--paper-inset)] p-0.5">
+          {([
+            ['active', '活跃'],
+            ['archived', '已归档'],
+          ] as const).map(([mode, label]) => {
+            const isActive = viewMode === mode;
+            return (
+              <button
+                key={mode}
+                type="button"
+                onClick={() => {
+                  if (viewMode === mode) return;
+                  setViewMode(mode);
+                  // Reset auxiliary state that doesn't make sense after a
+                  // viewMode flip: any active tag/query was scoped to the
+                  // previous data set; multi-select selection becomes a
+                  // mix of rows the user may no longer see.
+                  setActiveTag(null);
+                  setQuery('');
+                  setSelectMode(false);
+                  setSelectedIds(new Set());
+                }}
+                className={`rounded-full px-2.5 py-0.5 text-[11px] transition-colors ${
+                  isActive
+                    ? 'bg-[var(--paper-elevated)] font-medium text-[var(--ink)] shadow-sm'
+                    : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
+                }`}
+                aria-pressed={isActive}
+              >
+                {label}
+              </button>
+            );
+          })}
+        </div>
       </div>
 
       {/* List */}
@@ -503,7 +626,9 @@ export function ThoughtPanel({
         ) : filtered.length === 0 ? (
           <div className="py-12 text-center text-[13px] text-[var(--ink-muted)]">
             {thoughts.length === 0
-              ? '还没有想法，写下第一条吧'
+              ? viewMode === 'archived'
+                ? '还没有已归档的想法'
+                : '还没有想法，写下第一条吧'
               : '没有匹配的想法'}
           </div>
         ) : (
@@ -534,8 +659,10 @@ export function ThoughtPanel({
         <ThoughtBulkBar
           count={selectedIds.size}
           onMerge={() => void handleMerge()}
+          onArchive={() => void handleBulkArchive()}
           onDelete={() => setConfirmDeleteOpen(true)}
           onCancel={exitSelectMode}
+          viewMode={viewMode}
           busy={bulkBusy}
         />
       )}

@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.2.16] - 2026-05-16
+
+> 全局快捷键 + 想法归档两个常用快捷动作；Codex Runtime 的「为什么不工作」终于看得见；订阅验证、IM 群消息、工作区文件树几条体验断点修齐。
+
+### Added
+
+- **全局快捷键唤起 MyAgents**：默认 `⌘⇧M`（Windows / Linux: `Ctrl+Shift+M`），按一下前台、再按一下隐藏到托盘（Raycast 风格 toggle）。可在 设置 → 通用 → 启动设置 改键或关闭。当前 tab / 焦点保持不变——快捷键纯粹是窗口显隐切换，不抢焦点也不强切到 launcher。
+- **Codex Runtime 自诊断面板 + 每 Agent 网络代理选择**（#194）：用 Codex Runtime 时如果遇到登录、MCP server、外部连接器（artifact-tool 等）问题，chat 顶栏会自动浮出一条诊断条让你直接看到「哪里挂了」，不用翻日志。每个 Agent 的「基础设置」也多了一项「网络代理」二选一：**MyAgents 代理**（默认，与桌面端 设置 → 网络代理 一致）和 **跟随终端**（等同于在你电脑的终端里手动启动这个 CLI 时看到的环境变量）。解决一类典型问题：用户终端里能调到的外部连接器，MyAgents 里因为代理不一致调不到。
+- **想法可归档**：想法列表的「更多」菜单和批量操作栏都加了归档/取消归档。归档后从默认视图隐藏但全文搜索仍可命中（邮箱式语义）。在已归档分段里也能直接新建想法（会自动切回活跃视图）。Launcher 最近想法行 / 输入框 `#` picker 默认不展示已归档项。
+- **链接右键菜单**：chat 消息 / AI 回复里的链接，右键弹自定义菜单「预览（内置浏览器）/ 拷贝链接 / 在系统浏览器中打开」——之前只能直接外部打开。「预览」在 split view 启用时会落到右侧浏览器面板。
+- **CLI 新增 runtime 诊断子命令**：`myagents runtime diagnose codex`（或 `myagents diagnose runtime codex`），返回结构化 JSON 可直接贴 GitHub issue。
+
+### Fixed
+
+- **工作区文件树不再每次 AI 写文件后就收起**：展开了多层目录后，AI 跑工具 / 保存文件 / 文件 watcher 事件 / 120s 后台轮询任意一个动作都会让深层目录视觉上收回去——多层嵌套项目用户感受明显。现在 tab 生命周期里展开状态稳定。
+- **第三方迁订阅用户的 Anthropic 订阅验证不再 403**（#199）：从 cc-switch / Claude Code Router 等第三方 CLI 工具迁过来的用户，`~/.claude/settings.json` 里残留的 `apiKeyHelper` 字段会让 SDK 拒绝走 OAuth → verify 报 403。verify 路径不再加载这个文件，与 chat session 行为一致，SDK 走 macOS Keychain 完成认证。
+- **CLI 创建的定时任务能正确用工作区 provider 与模型**（#197）：`myagents cron add` 创建的任务之前会忽略工作区 Agent 配的第三方 provider，回退到订阅 + Sonnet 默认模型，上游报 403。现在与桌面端 Chat 路径对齐，自动从 Agent 配置捕获 providerId + model；存量旧 cron 在执行时也会动态解析 provider env。
+- **Codex Runtime 切换不再带走旧 runtime 的模型设置**（#194）：从 Gemini Agent 切到 Codex，新开 tab 之前会继续把 `gemini-3.1-pro-preview` 喂给 Codex，CLI 直接报 "model not supported"。Settings 面板 / Launcher / CLI `agent set runtime` 三条切换路径现在统一清理跨 runtime 不通用的字段；启动时还会自动扫描并修复旧版本残留的污染配置。
+- **Codex 已登录用户不再误报"需要登录"**（#194）：诊断面板把 Codex 的产品级元标志当成了用户态信号，已登录的 ChatGPT 账号也会被判定"需要登录 Codex"。现在按真信号判断。
+- **打开 Codex / Gemini 历史会话从 8-10 秒变成几乎瞬间**：以前切到 prewarm 过的同一 session 还要再等一遍 CLI 冷启动，纯白屏；现在同 session 切换立即返回。
+- **Gemini Runtime 启动不再卡 30-40 秒**：之前打开 Gemini Tab 时两个并发的 `gemini --acp` 会互抢资源各自 timeout 30 秒，重试才能正常起来。修了并发协调 + stderr 管道阻塞，冷启动现在按预期完成。
+- **企业微信群里 @ 机器人不再静默丢失**：之前每次 @ 都被识别成"非 mention"丢进 history buffer 不路由给 AI，机器人不回。同时群内消息现在能正确带 `[from: 发言人 时间]` 标签，AI 在群里能区分不同发言人。
+- **主窗口右键打开链接不再劫持整个 App**：之前右键 chat 里的链接 → WKWebView 原生菜单选 "Open Link" → 整个 App 被替换成被点链接的页面，没有返回路径。现在外链统一走系统浏览器；恶意 `data:` URL 也无法替换主窗（潜在 XSS 风险一并堵了）。
+- **macOS 顶栏红黄绿按钮垂直居中**：开源以来一直略偏下 4 像素的祖传错位顺手修了。
+
+### Changed
+
+- **从 GitHub 安装 Skill 的超时窗口拉宽到 5 分钟**（#193）：之前 10s / 60s 的三层超时在 CN 代理或慢网络下基本每次 install 都撞超时。
+
+### Internal
+
+- 新增 `RuntimeEnvPolicy` 共享校验入口、`shell.ts` 启动期抓取用户 shell 的 8 个 proxy 环境变量、Rust `apply_to_subprocess` 统一清除继承的 `ALL_PROXY`/`all_proxy`，为「跟随终端」模式提供基础设施。
+- 工作区文件树新增 `treeMerge.ts` 模块（4 个纯函数 + 27 vitest 用例）：merge stale lazy children 作 fallback + frontier dirExpand 重抓 + 同路径死循环防护 + BFS 级联上限。
+- 三视角 cross-review 流水线（Claude Code 代码质量 / Codex 对抗测试 / 架构合规）整合到合并前流程，本次发现 5 个 critical / warning 问题已全部修复。
+- `tech_docs/multi_agent_runtime.md` / `proxy_config.md` / `cli_architecture.md` 同步 envPolicy + Codex 诊断 + CLI diagnose 子命令的契约文档。
+
+---
+
 ## [0.2.15] - 2026-05-12
 
 > 长对话回溯、长任务执行、Codex 工具图片三条常见路径的可靠性收紧；外部 Runtime、Windows 下的几条阻塞性问题一并处理。

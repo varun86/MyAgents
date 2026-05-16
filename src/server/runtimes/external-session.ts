@@ -43,6 +43,12 @@ let activeRuntime: AgentRuntime | null = null;
 let isRunning = false;
 let turnCompleted = false;
 let startingPromise: Promise<void> | null = null;  // Guard against concurrent startExternalSession
+// Target sessionId of the in-flight startExternalSession. Set the moment
+// startExternalSession is called (before _doStartExternalSession's spawn-and-handshake
+// even begins), cleared in finally. Lets /sessions/switch detect that an in-flight
+// prewarm is going to land on the same session it wants to switch to — making the
+// switch a no-op without paying the 8-10s gemini --acp cold-start.
+let startingSessionId: string | null = null;
 let watchdogTimer: ReturnType<typeof setTimeout> | null = null;  // Hung process detection
 
 // Track session context for multi-turn resume (CC -p mode exits after each turn)
@@ -158,6 +164,7 @@ function resetModuleState(): void {
   isRunning = false;
   turnCompleted = false;
   startingPromise = null;
+  startingSessionId = null;
   if (watchdogTimer) { clearTimeout(watchdogTimer); watchdogTimer = null; }
   lastRuntimeSessionId = '';
   lastModel = '';
@@ -685,6 +692,15 @@ export function getExternalSessionId(): string {
   return lastSessionId;
 }
 
+/** The session this Sidecar is bound to right now — either already committed
+ *  (lastSessionId, set by restoreExternalSessionState at boot or by a completed
+ *  start) or about to be committed by an in-flight prewarm/start (startingSessionId).
+ *  Used by /sessions/switch to detect a no-op switch (target matches the bound
+ *  session) without awaiting the prewarm's CLI cold-start. */
+export function getCurrentBoundSessionId(): string {
+  return startingSessionId || lastSessionId;
+}
+
 export function getExternalSessionModel(): string | null {
   return lastRuntimeReportedModel || lastModel || null;
 }
@@ -824,6 +840,19 @@ export function getLastExternalAssistantText(): string {
 }
 
 /**
+ * Resolve the agent's envPolicy from disk. Thin wrapper over the shared
+ * helper in `env-utils.ts` — kept as a local re-export so existing call
+ * sites in this file stay 1-line. See `env-utils.resolveAgentEnvPolicy` for
+ * validation contract.
+ */
+async function resolveAgentEnvPolicy(
+  workspacePath: string,
+): Promise<import('../../shared/types/runtime').RuntimeEnvPolicy | undefined> {
+  const { resolveAgentEnvPolicy: shared } = await import('./env-utils');
+  return shared(workspacePath);
+}
+
+/**
  * Start an external runtime session.
  * Called instead of the builtin startStreamingSession() when runtime is external.
  */
@@ -836,6 +865,8 @@ export async function startExternalSession(options: {
   permissionMode?: string;
   scenario: InteractionScenario;
   resumeSessionId?: string;
+  /** Issue #194 — per-agent env policy (proxy: myagents/terminal/direct). */
+  envPolicy?: import('../../shared/types/runtime').RuntimeEnvPolicy;
 }): Promise<void> {
   // Concurrency guard — wait for any in-flight start to finish
   if (startingPromise) {
@@ -846,14 +877,20 @@ export async function startExternalSession(options: {
     return;
   }
 
-  // Wrap the body so concurrent callers serialize via startingPromise
+  // Wrap the body so concurrent callers serialize via startingPromise.
+  // startingSessionId is set BEFORE _doStartExternalSession runs so that any
+  // concurrent /sessions/switch into the same target can short-circuit even
+  // while the spawn is still mid-flight (lastSessionId isn't written until
+  // _doStartExternalSession reaches its session-context-bind step).
   let resolveStarting: () => void;
   startingPromise = new Promise(r => { resolveStarting = r; });
+  startingSessionId = options.sessionId;
 
   try {
     await _doStartExternalSession(options);
   } finally {
     startingPromise = null;
+    startingSessionId = null;
     resolveStarting!();
   }
 }
@@ -868,11 +905,18 @@ async function _doStartExternalSession(options: {
   permissionMode?: string;
   scenario: InteractionScenario;
   resumeSessionId?: string;
+  envPolicy?: import('../../shared/types/runtime').RuntimeEnvPolicy;
 }): Promise<void> {
 
   const runtimeType = getCurrentRuntimeType();
   const runtime = getExternalRuntime(runtimeType);
   activeRuntime = runtime;
+
+  // Issue #194 — resolve agent envPolicy from disk if caller didn't pass it
+  // explicitly. Most call sites (sendExternalMessage, prewarm) don't have
+  // access to the agent config, so doing it here avoids N copies of the lookup.
+  const resolvedEnvPolicy = options.envPolicy
+    ?? await resolveAgentEnvPolicy(options.workspacePath);
 
   // Build system prompt using MyAgents' three-layer architecture.
   // Pass the current runtime so L1 identity text reports the correct CLI
@@ -1002,6 +1046,7 @@ async function _doStartExternalSession(options: {
         permissionMode: options.permissionMode,
         scenario: options.scenario,
         resumeSessionId: resumeId,
+        envPolicy: resolvedEnvPolicy,
       },
       handleUnifiedEvent,
     );
@@ -1505,6 +1550,60 @@ export function isExternalSessionActive(): boolean {
 }
 
 /**
+ * Truncate `allSessionMessages` at the given user message id and persist the
+ * truncation. Returns the popped user message's content + attachments so the
+ * caller can re-send.
+ *
+ * External-runtime equivalent of builtin `rewindSession()`. Used by the
+ * retry button when the previous turn failed (e.g. model capacity). External
+ * runtimes don't support /chat/rewind because there's no SDK resume anchor /
+ * file checkpoint to roll back, but a "drop the failed user turn + resend"
+ * semantic is still sound: the failed turn never produced an assistant
+ * message (persistTurnResult only fires on subtype=success), so the local
+ * history just has a dangling user message at the tail.
+ *
+ * Caller is responsible for invoking sendExternalMessage with the returned
+ * content. We don't do the resend here so the existing send path's
+ * MCP/agents/model wiring stays the single source of truth.
+ *
+ * Refuses if a turn is currently in flight — the user must abort first.
+ */
+export async function popLastUserMessageForRetry(userMessageId: string): Promise<{
+  success: boolean;
+  error?: string;
+  content?: string;
+  attachments?: SessionMessage['attachments'];
+}> {
+  if (!lastSessionId) {
+    return { success: false, error: 'No active external session' };
+  }
+  if (isExternalSessionActive()) {
+    return { success: false, error: 'Cannot retry while a turn is in progress' };
+  }
+  const targetIndex = allSessionMessages.findIndex(
+    m => m.id === userMessageId && m.role === 'user',
+  );
+  if (targetIndex < 0) {
+    return { success: false, error: 'Message not found' };
+  }
+  const target = allSessionMessages[targetIndex];
+  const content = typeof target.content === 'string' ? target.content : '';
+  const attachments = target.attachments;
+
+  // Truncate (drops the failed user msg + any partial assistant blocks left
+  // behind from a half-finalized turn). saveSessionMessages already detects
+  // `messages.length < existingCount` and rewrites the JSONL.
+  allSessionMessages.length = targetIndex;
+  try {
+    await saveSessionMessages(lastSessionId, allSessionMessages);
+  } catch (err) {
+    console.error('[external-session] popLastUserMessageForRetry: failed to persist truncation:', err);
+    return { success: false, error: 'Failed to persist truncation' };
+  }
+  return { success: true, content, attachments };
+}
+
+/**
  * Pre-warm an external runtime process so the first user message skips the
  * cold-start cost (spawn + `initialize` + `session/new` + prompt-file write).
  *
@@ -1998,6 +2097,64 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
       }
       break;
 
+    case 'runtime_diagnostics': {
+      // Issue #194: runtime's self-report (auth, features, MCP, apps, effective env).
+      // Sidecar log keeps a snapshot for unified-log triage; renderer renders the
+      // diagnostic strip / details panel.
+      console.log(`[external-session] runtime_diagnostics: runtime=${event.diagnostics.runtime} features=${event.diagnostics.features?.length ?? 0} mcp=${event.diagnostics.mcpServers?.length ?? 0} apps=${event.diagnostics.apps?.length ?? 0} auth=${event.diagnostics.auth?.authMethod ?? 'none'}`);
+      broadcast('chat:runtime-diagnostics', event.diagnostics);
+
+      // Banner v2 only renders BLOCKING issues (auth.requiresLogin + total
+      // RPC failure). Non-blocking signals — app/list 403, individual MCP
+      // server failure, feature-flag query error — used to show up in the
+      // yellow banner too; users (rightly) complained about chronic noise
+      // from transient Codex backend hiccups. Route them through chat:log
+      // instead so the Logs panel shows them but the chat header stays
+      // clean. Sidecar console / unified log still has the full snapshot.
+      const d = event.diagnostics;
+      const emitDiagnosticLog = (level: 'warn' | 'error', message: string): void => {
+        broadcast('chat:log', {
+          source: 'bun',
+          level,
+          message,
+          timestamp: new Date().toISOString(),
+          runtime: getCurrentRuntimeType(),
+        });
+      };
+      const errOf = (s: typeof d.status.auth): string | null =>
+        s && typeof s === 'object' && 'error' in s ? String(s.error) : null;
+      const authErr = errOf(d.status.auth);
+      const appsErr = errOf(d.status.apps);
+      const mcpErr = errOf(d.status.mcpServers);
+      const featErr = errOf(d.status.features);
+      // `error` for ones the banner would have considered "warn-tier" in v1;
+      // `warn` for purely informational. Severity here drives Logs panel
+      // sort/filter — it isn't what makes the banner appear.
+      if (authErr) emitDiagnosticLog('error', `[codex-diag] auth status query failed: ${authErr.slice(0, 200)}`);
+      if (appsErr) emitDiagnosticLog('warn', `[codex-diag] app/list failed: ${appsErr.slice(0, 200)}`);
+      if (mcpErr) emitDiagnosticLog('warn', `[codex-diag] mcpServerStatus/list failed: ${mcpErr.slice(0, 200)}`);
+      if (featErr) emitDiagnosticLog('warn', `[codex-diag] experimentalFeature/list failed: ${featErr.slice(0, 200)}`);
+      if (d.apps) {
+        const inaccessible = d.apps.filter(a => a.isEnabled && !a.isAccessible);
+        if (inaccessible.length > 0) {
+          emitDiagnosticLog(
+            'warn',
+            `[codex-diag] ${inaccessible.length} app(s) enabled but not accessible: ${inaccessible.map(a => a.id).slice(0, 5).join(', ')}`,
+          );
+        }
+      }
+      if (d.mcpServers) {
+        const failed = d.mcpServers.filter(s => s.state === 'failed');
+        if (failed.length > 0) {
+          emitDiagnosticLog(
+            'warn',
+            `[codex-diag] MCP server(s) in failed state: ${failed.map(s => s.name).join(', ')}`,
+          );
+        }
+      }
+      break;
+    }
+
     case 'status_change': {
       // Map runtime states to frontend session states (match builtin runtime behavior)
       const stateMap: Record<string, string> = { running: 'running', error: 'error', waiting_permission: 'running' };
@@ -2124,8 +2281,25 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
     case 'log':
       if (event.level === 'error') {
         console.error(`[external-runtime] ${event.message}`);
+      } else if (event.level === 'warn') {
+        console.warn(`[external-runtime] ${event.message}`);
       } else {
         console.log(`[external-runtime] ${event.message}`);
+      }
+      // Issue #194: surface warn/error to the renderer so the user sees them
+      // in the chat log panel rather than only the unified log. Info-level is
+      // log-only — it's high-volume runtime noise (turn/tool lifecycle).
+      // Shape MUST match LogEntry (src/renderer/types/log.ts) — the renderer's
+      // `chat:log` handler discriminates on `source in data` and drops anything
+      // without it. `source: 'bun'` is correct: the sidecar is the writer.
+      if (event.level === 'warn' || event.level === 'error') {
+        broadcast('chat:log', {
+          source: 'bun',
+          level: event.level,
+          message: event.message,
+          timestamp: new Date().toISOString(),
+          runtime: getCurrentRuntimeType(),
+        });
       }
       break;
 

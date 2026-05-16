@@ -6,6 +6,7 @@ import { stopTabSidecar, startGlobalSidecar, initGlobalSidecarReadyPromise, mark
 import ConfirmDialog from '@/components/ConfirmDialog';
 import BugReportOverlay from '@/components/BugReportOverlay';
 import CustomTitleBar from '@/components/CustomTitleBar';
+import LinkContextMenuProvider from '@/components/LinkContextMenuProvider';
 import TabBar from '@/components/TabBar';
 import TabProvider from '@/context/TabProvider';
 import { useToast } from '@/components/Toast';
@@ -2392,6 +2393,7 @@ export default function App() {
   }, [handleSelectTab]);
 
   return (
+    <LinkContextMenuProvider>
     <div className="flex h-screen flex-col bg-[var(--paper)]">
       {/* Chrome-style titlebar with tabs */}
       <CustomTitleBar
@@ -2508,5 +2510,6 @@ export default function App() {
         />
       )}
     </div>
+    </LinkContextMenuProvider>
   );
 }

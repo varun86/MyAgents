@@ -9,7 +9,12 @@
 import { spawn, type Subprocess, type SubprocessStdin } from '../utils/subprocess';
 import { writeFileSync , existsSync, readdirSync, unlinkSync, statSync } from 'fs';
 import { join } from 'path';
-import type { RuntimeDetection, RuntimeModelInfo, RuntimePermissionMode, RuntimeType } from '../../shared/types/runtime';
+import type {
+  RuntimeDetection, RuntimeModelInfo, RuntimePermissionMode, RuntimeType,
+  RuntimeAuthStatus, RuntimeFeatureFlag, RuntimeMcpServerInfo, RuntimeAppInfo,
+  RuntimeDiagnostics, RuntimeDiagnosticsStatus, RuntimeEffectiveEnv,
+  RuntimeProxyPolicy,
+} from '../../shared/types/runtime';
 import { CODEX_PERMISSION_MODES } from '../../shared/types/runtime';
 import type { AgentRuntime, RuntimeProcess, SessionStartOptions, UnifiedEvent, UnifiedEventCallback, ImagePayload } from './types';
 import { StaleRuntimeSessionError } from './types';
@@ -330,6 +335,290 @@ function mapPermissionMode(mode: string): { approval: string; sandbox: string } 
   }
 }
 
+// ─── Stderr error classification (issue #194) ───
+//
+// Conservative pattern matcher: forwards a small set of high-signal failures
+// to the UnifiedEvent log stream so the renderer/IM bus can surface them.
+// Anything not matching here still ends up in the unified log via console.error.
+//
+// Adding patterns: prefer specific phrases over broad terms. A false-positive
+// log line in the renderer is annoying; a false-negative just means the user
+// sees the unified log instead — same baseline as today.
+
+interface StderrPattern {
+  /** Regex tested against the stripped stderr line. */
+  re: RegExp;
+  /** Mapped severity in the UnifiedEvent. */
+  level: 'warn' | 'error';
+  /** Human-readable summary prefix shown to the user. */
+  prefix: string;
+}
+
+const CODEX_STDERR_PATTERNS: StderrPattern[] = [
+  // App / MCP discovery transport — direct repro of issue #194.
+  { re: /rmcp::transport::worker.*worker quit/i, level: 'error', prefix: 'Codex MCP transport failed' },
+  { re: /error sending request for url \(([^)]+)\)/i, level: 'error', prefix: 'Codex HTTP request failed' },
+  // App-server lifecycle.
+  { re: /app-server process exited/i, level: 'error', prefix: 'Codex app-server exited' },
+  // Auth failures — these break tool access silently otherwise.
+  { re: /not (signed in|logged in|authenticated)|authentication required|please sign in/i, level: 'error', prefix: 'Codex authentication required' },
+  { re: /(401|403)\b.*?(unauthor|forbid)/i, level: 'error', prefix: 'Codex authorization rejected' },
+  // Network / proxy diagnostics.
+  { re: /(connection (refused|reset)|tls handshake|dns (failure|resolve))/i, level: 'error', prefix: 'Codex network error' },
+];
+
+function classifyAndForwardCodexStderr(text: string, onEvent: UnifiedEventCallback): void {
+  // Many stderr writes are multi-line. Process each line independently — one
+  // matching line should fire one event, not block the rest of the chunk.
+  for (const line of text.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    for (const p of CODEX_STDERR_PATTERNS) {
+      const m = trimmed.match(p.re);
+      if (!m) continue;
+      // Keep the message short — the renderer shows these as toast/log lines.
+      // The full stderr line still went to console.error / unified log.
+      const detail = trimmed.length > 200 ? `${trimmed.slice(0, 200)}…` : trimmed;
+      onEvent({
+        kind: 'log',
+        level: p.level,
+        message: `[codex] ${p.prefix}: ${detail}`,
+      });
+      break; // first match wins per line
+    }
+  }
+}
+
+// ─── Diagnostic helpers (issue #194) ───
+
+/**
+ * Mask credentials in a proxy URL before exposing to the renderer.
+ * `http://user:pass@proxy:7890` → `http://***@proxy:7890`. Falls back to the
+ * raw string if parsing fails (better to render an opaque blob than to leak
+ * partially-decoded credentials).
+ */
+function sanitizeProxyUrl(url: string | undefined): string | undefined {
+  if (!url) return undefined;
+  try {
+    const u = new URL(url);
+    if (u.username || u.password) {
+      u.username = '***';
+      u.password = '';
+    }
+    return u.toString();
+  } catch {
+    return url.includes('@') ? '[masked-proxy]' : url;
+  }
+}
+
+/**
+ * Build the sanitized effective-env snapshot for the diagnostic payload.
+ * NEVER include secret values — only sanitized URLs and presence-only booleans
+ * for sensitive vars. See `RuntimeEffectiveEnv` doc comment for the contract.
+ */
+function buildEffectiveEnvSnapshot(
+  env: Record<string, string | undefined>,
+  cwd: string,
+  proxyPolicy: RuntimeProxyPolicy = 'myagents',
+): RuntimeEffectiveEnv {
+  const path = env.PATH || env.Path || '';
+  const pathHead = path.split(process.platform === 'win32' ? ';' : ':')
+    .filter(Boolean)
+    .slice(0, 5);
+  return {
+    cwd,
+    proxy: {
+      http: sanitizeProxyUrl(env.HTTP_PROXY || env.http_proxy),
+      https: sanitizeProxyUrl(env.HTTPS_PROXY || env.https_proxy),
+      all: sanitizeProxyUrl(env.ALL_PROXY || env.all_proxy),
+      no: env.NO_PROXY || env.no_proxy || undefined,
+    },
+    // Reflects the agent's runtimeConfig.envPolicy.proxy resolved at session
+    // start (issue #194). 'myagents' = MyAgents-configured proxy is injected;
+    // 'terminal' = inherited from user's interactive shell.
+    proxyPolicy,
+    pathHead,
+    myagentsProxyInjected: env.MYAGENTS_PROXY_INJECTED === '1',
+    hasOpenaiApiKey: !!(env.OPENAI_API_KEY && env.OPENAI_API_KEY.length > 0),
+    hasAnthropicApiKey: !!(env.ANTHROPIC_API_KEY && env.ANTHROPIC_API_KEY.length > 0),
+    hasCodexHome: !!(env.CODEX_HOME && env.CODEX_HOME.length > 0),
+    hasXdgConfigHome: !!(env.XDG_CONFIG_HOME && env.XDG_CONFIG_HOME.length > 0),
+  };
+}
+
+/**
+ * Best-effort RPC fan-out: collect Codex's view of auth / features / MCP
+ * servers / apps. Each call has its own 5s timeout and is captured as either
+ * `'ok'`, `'unsupported'` (RPC `-32601` Method not found), or `{ error }`.
+ *
+ * Why parallel + Promise.allSettled: we never block the user's first turn on
+ * diagnostics — the call site is fire-and-forget after thread/start has
+ * already returned. Each RPC failure is independent and degrades gracefully.
+ */
+async function collectCodexDiagnostics(
+  rpc: JsonRpcClient,
+  env: Record<string, string | undefined>,
+  cwd: string,
+  /**
+   * Codex thread id for `app/list` feature gating. `null` for the standalone
+   * (CLI-driven) path where no thread has been started — Codex's schema
+   * declares this nullable. Earlier code passed `''`, which serde could reject.
+   */
+  threadId: string | null,
+  proxyPolicy: RuntimeProxyPolicy = 'myagents',
+): Promise<RuntimeDiagnostics> {
+  const status: RuntimeDiagnosticsStatus = {};
+
+  // Helper: returns ['ok', value] | ['unsupported'] | ['error', reason]
+  type CallResult<T> = ['ok', T] | ['unsupported'] | ['error', string];
+  const tryCall = async <T>(method: string, params: unknown): Promise<CallResult<T>> => {
+    try {
+      const v = await rpc.call(method, params, 5_000) as T;
+      return ['ok', v];
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      // RPC -32601: Method not found → unsupported on this Codex version.
+      // We don't want to flag old Codex as broken just because it lacks the
+      // newer experimentalFeature/list — render 'unsupported' instead.
+      if (/(-32601|Method not (found|supported))/i.test(msg)) return ['unsupported'];
+      return ['error', msg.slice(0, 200)];
+    }
+  };
+
+  // Fire all four in parallel — they're independent.
+  const [authR, featuresR, mcpR, appsR] = await Promise.all([
+    tryCall<{ authMethod: string | null; authToken?: string | null; requiresOpenaiAuth?: boolean | null }>(
+      'getAuthStatus', {}),
+    tryCall<{ data: Array<{ name: string; stage: string; enabled: boolean; defaultEnabled: boolean }> }>(
+      'experimentalFeature/list', {}),
+    tryCall<{ data: Array<{ name: string; tools: Record<string, unknown>; resources: unknown[]; authStatus: unknown }> }>(
+      'mcpServerStatus/list', {}),
+    tryCall<{ data: Array<{ id: string; name?: string; description?: string | null; isAccessible: boolean; isEnabled: boolean; installUrl?: string | null }> }>(
+      'app/list', { threadId }),
+  ]);
+
+  // Process auth.
+  //
+  // `requiresOpenaiAuth` is a **meta** flag — it means "this Codex product needs
+  // OpenAI-backed auth to work" (true for all current Codex builds backed by
+  // ChatGPT/OpenAI). It is NOT a per-user state. A logged-in user with a
+  // working ChatGPT account also sees `requiresOpenaiAuth: true`.
+  // Live probe of a healthy logged-in user returns:
+  //   { authMethod: "chatgpt", authToken: null, requiresOpenaiAuth: true }
+  // The user-state signal is `authMethod`: null ⇒ no credential of any kind
+  // (apikey / chatgpt / chatgptAuthTokens / agentIdentity), so the user must
+  // sign in. Earlier code derived requiresLogin from `requiresOpenaiAuth`
+  // alone, which flagged every authed Codex user as needing login — surfacing
+  // a false-positive "需要登录 Codex" banner in MyAgents (cross-bugfix #1).
+  let auth: RuntimeAuthStatus | undefined;
+  if (authR[0] === 'ok') {
+    status.auth = 'ok';
+    const hasAuth = !!authR[1].authMethod;
+    auth = {
+      authMethod: authR[1].authMethod,
+      // Treat the meta flag as a gate: even if `authMethod` is null, login is
+      // only "required" when the Codex build actually needs OpenAI auth.
+      // (Defensive — Codex could ship a build mode where neither is required.)
+      requiresLogin: !hasAuth && authR[1].requiresOpenaiAuth === true,
+    };
+  } else if (authR[0] === 'unsupported') {
+    status.auth = 'unsupported';
+  } else {
+    status.auth = { error: authR[1] };
+  }
+
+  // Process features — keep only enabled OR user-toggled (defaultEnabled !== enabled).
+  // Renderer doesn't need 80 disabled-by-default entries; the actionable signal
+  // is "what's actually on right now" + "what the user explicitly chose".
+  let features: RuntimeFeatureFlag[] | undefined;
+  if (featuresR[0] === 'ok') {
+    status.features = 'ok';
+    features = featuresR[1].data
+      .filter(f => f.enabled || f.defaultEnabled !== f.enabled)
+      .map(f => ({
+        name: f.name,
+        enabled: f.enabled,
+        defaultEnabled: f.defaultEnabled,
+        stage: f.stage,
+      }));
+  } else if (featuresR[0] === 'unsupported') {
+    status.features = 'unsupported';
+  } else {
+    status.features = { error: featuresR[1] };
+  }
+
+  // Process MCP servers
+  let mcpServers: RuntimeMcpServerInfo[] | undefined;
+  if (mcpR[0] === 'ok') {
+    status.mcpServers = 'ok';
+    mcpServers = mcpR[1].data.map(s => {
+      // authStatus shape varies — render the stringified status when it's a
+      // known marker, otherwise just flag whether MCP is auth'd.
+      let authStatusStr: string | undefined;
+      if (typeof s.authStatus === 'string') {
+        authStatusStr = s.authStatus;
+      } else if (s.authStatus && typeof s.authStatus === 'object') {
+        const obj = s.authStatus as Record<string, unknown>;
+        authStatusStr = typeof obj.status === 'string' ? obj.status :
+                        typeof obj.kind === 'string' ? obj.kind : undefined;
+      }
+      // Derive `state` from authStatus so the diagnostic banner has a single
+      // field to filter on (its existing `state === 'failed'` check would
+      // never fire if we only populated authStatus). Known unhealthy markers
+      // — explicit failure plus auth-required states the user must act on —
+      // surface as 'failed' so the banner highlights them.
+      const lowered = authStatusStr?.toLowerCase() ?? '';
+      const unhealthy =
+        lowered.includes('failed') ||
+        lowered.includes('error') ||
+        lowered.includes('oauth') ||
+        lowered.includes('unauthenticated') ||
+        lowered.includes('needs') ||
+        lowered.includes('required');
+      return {
+        name: s.name,
+        toolCount: Object.keys(s.tools ?? {}).length,
+        resourceCount: s.resources?.length ?? 0,
+        state: unhealthy ? 'failed' : undefined,
+        authStatus: authStatusStr,
+      };
+    });
+  } else if (mcpR[0] === 'unsupported') {
+    status.mcpServers = 'unsupported';
+  } else {
+    status.mcpServers = { error: mcpR[1] };
+  }
+
+  // Process apps — this is the artifact-tool diagnostic signal.
+  let apps: RuntimeAppInfo[] | undefined;
+  if (appsR[0] === 'ok') {
+    status.apps = 'ok';
+    apps = appsR[1].data.map(a => ({
+      id: a.id,
+      name: a.name,
+      description: a.description ?? undefined,
+      isAccessible: a.isAccessible,
+      isEnabled: a.isEnabled,
+      installUrl: a.installUrl ?? null,
+    }));
+  } else if (appsR[0] === 'unsupported') {
+    status.apps = 'unsupported';
+  } else {
+    status.apps = { error: appsR[1] };
+  }
+
+  return {
+    runtime: 'codex',
+    effectiveEnv: buildEffectiveEnvSnapshot(env, cwd, proxyPolicy),
+    auth,
+    features,
+    mcpServers,
+    apps,
+    status,
+    timestamp: new Date().toISOString(),
+  };
+}
+
 // ─── CodexRuntime ───
 
 export class CodexRuntime implements AgentRuntime {
@@ -423,6 +712,82 @@ export class CodexRuntime implements AgentRuntime {
     return CODEX_PERMISSION_MODES;
   }
 
+  /**
+   * Standalone diagnostic run (issue #194 — used by `myagents diagnose runtime
+   * codex`). Spawns a short-lived `codex app-server`, runs initialize, fans
+   * out the four diagnostic RPCs, and tears down. Does NOT start a thread —
+   * the three core RPCs (`getAuthStatus`, `experimentalFeature/list`,
+   * `mcpServerStatus/list`) don't need one, and `app/list` accepts
+   * `threadId: null`. This makes the command cheap (no agent.md scan, no
+   * sandbox spawn for tools).
+   *
+   * Uses the SAME spawn env / envPolicy / cwd as a real session so the
+   * snapshot reflects what production Codex would see. Pass `envPolicy` from
+   * the same `agent.runtimeConfig.envPolicy` that the real session would
+   * resolve — otherwise the diagnostic would silently report the legacy
+   * `myagents` proxy view even when the agent is set to `terminal`/`direct`
+   * (Codex review #3 catch).
+   */
+  async runStandaloneDiagnostics(
+    workspacePath?: string,
+    envPolicy?: import('../../shared/types/runtime').RuntimeEnvPolicy,
+  ): Promise<RuntimeDiagnostics> {
+    const env = augmentedProcessEnv(envPolicy);
+    const cwd = workspacePath || env.HOME || process.cwd();
+
+    const proc = spawn([resolveCommand('codex'), 'app-server'], {
+      stdout: 'pipe',
+      stderr: 'pipe',
+      stdin: 'pipe',
+      cwd,
+      env,
+      // Same detached/windowsHide treatment as the real session spawn —
+      // diverging here would mean the diagnostic env didn't match production.
+      detached: process.platform !== 'win32',
+      windowsHide: true,
+    });
+
+    // Drain stderr to /dev/null so a verbose Codex doesn't block the pipe.
+    // Errors land in unified log via the standard sidecar capture; the
+    // diagnostic report's `status` covers actionable failures.
+    if (proc.stderr) {
+      void (async () => {
+        const reader = (proc.stderr as ReadableStream<Uint8Array>).getReader();
+        try { while (true) { const { done } = await reader.read(); if (done) break; } }
+        catch { /* ignore */ }
+        finally { reader.releaseLock(); }
+      })();
+    }
+
+    const rpc = new JsonRpcClient(proc);
+    const readerDone = rpc.startReading();
+
+    try {
+      await rpc.call('initialize', {
+        clientInfo: { name: 'MyAgents', title: null, version: process.env.MYAGENTS_VERSION || '0.1.60' },
+        capabilities: null,
+      }, 10_000);
+
+      // No thread for the standalone path. `app/list` accepts `threadId: null`
+      // per Codex's TS schema (AppsListParams.threadId is optional/nullable).
+      // The other three RPCs don't take a threadId at all. Pass null explicitly
+      // — earlier draft passed '' here which Codex's serde could reject as
+      // "not a valid thread id" instead of treating it as absent (Codex
+      // review #4 catch).
+      return await collectCodexDiagnostics(
+        rpc,
+        env,
+        cwd,
+        null,
+        envPolicy?.proxy ?? 'myagents',
+      );
+    } finally {
+      rpc.destroy();
+      try { proc.kill(); } catch { /* ignore */ }
+      await readerDone.catch(() => {});
+    }
+  }
+
   async startSession(
     options: SessionStartOptions,
     onEvent: UnifiedEventCallback,
@@ -434,6 +799,14 @@ export class CodexRuntime implements AgentRuntime {
     // when no AGENTS.md is present. The -c flag overrides config.toml at runtime
     // without modifying any external config files. Codex's search order becomes:
     // AGENTS.override.md → AGENTS.md → CLAUDE.md (per directory, first found wins).
+    // Capture the env we hand to Codex so the diagnostic snapshot reflects what
+    // the subprocess actually saw (issue #194). The env policy is resolved by
+    // the session caller from the agent's runtimeConfig.envPolicy.
+    const codexEnv = augmentedProcessEnv(options.envPolicy);
+    // Issue #194 — pin PWD to workspacePath so any Codex-internal tool that
+    // consults `$PWD` (vs. the kernel-level cwd Rust's spawn passes) sees the
+    // workspace, not the sidecar's launch directory. Codex review SM finding.
+    codexEnv.PWD = options.workspacePath;
     const proc = spawn([
       resolveCommand('codex'),
       '-c', 'project_doc_fallback_filenames=["CLAUDE.md"]',
@@ -443,7 +816,7 @@ export class CodexRuntime implements AgentRuntime {
       stderr: 'pipe',
       stdin: 'pipe',
       cwd: options.workspacePath,
-      env: augmentedProcessEnv(),
+      env: codexEnv,
       // Detached → child becomes its own process-group leader on POSIX so
       // killWithEscalation({ killTree: true }) below can take down the entire
       // model/tool tree, not just the wrapper.
@@ -545,7 +918,16 @@ export class CodexRuntime implements AgentRuntime {
       });
     });
 
-    // Read stderr in background
+    // Read stderr in background.
+    //
+    // Two concerns:
+    //   1. Verbose unified-log capture (console.error) — every line, for triage.
+    //   2. Issue #194 — classify a small set of "user-actionable" error patterns
+    //      and re-emit them as UnifiedEvent log entries so the renderer/IM bus
+    //      gets a one-line summary instead of the user having to grep
+    //      unified-log. Pattern set is small + conservative — we only forward
+    //      lines that name an actual failure mode, not Codex's noisy info
+    //      messages.
     if (proc.stderr) {
       (async () => {
         const reader = (proc.stderr as ReadableStream<Uint8Array>).getReader();
@@ -554,8 +936,11 @@ export class CodexRuntime implements AgentRuntime {
           while (true) {
             const { done, value } = await reader.read();
             if (done) break;
-            const text = decoder.decode(value, { stream: true }).trim();
-            if (text) console.error(`[codex-stderr] ${stripAnsi(text)}`);
+            const raw = decoder.decode(value, { stream: true }).trim();
+            if (!raw) continue;
+            const text = stripAnsi(raw);
+            console.error(`[codex-stderr] ${text}`);
+            classifyAndForwardCodexStderr(text, wrappedOnEvent);
           }
         } catch { /* ignore */ } finally {
           reader.releaseLock();
@@ -631,6 +1016,37 @@ export class CodexRuntime implements AgentRuntime {
         }, 15_000) as { turn: { id: string } };
         codexProc.currentTurnId = turnResult.turn.id;
       }
+
+      // 5. Fire-and-forget diagnostic fan-out (issue #194). Never block startup
+      // or the user's first turn — even if all four RPCs hang they only
+      // surface a missing diagnostic strip, not a failed session. Failures are
+      // captured into the diagnostic `status` per-call.
+      void (async () => {
+        try {
+          const diagnostics = await collectCodexDiagnostics(
+            codexProc.rpc,
+            codexEnv,
+            options.workspacePath,
+            codexProc.threadId,
+            options.envPolicy?.proxy ?? 'myagents',
+          );
+          // Session-life gate: tab close / runtime teardown can race against
+          // the 5–10s diagnostic fan-out. Without this guard, a diagnostic
+          // resolving after the user switched tabs would broadcast into the
+          // already-torn-down session — TabProvider's setRuntimeDiagnostics(null)
+          // on session switch protects the NEXT session, but the stale event
+          // can still flash into the switched-away tab if SSE flushes faster
+          // than React commit.
+          if (codexProc.exited || codexProc.intentionalKillDuringStartup) {
+            return;
+          }
+          wrappedOnEvent({ kind: 'runtime_diagnostics', diagnostics });
+        } catch (err) {
+          // collectCodexDiagnostics already degrades per-call; reaching here
+          // means an unexpected error in the helper itself.
+          console.warn('[codex] collectDiagnostics failed:', err instanceof Error ? err.message : String(err));
+        }
+      })();
     } catch (err) {
       // Clean up on startup failure.
       // Flag must be set BEFORE proc.kill so proc.exited.then observes it.
@@ -1246,6 +1662,13 @@ export class CodexRuntime implements AgentRuntime {
 
             return { kind: 'text_stop' };
           }
+          case 'userMessage':
+          case 'contextCompaction':
+            // Mirror item/started: these are transition events that we
+            // intentionally don't render. Without an explicit case they
+            // fall through to the warning default and spam the unified log
+            // ~20+ times per session (issue #192).
+            return null;
           default:
             // Codex review W4 — log unknown item types so future Codex versions
             // are visible in production triage.

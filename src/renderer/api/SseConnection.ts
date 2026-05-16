@@ -68,6 +68,7 @@ const JSON_EVENTS = new Set([
     // `workspace:files-changed:<eventKey>` instead.)
     'chat:attachments-filtered', // Sidecar stripped image/video/audio attachments because the resolved model lacks the modality (see modelSupportsModality)
     'chat:attachments-fallback', // Sidecar wrote unsupported-modality attachments to <agentDir>/myagents_files/ and appended @<path> refs to the user text (see PRD prd_0.2.3_image_modality_file_fallback.md)
+    'chat:runtime-diagnostics', // Issue #194 — external-runtime self-report (auth/features/MCP/apps/effective env)
 ]);
 
 // Event types that can be JSON or plain string

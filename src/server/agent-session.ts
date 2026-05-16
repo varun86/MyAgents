@@ -4120,11 +4120,14 @@ export function buildClaudeSessionEnv(
     // resulting in timeout/502 errors. The subprocess only needs to talk to our local bridge;
     // the bridge handler itself handles upstream proxy if needed (via process.env).
     //
-    // NOTE: SDK 0.2.111+ changed env semantics from replace ({...$.env ?? process.env})
-    // to overlay ({...process.env, ...$.env}) — so `delete env[proxyVar]` no longer removes
-    // the parent's proxy vars from the subprocess env. Convert deletes into explicit empty
-    // strings; the CLI's proxy-from-env lookup (Yf6) uses `process.env[k] || ""` which
-    // treats empty string as "not set". Same sealing pattern as sealCcAuthEnv() above.
+    // NOTE: SDK env semantics — verified against installed sdk-0.2.119 sdk.mjs
+    // (kK function): `k6 = o6 ? {...o6} : {...process.env}`, i.e. REPLACE, not
+    // overlay. So in principle `delete env[proxyVar]` already prevents the var
+    // from reaching the subprocess. We still convert deletes into explicit
+    // empty strings as defense-in-depth: the CLI's proxy-from-env lookup
+    // (`process.env[k] || ""`) treats empty string as "not set", and any
+    // future SDK that flips back to overlay semantics keeps working without
+    // a rev here. Same sealing pattern as sealCcAuthEnv() above.
     for (const proxyVar of [
       'http_proxy', 'HTTP_PROXY', 'https_proxy', 'HTTPS_PROXY',
       'ALL_PROXY', 'all_proxy', 'no_proxy', 'NO_PROXY',

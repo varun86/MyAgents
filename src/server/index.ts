@@ -582,6 +582,8 @@ import {
   getExternalSessionPermissionMode,
   prewarmExternalSession,
   awaitExternalSessionStarting,
+  getCurrentBoundSessionId,
+  popLastUserMessageForRetry,
 } from './runtimes/external-session';
 import type { ImagePayload } from './runtimes/types';
 import { VALID_RUNTIMES, resolveCronPermissionMode } from '../shared/types/runtime';
@@ -1202,6 +1204,8 @@ async function routeAdminApi(pathname: string, payload: Record<string, unknown>)
   if (route === 'agent/channel/remove') return api.handleAgentChannelRemove(payload as Parameters<typeof api.handleAgentChannelRemove>[0]);
   if (route === 'runtime/list') return await api.handleRuntimeList();
   if (route === 'runtime/describe') return await api.handleRuntimeDescribe(payload as Parameters<typeof api.handleRuntimeDescribe>[0]);
+  if (route === 'runtime/diagnose') return await api.handleRuntimeDiagnose(payload as Parameters<typeof api.handleRuntimeDiagnose>[0]);
+  if (route === 'diagnose/runtime') return await api.handleRuntimeDiagnose(payload as Parameters<typeof api.handleRuntimeDiagnose>[0]);
 
   // Agent runtime status
   if (route === 'agent/runtime-status') return await api.handleAgentRuntimeStatus();
@@ -2279,6 +2283,25 @@ async function main() {
         return jsonResponse(result);
       }
 
+      // External-runtime retry: truncate the failed user turn from
+      // allSessionMessages and return its content for re-send. Builtin uses
+      // /chat/rewind which has SDK resume-anchor + file-checkpoint semantics;
+      // external runtimes don't have those, but a "drop the tail + resend"
+      // semantic is still sound when the previous turn never produced an
+      // assistant message (model capacity, network error, etc.). Issue #192.
+      if (pathname === '/chat/external-retry' && request.method === 'POST') {
+        if (!shouldUseExternalRuntime()) {
+          return jsonResponse({ success: false, error: 'external-retry is only for external runtimes; builtin uses /chat/rewind' }, 400);
+        }
+        const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+        const userMessageId = typeof body.userMessageId === 'string' ? body.userMessageId : '';
+        if (!userMessageId) {
+          return jsonResponse({ success: false, error: 'Missing userMessageId' }, 400);
+        }
+        const result = await popLastUserMessageForRetry(userMessageId);
+        return jsonResponse(result);
+      }
+
       // Fork session at a specific assistant message (create branch)
       if (pathname === '/sessions/fork' && request.method === 'POST') {
         if (shouldUseExternalRuntime()) {
@@ -2589,6 +2612,32 @@ async function main() {
                   } catch (e) {
                     console.warn(`[cron] execute followAgent: failed to parse providerEnvJson for session ${currentSessionId}, falling back to task-frozen value`, e);
                   }
+                } else if (resolved.providerId) {
+                  // Issue #197 — agent persists `providerId` (post-PRD 0.2.9
+                  // canonical state) but rarely a frozen `providerEnvJson`,
+                  // so the snapshot path was dropping provider context for
+                  // CLI/legacy crons that came in with intent=FollowAgent.
+                  // Live-resolve env from providerId so the SDK gets the
+                  // right ANTHROPIC_API_KEY/BASE_URL instead of falling
+                  // back to subscription (apiKeySource=none, model=
+                  // claude-sonnet-4-6 default).
+                  try {
+                    const env = resolveProviderEnv(resolved.providerId);
+                    if (env) {
+                      effectiveProviderEnv = env as ProviderEnv;
+                      // Pair model with provider when neither snapshot nor
+                      // agent has one — without this, SDK uses its default.
+                      if (effectiveModel === undefined) {
+                        const provider = findProvider(resolved.providerId);
+                        const primary = provider
+                          ? (provider as Record<string, unknown>).primaryModel as string | undefined
+                          : undefined;
+                        if (primary) effectiveModel = primary;
+                      }
+                    }
+                  } catch (e) {
+                    console.warn(`[cron] execute followAgent: failed to live-resolve providerId='${resolved.providerId}' for session ${currentSessionId}`, e);
+                  }
                 }
                 if (resolved.runtime !== 'builtin') {
                   effectiveRuntimeConfig = {
@@ -2873,6 +2922,27 @@ async function main() {
                   effectiveProviderEnv = JSON.parse(resolved.providerEnvJson) as ProviderEnv;
                 } catch (e) {
                   console.warn(`[cron] execute-sync followAgent: failed to parse providerEnvJson for session ${snapshotSessionId}, falling back to task-frozen value`, e);
+                }
+              } else if (resolved.providerId) {
+                // Issue #197 — see /cron/execute above for the full rationale.
+                // Agent persists `providerId` (post-PRD 0.2.9 canonical state)
+                // but rarely a frozen `providerEnvJson`. Live-resolve env from
+                // providerId so the SDK gets the right credentials instead of
+                // falling back to subscription with empty apiKey.
+                try {
+                  const env = resolveProviderEnv(resolved.providerId);
+                  if (env) {
+                    effectiveProviderEnv = env as ProviderEnv;
+                    if (effectiveModel === undefined) {
+                      const provider = findProvider(resolved.providerId);
+                      const primary = provider
+                        ? (provider as Record<string, unknown>).primaryModel as string | undefined
+                        : undefined;
+                      if (primary) effectiveModel = primary;
+                    }
+                  }
+                } catch (e) {
+                  console.warn(`[cron] execute-sync followAgent: failed to live-resolve providerId='${resolved.providerId}' for session ${snapshotSessionId}`, e);
                 }
               }
               if (resolved.runtime !== 'builtin') {
@@ -3778,46 +3848,49 @@ async function main() {
         // session and pollute the log with misleading "session not found" errors.
         // Handle external runtime directly without consulting builtin's store.
         if (shouldUseExternalRuntime()) {
-          // Wait for any in-flight startExternalSession (pre-warm handshake)
-          // to finish. Without this, user clicking session history during the
-          // 10–14s pre-warm spawn-and-handshake window sees `isExternalSessionActive()`
-          // = false → stopExternalSession is skipped → restoreExternalSessionState
-          // resets module state (lastSessionId, etc.) → the still-spawning prewarm
-          // subprocess for session-A then writes its post-spawn assignments
-          // against state that now believes it's session-B. Mirrors the
-          // serialization in setExternalModel/setExternalPermissionMode.
+          // Fast path: the Sidecar is already (or about to be) bound to this
+          // session. Boot's restoreExternalSessionState and any in-flight prewarm
+          // both converge on the same module state, so a switch into that target
+          // is a no-op. Skipping the prewarm await here is what makes opening
+          // Gemini session history feel instant instead of paying the 8-10s
+          // CLI cold-start. sendExternalMessage's own startingPromise guard
+          // (external-session.ts) still serializes any user message that races
+          // an in-flight prewarm, so this fast return is safe.
+          if (getCurrentBoundSessionId() === payload.sessionId) {
+            return jsonResponse({ success: true, sessionId: payload.sessionId });
+          }
+
+          // Cross-session switch: must serialize against any in-flight prewarm
+          // so its post-spawn writes (lastSessionId / lastModel / etc.) don't
+          // clobber the state restoreExternalSessionState is about to set up
+          // for the new target. Mirrors the guard in setExternalModel /
+          // setExternalPermissionMode (different races, same serialization).
           await awaitExternalSessionStarting();
 
-          const isCurrentlyActive = isExternalSessionActive() && payload.sessionId === getExternalSessionId();
+          // Validate target: cross-session switches must point at a real
+          // persisted session — same-target switches were already handled by
+          // the fast path above and don't require metadata (a freshly-prewarmed
+          // session writes metadata only on first user message).
           const meta = getSessionMetadata(payload.sessionId);
-
-          // Validate target: must be either the current live session, or a
-          // persisted session whose runtime matches this sidecar. Without this,
-          // a typo'd sessionId would silently succeed and the next user message
-          // would create a fresh session under the wrong id (parity with
-          // builtin's switchToSession which 404s on unknown ids).
-          if (!isCurrentlyActive && !meta) {
+          if (!meta) {
             return jsonResponse({ success: false, error: 'Session not found.' }, 404);
           }
-          // Cross-runtime guard — if the persisted session was created by a
-          // different runtime, refuse to attach. The cross-runtime fork flow
-          // is initiated by the frontend creating a new session, not by
-          // switching into the old one.
-          if (meta?.runtime && meta.runtime !== getActiveRuntimeType()) {
+          // Cross-runtime guard — refuse to attach to a session created by
+          // a different runtime. The cross-runtime fork flow goes through
+          // new-session creation, not switch.
+          if (meta.runtime && meta.runtime !== getActiveRuntimeType()) {
             return jsonResponse(
               { success: false, error: `Session runtime mismatch: persisted=${meta.runtime}, current=${getActiveRuntimeType()}` },
               409,
             );
           }
 
-          // Switching to a DIFFERENT live external session — tear down current first.
-          // Reopening the same running session must attach, not interrupt.
-          if (isExternalSessionActive() && payload.sessionId !== getExternalSessionId()) {
+          // Tear down the previous live session before binding to the new
+          // one. (Same-target reattach was handled by the fast path; if we
+          // reach here, the bound session is genuinely different.)
+          if (isExternalSessionActive()) {
             await stopExternalSession();
           }
-          // Idempotent — sets up resume state (runtimeSessionId / threadId / lastModel
-          // etc.) for the next user message. Safe for already-active sessions
-          // (sessionId === lastSessionId skips the state reset inside).
           restoreExternalSessionState(payload.sessionId, agentDir, { type: 'desktop' });
           console.log(`[sessions] Switched to external session: ${payload.sessionId}`);
           return jsonResponse({ success: true, sessionId: payload.sessionId });
@@ -7943,7 +8016,15 @@ async function main() {
             if (isAlways) {
               messageBlock += payload.isMention ? '[本条消息 @了你，你需要回复]\n' : '[本条消息未 @你]\n';
             }
-            messageBlock += payload.senderName ? `[from: ${sanitize(payload.senderName)} ${ts}]\n` : '';
+            // Fall back to senderId when the plugin didn't provide a senderName
+            // (WeCom's aibot_msg_callback only carries `from.userid`, no name —
+            // unlike Feishu which enriches senderName via contacts API). The
+            // Rust group_history writer (im/mod.rs:2393/2419) already does the
+            // same fallback; without it here the live message has no [from:]
+            // tag while history entries do, breaking the system-reminder's
+            // promise that "群内不同人的消息会以 [from: 名字 时间] 标注".
+            const displaySender = payload.senderName || payload.senderId;
+            messageBlock += displaySender ? `[from: ${sanitize(displaySender)} ${ts}]\n` : '';
             messageBlock += finalMessage;
             parts.push(messageBlock);
             finalMessage = parts.join('\n\n');
@@ -8844,6 +8925,23 @@ description: >
       // at each sweep so day-rollovers are reflected.
       startPeriodicSweep(collectActivePaths);
       cleanupStalePlaywrightProfile();
+
+      // Issue #194 follow-up — one-time scrub for stale agent.runtimeConfig
+      // fields from before buildRuntimeChangePatch existed. Idempotent via
+      // per-agent `_runtimeConfigScrubV1` marker; subsequent boots short-
+      // circuit per agent. See doc comment in the migration module.
+      try {
+        const { scrubStaleRuntimeConfig } = await import('./migrations/scrub-stale-runtime-config');
+        const result = await scrubStaleRuntimeConfig();
+        if (result.scannedAgents > 0) {
+          console.log(`[migration] runtimeConfig scrub: scanned=${result.scannedAgents} scrubbed=${result.scrubbedAgents}`);
+          for (const d of result.details) {
+            console.log(`[migration] runtimeConfig scrub: agent=${d.agentId} runtime=${d.runtime} dropped=${JSON.stringify(d.dropped)}`);
+          }
+        }
+      } catch (err) {
+        console.warn('[migration] runtimeConfig scrub failed (non-fatal):', err instanceof Error ? err.message : String(err));
+      }
 
       currentInitPhase = 'skill-seed';
       setDeferredInitPhase(currentInitPhase);

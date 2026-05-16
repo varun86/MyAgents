@@ -1,6 +1,6 @@
 [package]
 name = "myagents"
-version = "0.2.15"
+version = "0.2.16"
 description = "MyAgents - Desktop Claude Code for everyone"
 authors = ["MyAgents Team <myagents.io@gmail.com>"]
 license = "Apache-2.0"
@@ -41,6 +41,7 @@ tauri-plugin-process = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-autostart = "2"
 tauri-plugin-single-instance = "2"
+tauri-plugin-global-shortcut = "2"
 reqwest = { version = "0.13.1", features = ["stream", "json", "blocking", "multipart", "socks"] }
 futures-util = "0.3.31"
 tokio = { version = "1.49.0", features = ["rt", "rt-multi-thread", "sync", "time", "macros"] }
@@ -80,6 +81,13 @@ nix = { version = "0.29", default-features = false, features = ["signal"] }
 objc2 = "0.6"
 objc2-foundation = { version = "0.3.2", features = ["NSString"] }
 objc2-web-kit = { version = "0.3.2", features = ["WKWebView", "block2"] }
+# `macos_traffic_light::apply_inset` — replicates wry/tao internal
+# `inset_traffic_lights` against the post-build NSWindow because Tauri 2.10.x
+# `WebviewWindowBuilder::traffic_light_position` only writes the webview side
+# (see module docstring). Same crate version (0.3.2) as the other objc2-*
+# deps above; transitively pulled already by wry — adding it directly so we
+# can import the AppKit types.
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSWindow", "NSView", "NSResponder", "NSButton", "NSControl", "std"] }
 
 # Pattern 5: Windows pid-liveness + start-time probe via OpenProcess +
 # GetProcessTimes (PROCESS_QUERY_LIMITED_INFORMATION). Minimal feature set —

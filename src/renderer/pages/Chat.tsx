@@ -20,6 +20,7 @@ import ChatSearchPanel from '@/components/ChatSearchPanel';
 import { useChatSearch, isHighlightApiSupported } from '@/hooks/useChatSearch';
 import SelectionCommentMenu from '@/components/SelectionCommentMenu';
 import TerminalReasonBanner from '@/components/TerminalReasonBanner';
+import RuntimeDiagnosticsBanner from '@/components/RuntimeDiagnosticsBanner';
 import { UnifiedLogsPanel } from '@/components/UnifiedLogsPanel';
 import WorkspaceConfigPanel, { type Tab as WorkspaceTab } from '@/components/WorkspaceConfigPanel';
 import CronTaskSettingsModal from '@/components/cron/CronTaskSettingsModal';
@@ -55,7 +56,7 @@ import { BrowserPanelContext } from '@/context/BrowserPanelContext';
 import { BROWSER_BLANK_URL } from '@/components/browserConstants';
 import { CUSTOM_EVENTS, isPendingSessionId } from '../../shared/constants';
 import type { CapabilityInitialSelect } from '../../shared/skillsTypes';
-import { CC_MODELS, CC_PERMISSION_MODES, CODEX_PERMISSION_MODES, GEMINI_PERMISSION_MODES, getDefaultRuntimePermissionMode, getRuntimePermissionModes } from '../../shared/types/runtime';
+import { CC_MODELS, CC_PERMISSION_MODES, CODEX_PERMISSION_MODES, GEMINI_PERMISSION_MODES, getDefaultRuntimePermissionMode, getRuntimePermissionModes, buildRuntimeChangePatch } from '../../shared/types/runtime';
 import type { RuntimeType, RuntimeDetections, RuntimeConfig } from '../../shared/types/runtime';
 import type { InitialMessage } from '@/types/tab';
 // CronTaskConfig type is used via useCronTask hook
@@ -192,6 +193,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     setSessionMeta,
     unifiedLogs,
     systemInitInfo: _systemInitInfo,
+    runtimeDiagnostics,
     agentError,
     systemStatus,
     lastTerminalReason,
@@ -502,6 +504,24 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     () => (isSplitViewEnabled && !isNarrowLayout ? { openUrl: handleOpenInBrowserPanel } : null),
     [isSplitViewEnabled, isNarrowLayout, handleOpenInBrowserPanel],
   );
+
+  // Listen for the global LinkContextMenuProvider's "预览（内置浏览器）" intent.
+  // Only the active Chat tab with an available BrowserPanel claims the action
+  // (preventDefault → dispatcher skips the system-browser fallback). Inactive
+  // Chats or non-split layouts deliberately don't claim, so the dispatcher
+  // falls back to openExternal — the menu item never feels dead.
+  useEffect(() => {
+    if (!isActive || !browserPanelCtx) return;
+    const handler = (e: Event) => {
+      if (!(e instanceof CustomEvent)) return;
+      const url = (e.detail as { url?: unknown } | null)?.url;
+      if (typeof url !== 'string' || !url) return;
+      e.preventDefault();
+      browserPanelCtx.openUrl(url);
+    };
+    window.addEventListener(CUSTOM_EVENTS.OPEN_IN_BROWSER_PANEL, handler);
+    return () => window.removeEventListener(CUSTOM_EVENTS.OPEN_IN_BROWSER_PANEL, handler);
+  }, [isActive, browserPanelCtx]);
 
   // When split panel closes entirely, restore workspace sidebar to visible
   const prevSplitVisibleRef = useRef(splitPanelVisible);
@@ -2259,9 +2279,15 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     // Fork succeeded — now persist workspace default. Agent patch failure
     // is non-fatal (fork is done, user already sees the new Tab opening);
     // we surface a secondary toast so the inconsistency isn't silent.
+    //
+    // buildRuntimeChangePatch centralizes the "drop non-portable
+    // runtimeConfig fields (model / permissionMode / additionalArgs), keep
+    // envPolicy" policy — see its doc comment for the bug-class rationale.
+    // All 4 runtime-change callsites (here / Settings / Launcher / agent
+    // set CLI) MUST go through this helper.
     if (currentAgent.id) {
       try {
-        await patchAgentConfig(currentAgent.id, { runtime });
+        await patchAgentConfig(currentAgent.id, buildRuntimeChangePatch(currentAgent.runtimeConfig, runtime));
       } catch (err) {
         console.warn('[chat] Runtime fork succeeded but agent template update failed:', err);
         toastRef.current.warning('新 Tab 已打开，但工作区默认 Runtime 未能更新');
@@ -2570,10 +2596,19 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   // Rewind to before the given user message and re-send its content.
   // Shared by per-assistant retry (handleRetry) and banner-level retry
   // (handleRetryLastUserMessage). Uses refs throughout so deps stay stable.
+  //
+  // For external runtimes (Codex / Claude Code / Gemini), /chat/rewind is
+  // unsupported — there's no SDK resume anchor or file checkpoint to roll
+  // back. Issue #192 used to surface "Rewind is not supported for external
+  // runtimes" as a 400 here, turning a recoverable upstream capacity error
+  // into an additional app error. Instead we POST /chat/external-retry which
+  // truncates the failed user turn from allSessionMessages and persists the
+  // truncation; the auto-resend below then becomes the new user turn.
   const performRetryFromUserMessage = useCallback((userMsg: typeof messagesRef.current[number]) => {
     const content = typeof userMsg.content === 'string' ? userMsg.content : '';
     const attachments = userMsg.attachments;
     const userMessageId = userMsg.id;
+    const retryEndpoint = isExternalRuntime ? '/chat/external-retry' : '/chat/rewind';
 
     // 快照：后端失败时回滚（与 handleRewindConfirm 一致）
     const snapshot = messagesRef.current.slice();
@@ -2589,7 +2624,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     let resendFired = false;
     setIsLoading(true);
     setRewindStatus('rewinding');
-    apiPost('/chat/rewind', { userMessageId })
+    apiPost(retryEndpoint, { userMessageId })
       .then(res => {
         const r = res as { success?: boolean; error?: string } | undefined;
         if (r && !r.success) {
@@ -2621,7 +2656,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
           setIsLoading(false);
         }
       });
-  }, [apiPost, setMessages, setIsLoading, pauseAutoScroll]); // all stable — refs handle the rest
+  }, [apiPost, setMessages, setIsLoading, pauseAutoScroll, isExternalRuntime]); // all stable — refs handle the rest
 
   // Uses refs for messagesRef/toastRef/handleSendMessageRef — deps are all stable → reference stable
   const handleRetry = useCallback((assistantMessageId: string) => {
@@ -2968,6 +3003,11 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             onDismiss={() => setLastTerminalReason(null)}
             onNewSession={handleNewSession}
           />
+
+          {/* Issue #194 — external-runtime self-diagnostic banner. Only renders
+              when the runtime reports something actionable (auth/app/MCP
+              failures). Healthy runtimes don't draw attention here. */}
+          <RuntimeDiagnosticsBanner diagnostics={runtimeDiagnostics} />
 
           {agentError && (() => {
             // Find the last real user message — drives both the oversized-image

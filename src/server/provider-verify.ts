@@ -368,8 +368,13 @@ export async function fetchSdkSupportedModels(): Promise<Array<{ value: string; 
       maxTurns: 0,
       sessionId: randomUUID(),
       cwd,
-      // 'user' reads ~/.claude/ OAuth credentials (same as verifySubscription)
-      settingSources: ['user'],
+      // Issue #199: see verifySubscription() for the full rationale on why we
+      // explicitly omit 'user' here. Short version: settingSources governs
+      // settings.json / managed-settings only — OAuth credentials are read by
+      // the SDK independently (from Keychain / .credentials.json), so 'user'
+      // adds no auth value and instead exposes us to stale `apiKeyHelper` from
+      // prior third-party CLI tooling.
+      settingSources: [],
       permissionMode: 'bypassPermissions',
       allowDangerouslySkipPermissions: true,
       pathToClaudeCodeExecutable: cliPath,
@@ -438,13 +443,29 @@ export async function verifySubscription(): Promise<{ success: boolean; error?: 
   // PRD #124: subscription path doesn't need a bridge — SDK talks to
   // api.anthropic.com directly. `buildClaudeSessionEnv()` is now pure
   // and won't pollute any state.
+  //
+  // Issue #199: explicitly skip user settingSources. The native CLI's auth
+  // gate (`oD()`) treats `apiKeyHelper` in loaded settings as a hard signal
+  // "user has set up an API-key auth source, do NOT use OAuth." Users who
+  // arrived from third-party CLI tooling (cc-switch, Claude Code Router)
+  // often have a stale `apiKeyHelper` in `~/.claude/settings.json` pointing
+  // at their old third-party key — loading it makes the verify subprocess
+  // send `x-api-key: <third-party-key>` to api.anthropic.com → 403.
+  //
+  // OAuth credentials live in macOS Keychain (or `.credentials.json`),
+  // neither of which is gated by settingSources, so dropping 'user' here
+  // doesn't break auth lookup — the SDK reads Keychain unconditionally once
+  // the API-key path is out of the way. This brings verify in line with the
+  // chat session (which already uses `['project']` via `buildSettingSources()`,
+  // never `'user'`). The earlier-claimed need for `'user' to read OAuth
+  // credentials` was incorrect — settingSources only governs settings.json
+  // and managed-settings, not credentials files.
   const env = buildClaudeSessionEnv(); // No provider override = default Anthropic auth
   return verifyViaSdk(env, {
     sessionId: randomUUID(),
     logPrefix: 'subscription/verify',
     parseError: parseSubscriptionError,
-    // Subscription needs 'user' to read ~/.claude/ OAuth credentials
-    settingSources: ['user'],
+    settingSources: [],
   });
 }
 

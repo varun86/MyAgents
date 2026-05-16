@@ -22,6 +22,7 @@ import {
   saveProjects,
   redactSecret,
   findProvider,
+  findAgentByWorkspacePath,
   getProvidersDir,
   loadCustomProviderFiles,
   type AdminAppConfig,
@@ -36,6 +37,11 @@ import { readLoopbackJson } from './utils/loopback-response';
 // route — anything slower means the backend is wedged, in which case we'd
 // rather surface a CLI error than hang the user's terminal indefinitely.
 const ADMIN_LOOPBACK_TIMEOUT_MS = 10_000;
+
+// Long-running sidecar operations need their own budget. Anchored to the
+// sidecar's internal `FETCH_TIMEOUT_MS` (300s for tarball download) plus a
+// 30s buffer so the inner timeout always wins. Used by skill install routes.
+const SKILL_INSTALL_LOOPBACK_TIMEOUT_MS = 330_000;
 import { existsSync , writeFileSync, unlinkSync } from 'fs';
 import { ensureDirSync } from './utils/fs-utils';
 import { resolve } from 'path';
@@ -55,11 +61,13 @@ import {
   RUNTIME_DISPLAY_NAMES,
   getRuntimePermissionModes,
   getDefaultRuntimePermissionMode,
+  buildRuntimeChangePatch,
   type RuntimeType,
   type RecoveryHint,
   type RuntimePermissionMode,
   type RuntimeModelInfo,
   type RuntimeDetection,
+  type RuntimeConfig,
 } from '../shared/types/runtime';
 import { getExternalRuntime, isRuntimeSupported } from './runtimes/factory';
 import { queryRuntimeModels } from './runtimes/external-session';
@@ -140,6 +148,7 @@ async function sidecarSelf(
   path: string,
   method: 'GET' | 'POST' | 'DELETE' | 'PUT' = 'GET',
   body?: Record<string, unknown>,
+  opts?: { timeoutMs?: number },
 ): Promise<{ status: number; json: Record<string, unknown> }> {
   const sidecarPort = getSidecarPort();
   if (!sidecarPort) {
@@ -154,7 +163,9 @@ async function sidecarSelf(
     options.body = JSON.stringify(body);
   }
   try {
-    const resp = await cancellableFetch(url, options, { timeoutMs: ADMIN_LOOPBACK_TIMEOUT_MS });
+    const resp = await cancellableFetch(url, options, {
+      timeoutMs: opts?.timeoutMs ?? ADMIN_LOOPBACK_TIMEOUT_MS,
+    });
     // Issue #114 — defensive read via shared helper. Map to this caller's
     // legacy {status, json} shape (sidecarSelf has callers that branch on
     // status code, so we preserve that envelope rather than collapsing to
@@ -1021,6 +1032,36 @@ export async function handleAgentSet(payload: { id: string; key: string; value: 
     return { success: false, error: `Cannot directly set field '${key}'. Use specific commands instead.` };
   }
 
+  // `runtime` field has a cross-runtime scrub policy (see
+  // buildRuntimeChangePatch doc in shared/types/runtime.ts). A blind spread
+  // here would leak the previous runtime's model/permissionMode/additionalArgs
+  // into the new runtime — Codex CLI then rejects e.g. a Gemini model with
+  // "model is not supported when using ChatGPT account". Route through the
+  // helper so the CLI `myagents agent set <id> runtime codex` path stays in
+  // lockstep with the Chat / Settings / Launcher in-app paths.
+  if (key === 'runtime') {
+    if (typeof value !== 'string') {
+      return { success: false, error: 'runtime must be a string' };
+    }
+    if (!VALID_RUNTIMES.includes(value as RuntimeType)) {
+      return {
+        success: false,
+        error: `Unknown runtime: '${value}'. Valid: ${VALID_RUNTIMES.join(', ')}.`,
+      };
+    }
+    return modifyAgent(
+      id,
+      agent => {
+        const patch = buildRuntimeChangePatch(
+          agent.runtimeConfig as RuntimeConfig | undefined,
+          value as RuntimeType,
+        );
+        return { ...agent, runtime: patch.runtime, runtimeConfig: patch.runtimeConfig };
+      },
+      'set',
+    );
+  }
+
   return modifyAgent(id, agent => ({ ...agent, [key]: value }), 'set');
 }
 
@@ -1609,13 +1650,104 @@ export async function handleCronList(payload: { workspacePath?: string }): Promi
   return mgmtError(resp, 'Failed to list cron tasks');
 }
 
+/**
+ * Resolve effective providerId + model from the workspace context for a cron
+ * task being created without explicit provider info (issue #197 — `myagents
+ * cron add` without `--provider`/`--model` flags).
+ *
+ * Mirrors PRD 0.2.9 R7: every cron writer should forward `providerId` (live-
+ * resolve intent), not a frozen `providerEnv`. Renderer Chat already does
+ * this; the CLI path didn't, so CLI-created crons reached the sidecar with
+ * `provider_id=None + intent=FollowAgent` and the followAgent branch read
+ * `agent.providerEnvJson` (rarely set — renderer persists `providerId` only)
+ * → effectiveProviderEnv stayed undefined → SDK fell back to subscription
+ * (apiKeySource=none, model=claude-sonnet-4-6 default).
+ *
+ * Resolution order (most specific first):
+ *   1. agent.providerId          — workspace's explicit pick
+ *   2. config.defaultProviderId  — global default (covers the case where
+ *                                  user accepted the chat picker default
+ *                                  without explicitly switching, so the
+ *                                  pick was never persisted to the agent)
+ *   3. undefined                 — subscription mode (Anthropic-direct)
+ *
+ * When a providerId resolves, the model defaults to `agent.model` falling
+ * back to the provider's `primaryModel`. Without the `primaryModel`
+ * fallback, the SDK silently uses its built-in `claude-sonnet-4-6` default,
+ * which third-party endpoints reject as an unknown model.
+ */
+function resolveCronProviderDefaultsForWorkspace(workspacePath: string): {
+  providerId: string | undefined;
+  model: string | undefined;
+} {
+  const config = loadConfig();
+  const agent = findAgentByWorkspacePath(workspacePath);
+  const providerId = (agent?.providerId as string | undefined)
+    ?? (config.defaultProviderId as string | undefined);
+  if (!providerId) {
+    // Subscription mode: agent.model still meaningful (e.g. user picked an
+    // Anthropic model but cleared the provider). Pass it through.
+    return { providerId: undefined, model: agent?.model as string | undefined };
+  }
+  let model = agent?.model as string | undefined;
+  if (!model) {
+    const provider = findProvider(providerId);
+    if (provider) {
+      model = (provider as Record<string, unknown>).primaryModel as string | undefined;
+    }
+  }
+  return { providerId, model };
+}
+
 export async function handleCronCreate(payload: Record<string, unknown>): Promise<AdminResponse> {
   // Default workspacePath if caller didn't supply one. Rust requires the
   // field; without this default, every AI-issued `myagents cron add` would
   // 400 because the prompt examples (intentionally) don't mention --workspace.
-  const finalPayload = (payload.workspacePath || payload.workspace_path)
+  const resolvedWorkspacePath = (payload.workspacePath as string | undefined)
+    || (payload.workspace_path as string | undefined)
+    || defaultCronWorkspace();
+  let finalPayload: Record<string, unknown> = (payload.workspacePath || payload.workspace_path)
     ? payload
-    : { ...payload, workspacePath: defaultCronWorkspace() };
+    : { ...payload, workspacePath: resolvedWorkspacePath };
+
+  // Issue #197 — auto-capture provider/model from the workspace context when
+  // the caller didn't supply any provider hint. Renderer Chat already does
+  // this (Chat.tsx:2104); the CLI path was missing it, leaving CLI-created
+  // crons with empty provider context → SDK 403 at fire time. See
+  // `resolveCronProviderDefaultsForWorkspace` above for resolution order.
+  //
+  // We only default when the caller is silent about provider — explicit
+  // `providerId` / `providerEnv` / `providerIntent` (e.g., subscription) wins
+  // unchanged. Both camelCase and snake_case probed because admin payloads
+  // can come in either shape (CLI uses camelCase; Rust serde sometimes mirrors
+  // snake_case for legacy compat).
+  const hasExplicitProviderHint =
+    payload.providerId !== undefined ||
+    payload.provider_id !== undefined ||
+    payload.providerEnv !== undefined ||
+    payload.provider_env !== undefined ||
+    payload.providerIntent !== undefined ||
+    payload.provider_intent !== undefined;
+  if (!hasExplicitProviderHint) {
+    const defaults = resolveCronProviderDefaultsForWorkspace(resolvedWorkspacePath);
+    if (defaults.providerId) {
+      finalPayload = {
+        ...finalPayload,
+        providerId: defaults.providerId,
+        // Only fill model if caller didn't supply one. Pairing model with
+        // providerId is required by Rust's create-path validation
+        // (cron_task::create_task — `providerId 必须与 model 配对设置`).
+        ...(finalPayload.model === undefined && defaults.model
+          ? { model: defaults.model }
+          : {}),
+      };
+    } else if (defaults.model && finalPayload.model === undefined) {
+      // Subscription mode but agent has a model preference — pass it
+      // through so the sidecar uses the user's chosen Anthropic model
+      // (e.g. claude-opus-4-7) instead of falling back to the SDK default.
+      finalPayload = { ...finalPayload, model: defaults.model };
+    }
+  }
 
   // Issue #149: --dry-run was silently ignored — the previous implementation
   // forwarded payload to Rust regardless, so `cron add --dry-run` would
@@ -2457,7 +2589,7 @@ export async function handleSkillAdd(payload: {
   const probe = await sidecarSelf('/api/skill/install-from-url', 'POST', {
     url: payload.url,
     scope,
-  });
+  }, { timeoutMs: SKILL_INSTALL_LOOPBACK_TIMEOUT_MS });
   if (!probe.json.success) {
     return { success: false, error: String(probe.json.error ?? 'Install probe failed') };
   }
@@ -2516,7 +2648,7 @@ export async function handleSkillAdd(payload: {
         folderNames: plugin.skills.map(s => s.suggestedFolderName),
         overwrite: payload.force ? conflicts : [],
       },
-    });
+    }, { timeoutMs: SKILL_INSTALL_LOOPBACK_TIMEOUT_MS });
     if (!commit.json.success) {
       return { success: false, error: String(commit.json.error ?? 'Install failed') };
     }
@@ -2562,7 +2694,7 @@ export async function handleSkillAdd(payload: {
         folderNames: wanted.map(c => c.suggestedFolderName),
         overwrite: payload.force ? conflicts : [],
       },
-    });
+    }, { timeoutMs: SKILL_INSTALL_LOOPBACK_TIMEOUT_MS });
     if (!commit.json.success) {
       return { success: false, error: String(commit.json.error ?? 'Install failed') };
     }
@@ -2595,7 +2727,7 @@ export async function handleSkillAdd(payload: {
         folderNames: [preview.skill.suggestedFolderName],
         overwrite: [preview.skill.suggestedFolderName],
       },
-    });
+    }, { timeoutMs: SKILL_INSTALL_LOOPBACK_TIMEOUT_MS });
     if (!commit.json.success) {
       return { success: false, error: String(commit.json.error ?? 'Install failed') };
     }
@@ -2834,6 +2966,115 @@ export async function handleRuntimeDescribe(payload: {
       defaultPermissionMode,
     } satisfies RuntimeDescribeResult,
   };
+}
+
+/**
+ * Run a one-shot runtime diagnostic — spawns a short-lived runtime process,
+ * collects what it sees (auth, features, MCP, apps, effective env), and
+ * returns the structured snapshot. Used by `myagents diagnose runtime <type>`
+ * (issue #194) and the in-app "诊断" button.
+ *
+ * Codex: spawns `codex app-server`, no thread created.
+ * Claude Code / Gemini / builtin: not yet implemented — returns
+ * `unsupported` so the CLI can show a clear "not yet supported" message
+ * without crashing.
+ */
+export async function handleRuntimeDiagnose(payload: {
+  runtime?: string;
+  workspacePath?: string;
+}): Promise<AdminResponse> {
+  const runtimeArg = payload.runtime;
+  if (!runtimeArg) {
+    return {
+      success: false,
+      error: 'Missing required argument: runtime',
+      recoveryHint: {
+        recoveryCommand: 'myagents runtime list',
+        message: 'See valid runtime names.',
+      },
+    };
+  }
+  if (!isValidRuntimeType(runtimeArg)) {
+    return {
+      success: false,
+      error: `Unknown runtime: '${runtimeArg}'. Valid: ${VALID_RUNTIMES.join(', ')}.`,
+    };
+  }
+
+  // Codex is the only runtime with diagnostic RPCs today. Claude Code's
+  // -p mode doesn't expose an equivalent surface (it's one-shot per turn);
+  // Gemini's ACP has session-scoped state but no "list features / apps".
+  if (runtimeArg !== 'codex') {
+    return {
+      success: false,
+      error: `Diagnostic not yet implemented for runtime '${runtimeArg}'. Only 'codex' is currently supported.`,
+      data: { runtime: runtimeArg, supported: false },
+    };
+  }
+
+  let detection: RuntimeDetection = { installed: false };
+  try {
+    detection = await raceWithTimeout(
+      getExternalRuntime(runtimeArg).detect(),
+      RUNTIME_DETECT_TIMEOUT_MS,
+      { installed: false },
+    );
+  } catch { /* falls through to installed:false */ }
+
+  if (!detection.installed) {
+    return {
+      success: false,
+      error: `Codex CLI not installed. ${hintForMissingRuntime('codex')}`,
+      data: { runtime: 'codex', installed: false },
+    };
+  }
+
+  // Resolve the agent's envPolicy so the diagnostic reflects the same proxy
+  // policy the real session would use (Codex review #3 catch — without this,
+  // CLI diagnose silently reports the legacy `myagents` view even when the
+  // agent is configured to inherit terminal or skip proxy entirely).
+  //
+  // Funnel through the shared helper in `env-utils.ts` so this path validates
+  // the `proxy` literal the same way `external-session.ts` does — without
+  // shared validation, a malformed `envPolicy.proxy` on disk would silently
+  // appear as `'myagents'` in the diagnostic banner, hiding the misconfig.
+  const { resolveAgentEnvPolicy } = await import('./runtimes/env-utils');
+  const envPolicy = payload.workspacePath
+    ? await resolveAgentEnvPolicy(payload.workspacePath)
+    : undefined;
+
+  try {
+    const rt = getExternalRuntime('codex');
+    // Type-check the optional method — only CodexRuntime implements it today.
+    if (typeof (rt as { runStandaloneDiagnostics?: unknown }).runStandaloneDiagnostics !== 'function') {
+      return {
+        success: false,
+        error: 'Codex runtime adapter does not expose runStandaloneDiagnostics. Build is out of date.',
+      };
+    }
+    const diagnose = (rt as unknown as {
+      runStandaloneDiagnostics: (
+        wp?: string,
+        policy?: import('../shared/types/runtime').RuntimeEnvPolicy,
+      ) => Promise<unknown>;
+    }).runStandaloneDiagnostics;
+    const diagnostics = await diagnose(payload.workspacePath, envPolicy);
+    return {
+      success: true,
+      data: {
+        runtime: 'codex',
+        installed: true,
+        version: detection.version,
+        diagnostics,
+      },
+    };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return {
+      success: false,
+      error: `Codex diagnostic failed: ${msg}`,
+    };
+  }
 }
 
 /**
