@@ -15,6 +15,7 @@ import SessionSurfaceTags from '@/components/SessionSurfaceTags';
 import SessionMenuButton from '@/components/SessionMenuButton';
 import { FileActionProvider } from '@/context/FileActionContext';
 import SimpleChatInput, { type ImageAttachment, type SimpleChatInputHandle } from '@/components/SimpleChatInput';
+import AgentStatusPanel from '@/components/agent-status/AgentStatusPanel';
 import QueryNavigator from '@/components/chat/QueryNavigator';
 import ChatSearchPanel from '@/components/ChatSearchPanel';
 import { useChatSearch, isHighlightApiSupported } from '@/hooks/useChatSearch';
@@ -2457,6 +2458,36 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     }
   }, [pauseAutoScroll, virtuosoRef]);
 
+  // PRD 0.2.17 Agent Status Panel — 点击 SubAgent 行跳转到对话流中对应 TaskTool。
+  // 先用 Virtuoso 把承载该 tool 的 message 滚进视口（解决虚拟化卸载场景），下一帧
+  // 等 DOM 挂载后再通过 querySelector 找到 data-tool-id 元素 scrollIntoView + 高亮。
+  // 双阶段是因为 Virtuoso scrollToIndex 只能定位到 message 粒度，更精细的 tool 卡片
+  // 位置还得靠 DOM 测量。
+  const handleJumpToTool = useCallback((toolId: string) => {
+    const msgs = messagesRef.current;
+    const index = msgs.findIndex(m =>
+      Array.isArray(m.content)
+      && m.content.some(b => b.type === 'tool_use' && b.tool?.id === toolId),
+    );
+    if (index < 0) return;
+    pauseAutoScroll(2000);
+    virtuosoRef.current?.scrollToIndex({ index, behavior: 'smooth', align: 'center' });
+    // Virtuoso 滚动是异步的，给两帧时间让 row 挂载（折叠态也已挂载，单帧通常够；
+    // 虚拟化卸载场景要等 row 真正 mount + 子树渲染完）
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        const root = chatContentRef.current;
+        if (!root) return;
+        // Tauri WebView 是 WebKit；CSS.escape 自 2014 普适支持，不需要 fallback
+        const el = root.querySelector<HTMLElement>(`[data-tool-id="${CSS.escape(toolId)}"]`);
+        if (!el) return;
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        el.classList.add('agent-status-flash');
+        window.setTimeout(() => el.classList.remove('agent-status-flash'), 1500);
+      });
+    });
+  }, [pauseAutoScroll, virtuosoRef]);
+
   // Stable callbacks for MessageList (extracted from inline arrows to enable memo)
   const handlePermissionDecision = useCallback((decision: 'deny' | 'allow_once' | 'always_allow') => {
     void respondPermission(decision);
@@ -3164,6 +3195,19 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             onQuote={handleQuoteSelection}
             onElaborate={handleElaborateSelection}
           />
+
+          {/* PRD 0.2.17 — Agent Status Panel：悬浮在输入框上方的 Todo + SubAgent 聚合面板。
+              Lazy mount：未触发 TodoWrite / Task 工具时整段不渲染（panel 内部判定）。
+              当前仅 Builtin SDK；外部 Runtime（Codex/CC/Gemini）下显式 gate 关闭，避免它们
+              如果未来 emit 出 `tool.name === 'Task'` 的归一化事件意外触发面板（PRD D15）。
+              onJumpToTool 由 Chat 实现是因为 Virtuoso scrollToIndex 需要 messages 索引 + ref。 */}
+          {!isExternalRuntime && (
+            <AgentStatusPanel
+              messages={messages}
+              containerRef={chatContentRef}
+              onJumpToTool={handleJumpToTool}
+            />
+          )}
 
           {/* Floating input with integrated cron task components */}
           <SimpleChatInput
