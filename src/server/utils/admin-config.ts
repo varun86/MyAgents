@@ -507,6 +507,34 @@ export function findAgentByWorkspacePath(agentDir: string): AgentConfigSlim | un
   );
 }
 
+/**
+ * Decode a frozen providerEnv snapshot, enforcing the global enablement gate.
+ *
+ * Snapshot semantics: sessions / agents / cron tasks freeze provider env at
+ * config time, so live edits to baseUrl/apiKey don't break a running session
+ * ("snapshot wins"). But "provider globally disabled" must override the
+ * snapshot — otherwise cron / IM handover paths silently keep using credentials
+ * for a provider the user just turned off.
+ *
+ * Single source of truth for every snapshot consumer (resolveWorkspaceConfig,
+ * cron followAgent, IM handover). Returns undefined when:
+ *   - snapshot is missing or malformed
+ *   - providerId is known and currently disabled (caller must fail loud)
+ */
+export function decodeProviderEnvSnapshot(
+  snapshotJson: string | null | undefined,
+  providerId: string | null | undefined,
+  config?: AdminAppConfig,
+): ResolvedProviderEnv | undefined {
+  if (!snapshotJson) return undefined;
+  if (providerId && isProviderDisabled(providerId, config)) return undefined;
+  try {
+    return JSON.parse(snapshotJson) as ResolvedProviderEnv;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Result of self-resolution for a workspace */
 export interface WorkspaceResolvedConfig {
   mcpServers: McpServerDefinition[];
@@ -587,15 +615,14 @@ export function resolveWorkspaceConfig(
   // Snapshot env wins: if the session froze providerEnvJson, prefer that — even if
   // the providerId still resolves cleanly today, the session's intent was the snapshot
   // value (e.g., a custom baseUrl that has since been edited at the agent level).
+  // EXCEPT when providerId is globally disabled — decodeProviderEnvSnapshot enforces this.
   if (sessionMeta?.providerEnvJson) {
-    try {
-      providerEnv = JSON.parse(sessionMeta.providerEnvJson) as ResolvedProviderEnv;
-    } catch { /* malformed snapshot — keep providerEnv from above */ }
+    const decoded = decodeProviderEnvSnapshot(sessionMeta.providerEnvJson, providerId, config);
+    if (decoded) providerEnv = decoded;
   } else if (!providerEnv && agent?.providerEnvJson) {
     // Backward-compat: legacy sessions without a snapshot fall back to agent's persisted env
-    try {
-      providerEnv = JSON.parse(agent.providerEnvJson as string) as ResolvedProviderEnv;
-    } catch { /* ignore malformed snapshot */ }
+    const decoded = decodeProviderEnvSnapshot(agent.providerEnvJson as string, providerId, config);
+    if (decoded) providerEnv = decoded;
   }
 
   // --- Resolve Model ---

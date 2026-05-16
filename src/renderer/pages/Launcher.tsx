@@ -19,7 +19,7 @@ import { AddWorkspaceMenu, BrandSection, RecentTasks, TemplateLibraryDialog, Wor
 import WorkspaceConfigPanel from '@/components/WorkspaceConfigPanel';
 import { useConfig } from '@/hooks/useConfig';
 import { useTaskCenterData } from '@/hooks/useTaskCenterData';
-import { type Project, type PermissionMode, type McpServerDefinition } from '@/config/types';
+import { type Project, type PermissionMode, type McpServerDefinition, isProviderEnabled } from '@/config/types';
 import { CUSTOM_EVENTS } from '../../shared/constants';
 import {
     getAllMcpServers,
@@ -680,7 +680,9 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
         if (!agentOverlay) return;
         const project = projects.find(p => p.path === agentOverlay.workspacePath);
         if (!project) return;
-        const effectiveProvider = launcherProvider ?? providers[0];
+        // Fallback path must respect global enablement — providers[0] can be the
+        // first ordered provider which the user disabled in Settings → 启用和排序.
+        const effectiveProvider = launcherProvider ?? providers.find(isProviderEnabled);
         if (!effectiveProvider) {
             toastRef.current.error('没有可用的 Provider，请先在设置中配置');
             return;

@@ -945,7 +945,10 @@ function printModelList(providers: Array<Record<string, unknown>>): void {
   const pad = (s: string, n: number) => s.padEnd(n);
   console.log(pad('ID', 24) + pad('Status', 12) + 'Name');
   for (const p of providers) {
-    console.log(pad(String(p.id), 24) + pad(String(p.status), 12) + String(p.name));
+    // Disabled providers retain their verify status but the disabled label
+    // overrides — they can't be used until re-enabled in Settings.
+    const status = p.enabled === false ? 'disabled' : String(p.status);
+    console.log(pad(String(p.id), 24) + pad(status, 12) + String(p.name));
   }
 }
 

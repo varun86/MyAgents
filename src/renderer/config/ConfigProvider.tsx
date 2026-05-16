@@ -532,6 +532,18 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
             delete next[providerId];
             return next;
         });
+        // Scrub the deleted id from enablement/order arrays so they don't grow
+        // unbounded across delete-and-re-add cycles (helpers strip unknown ids
+        // at read time, but persisted disk state would otherwise accumulate).
+        await atomicModifyConfig(c => {
+            const providerOrder = c.providerOrder?.filter(id => id !== providerId);
+            const disabledProviderIds = c.disabledProviderIds?.filter(id => id !== providerId);
+            return {
+                ...c,
+                providerOrder: providerOrder && providerOrder.length > 0 ? providerOrder : undefined,
+                disabledProviderIds: disabledProviderIds && disabledProviderIds.length > 0 ? disabledProviderIds : undefined,
+            };
+        });
         await rebuildAndPersistAvailableProviders();
     }, [refreshProviders]);
 

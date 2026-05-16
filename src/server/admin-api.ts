@@ -968,7 +968,7 @@ export async function handleModelRemove(payload: { id: string }): Promise<AdminR
     return { success: false, error: `Custom provider '${id}' not found.` };
   }
 
-  // Clean up API key and verify status
+  // Clean up API key, verify status, and enablement/order stale IDs
   await atomicModifyConfig(c => {
     const apiKeys = { ...(c.providerApiKeys ?? {}) };
     delete apiKeys[id];
@@ -976,7 +976,18 @@ export async function handleModelRemove(payload: { id: string }): Promise<AdminR
     delete verifyStatus[id];
     // If this was the default provider, clear it
     const defaultId = c.defaultProviderId === id ? undefined : c.defaultProviderId;
-    return { ...c, providerApiKeys: apiKeys, providerVerifyStatus: verifyStatus, defaultProviderId: defaultId };
+    // Strip the deleted id from providerOrder / disabledProviderIds so disk
+    // state doesn't grow unbounded across delete-and-re-add cycles.
+    const providerOrder = c.providerOrder?.filter(pid => pid !== id);
+    const disabledProviderIds = c.disabledProviderIds?.filter(pid => pid !== id);
+    return {
+      ...c,
+      providerApiKeys: apiKeys,
+      providerVerifyStatus: verifyStatus,
+      defaultProviderId: defaultId,
+      providerOrder: providerOrder && providerOrder.length > 0 ? providerOrder : undefined,
+      disabledProviderIds: disabledProviderIds && disabledProviderIds.length > 0 ? disabledProviderIds : undefined,
+    };
   });
 
   broadcast('config:changed', { section: 'model', action: 'remove', id });

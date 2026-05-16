@@ -541,7 +541,7 @@ import {
   updateSessionMetadata,
   getAttachmentPath,
 } from './SessionStore';
-import { findAgentByWorkspacePath, findProvider, getAllMcpServers, getEffectiveMcpServers, isProviderDisabled, resolveProviderEnv } from './utils/admin-config';
+import { decodeProviderEnvSnapshot, findAgentByWorkspacePath, findProvider, getAllMcpServers, getEffectiveMcpServers, isProviderDisabled, resolveProviderEnv } from './utils/admin-config';
 import { snapshotForOwnedSession } from './utils/session-snapshot';
 import { resolveSessionConfig } from './utils/resolve-session-config';
 import type { AgentConfig } from '../shared/types/agent';
@@ -2680,10 +2680,16 @@ async function main() {
                 const resolved = resolveSessionConfig(sessionMeta, agent, undefined, 'owned');
                 if (resolved.model !== undefined) effectiveModel = resolved.model;
                 if (resolved.providerEnvJson) {
-                  try {
-                    effectiveProviderEnv = JSON.parse(resolved.providerEnvJson) as ProviderEnv;
-                  } catch (e) {
-                    console.warn(`[cron] execute followAgent: failed to parse providerEnvJson for session ${currentSessionId}, falling back to task-frozen value`, e);
+                  // Snapshot gate: disabled providers must not bypass the global enablement
+                  // contract via stale providerEnvJson. decodeProviderEnvSnapshot returns
+                  // undefined → caller fails loud (cron Task → Blocked at next layer).
+                  const decoded = decodeProviderEnvSnapshot(resolved.providerEnvJson, resolved.providerId);
+                  if (decoded) {
+                    effectiveProviderEnv = decoded as ProviderEnv;
+                  } else if (resolved.providerId && isProviderDisabled(resolved.providerId)) {
+                    console.warn(`[cron] execute followAgent: provider ${resolved.providerId} is globally disabled — refusing frozen snapshot for session ${currentSessionId}`);
+                  } else {
+                    console.warn(`[cron] execute followAgent: failed to decode providerEnvJson for session ${currentSessionId}, falling back to task-frozen value`);
                   }
                 } else if (resolved.providerId) {
                   // Issue #197 — agent persists `providerId` (post-PRD 0.2.9
@@ -2991,10 +2997,15 @@ async function main() {
               const resolved = resolveSessionConfig(sessionMeta, agent, undefined, 'owned');
               if (resolved.model !== undefined) effectiveModel = resolved.model;
               if (resolved.providerEnvJson) {
-                try {
-                  effectiveProviderEnv = JSON.parse(resolved.providerEnvJson) as ProviderEnv;
-                } catch (e) {
-                  console.warn(`[cron] execute-sync followAgent: failed to parse providerEnvJson for session ${snapshotSessionId}, falling back to task-frozen value`, e);
+                // Snapshot gate: see /cron/execute above. decodeProviderEnvSnapshot
+                // refuses the snapshot when providerId is globally disabled.
+                const decoded = decodeProviderEnvSnapshot(resolved.providerEnvJson, resolved.providerId);
+                if (decoded) {
+                  effectiveProviderEnv = decoded as ProviderEnv;
+                } else if (resolved.providerId && isProviderDisabled(resolved.providerId)) {
+                  console.warn(`[cron] execute-sync followAgent: provider ${resolved.providerId} is globally disabled — refusing frozen snapshot for session ${snapshotSessionId}`);
+                } else {
+                  console.warn(`[cron] execute-sync followAgent: failed to decode providerEnvJson for session ${snapshotSessionId}, falling back to task-frozen value`);
                 }
               } else if (resolved.providerId) {
                 // Issue #197 — see /cron/execute above for the full rationale.
@@ -8343,9 +8354,12 @@ async function main() {
                 resolvedModel = snapshotMeta.model;
               }
               if (snapshotMeta.providerEnvJson) {
-                try {
-                  resolvedProviderEnv = JSON.parse(snapshotMeta.providerEnvJson) as ProviderEnv;
-                } catch { /* malformed snapshot — fall back to live */ }
+                // Snapshot gate: if the desktop handover's providerId is now
+                // globally disabled, refuse the frozen snapshot — fall back to
+                // live payload.providerEnv (which the user can also disable by
+                // restarting the bot). decodeProviderEnvSnapshot enforces this.
+                const decoded = decodeProviderEnvSnapshot(snapshotMeta.providerEnvJson, snapshotMeta.providerId);
+                if (decoded) resolvedProviderEnv = decoded as ProviderEnv;
               }
             }
 

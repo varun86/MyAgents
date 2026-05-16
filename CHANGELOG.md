@@ -47,6 +47,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Orphan 7-day GC
 - 透传 `extraKnownMarketplaces` 直接读 `~/.claude/`（方案 C）
 
+### Provider 启用 / 排序（PR #201）
+
+- 设置 → 供应商新增「启用和排序」对话框（dnd-kit 拖拽 + toggle）。禁用的 provider 从设置列表 / 模型选择器 / fallback 链 / cron 路由 / IM Bot picker 全面隐藏，但保留 config + API Key，重新启用即恢复。
+- `AppConfig` 新增 `providerOrder` / `disabledProviderIds` 两个 optional 字段；helper `applyProviderEnablementAndOrder` / `isProviderEnabled` / `isProviderDisabled` 为所有读取路径提供单一真相源。
+- 禁用 default provider 时自动清空 `defaultProviderId`；删除 provider 时同步 scrub 残留 ID，避免磁盘状态无限累积。
+- 新增 `decodeProviderEnvSnapshot` helper：cron followAgent / IM 桌面 handover 等"frozen snapshot"消费路径统一走它，禁用的 providerId 不会通过 stale snapshot 绕过启用闸门。
+- CLI `myagents model list` 对禁用 provider 显示 `disabled` 状态。
+- 修改文案：Settings 添加按钮 → 「添加供应商」。
+
 ---
 
 ## [0.2.16] - 2026-05-16
