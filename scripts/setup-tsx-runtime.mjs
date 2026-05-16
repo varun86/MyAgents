@@ -45,6 +45,22 @@ const RUNTIME_DIR = resolve(PROJECT_ROOT, 'src-tauri/resources/tsx-runtime');
 // Read tsx version from the project so the runtime always matches what
 // the project's other tooling (test runner / generate-sdk-shims) uses —
 // avoids two-tsx-versions-in-one-install footguns.
+//
+// IMPORTANT: tsx is pinned to an EXACT version (not caret) on purpose.
+// tsx 4.21.1 and 4.22.0 introduced a regression in their ESM load hook:
+// for any `require('./foo.json')` made under a `--import tsx` process,
+// the hook now runs esbuild's JSON-to-ESM transform first, producing
+// JS source (`var application_... = {...}; export default ...`). Node's
+// CJS `.json` extension handler then JSON.parse's that JS source and
+// dies with `SyntaxError: Unexpected token 'v', "var applic"...`.
+// Our Plugin Bridge spawns Node with `--import tsx/.../index.mjs` for
+// every OpenClaw plugin, so every plugin whose deps require any .json
+// (mime-db, axios, form-data → mime-db) fails to load — feishu/wecom/
+// qqbot all go gray in production. Repros with tsx 4.21.1+; 4.21.0 is
+// the last known-good. See unified-2026-05-16.log for the prod incident.
+// Before bumping, verify with:
+//   node --import file://<runtime>/node_modules/tsx/dist/esm/index.mjs \
+//     -e "require('module').createRequire(\"$HOME/.myagents/openclaw-plugins/openclaw-lark/\")('mime-db')"
 const projectPkgRaw = await readFile(resolve(PROJECT_ROOT, 'package.json'), 'utf8');
 const projectPkg = JSON.parse(projectPkgRaw);
 const tsxVersion =
