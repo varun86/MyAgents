@@ -1617,12 +1617,15 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
         const retryDelay = 1500; // 1.5s between retries
 
         const verifySubscriptionCredentials = async (status: SubscriptionStatus, forceVerify = false) => {
-            // Only verify if oauthAccount exists
-            if (!status.available || !status.info) {
+            // Issue #203: `info` may be empty when the user just ran `claude auth login`
+            // (Keychain has the token but ~/.claude.json::oauthAccount hasn't been seeded
+            // yet). Gate solely on `available`; missing email falls back to undefined and
+            // bypasses the cache (which keys by email).
+            if (!status.available) {
                 return;
             }
 
-            const currentEmail = status.info.email;
+            const currentEmail = status.info?.email;
             const cached = providerVerifyStatusRef.current[SUBSCRIPTION_PROVIDER_ID];
 
             // Only use cache for successful verifications (valid status)
@@ -1698,8 +1701,9 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                 .then((status) => {
                     if (!isMounted) return;
                     setSubscriptionStatus({ ...status, verifyStatus: 'idle' });
-                    // Auto-verify if oauthAccount exists
-                    if (status.available && status.info) {
+                    // Issue #203: trigger verify whenever credentials are present, even
+                    // if account metadata (`info`) hasn't been seeded yet.
+                    if (status.available) {
                         verifySubscriptionCredentials(status);
                     }
                 })
@@ -1727,11 +1731,11 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
 
     // Force re-verify subscription (called from UI button)
     const handleReVerifySubscription = useCallback(async () => {
-        if (!subscriptionStatus?.available || !subscriptionStatus?.info?.email) {
+        if (!subscriptionStatus?.available) {
             return;
         }
 
-        const currentEmail = subscriptionStatus.info.email;
+        const currentEmail = subscriptionStatus.info?.email;
         setSubscriptionVerifying(true);
         setSubscriptionStatus(prev => prev ? { ...prev, verifyStatus: 'loading', verifyError: undefined } : prev);
 
@@ -2520,9 +2524,11 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                             <div className="flex items-center gap-2 text-xs flex-wrap">
                                                 {subscriptionStatus?.available ? (
                                                     <>
-                                                        {/* Email display first */}
+                                                        {/* Email display first; Issue #203: info may be empty
+                                                            when the user just did `claude auth login` without
+                                                            ever opening the CLI REPL. */}
                                                         <span className="text-[var(--ink-muted)] font-mono text-[10px]">
-                                                            {subscriptionStatus.info?.email}
+                                                            {subscriptionStatus.info?.email ?? '已检测到本地 OAuth 凭证'}
                                                         </span>
                                                         {/* Verification status after email */}
                                                         {subscriptionStatus.verifyStatus === 'loading' && (

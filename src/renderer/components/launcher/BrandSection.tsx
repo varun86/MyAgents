@@ -388,8 +388,11 @@ export default memo(function BrandSection({
     const hasAnyProvider = useMemo(() => {
         return providers?.some(p => {
             if (p.type === 'subscription') {
+                // Issue #203: a valid SDK verify is sufficient proof —
+                // accountEmail is enrichment that may be missing for users
+                // who only ran `claude auth login`.
                 const v = providerVerifyStatus?.[p.id];
-                return v?.status === 'valid' && !!v?.accountEmail;
+                return v?.status === 'valid';
             }
             return !!apiKeys?.[p.id];
         }) ?? false;

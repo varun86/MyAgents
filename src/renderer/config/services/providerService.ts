@@ -218,9 +218,7 @@ export async function rebuildAndPersistAvailableProviders(): Promise<void> {
         );
         // Apply user primary model overrides
         const primaryOverrides = config.providerPrimaryModels as Record<string, string> | undefined;
-        // Only include providers with valid credentials:
-        // - Subscription: must have verified status + accountEmail (same as isProviderAvailable)
-        // - API: must have a non-empty API key
+        // Only include providers with valid credentials (see isProviderAvailable)
         const availableProviders = mergedProviders
             .filter(p => isProviderAvailable(p, apiKeys, verifyStatus))
             .map(p => {
@@ -247,7 +245,8 @@ export async function rebuildAndPersistAvailableProviders(): Promise<void> {
 
 /**
  * Check if a provider has valid credentials (subscription verified or API key present).
- * Subscription providers need verifyStatus.status === 'valid' AND accountEmail.
+ * Subscription providers need verifyStatus.status === 'valid' (accountEmail is
+ * enrichment only — see Issue #203).
  * API providers just need a non-blank API key (whitespace-only is treated
  * as absent, matching the sidecar's strict check in
  * `admin-config.ts::resolveProviderEnv`). Without this trim, a provider
@@ -262,8 +261,12 @@ export function isProviderAvailable(
 ): boolean {
     if (!isProviderEnabled(provider)) return false;
     if (provider.type === 'subscription') {
+        // Issue #203: `accountEmail` is enrichment only — a valid SDK verify
+        // already proves the OAuth token works. Users who only ran
+        // `claude auth login` (without ever opening the CLI REPL) have no
+        // email cached, but they ARE authenticated. Don't gate on email.
         const result = verifyStatus[provider.id];
-        return result?.status === 'valid' && !!result?.accountEmail;
+        return result?.status === 'valid';
     }
     const key = apiKeys[provider.id];
     return !!key && key.trim().length > 0;
