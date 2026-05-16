@@ -30,10 +30,12 @@ import {
   ChevronLeft,
 } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 
 import { apiGetJson, apiPostJson } from '@/api/apiFetch';
 import { useToast } from '@/components/Toast';
 import ConfirmDialog from '@/components/ConfirmDialog';
+import OverlayBackdrop from '@/components/OverlayBackdrop';
 import { useCloseLayer } from '@/hooks/useCloseLayer';
 import type {
   PluginListItem,
@@ -586,12 +588,13 @@ function PluginInstallDialog({
   // Cmd+W close — without this hook, Cmd+W skips the dialog and closes the
   // Tab (CLAUDE.md "新增 overlay / 可关闭面板不调 useCloseLayer" red-line).
   // Suppress closure while an install is in flight so user can't accidentally
-  // background a 60s download.
+  // background a 60s download. z-index 300 matches the createPortal modal tier
+  // used by ConfirmDialog (the dialog lives in document.body, so z is global).
   useCloseLayer(() => {
     if (submitting) return false;
     onClose();
     return true;
-  }, 50);
+  }, 300);
 
   useEffect(() => {
     const onProgress = (evt: Event) => {
@@ -636,47 +639,60 @@ function PluginInstallDialog({
     }
   }, [sourceUrl, onInstalled]);
 
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-      <div className="w-full max-w-lg rounded-xl bg-[var(--surface)] p-6 shadow-2xl">
-        <h2 className="text-lg font-semibold text-[var(--ink)]">安装插件</h2>
-        <p className="mt-2 text-sm text-[var(--ink-muted)]">
-          支持：GitHub 仓库（<code className="text-xs">owner/repo</code> 或完整 URL）、直链 zip、<code className="text-xs">file:///</code> 本地目录
-        </p>
-
-        <label className="mt-4 block">
-          <span className="text-sm text-[var(--ink-muted)]">来源地址</span>
-          <input
-            type="text"
-            value={sourceUrl}
-            onChange={(e) => setSourceUrl(e.target.value)}
-            disabled={submitting}
-            placeholder="anthropics/example-plugin 或 https://github.com/... 或 file:///..."
-            className="mt-1 w-full rounded-lg border border-[var(--border)] bg-transparent px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--accent)]/40"
-            autoFocus
-          />
-        </label>
-
-        <div className="mt-4 rounded-lg border border-amber-400/40 bg-amber-500/5 px-3 py-2 text-xs text-amber-700 dark:text-amber-500">
-          ⚠ 插件以你的用户权限运行任意代码 / 启动 MCP 进程 / 触发 hook 脚本。仅安装可信来源。
+  // Portal to body — the Settings page lives inside several flex/overflow
+  // containers that create stacking contexts and trap z-index. Without
+  // portal, the modal renders behind sibling FloatingPortal content and
+  // the backdrop fails to cover the whole viewport. Matches the
+  // ConfirmDialog pattern that other modals use across the app.
+  return createPortal(
+    <OverlayBackdrop
+      onClose={submitting ? undefined : onClose}
+      className="z-[300] px-4"
+    >
+      <div className="glass-panel w-full max-w-lg">
+        <div className="border-b border-[var(--line)] px-5 py-4">
+          <h2 className="text-[14px] font-semibold text-[var(--ink)]">安装插件</h2>
+          <p className="mt-1 text-[12px] text-[var(--ink-muted)]">
+            支持：GitHub 仓库（<code className="text-[11px]">owner/repo</code> 或完整 URL）、直链 zip、<code className="text-[11px]">file:///</code> 本地目录
+          </p>
         </div>
 
-        {phase && (
-          <div className="mt-4 rounded-lg border border-[var(--border)] px-3 py-2 text-xs">
-            <div className="flex items-center gap-2">
-              {phase !== 'done' && phase !== 'failed' && <Loader2 className="h-3 w-3 animate-spin" />}
-              <span className="font-medium text-[var(--ink)]">{phaseLabel(phase)}</span>
-            </div>
-            {phaseMsg && <div className="mt-1 break-all text-[var(--ink-muted)]">{phaseMsg}</div>}
-          </div>
-        )}
+        <div className="space-y-3 px-5 py-4">
+          <label className="block">
+            <span className="text-[12px] text-[var(--ink-muted)]">来源地址</span>
+            <input
+              type="text"
+              value={sourceUrl}
+              onChange={(e) => setSourceUrl(e.target.value)}
+              disabled={submitting}
+              placeholder="anthropics/example-plugin 或 https://github.com/... 或 file:///..."
+              className="mt-1 w-full rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 text-[13px] text-[var(--ink)] focus:border-[var(--accent)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)]/40 disabled:opacity-60"
+              autoFocus
+            />
+          </label>
 
-        <div className="mt-6 flex justify-end gap-2">
+          <div className="rounded-lg border border-[var(--warning,#d97706)]/40 bg-[var(--warning,#d97706)]/10 px-3 py-2 text-[11px] text-[var(--warning,#d97706)]">
+            <AlertTriangle className="mr-1 inline h-3 w-3 align-text-bottom" />
+            插件以你的用户权限运行任意代码 / 启动 MCP 进程 / 触发 hook 脚本。仅安装可信来源。
+          </div>
+
+          {phase && (
+            <div className="rounded-lg border border-[var(--line)] px-3 py-2 text-[12px]">
+              <div className="flex items-center gap-2">
+                {phase !== 'done' && phase !== 'failed' && <Loader2 className="h-3 w-3 animate-spin" />}
+                <span className="font-medium text-[var(--ink)]">{phaseLabel(phase)}</span>
+              </div>
+              {phaseMsg && <div className="mt-1 break-all text-[var(--ink-muted)]">{phaseMsg}</div>}
+            </div>
+          )}
+        </div>
+
+        <div className="flex justify-end gap-2 border-t border-[var(--line)] px-5 py-3">
           <button
             type="button"
             onClick={onClose}
             disabled={submitting}
-            className="rounded-lg border border-[var(--border)] px-3 py-1.5 text-sm hover:bg-[var(--hover-bg)] disabled:opacity-50"
+            className="rounded-full bg-[var(--button-secondary-bg)] px-4 py-1.5 text-[12px] font-semibold text-[var(--button-secondary-text)] transition-colors hover:bg-[var(--button-secondary-bg-hover)] disabled:opacity-50"
           >
             取消
           </button>
@@ -684,14 +700,15 @@ function PluginInstallDialog({
             type="button"
             onClick={handleInstall}
             disabled={submitting || !sourceUrl.trim()}
-            className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--accent)] px-3 py-1.5 text-sm font-medium text-white hover:opacity-90 disabled:opacity-50"
+            className="flex items-center gap-1.5 rounded-full bg-[var(--button-primary-bg)] px-4 py-1.5 text-[12px] font-semibold text-white transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:opacity-50"
           >
-            {submitting && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+            {submitting && <Loader2 className="h-3 w-3 animate-spin" />}
             开始安装
           </button>
         </div>
       </div>
-    </div>
+    </OverlayBackdrop>,
+    document.body,
   );
 }
 
