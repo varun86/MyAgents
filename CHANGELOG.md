@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+---
+
+## [0.2.18] - 2026-05-19
+
+> 引入「Session 间异步消息」——AI 现在可以用一行 `myagents session send` 让另一个 session 帮忙处理子任务，跑完自动把结果推回。Chat 顶部 Cmd+F 长会话搜索打通虚拟化，再也不会出现 "0 matches"。CLI 端 `task` 补齐缺口，从命令行就能搭起带 IM 推送的循环任务。配套修了一批 cron 历史会话、IM 渠道、Markdown 渲染上的细碎问题。
+
+### Added
+
+- **Session 间异步消息通道（Session Inbox）**：AI 通过 `myagents session send <sid> -p "..."` 把 prompt 投递给另一个 session，target 处理完自动把回复推回 caller 的下一个 turn。Fire-and-forget 不阻塞，支持 `--no-reply` 单向投递（target 收到后不回包）。秘书 AI、并行调研、跨 workspace 协作场景的基础设施。
+- **长会话 Cmd+F 搜索打通虚拟化**（[#209](https://github.com/hAcKlyc/MyAgents/issues/209)）：之前 Chat 搜索只在已渲染的消息里扫，长会话往上的关键词显示 "0 matches"，要手动滚到那条才能搜到。现在直接扫消息数组，跳转时自动滚动定位并高亮命中位置，落点还有 pulse 提示。
+- **`myagents task` CLI 全 flag 支持**（[#205](https://github.com/hAcKlyc/MyAgents/issues/205)）：`task create-direct` 现在能接 `--intervalMinutes / --cronExpression / --cronTimezone / --dispatchAt`，以及 `--notificationBotChannelId / --notificationBotThread / --notificationDesktop / --notificationEvents` 等 IM 推送字段，纯命令行就能搭起 recurring Task Center 任务。新增 `task update <id>`（与 `cron update` 能力对齐），可在创建后改 interval / cron / notification / prompt / 各 runtime 覆写；通知字段是客户端 merge，不会一改 `--notificationDesktop` 就把 botChannelId 一起抹掉。
+
+### Fixed
+
+- **`task remove` 与 `im --help` 命令补齐**（[#205](https://github.com/hAcKlyc/MyAgents/issues/205)）：`task remove` 不再 404，是 `task delete` 的别名；`im --help` 不再返回硬编码的过期组列表，fallback 由真实 `HELP_TEXTS` 自动派生，并补上 `im / thought / widget / skill / diagnose` 五组 `--help` 文案。`task get` 在 recurring/scheduled/loop 任务上显式标出「IM 推送：未配置」，recurring 不带 interval 时直接 warning，避免静默走 60 分钟默认。
+- **Cron `new_session` 历史会话不再被任务面板挡住**（[#206](https://github.com/hAcKlyc/MyAgents/issues/206)）：`runMode: new_session` 模式下每次执行都换新 sessionId，从「任务详情 → 关联会话」打开的历史会话本就是只读的一次性记录，但之前还会显示 CronTask Overlay 把输入框挡住。现在 new_session 历史会话与普通会话一致；single_session（连续模式）行为不变。
+- **WeCom 渠道凭据被静默覆盖**（[#207](https://github.com/hAcKlyc/MyAgents/issues/207)）：通过 dualConfig 表单填的 botId / secret 在保存时会被空 customFields 覆盖，重开渠道发现凭据没了。现已修正保存逻辑。
+- **OpenClaw 第三方插件适配**（[#208](https://github.com/hAcKlyc/MyAgents/issues/208)）：openclaw-plugin-yuanbao 等第三方插件首次收消息时报 `Cannot read properties of undefined (reading 'debouncer')` 而崩溃。补全 channel-inbound / reply-pipeline 两个 shim 后正常路由。
+- **Markdown 自动修正过于激进**：之前会把 `#210`（issue 引用）、`#topic`（tag）改成 h1，把 `0.2.18` `2026.5.18` `192.168.1.1` 改成 ordered list，把 `-50%` 改成 unordered list。现在只在明确是列表的场景（`1.item` → `1. item`、`-item` → `- item`）改写，其余依 CommonMark 原样渲染。
+- **IM Bot Bridge 启动时序**（[#211](https://github.com/hAcKlyc/MyAgents/issues/211)）：Bridge `/status` 在 spawn 后 ~13ms 第一次查询时会因 ECONNREFUSED 直接退出，导致渠道偶发起不来。现在连接失败按 retry 处理，仍在 15s 重试窗口内。
+
+---
+
 ## [0.2.17] - 2026-05-17
 
 > 支持安装 Claude 插件，一行链接装一个，带 skills、子 agent、工具、hook 一并到位。新增 Chat 顶部 Agent Status 悬浮条，让你随时看到当前任务的 Todo 进度和正在跑的子 Agent。供应商可拖拽排序与按需启用，让模型选择器和 fallback 链只显示你在用的。

@@ -429,6 +429,44 @@ function extractTextPreview(content: string, maxLen = 100): string {
 // Mirrors `agent-session.ts::activeRequestId` semantics — same bus instance.
 let activeRequestId: string | null = null;
 
+// PRD 0.2.18 Session Inbox — per-turn binding for reply pushback. Set on
+// sendExternalMessage accept (after context.inboxMeta arrives via /api/inbox/drain),
+// read at persistTurnResult to push <inbox-reply> back to caller. Cleared at
+// the end of persistTurnResult regardless of success/error.
+// Same per-turn semantics as agent-session.ts::currentTurnInboxMeta.
+let currentTurnInboxMeta: import('../inbox/types').InboxTurnMeta | null = null;
+
+// PRD 0.2.18 — track tool attachment hints accumulated in current turn for
+// reply pushback. Reset at turn start, populated as `chat:tool-result-complete`
+// events fire, drained at persistTurnResult.
+const currentTurnAttachmentHints: string[] = [];
+
+/**
+ * PRD 0.2.18 — clear inbox meta + push error reply if needed when
+ * sendExternalMessage rejects BEFORE persistTurnResult ever runs (Case 1/2/3
+ * throw paths). Without this helper the meta would leak to the next turn and
+ * a stale reply would be pushed to the wrong caller.
+ *
+ * Cross-review CC + Codex both flagged this leak. Call from EVERY rejection
+ * return inside sendExternalMessage that runs after the meta-binding line.
+ */
+function clearInboxMetaOnRejection(errorCode: string, errorMessage: string): void {
+  if (!currentTurnInboxMeta) return;
+  const meta = currentTurnInboxMeta;
+  currentTurnInboxMeta = null;
+  currentTurnAttachmentHints.length = 0;
+  if (!meta.replyBack) return;
+  const sid = lastSessionId ?? meta.fromSessionId; // best-effort
+  void import('../inbox/reply-deliver').then(({ deliverInboxReply }) =>
+    deliverInboxReply(sid, meta, {
+      text: '',
+      error: { code: errorCode, message: errorMessage },
+    }),
+  ).catch((err) =>
+    console.error('[inbox] external rejection reply pushback failed:', err),
+  );
+}
+
 // Pending permission suggestions — keyed by requestId, consumed by respondExternalPermission.
 // CC sends permission_suggestions in control_request; we echo them back as updatedPermissions
 // in control_response for "always_allow" so CC persists the rule.
@@ -1121,6 +1159,10 @@ export interface ExternalSendContext {
   // request can route delta/block-end/etc. to the correct reply slot.
   // Desktop / cron callers omit (no IM identity) — events drop silently.
   requestId?: string;
+  // PRD 0.2.18 Session Inbox — inbox metadata for cross-session messages.
+  // Present when message came in via /api/inbox/drain. Bound on accept,
+  // read at persistTurnResult to decide reply pushback.
+  inboxMeta?: import('../inbox/types').InboxTurnMeta;
 }
 
 /**
@@ -1207,9 +1249,21 @@ export async function sendExternalMessage(
     const settled = await waitForExternalSessionIdle(5 * 60 * 1000, 100);
     if (!settled) {
       earlyBroadcastedUserMsg = null;
-      return { queued: false, error: '上一个回合超过 5 分钟未完成，消息未发送，请稍后重试。' };
+      // PRD 0.2.18 — busy reject BEFORE binding meta, so no leak risk here.
+      // Caller (if inbox) gets a single signal via queued:false → drain handler
+      // surfaces the error code; no need to also push a reply (cross-review CC:
+      // double-signal causes duplicate / contradictory caller feedback).
+      return { queued: false, error: 'external_busy: 上一个回合超过 5 分钟未完成，消息未发送，请稍后重试。' };
     }
   }
+
+  // PRD 0.2.18 Session Inbox — bind per-turn inbox meta + reset attachment hints
+  // accumulator now that we know this turn is going to run. (After the busy
+  // check, before kicking the runtime.) Cleared at persistTurnResult finally
+  // OR via clearInboxMetaOnRejection() below when sendExternalMessage rejects
+  // before persistTurnResult ever runs.
+  currentTurnInboxMeta = context?.inboxMeta ?? null;
+  currentTurnAttachmentHints.length = 0;
 
   // Pattern B — set the active IM trace ID *after* the previous turn has
   // settled. Setting it earlier (pre-fix) caused tail deltas/complete events
@@ -1225,6 +1279,7 @@ export async function sendExternalMessage(
   // Case 1: No previous session — start fresh
   if (!lastRuntimeSessionId && !isRunning) {
     if (!context) {
+      clearInboxMetaOnRejection('no_context', 'No session context for first message');
       return { queued: false, error: 'No session context for first message' };
     }
     try {
@@ -1240,7 +1295,9 @@ export async function sendExternalMessage(
       return { queued: true };
     } catch (err) {
       earlyBroadcastedUserMsg = null;  // Defensive: prevent stale msg leaking to next send
-      return { queued: false, error: err instanceof Error ? err.message : String(err) };
+      const msg = err instanceof Error ? err.message : String(err);
+      clearInboxMetaOnRejection('start_failed', msg);
+      return { queued: false, error: msg };
     }
   }
 
@@ -1268,13 +1325,16 @@ export async function sendExternalMessage(
       return { queued: true };
     } catch (err) {
       earlyBroadcastedUserMsg = null;  // Defensive: prevent stale msg leaking to next send
-      return { queued: false, error: err instanceof Error ? err.message : String(err) };
+      const msg = err instanceof Error ? err.message : String(err);
+      clearInboxMetaOnRejection('resume_failed', msg);
+      return { queued: false, error: msg };
     }
   }
 
   // Case 3: Process still running — send via runtime.sendMessage
   // This is the normal path for persistent-process runtimes like Codex app-server.
   if (!activeRuntime) {
+    clearInboxMetaOnRejection('no_runtime', 'No active runtime');
     return { queued: false, error: 'No active runtime' };
   }
   try {
@@ -1321,7 +1381,9 @@ export async function sendExternalMessage(
     await activeRuntime.sendMessage(activeProcess, text, hasImages ? images : undefined);
     return { queued: true };
   } catch (err) {
-    return { queued: false, error: err instanceof Error ? err.message : String(err) };
+    const msg = err instanceof Error ? err.message : String(err);
+    clearInboxMetaOnRejection('send_failed', msg);
+    return { queued: false, error: msg };
   }
 }
 
@@ -1538,6 +1600,9 @@ export async function stopExternalSession(): Promise<boolean> {
       imRequestRegistry.unregister(activeRequestId);
     }
     activeRequestId = null;
+    // PRD 0.2.18 — clear inbox meta on hard stop (user clicked stop / runtime
+    // killed mid-turn). Push session_aborted reply so caller doesn't hang.
+    clearInboxMetaOnRejection('session_aborted', 'external runtime session was stopped before turn completed');
     setExternalSessionState('idle');
   }
 }
@@ -1718,6 +1783,27 @@ async function persistTurnResult(): Promise<void> {
   // forever for that session. Outer try/finally guarantees idle ALWAYS fires.
   // Caller still gets the error via the fire-and-forget `.catch` for logging.
   // v0.2.14 cross-bugfix follow-up.
+
+  // PRD 0.2.18 Session Inbox — snapshot meta + hints SYNCHRONOUSLY at entry
+  // and immediately clear the module slots, so a concurrent sendExternalMessage
+  // arriving during the await chain below cannot overwrite them. Without this,
+  // turn_complete sets turnCompleted=true and fires persistTurnResult
+  // fire-and-forget; the busy gate at L1249 stops blocking; the next
+  // sendExternalMessage runs L1265 (`currentTurnInboxMeta = next ?? null`)
+  // before this turn's finally reads the meta — replying to the wrong caller
+  // or losing the reply entirely (cross-review CC BLOCKER #1 + Codex Critical
+  // #1 / Scenario 1+11).
+  const turnInboxMeta = currentTurnInboxMeta;
+  currentTurnInboxMeta = null;
+  const turnAttachmentHints = currentTurnAttachmentHints.splice(0);
+
+  // PRD 0.2.18 Session Inbox — capture turn text BEFORE resetTurnAccumulators()
+  // wipes it (cross-review CC + Architecture: the original impl read
+  // `currentAssistantText` in the finally block AFTER reset → always empty for
+  // structured-blocks turns, which is the common Codex/CC case). Build the
+  // reply body from currentContentBlocks (preferred — captures all text blocks
+  // even if streamed via deltas) with currentAssistantText as fallback.
+  let capturedReplyText = '';
   try {
     const turnDurationMs = currentTurnStartTime ? Date.now() - currentTurnStartTime : undefined;
     flushAllPending();
@@ -1732,6 +1818,19 @@ async function persistTurnResult(): Promise<void> {
     const usageData = buildPersistedTurnUsage();
     const turnToolCount = currentContentBlocks.filter(b => b.type === 'tool_use').length;
     const runtimeType = getCurrentRuntimeType();
+
+    // PRD 0.2.18 — capture reply text into local var BEFORE resetTurnAccumulators
+    // clears the source. The finally block reads this for inbox reply pushback.
+    if (turnInboxMeta) {
+      if (currentContentBlocks.length > 0) {
+        capturedReplyText = currentContentBlocks
+          .filter((b) => b.type === 'text' && typeof b.text === 'string')
+          .map((b) => b.text ?? '')
+          .join('\n\n')
+          .trim();
+      }
+      if (!capturedReplyText) capturedReplyText = currentAssistantText.trim();
+    }
 
     if (currentContentBlocks.length > 0) {
       const content = JSON.stringify(currentContentBlocks);
@@ -1797,6 +1896,32 @@ async function persistTurnResult(): Promise<void> {
       duration_ms: turnDurationMs ?? 0,
     });
   } finally {
+    // PRD 0.2.18 Session Inbox — reply pushback for external runtime.
+    // Use the meta/hints snapshotted at entry (NOT module-level slots, which
+    // may have been overwritten by a concurrent sendExternalMessage during
+    // the await chain above).
+    if (turnInboxMeta) {
+      // Use captured-before-reset text (PRD 0.2.18 cross-review fix). If reset
+      // didn't actually fire (early throw path), fall back to currentAssistantText.
+      const replyText = capturedReplyText || currentAssistantText.trim();
+      const replyError = lastTurnSucceeded
+        ? undefined
+        : {
+            code: 'turn_failed',
+            message: 'external runtime turn did not complete successfully',
+          };
+      const sid = lastSessionId;
+      void import('../inbox/reply-deliver').then(({ deliverInboxReply }) =>
+        deliverInboxReply(sid, turnInboxMeta, {
+          text: replyText,
+          error: replyError,
+          attachmentHints: turnAttachmentHints.length > 0 ? turnAttachmentHints : undefined,
+        }),
+      ).catch((err) =>
+        console.error('[inbox] external turn-end reply pushback failed:', err),
+      );
+    }
+
     // Always reach idle, even if the body above threw. The
     // session_complete handler counts on us to drain the deferred idle.
     setExternalSessionState('idle');
@@ -1951,6 +2076,17 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
         metadata: event.metadata,
         attachments: event.attachments,
       });
+      // PRD 0.2.18 — accumulate attachment hints for inbox reply pushback
+      // (only when this turn has inbox binding to avoid memory accumulation
+      // for non-inbox turns).
+      if (currentTurnInboxMeta && event.attachments && event.attachments.length > 0) {
+        for (const a of event.attachments) {
+          const hint = (a as { name?: string; path?: string; pendingId?: string }).name
+            ?? (a as { path?: string }).path
+            ?? '<attachment>';
+          currentTurnAttachmentHints.push(hint);
+        }
+      }
       resetWatchdog();
       break;
 

@@ -611,6 +611,8 @@ import {
 import type { ImagePayload } from './runtimes/types';
 import { VALID_RUNTIMES, resolveCronPermissionMode } from '../shared/types/runtime';
 import type { RuntimeConfig, RuntimeType } from '../shared/types/runtime';
+// PRD 0.2.18 Session Inbox — sanitize helper for cron envelope wrapping
+import { neutralizeInboxStructuralTags, sanitizeInboxLabel } from './inbox/sanitize-label';
 
 type PermissionMode = 'auto' | 'plan' | 'fullAgency' | 'custom';
 
@@ -1338,6 +1340,7 @@ async function routeAdminApi(pathname: string, payload: Record<string, unknown>)
   if (route === 'task/create-from-alignment') return await api.handleTaskCreateFromAlignment(payload);
   if (route === 'task/run') return await api.handleTaskRun(payload as Parameters<typeof api.handleTaskRun>[0]);
   if (route === 'task/rerun') return await api.handleTaskRerun(payload as Parameters<typeof api.handleTaskRerun>[0]);
+  if (route === 'task/update') return await api.handleTaskUpdate(payload);
   if (route === 'task/update-status') return await api.handleTaskUpdateStatus(payload);
   if (route === 'task/append-session') return await api.handleTaskAppendSession(payload as Parameters<typeof api.handleTaskAppendSession>[0]);
   if (route === 'task/archive') return await api.handleTaskArchive(payload as Parameters<typeof api.handleTaskArchive>[0]);
@@ -1346,6 +1349,32 @@ async function routeAdminApi(pathname: string, payload: Record<string, unknown>)
   if (route === 'task/write-doc') return await api.handleTaskWriteDoc(payload as Parameters<typeof api.handleTaskWriteDoc>[0]);
   if (route === 'thought/list') return await api.handleThoughtList(payload as Parameters<typeof api.handleThoughtList>[0]);
   if (route === 'thought/create') return await api.handleThoughtCreate(payload as Parameters<typeof api.handleThoughtCreate>[0]);
+
+  // Session Inbox (PRD 0.2.18) — `myagents session send`
+  if (route === 'session/send') {
+    const { handleAdminInbox } = await import('./inbox/admin-handler');
+    const sessionRequest = {
+      toSessionId: typeof payload.toSessionId === 'string' ? payload.toSessionId : '',
+      prompt: typeof payload.prompt === 'string' ? payload.prompt : '',
+      replyBack: payload.replyBack !== false,
+    };
+    const result = await handleAdminInbox(getSessionId(), sessionRequest);
+    // PRD 0.2.18 cross-review CC HIGH #4 — the previous shape spread
+    // `result.response` AFTER `error: string`, so the nested `error: { code,
+    // message }` object overwrote the string. CLI printResult then rendered
+    // `Error: [object Object]`. Put the spread first and let explicit fields
+    // win; also surface `code` at top level so the granular exit-code branch
+    // in cli/myagents.ts:1627-1633 can read it without destructuring the
+    // nested error object.
+    return result.status >= 200 && result.status < 300
+      ? { success: true, ...(result.response as unknown as Record<string, unknown>) }
+      : {
+          ...(result.response as unknown as Record<string, unknown>),
+          success: false,
+          error: result.response.error?.message ?? 'delivery failed',
+          code: result.response.error?.code,
+        };
+  }
 
   // System commands
   if (route === 'status') return api.handleStatus();
@@ -1479,7 +1508,17 @@ export function drainSystemEvents(): Array<{ event: string; content: string; tim
 
 /** Build a dedicated prompt for cron completion events (replaces standard heartbeat prompt) */
 function buildCronEventPrompt(
-  cronEvents: Array<{ event: string; content: string; timestamp: number; taskId?: string }>
+  cronEvents: Array<{
+    event: string;
+    content: string;
+    timestamp: number;
+    taskId?: string;
+    // PRD 0.2.18 Phase 3 — inbox envelope bridge: when present, wrap content
+    // with `<inbox-message from="..." reply_back="false">` so the IM Bot AI
+    // sees the same envelope context as `myagents session send` messages.
+    fromSessionId?: string;
+    fromLabel?: string;
+  }>
 ): string {
   const now = new Date().toLocaleString('en-US', {
     timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
@@ -1487,16 +1526,32 @@ function buildCronEventPrompt(
     hour: '2-digit', minute: '2-digit', timeZoneName: 'short',
   });
 
+  // Lazy-load sanitize helper — used only when from_label is present.
+  const wrapInboxIfNeeded = (
+    e: { content: string; fromSessionId?: string; fromLabel?: string; taskId?: string },
+  ): string => {
+    if (!e.fromSessionId || !e.fromLabel) return e.content;
+    const label = sanitizeInboxLabel(e.fromLabel);
+    // Cross-review CC HIGH #5 + Architecture M1: use the single-source-of-truth
+    // helper instead of an inline copy. Inline regex was missing whitespace-
+    // tolerant close tags and fullwidth-bracket smuggling (cross-review Codex
+    // Critical #2) — defense in the shared helper covers both.
+    const safeBody = neutralizeInboxStructuralTags(e.content);
+    return `<inbox-message from="${label}" reply_back="false">\n${safeBody}\n</inbox-message>`;
+  };
+
   if (cronEvents.length === 1) {
     const e = cronEvents[0];
+    const wrappedContent = wrapInboxIfNeeded(e);
     return (
       'A scheduled task has been triggered and completed. ' +
       'Please relay these results to the user in a helpful and friendly way.\n' +
       `Task id: ${e.taskId || 'unknown'}\n` +
+      (e.fromSessionId ? `Source session id: ${e.fromSessionId} (use \`myagents session send ${e.fromSessionId} -p "..."\` to follow up)\n` : '') +
       `Current time: ${now}\n` +
       'The task results are:\n' +
       '```markdown\n' +
-      e.content + '\n' +
+      wrappedContent + '\n' +
       '```'
     );
   }
@@ -1507,12 +1562,20 @@ function buildCronEventPrompt(
     'Please relay these results to the user in a helpful and friendly way.\n' +
     `Current time: ${now}\n`;
 
+  // PRD 0.2.18 cross-review fix (CC): align with single-event branch by also
+  // emitting follow-up hint when fromSessionId is present, so the IM Bot AI
+  // knows it can `myagents session send <sid>` to ask follow-ups on any of
+  // the bundled cron deliveries.
   for (const e of cronEvents) {
+    const wrappedContent = wrapInboxIfNeeded(e);
     prompt +=
       `\nTask id: ${e.taskId || 'unknown'}\n` +
+      (e.fromSessionId
+        ? `Source session id: ${e.fromSessionId} (use \`myagents session send ${e.fromSessionId} -p "..."\` to follow up)\n`
+        : '') +
       'The task results are:\n' +
       '```markdown\n' +
-      e.content + '\n' +
+      wrappedContent + '\n' +
       '```\n';
   }
   return prompt;
@@ -8686,7 +8749,20 @@ async function main() {
             // sidecar's in-memory `systemEventQueue` (Rust survives sidecar
             // restarts; the queue does not). Non-cron events still flow through
             // the queue. Field is camelCase to match the Rust serde attr.
-            pendingCronEvents?: Array<{ event: string; taskId: string; content: string; timestamp: number }>;
+            pendingCronEvents?: Array<{
+              event: string;
+              taskId: string;
+              content: string;
+              timestamp: number;
+              // PRD 0.2.18 Phase 3 — inbox envelope bridge fields (optional).
+              // When present, buildCronEventPrompt wraps the cron content with
+              // an `<inbox-message from="..." reply_back="false">` prefix so
+              // the IM Bot AI can `myagents session send <fromSessionId>` to
+              // follow up. Cron uses reply_back=false because the cron task
+              // session is short-lived and doesn't await a reply.
+              fromSessionId?: string;
+              fromLabel?: string;
+            }>;
           };
 
           if (!payload.prompt) {
@@ -8742,6 +8818,9 @@ description: >
             content: e.content,
             timestamp: e.timestamp,
             taskId: e.taskId,
+            // PRD 0.2.18 Phase 3 — forward inbox envelope bridge fields
+            fromSessionId: e.fromSessionId,
+            fromLabel: e.fromLabel,
           }));
           const queueCronEventsAll = drainedEvents.filter(e => e.event === 'cron_complete');
           const otherEvents = drainedEvents.filter(e => e.event !== 'cron_complete');
@@ -9140,6 +9219,74 @@ description: >
       }
 
       // ============= END IM BOT API =============
+
+      // ============= SESSION INBOX (PRD 0.2.18) =============
+      //
+      // Note: `myagents session send` CLI hits `/api/admin/session/send`
+      // (handled by `routeAdminApi` → `handleAdminInbox`). The previous raw
+      // route at `/api/session/inbox` was deleted (cross-review Architecture
+      // flagged it as duplicate dead code — CLI never hit it).
+      //
+      // /api/inbox/drain remains as the internal sidecar-to-sidecar endpoint
+      // that Rust `cmd_inbox_deliver` POSTs to.
+
+      // POST /api/inbox/drain — Internal endpoint: Rust pushes
+      // PendingInboxMessage[] here after queuing in target sidecar's vec.
+      // We unwrap, format the prompt, and enqueue via the appropriate runtime.
+      if (pathname === '/api/inbox/drain' && request.method === 'POST') {
+        try {
+          const body = (await request.json().catch(() => null)) as {
+            messages?: unknown[];
+          } | null;
+          if (!body || !Array.isArray(body.messages)) {
+            return jsonResponse({ accepted: false, reason: 'invalid body' }, 400);
+          }
+          const { handleInboxDrain } = await import('./inbox/drain-handler');
+          // Build the injector — picks builtin vs external based on current runtime
+          const { shouldUseExternalRuntime } = await import('./runtimes/external-session');
+          const useExternal = shouldUseExternalRuntime();
+          const injector: import('./inbox/drain-handler').InboxInjector = useExternal
+            ? async (text, inboxMeta) => {
+                const { sendExternalMessage } = await import('./runtimes/external-session');
+                // PRD 0.2.18 cross-review fix (CC):
+                //   Read workspacePath from THIS sidecar's session metadata —
+                //   process.cwd() is wrong (sidecar cwd is app bundle / `/`),
+                //   and MYAGENTS_AGENT_DIR env var isn't reliably set. The
+                //   sidecar always serves a single session; getSessionMetadata
+                //   gives us its agentDir.
+                //   For scenario: 'desktop' is the safe baseline for Case 3 (existing
+                //   process accepts via stdin — scenario doesn't matter there).
+                //   IM sessions never end up here for normal IM dispatch (they
+                //   have their own routes); inbox to an IM Bot session is
+                //   typically Case 3 too. If we ever hit Case 1/2 with an IM
+                //   Bot, the desktop scenario would mis-prompt — that's a known
+                //   gap (would need scenario plumbing through inboxMeta).
+                const sessionMeta = getSessionMetadata(getSessionId());
+                const workspacePath = sessionMeta?.agentDir ?? process.cwd();
+                return sendExternalMessage(text, undefined, undefined, undefined, {
+                  sessionId: getSessionId(),
+                  workspacePath,
+                  scenario: { type: 'desktop' },
+                  inboxMeta,
+                });
+              }
+            : async (text, inboxMeta) =>
+                enqueueUserMessage(text, undefined, undefined, undefined, undefined, { source: 'desktop' }, undefined, inboxMeta);
+          const result = await handleInboxDrain(
+            body.messages as import('./inbox/types').PendingInboxMessage[],
+            injector,
+          );
+          return jsonResponse(result, result.accepted ? 200 : 409);
+        } catch (error) {
+          console.error('[inbox/drain] Error:', error);
+          return jsonResponse(
+            { accepted: false, reason: error instanceof Error ? error.message : String(error) },
+            500,
+          );
+        }
+      }
+
+      // ============= END SESSION INBOX =============
 
       // ============= OPENAI BRIDGE (Loopback, per-token) =============
       // PRD #124: each SDK subprocess registers under a unique token.

@@ -110,6 +110,7 @@ pub async fn start_management_api() -> Result<u16, String> {
             "/api/task/create-from-alignment",
             post(task_create_from_alignment_handler),
         )
+        .route("/api/task/update", post(task_update_handler))
         .route("/api/task/update-status", post(task_update_status_handler))
         .route("/api/task/append-session", post(task_append_session_handler))
         .route("/api/task/archive", post(task_archive_handler))
@@ -120,6 +121,8 @@ pub async fn start_management_api() -> Result<u16, String> {
         .route("/api/task/write-doc", post(task_write_doc_handler))
         .route("/api/thought/list", get(thought_list_handler))
         .route("/api/thought/create", post(thought_create_handler))
+        // Session Inbox cross-sidecar delivery (PRD 0.2.18)
+        .route("/api/inbox/deliver", post(inbox_deliver_handler))
         // Bridge messages carry base64-encoded media attachments (images/files).
         // Default axum 2MB limit is too small — raise to 50MB for this API.
         .layer(DefaultBodyLimit::max(50 * 1024 * 1024));
@@ -1258,6 +1261,45 @@ async fn task_create_direct_handler(
     }
 }
 
+async fn task_update_handler(
+    Json(input): Json<task::TaskUpdateInput>,
+) -> Json<serde_json::Value> {
+    let Some(store) = task::get_task_store() else {
+        return Json(serde_json::json!({
+            "ok": false,
+            "error": "task store not initialized"
+        }));
+    };
+    // Reuses `TaskStore::update`, which:
+    //   * rejects updates on Running/Verifying tasks (state-machine guard),
+    //   * applies mode-transition hygiene (clearing recurring fields when
+    //     `executionMode` flips to Once etc.),
+    //   * projects schedule/notification/override changes back to the linked
+    //     CronTask via `update_task_fields`, so a CLI patch like
+    //     `--intervalMinutes 180` actually re-arms the scheduler.
+    match store.update(input).await {
+        Ok(task) => {
+            let docs = match task::build_task_docs(&task.id) {
+                Ok(d) => d,
+                // Doc dir absence is non-fatal — surface the task without
+                // docs paths so the caller still sees the update result.
+                Err(_) => task::TaskDocs {
+                    dir: String::new(),
+                    task_md: String::new(),
+                    verify_md: None,
+                    progress_md: None,
+                    alignment_md: None,
+                },
+            };
+            Json(serde_json::json!({
+                "ok": true,
+                "task": task::TaskWithDocs { task, docs },
+            }))
+        }
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct TaskUpdateStatusApiRequest {
@@ -2214,4 +2256,60 @@ async fn mirror_to_channel_handler(
 fn base64_decode(s: &str) -> Option<Vec<u8>> {
     use base64::{engine::general_purpose::STANDARD, Engine as _};
     STANDARD.decode(s.trim()).ok()
+}
+
+// ========================================================================
+// Session Inbox handlers (PRD 0.2.18)
+// ========================================================================
+
+/// Request body for `POST /api/inbox/deliver`. Wraps a `PendingInboxMessage`
+/// plus optional `resume_workspace_path` for dead-session resume.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct InboxDeliverRequest {
+    message: crate::inbox::PendingInboxMessage,
+    /// Optional workspace path (absolute) — when provided AND target session
+    /// has no live sidecar, the target sidecar will be spawned with
+    /// `resumeSessionId=<target_session_id>`. Caller sidecar (Node) reads
+    /// this from its own SessionStore before invoking the management API.
+    #[serde(default)]
+    resume_workspace_path: Option<String>,
+}
+
+/// `POST /api/inbox/deliver` — sidecar-callable entry point for session inbox.
+///
+/// Invoked by:
+///   - Caller sidecar's admin handler (POST /api/session/inbox) for request delivery
+///   - Target sidecar's turn-end hook for reply pushback
+///
+/// Body: `{ message: PendingInboxMessage, resume_workspace_path?: string }`
+async fn inbox_deliver_handler(
+    Json(req): Json<InboxDeliverRequest>,
+) -> Json<serde_json::Value> {
+    let Some(manager) = get_sidecar_state() else {
+        return Json(serde_json::json!({
+            "ok": false,
+            "error": "sidecar manager not initialized"
+        }));
+    };
+
+    let resume_path = req.resume_workspace_path.as_ref().map(std::path::PathBuf::from);
+
+    let outcome = if resume_path.is_some() {
+        let Some(app_handle) = crate::logger::get_app_handle() else {
+            return Json(serde_json::json!({
+                "ok": false,
+                "error": "global AppHandle not initialized — cannot resume dead session"
+            }));
+        };
+        crate::inbox::deliver::deliver_with_resume(app_handle, manager, req.message, resume_path)
+            .await
+    } else {
+        crate::inbox::deliver::deliver_inbox_message(manager, req.message).await
+    };
+
+    Json(serde_json::json!({
+        "ok": true,
+        "outcome": outcome,
+    }))
 }

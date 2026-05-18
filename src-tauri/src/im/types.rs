@@ -685,6 +685,19 @@ pub struct PendingCronEvent {
     /// Acts as the disambiguator when the same task fires twice before the
     /// first delivery clears (rare, but keeps `retain` idempotent).
     pub timestamp: u64,
+    /// PRD 0.2.18 Session Inbox bridge — cron task's session id (the source).
+    /// Sidecar uses this + `from_label` to wrap the prompt with an
+    /// `<inbox-message from="Cron: <name>" reply_back="false">` prefix so the
+    /// IM Bot AI sees the same envelope context as messages from
+    /// `myagents session send`. Without this, the AI doesn't know which
+    /// session to reply back to if the user wants to follow up.
+    /// `#[serde(default)]` keeps backward compatibility with old payloads.
+    #[serde(default)]
+    pub from_session_id: Option<String>,
+    /// PRD 0.2.18 Session Inbox bridge — caller's human-readable label
+    /// (e.g. "Issue Triage 凌晨任务"). Sanitized by sidecar before injection.
+    #[serde(default)]
+    pub from_label: Option<String>,
 }
 
 /// Reason for heartbeat wake-up

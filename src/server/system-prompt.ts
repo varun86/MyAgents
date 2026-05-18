@@ -11,7 +11,7 @@
  */
 
 import type { RuntimeType } from '../shared/types/runtime';
-import { buildCliToolsAppend, buildWidgetSection } from './system-prompt-cli-tools';
+import { buildCliToolsAppend, buildWidgetSection, buildSessionInboxSection } from './system-prompt-cli-tools';
 
 // ===== Scenario types =====
 
@@ -158,6 +158,12 @@ export function buildSystemPromptAppend(scenario: InteractionScenario, options?:
   // `myagents widget readme <module>` invoked through their shell tool.
   const widgetSection = buildWidgetSection(scenario);
   if (widgetSection) parts.push(widgetSection);
+
+  // L3: Session Inbox guidance (PRD 0.2.18 §4.1) — universal across runtimes
+  // and scenarios. Emitted next to widget guidance for the same reason: it's
+  // a capability the AI should notice without needing to load the skill doc.
+  const sessionInboxSection = buildSessionInboxSection(scenario);
+  if (sessionInboxSection) parts.push(sessionInboxSection);
 
   // L3: Browser storage state save instruction (when Playwright with --caps=storage is active)
   if (options?.playwrightStorageEnabled) {

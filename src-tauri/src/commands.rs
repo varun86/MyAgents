@@ -900,7 +900,7 @@ pub fn cmd_copy_folder_to_templates(
 
 // ============= Admin Agent Sync =============
 
-const ADMIN_AGENT_VERSION: &str = "17";
+const ADMIN_AGENT_VERSION: &str = "18";
 
 /// Helper-bundled paths (relative to `~/.myagents/`) that previous versions
 /// shipped but that have since been retired.
@@ -993,7 +993,7 @@ pub fn cmd_sync_admin_agent<R: Runtime>(
 
 // ============= CLI Sync =============
 
-const CLI_VERSION: &str = "16";
+const CLI_VERSION: &str = "17";
 
 /// Sync the CLI script from bundled resources to ~/.myagents/bin/.
 /// Version-gated: only runs when CLI_VERSION changes.
@@ -1147,7 +1147,7 @@ pub fn cmd_sync_cli<R: Runtime>(
 // matching exclusion list in src/server/index.ts::seedBundledSkills
 // MUST be kept in sync (comment there points back here).
 
-const SYSTEM_SKILLS_VERSION: &str = "14";
+const SYSTEM_SKILLS_VERSION: &str = "15";
 
 /// Skills that ship with the app and MUST stay at the bundled version —
 /// the app's flows depend on them, users are not meant to customise.

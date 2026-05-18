@@ -136,6 +136,37 @@ Skip it for: one-line answers, chitchat, content the user explicitly asked as pl
 Before your first widget in a session, run \`myagents widget readme <module> [<module> ...]\` via your shell tool (e.g. Bash) to load the design contract. Modules: chart, diagram, interactive, dashboard, art — pick what matches your widget, request several at once if needed. Skip if already pulled this session.
 </myagents-generative-ui>`;
 
+// ===== Session Inbox (PRD 0.2.18) =====
+//
+// Pre-injected capability hint for `myagents session send` — universal across
+// runtimes (builtin SDK / Claude Code / Codex / Gemini all reach this CLI via
+// their shell tool). Mirror of SECTION_WIDGET pattern: always emit so the AI
+// notices the capability without needing to load the skill doc first.
+//
+// 详情见 PRD §4.1 注入点 1。
+
+const SECTION_SESSION_INBOX = `<myagents-session-inbox>
+当上下文里出现**其它 session 的 sessionId**(常见来源:cron 推送的通知、用户在消息中给出),且用户希望你向那个 session **追问、反馈或下指令**时,使用:
+
+  \`myagents session send <sessionId> -p "<prompt>"\`
+
+CLI 立即返回投递结果。目标 session 会被唤起处理你的消息——**其回应将异步推送回你**,你将在新的 turn 收到一条 \`<inbox-reply ...>\` 前缀的消息。加 \`--no-reply\` 表示仅通知,不期待回应推回。
+
+短文本用 \`-p\`;多行 / 长文本(>4KB) / 含特殊字符时改用 \`--prompt-file <path>\`(先写到临时文件),避免 Windows 上被 cmd.exe 截断换行。CLI 在 \`-p\` 含 \\n 或超长时会 fail-fast 提示切到 file 模式。
+
+完整用法见 \`myagents session send --help\`。仅答复**当前用户**时直接回复即可,不需要此工具。
+</myagents-session-inbox>`;
+
+/**
+ * Build the Session Inbox guidance section (PRD 0.2.18 §4.1).
+ *
+ * Emitted unconditionally for all scenarios since session inbox works in any
+ * runtime context (cross-session messaging is a universal capability).
+ */
+export function buildSessionInboxSection(_scenario: InteractionScenario): string {
+  return SECTION_SESSION_INBOX;
+}
+
 // ===== Main entries =====
 
 /**
