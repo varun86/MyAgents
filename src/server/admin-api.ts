@@ -1462,12 +1462,14 @@ Commands:
   get <taskId>                    Task metadata + .task/ doc paths
   create-direct <name>            Create a task with inline task.md content
   create-from-alignment <sid>     Materialize a task from an alignment session
+  update <taskId>                 Patch task fields (schedule / notification /
+                                  prompt / overrides). Rejected while running.
   update-status <taskId> <status> Transition state (running/verifying/done/blocked/stopped)
   append-session <taskId> <sid>   Link an SDK session id to a task
   run <taskId>                    Dispatch a todo task for execution
   rerun <taskId>                  Reset to 'todo' and dispatch
   archive <taskId>                Soft-archive (with 30d retention)
-  delete <taskId>                 Hard delete
+  delete <taskId>                 Hard delete (alias: 'remove' for cron-CLI parity)
 
 Options for 'create-direct':
   --name               Task name (required; may also be the 1st positional)
@@ -1485,6 +1487,23 @@ Options for 'create-direct':
   --tags               Comma-separated tag list
   --sourceThoughtId    Link back to the originating thought
 
+Scheduling (for executionMode = 'recurring' / 'scheduled'; omitting
+--intervalMinutes on recurring silently defaults to 60 min — the CLI now
+emits a warning when you do):
+  --intervalMinutes <n>            Fixed interval in minutes (recurring; min 5)
+  --cronExpression "0 */3 * * *"   Cron expression (recurring; takes precedence over interval)
+  --cronTimezone Asia/Shanghai     IANA tz id for cronExpression
+  --dispatchAt 2026-06-01T09:00:00+08:00  Epoch-ms or ISO 8601 (scheduled mode;
+                                          tz offset MUST be +HH:MM, not +HH)
+
+IM / desktop notification (forward to a bot configured via
+\`myagents im channels\` — without --notificationBotChannelId the task runs
+silently to disk, even if you set --notificationDesktop):
+  --notificationBotChannelId <id>  IM bot id (see 'myagents im channels')
+  --notificationBotThread <chat>   Override bot routing thread / channel id
+  --notificationDesktop true|false Desktop notification toggle (default: true)
+  --notificationEvents done,blocked,endCondition  Comma-separated events filter
+
 Per-task RUNTIME overrides (all optional; omit to inherit workspace defaults):
   --runtime            Override runtime (${RUNTIMES_ENUM_LINE})
                        See: myagents runtime list
@@ -1501,6 +1520,18 @@ Options for 'create-from-alignment' (identical override flags):
   --executionMode --runMode --tags --sourceThoughtId
   --runtime --model --permissionMode --runtimeConfig   (per-task overrides)
 
+Options for 'update' <taskId>:
+  Accepts every create-direct flag (each optional; missing = leave unchanged).
+  Additional flags for clearing overrides:
+    --clearProviderOverride   Reset providerId + model to follow Agent
+    --clearRuntimeOverride    Reset runtime + runtimeConfig to follow Agent
+  Update is rejected when the task is Running/Verifying.
+  Notification semantics: --notification* flags MERGE with the existing
+  config (CLI reads current state, overlays your values, then writes). So
+  '--notificationDesktop false' preserves botChannelId / botThread / events.
+  To clear bot routing entirely, recreate the task — empty values are
+  rejected at the CLI boundary to catch typos.
+
 Options for 'update-status':
   Positional: <taskId> <status>
   --message            Optional message attached to the transition
@@ -1516,13 +1547,66 @@ Examples:
       --workspaceId my-proj --workspacePath /path/to/my-proj \\
       --taskMdContent "Review the latest PR and file findings in progress.md" \\
       --runtime codex --model gpt-5.2 --permissionMode full-auto
+  # Recurring + IM push — was GUI-only before issue #205
+  myagents task create-direct --name "issue triage" \\
+      --workspaceId my-proj --workspacePath /path/to/my-proj \\
+      --taskMdFile /tmp/triage-prompt.md \\
+      --executionMode recurring --intervalMinutes 180 \\
+      --notificationBotChannelId feishu_main
   myagents task create-from-alignment sess_abc --name "Ship feature X" --runtime claude-code
   myagents task run t_abc123
+  myagents task update t_abc123 --intervalMinutes 240   # change cadence after the fact
   myagents task update-status t_abc123 done --message "shipped in v0.1.70"
 
 Related:
   myagents agent show <id>          Inspect an agent's effective defaults first,
                                     so you know what you are overriding.`,
+
+  im: `myagents im — IM Bot capabilities (run 'myagents im readme' for long-form docs)
+
+Commands:
+  channels                            List configured IM bots (works anywhere)
+  send-media --file <path> [--caption <text>]
+                                      Send a file to the current IM chat (IM session only)
+  wake [--text <text>]                Trigger a heartbeat wake (IM session only)
+  readme                              Full reference + when-to-use guidance
+
+Use 'myagents im channels' to discover bot ids for --notificationBotChannelId
+on 'myagents task create-direct / update'.`,
+
+  thought: `myagents thought — Inbox capture for the user's second brain
+(run 'myagents thought readme' for long-form docs)
+
+Commands:
+  list                  List thoughts (filter via --tag / --query / --limit)
+  create <content>      Capture a new thought (also: --content / --content-file)`,
+
+  widget: `myagents widget — Generative UI widget design guidelines
+(run 'myagents widget readme' for the full design system + modules)
+
+Use to render inline charts / SVG / dashboards in desktop Chat replies.
+IM bot sessions don't render widgets.`,
+
+  skill: `myagents skill — Manage Claude Skills (installed under ~/.claude/skills)
+
+Commands:
+  list                       List installed skills + enabled state
+  info <name>                Show one skill's manifest + description
+  add <url>                  Install from URL / file path
+                             [--scope user|project] [--plugin <id>] [--skill <id>]
+                             [--force] [--dry-run]
+  remove <name>              Uninstall a skill   [--scope user|project]
+  enable <name>              Enable an installed skill
+  disable <name>             Disable without uninstalling
+  sync                       Re-seed system skills from bundled defaults`,
+
+  diagnose: `myagents diagnose — Diagnostic helpers
+
+Commands:
+  diagnose runtime <type>    Inspect why a runtime is not detected / responding.
+                             Same as 'myagents runtime diagnose <type>'; the
+                             top-level form is provided so AI guesses route
+                             to a real handler (issue #194).`,
 
   agent: `myagents agent — Manage agents & channels
 
@@ -1547,6 +1631,76 @@ Typical flow (AI preparing a task override):
   1. myagents agent show <id>          — learn current defaults
   2. myagents runtime describe <rt>    — see valid model + permission values
   3. myagents task create-direct ... --runtime <rt> --model <m>`,
+
+  session: `myagents session send — 给另一个 session 投送一条消息 (PRD 0.2.18)
+
+USAGE
+  myagents session send <sessionId> -p "<prompt>" [OPTIONS]
+  myagents session send <sessionId> --prompt-file <path> [OPTIONS]
+
+DESCRIPTION
+  把一条消息异步投送给另一个 session。CLI 立即返回投递结果(成功/失败),
+  不等待目标处理。目标 session 当前是否活跃不影响投递——idle 的 session
+  会被自动唤起(类似用户在桌面打开历史记录),处理完成后按现有机制释放。
+
+  目标 session 处理完成后:
+    • 默认: 其回应会被自动推送回你这里。你将在新的 turn 收到一条带
+      <inbox-reply> 前缀的消息,可以继续推进对话或发起新一轮 send
+    • --no-reply: 其回应走目标 session 自己的呈现路径(IM Bot 推到 IM、
+      桌面 session 显示在桌面 Tab),不会推回给你
+
+WHEN TO USE
+  ✓ 你收到了来自其它 session 的消息(如 <inbox-message> 或 cron 推送),
+    用户希望你向那个 session 反馈、追问、澄清或下指令
+  ✓ 用户在对话里给了你一个 sessionId,让你与其交互
+  ✗ 想答复当前用户——直接回复就行,不要用这个工具
+  ✗ 想给 IM peer 发消息——用 \`myagents im send\`,不是这个
+
+OPTIONS
+  <sessionId>            目标 session 的 ID(必填)
+  -p, --prompt TEXT      消息内容(与 --prompt-file 二选一,适合单行短文本)
+  --prompt-file PATH     消息内容文件路径(与 -p 二选一,适合多行 / 长文本 /
+                         任何含换行或特殊字符的内容,跨平台稳定)
+  --no-reply             不期待回应推回(默认会推回)
+
+ABOUT IDENTITY
+  系统会自动用你所在 session 的元数据(cron task name / IM bot name /
+  session name 等)作为对方看到的 from 标识——你不需要也不应该手动
+  指定身份。
+
+PLATFORM NOTE
+  Windows 上 cmd.exe 会把 -p 文本中的换行符当成命令边界截断,导致后续
+  flag 全部丢失。本 CLI 在 -p 模式下检测到内容含 \\n 或长度 > 4KB 时
+  会立即 fail-fast(exit 3),提示你切到 --prompt-file。所有平台行为
+  一致——养成统一习惯,长 / 多行内容写到临时文件再传路径。
+
+EXIT CODES
+  0   投递成功
+  1   sessionId 不存在 / 业务错误
+  2   投递失败(目标 sidecar 不可达 / Rust 路由错误等)
+  3   参数错误(包括 -p 含 \\n 或超长时的 fail-fast)
+
+EXAMPLES
+  # 让目标 session 处理一件事并把结果推回来(最常见,短文本)
+  myagents session send sess_abc123 -p "用户希望加上 deepseek 也跑一遍"
+
+  # 仅通知,不期待回应
+  myagents session send sess_xyz789 -p "任务已完成,无需回应" --no-reply
+
+  # 多行 / 长文本(必须用 --prompt-file,跨平台稳定)
+  myagents session send sess_abc123 --prompt-file /tmp/inbox_msg.txt
+
+ASYNC NOTES
+  这是异步通道。如果默认期待 reply,reply 到达时你会在下一个 turn 收到:
+
+    <inbox-reply from="<label>" in_reply_to="<原 message 前 40 字>">
+    那个 task 我已经加上 deepseek 了,下次 03:00 跑
+    </inbox-reply>
+
+  in_reply_to 帮你在同时发出多条 send 时关联回是哪一条的回应。
+
+SEE ALSO
+  myagents im send           给 IM peer 发消息(不是给 session)`,
 };
 
 export function handleHelp(payload: { path?: string[] }): AdminResponse {
@@ -1557,11 +1711,27 @@ export function handleHelp(payload: { path?: string[] }): AdminResponse {
     return { success: true, data: { text: HELP_TEXTS[group] } };
   }
 
+  // Derive the group list from HELP_TEXTS so it can't drift as new commands
+  // are added (issue #205 gap #5: the previous hardcoded list claimed only
+  // 8 groups existed and omitted im / task / runtime / cc-plugin / session,
+  // turning `myagents im --help` into a misleading "use one of these
+  // unrelated groups" message). Append the leaf commands that aren't in
+  // HELP_TEXTS but are still valid top-level invocations.
+  const groups = Object.keys(HELP_TEXTS).sort();
+  const leafCommands = ['status', 'reload', 'version'];
+  const header = group
+    ? `Unknown command group "${group}".`
+    : 'myagents — Available commands';
   return {
     success: true,
     data: {
-      text: `Available command groups: mcp, model, agent, config, cron, plugin, status, reload
-Use "myagents <group> --help" for details on a specific group.`,
+      text: `${header}
+
+Command groups (run "myagents <group> --help" for details):
+  ${groups.join(', ')}
+
+Leaf commands:
+  ${leafCommands.join(', ')}`,
     },
   };
 }
@@ -2068,6 +2238,30 @@ function enrichTaskCreateResponse(
     };
   }
   return { ...response, data: enriched };
+}
+
+/**
+ * Patch a Task's fields after creation. Rust handler reuses `TaskStore::update`,
+ * which is rejected on Running/Verifying tasks and projects schedule /
+ * notification / override changes back to the linked CronTask. The CLI accepts
+ * the same flag set as `task create-direct`, and the same override validator
+ * runs first so a bad `--runtime` / `--model` / `--permissionMode` is caught
+ * before serde would silently drop it.
+ *
+ * The payload's `id` field is required by Rust (`TaskUpdateInput.id`); CLI
+ * promotes the positional `taskId` into `id` so callers don't have to know
+ * the wire field name.
+ */
+export async function handleTaskUpdate(
+  payload: Record<string, unknown>,
+): Promise<AdminResponse> {
+  if (typeof payload.id !== 'string' || payload.id.length === 0) {
+    return { success: false, error: 'task id is required' };
+  }
+  const validationError = await validateTaskOverrides(payload);
+  if (validationError) return validationError;
+  const resp = await managementApi('/api/task/update', 'POST', payload);
+  return wrapMgmtResponse(resp);
 }
 
 export async function handleTaskUpdateStatus(

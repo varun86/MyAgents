@@ -66,17 +66,24 @@ export function preprocessMarkdownContent(content: string): string {
   // "F# tutorial" from being rewritten into headings.
   processed = processed.replace(/([^\n#\p{L}\p{N}])(#{1,6}\s+)(?=\S)/gu, '$1\n\n$2');
 
-  // 2c. Ensure headers at the start of lines have a space after # (if missing)
-  // "##Title" -> "## Title" (only at line start)
-  processed = processed.replace(/^(#{1,6})([^\s#\n])/gm, '$1 $2');
+  // 2c removed: We used to auto-insert a space after a leading `#` to fix
+  // AI-emitted `##Title` (missing space). But that rule can't distinguish a
+  // heading from a tag — `#210`, `#heihei`, `#标题` are all common as plain
+  // tags / issue refs, and rewriting them into `# 210` / `# heihei` / `# 标题`
+  // turned the whole line into an `<h1>` (CommonMark requires the space). Per
+  // spec, `#text` (no space) is NOT a heading; trust the spec rather than
+  // guess the model's intent.
 
   // 2d. Fix unordered list items at LINE START ONLY
-  // "-item" -> "- item"
-  processed = processed.replace(/^-([^\s\-\n])/gm, '- $1');
+  // "-item" -> "- item". Exclude digits so negative-leading values like
+  // "-50% drop" at line start don't get rewritten into a list item.
+  processed = processed.replace(/^-([^\s\-\n\d])/gm, '- $1');
 
   // 2e. Fix ordered list items at LINE START ONLY
-  // "1.item" -> "1. item"
-  processed = processed.replace(/^(\d+\.)([^\s\n])/gm, '$1 $2');
+  // "1.item" -> "1. item". Exclude digits so version numbers / dates /
+  // IPs like "0.2.18", "2026.5.18", "192.168.1.1" at line start don't get
+  // rewritten into an ordered list (which then swallows the rest of the line).
+  processed = processed.replace(/^(\d+\.)([^\s\n\d])/gm, '$1 $2');
 
   // Step 3: Restore protected code blocks and inline code
   // Multiple passes needed: table blocks may contain inline code placeholders,

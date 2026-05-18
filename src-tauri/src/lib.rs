@@ -9,6 +9,7 @@ mod commands;
 pub mod cron_task;
 mod global_shortcut;
 pub mod im;
+pub mod inbox;
 pub mod notification;
 pub mod local_http;
 pub mod logger;
@@ -295,6 +296,8 @@ pub fn run() {
             cmd_update_session_tab,
             // Cron task execution (Rust -> Sidecar direct call)
             cmd_execute_cron_task,
+            // Session Inbox cross-sidecar delivery (PRD 0.2.18)
+            crate::inbox::deliver::cmd_inbox_deliver,
             // Session-centric Sidecar API (v0.1.11)
             cmd_ensure_session_sidecar,
             cmd_release_session_sidecar,

@@ -3761,6 +3761,19 @@ async fn deliver_cron_result_to_bot(
     task_id: &str,
     summary: &str,
 ) {
+    // PRD 0.2.18 Phase 3 — derive cron task session metadata (cron task name +
+    // session id) for inbox-style envelope wrapping. Cron task fires *into* an
+    // IM Bot session; the IM Bot AI sees the cron result as an `<inbox-message
+    // from="Cron: <name>" reply_back="false">` prefix so it can later use
+    // `myagents session send <from_session_id>` to follow up. Look-up is
+    // best-effort — failures fall back to the legacy un-decorated cron prompt.
+    let (cron_from_session_id, cron_from_label) = {
+        match resolve_cron_inbox_source(handle, task_id).await {
+            Some((sid, label)) => (Some(sid), Some(label)),
+            None => (None, None),
+        }
+    };
+
     ulog_info!(
         "[CronTask] Delivering result for task {} to bot {} (platform: {})",
         task_id, delivery.bot_id, delivery.platform
@@ -3839,6 +3852,10 @@ async fn deliver_cron_result_to_bot(
             // Local-side timestamp; only used internally as a dedup-clear
             // disambiguator, never displayed to the user.
             timestamp: chrono::Utc::now().timestamp_millis().max(0) as u64,
+            // PRD 0.2.18 Phase 3 — inbox envelope bridge (may be None when
+            // cron task lookup fails; sidecar falls back to legacy prompt).
+            from_session_id: cron_from_session_id.clone(),
+            from_label: cron_from_label.clone(),
         });
         ulog_info!(
             "[CronTask] Appended cron event to bot {} pending (now {} pending)",
@@ -3866,6 +3883,31 @@ async fn deliver_cron_result_to_bot(
             delivery.bot_id
         );
     }
+}
+
+/// PRD 0.2.18 Phase 3 — look up cron task's session id + human-readable name
+/// for inbox envelope wrapping. Returns None when task lookup fails (sidecar
+/// then falls back to the legacy un-decorated cron prompt).
+///
+/// Why this lives separately from `deliver_cron_result_to_bot`:
+///   - Cron task name is the source of the `<inbox-message from="Cron: <name>">`
+///     prefix the IM Bot AI will see — this is what makes session→session
+///     reply meaningful (秘书 AI can do `myagents session send <sid>` later).
+///   - The lookup is best-effort: a renamed/removed task doesn't break delivery
+///     (the at-least-once cron pipeline keeps working without the envelope).
+async fn resolve_cron_inbox_source(
+    handle: &AppHandle,
+    task_id: &str,
+) -> Option<(String, String)> {
+    let manager = handle.try_state::<CronTaskManager>()?;
+    let tasks = manager.tasks.read().await;
+    let task = tasks.get(task_id)?;
+    let label = task
+        .name
+        .clone()
+        .map(|n| format!("Cron: {n}"))
+        .unwrap_or_else(|| format!("Cron task {}", &task_id[..task_id.len().min(8)]));
+    Some((task.session_id.clone(), label))
 }
 
 /// Initialize cron task manager with app handle (called during app setup)

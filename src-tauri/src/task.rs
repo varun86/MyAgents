@@ -570,12 +570,12 @@ pub struct TaskUpdateInput {
     pub model: Option<String>,
     /// PRD 0.2.9 — Per-task provider id override.
     ///
-    /// On update semantics: `None` means "leave provider_id unchanged"
-    /// (Option-of-Option would be the principled choice but the surrounding
-    /// fields all use `None = no change` so we mirror that). To clear the
-    /// override, callers MUST send the JSON `{"providerId": null, "model":
-    /// null}` pair — `update` accepts the explicit `clear_overrides` flag
-    /// below for the no-ambiguity case. Validated by
+    /// On update semantics: `None` means "leave provider_id unchanged" (omitted
+    /// in JSON or sent as `null` — serde collapses both to `None` here, so
+    /// `null-as-clear` is NOT a thing for this field, contrary to a stale
+    /// earlier doc revision). To clear the override, callers MUST use
+    /// `clear_provider_override: true` (below), which atomically resets both
+    /// `provider_id` and `model` to `None`. Validated by
     /// `validate_task_provider_routing`.
     #[serde(default)]
     pub provider_id: Option<String>,
