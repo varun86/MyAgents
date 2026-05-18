@@ -1340,6 +1340,7 @@ async function routeAdminApi(pathname: string, payload: Record<string, unknown>)
   if (route === 'task/create-from-alignment') return await api.handleTaskCreateFromAlignment(payload);
   if (route === 'task/run') return await api.handleTaskRun(payload as Parameters<typeof api.handleTaskRun>[0]);
   if (route === 'task/rerun') return await api.handleTaskRerun(payload as Parameters<typeof api.handleTaskRerun>[0]);
+  if (route === 'task/update') return await api.handleTaskUpdate(payload);
   if (route === 'task/update-status') return await api.handleTaskUpdateStatus(payload);
   if (route === 'task/append-session') return await api.handleTaskAppendSession(payload as Parameters<typeof api.handleTaskAppendSession>[0]);
   if (route === 'task/archive') return await api.handleTaskArchive(payload as Parameters<typeof api.handleTaskArchive>[0]);

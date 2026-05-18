@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### Fixed
+
+- **`myagents task` CLI 缺口补齐**（[#205](https://github.com/hAcKlyc/MyAgents/issues/205)）：之前从命令行搭一个 recurring Task Center 任务，要不到 `--intervalMinutes / --cronExpression / --cronTimezone / --dispatchAt`，也设不上 `--notificationBotChannelId` 等 IM 推送字段，建完只能去 GUI 补；现在 `task create-direct` 全部支持。新增 `task update <id>` 端点（与 `cron update` 能力对齐），可在创建后改 interval / cron / notification / prompt / 各 runtime 覆写；通知字段做客户端 merge，不会一改 `--notificationDesktop` 就把 botChannelId 一起抹掉。`task remove` 不再 404，现在是 `task delete` 的别名。`task get` 在 recurring/scheduled/loop 任务上显式标出「IM 推送：未配置」，recurring 不带 interval 时 CLI 直接 warning，避免静默走 60 分钟默认。
+- **`myagents im --help` 误报**（[#205](https://github.com/hAcKlyc/MyAgents/issues/205)）：之前 `im --help` 返回硬编码的「Available command groups: mcp, model, agent, config, cron, plugin, status, reload」，既漏了 im / task / runtime / cc-plugin / session 等真实组，也没列 im 自己的子命令。现在 fallback 列表由 `HELP_TEXTS` 自动派生，且新增 `im / thought / widget / skill / diagnose` 五组的 `--help` 文案。
+
+---
+
 ## [0.2.17] - 2026-05-17
 
 > 支持安装 Claude 插件，一行链接装一个，带 skills、子 agent、工具、hook 一并到位。新增 Chat 顶部 Agent Status 悬浮条，让你随时看到当前任务的 Todo 进度和正在跑的子 Agent。供应商可拖拽排序与按需启用，让模型选择器和 fallback 链只显示你在用的。

@@ -1322,12 +1322,28 @@ function printTaskDetail(task: Record<string, unknown>): void {
     if (end.aiCanExit === false) console.log(`  AI can exit:    no (must run to end conditions)`);
   }
 
-  // Notification
+  // Notification — for unattended modes (recurring / scheduled / loop), the
+  // absence of a bot channel is decision-relevant: the task runs to disk but
+  // nothing reaches the user's IM. Surface this even when `notification` is
+  // None so CLI users don't have to grep `management_api.rs` to learn the
+  // mechanism exists (issue #205 gap #6).
   const notif = task.notification as Record<string, unknown> | undefined;
+  const unattended = mode === 'recurring' || mode === 'scheduled' || mode === 'loop';
   if (notif) {
     console.log('\nNotification:');
     console.log(`  Desktop:        ${notif.desktop !== false ? 'on' : 'off'}`);
-    if (notif.botChannelId) console.log(`  Bot channel:    ${notif.botChannelId}`);
+    if (notif.botChannelId) {
+      console.log(`  Bot channel:    ${notif.botChannelId}`);
+    } else if (unattended) {
+      console.log('  Bot channel:    (not set — IM push disabled; set --notificationBotChannelId via `task update`)');
+    }
+    if (Array.isArray(notif.events) && (notif.events as string[]).length > 0) {
+      console.log(`  Events:         ${(notif.events as string[]).join(', ')}`);
+    }
+  } else if (unattended) {
+    console.log('\nNotification:');
+    console.log('  Desktop:        on (default)');
+    console.log('  Bot channel:    (not set — IM push disabled; set --notificationBotChannelId via `task update`)');
   }
 
   // Sessions + source thought
@@ -1516,6 +1532,41 @@ async function main(): Promise<void> {
     const restArgs = positional.slice(2);
     const body = buildRequestBody(group, action, restArgs, flags);
     const route = buildRoute(group, action, restArgs);
+
+    // `task update` notification merge (issue #205 cross-review): Rust
+    // `TaskStore::update` REPLACES `notification` wholesale when the field
+    // is present, so a partial CLI patch like `--notificationDesktop false`
+    // would clear an existing `botChannelId`. Read the current notification
+    // and merge the user's flags on top so partial updates are non-
+    // destructive. Limited to the `task update` path — `create-direct`
+    // doesn't need merging since there's nothing to preserve. The fetch
+    // round-trip is unconditional on this path (only fires when a
+    // --notification* flag was actually passed) so it costs nothing in the
+    // common "interval-only" patch case.
+    if (
+      group === 'task'
+      && action === 'update'
+      && body
+      && (body as Record<string, unknown>).notification !== undefined
+    ) {
+      const idForFetch = (body as Record<string, unknown>).id as string | undefined;
+      if (idForFetch) {
+        const fetched = await callApi(`task/get`, { id: idForFetch });
+        if (fetched.success && fetched.data) {
+          const existing =
+            ((fetched.data as Record<string, unknown>).task as Record<string, unknown> | undefined)
+            ?? (fetched.data as Record<string, unknown>);
+          const existingNotif = (existing.notification as Record<string, unknown> | undefined) ?? {};
+          const userNotif = (body as Record<string, unknown>).notification as Record<string, unknown>;
+          // Order matters: spread existing first so user values win.
+          (body as Record<string, unknown>).notification = { ...existingNotif, ...userNotif };
+        }
+        // Best-effort: if the get fails (rare — task ids are local), fall
+        // through with the partial. Rust will surface the real error on the
+        // subsequent update call.
+      }
+    }
+
     result = await callApi(route, body);
 
     // --run bundled with `task create-from-alignment`: chain immediately
@@ -1604,6 +1655,13 @@ function buildRoute(group: string, action: string, rest: string[]): string {
   // routes to the same handler. The handler parses modules from the payload.
   if (group === 'widget') {
     return 'readme/widget';
+  }
+  // `task remove` is an alias for `task delete` — the cron CLI uses `remove`
+  // for the same operation, so AI / users who generalize the verb hit a real
+  // route instead of the previous opaque "Unknown admin route" 404 (issue
+  // #205 gap #4). buildRequestBody already treats them as the same shape.
+  if (group === 'task' && action === 'remove') {
+    return 'task/delete';
   }
   return `${group}/${action}`;
 }
@@ -1951,7 +2009,12 @@ function buildRequestBody(
       return { id: rest[0], sessionId: rest[1] || flags.sessionId };
     }
     if (action === 'archive') return { id: rest[0], message: flags.message };
-    if (action === 'delete') return { id: rest[0] };
+    // `remove` is the cron-side vocabulary for the same operation; before this
+    // alias the CLI accepted `task remove` and forwarded to a non-existent
+    // /api/admin/task/remove route, leaving the user with an opaque "Unknown
+    // admin route" error (issue #205 gap #4). Accept both so AI / users who
+    // generalized from `cron remove` don't hit a dead end.
+    if (action === 'delete' || action === 'remove') return { id: rest[0] };
     if (action === 'create-direct') {
       assertStringFlag(flags.name, 'name');
       // Resolve task.md body: `--taskMdFile` (industry-standard for long
@@ -1959,6 +2022,8 @@ function buildRequestBody(
       // markdown) takes precedence over `--taskMdContent` when both are
       // set. Mirrors the `cron add --prompt-file` pattern above.
       const taskMdContent = resolveTaskMdContent(flags);
+      const executionMode = (flags.executionMode as string | undefined) ?? 'once';
+      maybeWarnRecurringWithoutInterval(executionMode, flags);
       return {
         name: rest[0] || flags.name,
         executor: flags.executor ?? 'agent',
@@ -1966,12 +2031,23 @@ function buildRequestBody(
         workspaceId: flags.workspaceId,
         workspacePath: flags.workspacePath,
         taskMdContent,
-        executionMode: flags.executionMode ?? 'once',
+        executionMode,
         runMode: flags.runMode,
         sourceThoughtId: flags.sourceThoughtId,
         tags: typeof flags.tags === 'string'
           ? (flags.tags as string).split(',').map(s => s.trim()).filter(Boolean)
           : undefined,
+        // Scheduling-detail fields the Rust TaskCreateDirectInput already
+        // accepts. Before issue #205 only the create-from-alignment path
+        // (which inherits them from the alignment session) could populate
+        // these; the CLI parser dropped them on create-direct, forcing every
+        // recurring task to default to 60 min and every cron / dispatchAt
+        // schedule to be set via GUI afterward.
+        intervalMinutes: parseIntervalMinutesFlag(flags.intervalMinutes),
+        cronExpression: flags.cronExpression,
+        cronTimezone: flags.cronTimezone,
+        dispatchAt: parseDispatchAtFlag(flags.dispatchAt),
+        notification: buildNotificationFromFlags(flags),
         // Per-task runtime overrides. Admin-api validates these before
         // forwarding to Rust — if the caller mistypes a value, they get a
         // recovery hint pointing to `runtime list` / `runtime describe`.
@@ -1980,6 +2056,51 @@ function buildRequestBody(
         permissionMode: flags.permissionMode,
         runtimeConfig: parseRuntimeConfigFlag(flags.runtimeConfig),
       };
+    }
+    if (action === 'update') {
+      // Patch shape mirrors `create-direct`: the same flag set, but every
+      // field is optional. Rust `TaskUpdateInput` treats `None` as
+      // "leave unchanged" except for the explicit clear-override flags
+      // (`clearProviderOverride` / `clearRuntimeOverride`), which the CLI
+      // exposes for the AI's "reset to follow Agent" intent.
+      const id = requirePositional(rest[0] ?? (flags.id as string | undefined), 'task-id', 'task update', 'id');
+      // `--taskMdFile` / `--taskMdContent` map to TaskUpdateInput.prompt
+      // (Rust writes the body to task.md atomically under the row's write
+      // lock). Reuse the create-side helper so size / NUL / file-not-found
+      // errors stay consistent.
+      const promptFromTaskMd =
+        flags.taskMdFile !== undefined || flags.taskMdContent !== undefined
+          ? resolveTaskMdContent(flags)
+          : undefined;
+      const executionMode = flags.executionMode as string | undefined;
+      if (executionMode) maybeWarnRecurringWithoutInterval(executionMode, flags);
+      const body: Record<string, unknown> = { id };
+      if (flags.name !== undefined) body.name = flags.name;
+      if (flags.executor !== undefined) body.executor = flags.executor;
+      if (flags.description !== undefined) body.description = flags.description;
+      if (executionMode !== undefined) body.executionMode = executionMode;
+      if (flags.runMode !== undefined) body.runMode = flags.runMode;
+      if (flags.intervalMinutes !== undefined) body.intervalMinutes = parseIntervalMinutesFlag(flags.intervalMinutes);
+      if (flags.cronExpression !== undefined) body.cronExpression = flags.cronExpression;
+      if (flags.cronTimezone !== undefined) body.cronTimezone = flags.cronTimezone;
+      if (flags.dispatchAt !== undefined) body.dispatchAt = parseDispatchAtFlag(flags.dispatchAt);
+      if (flags.model !== undefined) body.model = flags.model;
+      if (flags.providerId !== undefined) body.providerId = flags.providerId;
+      if (flags.clearProviderOverride) body.clearProviderOverride = true;
+      if (flags.permissionMode !== undefined) body.permissionMode = flags.permissionMode;
+      if (flags.runtime !== undefined) body.runtime = flags.runtime;
+      if (flags.runtimeConfig !== undefined) body.runtimeConfig = parseRuntimeConfigFlag(flags.runtimeConfig);
+      if (flags.clearRuntimeOverride) body.clearRuntimeOverride = true;
+      if (typeof flags.tags === 'string') {
+        body.tags = (flags.tags as string).split(',').map(s => s.trim()).filter(Boolean);
+      }
+      const notification = buildNotificationFromFlags(flags);
+      // CLI merges with existing notification before sending — see the
+      // notification-merge block in main() so partial patches like
+      // `--notificationDesktop false` don't clobber `botChannelId`.
+      if (notification !== undefined) body.notification = notification;
+      if (promptFromTaskMd !== undefined) body.prompt = promptFromTaskMd;
+      return body;
     }
     if (action === 'create-from-alignment') {
       // First positional MUST be the alignmentSessionId. Use --name for the
@@ -2359,6 +2480,163 @@ function parseRuntimeConfigFlag(raw: unknown): Record<string, unknown> | undefin
     process.exit(2);
   }
   return parsed as Record<string, unknown>;
+}
+
+/**
+ * Build a `notification` sub-object from the `--notification*` flags so the
+ * Rust `TaskCreateDirectInput.notification` / `TaskUpdateInput.notification`
+ * field (`Option<NotificationConfig>`) round-trips cleanly.
+ *
+ * Returns `undefined` when no notification flag was set — the Rust update
+ * path treats `None` as "leave unchanged", and create-direct already defaults
+ * to `{ desktop: true }` via serde so omitting it is the right behavior.
+ *
+ * Flags supported:
+ *   --notificationBotChannelId <bot-id>     IM bot id (see `myagents im channels`)
+ *   --notificationBotThread <chat-id>       Override bot routing thread / channel
+ *   --notificationDesktop true|false        Toggle desktop notification (default true)
+ *   --notificationEvents done,blocked,...   Comma-separated event filter
+ */
+function buildNotificationFromFlags(
+  flags: Record<string, unknown>,
+): Record<string, unknown> | undefined {
+  const channel = flags.notificationBotChannelId;
+  const thread = flags.notificationBotThread;
+  const desktop = flags.notificationDesktop;
+  const events = flags.notificationEvents;
+  if (
+    channel === undefined
+    && thread === undefined
+    && desktop === undefined
+    && events === undefined
+  ) {
+    return undefined;
+  }
+  const out: Record<string, unknown> = {};
+  if (desktop !== undefined) {
+    // Accept `true` / `false` strings (CLI parser leaves un-quoted bools as
+    // strings) and any truthy/falsy value; explicit `false` MUST disable.
+    if (typeof desktop === 'boolean') {
+      out.desktop = desktop;
+    } else if (typeof desktop === 'string') {
+      const v = desktop.toLowerCase();
+      if (v === 'false' || v === '0' || v === 'no' || v === 'off') {
+        out.desktop = false;
+      } else {
+        out.desktop = true;
+      }
+    } else {
+      out.desktop = !!desktop;
+    }
+  }
+  if (channel !== undefined) {
+    // Bare `--notificationBotChannelId` (no value) parses as boolean `true`;
+    // forwarding `"true"` as a bot id is a near-certain mistake. Require a
+    // non-empty string so the AI / user gets a clear error instead of a
+    // confused router that says "no such bot 'true'".
+    if (typeof channel !== 'string' || channel.length === 0) {
+      console.error('Error: --notificationBotChannelId requires a bot id (e.g. --notificationBotChannelId feishu_main). See: myagents im channels');
+      process.exit(2);
+    }
+    out.botChannelId = channel;
+  }
+  if (thread !== undefined) {
+    if (typeof thread !== 'string' || thread.length === 0) {
+      console.error('Error: --notificationBotThread requires a non-empty value');
+      process.exit(2);
+    }
+    out.botThread = thread;
+  }
+  if (events !== undefined) {
+    if (typeof events !== 'string') {
+      console.error('Error: --notificationEvents must be a comma-separated string (e.g. done,blocked,endCondition)');
+      process.exit(2);
+    }
+    const eventsList = events.split(',').map(s => s.trim()).filter(Boolean);
+    if (eventsList.length === 0) {
+      // Empty list would silently mean "subscribe to nothing" — almost
+      // certainly a typo (`--notificationEvents=,,,` or empty string).
+      console.error('Error: --notificationEvents resolved to an empty list. Pass at least one event (e.g. done,blocked,endCondition) or omit the flag to use the default set.');
+      process.exit(2);
+    }
+    out.events = eventsList;
+  }
+  return out;
+}
+
+/**
+ * Parse `--dispatchAt` flag into milliseconds since epoch. Accepts either a
+ * raw epoch-ms integer (what Rust persists) or an ISO 8601 / RFC 3339 string
+ * (what humans type). Bails with a precise error on unparseable input — a
+ * silent fall-through would later become a confusing "task never fires"
+ * because Rust treats `None` as "no schedule".
+ */
+function parseDispatchAtFlag(raw: unknown): number | undefined {
+  if (raw === undefined) return undefined;
+  if (typeof raw === 'number' && Number.isFinite(raw)) return raw;
+  if (typeof raw !== 'string' || raw.trim().length === 0) {
+    console.error('Error: --dispatchAt must be a number (epoch ms) or an ISO 8601 timestamp');
+    process.exit(2);
+  }
+  const trimmed = raw.trim();
+  // Pure-integer path: epoch-ms (the Rust wire format). `parseInt` would
+  // silently chop `"123abc"`; require the whole string to be digits to
+  // surface typos.
+  if (/^-?\d+$/.test(trimmed)) {
+    const n = Number(trimmed);
+    if (Number.isFinite(n)) return n;
+  }
+  const ms = Date.parse(trimmed);
+  if (Number.isNaN(ms)) {
+    console.error(`Error: --dispatchAt "${raw}" is not a valid timestamp (try epoch ms or ISO 8601, e.g. 2026-06-01T09:00:00+08:00)`);
+    process.exit(2);
+  }
+  return ms;
+}
+
+/**
+ * Recurring tasks with no explicit interval / cron silently default to 60min
+ * on the Rust side (`schedule_from_task` falls through to
+ * `interval_minutes.unwrap_or(60).max(5)`). Surface this so the AI / user
+ * doesn't ship a "let me poll every minute" task that quietly runs hourly.
+ * Print to stderr so JSON output stays parseable.
+ */
+function maybeWarnRecurringWithoutInterval(
+  executionMode: string,
+  flags: Record<string, unknown>,
+): void {
+  if (executionMode !== 'recurring') return;
+  if (flags.intervalMinutes !== undefined || flags.cronExpression !== undefined) {
+    return;
+  }
+  console.error(
+    'Warning: --executionMode recurring without --intervalMinutes or --cronExpression — '
+    + 'task will run every 60 minutes (Rust default). Add --intervalMinutes <n> to set the cadence.',
+  );
+}
+
+/**
+ * Parse `--intervalMinutes` into a positive integer. Without this validator
+ * `Number("abc")` produces `NaN`, which `JSON.stringify` emits as `null`,
+ * which Rust serde drops via `#[serde(default)]` → the task silently falls
+ * back to the 60-minute default with no error surfaced to the user.
+ * Codex review (issue #205) caught this as a class-of-bug pattern.
+ */
+function parseIntervalMinutesFlag(raw: unknown): number | undefined {
+  if (raw === undefined) return undefined;
+  const n = typeof raw === 'number' ? raw : Number(raw);
+  if (!Number.isFinite(n) || !Number.isInteger(n) || n <= 0) {
+    console.error(`Error: --intervalMinutes must be a positive integer (got: ${JSON.stringify(raw)})`);
+    process.exit(2);
+  }
+  if (n < 5) {
+    // The Rust scheduler clamps to .max(5), so anything lower would silently
+    // be ignored. Reject so the user knows their "every 2 min" turned into
+    // "every 5 min" before they ship a misconfigured cadence.
+    console.error(`Error: --intervalMinutes minimum is 5 (got: ${n}). The scheduler enforces this floor; lower values are silently clamped.`);
+    process.exit(2);
+  }
+  return n;
 }
 
 // ---------------------------------------------------------------------------

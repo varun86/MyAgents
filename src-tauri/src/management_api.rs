@@ -110,6 +110,7 @@ pub async fn start_management_api() -> Result<u16, String> {
             "/api/task/create-from-alignment",
             post(task_create_from_alignment_handler),
         )
+        .route("/api/task/update", post(task_update_handler))
         .route("/api/task/update-status", post(task_update_status_handler))
         .route("/api/task/append-session", post(task_append_session_handler))
         .route("/api/task/archive", post(task_archive_handler))
@@ -1255,6 +1256,45 @@ async fn task_create_direct_handler(
                 let _ = thoughts.link_task(&thought_id, &t.id).await;
             }
             Json(serde_json::json!({ "ok": true, "task": t }))
+        }
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
+    }
+}
+
+async fn task_update_handler(
+    Json(input): Json<task::TaskUpdateInput>,
+) -> Json<serde_json::Value> {
+    let Some(store) = task::get_task_store() else {
+        return Json(serde_json::json!({
+            "ok": false,
+            "error": "task store not initialized"
+        }));
+    };
+    // Reuses `TaskStore::update`, which:
+    //   * rejects updates on Running/Verifying tasks (state-machine guard),
+    //   * applies mode-transition hygiene (clearing recurring fields when
+    //     `executionMode` flips to Once etc.),
+    //   * projects schedule/notification/override changes back to the linked
+    //     CronTask via `update_task_fields`, so a CLI patch like
+    //     `--intervalMinutes 180` actually re-arms the scheduler.
+    match store.update(input).await {
+        Ok(task) => {
+            let docs = match task::build_task_docs(&task.id) {
+                Ok(d) => d,
+                // Doc dir absence is non-fatal — surface the task without
+                // docs paths so the caller still sees the update result.
+                Err(_) => task::TaskDocs {
+                    dir: String::new(),
+                    task_md: String::new(),
+                    verify_md: None,
+                    progress_md: None,
+                    alignment_md: None,
+                },
+            };
+            Json(serde_json::json!({
+                "ok": true,
+                "task": task::TaskWithDocs { task, docs },
+            }))
         }
         Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
     }
