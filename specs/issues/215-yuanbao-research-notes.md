@@ -324,3 +324,134 @@ match sender.send(msg).await {     // mpsc::Sender::send，纯 enqueue
 - Q3 weixin-cli 未装无法核 → owner 决策前 npm view 一下
 - `/send-text` 的 IM-command / handover / cron 三类 standalone 调用与 dispatch 上下文无关，需要 `/send-text` handler 主动 query pending-dispatch (`getPendingDispatch(chatId)`) → 有 → 走 deliver；无 → 走 plugin.sendText。但此改动**今天不一定要落**——A 方案的核心是 bypass path 自己注册 pending-dispatch 阻塞，AI reply 通过 reply_router → finalize_stream → 合成 sendFinalReply → deliver，**根本不会走 /send-text**。standalone 调用维持原样。
 - SHIM_COMPAT_VERSION bump 会触发所有已安装 plugin 的 shim 重装；用户首次启动新版本会有 5-30s 等待。
+
+---
+
+## Round 2 Follow-ups (2026-05-19)
+
+### FU-1: 谁实际发送了 yuanbao 的 fallback 文本？
+
+**结论**: **在 owner 机器装的 yuanbao 2.13.1 dist 里，没有任何代码路径会发送 fallbackReply 文本**。`dispatch-reply.js` L173-181 只 `log.warn`，没 `sender.sendText(fallbackReply)`。穷尽搜索整个 yuanbao 包 + MyAgents Bridge + Rust IM，**找不到 fallback 文本的实际发送代码路径**。最可能的解释：**reporter 跑的不是 2.13.1**（或装了 patched 版本），有一份本机看不到的 sender.sendText(fallbackReply) 在那里。但即使 reporter 跑别的版本，**A 方案的核心假设依然成立** —— 因为如果 reporter 的 yuanbao 版本里 fallback 确实通过 `queueSession.push` / `sender.sendText` 触发，必然受 `!hasSentContent` 或 `!flushed` 这两个 guard 控制（Tests at L113-138 表明它绕不开），合成 deliver 让 `hasSentContent=true` 就会让 guard 跳过 fallback。
+
+**证据**:
+
+1. **dispatch-reply.js dist 2.13.1** (`~/.myagents/openclaw-plugins/openclaw-plugin-yuanbao/.../dispatch-reply.js`, MD5 `14cfa330c1f84e274c480739d1eeb810`, 202 行):
+   ```js
+   // L173-181:
+   if (!flushed && !hasSentContent && !ctx.abortSignal?.aborted) {
+       const { fallbackReply } = account;
+       if (fallbackReply) {
+           ctx.log.warn("[dispatch-reply] AI returned no reply content, using fallback reply");
+       } else {
+           ctx.log.warn("[dispatch-reply] AI returned no reply content");
+       }
+   }
+   ```
+   只 log。grep `sender\.|sendC2C|sendText` 全文件命中 3 处全是变量解构（`const { sender } = ctx;`）和 prereq check，**没有 `sender.sendText` 调用**。
+
+2. **dispatch-reply.test.js** (同目录) L113-138 期望 `sender.sendText("我暂时无法回答")` 被调，但 dist 不调。**TEST 与 DIST 不一致**。
+
+3. **pipeline 编排** (`pipeline/create.js`): 17 个 middleware 依次跑，`dispatchReply` 是 last。没有 wrapper / hook / decorator catch warn 转 send。`engine.js` 的 execute 是单向链，next() 跑完就完。
+
+4. **prepare-sender.js** L29-31 的 `onComplete: () => ctx.log.debug(...)`：纯 log，没有 fallback 发送。
+
+5. **outbound/queue.js** flush 实现 (L52-56 immediate / L89-121 mergeOnFlush / L245-255 merge-text): `flush()` 只 await sendChain + return hasSentContent。**没 push 过的内容不会被 flush 出去**。
+
+6. **channel-shared.js** L57 提到 `fallbackReply` 仅在 `deleteAccount.clearBaseFields` 列表里（删账号时清字段名），不是发送路径。
+
+7. **channel.js L129-148** `channel.outbound.sendText` 是 plugin **top-level** sendText handler（Bridge `/send-text` endpoint 调它），不被 dispatch-reply 调。链路是 `Rust send_message → Bridge /send-text → capturedPlugin.sendText → channel.outbound.sendText → handleAction → handler.js's sender.send → wsClient.sendC2CMessage`。这条 chain 解释了 `[yuanbao][ws] [C2C] preparing to send message` 日志——但**触发它的只能是 Rust 端 send_message 调用，不是 yuanbao 自己的 fallback warn**。
+
+8. **MyAgents 侧 grep**: `src/server` + `src-tauri/src` 全文搜 `"暂时无法解答"` / `"fallbackReply"` / `"换个问题问问"` —— 零命中。Rust 端不知道 yuanbao 的 fallback 文本，**不可能由 MyAgents 主动发**。
+
+**置信度**: high（owner 机器 2.13.1 dist 行为）；low（reporter 真实跑的版本）。
+
+**对 A 方案的影响**: **unblock，但需要 owner 跟 reporter 核对版本**。如果 reporter 版本和 owner 一致（2.13.1），那 reporter 的 log 截图可能误植/混淆（fallback warn 和 5s 后真实回复同 ms？不可能）。如果 reporter 跑的是别的版本，A 方案修法仍然有效（只要 fallback 的发送 guard 是 `hasSentContent`/`flushed`，灌 deliver 就能压住）。
+
+**未解 / 需 owner 跟 reporter 确认的**:
+- reporter 机器的 yuanbao 版本（`~/.myagents/openclaw-plugins/openclaw-plugin-yuanbao/node_modules/openclaw-plugin-yuanbao/package.json` 的 version 字段）
+- 让 reporter 给一段完整 unified-*.log 摘录（含 dispatch ENTER/EXIT、send_message、message-complete 全部行），不是手写截图
+
+---
+
+### FU-2: builtin SDK + yuanbao 真实日志验证 H2
+
+**结论**: **owner 机器 30 天日志（unified-2026-04-19 → 2026-05-19）零 yuanbao 流量**。无法从本地日志确证 H2。但同档期 feishu/lark 跑过的 dispatch（包括今天 2026-05-19）能确认 **bypass path 在 builtin SDK 下也命中**，且发出后 plugin 不会触发"AI returned no reply" warn（feishu 没这个 middleware）。所以 feishu 上观察不到双发不能反推 yuanbao 没双发——他俩的 dispatch-reply 链路完全不同。
+
+**证据**:
+
+1. **本机 30 天 unified-*.log 中 yuanbao 流量** (`grep -l yuanbao /Users/zhihu/.myagents/logs/unified-*.log`)：
+   - `unified-2026-05-11.log` — 8 行命中，全是 SDK shim 的 "Bridge mode" 日志（plugin loading 而非 dispatch）
+   - `unified-2026-05-18.log` — 3 行命中（同上）
+   - `unified-2026-05-19.log` — 21 行命中（全是 AI 调研本 issue 时打的命令噪音）
+   - **没有任何一行实际的 `[yuanbao][pipeline]` / `[yuanbao][ws]` runtime 日志**。owner 机器从未跑过 yuanbao plugin 处理用户消息。
+
+2. **同期 feishu 跑过 bypass path**（确认 bypass path 是 hot path，不是 dead code）:
+   ```
+   2026-05-19 02:46:56.995 [bridge-out][fb49ede4] [compat-timing] dispatchReplyFromConfig ENTER
+   2026-05-19 02:46:56.995 [bridge-out][fb49ede4] [compat-timing] dispatchReplyWithBufferedBlockDispatcher ENTER: chat=ou_..., len=4
+   2026-05-19 02:46:56.998 [bridge-out][fb49ede4] [compat-timing] dispatchReplyFromConfig EXIT (fallback) (+5ms)
+   2026-05-19 02:46:56.998 [bridge-out][fb49ede4] [plugin] feishu[default]: dispatch complete (queuedFinal=0, replies=undefined)
+   ```
+   feishu 也 `hasProtocolCallbacks=false` → bypass → 5ms return。**今天 owner 的 feishu 跑的就是 builtin SDK runtime**（`[sse] chat:system-init -> ..."runtime":"builtin"...`），共 8 个 dispatch (+2ms ~ +11ms)。但 feishu 没有 fallback warn 因为它没 yuanbao 那条 middleware。
+
+3. **feishu builtin runtime 完整 turn 时序**（2026-05-19 13:35）:
+   ```
+   13:35:16.212 [agent][sdk] Broadcasting chat:message-complete (output_tokens=107708)
+   13:35:16.301 [bridge:openclaw-lark] send_message: textLen=1676  ← AI 真实回复
+   13:35:19.545 [bridge:openclaw-lark] send_message_returning_id: textLen=12  ← 下一轮 thinking 占位
+   ```
+   AI 完成 → 90ms 后真实回复发到 feishu via send_message → 单发。**feishu 上没有双发**。但这不能推论 yuanbao —— 缺 fallback middleware ≠ 缺 double-send 路径。
+
+4. **2026-05-19 02:46:56.997 的 33 byte send_message 异常**: `[bridge:openclaw-lark] send_message: textLen=33` 在 `dispatchReplyWithBufferedBlockDispatcher ENTER` 后 2ms、`dispatchReplyFromConfig EXIT (fallback)` 前 1ms 触发。**Rust 端在 bypass dispatch 跑的同时主动发了一条 33-byte 消息**。可能候选：handover.rs:409 通知 / im/mod.rs:1579-1609 command 回执 / cron 推送 / 启动前 queued 事件。**这条不在 reply_router 的 dispatch 上下文里**——说明今天的 feishu 路径里 `/send-text` **被非-dispatch 路径主动调用**，A 方案的 standalone-bypass 设计（不改 /send-text）仍然安全。
+
+**置信度**: high（本机无 yuanbao）；medium（H2 状态：从 feishu 间接推测但不能直接断言 yuanbao 也单发或双发）。
+
+**对 A 方案的影响**: **partial unblock**。bypass path 是 hot path 确认；H2 直接判定仍然 owner 需手动复现。
+
+**最小复现给 owner（5 步以内）**:
+
+1. 装 yuanbao plugin: 在 MyAgents 启动后 → Settings → IM Bot → 添加腾讯元宝 → 走完 OAuth / Token 流程
+2. 把 Agent 的 `runtimeConfig.runtime` 切到 `builtin`（不是 claude-code / codex）。或者直接选个走 builtin 的 Agent 绑给 yuanbao。
+3. 在元宝里发一条 12 字以内的中文消息
+4. `tail -F ~/.myagents/logs/unified-$(date +%Y-%m-%d).log | grep -E "yuanbao|dispatch-reply|send_message|message-complete"`
+5. 观察是否出现：
+   - 在 `message-complete` 之前先有 `[yuanbao][pipeline] [dispatch-reply] AI returned no reply content` warn（→ 触发 fallback 路径，H2 成立）
+   - 之后 5s 内 AI 回复经 Rust send_message 发回（→ 双发，需要 A 方案）
+
+如果第 5 步**没看到** fallback warn —— 那说明 owner 装的 2.13.1 跟 reporter 装的版本不一样，需要让 reporter 给 yuanbao version。
+
+---
+
+### FU-3: weixin-cli 形状
+
+**结论**: **`openclaw-weixin-cli` 不在公开 npm 上**（`npm view ... E404`）。本地 `~/.myagents/openclaw-plugins/openclaw-weixin-cli/` 是个**占位目录**，唯一文件 `package.json` 内容是 `{"name":"openclaw-weixin-cli","private":true,"version":"1.0.0"}`，没 dependencies、没 node_modules、没 implementation。可视作"未启用"——**A 方案 day-1 不需要为 weixin-cli 留 escape hatch**。
+
+**证据**:
+
+1. `npm view openclaw-weixin-cli versions --json` → `E404 Not Found - GET https://registry.npmjs.org/openclaw-weixin-cli`
+2. `find /Users/zhihu/.myagents/openclaw-plugins/openclaw-weixin-cli -type f` → 仅一个文件：`package.json`
+3. `cat .../openclaw-weixin-cli/package.json` → `{"name":"openclaw-weixin-cli","private":true,"version":"1.0.0"}`（无 dependencies / main / 任何实际代码）
+4. 对比 sibling `openclaw-weixin/package.json`: `{"name":"openclaw-weixin","private":true,"version":"1.0.0","dependencies":{"@tencent-weixin/openclaw-weixin":"^2.4.3"}}` —— **openclaw-weixin 是真插件，openclaw-weixin-cli 是空 stub**。
+
+**Round 1 Q3 表格更新行**:
+
+| Plugin | 文件 | 有 `dispatcherOptions.deliver` | deliver 行为 | 有 fallback 分支 | 与合成 deliver 兼容性 |
+|---|---|---|---|---|---|
+| openclaw-weixin-cli | **stub（仅 package.json）** | **N/A** | N/A | N/A | **N/A — 未启用，A 方案无需覆盖** |
+
+**置信度**: high。
+
+**对 A 方案的影响**: **unblock**。weixin-cli 不需要进 day-1 兼容矩阵；将来如果 weixin-cli 真发布，再补一轮调研。
+
+---
+
+### Round 1 颠覆性证据汇总
+
+1. **FU-1 颠覆点**: Round 1 Q1 副发现说"dist 与 test 不一致"——Round 2 穷尽搜索后**坐实**：yuanbao 2.13.1 dist 完全没有 fallback 发送代码路径，连 wrapper / hook / decorator 都没有。reporter 看到的 fallback send 必然来自其它来源（最可能：reporter 跑别的版本）。**A 方案修法不受影响**，但 reporter 版本待确认。
+2. **FU-2 中性证据**: 本机 30 天日志只跑 feishu/lark/weixin，零 yuanbao。今天看到的 feishu builtin runtime + bypass path 8 次 dispatch 都**单发**——但这是因为 feishu 缺 dispatch-reply middleware，**不能推论 yuanbao 也单发**。H2 仍未直接确证，但 A 方案的 architecture 假设（bypass path 跑过、deliver 不灌 → plugin 见不到 content）已经在 feishu 上 100% 复现。
+3. **FU-3 unblock 点**: weixin-cli 是 stub，A 方案不用为它留 escape hatch。Round 1 风险点矩阵能去掉一行。
+4. **新发现的 Rust /send-text 主动调用路径**: 2026-05-19 02:46:56.997 的 33-byte send_message 在 bypass dispatch 跑的同时被 Rust 主动调，**不在 reply_router 的 dispatch 上下文里**——说明 Round 1 Q2 表里的 standalone 调用方（command/handover/cron）确实在生产里会被打中。A 方案保持"不改 /send-text"是正确选择。
+
+### 一行决策建议
+
+**A 方案可以动手 — 但 owner 先（1）让 reporter 报 yuanbao 版本号 + 给完整 unified-*.log 摘录确认 fallback 真实发送路径；（2）owner 本机手动跑一遍 builtin+yuanbao（FU-2 5 步复现）确认 H2。两件 5 分钟内可完成 —— 完成后即可开工。**
