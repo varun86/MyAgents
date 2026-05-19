@@ -157,6 +157,7 @@ function sanitizeParams(params: EventParams): EventParams {
 const SESSION_SCOPED_AUTO_INJECT_EVENTS: ReadonlySet<string> = new Set([
   'session_new',
   'session_switch',
+  'session_fork',          // Chat.tsx:2797 — fork from an existing session, intrinsically session-scoped
   'session_rewind',
   'session_title_edit',
   'message_send',
@@ -168,6 +169,7 @@ const SESSION_SCOPED_AUTO_INJECT_EVENTS: ReadonlySet<string> = new Set([
   'tool_use',
   'permission_grant',
   'permission_deny',
+  'skill_use',             // AgentCapabilitiesPanel — fires during an active turn
 ]);
 
 /**

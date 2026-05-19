@@ -316,14 +316,18 @@ export default function TabProvider({
     }, [appConfig, agentDir]);
 
     // PRD 0.2.19 cross-review fix (B2): Tab-scoped track wrapper that always
-    // attaches THIS tab's session_id (from `currentSessionIdRef`), not the
-    // global Active Context. Without this, SSE callbacks that fire on an
-    // inactive Tab inherit the foreground Tab's session_id from `setAnalyticsContext`,
-    // join to the wrong session, and make multi-tab analytics actively misleading
-    // (Codex BLOCKER #1). Stable callback — uses ref so always reads latest id.
+    // attaches THIS tab's session_id (from `currentSessionIdRef`) AND tab_id
+    // (from the closure-captured `tabId` prop), not the global Active Context.
+    //
+    // Without this, SSE callbacks that fire on an inactive Tab inherit the
+    // foreground Tab's session_id/tab_id from `setAnalyticsContext`, join to
+    // the wrong session/tab, and make multi-tab analytics actively misleading
+    // (Codex BLOCKER #1 + cross-review fix: tab_id was previously bypassed).
+    // Stable callback — `tabId` is a stable prop, `currentSessionIdRef` is a
+    // ref so it always reads the latest id.
     const trackTabEvent = useCallback((event: string, params: Record<string, string | number | boolean | null | undefined> = {}): void => {
-        track(event, { session_id: currentSessionIdRef.current ?? null, ...params });
-    }, []);
+        track(event, { session_id: currentSessionIdRef.current ?? null, tab_id: tabId, ...params });
+    }, [tabId]);
 
     // ── Split message state: history (stable during streaming) + streaming (updates on every SSE event)
     const [historyMessages, setHistoryMessages] = useState<Message[]>([]);
@@ -1908,8 +1912,13 @@ export default function TabProvider({
                             // (user must type after); the other surfaces all carry a first
                             // message (either typed in launcher or piggybacked on agent_card).
                             const hasInitialMessage = surface !== 'new_chat_button';
+                            // Explicit tab_id — this track call is inside an SSE handler
+                            // that may fire on a backgrounded tab; without an explicit value
+                            // it would inherit the foreground tab's tab_id from Active Context.
+                            // (cross-review fix matching trackTabEvent's behavior.)
                             track('session_new', {
                                 session_id: newSessionId,
+                                tab_id: tabId,
                                 triggered_by: surface,
                                 runtime: meta.runtime,
                                 has_initial_message: hasInitialMessage,

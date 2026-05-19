@@ -23,8 +23,9 @@
  * 不影响整体聚合）。预热路径：App.tsx 在 config.agents 加载后批量调
  * hashAgentName 预填缓存。
  *
- * 缓存采用 bounded LRU（上限 1000，FIFO 驱逐）。1000 个不同 Agent 远超
- * 实际产品场景，但避免极端用户/恶意场景内存泄漏。
+ * 缓存采用 bounded LRU（上限 1000）。命中时 delete+set 把条目移到末尾刷新
+ * 顺序；满时驱逐最早条目。1000 个不同 Agent 远超实际产品场景，但避免极端
+ * 用户/恶意场景内存泄漏。
  */
 
 const PEPPER_KEY = 'myagents_analytics_pepper';
@@ -63,7 +64,13 @@ function getOrCreatePepper(): string {
 export async function hashAgentName(name: string | null | undefined): Promise<string | null> {
   if (!name) return null;
   const cached = cache.get(name);
-  if (cached) return cached;
+  if (cached !== undefined) {
+    // Touch on hit so Map iteration order reflects true recency (LRU, not FIFO).
+    // Cheap — Map.delete + set is O(1) and the cache caps at 1000 entries.
+    cache.delete(name);
+    cache.set(name, cached);
+    return cached;
+  }
 
   try {
     const pepper = getOrCreatePepper();
@@ -75,7 +82,9 @@ export async function hashAgentName(name: string | null | undefined): Promise<st
       .map((b) => b.toString(16).padStart(2, '0'))
       .join('');
 
-    // Bounded LRU — evict oldest (insertion order) when at capacity.
+    // Bounded LRU — evict least-recently-used when at capacity. Map iteration
+    // is insertion order, and we re-insert on hit above, so the first key is
+    // the LRU victim.
     if (cache.size >= MAX_CACHE_SIZE) {
       const firstKey = cache.keys().next().value;
       if (firstKey !== undefined) cache.delete(firstKey);
@@ -98,7 +107,11 @@ export async function hashAgentName(name: string | null | undefined): Promise<st
 export function hashAgentNameSync(name: string | null | undefined): string | null {
   if (!name) return null;
   const cached = cache.get(name);
-  if (cached) return cached;
+  if (cached !== undefined) {
+    cache.delete(name);
+    cache.set(name, cached);
+    return cached;
+  }
 
   if (!pending.has(name)) {
     pending.add(name);

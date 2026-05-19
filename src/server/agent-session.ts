@@ -1492,6 +1492,14 @@ let currentTurnStartTime: number | null = null;
 let currentTurnToolCount = 0;
 // Whether the current turn produced any visible assistant text output
 let currentTurnHasOutput = false;
+// Whether the current turn observed any non-init SDK frame (assistant /
+// user / tool_result / stream_event / result / rate_limit_event etc.).
+// Cheaper signal than currentTurnHasOutput — flips on the FIRST substantive
+// SDK frame, before the assistant message is fully assembled. Used by the
+// inactivity watchdog to decide whether to set pendingContinueAfterAbort
+// (replaces the previous `messageCount > 3` heuristic, which was both
+// cumulative across turns and brittle against SDK init-framing changes).
+let turnHadSubstantiveActivity = false;
 // Browser tool tracking for storage-state auto-save
 // Tracks whether any browser_* MCP tools were used in the current session,
 // and whether browser_storage_state was called (to avoid redundant save).
@@ -1524,19 +1532,17 @@ const currentTurnTextBlocks: string[] = [];
 // SDK for-await loop) aborts a turn that produced real output, the
 // SessionMetadata gets `pendingContinueAfterAbort=true`. The next
 // `enqueueUserMessage` call against this session reads the flag,
-// synchronously test-and-sets the in-process guard, clears the disk
-// flag, and recursively enqueues a single system-reminder turn before
-// the caller's actual message — letting the model resume from
-// existing context.
+// synchronously test-and-sets the per-session guard, recursively
+// enqueues a single system-reminder turn, then (on success) clears
+// the disk flag and marks the per-process cap.
 //
-// `consumingPendingContinue` is the synchronous mutex preventing two
-// concurrent enqueueUserMessage callers from each injecting a reminder
-// for the same abort. The window where it matters is brief (one
-// `await updateSessionMetadata(...)` + one recursive enqueue) but the
-// guard guarantees at most one reminder per abort even under burst
-// traffic (e.g. user sends two messages in quick succession after
-// returning to an aborted session).
-let consumingPendingContinue = false;
+// `consumingPendingContinueSessions` is a per-session synchronous lock
+// preventing two concurrent enqueueUserMessage callers against the SAME
+// session from each injecting a reminder. Per-session (not global) so
+// two different sessions consuming their own flags in parallel don't
+// block each other — cross-review caught the global lock as a real
+// correctness issue (second session would silently skip consume).
+const consumingPendingContinueSessions = new Set<string>();
 
 // Cap auto-Continue at exactly ONE injection per sessionId per sidecar
 // process lifetime. Without this cap, the chain
@@ -1548,6 +1554,11 @@ let consumingPendingContinue = false;
 // otherwise re-arm the flag. Capping per-session here is the structural
 // guarantee that the user's "避免循环重试" requirement holds even under
 // the partial-output-then-hang scenario.
+//
+// The Set is added to ONLY after a successful reminder enqueue (post-await,
+// post-session-switch-verification). If the reminder rejects (queue full)
+// or a switchToSession races, neither the disk flag nor this Set is
+// updated — the next legit enqueue on the original session re-attempts.
 //
 // New sidecar process = new Set = one fresh auto-Continue allowed (e.g.,
 // user opens an aborted-cron session hours later in chat). That's
@@ -1574,6 +1585,7 @@ function resetTurnUsage(): void {
   currentTurnStartTime = null;
   currentTurnToolCount = 0;
   currentTurnHasOutput = false;
+  turnHadSubstantiveActivity = false;
   currentTurnTextBlocks.length = 0;
   // Note: currentTurnInboxMeta is NOT reset here — it's bound on dequeue
   // (generator yield) and cleared at result handler / abort path.
@@ -6193,31 +6205,42 @@ export async function enqueueUserMessage(
   // user-turn *before* the caller's actual message so the model resumes
   // from existing context.
   //
-  // Clear-on-dispatch — disk flag is cleared synchronously BEFORE the
-  // recursive enqueue. If the reminder turn itself watchdog-aborts and
-  // produces output, the watchdog will set the flag again from scratch;
-  // if it aborts with zero output, no flag is set (empty-turn skip). Net:
-  // at most one auto-Continue per abort, no infinite retry loop possible.
+  // Invariants (cross-review hardened):
   //
-  // `consumingPendingContinue` is a synchronous in-process mutex covering
-  // the await window. Concurrent enqueueUserMessage callers see it set
-  // and skip the consume path — they enqueue their own messages normally,
-  // landing after the reminder in messageQueue.
+  //  1. `sessionIdSnapshot` captures module-level sessionId SYNCHRONOUSLY
+  //     before any await. Without this, a concurrent `switchToSession`
+  //     could mutate sessionId across the await in updateSessionMetadata
+  //     or the recursive enqueue — clearing the flag and/or sending the
+  //     reminder against the wrong session.
   //
-  // `autoResumeInjectedSessions.has(sessionId)` is the per-process,
-  // per-session cap: at most one auto-Continue per sessionId per sidecar
-  // lifetime. Marked synchronously BEFORE the disk write + recursive
-  // enqueue to prevent any concurrent or follow-up call from re-injecting.
-  // See the Set's declaration for the loop-prevention rationale.
-  if (!consumingPendingContinue && !autoResumeInjectedSessions.has(sessionId)) {
-    const meta = getSessionMetadata(sessionId);
+  //  2. `consumingPendingContinueSessions` is a PER-SESSION lock, not
+  //     global. Two different sessions consuming their own flags
+  //     concurrently must not block each other.
+  //
+  //  3. Clear-on-SUCCESS — disk flag is cleared and per-process cap is
+  //     marked ONLY after the recursive enqueue succeeds AND we verify
+  //     no session switch raced through. If the recursive enqueue
+  //     rejects (queue full) or `sessionId !== sessionIdSnapshot`
+  //     post-await, leave the flag set so the next legit enqueue on
+  //     the original session re-attempts.
+  //
+  //  4. The recursive `enqueueUserMessage` itself awaits resetPromise,
+  //     so a switchToSession running between this call and the recursive
+  //     entry is serialized. But it would then route the reminder to
+  //     the NEW session — which is wrong. The post-await sessionId
+  //     check catches that case; we can't un-enqueue the reminder but
+  //     we MUST preserve the original session's flag for retry.
+  const sessionIdSnapshot = sessionId;
+  if (
+    !consumingPendingContinueSessions.has(sessionIdSnapshot) &&
+    !autoResumeInjectedSessions.has(sessionIdSnapshot)
+  ) {
+    const meta = getSessionMetadata(sessionIdSnapshot);
     if (meta?.pendingContinueAfterAbort) {
-      consumingPendingContinue = true; // sync test-and-set
-      autoResumeInjectedSessions.add(sessionId); // mark sync BEFORE await
+      consumingPendingContinueSessions.add(sessionIdSnapshot); // sync test-and-set
       try {
-        await updateSessionMetadata(sessionId, { pendingContinueAfterAbort: false });
-        console.log(`[agent] Consuming pendingContinueAfterAbort for session ${sessionId}, injecting reminder turn`);
-        await enqueueUserMessage(
+        console.log(`[agent] Consuming pendingContinueAfterAbort for session ${sessionIdSnapshot}, injecting reminder turn`);
+        const reminderResult = await enqueueUserMessage(
           WATCHDOG_RESUME_REMINDER,
           undefined,        // images
           permissionMode,   // inherit caller's permission mode
@@ -6227,10 +6250,28 @@ export async function enqueueUserMessage(
           undefined,        // requestId — synthetic, no IM trace
           undefined,        // inboxMeta — synthetic, no inbox pushback
         );
+
+        if (sessionId !== sessionIdSnapshot) {
+          // switchToSession raced between our call and the recursive
+          // enqueue's resetPromise wait — reminder went to the new
+          // session. Preserve the original session's flag for retry;
+          // do NOT clear it or mark the per-process cap.
+          console.error(`[agent] Reminder enqueue raced session switch ${sessionIdSnapshot} → ${sessionId}; flag for ${sessionIdSnapshot} preserved for retry`);
+        } else if (reminderResult.error) {
+          // Queue rejection — preserve flag for retry, same rationale.
+          console.error(`[agent] Reminder enqueue rejected (${reminderResult.error}); flag for ${sessionIdSnapshot} preserved for retry`);
+        } else {
+          // Success path — reminder is in the right session's queue.
+          // Clear disk flag + mark per-process cap, both against the
+          // snapshot (not module-level) so a switch race after this
+          // point still targets the correct session.
+          await updateSessionMetadata(sessionIdSnapshot, { pendingContinueAfterAbort: false });
+          autoResumeInjectedSessions.add(sessionIdSnapshot);
+        }
       } catch (e) {
         console.error('[agent] Failed to inject Continue reminder turn:', e);
       } finally {
-        consumingPendingContinue = false;
+        consumingPendingContinueSessions.delete(sessionIdSnapshot);
       }
     }
   }
@@ -8440,13 +8481,17 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         // inside `abortPersistentSession()`, is what guarantees only
         // watchdog-driven aborts trigger the delayed Continue.
         //
-        // Empty-turn skip uses `messageCount > 3` (more than the 3 boilerplate
-        // SDK init frames: session_state_changed, system_init, status). A turn
-        // that received any user/assistant/stream_event/tool_result frame had
-        // real activity. `currentTurnTextBlocks` is NOT a reliable signal here
-        // because it is gated by `currentTurnInboxMeta` at the push site —
-        // non-inbox sessions (cron / desktop / IM-bot non-inbox) never
-        // populate it. (Caught in review-by-cc / review-by-codex.)
+        // Empty-turn skip uses the semantic `turnHadSubstantiveActivity`
+        // flag (set on first non-init SDK frame in the for-await loop;
+        // reset by `resetTurnUsage()` at turn start). This replaced the
+        // earlier `messageCount > 3` heuristic, which had two problems:
+        // (1) messageCount is cumulative across turns in a persistent
+        // session, so turn N>1 that aborted with zero activity still
+        // satisfied >3 from earlier turns; (2) the "3 init frames"
+        // assumption is brittle against SDK init-framing changes.
+        // `currentTurnTextBlocks` was also rejected — gated by
+        // `currentTurnInboxMeta`, never populated on cron / desktop /
+        // IM-bot non-inbox sessions. (Caught in cross-review.)
         //
         // `sessionId` is module-level and could mutate during the
         // `await updateSessionMetadata` below if `switchToSession` runs
@@ -8457,17 +8502,16 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         // Persist BEFORE `abortPersistentSession()` to maximize the window
         // for the file write to complete before the sidecar tears down
         // (cron sidecars in particular shut down ~1s after abort).
-        const turnProducedOutput = messageCount > 3;
         const watchdogSessionId = sessionId;
-        if (turnProducedOutput) {
+        if (turnHadSubstantiveActivity) {
           try {
             await updateSessionMetadata(watchdogSessionId, { pendingContinueAfterAbort: true });
-            console.log(`[agent] Watchdog: marked session ${watchdogSessionId} pendingContinueAfterAbort=true (messageCount=${messageCount})`);
+            console.log(`[agent] Watchdog: marked session ${watchdogSessionId} pendingContinueAfterAbort=true (turnHadSubstantiveActivity=true)`);
           } catch (e) {
             console.error('[agent] Watchdog: failed to persist pendingContinueAfterAbort:', e);
           }
         } else {
-          console.log(`[agent] Watchdog: turn produced no SDK output (messageCount=${messageCount}) — skipping pendingContinueAfterAbort`);
+          console.log(`[agent] Watchdog: turn had no substantive SDK activity — skipping pendingContinueAfterAbort`);
         }
 
         broadcast('chat:agent-error', {
@@ -8481,6 +8525,19 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     for await (const sdkMessage of querySession) {
       messageCount++;
       lastSdkEventAt = Date.now();
+      // Flip turn-scoped substantive-activity flag on first non-init frame.
+      // `system/init` is the boilerplate startup frame and must not count
+      // as "this turn produced output" for the watchdog auto-resume decision.
+      // Everything else (assistant / user / tool_result / stream_event /
+      // result / rate_limit_event / system non-init) is real activity.
+      if (!turnHadSubstantiveActivity) {
+        const isBoilerplateInit =
+          sdkMessage.type === 'system' &&
+          (sdkMessage as { subtype?: string }).subtype === 'init';
+        if (!isBoilerplateInit) {
+          turnHadSubstantiveActivity = true;
+        }
+      }
       // stream_event is high-frequency (per token delta) — skip logging entirely.
       // All other types are low-frequency and logged with type-specific detail:
       //   system/init  — full JSON dump (once per session, all fields for diagnostics)

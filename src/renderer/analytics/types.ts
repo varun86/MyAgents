@@ -161,7 +161,8 @@ export interface SessionNewParams {
   runtime: AnalyticsRuntime;
   /** session 创建时是否带了首条消息（Agent card 点击 / launcher 输入 = true） */
   has_initial_message: boolean;
-  /** SHA256(deviceId + agent_name) 前 16 字节 hex；无绑定 agent 填 null */
+  /** SHA-256(local_pepper + ':' + agent_name) 前 16 字节 hex；pepper 永不上传，
+   *  无绑定 agent 填 null。详见 `analytics/hash.ts`。 */
   agent_hash: string | null;
 }
 
@@ -172,7 +173,8 @@ export interface SessionNewParams {
  * 走 `history_open` 路径。
  */
 export interface WorkspaceOpenParams {
-  /** SHA256(deviceId + agent_name) 前 16 字节 hex；无绑定 agent 填 null */
+  /** SHA-256(local_pepper + ':' + agent_name) 前 16 字节 hex；pepper 永不上传，
+   *  无绑定 agent 填 null。详见 `analytics/hash.ts`。 */
   agent_hash: string | null;
   /** 目标工作区的 runtime */
   runtime: AnalyticsRuntime;
