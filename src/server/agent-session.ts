@@ -1518,6 +1518,50 @@ let currentTurnInboxMeta: import('./inbox/types').InboxTurnMeta | undefined = un
 // inbox reply pushback to assemble the reply body. Reset at turn start.
 const currentTurnTextBlocks: string[] = [];
 
+// ─── Delayed Continue (watchdog-driven session resume) ────────────────────
+//
+// When the inactivity watchdog (`apiWatchdogId` setInterval below the
+// SDK for-await loop) aborts a turn that produced real output, the
+// SessionMetadata gets `pendingContinueAfterAbort=true`. The next
+// `enqueueUserMessage` call against this session reads the flag,
+// synchronously test-and-sets the in-process guard, clears the disk
+// flag, and recursively enqueues a single system-reminder turn before
+// the caller's actual message — letting the model resume from
+// existing context.
+//
+// `consumingPendingContinue` is the synchronous mutex preventing two
+// concurrent enqueueUserMessage callers from each injecting a reminder
+// for the same abort. The window where it matters is brief (one
+// `await updateSessionMetadata(...)` + one recursive enqueue) but the
+// guard guarantees at most one reminder per abort even under burst
+// traffic (e.g. user sends two messages in quick succession after
+// returning to an aborted session).
+let consumingPendingContinue = false;
+
+// Cap auto-Continue at exactly ONE injection per sessionId per sidecar
+// process lifetime. Without this cap, the chain
+//   watchdog abort → consume + inject reminder → reminder turn produces 1 byte
+//   then itself watchdog-aborts → flag re-set → user's next message consumes
+//   again → reminder again → ...
+// would loop. The empty-turn skip in the watchdog catches "the API is dead"
+// turns, but a reminder turn that gets *some* output before stalling would
+// otherwise re-arm the flag. Capping per-session here is the structural
+// guarantee that the user's "避免循环重试" requirement holds even under
+// the partial-output-then-hang scenario.
+//
+// New sidecar process = new Set = one fresh auto-Continue allowed (e.g.,
+// user opens an aborted-cron session hours later in chat). That's
+// intentional, matching the spec.
+const autoResumeInjectedSessions = new Set<string>();
+
+// Synthetic user-turn content injected by the Delayed Continue path.
+// Kept short and in English: the SDK's system-reminder convention
+// expects compact, model-readable instructions, not verbose user-facing
+// copy. Sent as a user turn (no special metadata) so it appears in
+// session history exactly once and is durable across sidecar restarts.
+const WATCHDOG_RESUME_REMINDER =
+  '<system-reminder>The previous turn was aborted by the inactivity watchdog (10-minute timeout). Resume from existing context and complete the unfinished task.</system-reminder>';
+
 function resetTurnUsage(): void {
   currentTurnUsage = {
     inputTokens: 0,
@@ -6142,6 +6186,55 @@ export async function enqueueUserMessage(
     return { queued: false };
   }
 
+  // ─── DELAYED CONTINUE (consume flag) ──────────────────────────────────
+  // If the previous turn on this session was aborted by the inactivity
+  // watchdog *and* produced real model output, the SessionMetadata
+  // carries `pendingContinueAfterAbort=true`. Inject one system-reminder
+  // user-turn *before* the caller's actual message so the model resumes
+  // from existing context.
+  //
+  // Clear-on-dispatch — disk flag is cleared synchronously BEFORE the
+  // recursive enqueue. If the reminder turn itself watchdog-aborts and
+  // produces output, the watchdog will set the flag again from scratch;
+  // if it aborts with zero output, no flag is set (empty-turn skip). Net:
+  // at most one auto-Continue per abort, no infinite retry loop possible.
+  //
+  // `consumingPendingContinue` is a synchronous in-process mutex covering
+  // the await window. Concurrent enqueueUserMessage callers see it set
+  // and skip the consume path — they enqueue their own messages normally,
+  // landing after the reminder in messageQueue.
+  //
+  // `autoResumeInjectedSessions.has(sessionId)` is the per-process,
+  // per-session cap: at most one auto-Continue per sessionId per sidecar
+  // lifetime. Marked synchronously BEFORE the disk write + recursive
+  // enqueue to prevent any concurrent or follow-up call from re-injecting.
+  // See the Set's declaration for the loop-prevention rationale.
+  if (!consumingPendingContinue && !autoResumeInjectedSessions.has(sessionId)) {
+    const meta = getSessionMetadata(sessionId);
+    if (meta?.pendingContinueAfterAbort) {
+      consumingPendingContinue = true; // sync test-and-set
+      autoResumeInjectedSessions.add(sessionId); // mark sync BEFORE await
+      try {
+        await updateSessionMetadata(sessionId, { pendingContinueAfterAbort: false });
+        console.log(`[agent] Consuming pendingContinueAfterAbort for session ${sessionId}, injecting reminder turn`);
+        await enqueueUserMessage(
+          WATCHDOG_RESUME_REMINDER,
+          undefined,        // images
+          permissionMode,   // inherit caller's permission mode
+          model,            // inherit caller's model
+          providerEnv,      // inherit caller's provider env
+          undefined,        // metadata — synthetic, no source attribution
+          undefined,        // requestId — synthetic, no IM trace
+          undefined,        // inboxMeta — synthetic, no inbox pushback
+        );
+      } catch (e) {
+        console.error('[agent] Failed to inject Continue reminder turn:', e);
+      } finally {
+        consumingPendingContinue = false;
+      }
+    }
+  }
+
   // Session is "busy" if AI is streaming OR there are pending messages in
   // any of the three queues. This prevents config changes and turn-usage
   // resets during the brief gap between turns.
@@ -8327,7 +8420,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     const API_WATCHDOG_INTERVAL_MS = 30_000;
     const WATCHDOG_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes — unified for API and MCP tools
     let watchdogFired = false;
-    apiWatchdogId = setInterval(() => {
+    apiWatchdogId = setInterval(async () => {
       // Only check during active turns (not pre-warm, not idle between turns)
       if (!isStreamingMessage || isPreWarming) return;
       if (watchdogFired) return;
@@ -8338,6 +8431,45 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         watchdogFired = true;
         const toolInfo = inFlightToolCount > 0 ? `（${inFlightToolCount} 个工具执行中）` : '';
         console.error(`[agent] Watchdog: no SDK event for ${WATCHDOG_TIMEOUT_MS / 1000}s${toolInfo} — aborting`);
+
+        // ─── DELAYED CONTINUE (set flag) ─────────────────────────────────
+        // This is the ONE AND ONLY site that sets `pendingContinueAfterAbort`.
+        // `abortPersistentSession()` has multiple other callers (user ESC,
+        // config switch, provider switch, deferred restart, error fallbacks)
+        // — none of them touch this flag. Putting the set logic here, not
+        // inside `abortPersistentSession()`, is what guarantees only
+        // watchdog-driven aborts trigger the delayed Continue.
+        //
+        // Empty-turn skip uses `messageCount > 3` (more than the 3 boilerplate
+        // SDK init frames: session_state_changed, system_init, status). A turn
+        // that received any user/assistant/stream_event/tool_result frame had
+        // real activity. `currentTurnTextBlocks` is NOT a reliable signal here
+        // because it is gated by `currentTurnInboxMeta` at the push site —
+        // non-inbox sessions (cron / desktop / IM-bot non-inbox) never
+        // populate it. (Caught in review-by-cc / review-by-codex.)
+        //
+        // `sessionId` is module-level and could mutate during the
+        // `await updateSessionMetadata` below if `switchToSession` runs
+        // concurrently. Snapshot synchronously so the flag is persisted
+        // against the session that actually aborted, not whichever session
+        // happens to be current at await-resume time.
+        //
+        // Persist BEFORE `abortPersistentSession()` to maximize the window
+        // for the file write to complete before the sidecar tears down
+        // (cron sidecars in particular shut down ~1s after abort).
+        const turnProducedOutput = messageCount > 3;
+        const watchdogSessionId = sessionId;
+        if (turnProducedOutput) {
+          try {
+            await updateSessionMetadata(watchdogSessionId, { pendingContinueAfterAbort: true });
+            console.log(`[agent] Watchdog: marked session ${watchdogSessionId} pendingContinueAfterAbort=true (messageCount=${messageCount})`);
+          } catch (e) {
+            console.error('[agent] Watchdog: failed to persist pendingContinueAfterAbort:', e);
+          }
+        } else {
+          console.log(`[agent] Watchdog: turn produced no SDK output (messageCount=${messageCount}) — skipping pendingContinueAfterAbort`);
+        }
+
         broadcast('chat:agent-error', {
           message: `响应超时（10 分钟无活动${toolInfo}），已自动终止。请重试。`
         });
