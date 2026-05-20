@@ -118,21 +118,54 @@ label { font-size: 12px; font-weight: 600; color: var(--widget-text-secondary); 
     }
   });
 
-  // Execute script tags (innerHTML doesn't run them)
+  // Execute script tags in document order (innerHTML doesn't run them).
+  //
+  // A DOM-inserted <script src> loads ASYNCHRONOUSLY and does NOT block the
+  // next script — unlike a parser-inserted one. So replacing every <script> in
+  // one synchronous pass runs an inline "new Chart(...)" BEFORE the CDN
+  // chart.js it depends on has loaded → "Chart is not defined" (thrown inside
+  // this iframe, invisible to the parent console) → blank widget. Contract-
+  // compliant widgets dodge it via the documented onload="init()" + window.Lib
+  // fallback, but weaker / non-Claude models routinely emit the naive shape
+  // (issue #221: widgets blank on GLM etc.).
+  //
+  // Fix: walk scripts sequentially and BLOCK on each external script's load
+  // before running the next — replicating native parser-blocking order, so an
+  // inline script that references a CDN global always runs after it loads. We
+  // chain via load/error listeners and drop the script's own on* handler
+  // attributes: with external-before-inline guaranteed, the inline
+  // "if(window.Lib)init()" fallback covers init, while a stale onload="init()"
+  // firing before the inline defines init would otherwise throw or double-run.
   function runScripts() {
-    var scripts = root.querySelectorAll('script');
-    scripts.forEach(function(old) {
+    var scripts = Array.prototype.slice.call(root.querySelectorAll('script'));
+    var i = 0;
+    function runNext() {
+      if (i >= scripts.length) { requestAnimationFrame(reportHeight); return; }
+      var old = scripts[i++];
       var s = document.createElement('script');
-      if (old.src) { s.src = old.src; }
-      else { s.textContent = old.textContent; }
-      // Copy attributes (type, etc.)
+      // Copy attributes except src (set explicitly) and on* handlers (managed here).
       Array.from(old.attributes).forEach(function(attr) {
-        if (attr.name !== 'src') s.setAttribute(attr.name, attr.value);
+        if (attr.name === 'src' || /^on/i.test(attr.name)) return;
+        s.setAttribute(attr.name, attr.value);
       });
-      old.parentNode.replaceChild(s, old);
-    });
-    // Report height after scripts run
-    requestAnimationFrame(reportHeight);
+      if (old.src) {
+        s.src = old.src;
+        // Proceed once the external script settles. 'error' also advances so a
+        // blocked / failed CDN never stalls the chain; a watchdog covers the
+        // rare case where a hung connection fires neither event.
+        var advanced = false;
+        var advance = function() { if (advanced) return; advanced = true; runNext(); };
+        s.addEventListener('load', advance);
+        s.addEventListener('error', advance);
+        setTimeout(advance, 10000);
+        old.parentNode.replaceChild(s, old);
+      } else {
+        s.textContent = old.textContent;
+        old.parentNode.replaceChild(s, old); // inline scripts run synchronously
+        runNext();
+      }
+    }
+    runNext();
   }
 
   // Message handler

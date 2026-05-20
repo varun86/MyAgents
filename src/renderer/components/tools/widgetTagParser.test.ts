@@ -115,4 +115,57 @@ describe('widget tag false-positive guards', () => {
     expect(hasWidgetTags(input)).toBe(false);
     expect(parseWidgetTags(input)).toEqual([{ type: 'text', content: input }]);
   });
+
+  // issue #221: weaker / non-Claude models don't always honor the "tag on its
+  // own line" contract. A self-contained CLOSED widget emitted mid-line must
+  // still render — otherwise the whole message degrades to Markdown, which
+  // sanitizes away <style>/<canvas>/<svg> and leaves a blank gap.
+  test('mid-line closed widget (no leading newline) is still parsed', () => {
+    const input = '数据：<generative-ui-widget title="m"><div>x</div></generative-ui-widget> 完成';
+    expect(hasWidgetTags(input)).toBe(true);
+    const segs = parseWidgetTags(input);
+    expect(segs.map((s) => s.type)).toEqual(['text', 'widget', 'text']);
+    expect(segs[1]).toMatchObject({ type: 'widget', title: 'm', isComplete: true });
+    expect(segs[1]).toMatchObject({ code: '<div>x</div>' });
+    expect((segs[0] as { content: string }).content).toBe('数据：');
+  });
+
+  test('mid-line bare mention with no closing tag is still treated as text', () => {
+    const input = 'You can use <generative-ui-widget> somewhere in your reply.';
+    expect(hasWidgetTags(input)).toBe(false);
+    expect(parseWidgetTags(input)).toEqual([{ type: 'text', content: input }]);
+  });
+
+  // Regression guard (independent-review finding): prose explaining the widget
+  // syntax mentions BOTH tag strings on one line. The "mid-line closed widget"
+  // relaxation must NOT treat the span between them as a widget body.
+  test('prose mentioning both open and close tag strings mid-line stays text', () => {
+    const en = 'It wraps content between <generative-ui-widget> and </generative-ui-widget>, then renders.';
+    expect(hasWidgetTags(en)).toBe(false);
+    expect(parseWidgetTags(en)).toEqual([{ type: 'text', content: en }]);
+
+    const zh = '先输出 <generative-ui-widget> 标签，最后用 </generative-ui-widget> 结束即可。';
+    expect(hasWidgetTags(zh)).toBe(false);
+    expect(parseWidgetTags(zh)).toEqual([{ type: 'text', content: zh }]);
+  });
+
+  test('mid-line open whose only closing tag is inside inline code stays text', () => {
+    const input = 'Open with <generative-ui-widget> then close with `</generative-ui-widget>`.';
+    expect(hasWidgetTags(input)).toBe(false);
+    expect(parseWidgetTags(input)).toEqual([{ type: 'text', content: input }]);
+  });
+
+  test('mid-line bare mention before a real line-start widget does not swallow it', () => {
+    const input = [
+      'Mentioning <generative-ui-widget> inline here.',
+      '',
+      '<generative-ui-widget title="real">',
+      '<div>hi</div>',
+      '</generative-ui-widget>',
+    ].join('\n');
+    const segs = parseWidgetTags(input);
+    expect(segs.map((s) => s.type)).toEqual(['text', 'widget']);
+    expect(segs[1]).toMatchObject({ type: 'widget', title: 'real', isComplete: true });
+    expect((segs[0] as { content: string }).content).toContain('Mentioning <generative-ui-widget> inline here.');
+  });
 });

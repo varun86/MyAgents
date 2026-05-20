@@ -338,7 +338,7 @@ More explanatory text here...
 \`\`\`
 
 ## Rules
-- The opening \`<generative-ui-widget>\` tag MUST start a new line (leading indent allowed). The frontend parser anchors on line-start; mid-line tags are treated as literal text.
+- Put the opening \`<generative-ui-widget>\` tag on its own line (leading indent allowed). The parser also accepts a fully-closed widget mid-line, but a bare mid-line mention with no closing tag is treated as literal prose.
 - Content inside is a self-contained HTML fragment — NO <!DOCTYPE>, <html>, <head>, <body>
 - Structure for streaming: <style> first (short) → content HTML → <script> last
 - All explanatory text goes OUTSIDE the <generative-ui-widget> tags (in normal markdown)
