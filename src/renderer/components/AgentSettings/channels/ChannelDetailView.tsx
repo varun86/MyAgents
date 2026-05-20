@@ -15,7 +15,7 @@ import { listenWithCleanup } from '@/utils/tauriListen';
 import { useToast } from '@/components/Toast';
 import { useConfig } from '@/hooks/useConfig';
 import { getEffectiveModelAliases, getProviderModels, isProviderEnabled } from '@/config/types';
-import { patchAgentConfig, invokeStartAgentChannel } from '@/config/services/agentConfigService';
+import { patchAgentConfig, invokeStartAgentChannel, stopAndDisableAgentChannel } from '@/config/services/agentConfigService';
 import { resolveEffectiveConfig } from '../../../../shared/types/agent';
 import BotTokenInput from '../../ImSettings/components/BotTokenInput';
 import FeishuCredentialInput from '../../ImSettings/components/FeishuCredentialInput';
@@ -334,16 +334,19 @@ export default function ChannelDetailView({
 
         setToggling(true);
         try {
-            const { invoke } = await import('@tauri-apps/api/core');
             const isRunning = botStatusRef.current?.status === 'online' || botStatusRef.current?.status === 'connecting';
 
             if (isRunning) {
-                await invoke('cmd_stop_agent_channel', { agentId: agent.id, channelId });
+                // issue #219: helper persists enabled=false alongside the runtime stop.
+                // Equivalent to the prior inline (cmd_stop_agent_channel + patchChannel{enabled:false})
+                // pair, but the helper is the single source of truth so future stop call sites
+                // can't drift out of sync.
+                await stopAndDisableAgentChannel(agent, channelId);
                 if (isMountedRef.current) {
                     track('agent_channel_toggle', { platform: channelRef.current.type, enabled: false });
                     toastRef.current.success('Channel 已停止');
                     setBotStatus(null);
-                    await patchChannel({ enabled: false });
+                    onChanged();
                 }
             } else {
                 const ch = channelRef.current;
@@ -373,7 +376,7 @@ export default function ChannelDetailView({
         } finally {
             if (isMountedRef.current) setToggling(false);
         }
-    }, [agent.id, channelId, startChannelCmd, patchChannel]);
+    }, [agent, channelId, startChannelCmd, patchChannel, onChanged]);
 
     // Delete channel
     const executeDelete = useCallback(async () => {

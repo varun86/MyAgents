@@ -490,3 +490,42 @@ export async function invokeStartAgentChannel(
     },
   });
 }
+
+/**
+ * Stop a running agent channel AND persist `channel.enabled = false` so the
+ * channel stays stopped across app restarts (issue #219).
+ *
+ * Pair this with `invokeStartAgentChannel` — these two are the "user-initiated
+ * lifecycle" operations. They MUST be symmetric: start flips enabled to true,
+ * stop flips it to false. Otherwise auto_start_all_enabled_agent_channels in
+ * the Rust layer re-launches the channel on next app start despite the user
+ * having explicitly stopped it.
+ *
+ * DO NOT use this for:
+ *  - Transient stop+restart (e.g. credential refresh) — keep enabled untouched
+ *  - Channel deletion — remove from channels[] instead of flipping a flag
+ *  - Agent-level disable — patch `agent.enabled = false`, the auto-start
+ *    auto_start_all_enabled_agent_channels gate handles the rest
+ *
+ * Best-effort on the runtime stop: even if cmd_stop_agent_channel throws
+ * (channel might already be stopped, or sidecar lost), still persist the
+ * enabled=false to honor the user's intent.
+ */
+export async function stopAndDisableAgentChannel(
+  agent: AgentConfig,
+  channelId: string,
+): Promise<void> {
+  const { isTauriEnvironment } = await import('@/utils/browserMock');
+  if (isTauriEnvironment()) {
+    const { invoke } = await import('@tauri-apps/api/core');
+    try {
+      await invoke('cmd_stop_agent_channel', { agentId: agent.id, channelId });
+    } catch (e) {
+      console.warn('[agentConfigService] cmd_stop_agent_channel failed (continuing to persist disabled):', e);
+    }
+  }
+  const updatedChannels = (agent.channels ?? []).map(ch =>
+    ch.id === channelId ? { ...ch, enabled: false } : ch,
+  );
+  await patchAgentConfig(agent.id, { channels: updatedChannels });
+}

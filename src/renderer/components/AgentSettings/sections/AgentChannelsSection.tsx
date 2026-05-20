@@ -3,11 +3,10 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { Plus, X, Loader2 } from 'lucide-react';
-import { invoke } from '@tauri-apps/api/core';
 import type { AgentConfig, ChannelConfig, ChannelType } from '../../../../shared/types/agent';
 import type { AgentStatusData, ChannelStatusData } from '@/hooks/useAgentStatuses';
 import OverlayBackdrop from '@/components/OverlayBackdrop';
-import { invokeStartAgentChannel } from '@/config/services/agentConfigService';
+import { invokeStartAgentChannel, stopAndDisableAgentChannel } from '@/config/services/agentConfigService';
 import ChannelPlatformSelect from '../channels/ChannelPlatformSelect';
 import ChannelWizard from '../channels/ChannelWizard';
 import ChannelDetailView from '../channels/ChannelDetailView';
@@ -82,17 +81,18 @@ export default function AgentChannelsSection({ agent, status, onAgentChanged }: 
   const handleStopChannel = useCallback(async (channelId: string) => {
     setLoading(channelId);
     try {
-      await invoke('cmd_stop_agent_channel', {
-        agentId: agent.id,
-        channelId,
-      });
+      // issue #219: persist enabled=false so the channel stays stopped across
+      // app restarts. Plain cmd_stop_agent_channel only kills the runtime
+      // instance; auto_start_all_enabled_agent_channels would re-launch it
+      // next launch because channel.enabled is still true on disk.
+      await stopAndDisableAgentChannel(agent, channelId);
       onAgentChanged();
     } catch (e) {
       console.error('[AgentChannels] Stop failed:', e);
     } finally {
       if (isMountedRef.current) setLoading(null);
     }
-  }, [agent.id, onAgentChanged]);
+  }, [agent, onAgentChanged]);
 
   // Close overlay and refresh
   const closeOverlay = useCallback(() => {
