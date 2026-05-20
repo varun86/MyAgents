@@ -43,7 +43,11 @@ export interface SessionMetadata {
     /** Fork source info — consumed on first session startup, then cleared */
     forkFrom?: {
         sourceSessionId: string;  // Source session's SDK session ID (for resume)
-        messageUuid: string;      // Fork point: assistant message's sdkUuid (for resumeSessionAt)
+        // Fork point: assistant message's sdkUuid (for resumeSessionAt).
+        // Optional because the catch-block recovery at agent-session.ts:9737 clears it when
+        // the SDK rejects the anchor as stale ("No message found with message.uuid"), so the
+        // retry can degrade to "fork at source tail" instead of looping forever. See issue #220.
+        messageUuid?: string;
     };
     /** Which runtime created this session. Absent = 'builtin' (backward compatible) */
     runtime?: RuntimeType;

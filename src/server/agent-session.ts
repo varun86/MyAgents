@@ -7737,7 +7737,11 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         // sessionRegistered branch above.
       } else {
         const { sourceSessionId, messageUuid } = forkMeta.forkFrom;
-        console.log(`[agent] fork mode: resuming from ${sourceSessionId}, fork at ${messageUuid}, new session ${sessionId}`);
+        // messageUuid may be undefined if the catch-block recovery (~line 9737) cleared
+        // it after a "No message found" rejection. Without an anchor, SDK forks at the
+        // source's tail rather than the user-clicked midpoint — see issue #220.
+        const anchorDesc = messageUuid ? `fork at ${messageUuid}` : 'no anchor (degraded: SDK will fork at source tail)';
+        console.log(`[agent] fork mode: resuming from ${sourceSessionId}, ${anchorDesc}, new session ${sessionId}`);
         resumeFrom = sourceSessionId;
         effectiveSdkSessionId = sessionId;
         forkMode = true;
@@ -9719,6 +9723,17 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     // Fix: clear the invalid rewind anchor so retry resumes with full history intact.
     // Keep sessionRegistered=true — the session itself exists, only the UUID is wrong.
     // The retry will use `resume: sessionId` without resumeSessionAt, loading all messages.
+    // Two durable anchors can be the rejected UUID:
+    //   1. pendingResumeSessionAt (in-memory) — set by rewindSession()
+    //   2. SessionMetadata.forkFrom.messageUuid (disk-persisted) — set by forkSession()
+    // effectiveResumeAt prefers rewindResumeAt ?? forkResumeAt (see line ~7776), so
+    // when both are set the rewind UUID is the one actually sent to the SDK. Capture
+    // that here so the fork branch below can avoid clearing an innocent fork anchor.
+    const rewindAnchorWasSent = errorMessage.includes('No message found with message.uuid')
+      && pendingResumeSessionAt !== undefined;
+
+    // Rewind-mode "No message found" recovery (issue #189). Gated on sessionRegistered
+    // because the rewind path is only valid for an already-registered session.
     if (errorMessage.includes('No message found with message.uuid') && sessionRegistered) {
       const rejectedUuid = pendingResumeSessionAt;
       console.warn(`[agent] resumeSessionAt UUID rejected by SDK — clearing rewind anchor, retry will resume with full history`);
@@ -9732,6 +9747,41 @@ async function startStreamingSession(preWarm = false): Promise<void> {
       // Don't modify sessionRegistered — session exists, just the UUID is invalid.
       // Don't return — let pre-warm retry (finally block) handle recovery.
       // For non-pre-warm (user message triggered): fall through to error broadcast.
+    }
+
+    // Fork-mode "No message found" recovery (issue #220). The durable anchor here lives
+    // in `SessionMetadata.forkFrom.messageUuid` (disk-persisted), not in-memory, so we
+    // must mutate + persist the metadata or every retry rereads the stale UUID.
+    //
+    // NOT gated on `sessionRegistered`: a fresh fork session has sessionRegistered=false
+    // until SDK's first non-error result lands, but that's exactly when this error fires.
+    //
+    // Skip when the rewind branch above was the actual culprit — clearing both anchors
+    // on every "No message found" would over-degrade a still-good fork anchor. If the
+    // fork anchor is also stale, the next retry's effectiveResumeAt will fall through to
+    // it, SDK will reject again, and this branch will fire on that pass.
+    //
+    // Trade-off: dropping the fork anchor degrades semantics — SDK forks at source's
+    // *tail*, not the user-clicked midpoint. AI then sees more source context than the
+    // UI shows (UI has the N copied messages; SDK has all source messages). Same
+    // degradation philosophy as the rewind branch's "resume with full history". Better
+    // than a fail-loop or losing the fork entirely.
+    if (errorMessage.includes('No message found with message.uuid') && !rewindAnchorWasSent) {
+      const failedForkMeta = getSessionMetadata(sessionId);
+      if (failedForkMeta?.forkFrom?.messageUuid) {
+        const rejectedForkUuid = failedForkMeta.forkFrom.messageUuid;
+        console.warn(`[agent] forkSession anchor UUID ${rejectedForkUuid} rejected by SDK (source store no longer contains it) — clearing anchor; retry will fork at source tail`);
+        delete failedForkMeta.forkFrom.messageUuid;
+        try {
+          await saveSessionMetadata(failedForkMeta);
+        } catch (saveErr) {
+          // Persist failure → disk still has the stale UUID. The next retry reads
+          // it back and SDK rejects again → this branch fires again → save retries.
+          // Eventually converges or the underlying I/O issue surfaces. Don't bail.
+          console.warn(`[agent] forkFrom.messageUuid clear: disk persist failed (next retry will re-read stale UUID and re-enter this recovery): ${(saveErr as Error)?.message ?? saveErr}`);
+        }
+        currentSessionUuids.delete(rejectedForkUuid);
+      }
     }
 
     // "No conversation found" recovery: our metadata has sessionRegistered=true but
