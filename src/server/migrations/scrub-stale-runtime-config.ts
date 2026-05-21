@@ -53,8 +53,13 @@ const MARKER_KEY = '_runtimeConfigScrubV1';
  * within a runtime family land within the prefix; cross-runtime drift does
  * NOT. So a value is "obviously wrong" iff it matches one runtime's family
  * prefix and we're on a different runtime.
+ *
+ * Exported for read-side reuse (issue #224 — owned-session snapshot
+ * coercion in `resolveSessionConfig`). The same conservative semantics
+ * apply: false-positives just mean the runtime uses its own default, which
+ * is the right safety profile when we can't trust the persisted value.
  */
-function modelLooksLikeRuntime(model: string, runtime: RuntimeType): boolean {
+export function modelLooksLikeRuntime(model: string, runtime: RuntimeType): boolean {
   const m = model.trim().toLowerCase();
   if (m.length === 0) return true; // empty string is benign — caller decides
   if (runtime === 'codex') {

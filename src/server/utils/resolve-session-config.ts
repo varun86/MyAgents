@@ -2,6 +2,7 @@ import type { AgentConfig, ChannelConfig } from '../../shared/types/agent';
 import { resolveEffectiveConfig } from '../../shared/types/agent';
 import type { SessionMetadata } from '../types/session';
 import type { RuntimeType } from '../../shared/types/runtime';
+import { modelLooksLikeRuntime } from '../migrations/scrub-stale-runtime-config';
 
 /**
  * Effective runtime config for a single query (v0.1.69).
@@ -77,10 +78,36 @@ export function resolveSessionConfig(
   }
 
   // owned (Desktop + Cron): session snapshot first, agent fallback per field
+  const runtime = meta?.runtime ?? agent.runtime ?? 'builtin';
+  // Snapshot vs agent-fallback for model. For external runtimes the snapshot
+  // and agent fallback target different fields — snapshot holds the runtime
+  // model (set by interactive writes + the runtime-aware snapshot helper),
+  // agent fallback should read `runtimeConfig.model` not `agent.model`
+  // (which is the builtin/provider field). Without this branch a fresh
+  // unsnapshotted external session would read `agent.model` (Claude) and
+  // hand it to Codex → 400 (issue #224).
+  const rawModel = runtime === 'builtin'
+    ? (meta?.model ?? agent.model)
+    : (meta?.model ?? agent.runtimeConfig?.model);
+  // Coerce obviously-foreign models out before they reach the runtime CLI.
+  // Heals existing stale snapshots written by the pre-fix snapshot helper
+  // (e.g. cron tasks created on App ≤ 0.2.19 with runtime=codex but
+  // model=claude-opus-4-6). Uses the same conservative heuristic as the
+  // agent-config migration — only drops values we're confident don't
+  // belong, keeps unknown values intact.
+  let model = rawModel;
+  if (runtime !== 'builtin'
+      && typeof model === 'string' && model.length > 0
+      && !modelLooksLikeRuntime(model, runtime)) {
+    console.warn(
+      `[runtime-coerce] dropping stale session model='${model}' on runtime='${runtime}' (issue #224); falling back to runtime default. sessionId=${meta?.id ?? '<none>'} agentDir=${meta?.agentDir ?? agent.workspacePath ?? '<unknown>'}`,
+    );
+    model = undefined;
+  }
   return {
-    runtime: meta?.runtime ?? agent.runtime ?? 'builtin',
-    model: meta?.model ?? agent.model,
-    permissionMode: meta?.permissionMode ?? agent.permissionMode,
+    runtime,
+    model,
+    permissionMode: meta?.permissionMode ?? (runtime === 'builtin' ? agent.permissionMode : agent.runtimeConfig?.permissionMode),
     mcpEnabledServers: meta?.mcpEnabledServers ?? agent.mcpEnabledServers,
     providerId: meta?.providerId ?? agent.providerId,
     providerEnvJson: meta?.providerEnvJson ?? agent.providerEnvJson,
