@@ -7632,6 +7632,23 @@ async function startStreamingSession(preWarm = false): Promise<void> {
   let startupTimeoutId: ReturnType<typeof setTimeout> | undefined;
   let apiWatchdogId: ReturnType<typeof setInterval> | undefined;
 
+  // Background sub-agents started in this session but not yet terminal, keyed by
+  // task_id. Entries are removed when a terminal task_notification/task_updated is
+  // broadcast; whatever remains when the subprocess tears down (the finally below)
+  // is flushed as a synthetic `stopped`.
+  //
+  // WHY: terminal events (task_notification / task_updated) are best-effort. When
+  // the owning subprocess dies first — abort, deferred config restart, watchdog
+  // kill, transport error — an in-flight background sub-agent emits NO terminal
+  // event ever (the process that would emit it is gone). The renderer's Agent
+  // Status Panel then shows it "后台运行中" permanently (all three of its
+  // clear-defenses require a terminal event). Observed in production: ~7% of
+  // background sub-agents (16/218 local_agent) stuck this way. The stored
+  // toolUseId also backfills the task_updated terminal channel (its patch carries
+  // none) so the renderer's persisted history fallback survives a reload.
+  // Declared outside try so the finally can flush it.
+  const startedBackgroundTasks = new Map<string, { toolUseId?: string; description?: string }>();
+
   try {
     const sdkPermissionMode = mapToSdkPermissionMode(currentPermissionMode);
 
@@ -8755,6 +8772,12 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           patch?: { status?: string; error?: string; description?: string } };
         if (taskMsg.subtype === 'task_started' && taskMsg.task_id) {
           console.log(`[agent] Background task started: ${taskMsg.task_id} — ${taskMsg.description}`);
+          // Record so the teardown flush + task_updated channel can resolve the
+          // tool_use_id later (see startedBackgroundTasks declaration).
+          startedBackgroundTasks.set(taskMsg.task_id, {
+            toolUseId: taskMsg.tool_use_id,
+            description: taskMsg.description,
+          });
           broadcast('chat:task-started', {
             taskId: taskMsg.task_id,
             toolUseId: taskMsg.tool_use_id,
@@ -8778,6 +8801,8 @@ async function startStreamingSession(preWarm = false): Promise<void> {
               summary: taskMsg.summary,
               outputFile: taskMsg.output_file,
             });
+            // Reached terminal — drop from the pending set so the teardown flush skips it.
+            startedBackgroundTasks.delete(taskMsg.task_id);
           }
         } else if (taskMsg.subtype === 'task_updated' && taskMsg.task_id) {
           const patchStatus = taskMsg.patch?.status;
@@ -8799,17 +8824,21 @@ async function startStreamingSession(preWarm = false): Promise<void> {
               console.log(`[agent] Background task ${normalized} (via task_updated): ${taskMsg.task_id} — patch.status=${patchStatus}${errorSummary ? ` error=${errorSummary}` : ''}`);
               broadcast('chat:task-notification', {
                 taskId: taskMsg.task_id,
-                // task_updated.patch doesn't carry tool_use_id. The
-                // renderer resolves via the toolUseId↔taskId mapping
-                // registered at task_started time (registerBackgroundTask);
-                // if registration was never seen (e.g. tab opened mid-run
-                // with state lost), backgroundTaskStatus.ts parks the
-                // status in its orphan pool for later reconciliation.
-                toolUseId: undefined,
+                // task_updated.patch doesn't carry tool_use_id, so resolve it
+                // from the task_started record. The renderer can also bridge
+                // taskId→toolUseId at runtime (registerBackgroundTask), but the
+                // PERSISTED `task-notification-<taskId>` history message stores
+                // this field verbatim — sending undefined there breaks the
+                // panel's history fallback after a reload (it keys on toolUseId).
+                // Falls back to undefined (orphan-pool reconciliation) if the
+                // start was never observed in this session.
+                toolUseId: startedBackgroundTasks.get(taskMsg.task_id)?.toolUseId,
                 status: normalized,
                 summary: errorSummary,
                 outputFile: '',
               });
+              // Reached terminal — drop from the pending set so the teardown flush skips it.
+              startedBackgroundTasks.delete(taskMsg.task_id);
             }
           }
         }
@@ -10065,6 +10094,28 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     // hold pending entries (they never serve a turn), but draining is
     // idempotent so the wasPreWarming branch is harmless.
     drainPendingInteractiveRequests('session-end');
+
+    // Flush a synthetic terminal `stopped` for every background sub-agent that
+    // started in this session but never reached terminal (still in the pending
+    // map — terminal branches delete on broadcast). The owning SDK subprocess is
+    // now gone (this finally runs on EVERY for-await exit: abort, deferred config
+    // restart, watchdog kill, transport error), so the real terminal event can
+    // never arrive — the process that would emit it just died. Without this, the
+    // renderer's Agent Status Panel shows these sub-agents "后台运行中" forever
+    // (all its clear-defenses require a terminal event). A late real terminal
+    // after this flush is deduped renderer-side by taskId. Empty for pre-warm
+    // sessions (no tasks started).
+    for (const [taskId, info] of startedBackgroundTasks) {
+      console.log(`[agent] Background task orphaned by session teardown → flushing stopped: ${taskId} — ${info.description ?? ''}`);
+      broadcast('chat:task-notification', {
+        taskId,
+        toolUseId: info.toolUseId,
+        status: 'stopped',
+        summary: '',
+        outputFile: '',
+      });
+    }
+    startedBackgroundTasks.clear();
 
     // sessionRegistered 已在 system_init handler 中设置，无需重复
 
