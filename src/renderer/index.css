@@ -120,6 +120,21 @@
   to { opacity: 1; }
 }
 
+/* ── Streaming leading-edge fade ──
+   While streaming, a rehype plugin (Markdown.tsx::rehypeStreamTail) wraps the LAST few
+   characters of the last text node in <span class="md-stream-tail">. The horizontal mask
+   fades them left→opaque to right→faint, so freshly-typed text emerges softly instead of
+   hard-popping (replaces the old caret). As the data-layer typewriter reveals more, the
+   tail window slides, so each character fades in over a few reveal steps. The class only
+   exists mid-stream → the final render is crisp. mask-image alpha values are taste params. */
+.md-stream-tail {
+  -webkit-mask-image: linear-gradient(to right, #000 0%, #000 35%, rgba(0, 0, 0, 0.2) 100%);
+  mask-image: linear-gradient(to right, #000 0%, #000 35%, rgba(0, 0, 0, 0.2) 100%);
+}
+@media (prefers-reduced-motion: reduce) {
+  .md-stream-tail { -webkit-mask-image: none; mask-image: none; }
+}
+
 :root {
   /* ========== Layout ========== */
   --breakpoint-mobile: 768px;

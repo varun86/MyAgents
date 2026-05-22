@@ -566,6 +566,16 @@ export default function TabProvider({
         pendingToolInputDeltasRef.current.clear();
         pendingSubagentToolResultDeltasRef.current.clear();
         pendingSubagentToolInputDeltasRef.current.clear();
+        // Reveal state is per-tab; a session swap/reset must not let a stale reveal loop or
+        // un-revealed pending text bleed into the next session. (Loop-stop is inlined rather
+        // than calling stopRevealLoop — these reset callbacks are declared before it, so
+        // referencing it in their dep arrays would be a TDZ error. Refs are safe in the body.
+        // Staleness of any already-enqueued commit is handled by the message-id guard.)
+        pendingTextRef.current = '';
+        if (revealRafRef.current != null) { cancelAnimationFrame(revealRafRef.current); revealRafRef.current = null; }
+        revealAccRef.current = 0;
+        revealLastRef.current = 0;
+        adoptedStreamRef.current = false;
         setIsLoading(false);
         setSessionState('idle');  // Reset session state for new conversation
         setSystemStatus(null);
@@ -659,6 +669,16 @@ export default function TabProvider({
         pendingToolInputDeltasRef.current.clear();
         pendingSubagentToolResultDeltasRef.current.clear();
         pendingSubagentToolInputDeltasRef.current.clear();
+        // Reveal state is per-tab; a session swap/reset must not let a stale reveal loop or
+        // un-revealed pending text bleed into the next session. (Loop-stop is inlined rather
+        // than calling stopRevealLoop — these reset callbacks are declared before it, so
+        // referencing it in their dep arrays would be a TDZ error. Refs are safe in the body.
+        // Staleness of any already-enqueued commit is handled by the message-id guard.)
+        pendingTextRef.current = '';
+        if (revealRafRef.current != null) { cancelAnimationFrame(revealRafRef.current); revealRafRef.current = null; }
+        revealAccRef.current = 0;
+        revealLastRef.current = 0;
+        adoptedStreamRef.current = false;
         setIsLoading(false);
         setSessionState('idle');
         setSystemStatus(null);
@@ -782,8 +802,24 @@ export default function TabProvider({
     // ─── RAF batching for streaming chunks ───
     // Accumulates text chunks and flushes once per animation frame (~16ms),
     // reducing 50 render/s to ~16 render/s during streaming.
-    const pendingChunksRef = useRef<string[]>([]);
-    const rafIdRef = useRef<number | null>(null);
+    // ── Data-layer typewriter (cross-bugfix: streaming-phantom-thinking-rows) ──
+    // Reveal of received text into `streamingMessage` is paced HERE, on the data clock,
+    // so ONE clock drives render + autoscroll + Virtuoso measurement together. (The prior
+    // view-layer typewriter inside Markdown ran on its own rAF decoupled from scroll &
+    // measurement → auto-scroll stopped following, follow got disabled, and a [full]-keyed
+    // effect cancelled its own rAF → slow→freeze→burst. See specs/issues/.)
+    //
+    // pendingTextRef = received-but-not-yet-revealed text; a single persistent rAF reveals
+    // a rate-matched prefix (cps = backlog / TAU) into streamingMessage. Every async append is
+    // guarded by the TARGET MESSAGE ID (see commitText): a stale rAF from a previous turn/session
+    // must never write into a newer message, and — unlike a generation counter bumped
+    // synchronously by a same-batch handler — an id guard can't discard a prefix that was
+    // already cut from the buffer (the id stays valid until the finalize updater runs last).
+    const pendingTextRef = useRef<string>('');
+    const revealAccRef = useRef(0);            // fractional char accumulator (sub-char pacing)
+    const revealLastRef = useRef(0);           // last commit timestamp (continuous across flushes)
+    const revealRafRef = useRef<number | null>(null);
+    const adoptedStreamRef = useRef(false);    // loadSession mid-turn adopt → reveal instantly (no pacing)
 
     // ─── Pattern 3 §3.2.2 — RAF batching for tool-result deltas + tool-input deltas ───
     // Per-tool-id buffer. Each tool-result-delta event was previously its own
@@ -802,66 +838,107 @@ export default function TabProvider({
     const pendingSubagentToolResultDeltasRef = useRef<Map<string, PendingDeltaBuffer>>(new Map());
     const pendingSubagentToolInputDeltasRef = useRef<Map<string, PendingDeltaBuffer>>(new Map());
 
-    const flushPendingChunks = useCallback(() => {
-        rafIdRef.current = null;
-        const chunks = pendingChunksRef.current;
-        if (chunks.length === 0) return;
-        const merged = chunks.join('');
-        pendingChunksRef.current = [];
-
+    // Append `text` to the streaming message's trailing text block. Reuses the exact merge
+    // semantics the old flushPendingChunks had (string vs blocks, closeOpenThinkingBlocks,
+    // merge-into-last-text-block, else open a new text block after a tool/thinking block).
+    //
+    // Staleness is guarded by TARGET MESSAGE ID, not a generation counter:
+    //   - expectedId === null → synchronous-intent DRAIN (flushPendingTextNow): append to
+    //                           whatever the current streaming message is (prev at run time).
+    //   - expectedId === <id> → async reveal-loop tick captured for a specific message: no-ops
+    //                           if `prev` is a different/cleared message (turn/session switched).
+    // Why id over a generation ref: the reveal tick removes a prefix from pendingTextRef
+    // synchronously, then enqueues this commit. A generation counter bumped synchronously by a
+    // later same-batch handler (finalize/midTurnBreak) would make this commit no-op AFTER the
+    // prefix was already cut → lost text. The message id stays stable until the finalize updater
+    // (which is enqueued LAST) moves it to history, so this commit always lands first; a genuine
+    // switch replaces the id, so it correctly no-ops without losing in-stream text.
+    // Keep the v0.2.14 invariant: do NOT gate on isStreamingRef (idle can race ahead of
+    // message-complete and clear it while text is still pending → would silently drop it).
+    const commitText = useCallback((text: string, expectedId: string | null) => {
+        if (!text) return;
         setStreamingMessage(prev => {
-            // `!prev` is the authoritative "message already finalised" check —
-            // moveStreamingToHistory() returns null from its updater, so any
-            // stale RAF firing afterwards sees prev=null and bails. Do NOT
-            // also gate on `isStreamingRef.current`: that flag is cleared by
-            // ANY chat:status idle event (clearSessionActive), and a runtime
-            // that races idle ahead of chat:message-complete (e.g. a sidecar
-            // bug or out-of-order SSE) would here clear pendingChunksRef
-            // synchronously above and then throw the merged text away in
-            // this updater — silently dropping every chunk that hadn't yet
-            // RAF-flushed. v0.2.14 cross-bugfix.
             if (!prev || prev.role !== 'assistant') return prev;
+            if (expectedId !== null && prev.id !== expectedId) return prev;
             if (typeof prev.content === 'string') {
-                return { ...prev, content: prev.content + merged };
+                return { ...prev, content: prev.content + text };
             }
             const contentArray = closeOpenThinkingBlocks(prev.content);
             const lastBlock = contentArray[contentArray.length - 1];
             if (lastBlock?.type === 'text') {
-                return {
-                    ...prev,
-                    content: [...contentArray.slice(0, -1), { type: 'text', text: (lastBlock.text || '') + merged }]
-                };
+                return { ...prev, content: [...contentArray.slice(0, -1), { type: 'text', text: (lastBlock.text || '') + text }] };
             }
-            return {
-                ...prev,
-                content: [...contentArray, { type: 'text', text: merged }]
-            };
+            return { ...prev, content: [...contentArray, { type: 'text', text }] };
         });
     }, [setStreamingMessage]);
 
+    const stopRevealLoop = useCallback(() => {
+        if (revealRafRef.current != null) {
+            cancelAnimationFrame(revealRafRef.current);
+            revealRafRef.current = null;
+        }
+        revealAccRef.current = 0;
+        revealLastRef.current = 0;
+    }, []);
+
+    // Persistent rAF that reveals pendingTextRef into streamingMessage at a rate that
+    // self-matches the model's output rate (steady-state backlog ≈ TAU × arrival rate), so
+    // the chunky SSE/40ms-coalesced cadence becomes a smooth per-character glide. Commits at
+    // ~30fps to bound markdown re-parse cost. Stops when caught up; the next chunk restarts it.
+    const startRevealLoop = useCallback(() => {
+        if (revealRafRef.current != null) return; // already running
+        const loopMsgId = streamingMessageRef.current?.id;
+        if (!loopMsgId) return; // no streaming message to reveal into yet
+        const TAU = 0.32;       // steady-state trailing latency / cushion (s); larger = lazier
+        const MIN_CPS = 8;      // chars/s floor — only bites at a burst's tail
+        const COMMIT_MS = 33;   // ~30fps commit throttle
+        revealLastRef.current = performance.now();
+        const tick = (now: number) => {
+            // Stop if the streaming message we were revealing into is gone/replaced
+            // (finalized to history, session switch, midTurnBreak split).
+            if (streamingMessageRef.current?.id !== loopMsgId) { revealRafRef.current = null; return; }
+            const buf = pendingTextRef.current;
+            if (buf.length === 0) { revealRafRef.current = null; revealAccRef.current = 0; revealLastRef.current = 0; return; }
+            const last = revealLastRef.current || now;
+            const elapsed = now - last;
+            if (elapsed < COMMIT_MS) { revealRafRef.current = requestAnimationFrame(tick); return; }
+            revealLastRef.current = now;
+            const dt = Math.min(elapsed / 1000, 0.05); // clamp against tab-throttle / hitches
+            const cps = Math.max(buf.length / TAU, MIN_CPS);
+            revealAccRef.current += cps * dt;
+            let n = Math.floor(revealAccRef.current);
+            if (n > 0) {
+                if (n > buf.length) n = buf.length;
+                // Never cut inside a UTF-16 surrogate pair → no lone-surrogate '�' flash.
+                if (n < buf.length) {
+                    const code = buf.charCodeAt(n - 1);
+                    if (code >= 0xd800 && code <= 0xdbff) n -= 1;
+                }
+                if (n > 0) {
+                    revealAccRef.current -= n;
+                    pendingTextRef.current = buf.slice(n);
+                    commitText(buf.slice(0, n), loopMsgId);
+                }
+            }
+            revealRafRef.current = requestAnimationFrame(tick);
+        };
+        revealRafRef.current = requestAnimationFrame(tick);
+    }, [commitText]);
+
     /**
-     * Drain any RAF-batched text chunks into the React update queue BEFORE a new content block
-     * starts (tool_use / server_tool_use / thinking).
-     *
-     * Without this, the handler race goes:
-     *   1. chat:message-chunk pushes into pendingChunksRef + schedules RAF  (NO state update yet)
-     *   2. chat:tool-use-start runs synchronously and setStreamingMessage-appends a tool block
-     *   3. RAF fires → flushPendingChunks sees tool block as last, so it opens a NEW text block
-     *      after the tool — splitting what was logically one continuous SDK text block into
-     *      [text-head] [tool] [text-tail] with the tool card wedged mid-sentence.
-     *
-     * Calling this before any block-starting handler enqueues the pending-text updater first,
-     * so React applies `merge-into-last-text-block` before `append-new-block`.
+     * Reveal ALL un-revealed text immediately (no pacing) and stop the loop. Called:
+     *  - before a new content block (thinking / tool) so text lands before the block
+     *    (the [text-head][tool][text-tail] split the old flushPendingChunksNow prevented);
+     *  - at finalize / midTurnBreak split so history captures the full text;
+     *  - for adopted (loadSession mid-turn) streams, which bypass pacing entirely.
+     * gen=null so a generation bump enqueued immediately after does not discard the drain.
      */
-    const flushPendingChunksNow = useCallback(() => {
-        if (rafIdRef.current) {
-            cancelAnimationFrame(rafIdRef.current);
-            rafIdRef.current = null;
-        }
-        if (pendingChunksRef.current.length > 0) {
-            flushPendingChunks();
-        }
-    }, [flushPendingChunks]);
+    const flushPendingTextNow = useCallback(() => {
+        stopRevealLoop();
+        const all = pendingTextRef.current;
+        pendingTextRef.current = '';
+        if (all) commitText(all, null);
+    }, [stopRevealLoop, commitText]);
 
     // ── Pattern 3 §3.2.2 — flush helpers for tool-result / tool-input deltas ──
     // Truncate the displayed inline tool result to 8 KB so an O(n²) re-render
@@ -992,9 +1069,9 @@ export default function TabProvider({
         }
     }, [flushPendingToolResultDelta, flushPendingToolInputDelta, flushPendingSubagentToolResultDelta, flushPendingSubagentToolInputDelta]);
 
-    // Cleanup RAF on unmount
+    // Cleanup reveal RAF on unmount
     useEffect(() => {
-        return () => { if (rafIdRef.current) cancelAnimationFrame(rafIdRef.current); };
+        return () => { if (revealRafRef.current != null) cancelAnimationFrame(revealRafRef.current); };
     }, []);
 
     /**
@@ -1002,14 +1079,13 @@ export default function TabProvider({
      * Replaces the old markIncompleteBlocksAsFinished — does everything in one atomic step.
      */
     const moveStreamingToHistory = useCallback((status: 'completed' | 'stopped' | 'failed') => {
-        // Flush any pending RAF-batched chunks before finalizing
-        if (rafIdRef.current) {
-            cancelAnimationFrame(rafIdRef.current);
-            rafIdRef.current = null;
-        }
-        if (pendingChunksRef.current.length > 0) {
-            flushPendingChunks();
-        }
+        // Stop the reveal loop + drain ALL un-revealed text into the streaming message before
+        // finalizing — history must capture the full text. flushPendingTextNow drains with
+        // expectedId=null (append to current message), and the finalize updater below is
+        // enqueued AFTER the drain updater, so it sees the complete message. The reveal loop
+        // self-stops next tick (its captured message id no longer matches the live one).
+        flushPendingTextNow();
+        adoptedStreamRef.current = false;
         // Pattern 3 §3.2.2 — also drain tool delta buffers so accumulated
         // fragments land on the streaming message before it is moved into
         // history. Buffers themselves are cleared once the next session/turn
@@ -1082,7 +1158,25 @@ export default function TabProvider({
             streamingMessageRef.current = null;
             return null;
         });
-    }, [flushPendingChunks, flushAllPendingToolDeltas, clearSessionActive]);
+    }, [flushPendingTextNow, flushAllPendingToolDeltas, clearSessionActive]);
+
+    // Called at the START of every event that can begin a NEW assistant message
+    // (message-chunk / thinking-start / tool-use-start / server-tool-use-start) when no
+    // stream is active. Ensures a residual streaming message left un-finalized by a lost
+    // message-complete is moved to history FIRST (so the new turn never appends into it),
+    // and resets reveal state. Without this, a new turn whose first event is thinking/tool
+    // (not text) would bleed its first block into the stale message. No-op mid-stream.
+    const beginFreshStreamIfNeeded = useCallback(() => {
+        if (isStreamingRef.current) return;
+        if (streamingMessageRef.current) {
+            moveStreamingToHistory('completed'); // drains residual pending + moves to history
+        }
+        pendingTextRef.current = '';
+        if (revealRafRef.current != null) { cancelAnimationFrame(revealRafRef.current); revealRafRef.current = null; }
+        revealAccRef.current = 0;
+        revealLastRef.current = 0;
+        adoptedStreamRef.current = false;
+    }, [moveStreamingToHistory]);
 
     const recoverStreamingUi = useCallback((status: 'stopped' | 'failed') => {
         moveStreamingToHistory(status);
@@ -1126,6 +1220,13 @@ export default function TabProvider({
                     setHistoryMessages([]);
                     resetPaginationState();
                     setStreamingMessage(null);
+                    // Reset reveal state at this session/reset boundary too (any enqueued commit
+                    // is id-guarded against the now-null message).
+                    pendingTextRef.current = '';
+                    if (revealRafRef.current != null) { cancelAnimationFrame(revealRafRef.current); revealRafRef.current = null; }
+                    revealAccRef.current = 0;
+                    revealLastRef.current = 0;
+                    adoptedStreamRef.current = false;
                     setAgentError(null);
                     setLastTerminalReason(null);
                     clearInteractiveState();
@@ -1287,29 +1388,47 @@ export default function TabProvider({
 
                 const chunk = data as string;
 
-                // If no streaming message exists yet, create it immediately (first chunk)
+                // If no streaming message exists yet, this is a NEW stream's first chunk.
                 if (!isStreamingRef.current) {
-                    isStreamingRef.current = true;
-                    // First chunk + message-complete can land in the same React batch for
-                    // very short responses. Commit the initial assistant message synchronously
-                    // so finalize logic always has a rendered message to move into history.
+                    // Finalize any residual (lost-complete) message + reset reveal state.
+                    beginFreshStreamIfNeeded();
+                    pendingTextRef.current = chunk;          // reveal this chunk via the loop
+                    revealAccRef.current = 0;
+                    // Create the (empty) assistant message synchronously so finalize logic always
+                    // has a rendered message to move into history even if message-complete lands
+                    // in the same React batch (very short responses). The reveal loop fills it.
                     flushSync(() => {
                         setIsLoading(true);
                         setStreamingMessage({
                             id: Date.now().toString(),
                             role: 'assistant',
-                            content: chunk,
+                            content: '',
                             timestamp: new Date()
                         });
                     });
+                    // Set AFTER flushSync: if beginFreshStreamIfNeeded finalized a residual message,
+                    // its finalize updater calls clearSessionActive() (→ isStreamingRef=false) and is
+                    // flushed synchronously inside the flushSync — setting the flag before would be
+                    // clobbered back to false, making the next chunk spawn a second message.
+                    isStreamingRef.current = true;
+                    adoptedStreamRef.current = false;
+                    startRevealLoop();
                     break;
                 }
 
-                // Subsequent chunks: batch via RAF (reduces ~50 render/s to ~16 render/s)
-                pendingChunksRef.current.push(chunk);
-                if (!rafIdRef.current) {
-                    rafIdRef.current = requestAnimationFrame(flushPendingChunks);
+                // Adopted (loadSession mid-turn) streams bypass pacing: reveal instantly so the
+                // REST-snapshot / live-SSE boundary race is not amplified by buffered text.
+                if (adoptedStreamRef.current) {
+                    pendingTextRef.current += chunk;
+                    flushPendingTextNow();
+                    break;
                 }
+
+                // Subsequent chunks of a fresh stream: buffer + pace via the reveal loop
+                // (restart it if it stopped after catching up). streamingMessage now grows on
+                // the reveal clock → autoscroll + Virtuoso measurement follow the same clock.
+                pendingTextRef.current += chunk;
+                startRevealLoop();
                 break;
             }
 
@@ -1319,10 +1438,24 @@ export default function TabProvider({
                     console.log('[TabProvider] Skipping thinking-start (new session, stale event)');
                     break;
                 }
-                // Drain RAF-batched text chunks before opening a new thinking block,
-                // otherwise the trailing text of the previous text block lands AFTER the
-                // thinking block (see flushPendingChunksNow docstring).
-                flushPendingChunksNow();
+                // If this thinking block is a new turn's first event, finalize any residual
+                // stale message first so the block doesn't bleed into it.
+                beginFreshStreamIfNeeded();
+                // Drain un-revealed text before opening a new thinking block, otherwise the
+                // trailing text of the previous text block lands AFTER the thinking block
+                // (see flushPendingTextNow docstring).
+                flushPendingTextNow();
+                // First event of a new turn: synchronously materialize the assistant message +
+                // isStreamingRef so a same-React-batch message-chunk can't see isStreamingRef=false,
+                // flushSync-create a competing empty message, and overwrite this block (Codex). The
+                // updater below then appends to this (now-assistant) message. Mirrors message-chunk.
+                if (!isStreamingRef.current) {
+                    flushSync(() => {
+                        setIsLoading(true);
+                        setStreamingMessage({ id: Date.now().toString(), role: 'assistant', content: [], timestamp: new Date() });
+                    });
+                    isStreamingRef.current = true;
+                }
                 const { index } = data as { index: number };
                 setStreamingMessage(prev => {
                     const thinkingBlock: ContentBlock = {
@@ -1375,10 +1508,22 @@ export default function TabProvider({
                     console.log('[TabProvider] Skipping tool-use-start (new session, stale event)');
                     break;
                 }
-                // Drain RAF-batched text chunks before opening the tool block, otherwise the
-                // tool card ends up wedged inside a single SDK text block (see
-                // flushPendingChunksNow docstring — this is the primary bug the helper fixes).
-                flushPendingChunksNow();
+                // If this tool block is a new turn's first event, finalize any residual stale
+                // message first so the tool card doesn't bleed into it.
+                beginFreshStreamIfNeeded();
+                // Drain un-revealed text before opening the tool block, otherwise the tool
+                // card ends up wedged inside a single SDK text block (see flushPendingTextNow
+                // docstring — this is the primary bug the helper fixes).
+                flushPendingTextNow();
+                // First event of a new turn: synchronously materialize the message + isStreamingRef
+                // so a same-React-batch message-chunk can't overwrite this tool block (see thinking-start).
+                if (!isStreamingRef.current) {
+                    flushSync(() => {
+                        setIsLoading(true);
+                        setStreamingMessage({ id: Date.now().toString(), role: 'assistant', content: [], timestamp: new Date() });
+                    });
+                    isStreamingRef.current = true;
+                }
                 const tool = data as ToolUse;
 
                 // Track tool_use event
@@ -1432,9 +1577,20 @@ export default function TabProvider({
                     console.log('[TabProvider] Skipping server-tool-use-start (new session, stale event)');
                     break;
                 }
-                // Drain RAF-batched text chunks before opening the tool block (see
-                // flushPendingChunksNow docstring).
-                flushPendingChunksNow();
+                // If this server-tool block is a new turn's first event, finalize any residual
+                // stale message first so it doesn't bleed into the previous turn's message.
+                beginFreshStreamIfNeeded();
+                // Drain un-revealed text before opening the tool block (see flushPendingTextNow docstring).
+                flushPendingTextNow();
+                // First event of a new turn: synchronously materialize the message + isStreamingRef
+                // so a same-React-batch message-chunk can't overwrite this tool block (see thinking-start).
+                if (!isStreamingRef.current) {
+                    flushSync(() => {
+                        setIsLoading(true);
+                        setStreamingMessage({ id: Date.now().toString(), role: 'assistant', content: [], timestamp: new Date() });
+                    });
+                    isStreamingRef.current = true;
+                }
                 const tool = data as ToolUse;
 
                 // Track tool_use event (server-side tools)
@@ -2341,6 +2497,12 @@ export default function TabProvider({
                                 // Mid-turn break: AI consumed the injected message and started new content.
                                 // Split the streaming: snapshot current streaming → history, insert user message.
                                 // New streaming events will create a fresh streaming message automatically.
+                                //
+                                // Drain un-revealed text into the current streaming message FIRST (gen=null,
+                                // enqueued before the snapshot updater) so the message moved to history captures
+                                // the full text — otherwise the un-revealed tail is lost or bleeds into the next
+                                // assistant segment.
+                                flushPendingTextNow();
                                 rawSetStreamingMessage(prev => {
                                     if (prev) {
                                         setHistoryMessages(prevHistory => [...prevHistory, prev, userMsg]);
@@ -2350,6 +2512,18 @@ export default function TabProvider({
                                     streamingMessageRef.current = null;
                                     return null;
                                 });
+                                // Fresh segment: clear the buffer and, crucially, drop isStreamingRef so the
+                                // NEXT streaming event takes the create-fresh-message path (the comment above
+                                // promises "a fresh streaming message automatically"). Without this the next
+                                // chunk would hit the subsequent-chunk path and commitText would no-op against
+                                // prev=null, silently dropping the new segment. Do NOT clearSessionActive — the
+                                // session is still running. The reveal loop self-stops (its message id is gone).
+                                pendingTextRef.current = '';
+                                if (revealRafRef.current != null) { cancelAnimationFrame(revealRafRef.current); revealRafRef.current = null; }
+                                revealAccRef.current = 0;
+                                revealLastRef.current = 0;
+                                isStreamingRef.current = false;
+                                adoptedStreamRef.current = false;
                             } else {
                                 // Normal turn start: render immediately
                                 setHistoryMessages(prev => [...prev, userMsg]);
@@ -2427,7 +2601,7 @@ export default function TabProvider({
                 }
             }
         }
-    }, [appendLog, appendUnifiedLog, tabId, moveStreamingToHistory, setStreamingMessage, postJson, clearInteractiveState, flushPendingChunks, flushPendingChunksNow, flushAllPendingToolDeltas, flushPendingToolInputDelta, flushPendingToolResultDelta, flushPendingSubagentToolInputDelta, flushPendingSubagentToolResultDelta, clearSessionActive, resetPaginationState, trackTabEvent]);
+    }, [appendLog, appendUnifiedLog, tabId, moveStreamingToHistory, beginFreshStreamIfNeeded, setStreamingMessage, postJson, clearInteractiveState, flushPendingTextNow, startRevealLoop, flushAllPendingToolDeltas, flushPendingToolInputDelta, flushPendingToolResultDelta, flushPendingSubagentToolInputDelta, flushPendingSubagentToolResultDelta, clearSessionActive, resetPaginationState, trackTabEvent]);
 
     // Recovery guard — prevents concurrent recovery from both SSE failed + session-sidecar:restarted
     const recoveryInFlightRef = useRef(false);
@@ -3144,11 +3318,22 @@ export default function TabProvider({
             // Preload seen IDs so SSE replays / cron sync don't re-append them.
             for (const m of loadedMessages) seenIdsRef.current.add(m.id);
             setHistoryMessages(loadedMessages);
+            // Reveal state is per-tab; a session swap must not let a stale reveal loop or
+            // un-revealed pending text bleed across. Clear buffer + stop loop (any enqueued
+            // commit is id-guarded against the new/null message).
+            pendingTextRef.current = '';
+            if (revealRafRef.current != null) { cancelAnimationFrame(revealRafRef.current); revealRafRef.current = null; }
+            revealAccRef.current = 0;
+            revealLastRef.current = 0;
             if (liveStreamingMessage && response.session.liveSessionState === 'running') {
                 isStreamingRef.current = true;
                 isSessionActiveRef.current = true;
+                // Adopted mid-turn stream: bypass the typewriter (reveal instantly) so the
+                // REST-snapshot / live-SSE boundary race is not amplified by buffered text.
+                adoptedStreamRef.current = true;
                 setStreamingMessage(liveStreamingMessage);
             } else {
+                adoptedStreamRef.current = false;
                 setStreamingMessage(null);
             }
             // Old sessions (pre-v0.1.60) have no runtime field → treat as 'builtin'.
