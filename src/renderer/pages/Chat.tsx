@@ -2425,7 +2425,15 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   }, [pendingCrossRuntimeMessage, agentDir, onForkSession, currentRuntime]);
 
   const handleCollapseWorkspace = useCallback(() => setShowWorkspace(false), []);
-  const handleOpenCronSettings = useCallback(() => setShowCronSettings(true), []);
+  // Issue #231: snapshot the current input value at the moment the user opens
+  // the cron-settings modal, instead of keeping `cronPrompt` continuously in
+  // sync with every keystroke (the prior `onInputChange={setCronPrompt}` wiring
+  // re-rendered the entire Chat tree on every paste — see SimpleChatInput #231
+  // comment).
+  const handleOpenCronSettings = useCallback(() => {
+    setCronPrompt(chatInputRef.current?.getCurrentValue() ?? '');
+    setShowCronSettings(true);
+  }, []);
 
   const handleCronStop = useCallback(async () => {
     const originalPrompt = await stopCronTask();
@@ -3331,7 +3339,6 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             onCronSettings={handleOpenCronSettings}
             onCronCancel={disableCronMode}
             onCronStop={handleCronStop}
-            onInputChange={setCronPrompt}
             runtime={currentRuntime}
             runtimeDetections={multiAgentRuntimeEnabled ? runtimeDetections : undefined}
             onRuntimeChange={multiAgentRuntimeEnabled ? handleRuntimeChange : undefined}
