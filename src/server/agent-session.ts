@@ -8470,12 +8470,23 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     let streamEventTokenTotal = 0;
 
     // #227 — track which background-task ids have already produced a terminal
-    // `chat:task-notification` broadcast in THIS SDK session, so subsequent
-    // task_updated/task_notification messages for the same id don't fire
-    // duplicate broadcasts. See the background-task lifecycle handler block
-    // below (~L8763) for the full architectural rationale (SDK exposes two
-    // independent channels for the same logical event; we forward whichever
-    // arrives first and suppress the rest).
+    // `chat:task-notification` broadcast in THIS SDK session, AND whether that
+    // broadcast already carried a RICH (non-empty summary / output_file) payload.
+    // Value = true once a rich terminal broadcast has gone out for the id.
+    //
+    // The SDK exposes two independent terminal channels for the same logical
+    // event (task_updated / task_notification — see the lifecycle handler block
+    // below, ~L8763). We forward whichever arrives FIRST so the user sees the
+    // completion promptly. But the first-to-arrive channel is usually
+    // task_updated, whose patch carries only an error string (empty on success)
+    // — NOT the rich summary / output_file the later task_notification delivers.
+    // So a plain first-wins suppression would drop the real summary on the
+    // common happy path. Instead we let a LATER terminal event ENRICH an
+    // already-broadcast card when it brings a non-empty summary/output_file the
+    // first broadcast lacked. The renderer upserts the
+    // `task-notification-<taskId>` history row by id, so the enrich re-broadcast
+    // updates the bubble in place rather than duplicating it. Once rich, further
+    // events for the id (and events that add nothing new) are suppressed.
     //
     // Lifetime = one for-await loop = one SDK session = one task registry.
     // Tasks can't cross SDK-session boundaries (the registry is in-process to
@@ -8483,7 +8494,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     // logic needed: the renderer's backgroundTaskStatus.ts has its own LRU,
     // and a single session is realistically bounded to << 1000 background
     // sub-agents.
-    const terminalBroadcastedTaskIds = new Set<string>();
+    const terminalBroadcastedTaskIds = new Map<string, boolean>();
 
     // ── API response watchdog ──────────────────────────────────────────
     // Detects hung API connections AND hung MCP tool calls.
@@ -8785,15 +8796,21 @@ async function startStreamingSession(preWarm = false): Promise<void> {
             taskType: taskMsg.task_type,
           });
         } else if (taskMsg.subtype === 'task_notification' && taskMsg.task_id) {
-          if (terminalBroadcastedTaskIds.has(taskMsg.task_id)) {
-            // task_updated terminal already broadcast for this task — suppress
-            // the notification-channel duplicate. This is the common happy
-            // path: SDK emits task_updated{completed} immediately then
-            // task_notification{completed} after the queue drains.
-            console.log(`[agent] Background task notification ${taskMsg.status} suppressed (already terminal-broadcast via task_updated): ${taskMsg.task_id}`);
+          // Rich iff it carries a real summary or an output_file (the
+          // notification channel is the one that delivers these).
+          const isRich = Boolean((taskMsg.summary && taskMsg.summary.trim()) || taskMsg.output_file);
+          const priorRich = terminalBroadcastedTaskIds.get(taskMsg.task_id);
+          if (priorRich !== undefined && (priorRich || !isRich)) {
+            // Already broadcast for this task, and either that broadcast was
+            // already rich OR this one adds nothing new — suppress the
+            // duplicate. (Happy path that DOES enrich: task_updated{completed}
+            // fired first with an empty summary [priorRich=false], so a rich
+            // notification here [isRich=true] falls through to re-broadcast.)
+            console.log(`[agent] Background task notification ${taskMsg.status} suppressed (no new info; priorRich=${priorRich}): ${taskMsg.task_id}`);
           } else {
-            terminalBroadcastedTaskIds.add(taskMsg.task_id);
-            console.log(`[agent] Background task ${taskMsg.status}: ${taskMsg.task_id} — ${taskMsg.summary}`);
+            const enriching = priorRich !== undefined;
+            terminalBroadcastedTaskIds.set(taskMsg.task_id, isRich);
+            console.log(`[agent] Background task ${taskMsg.status}${enriching ? ' (enriching prior broadcast)' : ''}: ${taskMsg.task_id} — ${taskMsg.summary}`);
             broadcast('chat:task-notification', {
               taskId: taskMsg.task_id,
               toolUseId: taskMsg.tool_use_id,
@@ -8810,18 +8827,24 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           // done" signal. Non-terminal patches (pending/running) leave the
           // UI in its current state.
           if (patchStatus === 'completed' || patchStatus === 'failed' || patchStatus === 'killed') {
-            if (terminalBroadcastedTaskIds.has(taskMsg.task_id)) {
-              console.log(`[agent] Background task patch ${patchStatus} suppressed (already terminal-broadcast): ${taskMsg.task_id}`);
+            const errorSummary = taskMsg.patch?.error ?? '';
+            // task_updated only carries an error string as its summary (empty on
+            // success) and never an output_file, so it is "rich" only when that
+            // error is non-empty.
+            const isRich = Boolean(errorSummary.trim());
+            const priorRich = terminalBroadcastedTaskIds.get(taskMsg.task_id);
+            if (priorRich !== undefined && (priorRich || !isRich)) {
+              console.log(`[agent] Background task patch ${patchStatus} suppressed (no new info; priorRich=${priorRich}): ${taskMsg.task_id}`);
             } else {
-              terminalBroadcastedTaskIds.add(taskMsg.task_id);
+              const enriching = priorRich !== undefined;
+              terminalBroadcastedTaskIds.set(taskMsg.task_id, isRich);
               // Map 'killed' → 'stopped': the renderer's
               // `backgroundTaskStatus.ts::TERMINAL` set is
               // {completed, error, failed, stopped} and knows nothing about
               // 'killed'. Aligning with the SDK CLI's own normalization
               // keeps the renderer vocab stable.
               const normalized = patchStatus === 'killed' ? 'stopped' : patchStatus;
-              const errorSummary = taskMsg.patch?.error ?? '';
-              console.log(`[agent] Background task ${normalized} (via task_updated): ${taskMsg.task_id} — patch.status=${patchStatus}${errorSummary ? ` error=${errorSummary}` : ''}`);
+              console.log(`[agent] Background task ${normalized} (via task_updated)${enriching ? ' (enriching prior broadcast)' : ''}: ${taskMsg.task_id} — patch.status=${patchStatus}${errorSummary ? ` error=${errorSummary}` : ''}`);
               broadcast('chat:task-notification', {
                 taskId: taskMsg.task_id,
                 // task_updated.patch doesn't carry tool_use_id, so resolve it

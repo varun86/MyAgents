@@ -2380,7 +2380,22 @@ export default function TabProvider({
                         content: `<task-notification>${notificationData}</task-notification>`,
                         timestamp: new Date(),
                     };
-                    setHistoryMessages(prev => [...prev, notificationMsg]);
+                    // Upsert by id. The sidecar may broadcast a SECOND terminal
+                    // event for the same task to ENRICH the summary: the SDK's
+                    // task_updated channel often arrives first with an empty
+                    // summary, then task_notification delivers the real one
+                    // (#227). Replace the row in place so the bubble updates
+                    // rather than duplicating under the same id. This also makes
+                    // the renderer self-correct if sidecar dedup ever regresses.
+                    setHistoryMessages(prev => {
+                        const idx = prev.findIndex(m => m.id === notificationMsg.id);
+                        if (idx === -1) return [...prev, notificationMsg];
+                        const next = [...prev];
+                        // Keep the original position + timestamp; only the
+                        // enriched content/status changes.
+                        next[idx] = { ...notificationMsg, timestamp: prev[idx].timestamp };
+                        return next;
+                    });
                 }
                 break;
             }
