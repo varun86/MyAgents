@@ -49,5 +49,10 @@
  * ```
  */
 export function retainFocusOnMouseDown(e: React.MouseEvent): void {
+  // Primary button only. Focus retention is a left-click concern; calling
+  // preventDefault on a right-/middle-button mousedown is pointless and risks
+  // interfering with native right-click behaviour on buttons that also handle
+  // `onContextMenu` (e.g. AgentCapabilitiesPanel command/skill rows).
+  if (e.button !== 0) return;
   e.preventDefault();
 }

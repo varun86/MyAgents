@@ -18,6 +18,7 @@ import { isImageFile, isImageMimeType, ALLOWED_IMAGE_MIME_TYPES } from '../../sh
 import type { QueuedMessageInfo } from '@/types/queue';
 import { CUSTOM_EVENTS } from '../../shared/constants';
 import { isDebugMode } from '@/utils/debug';
+import { retainFocusOnMouseDown } from '@/utils/focusRetention';
 import { renameIfBareClipboardImage } from '@/utils/clipboardImage';
 import { isProviderAvailable } from '@/config/configService';
 import { modelSupportsModality } from '@/config/services/providerService';
@@ -1987,6 +1988,11 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                  *  can offer 引用文件 / 使用技能 the same way. */}
                 <button
                   type="button"
+                  // This item moves focus to the textarea; preventDefault on mousedown stops
+                  // the item itself from grabbing focus during the tap, which avoids the
+                  // macOS WebKit focus-steal that drops the click (matching the menu-item /
+                  // toolbar-button convention elsewhere).
+                  onMouseDown={retainFocusOnMouseDown}
                   onClick={(e) => {
                     e.stopPropagation();
                     // Insert @ at cursor position and trigger file search
@@ -2010,6 +2016,8 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                 </button>
                 <button
                   type="button"
+                  // Same focus-steal guard as 引用文件 above.
+                  onMouseDown={retainFocusOnMouseDown}
                   onClick={(e) => {
                     e.stopPropagation();
                     // Insert / at cursor position and trigger slash menu

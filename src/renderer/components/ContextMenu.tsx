@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { useCloseLayer } from '@/hooks/useCloseLayer';
+import { retainFocusOnMouseDown } from '@/utils/focusRetention';
 
 export type ContextMenuItem = {
     label: string;
@@ -83,6 +84,11 @@ export default function ContextMenu({ x, y, items, onClose }: ContextMenuProps) 
                         key={index}
                         type="button"
                         disabled={item.disabled}
+                        // Menu items are actions that never need focus. Without this,
+                        // an item whose onClick routes focus to an input (e.g. 引用文件 →
+                        // textarea.focus()) drops its own click on a macOS WebKit trackpad
+                        // tap (focus-steal). preventDefault on mousedown keeps focus put.
+                        onMouseDown={retainFocusOnMouseDown}
                         onClick={() => {
                             if (!item.disabled) {
                                 item.onClick();
