@@ -102,6 +102,20 @@ export interface DirectoryPanelHandle {
   refresh: () => void;
 }
 
+/**
+ * Per-tab persistent slice of the file-tree view state. Held in a ref by the
+ * parent (Chat) so it survives DirectoryPanel's unmount/remount when the
+ * workspace panel is dismissed and reopened. DirectoryPanel seeds its local
+ * state from this on mount and mirrors changes back into it.
+ *   - openPaths: which folders are expanded (source of truth for expansion)
+ *   - directoryInfo: the lazily-loaded tree, so reopen restores instantly
+ *     instead of cold-loading collapsed (the mount refresh then reconciles).
+ */
+export interface WorkspaceTreePersistedState {
+  openPaths: Set<string>;
+  directoryInfo: DirectoryTree | null;
+}
+
 interface DirectoryPanelProps {
   agentDir: string;
   /** Workspace icon ID (Phosphor) from project config */
@@ -117,6 +131,10 @@ interface DirectoryPanelProps {
   onOpenConfig?: () => void;
   /** External trigger to refresh (incremented when file-modifying tools complete) */
   refreshTrigger?: number;
+  /** Per-tab persistence of expand state + loaded tree, so the panel keeps its
+   *  expansion across dismiss/reopen within a tab. Held by the parent (Chat) in
+   *  a ref. Optional — omitting it (e.g. launcher) falls back to ephemeral state. */
+  persistedTreeStateRef?: React.MutableRefObject<WorkspaceTreePersistedState>;
   /** Trigger full refresh (file tree + capabilities) — called from context menu */
   onRefreshAll?: () => void;
   /** Whether Tauri drag is active over this panel */
@@ -228,6 +246,7 @@ const DirectoryPanel = memo(
       onCollapse,
       onOpenConfig,
       refreshTrigger,
+      persistedTreeStateRef,
       onRefreshAll,
       isTauriDragActive = false,
       onInsertReference,
@@ -247,8 +266,11 @@ const DirectoryPanel = memo(
     },
     ref,
   ) {
+    // Seed from the per-tab persisted ref so reopening the panel restores the
+    // previously-loaded tree instead of cold-loading collapsed. The mount
+    // refresh (rawRefresh) then reconciles it with fresh data via mergeLazyChildren.
     const [directoryInfo, setDirectoryInfo] = useState<DirectoryTree | null>(
-      null,
+      () => persistedTreeStateRef?.current.directoryInfo ?? null,
     );
     const [error, setError] = useState<string | null>(null);
     // Multi-selection support
@@ -755,14 +777,30 @@ const DirectoryPanel = memo(
       loadingPaths: loadingDirs,
       rootChildren: treeData,
       selectedPaths,
+      // Restore the previously-expanded folders when the panel remounts (read
+      // once on mount; see WorkspaceTreePersistedState).
+      initialOpenPaths: persistedTreeStateRef?.current.openPaths,
     });
     // Bridge: `rawRefresh` (declared above `useWorkspaceTreeModel`) reads
     // expansion state through this ref. Mirror via useEffect so we don't
     // write a ref during render — matches the project's other ref-mirror
-    // sites (toastRef, onSavedRef, etc).
+    // sites (toastRef, onSavedRef, etc). Also mirror into the per-tab persisted
+    // ref so the open set survives unmount/remount (getOpenPaths identity
+    // changes on every expand/collapse, so this captures the latest set).
     useEffect(() => {
       getOpenPathsRef.current = getOpenPaths;
-    }, [getOpenPaths]);
+      if (persistedTreeStateRef) {
+        persistedTreeStateRef.current.openPaths = new Set(getOpenPaths());
+      }
+    }, [getOpenPaths, persistedTreeStateRef]);
+
+    // Mirror the loaded tree into the per-tab persisted ref so reopening the
+    // panel restores it instantly (the mount refresh then reconciles).
+    useEffect(() => {
+      if (persistedTreeStateRef) {
+        persistedTreeStateRef.current.directoryInfo = directoryInfo;
+      }
+    }, [directoryInfo, persistedTreeStateRef]);
 
     // Pending-selection paths — used by 「新建笔记」 to keep the synthetic
     // newly-created file selected through the brief window between

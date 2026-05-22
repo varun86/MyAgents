@@ -7,7 +7,7 @@ import ConfirmDialog from '@/components/ConfirmDialog';
 import WorkspaceIcon from '@/components/launcher/WorkspaceIcon';
 import { useToast } from '@/components/Toast';
 import Tip from '@/components/Tip';
-import DirectoryPanel, { type DirectoryPanelHandle } from '@/components/DirectoryPanel';
+import DirectoryPanel, { type DirectoryPanelHandle, type WorkspaceTreePersistedState } from '@/components/DirectoryPanel';
 import DropZoneOverlay from '@/components/DropZoneOverlay';
 import MessageList from '@/components/MessageList';
 import SessionHistoryDropdown from '@/components/SessionHistoryDropdown';
@@ -635,6 +635,15 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
 
   // Ref for DirectoryPanel to trigger refresh
   const directoryPanelRef = useRef<DirectoryPanelHandle>(null);
+
+  // Per-tab persistence for the file-tree view state (expand set + loaded tree).
+  // Chat is a per-tab instance kept mounted for the tab's lifetime, so holding
+  // this here lets the file tree keep its expansion across the workspace panel's
+  // dismiss/reopen (DirectoryPanel unmounts when showWorkspace flips to false).
+  const workspaceTreeStateRef = useRef<WorkspaceTreePersistedState>({
+    openPaths: new Set(),
+    directoryInfo: null,
+  });
 
   // Ref for tracking previous isActive state (for config sync on tab switch)
   const prevIsActiveRef = useRef(isActive);
@@ -3381,6 +3390,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
               onCollapse={handleCollapseWorkspace}
               onOpenConfig={handleOpenAgentSettings}
               refreshTrigger={toolCompleteCount + workspaceRefreshTrigger}
+              persistedTreeStateRef={workspaceTreeStateRef}
               isTauriDragActive={isTauriDragging && activeZoneId === 'directory-panel'}
               onInsertReference={handleInsertReference}
               onQuoteFile={handleQuoteFile}
