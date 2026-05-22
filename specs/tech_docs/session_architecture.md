@@ -288,6 +288,16 @@ MyAgents 自身的存储服务于不同的业务场景：
 
 ## 状态同步与新会话机制
 
+### SSE 断连 **不是** 取消权威（load-bearing 不变量）
+
+关 Tab / 网络波动导致 `/chat/stream` 断连，**绝不能**用来取消进行中的 turn。turn 的生命周期归 Rust 的 **Sidecar Owner 模型**（Tab / CronTask / BackgroundCompletion / Agent 四种 owner），不归前端 SSE 连接：
+
+- 零 client 时的 `broadcast()` 是 no-op，turn 照常在 sidecar 跑完并持久化；重连后由 `chat:message-replay` 补发。
+- 真正卡死的 turn 由 10 分钟 inactivity watchdog 收口（见 `agent-session.ts` / `external-session.ts`，原语 `utils/inactivity-watchdog.ts`）。
+- 用户主动放弃用 **Stop**（`interruptCurrentResponse`），不是关 Tab。
+
+历史教训：`390d38ee`（4-25）曾给 `/chat/stream` 加 last-consumer grace interrupt，把"关 Tab"误当"杀 turn"，regress 了 BackgroundCompletion 与 cron/session-send（turn 被 interrupt → `[ERROR turn_failed]` 投回飞书）。最终修法是**彻底删除该 interrupt**；`index.ts` 留有 load-bearing 注释禁止复活。改 SSE 断连相关逻辑前 MUST 理解这条。
+
 ### 问题场景
 
 ```
