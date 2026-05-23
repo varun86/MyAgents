@@ -21,8 +21,10 @@ const alias = { '@': resolve(__dirname, 'src/renderer') };
 // If a `unit` test ever flakes under parallelism (turns out to import a stateful
 // module), move it to `stateful` — correctness over speed.
 //
-// The `dom` project (jsdom + @testing-library/react for `*.test.tsx`) is added
-// in Phase 4 of the test-harness plan; not wired yet.
+// The `dom` project runs `*.test.tsx` in jsdom with @testing-library/react for
+// component / hook behaviour (focus, events, rendering). Component tests that
+// need canvas / real WebView (pdf.js render, etc.) are out of scope for jsdom —
+// extract their pure logic and test that in `unit` instead.
 export default defineConfig({
   resolve: { alias },
   test: {
@@ -64,6 +66,18 @@ export default defineConfig({
           hookTimeout: 120_000,
           pool: 'forks',
           poolOptions: { forks: { singleFork: true } },
+        },
+      },
+      {
+        resolve: { alias },
+        test: {
+          name: 'dom',
+          environment: 'jsdom',
+          include: ['src/**/*.test.tsx'],
+          setupFiles: ['src/test/setup-dom.ts'],
+          testTimeout: 10_000,
+          hookTimeout: 10_000,
+          pool: 'forks',
         },
       },
     ],
