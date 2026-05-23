@@ -37,6 +37,7 @@ import { parsePartialJson } from '@/utils/parsePartialJson';
 import { subscribeFrontendLogs, setCurrentTabId } from '@/utils/frontendLogger';
 import { getTabServerUrl, proxyFetch, isTauri, getSessionActivation, getSessionPort, ensureSessionSidecar, resetTabServerUrlCache, setActiveCorrelation } from '@/api/tauriClient';
 import { resolveAttachmentUrl } from '@/utils/attachmentUrl';
+import { shouldDegradedLoad } from '@/utils/optionResolve';
 import { refreshWorkspaceFileIndex } from '@/api/searchClient';
 import { listenWithCleanup } from '@/utils/tauriListen';
 import type { PermissionMode } from '@/config/types';
@@ -3616,6 +3617,43 @@ export default function TabProvider({
     // Track previous sessionId to detect changes (must be before the effect that uses it)
     const prevSessionIdRef = useRef<string | null | undefined>(sessionId);
 
+    // #235: degraded-load fallback. When SSE never (re)attaches after a
+    // ConnectionReset cascade, the session-load effect's "waiting for SSE to
+    // attach" / "!isConnected" early-returns would leave the tab blank forever
+    // because loadSession never fires. This timer loads the session over HTTP
+    // (which is independent of the SSE stream) after a grace period so the user
+    // sees their conversation; live streaming resumes if/when SSE recovers.
+    const sseAttachFallbackRef = useRef<{ timer: ReturnType<typeof setTimeout>; sessionId: string } | null>(null);
+    const SSE_ATTACH_FALLBACK_MS = 8000;
+    const clearSseAttachFallback = useCallback(() => {
+        if (sseAttachFallbackRef.current) {
+            clearTimeout(sseAttachFallbackRef.current.timer);
+            sseAttachFallbackRef.current = null;
+        }
+    }, []);
+    const armSseAttachFallback = useCallback((target: string, prevSessionId: string | null | undefined) => {
+        // Already armed for this exact session — don't restart the countdown.
+        if (sseAttachFallbackRef.current?.sessionId === target) return;
+        clearSseAttachFallback();
+        const timer = setTimeout(() => {
+            sseAttachFallbackRef.current = null;
+            if (!shouldDegradedLoad({
+                mounted: isMountedRef.current,
+                currentSessionId: currentSessionIdRef.current,
+                target,
+                connectedSseSessionId: connectedSseSessionIdRef.current,
+                alreadyLoaded: initialSessionLoadedRef.current,
+                prevSessionId: prevSessionIdRef.current,
+            })) return;
+            console.warn(`[TabProvider ${tabId}] SSE attach timed out for ${target} after ${SSE_ATTACH_FALLBACK_MS}ms — loading session over HTTP (degraded)`);
+            initialSessionLoadedRef.current = true;
+            void loadSessionRef.current(target, { previousSessionId: prevSessionId ?? null });
+        }, SSE_ATTACH_FALLBACK_MS);
+        sseAttachFallbackRef.current = { timer, sessionId: target };
+    }, [tabId, clearSseAttachFallback]);
+    // #235: don't leak the degraded-load timer if the tab unmounts mid-wait.
+    useEffect(() => clearSseAttachFallback, [clearSseAttachFallback]);
+
     // Unified session loading effect - handles both initial load and session changes
     useEffect(() => {
         const prevSessionId = prevSessionIdRef.current;
@@ -3623,6 +3661,12 @@ export default function TabProvider({
         const wasPendingSession = isPendingSessionId(prevSessionId);
         const sessionChanged = prevSessionId !== sessionId;
         prevSessionIdRef.current = sessionId;
+
+        // #235: re-arm the degraded-load fallback fresh each run. During a real
+        // hang none of this effect's deps change, so the armed timer survives to
+        // fire; any re-run (e.g. isConnected flipping true) clears it before we
+        // proceed normally, so a successful attach never triggers a degraded load.
+        clearSseAttachFallback();
 
         // No sessionId - reset flag and return
         if (!sessionId) {
@@ -3637,8 +3681,10 @@ export default function TabProvider({
             initialSessionLoadedRef.current = false;
         }
 
-        // Not connected yet - wait
+        // Not connected yet - wait. For a real (non-pending) session, arm the
+        // degraded-load fallback so a never-connecting SSE doesn't hang the tab.
         if (!isConnected) {
+            if (!isPendingSession) armSseAttachFallback(sessionId, prevSessionId);
             return;
         }
 
@@ -3669,6 +3715,7 @@ export default function TabProvider({
 
             if (connectedSseSessionIdRef.current !== sessionId) {
                 console.log(`[TabProvider ${tabId}] Waiting for SSE to attach to session ${sessionId} before loadSession`);
+                armSseAttachFallback(sessionId, prevSessionId);
                 return;
             }
 
@@ -3682,6 +3729,7 @@ export default function TabProvider({
 
         if (connectedSseSessionIdRef.current !== sessionId) {
             console.log(`[TabProvider ${tabId}] Waiting for SSE to attach to session ${sessionId} before loadSession`);
+            armSseAttachFallback(sessionId, prevSessionId);
             return;
         }
 
@@ -3716,7 +3764,7 @@ export default function TabProvider({
         }
         initialSessionLoadedRef.current = true;
         void loadSession(sessionId, { previousSessionId: prevSessionId ?? null });
-    }, [sessionId, isConnected, tabId, loadSession]);
+    }, [sessionId, isConnected, tabId, loadSession, armSseAttachFallback, clearSseAttachFallback]);
 
     // Cancel a queued message — returns the original text (for restoring to input)
     const cancelQueuedMessage = useCallback(async (queueId: string): Promise<string | null> => {
