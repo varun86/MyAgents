@@ -233,11 +233,30 @@ npm run tauri:dev                 # Tauri 开发模式（完整桌面体验）
 ./build_macos.sh                  # 生产构建
 ./publish_release.sh              # 发布到 R2
 npm run typecheck && npm run lint # 代码质量检查
+npm run test:unit                 # 快池（纯逻辑，并行，秒级）— 开发回合中频繁跑
+npm run test:changed              # 只跑受未提交改动影响的测试
+npm test                          # 全套（unit + stateful 串行池，含真实 SDK/IO，~3min）
+npm run coverage                  # 覆盖率报告（不设硬阈值，看改动文件 ratchet）
 ```
+
+## 测试纪律（回归护栏）
+
+测试用 Vitest，拆两个 project（见 `vitest.config.ts`）：`unit`（纯逻辑，并行 forks，秒级，含 `src/shared/**`、`src/renderer/**`、server 侧 `*.unit.test.ts`）+ `stateful`（singleFork 串行，现有 `src/server/__tests__/**`，触碰模块级全局/端口/真实 SDK）。Rust 测试走 `cargo test`（独立，`npm test` 不碰）。
+
+**这套测试存在的唯一目的是在快速迭代中拦住回归**。AI 开发时 MUST 把它当成开发回合内的护栏，主动跑、即时修：
+
+- **改纯逻辑后 MUST 跑 `npm run test:unit`**（秒级，无理由不跑）；改后端核心后跑 `npm run test:changed`。
+- **修 bug MUST 先加一个能复现该 bug 的回归测试**（characterization test）让它先红，再修到绿——把"反复出同类 bug"从根上掐断。这是红线，不是建议。
+- **新增红线 helper / 纯函数 MUST 配单测**（放进 `unit` 快池：`src/shared/` 直接 `*.test.ts`；server 侧用 `*.unit.test.ts` 后缀进快池）。
+- **测试红了不许靠改弱断言/`skip` 糊过去**——先判断是产品 bug 还是测试漂移（拿确凿依据），产品 bug 就修产品代码。订正不变量必须有理由。
+- 写"纯逻辑可单测"的代码：把决策逻辑抽成纯函数（Functional Core / Imperative Shell），副作用留在薄外壳。巨型文件（`agent-session.ts` / `TabProvider.tsx`）的新逻辑优先抽纯核心再测。
+- 涉及时间的测试 MUST 注入时钟 / `vi.useFakeTimers`，涉及本地日期的 MUST pin `process.env.TZ`（否则跨时区/CI flaky）。
+
+CI（`.github/workflows/test.yml`）在 PR + push 到 `dev/*`/`main` 时自动跑 typecheck + lint + `test:unit` + `cargo test`，**不过不让合**。
 
 ## Git 与工作流
 
-- **提交前 MUST**：`npm run typecheck`，检查当前分支（`git branch --show-current`）
+- **提交前 MUST**：`npm run typecheck` + `npm run test:unit`（秒级），检查当前分支（`git branch --show-current`）
 - **分支策略**：`dev/x.x.x` 开发 → 合并到 `main`。MUST NOT 在 main 直接提交
 - **合并到 main**：需 typecheck + lint 通过 + 用户明确确认
 - **Commit 格式**：Conventional Commits（`feat:` / `fix:` / `refactor:`）
