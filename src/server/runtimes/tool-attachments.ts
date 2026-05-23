@@ -273,8 +273,10 @@ async function referenceExternalPath(sourcePath: string, ctx: SaveContext): Prom
  * (169.254.169.254 etc.) or localhost-bound services.
  *
  * Codex review Critical#3.
+ *
+ * Exported for unit testing — pure (URL) → result, no I/O.
  */
-function isUrlSchemeSafe(parsed: URL): { ok: true } | { ok: false; reason: string } {
+export function isUrlSchemeSafe(parsed: URL): { ok: true } | { ok: false; reason: string } {
   if (parsed.protocol !== 'https:') {
     return { ok: false, reason: `Unsupported URL scheme: ${parsed.protocol}` };
   }
