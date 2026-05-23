@@ -499,7 +499,6 @@ import {
   getSystemInitInfo,
   initializeAgent,
   interruptCurrentResponse,
-  isTurnInFlight,
   getStreamingAssistantId,
   switchToSession,
   setMcpServers,
@@ -541,7 +540,7 @@ import {
   updateSessionMetadata,
   getAttachmentPath,
 } from './SessionStore';
-import { decodeProviderEnvSnapshot, findAgentByWorkspacePath, findProvider, getAllMcpServers, getEffectiveMcpServers, isProviderDisabled, resolveProviderEnv } from './utils/admin-config';
+import { decodeProviderEnvSnapshot, findAgentByWorkspacePath, findProvider, getAllMcpServers, getEffectiveMcpServers, isProviderDisabled, resolveImProviderEnv, resolveProviderEnv } from './utils/admin-config';
 import { snapshotForOwnedSession } from './utils/session-snapshot';
 import { resolveSessionConfig } from './utils/resolve-session-config';
 import type { AgentConfig } from '../shared/types/agent';
@@ -1771,65 +1770,42 @@ async function main() {
   }
 
   /**
-   * Pattern 1 (last-consumer disconnect grace) state.
+   * `/chat/stream` SSE disconnect is intentionally NOT a turn-cancellation
+   * authority. When the last SSE client closes, we do NOT interrupt the
+   * in-flight SDK turn. This is load-bearing — do not "optimize" it back.
    *
-   * Audit C: when the last renderer client closes its `/chat/stream` SSE while
-   * a turn is in flight, the SDK keeps generating into the void — burning
-   * tokens and queuing chunks no one reads. Counter-design: a 3-second grace
-   * window. If a new client connects within the window (renderer reload
-   * typically reconnects in ~1s), cancel the schedule. Otherwise, interrupt
-   * the SDK with reason 'shutdown'.
+   * WHY (architecture: "后端优先，前端辅助" — ARCHITECTURE.md): a turn's lifecycle
+   * belongs to the Rust sidecar Owner model (Tab / CronTask / BackgroundCompletion
+   * / Agent), not to whether a frontend tab is currently watching. The product
+   * contract is explicit: closing / navigating away from a tab while the AI is
+   * running starts BackgroundCompletion and lets the turn FINISH ("AI 继续在后台
+   * 完成任务"); abandoning a turn is done via the Stop button (→ 'user' interrupt),
+   * not by closing the tab. So "no SSE consumer" must never mean "cancel".
    *
-   * Scoped to the sidecar process. IM/Cron/BackgroundCompletion sessions
-   * never have an SSE client connected in the first place, so the
-   * `clients.size === 0` check naturally excludes them — no interrupt fires
-   * for those owners.
+   * HISTORY: PRD 0.2.0 (structural refactors) specced an *owner-aware* check
+   * here ("interrupt only if the owner set no longer has a Tab/Frontend owner,
+   * but IM/Cron/BackgroundCompletion may still keep it alive"). The shipped impl
+   * (390d38ee) instead used a raw `getClients().length === 0` grace and assumed
+   * "headless turns never have an SSE client" — false the moment a user opens a
+   * tab to observe a cron / session-send turn then closes it mid-turn. That
+   * regressed BackgroundCompletion and delivered spurious `[ERROR turn_failed]
+   * [ede_diagnostic]` back to Feishu/IM. Removing the interrupt restores the
+   * owner-model boundary.
+   *
+   * What still governs turn lifecycle WITHOUT this interrupt:
+   *   - Stop button → interruptCurrentResponse('user').
+   *   - All owners released → Rust stops the sidecar → process exit ends the turn.
+   *   - Hung / silent turn → the 10-min inactivity watchdog (agent-session.ts),
+   *     which is SSE-independent.
+   *   - Zero SSE clients is a normal, handled state: broadcast() to an empty
+   *     client set is a no-op (cron/IM turns run headless this way constantly),
+   *     so there is no "chunks nobody reads" leak.
+   *
+   * The one residual gap — a leaked `Tab` owner after an abnormal renderer/SSE
+   * death keeping an event-emitting turn alive (watchdog won't fire) — is a
+   * stale-owner / renderer-health problem to solve with owner leases or tab
+   * cleanup, NOT by making SSE disconnect a cancellation signal.
    */
-  const LAST_CONSUMER_GRACE_MS = 3000;
-  let lastConsumerGraceTimer: ReturnType<typeof setTimeout> | null = null;
-
-  function cancelLastConsumerGrace(): void {
-    if (lastConsumerGraceTimer) {
-      clearTimeout(lastConsumerGraceTimer);
-      lastConsumerGraceTimer = null;
-    }
-  }
-
-  function handleChatStreamClose(): void {
-    // Recompute on close — after our own client was removed in sse.ts, the
-    // remaining count is what matters.
-    const remainingClients = getClients().length;
-    if (remainingClients > 0) {
-      // Other tabs still watching; nothing to do.
-      return;
-    }
-    if (!isTurnInFlight()) {
-      // No active turn → no tokens being burned; nothing to do.
-      return;
-    }
-    if (lastConsumerGraceTimer) {
-      // Already armed — let the existing window run out.
-      return;
-    }
-    console.warn('[chat-stream] last consumer disconnected; arming 3s grace before interrupt (reason=shutdown)');
-    lastConsumerGraceTimer = setTimeout(() => {
-      lastConsumerGraceTimer = null;
-      // Re-check at fire time — a new client may have raced past our gate.
-      if (getClients().length > 0) {
-        console.warn('[chat-stream] grace fired but a client reconnected; skipping interrupt');
-        return;
-      }
-      if (!isTurnInFlight()) {
-        // Turn already finished naturally; nothing to interrupt.
-        return;
-      }
-      console.warn('[chat-stream] grace expired; interrupting SDK turn (reason=shutdown)');
-      interruptCurrentResponse('shutdown').catch((err) => {
-        console.warn(`[chat-stream] interrupt after grace failed: ${err instanceof Error ? err.message : String(err)}`);
-      });
-    }, LAST_CONSUMER_GRACE_MS);
-    lastConsumerGraceTimer.unref?.();
-  }
 
   /**
    * Original Hono fetch body, unchanged except for being moved into a named
@@ -2104,11 +2080,9 @@ async function main() {
       }
 
       if (pathname === '/chat/stream' && request.method === 'GET') {
-        // Pattern 1: a new SSE consumer cancels any pending "last consumer
-        // disconnect" grace timer — the renderer just reconnected, no
-        // interrupt needed.
-        cancelLastConsumerGrace();
-        const { client, response } = createSseClient(handleChatStreamClose);
+        // No onClose turn-interrupt: SSE disconnect is not a cancellation
+        // authority (see the note above — turn lifecycle = Rust Owner model).
+        const { client, response } = createSseClient(() => {});
         const state = shouldUseExternalRuntime()
           ? { ...getAgentState(), sessionState: getExternalSessionState() }
           : getAgentState();
@@ -8489,7 +8463,21 @@ async function main() {
             // is a no-op for them and behavior matches v0.2.13.
             let resolvedPermissionMode: PermissionMode = (payload.permissionMode as PermissionMode) ?? 'plan';
             let resolvedModel: string | undefined = payload.model ?? undefined;
-            let resolvedProviderEnv: ProviderEnv | undefined = payload.providerEnv ?? undefined;
+            // (#237) Re-resolve providerEnv from canonical `providerId` on disk
+            // instead of trusting the blob Rust forwarded. Rust caches
+            // `provider_env_json` as an Arc at bot start and replays it on every
+            // /api/im/enqueue, so a stale agent.providerEnvJson (or
+            // channel.overrides.providerEnvJson — Rust's patch.channels
+            // hot-reload only updates group fields, not provider overrides)
+            // would pin IM forever to the wrong upstream. Desktop Chat is
+            // immune because Chat.tsx rebuilds providerEnv from React state on
+            // every send — this mirrors that "live from providerId" shape on
+            // the sidecar side. Falls back to payload.providerEnv if the agent
+            // has no resolvable providerId (provider deleted / disabled / no
+            // API key), preserving back-compat for edge cases.
+            const freshImProviderEnv = resolveImProviderEnv(agentDir, payload.botId);
+            let resolvedProviderEnv: ProviderEnv | undefined =
+              (freshImProviderEnv as ProviderEnv | undefined) ?? payload.providerEnv ?? undefined;
             const sidForSnapshot = getSessionId();
             const snapshotMeta = sidForSnapshot ? getSessionMetadata(sidForSnapshot) : null;
             if (snapshotMeta?.configSnapshotAt) {
@@ -8500,10 +8488,14 @@ async function main() {
                 resolvedModel = snapshotMeta.model;
               }
               if (snapshotMeta.providerEnvJson) {
+                // Desktop-handover snapshot wins over the fresh agent-disk
+                // resolve above: the user's intent at handover was "freeze
+                // this desktop session's provider"; re-resolving from current
+                // agent state would defeat that.
                 // Snapshot gate: if the desktop handover's providerId is now
                 // globally disabled, refuse the frozen snapshot — fall back to
-                // live payload.providerEnv (which the user can also disable by
-                // restarting the bot). decodeProviderEnvSnapshot enforces this.
+                // the live freshImProviderEnv / payload.providerEnv chain.
+                // decodeProviderEnvSnapshot enforces this.
                 const decoded = decodeProviderEnvSnapshot(snapshotMeta.providerEnvJson, snapshotMeta.providerId);
                 if (decoded) resolvedProviderEnv = decoded as ProviderEnv;
               }

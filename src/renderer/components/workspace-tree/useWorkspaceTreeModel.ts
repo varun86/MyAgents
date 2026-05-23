@@ -15,6 +15,13 @@ interface UseWorkspaceTreeModelOptions {
   loadingPaths: ReadonlySet<string>;
   selectedPaths: readonly string[];
   maxStickyDepth?: number;
+  /**
+   * Seed for the open/expanded path set, read once on mount. Lets a parent
+   * persist expand state across the panel's unmount/remount (e.g. dismissing
+   * and reopening the workspace overlay within a tab). Only the initializer
+   * reads it — later mutations live in this hook's own state.
+   */
+  initialOpenPaths?: ReadonlySet<string>;
 }
 
 export interface WorkspaceTreeModel {
@@ -49,8 +56,10 @@ export function useWorkspaceTreeModel({
   loadingPaths,
   selectedPaths,
   maxStickyDepth = 3,
+  initialOpenPaths,
 }: UseWorkspaceTreeModelOptions): WorkspaceTreeModel {
-  const [openPaths, setOpenPaths] = useState<Set<string>>(() => new Set());
+  // `new Set(undefined)` is an empty set, so the no-seed case is unchanged.
+  const [openPaths, setOpenPaths] = useState<Set<string>>(() => new Set(initialOpenPaths));
   // `getOpenPaths` identity changes when `openPaths` mutates. Consumers that
   // want a stable reference (e.g. a `useCallback` declared in a parent
   // component above this hook call) should mirror it into a ref via

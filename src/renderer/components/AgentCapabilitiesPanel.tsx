@@ -16,6 +16,7 @@ import { memo, useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { track } from '@/analytics';
 import { CUSTOM_EVENTS } from '../../shared/constants';
 import { useToast } from '@/components/Toast';
+import { retainFocusOnMouseDown } from '@/utils/focusRetention';
 import ContextMenu, { type ContextMenuItem } from './ContextMenu';
 import type { CapabilityInitialSelect } from '../../shared/skillsTypes';
 
@@ -311,6 +312,10 @@ export default memo(function AgentCapabilitiesPanel({
                                         <button
                                             onClick={() => handleCommandClick(item.name)}
                                             onContextMenu={e => handleCommandContextMenu(e, item.scope, item.fileName)}
+                                            // handleCommandClick inserts /name then focuses the chat textarea;
+                                            // without this the click is dropped on a macOS WebKit trackpad tap
+                                            // (focus-steal). preventDefault on mousedown keeps the textarea focused.
+                                            onMouseDown={retainFocusOnMouseDown}
                                             className="flex w-full items-center gap-2 rounded-md px-2 py-1 text-left hover:bg-[var(--hover-bg)] transition-colors"
                                         >
                                             <Terminal className="h-3 w-3 shrink-0 text-[var(--success)]" />
@@ -334,6 +339,8 @@ export default memo(function AgentCapabilitiesPanel({
                                         <button
                                             onClick={() => handleSkillClick(item.name)}
                                             onContextMenu={e => handleSkillContextMenu(e, item.scope, item.folderName)}
+                                            // Same focus-steal guard as the command rows above.
+                                            onMouseDown={retainFocusOnMouseDown}
                                             className="flex w-full items-center gap-2 rounded-md px-2 py-1 text-left hover:bg-[var(--hover-bg)] transition-colors"
                                         >
                                             <Sparkles className="h-3 w-3 shrink-0 text-amber-500" />

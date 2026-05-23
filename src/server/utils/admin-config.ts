@@ -508,6 +508,87 @@ export function findAgentByWorkspacePath(agentDir: string): AgentConfigSlim | un
 }
 
 /**
+ * Re-resolve providerEnv for an IM channel from canonical `providerId` (issue #237).
+ *
+ * The IM bot's Rust runtime caches `provider_env_json` as an Arc at bot start and
+ * forwards that blob in every `/api/im/enqueue` payload. The blob can drift away
+ * from the agent's canonical `providerId` — channel.overrides.providerEnvJson stays
+ * pinned to whatever was written when the user last touched that channel (the
+ * Rust hot-reload for `patch.channels` only updates group fields — see
+ * `src-tauri/src/im/mod.rs` patch.channels branch), and agent.providerEnvJson can
+ * outlive a providerId change if the writer didn't go through patchAgentConfig.
+ * Desktop Chat is immune because Chat.tsx builds providerEnv live from React state
+ * on every send; IM was not.
+ *
+ * The fix here mirrors that "live from canonical providerId" behavior on the
+ * sidecar side: look up the agent + channel, resolve `providerId` via the same
+ * priority chain Rust uses at `src-tauri/src/im/types.rs:968`
+ * (`channel.overrides.providerId` → legacy channel-root `channel.providerId`
+ * (pre-bc06386) → `agent.providerId` → `config.defaultProviderId`), and
+ * rebuild the env via `resolveProviderEnv()`.
+ *
+ * Returns undefined when:
+ *   - the agent can't be matched by workspacePath (legacy IM bot / drift) —
+ *     deliberately does NOT fall through to `defaultProviderId` here, since
+ *     rerouting every unmatched IM bot to the global default would be strictly
+ *     worse than the stale-blob bug we're fixing,
+ *   - or when the resolved providerId has no live env (provider deleted /
+ *     disabled / no API key).
+ *
+ * Callers fall back to the legacy `payload.providerEnv` blob in those cases
+ * to preserve back-compat for configs the user hasn't migrated yet.
+ */
+export function resolveImProviderEnv(
+  agentDir: string,
+  channelId: string | undefined,
+  config?: AdminAppConfig,
+): ResolvedProviderEnv | undefined {
+  const c = config ?? loadConfig();
+  const normalized = agentDir.replace(/\\/g, '/');
+  const agents = (c.agents ?? []) as AgentConfigSlim[];
+  const agent = agents.find(a =>
+    typeof a.workspacePath === 'string' && a.workspacePath.replace(/\\/g, '/') === normalized
+  );
+  // No agent matched (legacy IM bot / workspace-path drift) — bail out so the
+  // caller falls back to `payload.providerEnv`. Returning a resolution against
+  // `defaultProviderId` here would silently reroute every legacy IM bot to the
+  // global default provider, which is a strictly worse regression than the
+  // original stale-blob bug.
+  if (!agent) return undefined;
+  // Channel provider chain (mirrors Rust `ChannelConfigRust::to_im_config` at
+  // src-tauri/src/im/types.rs:968): `overrides.providerId` → channel-root
+  // `providerId` (legacy pre-v0.1.45) → agent providerId. The legacy channel-
+  // root field is still on disk for users who configured providers via the
+  // pre-bc06386 in-IM `/provider` command — skipping it would reroute those
+  // configs to the agent default. payload.botId == channel.id under the
+  // v0.1.41 Agent architecture (see src-tauri/src/im/mod.rs `channel.id` →
+  // `bot_id` mapping at line 4360).
+  let channelLevelProviderId: string | undefined;
+  if (channelId) {
+    const channels = (agent.channels ?? []) as ChannelConfigSlim[];
+    const channel = channels.find(ch => ch.id === channelId);
+    if (channel) {
+      const overrides = (channel.overrides as Record<string, unknown> | undefined) ?? undefined;
+      const ovProviderId = overrides?.providerId;
+      if (typeof ovProviderId === 'string' && ovProviderId.length > 0) {
+        channelLevelProviderId = ovProviderId;
+      } else {
+        // Legacy root-level channel.providerId (pre-bc06386).
+        const legacyProviderId = (channel as Record<string, unknown>).providerId;
+        if (typeof legacyProviderId === 'string' && legacyProviderId.length > 0) {
+          channelLevelProviderId = legacyProviderId;
+        }
+      }
+    }
+  }
+  const providerId = channelLevelProviderId
+    || agent.providerId
+    || (c.defaultProviderId as string | undefined);
+  if (!providerId) return undefined;
+  return resolveProviderEnv(providerId, c);
+}
+
+/**
  * Decode a frozen providerEnv snapshot, enforcing the global enablement gate.
  *
  * Snapshot semantics: sessions / agents / cron tasks freeze provider env at

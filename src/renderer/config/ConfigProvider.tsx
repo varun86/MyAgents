@@ -10,7 +10,9 @@ import {
     type ModelAliases,
     type Provider,
     type ProviderVerifyStatus,
+    type ProxySettings,
     PRESET_PROVIDERS,
+    PROXY_DEFAULTS,
     applyProviderEnablementAndOrder,
 } from './types';
 import {
@@ -104,6 +106,8 @@ export interface ConfigDataValue {
 
 export interface ConfigActionsValue {
     updateConfig: (updates: Partial<AppConfig>) => Promise<void>;
+    /** Merge-aware proxy update — see ConfigProvider for the lost-update rationale (#230). */
+    patchProxySettings: (partial: Partial<ProxySettings>) => Promise<void>;
     refreshConfig: () => Promise<void>;
     reload: () => Promise<void>;
     refreshProviderData: () => Promise<void>;
@@ -366,6 +370,29 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
         // No more CONFIG_CHANGED event — all consumers share this Context
     }, []);
 
+    // #230: Merge-aware proxy patch. Callers pass only the field(s) they changed;
+    // the merge happens against `c` (the disk-latest config) INSIDE the
+    // atomicModifyConfig modifier, under withConfigLock. This is what prevents
+    // lost updates when two proxy fields commit back-to-back from the same React
+    // render — e.g. editing the host field then clicking the enable toggle in one
+    // interaction: the host blur write lands on disk first, and the toggle's read
+    // sees it, instead of both spreading a stale render-time `config.proxySettings`
+    // base and the last writer clobbering the other's field. The base layering
+    // (`enabled:false` → PROXY_DEFAULTS → c.proxySettings → partial) also yields a
+    // complete ProxySettings even when proxySettings was previously undefined.
+    const patchProxySettings = useCallback(async (partial: Partial<ProxySettings>) => {
+        const newConfig = await atomicModifyConfig(c => ({
+            ...c,
+            proxySettings: {
+                enabled: false,
+                ...PROXY_DEFAULTS,
+                ...c.proxySettings,
+                ...partial,
+            },
+        }));
+        setConfig(newConfig);
+    }, []);
+
     const refreshConfig = useCallback(async () => {
         try {
             const latest = await loadAppConfig();
@@ -607,14 +634,14 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
     }), [config, projects, providers, apiKeys, providerVerifyStatus, isLoading, error]);
 
     const actions = useMemo<ConfigActionsValue>(() => ({
-        updateConfig, refreshConfig, reload: load, refreshProviderData,
+        updateConfig, patchProxySettings, refreshConfig, reload: load, refreshProviderData,
         addProject, updateProject, patchProject, removeProject, touchProject,
         addCustomProvider, updateCustomProvider, deleteCustomProvider, refreshProviders,
         savePresetCustomModels, removePresetCustomModel, savePrimaryModel, saveProviderModelAliases,
         saveApiKey, deleteApiKey,
         saveProviderVerifyStatus,
     }), [
-        updateConfig, refreshConfig, load, refreshProviderData,
+        updateConfig, patchProxySettings, refreshConfig, load, refreshProviderData,
         addProject, updateProject, patchProject, removeProject, touchProject,
         addCustomProvider, updateCustomProvider, deleteCustomProvider, refreshProviders,
         savePresetCustomModels, removePresetCustomModel, savePrimaryModel, saveProviderModelAliases,

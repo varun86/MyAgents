@@ -8,6 +8,7 @@ import { getScriptDir, getBundledNodeDir, getSystemNodeDirs, getBundledRuntimePa
 import { getCrossPlatformEnv, isSkillBlockedOnPlatform } from './utils/platform';
 import { ensureDirSync, isDirEntry } from './utils/fs-utils';
 import { applyContextWindowSuffix, lookupModelContextLength, modelSupportsModality } from './utils/model-capabilities';
+import { InactivityWatchdog } from './utils/inactivity-watchdog';
 import { processImage, resizeToolImageContent, classifyImageError } from './utils/imageResize';
 import { writeBase64FilesToAgentDir } from './utils/workspace-files';
 import { ensureGitignorePattern } from './utils/gitignore';
@@ -3013,6 +3014,25 @@ const pendingExitPlanMode = new Map<string, {
 const pendingEnterPlanMode = new Map<string, {
   resolve: (approved: boolean) => void;
 }>();
+
+/**
+ * True while the turn is blocked on a HUMAN response — a permission prompt,
+ * AskUserQuestion, or plan-mode approval. The inactivity watchdog treats this
+ * as a PAUSED state, not a hung turn: the user's think time is not turn
+ * inactivity, and the SDK emits no events while it awaits the canUseTool
+ * resolver. Without this, a >10-minute deliberation (e.g. the user steps away
+ * mid-permission-prompt) false-fires the watchdog and aborts the turn right as,
+ * or before, they answer — despite the comment claiming no wall-clock timeout.
+ * (High-2, cross-review. The wake-lock added alongside the suspension-aware
+ * watchdog only stops the machine SLEEPING during interactive turns; it does
+ * not stop the inactivity clock from counting the human wait.)
+ */
+function hasPendingInteractiveRequest(): boolean {
+  return pendingPermissions.size > 0
+    || pendingAskUserQuestions.size > 0
+    || pendingExitPlanMode.size > 0
+    || pendingEnterPlanMode.size > 0;
+}
 
 /**
  * Validate AskUserQuestion input structure
@@ -7631,6 +7651,23 @@ async function startStreamingSession(preWarm = false): Promise<void> {
   let startupTimeoutId: ReturnType<typeof setTimeout> | undefined;
   let apiWatchdogId: ReturnType<typeof setInterval> | undefined;
 
+  // Background sub-agents started in this session but not yet terminal, keyed by
+  // task_id. Entries are removed when a terminal task_notification/task_updated is
+  // broadcast; whatever remains when the subprocess tears down (the finally below)
+  // is flushed as a synthetic `stopped`.
+  //
+  // WHY: terminal events (task_notification / task_updated) are best-effort. When
+  // the owning subprocess dies first — abort, deferred config restart, watchdog
+  // kill, transport error — an in-flight background sub-agent emits NO terminal
+  // event ever (the process that would emit it is gone). The renderer's Agent
+  // Status Panel then shows it "后台运行中" permanently (all three of its
+  // clear-defenses require a terminal event). Observed in production: ~7% of
+  // background sub-agents (16/218 local_agent) stuck this way. The stored
+  // toolUseId also backfills the task_updated terminal channel (its patch carries
+  // none) so the renderer's persisted history fallback survives a reload.
+  // Declared outside try so the finally can flush it.
+  const startedBackgroundTasks = new Map<string, { toolUseId?: string; description?: string }>();
+
   try {
     const sdkPermissionMode = mapToSdkPermissionMode(currentPermissionMode);
 
@@ -7737,7 +7774,11 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         // sessionRegistered branch above.
       } else {
         const { sourceSessionId, messageUuid } = forkMeta.forkFrom;
-        console.log(`[agent] fork mode: resuming from ${sourceSessionId}, fork at ${messageUuid}, new session ${sessionId}`);
+        // messageUuid may be undefined if the catch-block recovery (~line 9737) cleared
+        // it after a "No message found" rejection. Without an anchor, SDK forks at the
+        // source's tail rather than the user-clicked midpoint — see issue #220.
+        const anchorDesc = messageUuid ? `fork at ${messageUuid}` : 'no anchor (degraded: SDK will fork at source tail)';
+        console.log(`[agent] fork mode: resuming from ${sourceSessionId}, ${anchorDesc}, new session ${sessionId}`);
         resumeFrom = sourceSessionId;
         effectiveSdkSessionId = sessionId;
         forkMode = true;
@@ -8447,6 +8488,33 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     let streamEventDeltaCount = 0;
     let streamEventTokenTotal = 0;
 
+    // #227 — track which background-task ids have already produced a terminal
+    // `chat:task-notification` broadcast in THIS SDK session, AND whether that
+    // broadcast already carried a RICH (non-empty summary / output_file) payload.
+    // Value = true once a rich terminal broadcast has gone out for the id.
+    //
+    // The SDK exposes two independent terminal channels for the same logical
+    // event (task_updated / task_notification — see the lifecycle handler block
+    // below, ~L8763). We forward whichever arrives FIRST so the user sees the
+    // completion promptly. But the first-to-arrive channel is usually
+    // task_updated, whose patch carries only an error string (empty on success)
+    // — NOT the rich summary / output_file the later task_notification delivers.
+    // So a plain first-wins suppression would drop the real summary on the
+    // common happy path. Instead we let a LATER terminal event ENRICH an
+    // already-broadcast card when it brings a non-empty summary/output_file the
+    // first broadcast lacked. The renderer upserts the
+    // `task-notification-<taskId>` history row by id, so the enrich re-broadcast
+    // updates the bubble in place rather than duplicating it. Once rich, further
+    // events for the id (and events that add nothing new) are suppressed.
+    //
+    // Lifetime = one for-await loop = one SDK session = one task registry.
+    // Tasks can't cross SDK-session boundaries (the registry is in-process to
+    // the CLI subprocess), so resetting per-session is correct. No bounded-cap
+    // logic needed: the renderer's backgroundTaskStatus.ts has its own LRU,
+    // and a single session is realistically bounded to << 1000 background
+    // sub-agents.
+    const terminalBroadcastedTaskIds = new Map<string, boolean>();
+
     // ── API response watchdog ──────────────────────────────────────────
     // Detects hung API connections AND hung MCP tool calls.
     // Heartbeat (15s ping) keeps the SSE alive, so Rust's 60s read_timeout
@@ -8457,21 +8525,39 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     // path can read it. Reset here so a new turn starts at 0 even if a
     // prior turn ended via abort/restart without clearing it.
     inFlightToolCount = 0;
-    let lastSdkEventAt = Date.now();
     const API_WATCHDOG_INTERVAL_MS = 30_000;
     const WATCHDOG_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes — unified for API and MCP tools
+    // Suspension-aware: only counts time the process was actually running, so
+    // macOS sleep / App Nap doesn't get mistaken for a hung turn. See
+    // utils/inactivity-watchdog.ts. markActivity() is called per SDK event
+    // below; the gate (`!isStreamingMessage`) means evaluateTick only runs
+    // during an active turn — the credited tick-gap on the first post-idle tick
+    // naturally absorbs inter-turn idle.
+    const watchdog = new InactivityWatchdog({ timeoutMs: WATCHDOG_TIMEOUT_MS, intervalMs: API_WATCHDOG_INTERVAL_MS });
     let watchdogFired = false;
     apiWatchdogId = setInterval(async () => {
       // Only check during active turns (not pre-warm, not idle between turns)
       if (!isStreamingMessage || isPreWarming) return;
       if (watchdogFired) return;
-      const now = Date.now();
-      const noRecentSdkEvents = now - lastSdkEventAt > WATCHDOG_TIMEOUT_MS;
+      const { fire: noRecentSdkEvents, suspendedMs } = watchdog.evaluateTick();
+      if (suspendedMs > 0) {
+        console.log(`[agent] Watchdog: credited ${Math.round(suspendedMs / 1000)}s process suspension (sleep/App Nap) — not counted as inactivity`);
+      }
+
+      // Paused on a human (permission prompt / AskUserQuestion / plan approval):
+      // their think time is not turn inactivity. Re-baseline the idle clock so
+      // the post-answer budget is fresh, and skip the kill. evaluateTick already
+      // advanced lastTickAt this tick, so the wait ending produces no spurious
+      // suspension credit. (High-2, cross-review.)
+      if (hasPendingInteractiveRequest()) {
+        watchdog.markActivity();
+        return;
+      }
 
       if (noRecentSdkEvents) {
         watchdogFired = true;
         const toolInfo = inFlightToolCount > 0 ? `（${inFlightToolCount} 个工具执行中）` : '';
-        console.error(`[agent] Watchdog: no SDK event for ${WATCHDOG_TIMEOUT_MS / 1000}s${toolInfo} — aborting`);
+        console.error(`[agent] Watchdog: no SDK event for ${WATCHDOG_TIMEOUT_MS / 1000}s of active time${toolInfo} — aborting`);
 
         // ─── DELAYED CONTINUE (set flag) ─────────────────────────────────
         // This is the ONE AND ONLY site that sets `pendingContinueAfterAbort`.
@@ -8524,7 +8610,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
 
     for await (const sdkMessage of querySession) {
       messageCount++;
-      lastSdkEventAt = Date.now();
+      watchdog.markActivity();
       // Flip turn-scoped substantive-activity flag on first non-init frame.
       // `system/init` is the boilerplate startup frame and must not count
       // as "this turn produced output" for the watchdog auto-resume decision.
@@ -8694,12 +8780,44 @@ async function startStreamingSession(preWarm = false): Promise<void> {
 
       // Handle background task lifecycle (SDK Task tool with run_in_background)
       // Gated behind type === 'system' to avoid unnecessary property access on high-frequency stream_events
+      //
+      // #227 — SDK exposes TWO independent channels for the same logical
+      // "task is done" event:
+      //   1. `task_notification` (user/parent-prompt channel, statuses
+      //      'completed' | 'failed' | 'stopped'). NOT guaranteed for every
+      //      terminal path — it's emitted from the CLI's internal
+      //      `mode:'task-notification'` queue, which can fail to fire when
+      //      e.g. the parent session ends before the queue is drained, or
+      //      when the task is killed via task_updated without an explicit
+      //      `TaskStop` tool call.
+      //   2. `task_updated` (state-machine patch channel, terminal statuses
+      //      'completed' | 'failed' | 'killed'). Reliably emitted for every
+      //      state transition — this is the authoritative "task is done"
+      //      signal per the SDK contract. Killed→stopped normalization
+      //      matches what the CLI itself does when synthesizing
+      //      task_notification (see CLI `f9=A8(Fq)?Fq==='killed'?'stopped':Fq`).
+      //
+      // We forward whichever arrives first, deduped per task_id via
+      // `terminalBroadcastedTaskIds`. The renderer's TabProvider appends a
+      // `task-notification-<taskId>` history message on each event — without
+      // sidecar-side dedup, the happy path (both events fire) would create
+      // duplicate history rows with the same id. Dual investigation: Claude
+      // root-traced via session JSONL evidence + binary string surface;
+      // Codex independently confirmed the channel separation in the SDK
+      // type contract.
       if (sdkMessage.type === 'system') {
         const taskMsg = sdkMessage as { subtype?: string; task_id?: string;
           tool_use_id?: string; description?: string; task_type?: string;
-          status?: string; summary?: string; output_file?: string };
+          status?: string; summary?: string; output_file?: string;
+          patch?: { status?: string; error?: string; description?: string } };
         if (taskMsg.subtype === 'task_started' && taskMsg.task_id) {
           console.log(`[agent] Background task started: ${taskMsg.task_id} — ${taskMsg.description}`);
+          // Record so the teardown flush + task_updated channel can resolve the
+          // tool_use_id later (see startedBackgroundTasks declaration).
+          startedBackgroundTasks.set(taskMsg.task_id, {
+            toolUseId: taskMsg.tool_use_id,
+            description: taskMsg.description,
+          });
           broadcast('chat:task-started', {
             taskId: taskMsg.task_id,
             toolUseId: taskMsg.tool_use_id,
@@ -8707,14 +8825,74 @@ async function startStreamingSession(preWarm = false): Promise<void> {
             taskType: taskMsg.task_type,
           });
         } else if (taskMsg.subtype === 'task_notification' && taskMsg.task_id) {
-          console.log(`[agent] Background task ${taskMsg.status}: ${taskMsg.task_id} — ${taskMsg.summary}`);
-          broadcast('chat:task-notification', {
-            taskId: taskMsg.task_id,
-            toolUseId: taskMsg.tool_use_id,
-            status: taskMsg.status,
-            summary: taskMsg.summary,
-            outputFile: taskMsg.output_file,
-          });
+          // Rich iff it carries a real summary or an output_file (the
+          // notification channel is the one that delivers these).
+          const isRich = Boolean((taskMsg.summary && taskMsg.summary.trim()) || taskMsg.output_file);
+          const priorRich = terminalBroadcastedTaskIds.get(taskMsg.task_id);
+          if (priorRich !== undefined && (priorRich || !isRich)) {
+            // Already broadcast for this task, and either that broadcast was
+            // already rich OR this one adds nothing new — suppress the
+            // duplicate. (Happy path that DOES enrich: task_updated{completed}
+            // fired first with an empty summary [priorRich=false], so a rich
+            // notification here [isRich=true] falls through to re-broadcast.)
+            console.log(`[agent] Background task notification ${taskMsg.status} suppressed (no new info; priorRich=${priorRich}): ${taskMsg.task_id}`);
+          } else {
+            const enriching = priorRich !== undefined;
+            terminalBroadcastedTaskIds.set(taskMsg.task_id, isRich);
+            console.log(`[agent] Background task ${taskMsg.status}${enriching ? ' (enriching prior broadcast)' : ''}: ${taskMsg.task_id} — ${taskMsg.summary}`);
+            broadcast('chat:task-notification', {
+              taskId: taskMsg.task_id,
+              toolUseId: taskMsg.tool_use_id,
+              status: taskMsg.status,
+              summary: taskMsg.summary,
+              outputFile: taskMsg.output_file,
+            });
+            // Reached terminal — drop from the pending set so the teardown flush skips it.
+            startedBackgroundTasks.delete(taskMsg.task_id);
+          }
+        } else if (taskMsg.subtype === 'task_updated' && taskMsg.task_id) {
+          const patchStatus = taskMsg.patch?.status;
+          // Only terminal patches are actionable for the renderer's "task
+          // done" signal. Non-terminal patches (pending/running) leave the
+          // UI in its current state.
+          if (patchStatus === 'completed' || patchStatus === 'failed' || patchStatus === 'killed') {
+            const errorSummary = taskMsg.patch?.error ?? '';
+            // task_updated only carries an error string as its summary (empty on
+            // success) and never an output_file, so it is "rich" only when that
+            // error is non-empty.
+            const isRich = Boolean(errorSummary.trim());
+            const priorRich = terminalBroadcastedTaskIds.get(taskMsg.task_id);
+            if (priorRich !== undefined && (priorRich || !isRich)) {
+              console.log(`[agent] Background task patch ${patchStatus} suppressed (no new info; priorRich=${priorRich}): ${taskMsg.task_id}`);
+            } else {
+              const enriching = priorRich !== undefined;
+              terminalBroadcastedTaskIds.set(taskMsg.task_id, isRich);
+              // Map 'killed' → 'stopped': the renderer's
+              // `backgroundTaskStatus.ts::TERMINAL` set is
+              // {completed, error, failed, stopped} and knows nothing about
+              // 'killed'. Aligning with the SDK CLI's own normalization
+              // keeps the renderer vocab stable.
+              const normalized = patchStatus === 'killed' ? 'stopped' : patchStatus;
+              console.log(`[agent] Background task ${normalized} (via task_updated)${enriching ? ' (enriching prior broadcast)' : ''}: ${taskMsg.task_id} — patch.status=${patchStatus}${errorSummary ? ` error=${errorSummary}` : ''}`);
+              broadcast('chat:task-notification', {
+                taskId: taskMsg.task_id,
+                // task_updated.patch doesn't carry tool_use_id, so resolve it
+                // from the task_started record. The renderer can also bridge
+                // taskId→toolUseId at runtime (registerBackgroundTask), but the
+                // PERSISTED `task-notification-<taskId>` history message stores
+                // this field verbatim — sending undefined there breaks the
+                // panel's history fallback after a reload (it keys on toolUseId).
+                // Falls back to undefined (orphan-pool reconciliation) if the
+                // start was never observed in this session.
+                toolUseId: startedBackgroundTasks.get(taskMsg.task_id)?.toolUseId,
+                status: normalized,
+                summary: errorSummary,
+                outputFile: '',
+              });
+              // Reached terminal — drop from the pending set so the teardown flush skips it.
+              startedBackgroundTasks.delete(taskMsg.task_id);
+            }
+          }
         }
 
         // Handle API retry events (v0.2.77+) — show retry status to user
@@ -9074,8 +9252,44 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           }
           continue;
         }
+        // (#228) Suppress SDK-synthetic transcript material from the user-visible
+        // channel. The SDK emits "synthetic" user messages for several internal
+        // purposes that must never reach the chat UI nor be persisted to
+        // SessionStore, because they have no user-visible semantics and their
+        // uuids belong to post-compact sessions (rewind anchors break):
+        //   - `isCompactSummary: true` — the post-`compact_boundary` continuation
+        //     prompt carrying the prior-conversation summary. In long
+        //     conversations the summary text often embeds historical
+        //     `<local-command-stdout>` substrings from prior /cost or /compact
+        //     echoes, which previously slipped past the local-command branch
+        //     below and materialized as a phantom user bubble.
+        //   - `isMeta: true` — meta messages (e.g. tool-trigger prompts CLI emits).
+        //   - `isSynthetic: true` — generic SDK-synthetic marker (also used
+        //     for some queued-command pseudo-replays below; covered for
+        //     defense-in-depth).
+        //   - `isVisibleInTranscriptOnly: true` — explicit SDK marker for
+        //     "show in transcript file only, never user-visible" (semantic
+        //     superset of the above).
+        // These flags are runtime properties of the live SDK stream events
+        // (verified against on-disk transcript JSONL); the public
+        // `SDKUserMessage` type only declares `isSynthetic?`. UUID tracking
+        // is still skipped (matches the prior `!isSynthetic` guard).
+        const syntheticFlags = sdkMessage as {
+          isCompactSummary?: boolean;
+          isMeta?: boolean;
+          isSynthetic?: boolean;
+          isVisibleInTranscriptOnly?: boolean;
+        };
+        if (
+          syntheticFlags.isCompactSummary ||
+          syntheticFlags.isMeta ||
+          syntheticFlags.isSynthetic ||
+          syntheticFlags.isVisibleInTranscriptOnly
+        ) {
+          continue;
+        }
         // Track SDK user UUID — only for non-synthetic messages
-        if (!(sdkMessage as { isSynthetic?: boolean }).isSynthetic && sdkMessage.uuid) {
+        if (sdkMessage.uuid) {
           currentSessionUuids.add(sdkMessage.uuid);
           liveSessionUuids.add(sdkMessage.uuid);
           for (let i = messages.length - 1; i >= 0; i--) {
@@ -9091,9 +9305,16 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         if (sdkMessage.message?.content) {
           const messageContent = sdkMessage.message.content;
 
-          // Handle local command output (e.g., /cost, /context commands)
-          // SDK sends these as user messages with string content wrapped in <local-command-stdout> tags
-          if (typeof messageContent === 'string' && messageContent.includes('<local-command-stdout>')) {
+          // Handle local command output (e.g., /cost, /context commands).
+          // SDK sends these as user messages with string content wrapped in
+          // <local-command-stdout> tags. (#228) Match `startsWith` (after
+          // whitespace trim), not `includes` — real CLI echoes always begin
+          // with the tag, but arbitrary text bodies (e.g. compact summaries
+          // that quote prior conversation verbatim) may embed the tag as a
+          // substring and used to false-positive into the user-visible
+          // channel. The synthetic guard above is the primary defense; this
+          // tightening is belt-and-suspenders.
+          if (typeof messageContent === 'string' && messageContent.trimStart().startsWith('<local-command-stdout>')) {
             const localCommandMessage: MessageWire = {
               id: String(messageSequence++),
               role: 'user',
@@ -9719,7 +9940,27 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     // Fix: clear the invalid rewind anchor so retry resumes with full history intact.
     // Keep sessionRegistered=true — the session itself exists, only the UUID is wrong.
     // The retry will use `resume: sessionId` without resumeSessionAt, loading all messages.
-    if (errorMessage.includes('No message found with message.uuid') && sessionRegistered) {
+    // Two durable anchors can be the rejected UUID:
+    //   1. pendingResumeSessionAt (in-memory) — set by rewindSession()
+    //   2. SessionMetadata.forkFrom.messageUuid (disk-persisted) — set by forkSession()
+    // effectiveResumeAt prefers rewindResumeAt ?? forkResumeAt (see line ~7776), so
+    // when both are set the rewind UUID is the one actually sent to the SDK. Capture
+    // that here so the fork branch below can avoid clearing an innocent fork anchor.
+    const rewindAnchorWasSent = errorMessage.includes('No message found with message.uuid')
+      && pendingResumeSessionAt !== undefined;
+
+    // Rewind-mode "No message found" recovery (issue #189). Fires when the session
+    // is registered, OR whenever there is a stale in-memory rewind anchor to clear —
+    // even on an unregistered (fresh) fork. A fresh fork can carry a rewind anchor:
+    // rewindSession() sets pendingResumeSessionAt for any UUID in currentSessionUuids
+    // (disk-seeded from the copied messages), regardless of sessionRegistered. If that
+    // anchor is then rejected by the SDK while sessionRegistered=false, gating purely on
+    // sessionRegistered would skip this branch AND the fork branch below (rewindAnchorWasSent
+    // is true) — neither anchor clears and every retry resends the same UUID (the #220
+    // loop class, fresh-fork sub-case). Clearing an in-memory anchor is safe in any
+    // registration state, so allow it whenever pendingResumeSessionAt is set.
+    if (errorMessage.includes('No message found with message.uuid')
+      && (sessionRegistered || pendingResumeSessionAt !== undefined)) {
       const rejectedUuid = pendingResumeSessionAt;
       console.warn(`[agent] resumeSessionAt UUID rejected by SDK — clearing rewind anchor, retry will resume with full history`);
       pendingResumeSessionAt = undefined;
@@ -9732,6 +9973,41 @@ async function startStreamingSession(preWarm = false): Promise<void> {
       // Don't modify sessionRegistered — session exists, just the UUID is invalid.
       // Don't return — let pre-warm retry (finally block) handle recovery.
       // For non-pre-warm (user message triggered): fall through to error broadcast.
+    }
+
+    // Fork-mode "No message found" recovery (issue #220). The durable anchor here lives
+    // in `SessionMetadata.forkFrom.messageUuid` (disk-persisted), not in-memory, so we
+    // must mutate + persist the metadata or every retry rereads the stale UUID.
+    //
+    // NOT gated on `sessionRegistered`: a fresh fork session has sessionRegistered=false
+    // until SDK's first non-error result lands, but that's exactly when this error fires.
+    //
+    // Skip when the rewind branch above was the actual culprit — clearing both anchors
+    // on every "No message found" would over-degrade a still-good fork anchor. If the
+    // fork anchor is also stale, the next retry's effectiveResumeAt will fall through to
+    // it, SDK will reject again, and this branch will fire on that pass.
+    //
+    // Trade-off: dropping the fork anchor degrades semantics — SDK forks at source's
+    // *tail*, not the user-clicked midpoint. AI then sees more source context than the
+    // UI shows (UI has the N copied messages; SDK has all source messages). Same
+    // degradation philosophy as the rewind branch's "resume with full history". Better
+    // than a fail-loop or losing the fork entirely.
+    if (errorMessage.includes('No message found with message.uuid') && !rewindAnchorWasSent) {
+      const failedForkMeta = getSessionMetadata(sessionId);
+      if (failedForkMeta?.forkFrom?.messageUuid) {
+        const rejectedForkUuid = failedForkMeta.forkFrom.messageUuid;
+        console.warn(`[agent] forkSession anchor UUID ${rejectedForkUuid} rejected by SDK (source store no longer contains it) — clearing anchor; retry will fork at source tail`);
+        delete failedForkMeta.forkFrom.messageUuid;
+        try {
+          await saveSessionMetadata(failedForkMeta);
+        } catch (saveErr) {
+          // Persist failure → disk still has the stale UUID. The next retry reads
+          // it back and SDK rejects again → this branch fires again → save retries.
+          // Eventually converges or the underlying I/O issue surfaces. Don't bail.
+          console.warn(`[agent] forkFrom.messageUuid clear: disk persist failed (next retry will re-read stale UUID and re-enter this recovery): ${(saveErr as Error)?.message ?? saveErr}`);
+        }
+        currentSessionUuids.delete(rejectedForkUuid);
+      }
     }
 
     // "No conversation found" recovery: our metadata has sessionRegistered=true but
@@ -9870,6 +10146,28 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     // hold pending entries (they never serve a turn), but draining is
     // idempotent so the wasPreWarming branch is harmless.
     drainPendingInteractiveRequests('session-end');
+
+    // Flush a synthetic terminal `stopped` for every background sub-agent that
+    // started in this session but never reached terminal (still in the pending
+    // map — terminal branches delete on broadcast). The owning SDK subprocess is
+    // now gone (this finally runs on EVERY for-await exit: abort, deferred config
+    // restart, watchdog kill, transport error), so the real terminal event can
+    // never arrive — the process that would emit it just died. Without this, the
+    // renderer's Agent Status Panel shows these sub-agents "后台运行中" forever
+    // (all its clear-defenses require a terminal event). A late real terminal
+    // after this flush is deduped renderer-side by taskId. Empty for pre-warm
+    // sessions (no tasks started).
+    for (const [taskId, info] of startedBackgroundTasks) {
+      console.log(`[agent] Background task orphaned by session teardown → flushing stopped: ${taskId} — ${info.description ?? ''}`);
+      broadcast('chat:task-notification', {
+        taskId,
+        toolUseId: info.toolUseId,
+        status: 'stopped',
+        summary: '',
+        outputFile: '',
+      });
+    }
+    startedBackgroundTasks.clear();
 
     // sessionRegistered 已在 system_init handler 中设置，无需重复
 

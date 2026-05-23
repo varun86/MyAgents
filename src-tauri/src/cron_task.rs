@@ -1655,7 +1655,12 @@ impl CronTaskManager {
                                     format!("Cron task '{}' completed with issues.", task.name.as_deref().unwrap_or(&task_id_owned))
                                 }
                             });
-                            deliver_cron_result_to_bot(&handle, delivery, &task_id_owned, &content).await;
+                            // Pass the run's actual session id (not a re-read of
+                            // task.session_id) so a concurrent trigger_now that
+                            // rotated session_id between L1588 (executing cleared)
+                            // and here can't smuggle the wrong id into the
+                            // follow-up envelope. #225 review (Codex).
+                            deliver_cron_result_to_bot(&handle, delivery, &task_id_owned, &content, internal_sid.as_deref()).await;
                         }
 
                         // Check if AI requested exit
@@ -2024,7 +2029,9 @@ impl CronTaskManager {
                                 format!("Cron task '{}' completed with issues.", t.name.as_deref().unwrap_or(&task_id_owned))
                             }
                         });
-                        deliver_cron_result_to_bot(&handle, delivery, &task_id_owned, &content).await;
+                        // Same rationale as scheduler-loop site: pass the run's
+                        // actual session id explicitly. See #225 review.
+                        deliver_cron_result_to_bot(&handle, delivery, &task_id_owned, &content, internal_sid.as_deref()).await;
                     }
 
                     // ai_exit_reason → stop the task. Even on a manual
@@ -3751,7 +3758,14 @@ pub async fn deliver_task_notification_to_bot_checked(
         chat_id: bot_thread.unwrap_or("").to_string(),
         platform: "task-center".to_string(),
     };
-    deliver_cron_result_to_bot(handle, &delivery, task_id, summary).await;
+    // Task Center task-completion notifications have no associated cron run,
+    // so there is no session id to use as the follow-up anchor. Caller passes
+    // None and the helper falls back to the legacy un-decorated prompt — the
+    // IM Bot AI still sees the result, just without the `<inbox-message>`
+    // envelope + `Source session id:` follow-up line (which would be wrong
+    // here anyway: a `myagents session send` against the Task Center task id
+    // wouldn't deliver to any session).
+    deliver_cron_result_to_bot(handle, &delivery, task_id, summary, None).await;
     true
 }
 
@@ -3778,6 +3792,14 @@ async fn deliver_cron_result_to_bot(
     delivery: &CronDelivery,
     task_id: &str,
     summary: &str,
+    // Session id of the cron run whose result is being delivered. Passed
+    // explicitly (rather than looked up via task_id) so a concurrent
+    // `trigger_now` that rotates the task's session_id between this run
+    // finishing and delivery firing can't smuggle the wrong id into the
+    // follow-up envelope. None means caller doesn't have a session anchor
+    // (e.g. Task Center notification — no associated cron session); we
+    // then fall back to the legacy un-decorated prompt.
+    run_session_id: Option<&str>,
 ) {
     // PRD 0.2.18 Phase 3 — derive cron task session metadata (cron task name +
     // session id) for inbox-style envelope wrapping. Cron task fires *into* an
@@ -3785,11 +3807,14 @@ async fn deliver_cron_result_to_bot(
     // from="Cron: <name>" reply_back="false">` prefix so it can later use
     // `myagents session send <from_session_id>` to follow up. Look-up is
     // best-effort — failures fall back to the legacy un-decorated cron prompt.
-    let (cron_from_session_id, cron_from_label) = {
-        match resolve_cron_inbox_source(handle, task_id).await {
-            Some((sid, label)) => (Some(sid), Some(label)),
-            None => (None, None),
+    // session id: caller-supplied (race-free); label: name lookup is stable
+    // even if a concurrent rotate has updated session_id underneath.
+    let (cron_from_session_id, cron_from_label) = match run_session_id {
+        Some(sid) if !sid.is_empty() => {
+            let label = resolve_cron_inbox_label(task_id).await;
+            (Some(sid.to_string()), label)
         }
+        _ => (None, None),
     };
 
     ulog_info!(
@@ -3903,29 +3928,37 @@ async fn deliver_cron_result_to_bot(
     }
 }
 
-/// PRD 0.2.18 Phase 3 — look up cron task's session id + human-readable name
-/// for inbox envelope wrapping. Returns None when task lookup fails (sidecar
-/// then falls back to the legacy un-decorated cron prompt).
+/// PRD 0.2.18 Phase 3 — look up the user-visible label for the
+/// `<inbox-message from="…">` wrap (e.g. `Cron: GitHub Issue 自动化处理`).
+/// Returns None when task lookup fails (sidecar then falls back to the
+/// legacy un-decorated cron prompt). Stable across concurrent
+/// `rotate_new_session_id` writes because it reads `task.name`, not
+/// `task.session_id`.
 ///
-/// Why this lives separately from `deliver_cron_result_to_bot`:
-///   - Cron task name is the source of the `<inbox-message from="Cron: <name>">`
-///     prefix the IM Bot AI will see — this is what makes session→session
-///     reply meaningful (秘书 AI can do `myagents session send <sid>` later).
-///   - The lookup is best-effort: a renamed/removed task doesn't break delivery
-///     (the at-least-once cron pipeline keeps working without the envelope).
-async fn resolve_cron_inbox_source(
-    handle: &AppHandle,
-    task_id: &str,
-) -> Option<(String, String)> {
-    let manager = handle.try_state::<CronTaskManager>()?;
+/// Why this lives separate from the session-id resolution: the session id
+/// is now caller-supplied (see `deliver_cron_result_to_bot`'s
+/// `run_session_id` parameter) precisely because looking it up here would
+/// race with rotate. The label has no such concern.
+///
+/// CronTaskManager is a process-singleton accessed via the global OnceLock
+/// helper (see `get_cron_task_manager()` + `static CRON_TASK_MANAGER`).
+/// It is NOT registered with Tauri's managed-state container, so an earlier
+/// `handle.try_state::<CronTaskManager>()` would silently return `None`
+/// on every call (issue #225: every cron→IM heartbeat went out without
+/// the `Source session id:` follow-up line + `<inbox-message>` wrap,
+/// blocking the `myagents session send` flow this feature exists for).
+async fn resolve_cron_inbox_label(task_id: &str) -> Option<String> {
+    let manager = get_cron_task_manager();
     let tasks = manager.tasks.read().await;
     let task = tasks.get(task_id)?;
-    let label = task
-        .name
-        .clone()
-        .map(|n| format!("Cron: {n}"))
-        .unwrap_or_else(|| format!("Cron task {}", &task_id[..task_id.len().min(8)]));
-    Some((task.session_id.clone(), label))
+    Some(
+        task.name
+            .clone()
+            .map(|n| format!("Cron: {n}"))
+            .unwrap_or_else(|| {
+                format!("Cron task {}", &task_id[..task_id.len().min(8)])
+            }),
+    )
 }
 
 /// Initialize cron task manager with app handle (called during app setup)
