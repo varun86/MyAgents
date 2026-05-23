@@ -50,6 +50,55 @@ const SANITIZE_SCHEMA = {
   },
 };
 
+// ── Streaming leading-edge fade ──
+// While streaming, wrap the LAST few characters of the last text node in a
+// <span class="md-stream-tail"> so CSS can give them a left→right fade — newly-typed
+// text emerges softly instead of hard-popping (replaces the old caret). A positional CSS
+// mask can't target "the newest characters" (their on-screen position varies), but since
+// the data-layer typewriter feeds revealed text into the message, we can find the tail in
+// the parsed HAST. Runs AFTER sanitize (last in the rehype chain) so the injected span is
+// never stripped. STREAM_TAIL_LEN code points fade; as reveal advances the window slides,
+// so each char fades in over a few reveal steps. Tunable taste param.
+const STREAM_TAIL_LEN = 10;
+interface HastNodeLite { type: string; value?: string; tagName?: string; properties?: Record<string, unknown>; children?: HastNodeLite[]; }
+type TailHit = { parent: HastNodeLite; index: number; value: string };
+function rehypeStreamTail() {
+  return (tree: HastNodeLite) => {
+    // Find the LAST text node in document order. walk returns its hit (rather than mutating
+    // an outer `let`, which TS can't narrow through a closure) — children are scanned in
+    // order and the latest text/recursion result wins, so the document-order-last text node.
+    const walk = (node: HastNodeLite): TailHit | null => {
+      const kids = node.children;
+      if (!kids) return null;
+      let result: TailHit | null = null;
+      for (let i = 0; i < kids.length; i++) {
+        const child = kids[i];
+        if (child.type === 'text' && child.value) {
+          result = { parent: node, index: i, value: child.value };
+        } else if (child.children) {
+          const deeper = walk(child);
+          if (deeper) result = deeper;
+        }
+      }
+      return result;
+    };
+    const found = walk(tree);
+    if (!found) return;
+    const chars = Array.from(found.value); // code-point aware
+    const n = Math.min(STREAM_TAIL_LEN, chars.length);
+    if (n <= 0) return;
+    const head = chars.slice(0, chars.length - n).join('');
+    const tail = chars.slice(chars.length - n).join('');
+    const span: HastNodeLite = {
+      type: 'element', tagName: 'span',
+      properties: { className: ['md-stream-tail'] },
+      children: [{ type: 'text', value: tail }],
+    };
+    const replacement: HastNodeLite[] = head ? [{ type: 'text', value: head }, span] : [span];
+    found.parent.children!.splice(found.index, 1, ...replacement);
+  };
+}
+
 // Static plugin arrays to avoid recreation on every render
 const REMARK_PLUGINS_DEFAULT = [remarkGfm, remarkMath];
 const REMARK_PLUGINS_WITH_BREAKS = [remarkGfm, remarkMath, remarkBreaks];
@@ -57,6 +106,11 @@ const REHYPE_PLUGINS: ComponentProps<typeof ReactMarkdown>['rehypePlugins'] = [
   rehypeRaw,
   [rehypeSanitize, SANITIZE_SCHEMA],
   rehypeKatex,
+];
+// Streaming variant: same chain + the trailing-fade injector last (post-sanitize).
+const REHYPE_PLUGINS_STREAMING: ComponentProps<typeof ReactMarkdown>['rehypePlugins'] = [
+  ...(REHYPE_PLUGINS ?? []),
+  rehypeStreamTail as unknown as NonNullable<ComponentProps<typeof ReactMarkdown>['rehypePlugins']>[number],
 ];
 
 // Custom link component that opens links in embedded browser panel (if available)
@@ -285,6 +339,10 @@ interface MarkdownProps {
   preserveNewlines?: boolean;
   /** Skip preprocessing (for rendering complete documents like file preview) */
   raw?: boolean;
+  /** Active streaming tail: softly fade the bottom edge + show a breathing caret
+   *  on the last paragraph. Only the currently-growing assistant text block sets
+   *  this (see Message.tsx); it is removed the instant the turn ends → crisp final. */
+  streaming?: boolean;
   /** Document base directory path **relative to workspace root** — used to
    *  resolve `<img src="../foo.png">` against the doc's own location. */
   basePath?: string;
@@ -444,9 +502,15 @@ function convertFrontmatter(content: string): string {
   return yamlBlock + content.slice(match[0].length);
 }
 
-const Markdown = memo(function Markdown({ children, compact = false, preserveNewlines = false, raw = false, basePath, workspacePath = null }: MarkdownProps) {
-  // Skip preprocessing for raw mode (file preview) - preprocessing is for streaming chat messages
-  // In raw mode, convert YAML frontmatter to a fenced code block for proper rendering
+const Markdown = memo(function Markdown({ children, compact = false, preserveNewlines = false, raw = false, basePath, workspacePath = null, streaming = false }: MarkdownProps) {
+  // Skip preprocessing for raw mode (file preview) - preprocessing is for streaming chat messages.
+  // In raw mode, convert YAML frontmatter to a fenced code block for proper rendering.
+  //
+  // NOTE: the per-character typewriter is NOT here. It lives in TabProvider's reveal loop
+  // (data layer) so streamingMessage grows on a single clock that also drives autoscroll +
+  // Virtuoso measurement. A view-layer typewriter inside this component animated item height
+  // on its own rAF, decoupled from scroll/measurement → the streaming-phantom-thinking-rows
+  // regressions. `streaming` here only swaps in the rehypeStreamTail plugin (leading-edge fade).
   const processedContent = raw ? convertFrontmatter(children) : preprocessMarkdownContent(children);
 
   // Phase D.5: image loading goes through Rust workspace_files. Renderer threads
@@ -471,7 +535,7 @@ const Markdown = memo(function Markdown({ children, compact = false, preserveNew
     <div className={`break-words ${compact ? 'text-sm' : 'text-base'}`}>
       <ReactMarkdown
         remarkPlugins={preserveNewlines ? REMARK_PLUGINS_WITH_BREAKS : REMARK_PLUGINS_DEFAULT}
-        rehypePlugins={REHYPE_PLUGINS}
+        rehypePlugins={streaming && !raw ? REHYPE_PLUGINS_STREAMING : REHYPE_PLUGINS}
         components={components}
       >
         {processedContent}

@@ -47,7 +47,7 @@ export interface SessionMetadata {
     /** How the title was set: default (first message truncation), auto (AI-generated), user (manually renamed) */
     titleSource?: 'default' | 'auto' | 'user';
     /** Fork source — present on first open after a fork, consumed and cleared */
-    forkFrom?: { sourceSessionId: string; messageUuid: string };
+    forkFrom?: { sourceSessionId: string; messageUuid?: string };
     /** Runtime that created this session. Absent = pre-v0.1.60 session → treat as 'builtin' */
     runtime?: string;
     /** Runtime's native session/thread ID (Codex threadId, CC session_id from hook) */

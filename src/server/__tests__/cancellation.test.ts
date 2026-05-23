@@ -8,12 +8,11 @@
  *  (d) anySignal aborts when any input signal aborts; doesn't abort others
  *  (e) withBoundedTimeout calls onTimeout and resolves to undefined; doesn't reject
  *
- * Integration test for "/chat/stream last consumer disconnect → grace → interrupt"
- * is intentionally NOT wired here — that flow needs a full sidecar harness which
- * doesn't exist yet at the unit-test layer. See `src/server/index.ts` near the
- * `createSseClient(handleChatStreamClose, ...)` call site for the production code
- * path; the next-best place to add an integration test is when the sidecar gets
- * its first end-to-end SSE harness.
+ * NOTE: the "/chat/stream last consumer disconnect → grace → interrupt" flow that
+ * an earlier revision of this comment referenced has been REMOVED. SSE disconnect
+ * is no longer a turn-cancellation authority — turn lifecycle belongs to the Rust
+ * sidecar Owner model (see the load-bearing comment in `src/server/index.ts` at
+ * the `/chat/stream` handler). There is therefore nothing to integration-test here.
  */
 
 import { describe, expect, it } from 'vitest';

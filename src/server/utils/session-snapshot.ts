@@ -73,14 +73,27 @@ export function snapshotForImSession(agent: AgentConfig): Partial<SessionMetadat
  * stamp `configSnapshotAt` themselves so the marker reflects when the
  * write actually committed — those callers should pass `OwnedSessionSnapshot`
  * by itself, not the return of this function.
+ *
+ * **Runtime-aware model/permission capture (issue #224).** `SessionMetadata.model`
+ * is overloaded — for builtin runtime it holds the SDK / provider model
+ * (`agent.model`), for external runtimes it holds the CLI's model id
+ * (`agent.runtimeConfig.model`). The interactive write path in
+ * `renderer/api/persistInputOption.ts::buildSnapshotPatch` already encodes
+ * this dispatch. Snapshot creation must match: previously this helper
+ * blindly captured `agent.model` even for external runtimes, leaking a
+ * Claude/builtin model name into a Codex/Gemini session snapshot. The cron
+ * `followAgent` resolution path then promoted that into
+ * `runtimeConfig.model`, which Codex CLI rejects (issue #224).
  */
 export function snapshotForOwnedSession(
   agent: AgentConfig,
 ): OwnedSessionSnapshot & Pick<SessionMetadata, 'configSnapshotAt'> {
+  const runtime = agent.runtime ?? 'builtin';
+  const isExternal = runtime !== 'builtin';
   return {
-    runtime: agent.runtime ?? 'builtin',
-    model: agent.model,
-    permissionMode: agent.permissionMode,
+    runtime,
+    model: isExternal ? agent.runtimeConfig?.model : agent.model,
+    permissionMode: isExternal ? agent.runtimeConfig?.permissionMode : agent.permissionMode,
     mcpEnabledServers: agent.mcpEnabledServers ? [...agent.mcpEnabledServers] : undefined,
     providerId: agent.providerId,
     providerEnvJson: agent.providerEnvJson,

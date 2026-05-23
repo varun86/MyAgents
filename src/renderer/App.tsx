@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, useRef, memo } from 'react';
+import { useCallback, useEffect, useState, useRef, useTransition, memo } from 'react';
 import { arrayMove } from '@dnd-kit/sortable';
 
 import {
@@ -97,6 +97,16 @@ interface TabContentProps {
   isActive: boolean;
   isLoading: boolean;
   error: string | null;
+  /**
+   * When true, render only a cheap placeholder instead of the (heavy) tab
+   * content. Set for a freshly created tab so its full subtree (e.g. the
+   * Launcher: BrandSection + SimpleChatInput + selectors + RecentTasks +
+   * WorkspaceCards) does NOT mount inside the synchronous click commit —
+   * that mount is what janked the "+" / Cmd+T action. handleNewTab clears
+   * the flag inside startTransition so React mounts the real content on a
+   * time-sliced concurrent render that doesn't block the main thread.
+   */
+  isDeferredMount: boolean;
   settingsInitialSection: string | undefined;
   settingsInitialMcpId: string | undefined;
   settingsInitialSelect: CapabilityInitialSelect | undefined;
@@ -131,7 +141,7 @@ interface TabContentProps {
 }
 
 const MemoizedTabContent = memo(function TabContent({
-  tab, isActive, isLoading, error,
+  tab, isActive, isLoading, error, isDeferredMount,
   onLaunchProject, onBack, onSwitchSession, onNewSession,
   onUpdateGenerating, onUpdateTitle, onUpdateUnread, onRenameSession, onForkSession, onUpdateSessionId, onClearInitialMessage,
   onClearJoinedExistingSidecar,
@@ -145,7 +155,12 @@ const MemoizedTabContent = memo(function TabContent({
       className={`absolute inset-0 ${isActive ? '' : 'pointer-events-none invisible'}`}
       style={isActive ? undefined : { contentVisibility: 'hidden' }}
     >
-      {tab.view === 'launcher' ? (
+      {isDeferredMount ? (
+        // One-frame placeholder: paper-colored fill so the just-activated
+        // tab paints instantly with no flash, while the real subtree mounts
+        // on the following transition render (see handleNewTab).
+        <div className="h-full w-full bg-[var(--paper)]" />
+      ) : tab.view === 'launcher' ? (
         <Launcher
           onLaunchProject={onLaunchProject}
           isStarting={isLoading}
@@ -205,6 +220,8 @@ const MemoizedTabContent = memo(function TabContent({
     prev.isActive === next.isActive &&
     prev.isLoading === next.isLoading &&
     prev.error === next.error &&
+    // Drives the deferred-mount → real-content transition for new tabs.
+    prev.isDeferredMount === next.isDeferredMount &&
     prev.settingsInitialSection === next.settingsInitialSection &&
     prev.settingsInitialMcpId === next.settingsInitialMcpId &&
     prev.settingsInitialSelect === next.settingsInitialSelect &&
@@ -276,6 +293,46 @@ export default function App() {
 
   const activeTabIdRef = useRef(activeTabId);
   activeTabIdRef.current = activeTabId;
+
+  // Deferred-mount set for freshly created tabs. A tab whose id is in here
+  // renders only a placeholder (see MemoizedTabContent), so clicking "+" /
+  // Cmd+T does not synchronously mount the heavy Launcher subtree in the
+  // click commit. handleNewTab adds the id urgently (instant chip + active
+  // highlight) then clears it inside startTransition, letting React mount
+  // the real content on a non-blocking, time-sliced concurrent render.
+  const [, startNewTabTransition] = useTransition();
+  const [deferredMountTabIds, setDeferredMountTabIds] = useState<Set<string>>(() => new Set());
+
+  // Single source of truth for opening a NEW tab whose view mounts a large
+  // renderer-only subtree (Launcher / Settings / TaskCenter). It appends and
+  // activates the tab in the urgent commit — so the chip + active highlight
+  // paint instantly with only a cheap placeholder as content — then clears
+  // the deferral inside a transition, letting React mount the heavy subtree on
+  // a non-blocking, time-sliced concurrent render. This keeps the open action
+  // from janking the frame regardless of how heavy the view is (e.g. the
+  // 5.8k-line Settings tree). The urgent commit stays trivial by construction.
+  //
+  // NOT for Chat / session opens (handleLaunchProject / fork / switch): those
+  // await a Sidecar and wire up SSE before the Chat is usable, so their mount
+  // cannot be hidden behind a placeholder — they intentionally do not use this.
+  const openNewTabDeferred = useCallback((newTab: Tab) => {
+    setDeferredMountTabIds((prev) => {
+      if (prev.has(newTab.id)) return prev;
+      const next = new Set(prev);
+      next.add(newTab.id);
+      return next;
+    });
+    setTabs((prev) => [...prev, newTab]);
+    setActiveTabId(newTab.id);
+    startNewTabTransition(() => {
+      setDeferredMountTabIds((prev) => {
+        if (!prev.has(newTab.id)) return prev;
+        const next = new Set(prev);
+        next.delete(newTab.id);
+        return next;
+      });
+    });
+  }, [startNewTabTransition]);
 
   // Analytics Active Context — propagate active tab's sessionId/tabId so that
   // downstream track() calls auto-inject these into params (see analytics/tracker.ts).
@@ -871,11 +928,12 @@ export default function App() {
         // Cmd+Shift+T would silently collapse onto "new tab" and users
         // couldn't reach the mode toggle from the keyboard at all.
         e.preventDefault();
-        if (tabsRef.current.length < MAX_TABS) {
-          const newTab = createNewTab();
-          setTabs((prev) => [...prev, newTab]);
-          setActiveTabId(newTab.id);
-        }
+        // Route through handleNewTab so Cmd+T shares the deferred-mount path
+        // (instant chip + non-blocking Launcher mount) and the MAX_TABS guard,
+        // instead of duplicating tab-creation logic. handleNewTab is a stable
+        // useCallback, so this empty-deps effect's keydown closure resolves it
+        // correctly at press time.
+        handleNewTab();
       } else if (!e.shiftKey && !e.altKey && (e.key === 'y' || e.key === 'Y')) {
         // Cmd/Ctrl+Y — open Task Center as a singleton tab. Mirrors the
         // header button's CUSTOM_EVENTS.OPEN_TASK_CENTER dispatch so both
@@ -1823,12 +1881,11 @@ export default function App() {
       return;
     }
     const newTab = createNewTab();
-    setTabs((prev) => [...prev, newTab]);
-    setActiveTabId(newTab.id);
+    openNewTabDeferred(newTab);
 
     // Track tab_new event
     track('tab_new', { tab_count: currentLength + 1 });
-  }, []);
+  }, [openNewTabDeferred]);
 
   // Handle tab reordering via drag and drop
   const handleReorderTabs = useCallback((activeId: string, overId: string) => {
@@ -1871,7 +1928,12 @@ export default function App() {
       return;
     }
 
-    // Create Tab first (instant UI response)
+    // Create Tab first (instant UI response). The 5.8k-line Settings subtree
+    // is a renderer-only mount with the same click-frame jank as the Launcher,
+    // so it goes through the shared deferred-mount path (placeholder this
+    // commit → real Settings on a transition render). settingsInitialSection
+    // etc. are set urgently above, so Settings reads the right section when it
+    // mounts on the transition.
     const newTab: Tab = {
       id: `tab-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       agentDir: null,
@@ -1879,11 +1941,10 @@ export default function App() {
       view: 'settings',
       title: '设置',
     };
-    setTabs((prev) => [...prev, newTab]);
-    setActiveTabId(newTab.id);
+    openNewTabDeferred(newTab);
 
     // Global Sidecar is now started on App mount, no need to start here
-  }, []);
+  }, [openNewTabDeferred]);
 
   // Listen for OPEN_SETTINGS custom event from child components
   useEffect(() => {
@@ -1920,9 +1981,8 @@ export default function App() {
       view: 'taskcenter',
       title: '任务中心',
     };
-    setTabs((prev) => [...prev, newTab]);
-    setActiveTabId(newTab.id);
-  }, []);
+    openNewTabDeferred(newTab);
+  }, [openNewTabDeferred]);
 
   // Intent carried across `OPEN_TASK_CENTER` — the event dispatcher
   // (Launcher "我的任务" tab's search icon) wants more than just "open
@@ -2514,6 +2574,7 @@ export default function App() {
             isActive={tab.id === activeTabId}
             isLoading={loadingTabs[tab.id] ?? false}
             error={tabErrors[tab.id] ?? null}
+            isDeferredMount={deferredMountTabIds.has(tab.id)}
             onLaunchProject={handleLaunchProject}
             onBack={handleBackToLauncher}
             onSwitchSession={handleSwitchSession}

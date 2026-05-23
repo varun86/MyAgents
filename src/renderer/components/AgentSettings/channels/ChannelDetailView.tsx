@@ -15,7 +15,7 @@ import { listenWithCleanup } from '@/utils/tauriListen';
 import { useToast } from '@/components/Toast';
 import { useConfig } from '@/hooks/useConfig';
 import { getEffectiveModelAliases, getProviderModels, isProviderEnabled } from '@/config/types';
-import { patchAgentConfig, invokeStartAgentChannel } from '@/config/services/agentConfigService';
+import { patchAgentConfig, invokeStartAgentChannel, stopAndDisableAgentChannel, startAndEnableAgentChannel, channelHasCredentials } from '@/config/services/agentConfigService';
 import { resolveEffectiveConfig } from '../../../../shared/types/agent';
 import BotTokenInput from '../../ImSettings/components/BotTokenInput';
 import FeishuCredentialInput from '../../ImSettings/components/FeishuCredentialInput';
@@ -319,12 +319,6 @@ export default function ChannelDetailView({
         return () => ac.abort();
     }, [channelId]);
 
-    // Start channel via shared utility (resolves MCP + overrides)
-    const startChannelCmd = useCallback(async () => {
-        if (!channel) return;
-        await invokeStartAgentChannel(agent, channel);
-    }, [agent, channel]);
-
     // Toggle channel start/stop
     const botStatusRef = useRef(botStatus);
     botStatusRef.current = botStatus;
@@ -334,36 +328,36 @@ export default function ChannelDetailView({
 
         setToggling(true);
         try {
-            const { invoke } = await import('@tauri-apps/api/core');
             const isRunning = botStatusRef.current?.status === 'online' || botStatusRef.current?.status === 'connecting';
 
             if (isRunning) {
-                await invoke('cmd_stop_agent_channel', { agentId: agent.id, channelId });
+                // issue #219 v2: helper persists enabled=false against the freshest
+                // on-disk config (avoids stale-array overwrite of concurrent edits),
+                // then best-effort stops runtime. Single source of truth shared with
+                // the list-view stop button.
+                await stopAndDisableAgentChannel(agent.id, channelId);
                 if (isMountedRef.current) {
                     track('agent_channel_toggle', { platform: channelRef.current.type, enabled: false });
                     toastRef.current.success('Channel 已停止');
                     setBotStatus(null);
-                    await patchChannel({ enabled: false });
+                    onChanged();
                 }
             } else {
                 const ch = channelRef.current;
-                const creds = ch.type === 'feishu'
-                    ? (ch.feishuAppId && ch.feishuAppSecret)
-                    : ch.type === 'dingtalk'
-                        ? (ch.dingtalkClientId && ch.dingtalkClientSecret)
-                        : ch.type.startsWith('openclaw:')
-                            ? !!ch.openclawPluginId
-                            : ch.botToken;
-                if (!creds) {
+                if (!channelHasCredentials(ch)) {
                     toastRef.current.error(ch.type === 'telegram' ? '请先配置 Bot Token' : '请先配置应用凭证');
                     setToggling(false);
                     return;
                 }
-                await startChannelCmd();
+                // issue #219 v2 symmetric: persist enabled=true + start with the fresh
+                // post-write snapshot in one operation. Replaces the prior
+                // (startChannelCmd + patchChannel{enabled:true}) inline pair which had
+                // the same stale-array clobber risk as the old stop path.
+                await startAndEnableAgentChannel(agent.id, channelId);
                 if (isMountedRef.current) {
                     track('agent_channel_toggle', { platform: channelRef.current.type, enabled: true });
                     toastRef.current.success('Channel 已启动');
-                    await patchChannel({ enabled: true });
+                    onChanged();
                 }
             }
         } catch (err) {
@@ -373,7 +367,7 @@ export default function ChannelDetailView({
         } finally {
             if (isMountedRef.current) setToggling(false);
         }
-    }, [agent.id, channelId, startChannelCmd, patchChannel]);
+    }, [agent.id, channelId, onChanged]);
 
     // Delete channel
     const executeDelete = useCallback(async () => {

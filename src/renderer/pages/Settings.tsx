@@ -196,6 +196,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
         saveProviderVerifyStatus,
         config,
         updateConfig,
+        patchProxySettings,
         providers,
         projects,
         addProject,
@@ -322,6 +323,65 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
             console.error('[Settings] Proxy propagation failed:', err)
         );
     }, [config.proxySettings]);
+
+    // #230: The proxy host/port fields previously called updateConfig() on every
+    // keystroke. Each call writes config.json AND — via the effect above — fires
+    // cmd_propagate_proxy(), which POSTs /api/proxy/set to every active sidecar.
+    // Typing "6666" therefore triggered 4 disk writes + 4 N-sidecar hot-reload
+    // storms. Fix: edit into local draft state and commit to config only on blur
+    // or Enter, so propagation happens once per intentional change. Protocol
+    // (CustomSelect) and the enable toggle stay immediate — they are single
+    // discrete actions, not high-frequency typing.
+    const [proxyHostDraft, setProxyHostDraft] = useState<string>(
+        () => config.proxySettings?.host || PROXY_DEFAULTS.host
+    );
+    const [proxyPortDraft, setProxyPortDraft] = useState<string>(
+        () => String(config.proxySettings?.port || PROXY_DEFAULTS.port)
+    );
+    // Re-sync drafts when the committed proxy values change from elsewhere
+    // (initial load, commit normalisation, external edit). No-op while the user
+    // types, since we don't commit until blur/Enter so config doesn't change.
+    useEffect(() => {
+        setProxyHostDraft(config.proxySettings?.host || PROXY_DEFAULTS.host);
+    }, [config.proxySettings?.host]);
+    useEffect(() => {
+        setProxyPortDraft(String(config.proxySettings?.port || PROXY_DEFAULTS.port));
+    }, [config.proxySettings?.port]);
+
+    const commitProxyHost = useCallback(() => {
+        const host = proxyHostDraft.trim();
+        const current = config.proxySettings?.host || PROXY_DEFAULTS.host;
+        if (host === '') {
+            setProxyHostDraft(PROXY_DEFAULTS.host);
+            if (current !== PROXY_DEFAULTS.host) {
+                patchProxySettings({ host: PROXY_DEFAULTS.host });
+            }
+            return;
+        }
+        if (isValidProxyHost(host)) {
+            if (host !== current) {
+                patchProxySettings({ host });
+            }
+        } else {
+            // Invalid host → discard the draft, snap back to the committed value.
+            setProxyHostDraft(current);
+        }
+    }, [proxyHostDraft, config.proxySettings?.host, patchProxySettings]);
+
+    const commitProxyPort = useCallback(() => {
+        const current = config.proxySettings?.port || PROXY_DEFAULTS.port;
+        const port = parseInt(proxyPortDraft, 10);
+        if (!isNaN(port) && port >= 1 && port <= 65535) {
+            if (port !== current) {
+                patchProxySettings({ port });
+            }
+            // Normalise the draft (e.g. strip leading zeros) to its committed form.
+            setProxyPortDraft(String(port));
+        } else {
+            // Empty or out-of-range → snap back to the committed value.
+            setProxyPortDraft(String(current));
+        }
+    }, [proxyPortDraft, config.proxySettings?.port, patchProxySettings]);
 
     const [showCustomForm, setShowCustomForm] = useState(false);
     const [customForm, setCustomForm] = useState<CustomProviderForm>(EMPTY_CUSTOM_FORM);
@@ -3010,15 +3070,10 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                     </div>
                                     <button
                                         onClick={() => {
-                                            const current = config.proxySettings;
-                                            updateConfig({
-                                                proxySettings: {
-                                                    enabled: !current?.enabled,
-                                                    protocol: current?.protocol || PROXY_DEFAULTS.protocol,
-                                                    host: current?.host || PROXY_DEFAULTS.host,
-                                                    port: current?.port || PROXY_DEFAULTS.port,
-                                                }
-                                            });
+                                            // patchProxySettings merges against disk-latest config, so
+                                            // toggling enabled preserves protocol/host/port (and seeds
+                                            // them from defaults on first enable). #230.
+                                            patchProxySettings({ enabled: !config.proxySettings?.enabled });
                                         }}
                                         className={`relative h-6 w-11 shrink-0 cursor-pointer rounded-full transition-colors ${
                                             config.proxySettings?.enabled
@@ -3047,12 +3102,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                                     { value: 'socks5', label: 'SOCKS5' },
                                                 ]}
                                                 onChange={(val) => {
-                                                    updateConfig({
-                                                        proxySettings: {
-                                                            ...config.proxySettings!,
-                                                            protocol: val as 'http' | 'socks5',
-                                                        }
-                                                    });
+                                                    patchProxySettings({ protocol: val as 'http' | 'socks5' });
                                                 }}
                                                 className="flex-1"
                                             />
@@ -3063,18 +3113,10 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                             <label className="w-16 text-xs text-[var(--ink-muted)]">服务器</label>
                                             <input
                                                 type="text"
-                                                value={config.proxySettings?.host || PROXY_DEFAULTS.host}
-                                                onChange={(e) => {
-                                                    const host = e.target.value.trim();
-                                                    if (host === '' || isValidProxyHost(host)) {
-                                                        updateConfig({
-                                                            proxySettings: {
-                                                                ...config.proxySettings!,
-                                                                host: host || PROXY_DEFAULTS.host,
-                                                            }
-                                                        });
-                                                    }
-                                                }}
+                                                value={proxyHostDraft}
+                                                onChange={(e) => setProxyHostDraft(e.target.value)}
+                                                onBlur={commitProxyHost}
+                                                onKeyDown={(e) => { if (e.key === 'Enter') e.currentTarget.blur(); }}
                                                 placeholder={PROXY_DEFAULTS.host}
                                                 className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-1.5 text-xs text-[var(--ink)] placeholder:text-[var(--ink-faint)] focus:border-[var(--focus-border)] focus:outline-none"
                                             />
@@ -3084,31 +3126,16 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                         <div className="flex items-center gap-3">
                                             <label className="w-16 text-xs text-[var(--ink-muted)]">端口</label>
                                             <input
-                                                type="number"
-                                                min={1}
-                                                max={65535}
-                                                value={config.proxySettings?.port || PROXY_DEFAULTS.port}
+                                                type="text"
+                                                inputMode="numeric"
+                                                value={proxyPortDraft}
                                                 onChange={(e) => {
-                                                    const value = e.target.value;
-                                                    if (value === '') {
-                                                        updateConfig({
-                                                            proxySettings: {
-                                                                ...config.proxySettings!,
-                                                                port: PROXY_DEFAULTS.port,
-                                                            }
-                                                        });
-                                                        return;
-                                                    }
-                                                    const port = parseInt(value, 10);
-                                                    if (!isNaN(port) && port >= 1 && port <= 65535) {
-                                                        updateConfig({
-                                                            proxySettings: {
-                                                                ...config.proxySettings!,
-                                                                port,
-                                                            }
-                                                        });
-                                                    }
+                                                    // Digit-only: drop everything else so it behaves
+                                                    // like a number field without the native spinner.
+                                                    setProxyPortDraft(e.target.value.replace(/[^0-9]/g, ''));
                                                 }}
+                                                onBlur={commitProxyPort}
+                                                onKeyDown={(e) => { if (e.key === 'Enter') e.currentTarget.blur(); }}
                                                 placeholder={String(PROXY_DEFAULTS.port)}
                                                 className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-1.5 text-xs text-[var(--ink)] placeholder:text-[var(--ink-faint)] focus:border-[var(--focus-border)] focus:outline-none"
                                             />
@@ -3118,7 +3145,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                         <div className="mt-2 rounded-lg bg-[var(--paper-inset)] px-3 py-2">
                                             <span className="text-xs text-[var(--ink-muted)]">代理地址: </span>
                                             <code className="text-xs font-mono text-[var(--ink)]">
-                                                {config.proxySettings?.protocol || PROXY_DEFAULTS.protocol}://{config.proxySettings?.host || PROXY_DEFAULTS.host}:{config.proxySettings?.port || PROXY_DEFAULTS.port}
+                                                {config.proxySettings?.protocol || PROXY_DEFAULTS.protocol}://{proxyHostDraft || PROXY_DEFAULTS.host}:{proxyPortDraft || PROXY_DEFAULTS.port}
                                             </code>
                                         </div>
 

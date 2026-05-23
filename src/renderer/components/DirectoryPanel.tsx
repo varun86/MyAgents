@@ -1,6 +1,7 @@
 import {
   AtSign,
   ChevronUp,
+  Copy,
   Eye,
   FilePlus,
   Folder,
@@ -51,7 +52,13 @@ import type {
   DirectoryTree,
   ExpandDirectoryResult,
 } from "../../shared/dir-types";
-import { isImageFile, isPreviewable } from "../../shared/fileTypes";
+import {
+  isImageFile,
+  isPreviewable,
+  isRichDocPreviewable,
+  getRichDocKind,
+  type RichDocKind,
+} from "../../shared/fileTypes";
 import type { CapabilityInitialSelect } from "../../shared/skillsTypes";
 import { getFileIcon } from "@/utils/fileIcons";
 
@@ -102,6 +109,20 @@ export interface DirectoryPanelHandle {
   refresh: () => void;
 }
 
+/**
+ * Per-tab persistent slice of the file-tree view state. Held in a ref by the
+ * parent (Chat) so it survives DirectoryPanel's unmount/remount when the
+ * workspace panel is dismissed and reopened. DirectoryPanel seeds its local
+ * state from this on mount and mirrors changes back into it.
+ *   - openPaths: which folders are expanded (source of truth for expansion)
+ *   - directoryInfo: the lazily-loaded tree, so reopen restores instantly
+ *     instead of cold-loading collapsed (the mount refresh then reconciles).
+ */
+export interface WorkspaceTreePersistedState {
+  openPaths: Set<string>;
+  directoryInfo: DirectoryTree | null;
+}
+
 interface DirectoryPanelProps {
   agentDir: string;
   /** Workspace icon ID (Phosphor) from project config */
@@ -117,6 +138,10 @@ interface DirectoryPanelProps {
   onOpenConfig?: () => void;
   /** External trigger to refresh (incremented when file-modifying tools complete) */
   refreshTrigger?: number;
+  /** Per-tab persistence of expand state + loaded tree, so the panel keeps its
+   *  expansion across dismiss/reopen within a tab. Held by the parent (Chat) in
+   *  a ref. Optional — omitting it (e.g. launcher) falls back to ephemeral state. */
+  persistedTreeStateRef?: React.MutableRefObject<WorkspaceTreePersistedState>;
   /** Trigger full refresh (file tree + capabilities) — called from context menu */
   onRefreshAll?: () => void;
   /** Whether Tauri drag is active over this panel */
@@ -173,6 +198,9 @@ interface DirectoryPanelProps {
       content: string;
       size: number;
       path: string;
+      /** Set for rich documents (pdf/docx/sheet/pptx) — split-view mounts the
+       *  read-only RichDocViewer instead of the text editor. */
+      richDocKind?: RichDocKind;
     },
     options?: { initialEditMode?: boolean },
   ) => void;
@@ -189,6 +217,9 @@ type FilePreview = {
   content: string;
   size: number;
   path: string;
+  /** When set, the modal renders the read-only rich-document viewer
+   *  (pdf/docx/sheet/pptx) instead of the text/markdown editor. */
+  richDocKind?: RichDocKind;
   /** When set, FilePreviewModal opens in markdown edit mode directly.
    *  Wired by 「新建笔记」 so a fresh empty `note-…md` skips the rendered-
    *  preview empty-state and lands the cursor in Monaco. */
@@ -228,6 +259,7 @@ const DirectoryPanel = memo(
       onCollapse,
       onOpenConfig,
       refreshTrigger,
+      persistedTreeStateRef,
       onRefreshAll,
       isTauriDragActive = false,
       onInsertReference,
@@ -247,8 +279,11 @@ const DirectoryPanel = memo(
     },
     ref,
   ) {
+    // Seed from the per-tab persisted ref so reopening the panel restores the
+    // previously-loaded tree instead of cold-loading collapsed. The mount
+    // refresh (rawRefresh) then reconciles it with fresh data via mergeLazyChildren.
     const [directoryInfo, setDirectoryInfo] = useState<DirectoryTree | null>(
-      null,
+      () => persistedTreeStateRef?.current.directoryInfo ?? null,
     );
     const [error, setError] = useState<string | null>(null);
     // Multi-selection support
@@ -755,14 +790,30 @@ const DirectoryPanel = memo(
       loadingPaths: loadingDirs,
       rootChildren: treeData,
       selectedPaths,
+      // Restore the previously-expanded folders when the panel remounts (read
+      // once on mount; see WorkspaceTreePersistedState).
+      initialOpenPaths: persistedTreeStateRef?.current.openPaths,
     });
     // Bridge: `rawRefresh` (declared above `useWorkspaceTreeModel`) reads
     // expansion state through this ref. Mirror via useEffect so we don't
     // write a ref during render — matches the project's other ref-mirror
-    // sites (toastRef, onSavedRef, etc).
+    // sites (toastRef, onSavedRef, etc). Also mirror into the per-tab persisted
+    // ref so the open set survives unmount/remount (getOpenPaths identity
+    // changes on every expand/collapse, so this captures the latest set).
     useEffect(() => {
       getOpenPathsRef.current = getOpenPaths;
-    }, [getOpenPaths]);
+      if (persistedTreeStateRef) {
+        persistedTreeStateRef.current.openPaths = new Set(getOpenPaths());
+      }
+    }, [getOpenPaths, persistedTreeStateRef]);
+
+    // Mirror the loaded tree into the per-tab persisted ref so reopening the
+    // panel restores it instantly (the mount refresh then reconciles).
+    useEffect(() => {
+      if (persistedTreeStateRef) {
+        persistedTreeStateRef.current.directoryInfo = directoryInfo;
+      }
+    }, [directoryInfo, persistedTreeStateRef]);
 
     // Pending-selection paths — used by 「新建笔记」 to keep the synthetic
     // newly-created file selected through the brief window between
@@ -830,6 +881,36 @@ const DirectoryPanel = memo(
         // finalizers (a slow earlier request finishing after a newer one) skip
         // the setter so the UI keeps reflecting the fresh in-flight request.
         if (myReq === previewReqIdRef.current) setIsPreviewLoading(false);
+      }
+    };
+
+    /** Route a rich document (pdf/docx/xlsx/xls/pptx) to the read-only viewer.
+     *  Unlike handlePreview, this does NOT call readPreview (binary → UTF-8
+     *  fail) and does NOT fetch bytes here — RichDocViewer fetches them. The
+     *  reqId bump invalidates any in-flight text/image preview so its async
+     *  result can't stomp this one (and won't reset isPreviewLoading, so we
+     *  clear it ourselves). */
+    const handleRichDocPreview = (node: DirectoryTreeNode) => {
+      if (node.type !== "file") return;
+      const richDocKind = getRichDocKind(node.name);
+      if (!richDocKind) return;
+      previewReqIdRef.current++;
+      // Clear loading regardless of branch: the reqId bump above means a prior
+      // in-flight text/image preview's finally won't reset it, and the external
+      // (split-view) branch must leave the state machine consistent too.
+      setIsPreviewLoading(false);
+      const fileData = {
+        name: node.name,
+        content: "",
+        size: 0, // non-load-bearing for rich docs; RichDocViewer fetches bytes
+        path: node.path,
+        richDocKind,
+      };
+      if (onFilePreviewExternal) {
+        onFilePreviewExternal(fileData);
+      } else {
+        setPreview(fileData);
+        setPreviewError(null);
       }
     };
 
@@ -1331,6 +1412,23 @@ const DirectoryPanel = memo(
       }
     };
 
+    // Tree node paths are workspace-relative (Rust `tree.rs` emits the relative
+    // path; root node is ""). Join with the absolute `agentDir` to get the real
+    // filesystem path users expect from "copy path". Mirrors Chat.tsx's join.
+    const toAbsolutePath = (relPath: string): string => {
+      if (!agentDir) return relPath;
+      if (!relPath) return agentDir;
+      const sep = agentDir.includes("\\") ? "\\" : "/";
+      return `${agentDir}${sep}${relPath}`;
+    };
+
+    const handleCopyPath = (relPath: string, label: string) => {
+      navigator.clipboard
+        .writeText(toAbsolutePath(relPath))
+        .then(() => toast.success(label))
+        .catch(() => toast.error("复制失败"));
+    };
+
     const handleRename = async (oldPath: string, newName: string) => {
       try {
         await fileService.rename({ oldPath, newName });
@@ -1629,7 +1727,10 @@ const DirectoryPanel = memo(
 
       const isDir = node.type === "dir";
       const canPreview =
-        !isDir && (isPreviewable(node.name) || isImageFile(node.name));
+        !isDir &&
+        (isPreviewable(node.name) ||
+          isImageFile(node.name) ||
+          isRichDocPreviewable(node.name));
 
       if (isDir) {
         return [
@@ -1660,6 +1761,11 @@ const DirectoryPanel = memo(
             label: "打开所在文件夹",
             icon: <FolderOpen className="h-4 w-4" />,
             onClick: () => handleOpenInFinder(node.path),
+          },
+          {
+            label: "复制文件夹路径",
+            icon: <Copy className="h-4 w-4" />,
+            onClick: () => handleCopyPath(node.path, "已复制文件夹路径"),
           },
           {
             label: "引用",
@@ -1696,6 +1802,8 @@ const DirectoryPanel = memo(
             onClick: () => {
               if (isImageFile(node.name)) {
                 void handleImagePreview(node);
+              } else if (isRichDocPreviewable(node.name)) {
+                handleRichDocPreview(node);
               } else if (isPreviewable(node.name)) {
                 void handlePreview(node);
               }
@@ -1715,6 +1823,11 @@ const DirectoryPanel = memo(
             label: "打开所在文件夹",
             icon: <FolderOpen className="h-4 w-4" />,
             onClick: () => handleOpenInFinder(node.path),
+          },
+          {
+            label: "复制文件路径",
+            icon: <Copy className="h-4 w-4" />,
+            onClick: () => handleCopyPath(node.path, "已复制文件路径"),
           },
           {
             label: "重命名",
@@ -2075,6 +2188,8 @@ const DirectoryPanel = memo(
                                 setIsPreviewLoading(false);
                               }
                             }
+                          } else if (isRichDocPreviewable(data.name)) {
+                            handleRichDocPreview(data);
                           } else if (isPreviewable(data.name)) {
                             void handlePreview(data);
                           } else {
@@ -2281,6 +2396,7 @@ const DirectoryPanel = memo(
                 content={preview?.content ?? ""}
                 size={preview?.size ?? 0}
                 path={preview?.path ?? ""}
+                richDocKind={preview?.richDocKind}
                 isLoading={isPreviewLoading}
                 error={previewError}
                 // Phase D.5: thread the absolute workspace root so rendered

@@ -414,7 +414,7 @@ const Message = memo(function Message({ message, isLoading = false, onRewind, on
       <div className="flex justify-start w-full px-4 py-2 select-none" data-role="assistant">
         <div className="w-full max-w-none">
           <div className="text-[var(--ink)] select-text">
-            <Markdown>{message.content}</Markdown>
+            <Markdown streaming={isLoading}>{message.content}</Markdown>
           </div>
           {actionsReady && !isLoading && <AssistantActions message={message} onRetry={onRetry} onFork={onFork} />}
         </div>
@@ -524,14 +524,15 @@ const Message = memo(function Message({ message, isLoading = false, onRewind, on
                       </div>
                     );
                   }
-                  // Plain text — no widget tags
+                  // Plain text — no widget tags. The last block of a still-loading
+                  // message is the actively-streaming tail → soft fade + caret.
                   return (
                     <div
                       key={index}
                       className="flex justify-start w-full px-1 py-1 select-none"
                     >
                       <div className="w-full max-w-none text-[var(--ink)] select-text">
-                        <Markdown>{item.text}</Markdown>
+                        <Markdown streaming={isLoading && index === groupedBlocks.length - 1}>{item.text}</Markdown>
                       </div>
                     </div>
                   );

@@ -75,6 +75,12 @@ interface MonacoEditorProps {
      *  Clicking it calls back with the selection's text + 1-based line range, then clears
      *  the selection. When omitted, no quote affordance is rendered (Monaco-side default). */
     onQuote?: (selection: MonacoQuoteSelection) => void;
+    /** Soft-wrap mode. Default `'on'`. Pass `'off'` for files with pathologically
+     *  long lines (data / minified JSON): Monaco's `wrappingStrategy: 'advanced'`
+     *  font-measured wrap of a 30k+ char line is the dominant load cost, and such
+     *  lines are unreadable wrapped anyway — horizontal scroll is both faster and
+     *  more appropriate. Normal prose (short lines) keeps wrapping. */
+    wordWrap?: 'on' | 'off';
 }
 
 export default function MonacoEditor({
@@ -87,6 +93,7 @@ export default function MonacoEditor({
     onSave,
     initialLineNumber,
     onQuote,
+    wordWrap = 'on',
 }: MonacoEditorProps) {
     const handleChange = useCallback((newValue: string | undefined) => {
         onChange(newValue ?? '');
@@ -390,7 +397,7 @@ export default function MonacoEditor({
         minimap: { enabled: false },
         lineNumbers: 'on' as const,
         scrollBeyondLastLine: false,
-        wordWrap: 'on' as const,
+        wordWrap,
         wrappingStrategy: 'advanced' as const,
         // Disable accessibility support to fix CJK IME composition issues on WebKit/macOS.
         // When enabled, Monaco uses a different text measurement path that causes:
@@ -458,7 +465,7 @@ export default function MonacoEditor({
         // text stops at `，` `。` etc. instead of swallowing whole paragraphs. Monaco's
         // default list only includes ASCII punctuation, which never appears mid-Chinese.
         wordSeparators: '~!@#$%^&*()-=+[{]}\\|;:\'",.<>/?，。！？；：“”‘’「」『』（）【】《》、…—·',
-    }), [readOnly]);
+    }), [readOnly, wordWrap]);
 
     // Wrapper class `monaco-editor-host` is targeted by index.css to add visual right
     // padding on the wrapper itself; Monaco's `automaticLayout: true` watches the

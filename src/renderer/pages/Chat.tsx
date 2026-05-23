@@ -7,7 +7,7 @@ import ConfirmDialog from '@/components/ConfirmDialog';
 import WorkspaceIcon from '@/components/launcher/WorkspaceIcon';
 import { useToast } from '@/components/Toast';
 import Tip from '@/components/Tip';
-import DirectoryPanel, { type DirectoryPanelHandle } from '@/components/DirectoryPanel';
+import DirectoryPanel, { type DirectoryPanelHandle, type WorkspaceTreePersistedState } from '@/components/DirectoryPanel';
 import DropZoneOverlay from '@/components/DropZoneOverlay';
 import MessageList from '@/components/MessageList';
 import SessionHistoryDropdown from '@/components/SessionHistoryDropdown';
@@ -62,6 +62,7 @@ import type { RuntimeType, RuntimeDetections, RuntimeConfig } from '../../shared
 import type { InitialMessage } from '@/types/tab';
 // CronTaskConfig type is used via useCronTask hook
 
+import type { RichDocKind } from '../../shared/fileTypes';
 // Lazy load FilePreviewModal for split view panel
 const FilePreviewModal = lazy(() => import('@/components/FilePreviewModal'));
 // Lazy load TerminalPanel for embedded terminal
@@ -306,7 +307,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   // FilePreviewModal opens directly in the editable Monaco view instead of the
   // markdown rendered preview.
   const isSplitViewEnabled = config.experimentalSplitView ?? true;
-  const [splitFile, setSplitFile] = useState<{ name: string; content: string; size: number; path: string; initialEditMode?: boolean } | null>(null);
+  const [splitFile, setSplitFile] = useState<{ name: string; content: string; size: number; path: string; richDocKind?: RichDocKind; initialEditMode?: boolean } | null>(null);
   // Clear split panel when feature is turned off (prevents stale split state)
   useEffect(() => { if (!isSplitViewEnabled) setSplitFile(null); }, [isSplitViewEnabled]);
   const [splitRatio, setSplitRatio] = useState(0.5); // 0-1, left panel fraction
@@ -406,9 +407,9 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   }, 0);
 
   // Fullscreen preview triggered from split panel's "全屏预览" button
-  const [fullscreenPreviewFile, setFullscreenPreviewFile] = useState<{ name: string; content: string; size: number; path: string; initialEditMode?: boolean } | null>(null);
+  const [fullscreenPreviewFile, setFullscreenPreviewFile] = useState<{ name: string; content: string; size: number; path: string; richDocKind?: RichDocKind; initialEditMode?: boolean } | null>(null);
 
-  const handleSplitFilePreview = useCallback((file: { name: string; content: string; size: number; path: string }, options?: { initialEditMode?: boolean }) => {
+  const handleSplitFilePreview = useCallback((file: { name: string; content: string; size: number; path: string; richDocKind?: RichDocKind }, options?: { initialEditMode?: boolean }) => {
     const ext = file.name.toLowerCase().split('.').pop();
     if ((ext === 'html' || ext === 'htm') && isSplitViewEnabled) {
       // HTML files → open in embedded browser for live preview
@@ -635,6 +636,15 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
 
   // Ref for DirectoryPanel to trigger refresh
   const directoryPanelRef = useRef<DirectoryPanelHandle>(null);
+
+  // Per-tab persistence for the file-tree view state (expand set + loaded tree).
+  // Chat is a per-tab instance kept mounted for the tab's lifetime, so holding
+  // this here lets the file tree keep its expansion across the workspace panel's
+  // dismiss/reopen (DirectoryPanel unmounts when showWorkspace flips to false).
+  const workspaceTreeStateRef = useRef<WorkspaceTreePersistedState>({
+    openPaths: new Set(),
+    directoryInfo: null,
+  });
 
   // Ref for tracking previous isActive state (for config sync on tab switch)
   const prevIsActiveRef = useRef(isActive);
@@ -2425,7 +2435,15 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   }, [pendingCrossRuntimeMessage, agentDir, onForkSession, currentRuntime]);
 
   const handleCollapseWorkspace = useCallback(() => setShowWorkspace(false), []);
-  const handleOpenCronSettings = useCallback(() => setShowCronSettings(true), []);
+  // Issue #231: snapshot the current input value at the moment the user opens
+  // the cron-settings modal, instead of keeping `cronPrompt` continuously in
+  // sync with every keystroke (the prior `onInputChange={setCronPrompt}` wiring
+  // re-rendered the entire Chat tree on every paste — see SimpleChatInput #231
+  // comment).
+  const handleOpenCronSettings = useCallback(() => {
+    setCronPrompt(chatInputRef.current?.getCurrentValue() ?? '');
+    setShowCronSettings(true);
+  }, []);
 
   const handleCronStop = useCallback(async () => {
     const originalPrompt = await stopCronTask();
@@ -3331,7 +3349,6 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             onCronSettings={handleOpenCronSettings}
             onCronCancel={disableCronMode}
             onCronStop={handleCronStop}
-            onInputChange={setCronPrompt}
             runtime={currentRuntime}
             runtimeDetections={multiAgentRuntimeEnabled ? runtimeDetections : undefined}
             onRuntimeChange={multiAgentRuntimeEnabled ? handleRuntimeChange : undefined}
@@ -3374,6 +3391,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
               onCollapse={handleCollapseWorkspace}
               onOpenConfig={handleOpenAgentSettings}
               refreshTrigger={toolCompleteCount + workspaceRefreshTrigger}
+              persistedTreeStateRef={workspaceTreeStateRef}
               isTauriDragActive={isTauriDragging && activeZoneId === 'directory-panel'}
               onInsertReference={handleInsertReference}
               onQuoteFile={handleQuoteFile}
@@ -3538,6 +3556,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
                     content={splitFile.content}
                     size={splitFile.size}
                     path={splitFile.path}
+                    richDocKind={splitFile.richDocKind}
                     workspacePath={agentDir}
                     initialEditMode={splitFile.initialEditMode}
                     onClose={() => {
@@ -3652,6 +3671,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             content={fullscreenPreviewFile.content}
             size={fullscreenPreviewFile.size}
             path={fullscreenPreviewFile.path}
+            richDocKind={fullscreenPreviewFile.richDocKind}
             workspacePath={agentDir}
             initialEditMode={fullscreenPreviewFile.initialEditMode}
             onClose={() => setFullscreenPreviewFile(null)}

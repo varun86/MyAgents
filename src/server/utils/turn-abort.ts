@@ -4,11 +4,10 @@
  * Every user turn (one inbound user message → SDK generation → tool calls →
  * final assistant message) gets a fresh `AbortController`. Tool fetches and
  * other in-flight async work derive their `AbortSignal` from this controller
- * via `getCurrentTurnSignal()`. When the renderer presses stop (or the
- * `/chat/stream` last-consumer-disconnect grace expires), `abortTurn(sessionId,
- * reason)` aborts the controller — every fetch / stream / awaiter that derived
- * from it observes the abort within ~one event-loop tick, regardless of its
- * own per-call timeout.
+ * via `getCurrentTurnSignal()`. When the renderer presses stop, `abortTurn(
+ * sessionId, reason)` aborts the controller — every fetch / stream / awaiter
+ * that derived from it observes the abort within ~one event-loop tick,
+ * regardless of its own per-call timeout.
  *
  * Why a module-level registry rather than `AsyncLocalStorage`:
  *   - The persistent SDK session is a long-running async generator. Tool
@@ -41,7 +40,6 @@
  *
  * Reason mapping (callers):
  *   - Renderer stop button       → 'user'
- *   - /chat/stream grace expired → 'shutdown'
  *   - Unhandled error path       → 'error'
  *   - Watchdog / startup timeout → 'timeout' (optional; abortPersistentSession
  *                                  is a hard kill, the turn signal abort is

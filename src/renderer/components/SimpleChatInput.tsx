@@ -18,6 +18,7 @@ import { isImageFile, isImageMimeType, ALLOWED_IMAGE_MIME_TYPES } from '../../sh
 import type { QueuedMessageInfo } from '@/types/queue';
 import { CUSTOM_EVENTS } from '../../shared/constants';
 import { isDebugMode } from '@/utils/debug';
+import { retainFocusOnMouseDown } from '@/utils/focusRetention';
 import { renameIfBareClipboardImage } from '@/utils/clipboardImage';
 import { isProviderAvailable } from '@/config/configService';
 import { modelSupportsModality } from '@/config/services/providerService';
@@ -230,8 +231,6 @@ interface SimpleChatInputProps {
   onCronCancel?: () => void;
   /** Callback when cron task is stopped */
   onCronStop?: () => void;
-  /** Callback when input text changes (for cron prompt tracking) */
-  onInputChange?: (text: string) => void;
   /** Display mode: 'chat' (default) or 'launcher' (hides @/slash/cron features) */
   mode?: 'chat' | 'launcher';
   /** Optional ReactNode rendered at the start of the toolbar (e.g., workspace selector in launcher) */
@@ -315,6 +314,13 @@ export interface SimpleChatInputHandle {
    *  Returns the count of stripped references so the caller can decide
    *  whether to surface a toast (PRD 0.2.7 D3). */
   clearWorkspaceBoundDraft: () => { strippedReferences: number; clearedImages: number };
+  /** Read the current input value imperatively. Use this when a parent needs
+   *  the value at a discrete event (e.g. opening the cron settings modal)
+   *  rather than subscribing to every keystroke. Replaces the previous
+   *  `onInputChange` reactive callback, which was a perf trap on large pastes
+   *  (issue #231) — pushing huge strings back into parent state on every
+   *  change re-rendered the entire Chat page. */
+  getCurrentValue: () => string;
 }
 
 // File search result type
@@ -361,7 +367,6 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   onCronSettings,
   onCronCancel,
   onCronStop,
-  onInputChange,
   mode = 'chat',
   toolbarPrefix,
   // Whether this input belongs to the currently active tab. Used to gate document-level
@@ -407,10 +412,13 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [externalValue]);
 
-  // Notify parent of input value changes (for cron prompt tracking)
-  useEffect(() => {
-    onInputChange?.(inputValue);
-  }, [inputValue, onInputChange]);
+  // Issue #231: previously a useEffect on `[inputValue]` pushed every change
+  // back to the parent Chat page via `onInputChange?.(inputValue)` so the
+  // cron-prompt state stayed live. For 500KB+ paste, that fanned out a
+  // setCronPrompt(huge) into Chat.tsx (3.8k LOC: MessageList virtuoso,
+  // panels, runtime selector …) on every paste, freezing macOS WebKit.
+  // Pulled the value lazily via SimpleChatInputHandle.getCurrentValue() at
+  // cron-modal open time instead — see Chat.tsx::handleOpenCronSettings.
 
   // Ref for current provider availability — used in handleKeyDown without adding deps
   const isCurrentProviderAvailable = provider ? isProviderAvailable(provider, apiKeys, providerVerifyStatus) : false;
@@ -1082,6 +1090,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
     setValue,
     setImages,
     focus: () => textareaRef.current?.focus(),
+    getCurrentValue: () => inputValueRef.current,
     clearWorkspaceBoundDraft: () => {
       // Match `@<path>` tokens that target the workspace-managed `myagents_files/`
       // upload directory. Plain typed `@something` (not workspace-tied) survives.
@@ -1979,6 +1988,11 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                  *  can offer 引用文件 / 使用技能 the same way. */}
                 <button
                   type="button"
+                  // This item moves focus to the textarea; preventDefault on mousedown stops
+                  // the item itself from grabbing focus during the tap, which avoids the
+                  // macOS WebKit focus-steal that drops the click (matching the menu-item /
+                  // toolbar-button convention elsewhere).
+                  onMouseDown={retainFocusOnMouseDown}
                   onClick={(e) => {
                     e.stopPropagation();
                     // Insert @ at cursor position and trigger file search
@@ -2002,6 +2016,8 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                 </button>
                 <button
                   type="button"
+                  // Same focus-steal guard as 引用文件 above.
+                  onMouseDown={retainFocusOnMouseDown}
                   onClick={(e) => {
                     e.stopPropagation();
                     // Insert / at cursor position and trigger slash menu

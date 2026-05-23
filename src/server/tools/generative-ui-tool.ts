@@ -119,24 +119,22 @@ const SECTION_CHART = `# Charts — Chart.js patterns
 Chart.js renders on <canvas>, which does NOT support CSS variables. Always use hex colors directly.
 
 ## Complete working template
+Scripts run in order and a CDN \`<script src>\` finishes loading before the next
+script runs, so just load the library, then use it — no onload/init dance.
 \`\`\`html
 <div style="position:relative;width:100%;height:300px"><canvas id="c"></canvas></div>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js" onload="init()"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
 <script>
-var chart;
-function init(){
-  chart=new Chart(document.getElementById('c'),{
-    type:'line',
-    data:{labels:['Jan','Feb','Mar','Apr','May'],datasets:[{
-      data:[30,45,28,50,42],
-      borderColor:'#c26d3a',backgroundColor:'rgba(194,109,58,0.1)',fill:true,tension:0.3
-    }]},
-    options:{responsive:true,maintainAspectRatio:false,
-      plugins:{legend:{display:false}},
-      scales:{y:{grid:{color:'rgba(0,0,0,0.06)'}},x:{grid:{display:false}}}}
-  });
-}
-if(window.Chart)init();
+var chart = new Chart(document.getElementById('c'),{
+  type:'line',
+  data:{labels:['Jan','Feb','Mar','Apr','May'],datasets:[{
+    data:[30,45,28,50,42],
+    borderColor:'#c26d3a',backgroundColor:'rgba(194,109,58,0.1)',fill:true,tension:0.3
+  }]},
+  options:{responsive:true,maintainAspectRatio:false,
+    plugins:{legend:{display:false}},
+    scales:{y:{grid:{color:'rgba(0,0,0,0.06)'}},x:{grid:{display:false}}}}
+});
 </script>
 \`\`\`
 
@@ -151,7 +149,7 @@ if(window.Chart)init();
 ## Chart rules
 - Height on wrapper div, responsive:true, maintainAspectRatio:false
 - borderRadius:6 for bars, tension:0.3 for smooth lines
-- Use CDN onload pattern: \`onload="init()"\` + \`if(window.Chart)init();\` fallback
+- Load the CDN script, then \`new Chart(...)\` in the next \`<script>\` — the library is guaranteed loaded by then
 - Multiple charts: unique canvas IDs (c1, c2...)
 - Round every displayed number
 
@@ -338,13 +336,14 @@ More explanatory text here...
 \`\`\`
 
 ## Rules
-- The opening \`<generative-ui-widget>\` tag MUST start a new line (leading indent allowed). The frontend parser anchors on line-start; mid-line tags are treated as literal text.
+- A widget is a BLOCK on its own. Put the opening \`<generative-ui-widget>\` tag on its own line with a blank line before and after. NEVER drop it inside a markdown table, list, or an emphasis/code span (\`**…**\`, \`\`\` \`…\` \`\`\`) — splitting a markdown structure across the widget leaves both halves malformed and they render as raw \`**\`/\`|\` symbols.
+- The parser also accepts a fully-closed widget mid-line, but a bare mid-line mention with no closing tag is treated as literal prose.
 - Content inside is a self-contained HTML fragment — NO <!DOCTYPE>, <html>, <head>, <body>
 - Structure for streaming: <style> first (short) → content HTML → <script> last
 - All explanatory text goes OUTSIDE the <generative-ui-widget> tags (in normal markdown)
-- You can output multiple widgets in a single response — interleave with text
+- You can output multiple widgets in a single response — interleave with text (each pair of tags is one self-contained widget, rendered in its own sandbox)
 - Each widget should be focused and ≤ 4000 chars. Split complex topics into multiple widgets.
-- CDN script loading: use \`onload="init()"\` + \`if(window.Lib)init();\` fallback pattern
+- CDN script loading: load the \`<script src>\`, then use the library in the next \`<script>\` — scripts run in order, so the library is loaded by then. No onload/init dance needed.
 - Pre-styled form elements: bare <input>, <button>, <select>, <textarea> are automatically styled. Use class="primary" for accent buttons.
 - Layout utility classes available: .flex, .grid, .grid-2, .grid-3, .gap-3, .gap-4, .p-3, .p-4, .rounded, .rounded-lg, .border, .bg-elevated, .stat-card, .stat-value, .stat-label
 
