@@ -15,7 +15,12 @@ use serde::Serialize;
 
 use super::path_safety::{resolve_existing_inside_workspace, validate_workspace_root};
 
-const MAX_DOWNLOAD_BYTES: u64 = 25 * 1024 * 1024;
+// Cap for binary download → rich-document preview (pdf/docx/xlsx/pptx) and the
+// image-preview modal. Raised 25MB → 50MB so larger decks / books / scanned PDFs
+// preview inline. base64 over the Tauri invoke channel inflates ~33%, so a 50MB
+// file is ~67MB on the wire — acceptable for a one-shot preview load; the bounded
+// read below still caps actual allocation.
+const MAX_DOWNLOAD_BYTES: u64 = 50 * 1024 * 1024;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]

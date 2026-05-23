@@ -508,6 +508,59 @@ export function findAgentByWorkspacePath(agentDir: string): AgentConfigSlim | un
 }
 
 /**
+ * Re-resolve providerEnv for an IM channel from canonical `providerId` (issue #237).
+ *
+ * The IM bot's Rust runtime caches `provider_env_json` as an Arc at bot start and
+ * forwards that blob in every `/api/im/enqueue` payload. The blob can drift away
+ * from the agent's canonical `providerId` — channel.overrides.providerEnvJson stays
+ * pinned to whatever was written when the user last touched that channel (the
+ * Rust hot-reload for `patch.channels` only updates group fields — see
+ * `src-tauri/src/im/mod.rs` patch.channels branch), and agent.providerEnvJson can
+ * outlive a providerId change if the writer didn't go through patchAgentConfig.
+ * Desktop Chat is immune because Chat.tsx builds providerEnv live from React state
+ * on every send; IM was not.
+ *
+ * The fix here mirrors that "live from canonical providerId" behavior on the
+ * sidecar side: look up the agent + channel, resolve `providerId` via the same
+ * priority chain (`channel.overrides.providerId` → `agent.providerId` →
+ * `config.defaultProviderId`), and rebuild the env via `resolveProviderEnv()`.
+ * Callers fall back to the legacy `payload.providerEnv` blob if this returns
+ * undefined (provider deleted / disabled / no API key) to preserve back-compat
+ * for edge cases where the blob is the only thing the user has left.
+ */
+export function resolveImProviderEnv(
+  agentDir: string,
+  channelId: string | undefined,
+  config?: AdminAppConfig,
+): ResolvedProviderEnv | undefined {
+  const c = config ?? loadConfig();
+  const normalized = agentDir.replace(/\\/g, '/');
+  const agents = (c.agents ?? []) as AgentConfigSlim[];
+  const agent = agents.find(a =>
+    typeof a.workspacePath === 'string' && a.workspacePath.replace(/\\/g, '/') === normalized
+  );
+  // Channel override considered only when a channelId is supplied AND the channel
+  // is actually present on the matched agent. payload.botId == channel.id under
+  // the v0.1.41 Agent architecture (see src-tauri/src/im/mod.rs `channel.id` →
+  // `bot_id` mapping at line 4360).
+  let channelOverrideProviderId: string | undefined;
+  if (agent && channelId) {
+    const channels = (agent.channels ?? []) as ChannelConfigSlim[];
+    const channel = channels.find(ch => ch.id === channelId);
+    const overrides = (channel?.overrides as Record<string, unknown> | undefined) ?? undefined;
+    const ovProviderId = overrides?.providerId;
+    if (typeof ovProviderId === 'string' && ovProviderId.length > 0) {
+      channelOverrideProviderId = ovProviderId;
+    }
+  }
+  const providerId = channelOverrideProviderId
+    || agent?.providerId
+    || (c.defaultProviderId as string | undefined);
+  if (!providerId) return undefined;
+  return resolveProviderEnv(providerId, c);
+}
+
+/**
  * Decode a frozen providerEnv snapshot, enforcing the global enablement gate.
  *
  * Snapshot semantics: sessions / agents / cron tasks freeze provider env at

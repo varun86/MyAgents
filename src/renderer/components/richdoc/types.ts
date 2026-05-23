@@ -9,4 +9,8 @@ export interface RichDocSubViewerProps {
   bytes: ArrayBuffer;
   /** Report a fatal parse/render error up to RichDocViewer's unified error UI. */
   onError: (message: string) => void;
+  /** Report that the document parsed fine but has no content (0 slides / 0 sheets
+   *  / 0 pages) — RichDocViewer shows a neutral "empty" placeholder rather than an
+   *  error. Viewers that can't cheaply detect emptiness simply never call it. */
+  onEmpty: () => void;
 }

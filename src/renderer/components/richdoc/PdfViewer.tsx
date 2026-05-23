@@ -17,7 +17,7 @@ import type { PDFDocumentProxy, RenderTask } from 'pdfjs-dist';
 import './pdfWorker';
 import type { RichDocSubViewerProps } from './types';
 
-export default function PdfViewer({ bytes, onError }: RichDocSubViewerProps) {
+export default function PdfViewer({ bytes, onError, onEmpty }: RichDocSubViewerProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const [loading, setLoading] = useState(true);
@@ -76,6 +76,10 @@ export default function PdfViewer({ bytes, onError }: RichDocSubViewerProps) {
         loadingTask = pdfjsLib.getDocument({ data: bytes.slice(0) });
         pdf = await loadingTask.promise;
         if (cancelled) return; // cleanup will destroy the loading task
+        if (pdf.numPages === 0) {
+          onEmpty();
+          return;
+        }
 
         const width = Math.max(scroller.clientWidth - 32, 320);
         const dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -129,10 +133,10 @@ export default function PdfViewer({ bytes, onError }: RichDocSubViewerProps) {
       renderTasks.forEach((t) => t.cancel());
       void Promise.allSettled(pending).then(() => loadingTask?.destroy());
     };
-  }, [bytes, onError]);
+  }, [bytes, onError, onEmpty]);
 
   return (
-    <div ref={scrollRef} className="relative h-full overflow-auto overscroll-contain bg-[var(--paper-inset)] p-4">
+    <div ref={scrollRef} className="relative h-full overflow-auto overscroll-contain bg-[var(--paper-elevated)] p-4">
       <div ref={contentRef} />
       {loading && (
         <div className="absolute inset-0 flex items-center justify-center text-[var(--ink-muted)]">

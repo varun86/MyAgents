@@ -25,17 +25,17 @@ interface SheetData {
   truncated: boolean;
 }
 
-export default function SheetViewer({ bytes, onError }: RichDocSubViewerProps) {
+export default function SheetViewer({ bytes, onError, onEmpty }: RichDocSubViewerProps) {
   // Parse purely in render — RichDocViewer keys this by path, so a file switch
   // remounts (recomputes) and resets `active` to 0 for free. Parse errors are
   // surfaced via an effect (not during render) so we never call a parent setter
   // mid-render.
-  const parsed = useMemo<{ sheets: SheetData[] | null; error: string | null }>(() => {
+  const parsed = useMemo<{ sheets: SheetData[] | null; error: string | null; empty: boolean }>(() => {
     try {
       // Uint8Array view; SheetJS reads (does not detach) the buffer.
       const wb = XLSX.read(new Uint8Array(bytes), { type: 'array' });
       if (wb.SheetNames.length === 0) {
-        return { sheets: null, error: '工作簿为空或无法读取' };
+        return { sheets: null, error: null, empty: true };
       }
       const sheets: SheetData[] = wb.SheetNames.map((name) => {
         const ws = wb.Sheets[name];
@@ -52,9 +52,9 @@ export default function SheetViewer({ bytes, onError }: RichDocSubViewerProps) {
         }
         return { name, html: XLSX.utils.sheet_to_html(ws, { editable: false }), truncated };
       });
-      return { sheets, error: null };
+      return { sheets, error: null, empty: false };
     } catch (e) {
-      return { sheets: null, error: e instanceof Error ? e.message : '表格解析失败' };
+      return { sheets: null, error: e instanceof Error ? e.message : '表格解析失败', empty: false };
     }
   }, [bytes]);
 
@@ -62,7 +62,8 @@ export default function SheetViewer({ bytes, onError }: RichDocSubViewerProps) {
 
   useEffect(() => {
     if (parsed.error) onError(parsed.error);
-  }, [parsed, onError]);
+    else if (parsed.empty) onEmpty();
+  }, [parsed, onError, onEmpty]);
 
   const sheets = parsed.sheets;
   if (!sheets || sheets.length === 0) return null; // error reported via effect above

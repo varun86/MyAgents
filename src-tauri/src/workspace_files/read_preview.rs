@@ -17,7 +17,14 @@ use serde::Serialize;
 
 use super::path_safety::{resolve_existing_inside_workspace, validate_workspace_root};
 
-const MAX_PREVIEW_BYTES: u64 = 512 * 1024;
+// Text preview cap. 512KB was too tight for everyday text artifacts — `.jsonl`
+// datasets, agent transcripts, logs and large JSON routinely exceed it, and the
+// rejection surfaces in split-view as a "文件预览失败" toast that opens nothing
+// (looks like the file "can't be previewed"). 2MB comfortably covers those while
+// staying well within what Monaco's plaintext mode (forced for files >100KB,
+// tokenizer off) renders smoothly. The bounded read below still guards against a
+// file growing under us.
+const MAX_PREVIEW_BYTES: u64 = 2 * 1024 * 1024;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -56,7 +63,10 @@ pub async fn cmd_workspace_read_preview(
 
     let size = fs::metadata(&resolved).map(|m| m.len()).unwrap_or(0);
     if size > MAX_PREVIEW_BYTES {
-        return Err("File too large to preview".to_string());
+        return Err(format!(
+            "File too large to preview (max {} MB)",
+            MAX_PREVIEW_BYTES / 1024 / 1024
+        ));
     }
 
     // Bounded read — TOCTOU between the size check above and the read here:
@@ -72,7 +82,10 @@ pub async fn cmd_workspace_read_preview(
         .read_to_end(&mut bytes)
         .map_err(|e| format!("Failed to read {}: {}", path, e))?;
     if bytes.len() as u64 > MAX_PREVIEW_BYTES {
-        return Err("File too large to preview".to_string());
+        return Err(format!(
+            "File too large to preview (max {} MB)",
+            MAX_PREVIEW_BYTES / 1024 / 1024
+        ));
     }
     let content = String::from_utf8(bytes)
         .map_err(|e| format!("File is not valid UTF-8: {}", e))?;

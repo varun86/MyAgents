@@ -24,7 +24,7 @@ import {
   type ComponentType,
   type LazyExoticComponent,
 } from 'react';
-import { ExternalLink, FileWarning, Loader2 } from 'lucide-react';
+import { ExternalLink, FileText, FileWarning, Loader2 } from 'lucide-react';
 
 import { useWorkspaceFileService } from '@/hooks/useWorkspaceFileService';
 import type { RichDocKind } from '../../../shared/fileTypes';
@@ -72,6 +72,8 @@ export default function RichDocViewer({ kind, path, workspacePath }: RichDocView
   const [state, setState] = useState<FetchState>({ phase: 'loading' });
   // Render/parse failure surfaced by a sub-viewer (separate from fetch failure).
   const [renderError, setRenderError] = useState<string | null>(null);
+  // Sub-viewer parsed successfully but the document has no content.
+  const [isEmpty, setIsEmpty] = useState(false);
   const hostRef = useRef<HTMLDivElement>(null);
 
   // Fetch bytes once on mount. RichDocViewer is keyed by `path` at the mount
@@ -99,13 +101,17 @@ export default function RichDocViewer({ kind, path, workspacePath }: RichDocView
   // External-resource guard: install once the host is mounted in the ready phase,
   // before sub-viewers inject their (async) DOM.
   useEffect(() => {
-    if (state.phase !== 'ready' || renderError || !hostRef.current) return;
+    if (state.phase !== 'ready' || renderError || isEmpty || !hostRef.current) return;
     return installExternalResourceGuard(hostRef.current);
-  }, [state.phase, renderError]);
+  }, [state.phase, renderError, isEmpty]);
 
   const openExternal = useCallback(() => {
     fileService.openWithDefault({ path }).catch(() => {});
   }, [path, fileService]);
+
+  // Stable so it can sit in sub-viewers' effect deps without re-triggering renders
+  // (setRenderError from useState is already stable; this mirrors that).
+  const markEmpty = useCallback(() => setIsEmpty(true), []);
 
   if (state.phase === 'loading') return Spinner;
 
@@ -116,7 +122,7 @@ export default function RichDocViewer({ kind, path, workspacePath }: RichDocView
         <FileWarning className="h-9 w-9 text-[var(--ink-subtle)]" />
         <p className="max-w-md text-sm text-[var(--ink-muted)]">
           {tooLarge
-            ? '文件超过 25MB，暂不支持内联预览。'
+            ? '文件超过 50MB，暂不支持内联预览。'
             : renderError
               ? '无法渲染此文件。'
               : '无法读取此文件。'}
@@ -133,12 +139,21 @@ export default function RichDocViewer({ kind, path, workspacePath }: RichDocView
     );
   }
 
+  if (isEmpty) {
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-3 bg-[var(--paper-elevated)] px-6 text-center">
+        <FileText className="h-10 w-10 text-[var(--ink-subtle)] opacity-40" />
+        <p className="text-sm text-[var(--ink-muted)]">此文档没有内容</p>
+      </div>
+    );
+  }
+
   const SubViewer = VIEWERS[kind];
   return (
     <div ref={hostRef} className="h-full overflow-hidden">
       <Suspense fallback={Spinner}>
         {/* key={path} forces a clean remount (+ sub-viewer cleanup) on file switch. */}
-        <SubViewer key={path} bytes={state.bytes} onError={setRenderError} />
+        <SubViewer key={path} bytes={state.bytes} onError={setRenderError} onEmpty={markEmpty} />
       </Suspense>
     </div>
   );

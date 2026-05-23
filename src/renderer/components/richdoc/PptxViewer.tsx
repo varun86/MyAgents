@@ -21,7 +21,7 @@ import { PptxViewer as PptxRenderer } from '@aiden0z/pptx-renderer';
 import './pdfWorker'; // pptx-renderer peerDeps pdfjs-dist (embedded PDF objects)
 import type { RichDocSubViewerProps } from './types';
 
-export default function PptxViewer({ bytes, onError }: RichDocSubViewerProps) {
+export default function PptxViewer({ bytes, onError, onEmpty }: RichDocSubViewerProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const [loading, setLoading] = useState(true);
@@ -49,7 +49,9 @@ export default function PptxViewer({ bytes, onError }: RichDocSubViewerProps) {
         signal: ac.signal,
       })
       .then(() => {
-        if (!disposed) setLoading(false);
+        if (disposed) return;
+        if (viewer.slideCount === 0) onEmpty();
+        else setLoading(false);
       })
       .catch((e) => {
         if (!disposed && !ac.signal.aborted) {
@@ -62,10 +64,10 @@ export default function PptxViewer({ bytes, onError }: RichDocSubViewerProps) {
       ac.abort();
       viewer.destroy();
     };
-  }, [bytes, onError]);
+  }, [bytes, onError, onEmpty]);
 
   return (
-    <div ref={scrollRef} className="relative h-full overflow-auto overscroll-contain bg-[var(--paper-inset)] p-4">
+    <div ref={scrollRef} className="relative h-full overflow-auto overscroll-contain bg-[var(--paper-elevated)] p-4">
       <div ref={contentRef} className="mx-auto" />
       {loading && (
         <div className="absolute inset-0 flex items-center justify-center text-[var(--ink-muted)]">
