@@ -40,6 +40,16 @@ export default function PptxViewer({ bytes, onError, onEmpty }: RichDocSubViewer
     const viewer = new PptxRenderer(content, {
       scrollContainer: scroll,
       fitMode: 'contain',
+      // Bound zip expansion (pptx-renderer defaults to "unlimited"). With a 50MB
+      // input cap, these headroom limits block a zip-bomb from exhausting memory
+      // while still allowing legitimate large decks; over-limit → onError → "open
+      // with default app".
+      zipLimits: {
+        maxEntries: 8000,
+        maxEntryUncompressedBytes: 100 * 1024 * 1024,
+        maxTotalUncompressedBytes: 300 * 1024 * 1024,
+        maxMediaBytes: 250 * 1024 * 1024,
+      },
     });
 
     viewer

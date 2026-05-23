@@ -33,7 +33,19 @@ export default function SheetViewer({ bytes, onError, onEmpty }: RichDocSubViewe
   const parsed = useMemo<{ sheets: SheetData[] | null; error: string | null; empty: boolean }>(() => {
     try {
       // Uint8Array view; SheetJS reads (does not detach) the buffer.
-      const wb = XLSX.read(new Uint8Array(bytes), { type: 'array' });
+      // Perf for big sheets (read-only HTML preview):
+      //  - `sheetRows: MAX_ROWS + 1` truncates at PARSE time (not after) — the +1
+      //    lets us still detect "there were more rows" to show the truncation note.
+      //  - `dense` is faster + lighter for large grids (sheet_to_html supports it).
+      //  - `cellFormula`/`cellHTML` are on by default but unused in a value-only
+      //    preview; `cellText` stays default so dates/currency keep their display.
+      const wb = XLSX.read(new Uint8Array(bytes), {
+        type: 'array',
+        sheetRows: MAX_ROWS + 1,
+        dense: true,
+        cellFormula: false,
+        cellHTML: false,
+      });
       if (wb.SheetNames.length === 0) {
         return { sheets: null, error: null, empty: true };
       }

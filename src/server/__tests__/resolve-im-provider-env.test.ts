@@ -1,0 +1,190 @@
+/**
+ * Regression test for issue #237 — IM Channel environment used a stale
+ * provider blob instead of re-resolving from the agent's canonical `providerId`.
+ *
+ * The fix added `resolveImProviderEnv(agentDir, channelId)` in
+ * `src/server/utils/admin-config.ts` and wired it into `/api/im/enqueue`.
+ * This test pins the contract of the helper so future refactors don't silently
+ * regress back to "trust the blob": providerId > providerEnvJson, with channel
+ * override winning over agent default.
+ */
+
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+
+let scratch: string;
+let prevHome: string | undefined;
+let prevUserProfile: string | undefined;
+
+const AGENT_WORKSPACE = '/tmp/agent-237';
+
+function writeConfig(config: Record<string, unknown>): void {
+  writeFileSync(
+    join(scratch, '.myagents', 'config.json'),
+    JSON.stringify(config, null, 2),
+    'utf-8',
+  );
+}
+
+beforeEach(() => {
+  scratch = mkdtempSync(join(tmpdir(), 'myagents-im-provider-'));
+  const configDir = join(scratch, '.myagents');
+  mkdirSync(configDir, { recursive: true });
+  prevHome = process.env.HOME;
+  prevUserProfile = process.env.USERPROFILE;
+  process.env.HOME = scratch;
+  process.env.USERPROFILE = scratch;
+});
+
+afterEach(() => {
+  process.env.HOME = prevHome;
+  process.env.USERPROFILE = prevUserProfile;
+  rmSync(scratch, { recursive: true, force: true });
+});
+
+describe('resolveImProviderEnv (#237)', () => {
+  it('resolves agent providerId fresh — ignores stale agent.providerEnvJson blob', async () => {
+    // User scenario from #237: agent.providerId is currently "deepseek", but
+    // agent.providerEnvJson still holds a MiniMax blob from before the user
+    // switched providers. The helper MUST resolve via providerId and never
+    // touch the stale blob.
+    writeConfig({
+      agents: [{
+        id: 'agent-1',
+        name: 'Mino',
+        enabled: true,
+        workspacePath: AGENT_WORKSPACE,
+        providerId: 'deepseek',
+        // Intentionally stale: looks valid but for the WRONG provider.
+        providerEnvJson: JSON.stringify({
+          baseUrl: 'https://api.minimaxi.com/anthropic',
+          apiKey: 'old-minimax-key',
+          authType: 'auth_token',
+          modelAliases: { sonnet: 'MiniMax-M2.7', opus: 'MiniMax-M2.7', haiku: 'MiniMax-M2.7' },
+        }),
+        permissionMode: 'plan',
+        channels: [],
+      }],
+      providerApiKeys: { deepseek: 'sk-test-deepseek' },
+    });
+
+    const { resolveImProviderEnv } = await import('../utils/admin-config');
+    const env = resolveImProviderEnv(AGENT_WORKSPACE, undefined);
+
+    expect(env).toBeDefined();
+    expect(env!.baseUrl).toBe('https://api.deepseek.com/anthropic');
+    expect(env!.apiKey).toBe('sk-test-deepseek');
+    // DeepSeek preset aliases from src/shared/config-types.ts
+    expect(env!.modelAliases).toEqual({
+      sonnet: 'deepseek-v4-pro',
+      opus: 'deepseek-v4-pro',
+      haiku: 'deepseek-v4-flash',
+    });
+  });
+
+  it('honors channel.overrides.providerId when present (intentional per-channel override)', async () => {
+    writeConfig({
+      agents: [{
+        id: 'agent-1',
+        name: 'Mino',
+        enabled: true,
+        workspacePath: AGENT_WORKSPACE,
+        providerId: 'deepseek',
+        permissionMode: 'plan',
+        channels: [{
+          id: 'channel-1',
+          type: 'openclaw:wecom-openclaw-plugin',
+          enabled: true,
+          overrides: { providerId: 'minimax' },
+        }],
+      }],
+      providerApiKeys: { deepseek: 'sk-d', minimax: 'sk-m' },
+    });
+
+    const { resolveImProviderEnv } = await import('../utils/admin-config');
+    // With channelId → channel override wins.
+    const overrideEnv = resolveImProviderEnv(AGENT_WORKSPACE, 'channel-1');
+    expect(overrideEnv?.baseUrl).toBe('https://api.minimaxi.com/anthropic');
+    // Without channelId → agent default.
+    const defaultEnv = resolveImProviderEnv(AGENT_WORKSPACE, undefined);
+    expect(defaultEnv?.baseUrl).toBe('https://api.deepseek.com/anthropic');
+  });
+
+  it('returns undefined when providerId resolution fails (missing API key)', async () => {
+    writeConfig({
+      agents: [{
+        id: 'agent-1',
+        name: 'Mino',
+        enabled: true,
+        workspacePath: AGENT_WORKSPACE,
+        providerId: 'deepseek',
+        permissionMode: 'plan',
+        channels: [],
+      }],
+      // No providerApiKeys.deepseek — resolveProviderEnv returns undefined.
+    });
+
+    const { resolveImProviderEnv } = await import('../utils/admin-config');
+    expect(resolveImProviderEnv(AGENT_WORKSPACE, undefined)).toBeUndefined();
+  });
+
+  it('falls back to config.defaultProviderId when agent has no providerId', async () => {
+    writeConfig({
+      defaultProviderId: 'deepseek',
+      agents: [{
+        id: 'agent-1',
+        name: 'Mino',
+        enabled: true,
+        workspacePath: AGENT_WORKSPACE,
+        permissionMode: 'plan',
+        channels: [],
+      }],
+      providerApiKeys: { deepseek: 'sk-d' },
+    });
+
+    const { resolveImProviderEnv } = await import('../utils/admin-config');
+    const env = resolveImProviderEnv(AGENT_WORKSPACE, undefined);
+    expect(env?.baseUrl).toBe('https://api.deepseek.com/anthropic');
+  });
+
+  it('returns undefined when agent cannot be matched by workspacePath', async () => {
+    writeConfig({
+      agents: [{
+        id: 'agent-1',
+        name: 'Mino',
+        enabled: true,
+        workspacePath: '/other/path',
+        providerId: 'deepseek',
+        permissionMode: 'plan',
+        channels: [],
+      }],
+      providerApiKeys: { deepseek: 'sk-d' },
+    });
+
+    const { resolveImProviderEnv } = await import('../utils/admin-config');
+    expect(resolveImProviderEnv(AGENT_WORKSPACE, undefined)).toBeUndefined();
+  });
+
+  it('normalizes Windows-style backslashes in workspacePath', async () => {
+    const winPath = 'C:\\Users\\test\\workspace';
+    writeConfig({
+      agents: [{
+        id: 'agent-1',
+        name: 'Mino',
+        enabled: true,
+        workspacePath: winPath,
+        providerId: 'deepseek',
+        permissionMode: 'plan',
+        channels: [],
+      }],
+      providerApiKeys: { deepseek: 'sk-d' },
+    });
+
+    const { resolveImProviderEnv } = await import('../utils/admin-config');
+    // Same path with forward slashes should also match.
+    const fwdEnv = resolveImProviderEnv('C:/Users/test/workspace', undefined);
+    expect(fwdEnv?.baseUrl).toBe('https://api.deepseek.com/anthropic');
+  });
+});

@@ -540,7 +540,7 @@ import {
   updateSessionMetadata,
   getAttachmentPath,
 } from './SessionStore';
-import { decodeProviderEnvSnapshot, findAgentByWorkspacePath, findProvider, getAllMcpServers, getEffectiveMcpServers, isProviderDisabled, resolveProviderEnv } from './utils/admin-config';
+import { decodeProviderEnvSnapshot, findAgentByWorkspacePath, findProvider, getAllMcpServers, getEffectiveMcpServers, isProviderDisabled, resolveImProviderEnv, resolveProviderEnv } from './utils/admin-config';
 import { snapshotForOwnedSession } from './utils/session-snapshot';
 import { resolveSessionConfig } from './utils/resolve-session-config';
 import type { AgentConfig } from '../shared/types/agent';
@@ -8463,7 +8463,21 @@ async function main() {
             // is a no-op for them and behavior matches v0.2.13.
             let resolvedPermissionMode: PermissionMode = (payload.permissionMode as PermissionMode) ?? 'plan';
             let resolvedModel: string | undefined = payload.model ?? undefined;
-            let resolvedProviderEnv: ProviderEnv | undefined = payload.providerEnv ?? undefined;
+            // (#237) Re-resolve providerEnv from canonical `providerId` on disk
+            // instead of trusting the blob Rust forwarded. Rust caches
+            // `provider_env_json` as an Arc at bot start and replays it on every
+            // /api/im/enqueue, so a stale agent.providerEnvJson (or
+            // channel.overrides.providerEnvJson — Rust's patch.channels
+            // hot-reload only updates group fields, not provider overrides)
+            // would pin IM forever to the wrong upstream. Desktop Chat is
+            // immune because Chat.tsx rebuilds providerEnv from React state on
+            // every send — this mirrors that "live from providerId" shape on
+            // the sidecar side. Falls back to payload.providerEnv if the agent
+            // has no resolvable providerId (provider deleted / disabled / no
+            // API key), preserving back-compat for edge cases.
+            const freshImProviderEnv = resolveImProviderEnv(agentDir, payload.botId);
+            let resolvedProviderEnv: ProviderEnv | undefined =
+              (freshImProviderEnv as ProviderEnv | undefined) ?? payload.providerEnv ?? undefined;
             const sidForSnapshot = getSessionId();
             const snapshotMeta = sidForSnapshot ? getSessionMetadata(sidForSnapshot) : null;
             if (snapshotMeta?.configSnapshotAt) {
@@ -8474,10 +8488,14 @@ async function main() {
                 resolvedModel = snapshotMeta.model;
               }
               if (snapshotMeta.providerEnvJson) {
+                // Desktop-handover snapshot wins over the fresh agent-disk
+                // resolve above: the user's intent at handover was "freeze
+                // this desktop session's provider"; re-resolving from current
+                // agent state would defeat that.
                 // Snapshot gate: if the desktop handover's providerId is now
                 // globally disabled, refuse the frozen snapshot — fall back to
-                // live payload.providerEnv (which the user can also disable by
-                // restarting the bot). decodeProviderEnvSnapshot enforces this.
+                // the live freshImProviderEnv / payload.providerEnv chain.
+                // decodeProviderEnvSnapshot enforces this.
                 const decoded = decodeProviderEnvSnapshot(snapshotMeta.providerEnvJson, snapshotMeta.providerId);
                 if (decoded) resolvedProviderEnv = decoded as ProviderEnv;
               }

@@ -54,6 +54,8 @@ export default function PdfViewer({ bytes, onError, onEmpty }: RichDocSubViewerP
         const task = page.render({
           canvas,
           viewport,
+          // Read-only canvas preview — skip annotation operator parsing/drawing.
+          annotationMode: pdfjsLib.AnnotationMode.DISABLE,
           transform: dpr !== 1 ? [dpr, 0, 0, dpr, 0, 0] : undefined,
         });
         renderTasks.add(task);
@@ -95,9 +97,19 @@ export default function PdfViewer({ bytes, onError, onEmpty }: RichDocSubViewerP
         observer = new IntersectionObserver(
           (entries) => {
             for (const entry of entries) {
-              if (!entry.isIntersecting) continue;
               const holder = entry.target as HTMLElement;
-              void renderPage(Number(holder.dataset.page), holder, width, dpr);
+              const pageNum = Number(holder.dataset.page);
+              if (entry.isIntersecting) {
+                void renderPage(pageNum, holder, width, dpr);
+              } else if (rendered.has(pageNum) && holder.firstChild) {
+                // Recycle off-screen page canvases — otherwise `rendered` grows
+                // unbounded and a long/scanned PDF leaks tens of MB per page.
+                // The 300px margin keeps this from thrashing on normal scrolling;
+                // re-entering the viewport re-renders (fast, cached).
+                holder.replaceChildren();
+                holder.style.minHeight = `${estHeight}px`;
+                rendered.delete(pageNum);
+              }
             }
           },
           { root: scroller, rootMargin: '300px 0px' },
