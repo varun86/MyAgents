@@ -32,6 +32,8 @@ import type { ToolUse } from '@/types/stream';
 import type { SystemInitInfo } from '../../shared/types/system';
 import type { RuntimeDiagnostics } from '../../shared/types/runtime';
 import type { TerminalReason } from '../../shared/terminalReason';
+import { shouldRecordTurnForTitle } from '../../shared/terminalReason';
+import { isLikelyErrorTitle } from '../../shared/titleFilters';
 import type { LogEntry } from '@/types/log';
 import { parsePartialJson } from '@/utils/parsePartialJson';
 import { subscribeFrontendLogs, setCurrentTabId } from '@/utils/frontendLogger';
@@ -1902,8 +1904,14 @@ export default function TabProvider({
 
                 // Auto-title: collect QA round, fire after 3+ rounds
                 // Shift from FIFO queue to correctly pair sends with completions (handles queued sends)
+                // #245 gate: SDK / openai-bridge surface upstream 4xx/5xx errors as
+                // assistant text + terminate the turn with terminal_reason='aborted_streaming'.
+                // Treating those as good rounds let title-gen name sessions after the error
+                // string ("API Error: 400 ..."). shouldRecordTurnForTitle accepts only
+                // 'completed' + undefined (external runtimes don't emit the field).
                 const completedUserText = pendingUserMessagesRef.current.shift();
-                if (!autoTitleAttemptedRef.current && currentSessionIdRef.current && completedUserText) {
+                const titleEligible = shouldRecordTurnForTitle(completePayload?.terminal_reason);
+                if (!autoTitleAttemptedRef.current && currentSessionIdRef.current && completedUserText && titleEligible) {
                     // Record this completed QA round (truncate both sides to 200 chars)
                     titleRoundsRef.current.push({
                         user: completedUserText.slice(0, 200),
@@ -3294,6 +3302,21 @@ export default function TabProvider({
                         }
                         const assistantText = typeof next.content === 'string' ? next.content
                             : next.content.filter(b => b.type === 'text').map(b => (b as { text?: string }).text || '').join('');
+                        // #245 reconstruction-path gate: messages persisted from a
+                        // prior session don't carry SDK terminal_reason, so we
+                        // can't use shouldRecordTurnForTitle here. Fall back to
+                        // pattern matching on the assistant text — a turn that
+                        // produced "API Error: 400 …" / "[Error]: …" / etc. as
+                        // its only text content is an upstream-error round that
+                        // must not seed title-gen, exactly like the live-flow
+                        // gate at message-complete. The cleanTitle backstop in
+                        // title-generator catches LLM echoes but cannot catch
+                        // LLM paraphrases ("API 400 渠道限制") of error inputs,
+                        // so we drop the bad rounds at the source.
+                        if (isLikelyErrorTitle(assistantText)) {
+                            i++;
+                            continue;
+                        }
                         rounds.push({ user: userText.slice(0, 200), assistant: assistantText.slice(0, 200) });
                         i++; // skip the assistant message
                     }

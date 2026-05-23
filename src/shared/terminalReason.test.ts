@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
-import { describeTerminalReason, shouldSurfaceTerminalReason } from './terminalReason';
+import {
+  describeTerminalReason,
+  shouldRecordTurnForTitle,
+  shouldSurfaceTerminalReason,
+} from './terminalReason';
 
 describe('describeTerminalReason — banner suppression', () => {
   it('returns null for non-disruptive reasons (completed + any aborted_*)', () => {
@@ -54,5 +58,54 @@ describe('shouldSurfaceTerminalReason', () => {
     expect(shouldSurfaceTerminalReason(undefined)).toBe(false);
     expect(shouldSurfaceTerminalReason('prompt_too_long')).toBe(true);
     expect(shouldSurfaceTerminalReason('some_future_reason')).toBe(true);
+  });
+});
+
+describe('shouldRecordTurnForTitle — #245 round-acceptance gate', () => {
+  it('accepts completed (the only "good" SDK terminal_reason)', () => {
+    expect(shouldRecordTurnForTitle('completed')).toBe(true);
+  });
+
+  it('accepts undefined / null / empty (external runtimes do not emit terminal_reason)', () => {
+    expect(shouldRecordTurnForTitle(undefined)).toBe(true);
+    expect(shouldRecordTurnForTitle(null)).toBe(true);
+    expect(shouldRecordTurnForTitle('')).toBe(true);
+  });
+
+  it('rejects the #245 culprit: aborted_streaming (SDK abort after upstream 4xx, partial assistant content is the error string)', () => {
+    expect(shouldRecordTurnForTitle('aborted_streaming')).toBe(false);
+    expect(shouldRecordTurnForTitle('aborted_tools')).toBe(false);
+    // Future aborted_* values also rejected — partial content is partial content.
+    expect(shouldRecordTurnForTitle('aborted_init')).toBe(false);
+  });
+
+  it('rejects upstream-error and limit reasons (content is degenerate or absent)', () => {
+    expect(shouldRecordTurnForTitle('prompt_too_long')).toBe(false);
+    expect(shouldRecordTurnForTitle('blocking_limit')).toBe(false);
+    expect(shouldRecordTurnForTitle('rapid_refill_breaker')).toBe(false);
+    expect(shouldRecordTurnForTitle('stop_hook_prevented')).toBe(false);
+    expect(shouldRecordTurnForTitle('hook_stopped')).toBe(false);
+    expect(shouldRecordTurnForTitle('image_error')).toBe(false);
+    expect(shouldRecordTurnForTitle('model_error')).toBe(false);
+  });
+
+  it('rejects max_turns and tool_deferred (text may be truncated mid-thought; conservative)', () => {
+    expect(shouldRecordTurnForTitle('max_turns')).toBe(false);
+    expect(shouldRecordTurnForTitle('tool_deferred')).toBe(false);
+  });
+
+  it('rejects unknown / future reasons (default-deny — never widen on unrecognized values)', () => {
+    expect(shouldRecordTurnForTitle('some_future_reason')).toBe(false);
+  });
+
+  it('treats non-string types like "field missing" → accept (degrade gracefully, do not silently kill title-gen)', () => {
+    // Same shape as undefined/null/'': callers should not be silently locked out
+    // of title-gen by an encoding bug somewhere upstream that turns terminal_reason
+    // into a non-string value. The renderer's title-gen is non-critical (frontend
+    // falls back to truncated first message) — over-rejection is worse than the
+    // occasional bad title.
+    expect(shouldRecordTurnForTitle(42)).toBe(true);
+    expect(shouldRecordTurnForTitle({})).toBe(true);
+    expect(shouldRecordTurnForTitle(false)).toBe(true);
   });
 });
