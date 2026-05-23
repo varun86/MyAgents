@@ -167,6 +167,88 @@ describe('resolveImProviderEnv (#237)', () => {
     expect(resolveImProviderEnv(AGENT_WORKSPACE, undefined)).toBeUndefined();
   });
 
+  it('Codex review-fix #1: does NOT fall through to defaultProviderId when no agent matches', async () => {
+    // Regression guard: previously the helper fell through to
+    // `config.defaultProviderId` whenever the agent lookup failed (legacy IM bot
+    // / workspace-path drift). That would silently reroute every unmatched IM
+    // call to the global default provider, which is strictly worse than the
+    // stale-blob bug we set out to fix. Returning undefined here lets the
+    // caller fall back to `payload.providerEnv`.
+    writeConfig({
+      defaultProviderId: 'minimax',
+      agents: [{
+        id: 'agent-other',
+        name: 'Other',
+        enabled: true,
+        workspacePath: '/other/path', // does NOT match AGENT_WORKSPACE
+        providerId: 'deepseek',
+        permissionMode: 'plan',
+        channels: [],
+      }],
+      providerApiKeys: { deepseek: 'sk-d', minimax: 'sk-m' },
+    });
+
+    const { resolveImProviderEnv } = await import('../utils/admin-config');
+    expect(resolveImProviderEnv(AGENT_WORKSPACE, undefined)).toBeUndefined();
+  });
+
+  it('Codex review-fix #2: honors legacy channel root-level providerId (pre-bc06386)', async () => {
+    // Pre-v0.1.45 the in-IM `/provider` command wrote the channel-root
+    // `providerId` field directly (not via `overrides.providerId`). Rust still
+    // honors that field — `ChannelConfigRust::to_im_config` at
+    // src-tauri/src/im/types.rs:968 walks `overrides.provider_id → channel
+    // provider_id → agent provider_id`. Skipping the legacy field here would
+    // reroute those configs to the agent default on every IM message.
+    writeConfig({
+      agents: [{
+        id: 'agent-1',
+        name: 'Mino',
+        enabled: true,
+        workspacePath: AGENT_WORKSPACE,
+        providerId: 'deepseek',
+        permissionMode: 'plan',
+        channels: [{
+          id: 'channel-legacy',
+          type: 'openclaw:wecom-openclaw-plugin',
+          enabled: true,
+          // Legacy root-level providerId — no overrides shape.
+          providerId: 'minimax',
+        }],
+      }],
+      providerApiKeys: { deepseek: 'sk-d', minimax: 'sk-m' },
+    });
+
+    const { resolveImProviderEnv } = await import('../utils/admin-config');
+    const env = resolveImProviderEnv(AGENT_WORKSPACE, 'channel-legacy');
+    expect(env?.baseUrl).toBe('https://api.minimaxi.com/anthropic');
+    expect(env?.apiKey).toBe('sk-m');
+  });
+
+  it('Codex review-fix #2b: overrides.providerId still wins over legacy channel-root providerId', async () => {
+    writeConfig({
+      agents: [{
+        id: 'agent-1',
+        name: 'Mino',
+        enabled: true,
+        workspacePath: AGENT_WORKSPACE,
+        providerId: 'deepseek',
+        permissionMode: 'plan',
+        channels: [{
+          id: 'channel-mixed',
+          type: 'openclaw:wecom-openclaw-plugin',
+          enabled: true,
+          providerId: 'minimax', // legacy root — should LOSE to overrides below
+          overrides: { providerId: 'zhipu' }, // post-bc06386 location — should WIN
+        }],
+      }],
+      providerApiKeys: { deepseek: 'sk-d', minimax: 'sk-m', zhipu: 'sk-z' },
+    });
+
+    const { resolveImProviderEnv } = await import('../utils/admin-config');
+    const env = resolveImProviderEnv(AGENT_WORKSPACE, 'channel-mixed');
+    expect(env?.baseUrl).toBe('https://open.bigmodel.cn/api/anthropic');
+  });
+
   it('normalizes Windows-style backslashes in workspacePath', async () => {
     const winPath = 'C:\\Users\\test\\workspace';
     writeConfig({

@@ -25,6 +25,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Loader2 } from 'lucide-react';
 import { renderAsync } from 'docx-preview';
 import type { RichDocSubViewerProps } from './types';
+import { useZoom, ZoomControls } from './zoom';
 
 /** docx-preview creates blob: URLs for embedded images/fonts and never revokes
  *  them — revoke on unmount/file-switch to avoid leaking Blobs across previews. */
@@ -45,7 +46,9 @@ function revokeBlobUrls(root: HTMLElement): void {
 
 export default function DocxViewer({ bytes, onError }: RichDocSubViewerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
   const [loading, setLoading] = useState(true);
+  const { zoom, zoomIn, zoomOut, reset } = useZoom(scrollRef);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -79,12 +82,14 @@ export default function DocxViewer({ bytes, onError }: RichDocSubViewerProps) {
   }, [bytes, onError]);
 
   return (
-    <div className="relative h-full overflow-auto overscroll-contain bg-[var(--paper-elevated)] p-4">
-      <div ref={containerRef} className="mx-auto" />
-      {loading && (
+    <div ref={scrollRef} className="relative h-full overflow-auto overscroll-contain bg-[var(--paper-elevated)] p-4">
+      <div ref={containerRef} className="mx-auto" style={{ zoom }} />
+      {loading ? (
         <div className="absolute inset-0 flex items-center justify-center text-[var(--ink-muted)]">
           <Loader2 className="h-5 w-5 animate-spin" />
         </div>
+      ) : (
+        <ZoomControls zoom={zoom} onZoomIn={zoomIn} onZoomOut={zoomOut} onReset={reset} />
       )}
     </div>
   );

@@ -522,11 +522,21 @@ export function findAgentByWorkspacePath(agentDir: string): AgentConfigSlim | un
  *
  * The fix here mirrors that "live from canonical providerId" behavior on the
  * sidecar side: look up the agent + channel, resolve `providerId` via the same
- * priority chain (`channel.overrides.providerId` → `agent.providerId` →
- * `config.defaultProviderId`), and rebuild the env via `resolveProviderEnv()`.
- * Callers fall back to the legacy `payload.providerEnv` blob if this returns
- * undefined (provider deleted / disabled / no API key) to preserve back-compat
- * for edge cases where the blob is the only thing the user has left.
+ * priority chain Rust uses at `src-tauri/src/im/types.rs:968`
+ * (`channel.overrides.providerId` → legacy channel-root `channel.providerId`
+ * (pre-bc06386) → `agent.providerId` → `config.defaultProviderId`), and
+ * rebuild the env via `resolveProviderEnv()`.
+ *
+ * Returns undefined when:
+ *   - the agent can't be matched by workspacePath (legacy IM bot / drift) —
+ *     deliberately does NOT fall through to `defaultProviderId` here, since
+ *     rerouting every unmatched IM bot to the global default would be strictly
+ *     worse than the stale-blob bug we're fixing,
+ *   - or when the resolved providerId has no live env (provider deleted /
+ *     disabled / no API key).
+ *
+ * Callers fall back to the legacy `payload.providerEnv` blob in those cases
+ * to preserve back-compat for configs the user hasn't migrated yet.
  */
 export function resolveImProviderEnv(
   agentDir: string,
@@ -539,22 +549,40 @@ export function resolveImProviderEnv(
   const agent = agents.find(a =>
     typeof a.workspacePath === 'string' && a.workspacePath.replace(/\\/g, '/') === normalized
   );
-  // Channel override considered only when a channelId is supplied AND the channel
-  // is actually present on the matched agent. payload.botId == channel.id under
-  // the v0.1.41 Agent architecture (see src-tauri/src/im/mod.rs `channel.id` →
+  // No agent matched (legacy IM bot / workspace-path drift) — bail out so the
+  // caller falls back to `payload.providerEnv`. Returning a resolution against
+  // `defaultProviderId` here would silently reroute every legacy IM bot to the
+  // global default provider, which is a strictly worse regression than the
+  // original stale-blob bug.
+  if (!agent) return undefined;
+  // Channel provider chain (mirrors Rust `ChannelConfigRust::to_im_config` at
+  // src-tauri/src/im/types.rs:968): `overrides.providerId` → channel-root
+  // `providerId` (legacy pre-v0.1.45) → agent providerId. The legacy channel-
+  // root field is still on disk for users who configured providers via the
+  // pre-bc06386 in-IM `/provider` command — skipping it would reroute those
+  // configs to the agent default. payload.botId == channel.id under the
+  // v0.1.41 Agent architecture (see src-tauri/src/im/mod.rs `channel.id` →
   // `bot_id` mapping at line 4360).
-  let channelOverrideProviderId: string | undefined;
-  if (agent && channelId) {
+  let channelLevelProviderId: string | undefined;
+  if (channelId) {
     const channels = (agent.channels ?? []) as ChannelConfigSlim[];
     const channel = channels.find(ch => ch.id === channelId);
-    const overrides = (channel?.overrides as Record<string, unknown> | undefined) ?? undefined;
-    const ovProviderId = overrides?.providerId;
-    if (typeof ovProviderId === 'string' && ovProviderId.length > 0) {
-      channelOverrideProviderId = ovProviderId;
+    if (channel) {
+      const overrides = (channel.overrides as Record<string, unknown> | undefined) ?? undefined;
+      const ovProviderId = overrides?.providerId;
+      if (typeof ovProviderId === 'string' && ovProviderId.length > 0) {
+        channelLevelProviderId = ovProviderId;
+      } else {
+        // Legacy root-level channel.providerId (pre-bc06386).
+        const legacyProviderId = (channel as Record<string, unknown>).providerId;
+        if (typeof legacyProviderId === 'string' && legacyProviderId.length > 0) {
+          channelLevelProviderId = legacyProviderId;
+        }
+      }
     }
   }
-  const providerId = channelOverrideProviderId
-    || agent?.providerId
+  const providerId = channelLevelProviderId
+    || agent.providerId
     || (c.defaultProviderId as string | undefined);
   if (!providerId) return undefined;
   return resolveProviderEnv(providerId, c);

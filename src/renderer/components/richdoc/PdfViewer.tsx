@@ -16,11 +16,13 @@ import * as pdfjsLib from 'pdfjs-dist';
 import type { PDFDocumentProxy, RenderTask } from 'pdfjs-dist';
 import './pdfWorker';
 import type { RichDocSubViewerProps } from './types';
+import { useZoom, ZoomControls } from './zoom';
 
 export default function PdfViewer({ bytes, onError, onEmpty }: RichDocSubViewerProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const [loading, setLoading] = useState(true);
+  const { zoom, zoomIn, zoomOut, reset } = useZoom(scrollRef);
 
   useEffect(() => {
     const scroller = scrollRef.current;
@@ -149,11 +151,13 @@ export default function PdfViewer({ bytes, onError, onEmpty }: RichDocSubViewerP
 
   return (
     <div ref={scrollRef} className="relative h-full overflow-auto overscroll-contain bg-[var(--paper-elevated)] p-4">
-      <div ref={contentRef} />
-      {loading && (
+      <div ref={contentRef} style={{ zoom }} />
+      {loading ? (
         <div className="absolute inset-0 flex items-center justify-center text-[var(--ink-muted)]">
           <Loader2 className="h-5 w-5 animate-spin" />
         </div>
+      ) : (
+        <ZoomControls zoom={zoom} onZoomIn={zoomIn} onZoomOut={zoomOut} onReset={reset} />
       )}
     </div>
   );

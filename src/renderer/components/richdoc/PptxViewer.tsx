@@ -20,11 +20,23 @@ import { Loader2 } from 'lucide-react';
 import { PptxViewer as PptxRenderer } from '@aiden0z/pptx-renderer';
 import './pdfWorker'; // pptx-renderer peerDeps pdfjs-dist (embedded PDF objects)
 import type { RichDocSubViewerProps } from './types';
+import { useZoom, ZoomControls } from './zoom';
 
 export default function PptxViewer({ bytes, onError, onEmpty }: RichDocSubViewerProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
+  const viewerRef = useRef<PptxRenderer | null>(null);
   const [loading, setLoading] = useState(true);
+  const { zoom, zoomIn, zoomOut, reset } = useZoom(scrollRef);
+  const zoomRef = useRef(zoom);
+  useEffect(() => {
+    zoomRef.current = zoom;
+  }, [zoom]);
+
+  // Apply zoom through the renderer's native (crisp) API rather than CSS scaling.
+  useEffect(() => {
+    void viewerRef.current?.setZoom(zoom * 100);
+  }, [zoom]);
 
   useEffect(() => {
     const scroll = scrollRef.current;
@@ -51,6 +63,7 @@ export default function PptxViewer({ bytes, onError, onEmpty }: RichDocSubViewer
         maxMediaBytes: 250 * 1024 * 1024,
       },
     });
+    viewerRef.current = viewer;
 
     viewer
       .open(bytes.slice(0), {
@@ -60,8 +73,13 @@ export default function PptxViewer({ bytes, onError, onEmpty }: RichDocSubViewer
       })
       .then(() => {
         if (disposed) return;
-        if (viewer.slideCount === 0) onEmpty();
-        else setLoading(false);
+        if (viewer.slideCount === 0) {
+          onEmpty();
+        } else {
+          setLoading(false);
+          // Re-apply zoom if the user zoomed while open() was still in flight.
+          if (zoomRef.current !== 1) void viewer.setZoom(zoomRef.current * 100);
+        }
       })
       .catch((e) => {
         if (!disposed && !ac.signal.aborted) {
@@ -73,16 +91,19 @@ export default function PptxViewer({ bytes, onError, onEmpty }: RichDocSubViewer
       disposed = true;
       ac.abort();
       viewer.destroy();
+      viewerRef.current = null;
     };
   }, [bytes, onError, onEmpty]);
 
   return (
     <div ref={scrollRef} className="relative h-full overflow-auto overscroll-contain bg-[var(--paper-elevated)] p-4">
       <div ref={contentRef} className="mx-auto" />
-      {loading && (
+      {loading ? (
         <div className="absolute inset-0 flex items-center justify-center text-[var(--ink-muted)]">
           <Loader2 className="h-5 w-5 animate-spin" />
         </div>
+      ) : (
+        <ZoomControls zoom={zoom} onZoomIn={zoomIn} onZoomOut={zoomOut} onReset={reset} />
       )}
     </div>
   );
