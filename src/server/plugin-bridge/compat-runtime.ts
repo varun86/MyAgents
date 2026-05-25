@@ -44,6 +44,29 @@ type BridgeAttachment = {
   attachmentType: 'image' | 'file';
 };
 
+type OpenClawDeliverPayload = {
+  text?: string;
+  mediaUrls?: string[];
+  mediaUrl?: string;
+  isReasoning?: boolean;
+  isCompactionNotice?: boolean;
+};
+
+type OpenClawDeliverInfo = { kind: 'block' | 'tool' | 'final' | 'reasoning' };
+type OpenClawDeliver = (
+  payload: OpenClawDeliverPayload,
+  info: OpenClawDeliverInfo,
+) => unknown | Promise<unknown>;
+
+function getOpenClawDeliver(dispatcherOptions: Record<string, unknown> | undefined): OpenClawDeliver | undefined {
+  const deliver = dispatcherOptions?.deliver;
+  return typeof deliver === 'function' ? deliver as OpenClawDeliver : undefined;
+}
+
+async function deliverTextBlock(deliver: OpenClawDeliver, text: string): Promise<void> {
+  await deliver({ text }, { kind: 'block' });
+}
+
 /**
  * Extract media from OpenClaw inbound context and convert to bridge attachments.
  *
@@ -583,7 +606,7 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
           cfg?: Record<string, unknown>;
           dispatcherOptions?: Record<string, unknown>;
         }) {
-          const { ctx } = params;
+          const { ctx, dispatcherOptions } = params;
 
           const text = String(ctx.BodyForAgent || ctx.Body || ctx.body || ctx.RawBody || '');
           const senderId = String(ctx.SenderId || ctx.senderId || '');
@@ -623,6 +646,19 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
 
           const t0 = Date.now();
           console.log(`[compat-timing] dispatchReplyWithBufferedBlockDispatcher ENTER: sender=${senderId} chat=${chatId} len=${text.length} attachments=${mediaAttachments.length}`);
+          const deliver = getOpenClawDeliver(dispatcherOptions);
+          const completionPromise = deliver && chatId
+            ? registerPendingDispatch(chatId, {
+                sendBlockReply: async (payload) => {
+                  await deliverTextBlock(deliver, payload.text || '');
+                  return true;
+                },
+                sendFinalReply: async (payload) => {
+                  await deliverTextBlock(deliver, payload.text || '');
+                  return true;
+                },
+              }, { resolveViaSendText: true })
+            : undefined;
 
           try {
             // Pattern 1: 5s cap on the local management API call. Plugin
@@ -659,7 +695,7 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
             console.log(`[compat-timing] Rust POST completed (+${Date.now() - t0}ms) status=${resp.status}`);
             if (!resp.ok) {
               const body = await resp.text();
-              console.error(`[compat-runtime] Rust returned ${resp.status}: ${body}`);
+              throw new Error(`Rust returned ${resp.status}: ${body}`);
             } else {
               // Pattern 4: record a successful forward for /health/functional.
               (globalThis as { __pluginBridgeLastForwardAt?: number }).__pluginBridgeLastForwardAt = Date.now();
@@ -668,9 +704,33 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
             const isTimeout = err instanceof Error && (err.name === 'AbortError' || err.name === 'TimeoutError');
             const reason = isTimeout ? 'timeout' : 'error';
             console.warn(`[compat-runtime] Rust POST FAILED (reason=${reason}, +${Date.now() - t0}ms): ${err instanceof Error ? err.message : String(err)}`);
+            if (completionPromise) {
+              rejectPendingDispatch(chatId, err instanceof Error ? err : new Error(String(err)));
+              try {
+                await completionPromise;
+              } catch {
+                /* consume the rejection we just triggered */
+              }
+              const onError = dispatcherOptions?.onError;
+              if (typeof onError === 'function') {
+                try {
+                  await onError(err, { kind: 'final' });
+                } catch {
+                  /* plugin error callback is best-effort */
+                }
+              }
+              throw err;
+            }
           }
 
-          // Do NOT call the deliver callback — AI reply comes back via /send-text
+          if (completionPromise) {
+            const result = await completionPromise;
+            console.log(`[compat-timing] dispatchReplyWithBufferedBlockDispatcher EXIT (synthetic deliver) (+${Date.now() - t0}ms)`);
+            return result;
+          }
+
+          // No OpenClaw deliver callback was supplied. Preserve the legacy
+          // bypass path: AI reply comes back through Bridge /send-text.
           return { queuedFinal: 0, counts: {}, dispatcher: { waitForIdle: async () => {} } };
         },
       },

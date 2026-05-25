@@ -674,6 +674,10 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
 
   // Ref for chat content area (for Tauri drop zone)
   const chatContentRef = useRef<HTMLDivElement>(null);
+  const [inputOverlayHeight, setInputOverlayHeight] = useState(176);
+  const handleInputOverlayHeightChange = useCallback((height: number) => {
+    setInputOverlayHeight(prev => Math.abs(prev - height) < 1 ? prev : Math.ceil(height));
+  }, []);
 
   // Ref for directory panel container (for Tauri drop zone)
   const directoryPanelContainerRef = useRef<HTMLDivElement>(null);
@@ -3300,6 +3304,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
               onRewind={isExternalRuntime ? undefined : handleRewind}
               onRetry={handleRetry}
               onFork={isExternalRuntime ? undefined : handleFork}
+              bottomSpacerPx={inputOverlayHeight}
             />
 
             {/* Introduction overlay — shown in empty sessions when INTRODUCTION.md exists */}
@@ -3403,6 +3408,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             onCancelQueued={handleCancelQueuedVoid}
             onForceExecuteQueued={handleForceExecuteQueuedVoid}
             agentStatusSlot={agentStatusSlot}
+            onOverlayHeightChange={handleInputOverlayHeightChange}
           />
         </div>
       </div>

@@ -10,6 +10,7 @@ import { ExitPlanModePrompt } from '@/components/ExitPlanModePrompt';
 import type { ExitPlanModeRequest } from '../../shared/types/planMode';
 import type { Message as MessageType } from '@/types/chat';
 import type { SessionState } from '@/context/TabContext';
+import { resolveChatBottomSpacerPx } from '@/utils/chatBottomSpacer';
 
 function formatElapsedTime(totalSeconds: number): string {
   const hours = Math.floor(totalSeconds / 3600);
@@ -67,6 +68,7 @@ interface MessageListProps {
   onRewind?: (messageId: string) => void;
   onRetry?: (assistantMessageId: string) => void;
   onFork?: (assistantMessageId: string) => void;
+  bottomSpacerPx?: number;
 }
 
 const STREAMING_MESSAGES = [
@@ -127,6 +129,7 @@ const VirtuosoFooter = memo(function VirtuosoFooter({
   pendingPermission, onPermissionDecision,
   pendingAskUserQuestion, onAskUserQuestionSubmit, onAskUserQuestionCancel,
   showStatus, statusMessage,
+  bottomSpacerPx,
 }: {
   pendingPermission?: PermissionRequest | null;
   onPermissionDecision?: (decision: 'deny' | 'allow_once' | 'always_allow') => void;
@@ -135,7 +138,9 @@ const VirtuosoFooter = memo(function VirtuosoFooter({
   onAskUserQuestionCancel?: (requestId: string) => void;
   showStatus: boolean;
   statusMessage: string;
+  bottomSpacerPx?: number;
 }) {
+  const spacerHeight = resolveChatBottomSpacerPx(bottomSpacerPx);
   return (
     <div className="mx-auto max-w-3xl px-3">
       {pendingPermission && onPermissionDecision && (
@@ -149,9 +154,11 @@ const VirtuosoFooter = memo(function VirtuosoFooter({
         </div>
       )}
       {showStatus && <StatusTimer message={statusMessage} />}
-      {/* Footer spacer: 既给 floating input 让位（~128px），也给 AgentStatusPanel
-          展开态（最多 ~240px）预留 clearance，避免完全遮住末条消息。 */}
-      <div style={{ height: 360 }} aria-hidden="true" />
+      {/* Footer spacer follows the measured floating input stack. A fixed large
+          value makes the scrollbar expose a half-screen blank tail on short
+          chats; the measured value still keeps the final message clear of the
+          overlay and grows when AgentStatusPanel expands. */}
+      <div style={{ height: spacerHeight }} aria-hidden="true" />
     </div>
   );
 });
@@ -189,6 +196,7 @@ const MessageList = memo(function MessageList({
   onRewind,
   onRetry,
   onFork,
+  bottomSpacerPx,
 }: MessageListProps) {
   const allMessages = useMemo(() =>
     streamingMessage ? [...historyMessages, streamingMessage] : historyMessages,
@@ -498,10 +506,11 @@ const MessageList = memo(function MessageList({
           onAskUserQuestionCancel={onAskUserQuestionCancel}
           showStatus={showStatus}
           statusMessage={statusMessage}
+          bottomSpacerPx={bottomSpacerPx}
         />
       );
     };
-  }, [pendingPermission, onPermissionDecision, pendingAskUserQuestion, onAskUserQuestionSubmit, onAskUserQuestionCancel, showStatus, statusMessage]);
+  }, [pendingPermission, onPermissionDecision, pendingAskUserQuestion, onAskUserQuestionSubmit, onAskUserQuestionCancel, showStatus, statusMessage, bottomSpacerPx]);
 
   // ── Stable components object ──
   const components = useMemo(() => ({ Footer: FooterComponent }), [FooterComponent]);
