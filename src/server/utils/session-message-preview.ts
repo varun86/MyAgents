@@ -3,6 +3,61 @@ import type { SessionMessage } from '../types/session';
 export const CLIENT_MESSAGE_INLINE_MAX_BYTES = 256 * 1024;
 const PREVIEW_HEAD_BYTES = 24 * 1024;
 const PREVIEW_TAIL_BYTES = 8 * 1024;
+const MAX_JSON_SHRINK_DEPTH = 8;
+
+interface StructuredShrinkLimits {
+  textBytes: number;
+  thinkingBytes: number;
+  toolStringBytes: number;
+  parsedInputStringBytes: number;
+  rawToolStringBytes: number;
+  jsonArrayItems: number;
+  omitDuplicateInput: boolean;
+  minimalToolDetails: boolean;
+}
+
+const STRUCTURED_SHRINK_PASSES: StructuredShrinkLimits[] = [
+  {
+    textBytes: 32 * 1024,
+    thinkingBytes: 8 * 1024,
+    toolStringBytes: 2 * 1024,
+    parsedInputStringBytes: 2 * 1024,
+    rawToolStringBytes: 4 * 1024,
+    jsonArrayItems: 80,
+    omitDuplicateInput: true,
+    minimalToolDetails: false,
+  },
+  {
+    textBytes: 12 * 1024,
+    thinkingBytes: 2 * 1024,
+    toolStringBytes: 768,
+    parsedInputStringBytes: 768,
+    rawToolStringBytes: 1024,
+    jsonArrayItems: 40,
+    omitDuplicateInput: true,
+    minimalToolDetails: false,
+  },
+  {
+    textBytes: 4 * 1024,
+    thinkingBytes: 1024,
+    toolStringBytes: 256,
+    parsedInputStringBytes: 256,
+    rawToolStringBytes: 384,
+    jsonArrayItems: 20,
+    omitDuplicateInput: true,
+    minimalToolDetails: false,
+  },
+  {
+    textBytes: 2 * 1024,
+    thinkingBytes: 512,
+    toolStringBytes: 192,
+    parsedInputStringBytes: 192,
+    rawToolStringBytes: 256,
+    jsonArrayItems: 12,
+    omitDuplicateInput: true,
+    minimalToolDetails: true,
+  },
+];
 
 function utf8Size(value: string): number {
   return Buffer.byteLength(value, 'utf8');
@@ -34,14 +89,171 @@ function formatBytes(bytes: number): string {
   return `${bytes} B`;
 }
 
-export function shrinkSessionMessageForClient(message: SessionMessage): SessionMessage {
-  const size = utf8Size(message.content);
-  if (size <= CLIENT_MESSAGE_INLINE_MAX_BYTES) return message;
+function truncateStringForHistory(value: string, maxBytes: number): string {
+  const size = utf8Size(value);
+  if (size <= maxBytes) return value;
 
-  const head = sliceUtf8(message.content, PREVIEW_HEAD_BYTES);
-  const tail = sliceUtf8(message.content, PREVIEW_TAIL_BYTES, true);
+  const marker = `\n\n... [history display truncated: original ${formatBytes(size)}; full content is preserved in the local session file]`;
+  const markerBytes = utf8Size(marker);
+  const headBytes = Math.max(0, maxBytes - markerBytes);
+  return `${sliceUtf8(value, headBytes)}${marker}`;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isStructuredBlockArray(value: unknown): value is Record<string, unknown>[] {
+  return Array.isArray(value)
+    && value.length > 0
+    && value.every((block) => isRecord(block) && typeof block.type === 'string');
+}
+
+function parseStructuredBlocks(content: string): Record<string, unknown>[] | null {
+  if (!content.startsWith('[') || !content.includes('"type"')) return null;
+  try {
+    const parsed = JSON.parse(content) as unknown;
+    return isStructuredBlockArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function shrinkJsonValueForHistory(value: unknown, maxStringBytes: number, maxArrayItems: number, depth = 0): unknown {
+  if (typeof value === 'string') {
+    return truncateStringForHistory(value, maxStringBytes);
+  }
+  if (typeof value !== 'object' || value === null) return value;
+
+  if (depth >= MAX_JSON_SHRINK_DEPTH) {
+    return '[history display truncated: nested value too deep; full content is preserved in the local session file]';
+  }
+
+  if (Array.isArray(value)) {
+    const items = value
+      .slice(0, maxArrayItems)
+      .map((item) => shrinkJsonValueForHistory(item, maxStringBytes, maxArrayItems, depth + 1));
+    if (value.length > maxArrayItems) {
+      items.push(`[history display truncated: omitted ${value.length - maxArrayItems} array items]`);
+    }
+    return items;
+  }
+
+  const output: Record<string, unknown> = {};
+  for (const [key, child] of Object.entries(value)) {
+    output[key] = shrinkJsonValueForHistory(child, maxStringBytes, maxArrayItems, depth + 1);
+  }
+  return output;
+}
+
+function shrinkJsonStringForHistory(value: string, maxStringBytes: number, maxArrayItems: number, rawStringBytes: number): string {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return JSON.stringify(shrinkJsonValueForHistory(parsed, maxStringBytes, maxArrayItems), null, 2);
+  } catch {
+    return truncateStringForHistory(value, rawStringBytes);
+  }
+}
+
+function shrinkToolForHistory(tool: Record<string, unknown>, limits: StructuredShrinkLimits): Record<string, unknown> {
+  const output: Record<string, unknown> = {};
+
+  for (const [key, value] of Object.entries(tool)) {
+    if (limits.minimalToolDetails && (key === 'input' || key === 'parsedInput' || key === 'inputJson')) {
+      continue;
+    }
+
+    if (limits.omitDuplicateInput && key === 'input' && typeof tool.inputJson === 'string') {
+      continue;
+    }
+
+    if (key === 'result' || key === 'inputJson') {
+      output[key] = typeof value === 'string'
+        ? shrinkJsonStringForHistory(value, limits.toolStringBytes, limits.jsonArrayItems, limits.rawToolStringBytes)
+        : shrinkJsonValueForHistory(value, limits.toolStringBytes, limits.jsonArrayItems);
+      continue;
+    }
+
+    if (key === 'parsedInput' || key === 'input' || key === 'subagentCalls') {
+      output[key] = shrinkJsonValueForHistory(value, limits.parsedInputStringBytes, limits.jsonArrayItems);
+      continue;
+    }
+
+    if (typeof value === 'string') {
+      output[key] = truncateStringForHistory(value, limits.rawToolStringBytes);
+    } else if (typeof value === 'object' && value !== null) {
+      output[key] = shrinkJsonValueForHistory(value, limits.toolStringBytes, limits.jsonArrayItems);
+    } else {
+      output[key] = value;
+    }
+  }
+
+  return output;
+}
+
+function shrinkStructuredBlocksForHistory(
+  blocks: Record<string, unknown>[],
+  limits: StructuredShrinkLimits,
+): Record<string, unknown>[] {
+  return blocks.map((block) => {
+    const output: Record<string, unknown> = { ...block };
+
+    if (typeof output.text === 'string') {
+      output.text = truncateStringForHistory(output.text, limits.textBytes);
+    }
+    if (typeof output.thinking === 'string') {
+      output.thinking = truncateStringForHistory(output.thinking, limits.thinkingBytes);
+    }
+    if (isRecord(output.tool)) {
+      output.tool = shrinkToolForHistory(output.tool, limits);
+    }
+
+    return output;
+  });
+}
+
+function shrinkStructuredContentForClient(content: string): string | null {
+  const blocks = parseStructuredBlocks(content);
+  if (!blocks) return null;
+
+  for (const limits of STRUCTURED_SHRINK_PASSES) {
+    const shrunk = JSON.stringify(shrinkStructuredBlocksForHistory(blocks, limits));
+    if (utf8Size(shrunk) <= CLIENT_MESSAGE_INLINE_MAX_BYTES) {
+      return shrunk;
+    }
+  }
+
+  const minimalBlocks = blocks.map((block) => {
+    const output: Record<string, unknown> = { type: block.type };
+    if (typeof block.text === 'string') {
+      output.text = truncateStringForHistory(block.text, 1024);
+    }
+    if (typeof block.thinking === 'string') {
+      output.thinking = truncateStringForHistory(block.thinking, 512);
+      output.isComplete = block.isComplete;
+      output.thinkingDurationMs = block.thinkingDurationMs;
+    }
+    if (isRecord(block.tool)) {
+      const tool: Record<string, unknown> = {};
+      for (const key of ['id', 'name', 'isLoading', 'isError', 'isStopped', 'isFailed', 'streamIndex']) {
+        if (key in block.tool) tool[key] = block.tool[key];
+      }
+      if (typeof block.tool.result === 'string') {
+        tool.result = truncateStringForHistory(block.tool.result, 256);
+      }
+      output.tool = tool;
+    }
+    return output;
+  });
+
+  return JSON.stringify(minimalBlocks);
+}
+
+function shrinkPlainContentForClient(content: string, size: number): string {
+  const head = sliceUtf8(content, PREVIEW_HEAD_BYTES);
+  const tail = sliceUtf8(content, PREVIEW_TAIL_BYTES, true);
   const omitted = Math.max(0, size - utf8Size(head) - utf8Size(tail));
-  const content = [
+  return [
     `This history message is too large for inline display and was truncated for the UI (original ${formatBytes(size)}, inline limit ${formatBytes(CLIENT_MESSAGE_INLINE_MAX_BYTES)}).`,
     'The complete content is still preserved in the local session file. Showing only the beginning and end avoids freezing history loading.',
     '',
@@ -53,6 +265,14 @@ export function shrinkSessionMessageForClient(message: SessionMessage): SessionM
     '--- End ---',
     tail,
   ].join('\n');
+}
+
+export function shrinkSessionMessageForClient(message: SessionMessage): SessionMessage {
+  const size = utf8Size(message.content);
+  if (size <= CLIENT_MESSAGE_INLINE_MAX_BYTES) return message;
+
+  const structuredContent = shrinkStructuredContentForClient(message.content);
+  const content = structuredContent ?? shrinkPlainContentForClient(message.content, size);
 
   return { ...message, content };
 }

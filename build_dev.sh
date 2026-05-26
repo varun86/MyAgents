@@ -94,6 +94,12 @@ mkdir -p "${PROJECT_DIR}/src-tauri/resources/tsx-runtime"
     echo "dev mode: tsx loads from top-level node_modules/tsx via find_tsx_runtime_loader fallback" \
     > "${PROJECT_DIR}/src-tauri/resources/tsx-runtime/.dev-placeholder"
 
+# 确保 Node.js 运行时已下载且架构匹配当前主机。download_nodejs.sh 使用
+# per-arch cache，resources/nodejs 只是当前 build 的 staging 目录。
+NODEJS_DIR="${PROJECT_DIR}/src-tauri/resources/nodejs"
+echo -e "${BLUE}[准备] 确保 Node.js 运行时匹配当前主机架构...${NC}"
+"${PROJECT_DIR}/scripts/download_nodejs.sh"
+
 # Rebuild native addons against bundled Node ABI (fixes ERR_DLOPEN_FAILED
 # when system npm used a different Node.js version for initial install).
 NODE_BIN="${PROJECT_DIR}/src-tauri/resources/nodejs/bin/node"
@@ -151,15 +157,7 @@ unset APPLE_API_KEY
 unset APPLE_API_KEY_PATH
 echo -e "${YELLOW}⚠ 已禁用 Apple 公证 (开发版，保留签名)${NC}"
 
-# 确保 Node.js 运行时已下载且架构匹配当前主机
-# 历史坑：build_macos.sh 的 per-TARGET loop 最后一次 download_nodejs.sh --target x64
-# 会用 x86_64 覆盖 resources/nodejs；后续 build_dev.sh 如果只检查 "文件存在"，就会
-# 把 x64 Node 带入 debug app（arm64 Mac 上 tsx → esbuild 因架构不匹配而崩）。
-# 正确做法：始终调用 download_nodejs.sh（默认当前 arch），它内部的 check_existing
-# 会检测 arm64/x86_64 mismatch 并自动重下，幂等无额外成本。
-NODEJS_DIR="${PROJECT_DIR}/src-tauri/resources/nodejs"
-echo -e "${BLUE}[准备] 确保 Node.js 运行时匹配当前主机架构...${NC}"
-"${PROJECT_DIR}/scripts/download_nodejs.sh"
+# Node.js 已在前置准备阶段完成 staging；这里开始处理 SDK native binary。
 
 # 拷贝 Claude Agent SDK native binary（按本机架构，debug app 运行时需要）
 # 0.2.113+ 取代原 cli.js 分发模式

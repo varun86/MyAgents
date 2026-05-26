@@ -680,7 +680,7 @@ trusted root `~/.myagents/generated/tool-attachments/<sid>/<tid>/<file>`（base6
 | `myagents` CLI |
 | AI Bash `node` / `npx` / `npm` |
 
-打包位置：`src-tauri/resources/nodejs/`。
+打包位置：`src-tauri/resources/nodejs/`（构建 staging 目录；按架构缓存见 `tech_docs/bundled_node.md`）。
 
 ### SDK Native Binary（SDK 团队的实现细节）
 

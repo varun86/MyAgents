@@ -15,8 +15,9 @@ Node.js v24 官方二进制通过 `scripts/download_nodejs.sh` / `.ps1` 从 node
 ```
 
 - **版本变量**：`NODE_VERSION` 在 `scripts/download_nodejs.sh` 顶部定义
-- **存储位置**：`src-tauri/resources/nodejs/`（已加入 `.gitignore`）
-- **ABI 保护**：脚本对每种架构做幂等下载；`build_dev.sh` 启动时用 `file(1)` 验证 binary 架构匹配 host，否则自动重下
+- **打包位置**：`src-tauri/resources/nodejs/`（Tauri staging 目录，已加入 `.gitignore`）
+- **缓存位置**：`src-tauri/resources/nodejs-cache/<platform>-<arch>-v<version>/`（按平台 / 架构 / 版本隔离，已加入 `.gitignore`）
+- **ABI 保护**：脚本先检查对应架构缓存；`resources/nodejs/` 只在构建某个 target 前从缓存同步。`build_dev.sh` 启动时用 `file(1)` 验证 binary 架构匹配 host，避免 macOS 双架构 release 构建后留下 x64 staging 影响 arm64 dev 构建
 
 ### 支持的平台
 
@@ -173,6 +174,6 @@ Claude Agent SDK 在 Windows 上需要 Git Bash 执行 shell 命令。
 
 1. **开发者首次 clone** → 运行 `./setup.sh`（自动下载 Node.js + `npm install` + `npm rebuild` 本机 native addons）
 2. **最终用户** → 零依赖（Node.js v24 已内置）
-3. **CI/CD** → 构建前运行 `setup.sh` 或缓存 `src-tauri/resources/nodejs/`
+3. **CI/CD** → 构建前运行 `setup.sh`，或缓存 `src-tauri/resources/nodejs-cache/`；`src-tauri/resources/nodejs/` 只是当前 target 的 staging 目录
 4. **生产构建** → 必须 `./build_macos.sh` / `./build_windows.ps1` / `./build_linux.sh`，裸 `cargo tauri build` 会漏掉 esbuild 步骤（但 `tauri.conf.json::beforeBuildCommand` 已兜底链上 `npm run build:server && build:bridge && build:cli`）
 5. **MCP 功能** → 完全使用内置 Node.js 生态，用户无需安装任何依赖
