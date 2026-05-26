@@ -187,7 +187,7 @@ export default function QueryNavigator({
 
   return (
     <div
-      className="absolute right-0 top-0 bottom-0 z-30 hidden md:flex items-center pointer-events-none"
+      className="absolute right-4 top-0 bottom-0 z-30 hidden md:flex items-center pointer-events-none"
     >
       {/* Single unified container — dashes always anchored right, text slides in */}
       <div

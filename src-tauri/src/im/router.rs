@@ -589,6 +589,32 @@ impl SessionRouter {
         self.peer_sessions.insert(ps.session_key.clone(), ps);
     }
 
+    /// Remove every peer_session bound to `session_id` except `keep_session_key`.
+    ///
+    /// Handover uses this to enforce the global invariant that a desktop
+    /// session can be bound to only one live IM channel at a time. The router
+    /// only owns its local HashMap; the caller remains responsible for
+    /// SidecarOwner release and any cross-router coordination.
+    pub fn remove_peer_sessions_for_session_except(
+        &mut self,
+        session_id: &str,
+        keep_session_key: Option<&str>,
+    ) -> Vec<PeerSession> {
+        let keys: Vec<String> = self
+            .peer_sessions
+            .iter()
+            .filter(|(key, ps)| {
+                ps.session_id == session_id
+                    && keep_session_key.map_or(true, |keep| key.as_str() != keep)
+            })
+            .map(|(key, _)| key.clone())
+            .collect();
+
+        keys.into_iter()
+            .filter_map(|key| self.peer_sessions.remove(&key))
+            .collect()
+    }
+
     /// Pick the most-recently-active peer_session_key in this channel.
     /// Used as the handover target — preserves "talk to the same chat,
     /// different session backend" semantics.
@@ -927,5 +953,71 @@ pub fn parse_session_key(session_key: &str) -> (ImSourceType, String) {
         (source_type, source_id)
     } else {
         (ImSourceType::Private, session_key.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+    use std::time::Instant;
+
+    use super::{parse_session_key, SessionRouter};
+    use crate::im::types::PeerSession;
+
+    fn peer(session_key: &str, session_id: &str) -> PeerSession {
+        let (source_type, source_id) = parse_session_key(session_key);
+        PeerSession {
+            session_key: session_key.to_string(),
+            session_id: session_id.to_string(),
+            sidecar_port: 0,
+            workspace_path: PathBuf::from("/tmp/workspace"),
+            source_type,
+            source_id,
+            message_count: 0,
+            last_active: Instant::now(),
+        }
+    }
+
+    #[test]
+    fn remove_peer_sessions_for_session_except_preserves_target_binding() {
+        let mut router = SessionRouter::new(PathBuf::from("/tmp/workspace"));
+        router.upsert_peer_session(peer("agent:a:openclaw:feishu:private:source", "s1"));
+        router.upsert_peer_session(peer("agent:a:openclaw:feishu:private:target", "s1"));
+        router.upsert_peer_session(peer("agent:a:openclaw:feishu:private:other", "s2"));
+
+        let removed = router.remove_peer_sessions_for_session_except(
+            "s1",
+            Some("agent:a:openclaw:feishu:private:target"),
+        );
+
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].session_key, "agent:a:openclaw:feishu:private:source");
+        assert!(router
+            .peer_session_snapshot("agent:a:openclaw:feishu:private:target")
+            .is_some());
+        assert!(router
+            .peer_session_snapshot("agent:a:openclaw:feishu:private:other")
+            .is_some());
+        assert!(router
+            .peer_session_snapshot("agent:a:openclaw:feishu:private:source")
+            .is_none());
+    }
+
+    #[test]
+    fn remove_peer_sessions_for_session_without_keep_removes_all_matching_bindings() {
+        let mut router = SessionRouter::new(PathBuf::from("/tmp/workspace"));
+        router.upsert_peer_session(peer("agent:a:feishu:private:same-key", "s1"));
+        router.upsert_peer_session(peer("agent:a:feishu:private:other", "s2"));
+
+        let removed = router.remove_peer_sessions_for_session_except("s1", None);
+
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].session_key, "agent:a:feishu:private:same-key");
+        assert!(router
+            .peer_session_snapshot("agent:a:feishu:private:same-key")
+            .is_none());
+        assert!(router
+            .peer_session_snapshot("agent:a:feishu:private:other")
+            .is_some());
     }
 }

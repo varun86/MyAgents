@@ -24,13 +24,21 @@ use std::time::Instant;
 use serde::Serialize;
 use tauri::{AppHandle, Manager, Runtime};
 
-use super::router::parse_session_key;
-use super::types::PeerSession;
-use super::ManagedAgents;
+use super::health::HealthManager;
+use super::router::{parse_session_key, SessionRouter};
+use super::types::{LastActiveChannel, PeerSession};
+use super::{ImConsumers, ManagedAgents};
 use crate::sidecar::{
     ensure_session_sidecar, release_session_sidecar, ManagedSidecarManager, SidecarOwner,
 };
 use crate::{ulog_info, ulog_warn};
+
+struct ChannelRuntimeRefs {
+    channel_id: String,
+    router: std::sync::Arc<tokio::sync::Mutex<SessionRouter>>,
+    health: std::sync::Arc<HealthManager>,
+    consumers: ImConsumers,
+}
 
 /// UTF-8-safe shortener for log lines and notification text. The bare
 /// `&s[..8.min(s.len())]` form is byte-indexed and panics if byte 8 lands
@@ -216,7 +224,7 @@ pub async fn cmd_handover_session_to_channel<R: Runtime>(
         })?;
 
     // ----- 1. Resolve target channel + workspace constraint
-    let (router_arc, adapter, agent_workspace) = {
+    let (router_arc, adapter, agent_workspace, last_active_channel, channel_runtimes) = {
         let agents = agent_state.lock().await;
         let agent = agents.get(&agentId).ok_or_else(|| {
             ulog_warn!(
@@ -233,10 +241,22 @@ pub async fn cmd_handover_session_to_channel<R: Runtime>(
             );
             format!("Channel {} not found in agent {}", channelId, agentId)
         })?;
+        let channel_runtimes = agent
+            .channels
+            .iter()
+            .map(|(ch_id, ch)| ChannelRuntimeRefs {
+                channel_id: ch_id.clone(),
+                router: ch.bot_instance.router.clone(),
+                health: ch.bot_instance.health.clone(),
+                consumers: ch.bot_instance.im_consumers.clone(),
+            })
+            .collect::<Vec<_>>();
         (
             channel.bot_instance.router.clone(),
             channel.bot_instance.adapter.clone(),
             agent.config.workspace_path.clone(),
+            agent.last_active_channel.clone(),
+            channel_runtimes,
         )
     };
     ulog_info!("[handover] step1 channel resolved");
@@ -375,6 +395,89 @@ pub async fn cmd_handover_session_to_channel<R: Runtime>(
         "[handover] step5 peer_session upserted: chat_id={} prior_session={}",
         chat_id,
         prior_session_id.as_deref().map(short_id).unwrap_or_else(|| "none".into()),
+    );
+
+    // ----- 5b. Enforce one channel binding per session.
+    //
+    // The handover command is also used as "switch this already-bound desktop
+    // session from channel A to channel B". In that path, mutating only the
+    // target router leaves the old channel's peer_session pointing at the same
+    // session_id; status polling and mirror routing then pick whichever channel
+    // they scan first. Remove every non-target binding for this session across
+    // the agent's channels before notifying the target.
+    let mut removed_count = 0usize;
+    for runtime in &channel_runtimes {
+        let (removed_bindings, active_sessions_after_removal) = {
+            let mut router_guard = runtime.router.lock().await;
+            let keep_session_key = if runtime.channel_id == channelId {
+                Some(target_session_key.as_str())
+            } else {
+                None
+            };
+            let removed = router_guard
+                .remove_peer_sessions_for_session_except(&sessionId, keep_session_key);
+            let active_sessions = if removed.is_empty() {
+                None
+            } else {
+                Some(router_guard.active_sessions())
+            };
+            (removed, active_sessions)
+        };
+        if let Some(active_sessions) = active_sessions_after_removal {
+            runtime.health.set_active_sessions(active_sessions).await;
+            if let Err(e) = runtime.health.persist().await {
+                ulog_warn!("[handover] step5b persist channel health after stale binding removal failed: {}", e);
+            }
+        }
+
+        for removed in removed_bindings {
+            removed_count += 1;
+            let removed_owner = SidecarOwner::Agent(removed.session_key.clone());
+            if let Some(handle) = runtime.consumers.lock().await.remove(&removed.session_key) {
+                handle
+                    .cancel
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                ulog_info!(
+                    "[handover] step5b cancelled stale ImEventConsumer for {}",
+                    removed.session_key
+                );
+            }
+            match release_session_sidecar(manager.inner(), &removed.session_id, &removed_owner) {
+                Ok(stopped) => ulog_info!(
+                    "[handover] step5b removed stale channel binding {} from session {} (sidecar_stopped={})",
+                    removed.session_key,
+                    short_id(&removed.session_id),
+                    stopped
+                ),
+                Err(e) => ulog_warn!(
+                    "[handover] step5b release stale binding {} failed: {}",
+                    removed.session_key,
+                    e
+                ),
+            }
+        }
+    }
+    if removed_count > 0 {
+        ulog_info!(
+            "[handover] step5b removed {} stale binding(s) for session {}",
+            removed_count,
+            short_id(&sessionId),
+        );
+    }
+
+    {
+        let now_str = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+        *last_active_channel.write().await = Some(LastActiveChannel {
+            channel_id: channelId.clone(),
+            session_key: target_session_key.clone(),
+            last_active_at: now_str,
+        });
+    }
+    ulog_info!(
+        "[handover] step5c lastActiveChannel updated: agent={} channel={} session_key={}",
+        agentId,
+        channelId,
+        target_session_key,
     );
 
     // ----- 6. Release the prior session's Agent owner (best-effort).

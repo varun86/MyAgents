@@ -509,6 +509,7 @@ import {
   setAgents,
   setSessionModel,
   resetSession,
+  materializeCurrentSessionMetadataForPublishedReset,
   waitForSessionIdle,
   cancelImRequest,
   setGroupToolsDeny,
@@ -8562,6 +8563,7 @@ async function main() {
         const sinceParam = url.searchParams.get('since');
         const sinceSeq = sinceParam ? parseInt(sinceParam, 10) : imEventBus.currentSeq();
         const safeSince = Number.isFinite(sinceSeq) && sinceSeq >= 0 ? sinceSeq : imEventBus.currentSeq();
+        const replayRequestId = url.searchParams.get('replayRequestId') || undefined;
 
         const encoder = new TextEncoder();
         let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
@@ -8604,6 +8606,7 @@ async function main() {
                 // from both the subscribers Set and the clearedCallbacks Map.
                 unsubscribe = null;
               },
+              replayRequestId,
             );
           },
           cancel() {
@@ -9162,6 +9165,7 @@ description: >
             }
           }
           await resetSession();
+          await materializeCurrentSessionMetadataForPublishedReset();
           // External runtime: stopExternalSession only nulls activeProcess —
           // module-level lastSessionId / lastRuntimeSessionId / allSessionMessages
           // still point at the OLD conversation. Without an explicit re-bind,

@@ -38,7 +38,11 @@ import { parsePartialJson } from '../shared/parsePartialJson';
 import type { SystemInitInfo } from '../shared/types/system';
 import { saveSessionMetadata, updateSessionTitleFromMessage, saveSessionMessages, saveAttachment, updateSessionMetadata, getSessionMetadata, getSessionData } from './SessionStore';
 import { createSessionMetadata, type SessionMessage, type MessageAttachment, type MessageUsage, type SessionSource } from './types/session';
-import { snapshotForImSession, snapshotForOwnedSession } from './utils/session-snapshot';
+import {
+  createMaterializedSessionMetadata,
+  isLiveFollowScenario,
+  type SessionMaterializationScenario,
+} from './utils/session-materialization';
 import { findAgentByWorkspacePath } from './utils/admin-config';
 import type { AgentConfig } from '../shared/types/agent';
 import { broadcast } from './sse';
@@ -3743,6 +3747,40 @@ export function getSessionId(): string {
   return sessionId;
 }
 
+function createMetadataForSessionId(
+  targetSessionId: string,
+  title: string,
+  scenario: SessionMaterializationScenario,
+) {
+  const agent = findAgentByWorkspacePath(agentDir) as AgentConfig | undefined;
+  const meta = createMaterializedSessionMetadata({
+    agentDir,
+    sessionId: targetSessionId,
+    scenario,
+    agent,
+    fallbackRuntime: getCurrentRuntimeType(),
+    title,
+  });
+  return {
+    meta,
+    snapshotKind: agent ? (isLiveFollowScenario(scenario) ? 'im' : 'owned') : `runtime:${meta.runtime ?? 'none'}`,
+  };
+}
+
+export async function materializeCurrentSessionMetadataForPublishedReset(): Promise<void> {
+  const targetSessionId = sessionId;
+  if (!targetSessionId || getSessionMetadata(targetSessionId)) {
+    return;
+  }
+  const { meta, snapshotKind } = createMetadataForSessionId(
+    targetSessionId,
+    'New Chat',
+    'agent-channel',
+  );
+  await saveSessionMetadata(meta);
+  console.log(`[agent] session ${targetSessionId} persisted to SessionStore (published reset, snapshot=${snapshotKind})`);
+}
+
 /** Localize SDK/system error messages for IM end-users */
 function localizeImError(rawError: string): string {
   if (!rawError) return '模型处理消息时出错';
@@ -6471,19 +6509,17 @@ export async function enqueueUserMessage(
       //   - 'im' / 'agent-channel' → live-follow (only runtime recorded)
       // If the agent lookup misses (workspace not registered), snapshot is `{}` and
       // `resolveSessionConfig`'s lazy fallback (meta ?? agent) covers it.
-      const lazyAgent = findAgentByWorkspacePath(agentDir) as AgentConfig | undefined;
-      const useLiveFollow = currentScenario.type === 'im' || currentScenario.type === 'agent-channel';
-      const lazySnapshot = lazyAgent
-        ? (useLiveFollow ? snapshotForImSession(lazyAgent) : snapshotForOwnedSession(lazyAgent))
-        : undefined;
-      const sessionMeta = createSessionMetadata(agentDir, lazySnapshot);
-      sessionMeta.id = sessionId;
-      sessionMeta.title = trimmed ? trimmed.slice(0, 40) : '图片消息';
-      if (sessionMeta.title.length < trimmed.length) {
-        sessionMeta.title += '...';
+      let title = trimmed ? trimmed.slice(0, 40) : '图片消息';
+      if (title.length < trimmed.length) {
+        title += '...';
       }
+      const { meta: sessionMeta, snapshotKind } = createMetadataForSessionId(
+        sessionId,
+        title,
+        currentScenario.type,
+      );
       await saveSessionMetadata(sessionMeta);
-      console.log(`[agent] session ${sessionId} persisted to SessionStore (lazy, scenario=${currentScenario.type}, snapshot=${lazyAgent ? (useLiveFollow ? 'im' : 'owned') : 'none'})`);
+      console.log(`[agent] session ${sessionId} persisted to SessionStore (lazy, scenario=${currentScenario.type}, snapshot=${snapshotKind})`);
     }
   } else {
     // Update session title from first real message if needed

@@ -38,7 +38,7 @@ export interface ImEvent {
    *    - 'delta' / 'block-end' / 'complete' / 'error' / 'cancelled': string
    *    - 'permission-request': JSON string with { requestId, toolName, input }
    *    - 'activity': string (content block type)
-   *    - 'gap': { droppedSeqs: [from, to] } */
+   *    - 'gap': { droppedSeqs: [from, to], requestIds?: string[] } */
   data?: unknown;
   ts: number;
 }
@@ -52,7 +52,21 @@ export type ImEventSubscriber = (event: ImEvent) => void;
  *  a live HTTP connection and a dead subscription. */
 export type ImEventOnCleared = () => void;
 
-const MAX_BUFFER = 1000;
+const MAX_BUFFER = 20_000;
+
+interface ImGapData {
+  droppedSeqs: [number, number];
+  reason?: string;
+  requestIds?: string[];
+}
+
+function addDroppedRequestId(data: ImGapData, requestId: string | null): void {
+  if (!requestId) return;
+  const ids = data.requestIds ?? (data.requestIds = []);
+  if (!ids.includes(requestId)) {
+    ids.push(requestId);
+  }
+}
 
 class ImEventBusImpl {
   private buffer: ImEvent[] = [];
@@ -80,14 +94,19 @@ class ImEventBusImpl {
       const dropped = this.buffer.shift()!;
       if (this.gap) {
         // Extend existing gap to cover the new dropped seq.
-        const range = (this.gap.data as { droppedSeqs: [number, number] }).droppedSeqs;
-        range[1] = Math.max(range[1], dropped.seq);
+        const data = this.gap.data as ImGapData;
+        data.droppedSeqs[1] = Math.max(data.droppedSeqs[1], dropped.seq);
+        addDroppedRequestId(data, dropped.requestId);
       } else {
+        const data: ImGapData = {
+          droppedSeqs: [dropped.seq, dropped.seq],
+        };
+        addDroppedRequestId(data, dropped.requestId);
         this.gap = {
           seq: dropped.seq,
           requestId: null,
           type: 'gap',
-          data: { droppedSeqs: [dropped.seq, dropped.seq] as [number, number] },
+          data,
           ts: Date.now(),
         };
       }
@@ -114,21 +133,27 @@ class ImEventBusImpl {
    *  (sinceSeq predating a `clear()`) also triggers a synthetic gap so the
    *  Rust consumer knows to re-sync rather than silently miss new events
    *  (Codex W3 fix). */
-  subscribe(sinceSeq: number, cb: ImEventSubscriber, onCleared?: ImEventOnCleared): () => void {
+  subscribe(
+    sinceSeq: number,
+    cb: ImEventSubscriber,
+    onCleared?: ImEventOnCleared,
+    replayRequestId?: string,
+  ): () => void {
     // Cross-generation: subscriber's `since` is older than our last reset.
     // Independent from the in-generation eviction gap below — both can apply
     // (a subscriber that resumed across a reset AND inside an eviction range
     // needs both markers, hence sequential `if`s instead of `else if`).
     if (sinceSeq > 0 && sinceSeq < this.generationStartSeq) {
       try {
+        const data: ImGapData = {
+          droppedSeqs: [sinceSeq + 1, this.generationStartSeq - 1] as [number, number],
+          reason: 'session-reset',
+        };
         cb({
           seq: this.generationStartSeq - 1,
           requestId: null,
           type: 'gap',
-          data: {
-            droppedSeqs: [sinceSeq + 1, this.generationStartSeq - 1] as [number, number],
-            reason: 'session-reset',
-          },
+          data,
           ts: Date.now(),
         });
       } catch (e) { console.error('[im-bus] subscriber threw on generation-gap', e); }
@@ -139,14 +164,24 @@ class ImEventBusImpl {
     // tracks the FIRST dropped event) silently lost events for any
     // subscriber that resumed inside a dropped range.
     if (this.gap) {
-      const range = (this.gap.data as { droppedSeqs: [number, number] }).droppedSeqs;
+      const gapData = this.gap.data as ImGapData;
+      const range = gapData.droppedSeqs;
       if (sinceSeq < range[1]) {
-        try { cb(this.gap); } catch (e) { console.error('[im-bus] subscriber threw on gap', e); }
+        const affectsReplayRequest =
+          !replayRequestId
+          || gapData.reason === 'session-reset'
+          || gapData.requestIds?.includes(replayRequestId);
+        if (affectsReplayRequest) {
+          try { cb(this.gap); } catch (e) { console.error('[im-bus] subscriber threw on gap', e); }
+        }
       }
     }
 
     for (const event of this.buffer) {
       if (event.seq > sinceSeq) {
+        if (replayRequestId && event.requestId !== replayRequestId && event.requestId !== null) {
+          continue;
+        }
         try { cb(event); } catch (e) { console.error('[im-bus] subscriber threw on replay', e); }
       }
     }

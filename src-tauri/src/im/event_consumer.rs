@@ -51,6 +51,7 @@ pub fn spawn_consumer<A>(
     client: Client,
     sidecar_port: u16,
     session_label: String,
+    initial_replay_request_id: String,
     router: Arc<Mutex<ReplyRouter>>,
     adapter: Arc<A>,
     cancel: CancelFlag,
@@ -75,10 +76,7 @@ where
             // W6 fix: legacy URL had `?session=<id>` but the Sidecar handler
             // never read it (Sidecar is 1:1 with session). Removed to avoid
             // misleading future readers.
-            let url = format!(
-                "http://127.0.0.1:{}/api/im/events?since={}",
-                sidecar_port, last_seq,
-            );
+            let url = events_url(sidecar_port, last_seq, &initial_replay_request_id);
 
             let response_result = client
                 .get(&url)
@@ -192,6 +190,20 @@ where
     })
 }
 
+fn events_url(sidecar_port: u16, last_seq: u64, initial_replay_request_id: &str) -> String {
+    if last_seq == 0 {
+        format!(
+            "http://127.0.0.1:{}/api/im/events?since=0&replayRequestId={}",
+            sidecar_port, initial_replay_request_id,
+        )
+    } else {
+        format!(
+            "http://127.0.0.1:{}/api/im/events?since={}",
+            sidecar_port, last_seq
+        )
+    }
+}
+
 async fn sleep_with_cancel(cancel: &CancelFlag, ms: u64) {
     let deadline = std::time::Instant::now() + Duration::from_millis(ms);
     while std::time::Instant::now() < deadline {
@@ -199,6 +211,27 @@ async fn sleep_with_cancel(cancel: &CancelFlag, ms: u64) {
             return;
         }
         tokio::time::sleep(Duration::from_millis(50.min(ms))).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::events_url;
+
+    #[test]
+    fn first_connection_replays_only_the_initial_request() {
+        assert_eq!(
+            events_url(31415, 0, "req-1"),
+            "http://127.0.0.1:31415/api/im/events?since=0&replayRequestId=req-1",
+        );
+    }
+
+    #[test]
+    fn reconnect_resumes_after_last_seen_sequence() {
+        assert_eq!(
+            events_url(31415, 42, "req-1"),
+            "http://127.0.0.1:31415/api/im/events?since=42",
+        );
     }
 }
 
