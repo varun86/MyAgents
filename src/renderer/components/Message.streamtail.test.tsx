@@ -19,6 +19,7 @@ vi.mock('@/analytics', () => ({ track: vi.fn() }));
 import Message from './Message';
 
 const TAIL = 'hello streaming tail with enough chars';
+const STABLE_BLOCKS = [{ type: 'text', text: TAIL }] as const;
 
 function arrayMsg(streamingTextActive: boolean): MessageType {
   return {
@@ -35,6 +36,14 @@ function stringMsg(streamingTextActive: boolean): MessageType {
     timestamp: new Date(),
     streamingTextActive,
   } as MessageType;
+}
+function arrayMsgWithStableContent(streamingTextActive: boolean): MessageType {
+  return {
+    id: 'm3', role: 'assistant',
+    content: STABLE_BLOCKS,
+    timestamp: new Date(),
+    streamingTextActive,
+  } as unknown as MessageType;
 }
 const hasFade = (c: HTMLElement) => c.querySelector('.md-stream-tail') !== null;
 
@@ -64,5 +73,13 @@ describe('Message — streaming tail-fade gating (.md-stream-tail)', () => {
   it('history (not loading) never fades', () => {
     expect(hasFade(render(<Message message={arrayMsg(true)} isLoading={false} />).container)).toBe(false);
     expect(hasFade(render(<Message message={stringMsg(true)} isLoading={false} />).container)).toBe(false);
+  });
+
+  it('re-renders when only streamingTextActive changes', () => {
+    const { container, rerender } = render(<Message message={arrayMsgWithStableContent(true)} isLoading />);
+    expect(hasFade(container)).toBe(true);
+
+    rerender(<Message message={arrayMsgWithStableContent(false)} isLoading />);
+    expect(hasFade(container)).toBe(false);
   });
 });

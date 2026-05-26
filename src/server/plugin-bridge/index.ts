@@ -952,6 +952,9 @@ const server = honoServe({
           return Response.json({ ok: true });
         } catch (err) {
           console.error(`[plugin-bridge] /stream-chunk protocol callback error for chatId=${body.chatId}:`, err);
+          if (body.chatId) {
+            rejectPendingDispatch(body.chatId, err instanceof Error ? err : new Error(String(err)));
+          }
           return Response.json({ ok: false, error: String(err) }, { status: 500 });
         }
       }

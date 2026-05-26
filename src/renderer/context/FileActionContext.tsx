@@ -211,10 +211,10 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
     error: string | null;
   } | null>(null);
 
-  const handlePreview = useCallback((path: string, options?: { initialLineNumber?: number }) => {
+  const handlePreview = useCallback((path: string, options?: { initialLineNumber?: number }): boolean => {
     const fileName = path.split(/[/\\]/).pop() ?? path;
     const svc = fileServiceRef.current;
-    if (!svc.isAvailable) return;
+    if (!svc.isAvailable) return false;
 
     const richDocKind = getRichDocKind(fileName);
     if (richDocKind) {
@@ -231,7 +231,7 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
       } else {
         setPreviewFile({ ...fileData, isLoading: false, error: null });
       }
-      return;
+      return true;
     }
 
     if (isImageFile(fileName)) {
@@ -262,10 +262,10 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
           if (handle) handle.revoke();
         }
       })();
-      return;
+      return true;
     }
 
-    if (!isPreviewable(fileName)) return;
+    if (!isPreviewable(fileName)) return false;
 
     // Route to split-view if external handler provided
     if (onFilePreviewExternalRef.current) {
@@ -280,9 +280,21 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
             path,
             initialLineNumber: options?.initialLineNumber,
           });
-        } catch { /* split-view fetch errors handled by DirectoryPanel toast */ }
+        } catch (err) {
+          if (!isMountedRef.current) return;
+          console.error('[FileAction] Failed to load preview:', err);
+          setPreviewFile({
+            name: fileName,
+            content: '',
+            size: 0,
+            path,
+            initialLineNumber: options?.initialLineNumber,
+            isLoading: false,
+            error: err instanceof Error ? err.message : 'Failed to load file',
+          });
+        }
       })();
-      return;
+      return true;
     }
 
     // Fallback: show fullscreen modal immediately in loading state
@@ -306,13 +318,19 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
         setPreviewFile(prev => prev ? { ...prev, isLoading: false, error: err instanceof Error ? err.message : 'Failed to load file' } : null);
       }
     })();
+    return true;
   }, [openImagePreview]);
 
   const openFileLink = useCallback((href: string): boolean => {
     if (!fileServiceRef.current.isAvailable) return false;
     const target = resolveWorkspaceFileLinkTarget(href, workspacePath);
     if (!target) return false;
-    handlePreview(target.path, { initialLineNumber: target.initialLineNumber });
+    if (handlePreview(target.path, { initialLineNumber: target.initialLineNumber })) {
+      return true;
+    }
+    void fileServiceRef.current.openWithDefault({ path: target.path }).catch((err) => {
+      console.error('[FileAction] Failed to open file link with default app:', err);
+    });
     return true;
   }, [handlePreview, workspacePath]);
 

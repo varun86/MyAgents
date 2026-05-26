@@ -83,6 +83,21 @@ describe('persistInputOptionChange — disk write fanout', () => {
     });
   });
 
+  it('writes external permission to session snapshot', async () => {
+    const m = makeMocks();
+    await persistInputOptionChange({
+      workspaceId: 'ws-1',
+      agentId: 'agent-1',
+      isExternalRuntime: true,
+      fields: { permissionMode: 'full-auto' },
+      patchProject: m.patchProject,
+      patchAgentConfig: m.patchAgentConfig,
+      patchSnapshot: m.patchSnapshot,
+    });
+
+    expect(m.patchSnapshot).toHaveBeenCalledWith({ permissionMode: 'full-auto' });
+  });
+
   it('writes runtimeModel to agent.runtimeConfig.model when external', async () => {
     const m = makeMocks();
     await persistInputOptionChange({

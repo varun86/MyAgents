@@ -99,7 +99,7 @@ export interface PersistInputOptionParams {
 export interface SessionSnapshotPatch {
   providerId?: string | null;
   model?: string | null;
-  permissionMode?: PermissionMode;
+  permissionMode?: string;
   mcpEnabledServers?: string[];
   enabledPluginIds?: string[];
 }
@@ -254,8 +254,8 @@ function buildSnapshotPatch(params: PersistInputOptionParams): SessionSnapshotPa
   } else if (fields.builtinModel !== undefined) {
     patch.model = fields.builtinModel;
   }
-  if (fields.permissionMode !== undefined && !isExternalRuntime) {
-    patch.permissionMode = fields.permissionMode as PermissionMode;
+  if (fields.permissionMode !== undefined) {
+    patch.permissionMode = fields.permissionMode;
   }
   if (fields.mcpEnabledServers !== undefined) {
     patch.mcpEnabledServers = fields.mcpEnabledServers;

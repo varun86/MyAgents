@@ -6,6 +6,7 @@ const mocks = vi.hoisted(() => ({
   openImagePreview: vi.fn(),
   readPreview: vi.fn(),
   readFileAsBlobUrl: vi.fn(),
+  openWithDefault: vi.fn(),
 }));
 
 vi.mock('@/utils/openExternal', async () => {
@@ -26,7 +27,7 @@ vi.mock('@/hooks/useWorkspaceFileService', () => ({
     readPreview: mocks.readPreview,
     readFileAsBlobUrl: mocks.readFileAsBlobUrl,
     checkPaths: vi.fn(),
-    openWithDefault: vi.fn(),
+    openWithDefault: mocks.openWithDefault,
     openInFinder: vi.fn(),
   }),
 }));
@@ -52,6 +53,7 @@ function renderMarkdown(markdown: string, onFilePreviewExternal = vi.fn()) {
 describe('Markdown local file links', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.openWithDefault.mockResolvedValue(undefined);
     mocks.readPreview.mockResolvedValue({
       name: 'Message.tsx',
       content: 'export default function Message() {}',
@@ -98,5 +100,16 @@ describe('Markdown local file links', () => {
 
     expect(mocks.openExternal).toHaveBeenCalledWith('/Users/zhihu/Other/Other.ts');
     expect(mocks.readPreview).not.toHaveBeenCalled();
+  });
+
+  it('opens non-previewable workspace links with the default app instead of swallowing the click', async () => {
+    renderMarkdown(`[Archive](${WORKSPACE}/dist/archive.zip)`);
+
+    fireEvent.click(screen.getByRole('link', { name: 'Archive' }));
+
+    await waitFor(() => {
+      expect(mocks.openWithDefault).toHaveBeenCalledWith({ path: 'dist/archive.zip' });
+    });
+    expect(mocks.openExternal).not.toHaveBeenCalled();
   });
 });

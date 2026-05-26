@@ -46,4 +46,32 @@ describe('plugin bridge compat runtime fallback dispatch', () => {
     await expect(dispatchPromise).resolves.toEqual({ queuedFinal: 1, counts: { final: 1 } });
     expect(delivered).toEqual([{ text: 'answer', kind: 'block' }]);
   });
+
+  it('does not wait for explicit non-mention group messages', async () => {
+    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => new Response('{}', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const runtime = createCompatRuntime(31_426, 'bot-1', 'openclaw-plugin-feishu');
+
+    await expect(runtime.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
+      ctx: {
+        To: 'chat:group-1',
+        ChatType: 'group',
+        IsMention: false,
+        SenderId: 'sender-1',
+        Body: 'background chatter',
+      },
+      dispatcherOptions: {
+        deliver: async () => {},
+      },
+    })).resolves.toEqual({ queuedFinal: 0, counts: {}, dispatcher: { waitForIdle: expect.any(Function) } });
+
+    expect(getPendingDispatch('group-1')).toBeUndefined();
+    const request = fetchMock.mock.calls[0]?.[1];
+    expect(JSON.parse(String(request?.body ?? '{}'))).toMatchObject({
+      chatType: 'group',
+      chatId: 'group-1',
+      isMention: false,
+    });
+  });
 });

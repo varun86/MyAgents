@@ -211,6 +211,16 @@ function defaultIsMentionForGroup(pluginId: string): boolean {
   return false;
 }
 
+function booleanFromContext(value: unknown): boolean | undefined {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === 'true') return true;
+    if (normalized === 'false') return false;
+  }
+  return undefined;
+}
+
 /**
  * Create a compat channel runtime that routes inbound messages to Rust.
  */
@@ -483,7 +493,7 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
           const chatType = String(ctx.ChatType || ctx.chatType || 'direct');
           const messageId = String(ctx.MessageSid || ctx.messageSid || ctx.MessageId || '');
           const groupId = String(ctx.QQGroupOpenid || ctx.GroupId || ctx.groupId || '');
-          const isMention = ctx.IsMention ?? ctx.WasMentioned ?? ctx.isMention
+          const isMention = booleanFromContext(ctx.IsMention ?? ctx.WasMentioned ?? ctx.isMention)
             ?? (chatType === 'group' ? defaultIsMentionForGroup(currentPluginId) : true);
           const groupName = String(ctx.GroupSubject || ctx.GroupName || ctx.groupName || '') || undefined;
           const threadId = String(ctx.MessageThreadId || ctx.threadId || '') || undefined;
@@ -515,7 +525,14 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
           // path → orphaned stream / mismatched output. Tradeoff: a POST
           // failure now leaves a transient pending dispatch, which we
           // explicitly reject below.
-          const completionPromise = registerPendingDispatch(chatId, callbacks);
+          // In group mention-gated channels, explicit non-mention messages are
+          // accepted by Rust then buffered into group history without producing
+          // a reply. Do not create a pending protocol dispatch for those, or the
+          // plugin bridge waits until the 10-minute safety timeout.
+          const expectsReply = !(chatType === 'group' && isMention === false);
+          const completionPromise = expectsReply
+            ? registerPendingDispatch(chatId, callbacks)
+            : undefined;
           try {
             const resp = await cancellableFetch(`${rustBaseUrl}/api/im-bridge/message`, {
               method: 'POST',
@@ -553,6 +570,9 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
           }
 
           // Block until AI response completes (resolved by /finalize-stream or /abort-stream)
+          if (!completionPromise) {
+            return { queuedFinal: 0, counts: {}, dispatcher: { waitForIdle: async () => {} } };
+          }
           try {
             const result = await completionPromise;
             console.log(`[compat-timing] dispatchReplyFromConfig EXIT (protocol) (+${Date.now() - t0}ms)`);
@@ -624,7 +644,7 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
           // group=plugin-specific (see defaultIsMentionForGroup — wecom group
           // callbacks are mention-only by platform invariant; other plugins
           // default to false unless they set WasMentioned explicitly).
-          const isMention = ctx.IsMention ?? ctx.WasMentioned ?? ctx.isMention
+          const isMention = booleanFromContext(ctx.IsMention ?? ctx.WasMentioned ?? ctx.isMention)
             ?? (chatType === 'group' ? defaultIsMentionForGroup(currentPluginId) : true);
 
           // Group metadata from OpenClaw plugin dispatch context
@@ -647,7 +667,8 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
           const t0 = Date.now();
           console.log(`[compat-timing] dispatchReplyWithBufferedBlockDispatcher ENTER: sender=${senderId} chat=${chatId} len=${text.length} attachments=${mediaAttachments.length}`);
           const deliver = getOpenClawDeliver(dispatcherOptions);
-          const completionPromise = deliver && chatId
+          const expectsReply = !(chatType === 'group' && isMention === false);
+          const completionPromise = deliver && chatId && expectsReply
             ? registerPendingDispatch(chatId, {
                 sendBlockReply: async (payload) => {
                   await deliverTextBlock(deliver, payload.text || '');

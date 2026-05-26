@@ -1734,12 +1734,30 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     if (adoptedSessionRef.current && adoptedSessionRef.current === sessionMeta.id) return;
     // Field-by-field merge: `session ?? agent` (Option C). Missing snapshot fields
     // re-derive from the agent — this is the write-read symmetry of IM live-follow.
-    const model = sessionMeta.model ?? currentAgent?.model;
-    const mode = sessionMeta.permissionMode ?? (currentAgent?.permissionMode as string | undefined);
+    const snapshotRuntime = (sessionMeta.runtime as RuntimeType | undefined) ?? agentRuntime;
+    const snapshotIsExternal = snapshotRuntime !== 'builtin';
+    const model = sessionMeta.model ?? (snapshotIsExternal
+      ? (currentAgent?.runtimeConfig as RuntimeConfig | undefined)?.model
+      : currentAgent?.model);
+    const mode = sessionMeta.permissionMode ?? (snapshotIsExternal
+      ? (currentAgent?.runtimeConfig as RuntimeConfig | undefined)?.permissionMode
+      : (currentAgent?.permissionMode as string | undefined));
     const providerId = sessionMeta.providerId ?? currentAgent?.providerId;
     const mcp = sessionMeta.mcpEnabledServers ?? currentAgent?.mcpEnabledServers;
-    if (model) setSelectedModel(model);
-    if (mode) setPermissionMode(mode as PermissionMode);
+    if (model) {
+      if (snapshotIsExternal) {
+        setRuntimeModel(model);
+      } else {
+        setSelectedModel(model);
+      }
+    }
+    if (mode) {
+      if (snapshotIsExternal) {
+        setRuntimePermissionMode(mode);
+      } else {
+        setPermissionMode(mode as PermissionMode);
+      }
+    }
     if (providerId) setSelectedProviderId(providerId);
     if (mcp) setWorkspaceMcpEnabled(mcp);
   // eslint-disable-next-line react-hooks/exhaustive-deps -- currentAgent derived from config, listening to its identity would re-fire on unrelated agent changes
