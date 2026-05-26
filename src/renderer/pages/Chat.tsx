@@ -308,7 +308,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   // FilePreviewModal opens directly in the editable Monaco view instead of the
   // markdown rendered preview.
   const isSplitViewEnabled = config.experimentalSplitView ?? true;
-  const [splitFile, setSplitFile] = useState<{ name: string; content: string; size: number; path: string; richDocKind?: RichDocKind; initialEditMode?: boolean } | null>(null);
+  const [splitFile, setSplitFile] = useState<{ name: string; content: string; size: number; path: string; richDocKind?: RichDocKind; initialEditMode?: boolean; initialLineNumber?: number } | null>(null);
   // Clear split panel when feature is turned off (prevents stale split state)
   useEffect(() => { if (!isSplitViewEnabled) setSplitFile(null); }, [isSplitViewEnabled]);
   const [splitRatio, setSplitRatio] = useState(0.5); // 0-1, left panel fraction
@@ -408,9 +408,9 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   }, 0);
 
   // Fullscreen preview triggered from split panel's "全屏预览" button
-  const [fullscreenPreviewFile, setFullscreenPreviewFile] = useState<{ name: string; content: string; size: number; path: string; richDocKind?: RichDocKind; initialEditMode?: boolean } | null>(null);
+  const [fullscreenPreviewFile, setFullscreenPreviewFile] = useState<{ name: string; content: string; size: number; path: string; richDocKind?: RichDocKind; initialEditMode?: boolean; initialLineNumber?: number } | null>(null);
 
-  const handleSplitFilePreview = useCallback((file: { name: string; content: string; size: number; path: string; richDocKind?: RichDocKind }, options?: { initialEditMode?: boolean }) => {
+  const handleSplitFilePreview = useCallback((file: { name: string; content: string; size: number; path: string; richDocKind?: RichDocKind; initialLineNumber?: number }, options?: { initialEditMode?: boolean }) => {
     const ext = file.name.toLowerCase().split('.').pop();
     if ((ext === 'html' || ext === 'htm') && isSplitViewEnabled) {
       // HTML files → open in embedded browser for live preview
@@ -3618,6 +3618,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
                     richDocKind={splitFile.richDocKind}
                     workspacePath={agentDir}
                     initialEditMode={splitFile.initialEditMode}
+                    initialLineNumber={splitFile.initialLineNumber}
                     onClose={() => {
                       setSplitFile(null);
                       if (browserUrl) setSplitActiveView('browser');
@@ -3733,6 +3734,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             richDocKind={fullscreenPreviewFile.richDocKind}
             workspacePath={agentDir}
             initialEditMode={fullscreenPreviewFile.initialEditMode}
+            initialLineNumber={fullscreenPreviewFile.initialLineNumber}
             onClose={() => setFullscreenPreviewFile(null)}
             onSaved={() => setWorkspaceRefreshTrigger(prev => prev + 1)}
             onRenamed={(newPath, newName) => {
