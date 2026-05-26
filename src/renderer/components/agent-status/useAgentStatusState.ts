@@ -9,7 +9,8 @@
 
 import { useEffect, useMemo, useState } from 'react';
 
-import type { AgentInput, Message, TodoWriteInput } from '@/types/chat';
+import type { AgentInput, Message } from '@/types/chat';
+import { getEffectiveTodoWriteTodos } from '@/utils/todoWriteState';
 import {
   BACKGROUND_TASK_STATUS_EVENT,
   getBackgroundTaskStatus,
@@ -18,22 +19,6 @@ import {
 } from '@/utils/backgroundTaskStatus';
 
 import type { AgentStatusState, SubagentStatus, TodoItem } from './types';
-
-// SDK TodoWriteOutput 形态（与 sdk-tools.d.ts:2450 对齐）。
-// 不从 SDK import 是因为我们只需 newTodos 一个字段，且要避开 sidecar/renderer
-// bundle 边界（renderer 已 import TodoWriteInput 类型即可）。
-interface TodoWriteResultShape {
-  newTodos?: TodoWriteInput['todos'];
-}
-
-function tryParseTodoResult(result: string | undefined): TodoWriteResultShape | null {
-  if (!result) return null;
-  try {
-    return JSON.parse(result) as TodoWriteResultShape;
-  } catch {
-    return null;
-  }
-}
 
 // 从历史 task-notification 消息抽出已完成的 BG toolUseId 集合。
 // TabProvider 在 chat:task-notification 事件里 setHistoryMessages 注入一条
@@ -102,9 +87,7 @@ export function useAgentStatusState(messages: Message[]): AgentStatusState {
 
         if (tool.name === 'TodoWrite') {
           // result 优先，input 作为 streaming-period fallback。
-          const result = tryParseTodoResult(tool.result);
-          const source = result?.newTodos
-            ?? (tool.parsedInput as TodoWriteInput | undefined)?.todos;
+          const source = getEffectiveTodoWriteTodos(tool);
           if (source && Array.isArray(source)) {
             todos = source.map((t, idx) => ({
               content: t.content,

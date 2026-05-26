@@ -23,6 +23,8 @@ import type { ReactNode } from 'react';
 
 import type { SubagentToolCall, ToolInput, ToolUseSimple } from '@/types/chat';
 
+import { getEffectiveTodoWriteTodos } from '@/utils/todoWriteState';
+
 // ===== MCP Server Name Registry =====
 // Module-level map updated by Chat.tsx when MCP config changes.
 // Enables tool display to show user-configured server names instead of raw IDs.
@@ -77,12 +79,6 @@ function getStringProp(input: ToolInput | undefined, key: string): string | unde
   if (!input || !isObject(input)) return undefined;
   const value = input[key];
   return typeof value === 'string' ? value : undefined;
-}
-
-function getArrayProp<T>(input: ToolInput | undefined, key: string): T[] | undefined {
-  if (!input || !isObject(input)) return undefined;
-  const value = input[key];
-  return Array.isArray(value) ? value as T[] : undefined;
 }
 
 // Helper to get string prop from either parsedInput or raw input
@@ -177,6 +173,15 @@ function getSubagentCallLabel(call: SubagentToolCall, maxLength = 35): string {
   }
 
   return label.length > maxLength ? `${label.substring(0, maxLength - 3)}...` : label;
+}
+
+function getTodoWriteLabel(tool: ToolUseSimple): string {
+  const todos = getEffectiveTodoWriteTodos(tool);
+  if (todos && todos.length > 0) {
+    const completedCount = todos.filter((t) => t.status === 'completed').length;
+    return `Todo ${completedCount}/${todos.length}`;
+  }
+  return 'Todo List';
 }
 
 export interface ToolBadgeConfig {
@@ -514,6 +519,10 @@ export function getToolMainLabel(tool: ToolUseSimple): string {
 
 // Unified label generation logic - extracts compact label from tool
 export function getToolLabel(tool: ToolUseSimple): string {
+  if (tool.name === 'TodoWrite') {
+    return getTodoWriteLabel(tool);
+  }
+
   if (!tool.parsedInput) {
     // Try to parse from inputJson if available
     if (tool.inputJson) {
@@ -544,9 +553,6 @@ export function getToolLabel(tool: ToolUseSimple): string {
         }
         if (tool.name === 'WebFetch') {
           return 'Fetch';
-        }
-        if (tool.name === 'TodoWrite') {
-          return 'Todo List';
         }
         if (tool.name === 'KillShell') {
           return 'Kill Shell';
@@ -644,12 +650,7 @@ export function getToolLabel(tool: ToolUseSimple): string {
       return 'Search';
     }
     case 'TodoWrite': {
-      const todos = getArrayProp<{ status?: string }>(tool.parsedInput, 'todos');
-      if (todos && todos.length > 0) {
-        const completedCount = todos.filter((t) => t.status === 'completed').length;
-        return `Todo ${completedCount}/${todos.length}`;
-      }
-      return 'Todo List';
+      return getTodoWriteLabel(tool);
     }
     case 'Skill': {
       const skill = getStringProp(tool.parsedInput, 'skill');
