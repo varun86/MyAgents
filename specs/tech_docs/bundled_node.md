@@ -15,8 +15,9 @@ Node.js v24 官方二进制通过 `scripts/download_nodejs.sh` / `.ps1` 从 node
 ```
 
 - **版本变量**：`NODE_VERSION` 在 `scripts/download_nodejs.sh` 顶部定义
-- **存储位置**：`src-tauri/resources/nodejs/`（已加入 `.gitignore`）
-- **ABI 保护**：脚本对每种架构做幂等下载；`build_dev.sh` 启动时用 `file(1)` 验证 binary 架构匹配 host，否则自动重下
+- **打包位置**：`src-tauri/resources/nodejs/`（Tauri staging 目录，已加入 `.gitignore`）
+- **缓存位置**：`src-tauri/resources/nodejs-cache/<platform>-<arch>-v<version>/`（按平台 / 架构 / 版本隔离，已加入 `.gitignore`）
+- **ABI 保护**：脚本先检查对应架构缓存；`resources/nodejs/` 只在构建某个 target 前从缓存同步。`build_dev.sh` 启动时用 `file(1)` 验证 binary 架构匹配 host，避免 macOS 双架构 release 构建后留下 x64 staging 影响 arm64 dev 构建
 
 ### 支持的平台
 
@@ -56,8 +57,9 @@ MyAgents.app/
         └── cli/myagents.js            # myagents CLI（esbuild bundle）
 
 注：v0.2.0+ 起 `agent-browser` 不再 bundle —— 改由 bundled-skills/agent-browser/SKILL.md
-教 AI 在首次使用时通过 `npm install -g agent-browser@<pinned>` 自装到
-`~/.myagents/npm-global/bin/`（buildClaudeSessionEnv 注入的 npm prefix）。
+教 AI 在首次使用时通过命令级 `npm_config_prefix="$MYAGENTS_NPM_GLOBAL_PREFIX" npm install -g agent-browser@<pinned>`
+自装到 `~/.myagents/npm-global/bin/`。`buildClaudeSessionEnv` 只暴露
+`MYAGENTS_NPM_GLOBAL_PREFIX`，不把 `npm_config_prefix` 泄漏到整个 SDK shell env。
 ```
 
 ## 运行时路径工具 (`src/server/utils/runtime.ts`)
@@ -86,10 +88,15 @@ getSystemNodeDirs(): string[]
 SDK 子进程（AI Bash 工具）看到的 PATH 优先级：
 1. 用户系统安装的 Node.js 目录（`getSystemNodeDirs()`）—— 用户自己维护，npm 更可靠
 2. bundled Node.js 目录（`resources/nodejs/bin`）—— fallback
-3. `~/.myagents/bin`（`myagents` CLI 所在）
-4. 系统 PATH
+3. `~/.myagents/npm-global/bin`（MyAgents-localized npm installs / legacy AI-installed CLIs）
+4. `~/.myagents/bin`（`myagents` CLI 所在）
+5. 系统 PATH
 
 规则：**系统优先，bundled 兜底**。这让用户既能享受零依赖分发，又不会让 bundled Node 干扰其专业环境。
+
+注意：SDK shell env **不设置** `npm_config_prefix` / `NPM_CONFIG_PREFIX` / `PREFIX`。
+nvm 会在 shell 初始化时检测这些变量并输出兼容性警告。需要固定 npm 全局安装落点的
+skill 必须用命令级 env（例如 `npm_config_prefix="$MYAGENTS_NPM_GLOBAL_PREFIX" npm install -g ...`）。
 
 ## MCP / 社区 npm 包的执行
 
@@ -167,6 +174,6 @@ Claude Agent SDK 在 Windows 上需要 Git Bash 执行 shell 命令。
 
 1. **开发者首次 clone** → 运行 `./setup.sh`（自动下载 Node.js + `npm install` + `npm rebuild` 本机 native addons）
 2. **最终用户** → 零依赖（Node.js v24 已内置）
-3. **CI/CD** → 构建前运行 `setup.sh` 或缓存 `src-tauri/resources/nodejs/`
+3. **CI/CD** → 构建前运行 `setup.sh`，或缓存 `src-tauri/resources/nodejs-cache/`；`src-tauri/resources/nodejs/` 只是当前 target 的 staging 目录
 4. **生产构建** → 必须 `./build_macos.sh` / `./build_windows.ps1` / `./build_linux.sh`，裸 `cargo tauri build` 会漏掉 esbuild 步骤（但 `tauri.conf.json::beforeBuildCommand` 已兜底链上 `npm run build:server && build:bridge && build:cli`）
 5. **MCP 功能** → 完全使用内置 Node.js 生态，用户无需安装任何依赖

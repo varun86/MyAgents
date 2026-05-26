@@ -7,6 +7,7 @@ import { registerBridge as registerBridgeInRegistry, unregisterBridge as unregis
 import { getScriptDir, getBundledNodeDir, getSystemNodeDirs, getBundledRuntimePath, getSystemNpxPaths, findExistingPath } from './utils/runtime';
 import { getCrossPlatformEnv, isSkillBlockedOnPlatform } from './utils/platform';
 import { ensureDirSync, isDirEntry } from './utils/fs-utils';
+import { getMyAgentsNpmGlobalBinDir, getMyAgentsNpmGlobalPrefix, scrubMyAgentsNpmPrefixEnv } from './utils/npm-prefix-env';
 import { applyContextWindowSuffix, lookupModelContextLength, modelSupportsModality } from './utils/model-capabilities';
 import { InactivityWatchdog } from './utils/inactivity-watchdog';
 import { processImage, resizeToolImageContent, classifyImageError } from './utils/imageResize';
@@ -37,7 +38,11 @@ import { parsePartialJson } from '../shared/parsePartialJson';
 import type { SystemInitInfo } from '../shared/types/system';
 import { saveSessionMetadata, updateSessionTitleFromMessage, saveSessionMessages, saveAttachment, updateSessionMetadata, getSessionMetadata, getSessionData } from './SessionStore';
 import { createSessionMetadata, type SessionMessage, type MessageAttachment, type MessageUsage, type SessionSource } from './types/session';
-import { snapshotForImSession, snapshotForOwnedSession } from './utils/session-snapshot';
+import {
+  createMaterializedSessionMetadata,
+  isLiveFollowScenario,
+  type SessionMaterializationScenario,
+} from './utils/session-materialization';
 import { findAgentByWorkspacePath } from './utils/admin-config';
 import type { AgentConfig } from '../shared/types/agent';
 import { broadcast } from './sse';
@@ -3742,6 +3747,40 @@ export function getSessionId(): string {
   return sessionId;
 }
 
+function createMetadataForSessionId(
+  targetSessionId: string,
+  title: string,
+  scenario: SessionMaterializationScenario,
+) {
+  const agent = findAgentByWorkspacePath(agentDir) as AgentConfig | undefined;
+  const meta = createMaterializedSessionMetadata({
+    agentDir,
+    sessionId: targetSessionId,
+    scenario,
+    agent,
+    fallbackRuntime: getCurrentRuntimeType(),
+    title,
+  });
+  return {
+    meta,
+    snapshotKind: agent ? (isLiveFollowScenario(scenario) ? 'im' : 'owned') : `runtime:${meta.runtime ?? 'none'}`,
+  };
+}
+
+export async function materializeCurrentSessionMetadataForPublishedReset(): Promise<void> {
+  const targetSessionId = sessionId;
+  if (!targetSessionId || getSessionMetadata(targetSessionId)) {
+    return;
+  }
+  const { meta, snapshotKind } = createMetadataForSessionId(
+    targetSessionId,
+    'New Chat',
+    'agent-channel',
+  );
+  await saveSessionMetadata(meta);
+  console.log(`[agent] session ${targetSessionId} persisted to SessionStore (published reset, snapshot=${snapshotKind})`);
+}
+
 /** Localize SDK/system error messages for IM end-users */
 function localizeImError(rawError: string): string {
   if (!rawError) return '模型处理消息时出错';
@@ -3965,6 +4004,8 @@ export function buildClaudeSessionEnv(
   // Detect bundled Node.js directory using shared utility from runtime.ts
   const isWindows = process.platform === 'win32';
   const bundledNodeDir = getBundledNodeDir();
+  const myAgentsNpmGlobalPrefix = getMyAgentsNpmGlobalPrefix(home);
+  const myAgentsNpmGlobalBinDir = getMyAgentsNpmGlobalBinDir(home);
 
   // Windows directory env vars — hoisted for reuse across essentialPaths + git-bash detection
   const winProgramFiles = isWindows ? (process.env.PROGRAMFILES || 'C:\\Program Files') : '';
@@ -3994,22 +4035,17 @@ export function buildClaudeSessionEnv(
     essentialPaths.push(bundledNodeDir);
   }
 
-  // MyAgents-managed npm global prefix — every `npm install -g <pkg>` from an
-  // AI Bash tool lands in `~/.myagents/npm-global/{bin,lib}` thanks to the
-  // `npm_config_prefix` env we inject below. This dir comes BEFORE
-  // `~/.myagents/bin` in essentialPaths so:
+  // MyAgents-managed npm global bin dir. It stays on PATH so tools installed
+  // by MyAgents-localized npm commands (see MYAGENTS_NPM_GLOBAL_PREFIX below)
+  // are immediately invocable. This dir comes BEFORE `~/.myagents/bin` in
+  // essentialPaths so:
   //   1. AI-installed tools (e.g. agent-browser) shadow any legacy
   //      `~/.myagents/bin/<name>` wrapper from older app versions —
   //      legacy wrappers naturally fall idle without explicit cleanup.
-  //   2. We control the install location regardless of whether bundled
-  //      Node or system Node serves the npm subprocess (signed app
-  //      bundle's default prefix is read-only → bare `npm install -g`
-  //      would fail without this override).
-  if (home) {
-    const npmGlobalBinDir = isWindows
-      ? resolve(home, '.myagents', 'npm-global')  // npm on Windows puts binaries under prefix root, not prefix/bin
-      : `${home}/.myagents/npm-global/bin`;
-    essentialPaths.push(npmGlobalBinDir);
+  //   2. Existing installs made by older MyAgents versions remain discoverable
+  //      after we stopped leaking npm_config_prefix globally.
+  if (myAgentsNpmGlobalBinDir) {
+    essentialPaths.push(myAgentsNpmGlobalBinDir);
   }
 
   // MyAgents bin directory — user-facing commands (the `myagents` CLI itself).
@@ -4083,23 +4119,18 @@ export function buildClaudeSessionEnv(
   delete env.Path;
   env[PATH_KEY] = finalPath;
 
-  // Pin `npm install -g` target to a writable, MyAgents-managed prefix.
-  //
-  // Without this override:
-  //   - Bundled Node's default prefix is the signed app bundle's Resources
-  //     dir → read-only → `npm install -g` fails EACCES on production macOS.
-  //   - System Node's default prefix is typically `/usr/local` (sudo) or
-  //     a user-configured path that may be inconsistent across machines.
-  //
-  // With the override: `~/.myagents/npm-global/{bin,lib}` is always writable
-  // and the install target is predictable. Combined with adding
-  // `<prefix>/bin` to PATH above, AI-installed CLIs (e.g. agent-browser via
-  // its skill bootstrap) become immediately invocable in subsequent Bash
-  // turns without per-shell setup.
-  if (home) {
-    env.npm_config_prefix = isWindows
-      ? resolve(home, '.myagents', 'npm-global')
-      : `${home}/.myagents/npm-global`;
+  // Expose the managed npm prefix for command-local use only. Do NOT set
+  // npm_config_prefix / NPM_CONFIG_PREFIX / PREFIX on the whole SDK env:
+  // interactive shells with nvm treat those vars as incompatible and print a
+  // warning before every Bash/zsh tool run. Skills that need a predictable
+  // global install target should use:
+  //   npm_config_prefix="$MYAGENTS_NPM_GLOBAL_PREFIX" npm install -g <pkg>
+  if (myAgentsNpmGlobalPrefix) {
+    env.MYAGENTS_NPM_GLOBAL_PREFIX = myAgentsNpmGlobalPrefix;
+    if (myAgentsNpmGlobalBinDir) {
+      env.MYAGENTS_NPM_GLOBAL_BIN = myAgentsNpmGlobalBinDir;
+    }
+    scrubMyAgentsNpmPrefixEnv(env, myAgentsNpmGlobalPrefix);
   }
   // Disable SDK nonessential traffic (Statsig telemetry, Sentry error reporting, surveys).
   // MyAgents manages its own telemetry; these external connections add startup latency
@@ -6478,19 +6509,17 @@ export async function enqueueUserMessage(
       //   - 'im' / 'agent-channel' → live-follow (only runtime recorded)
       // If the agent lookup misses (workspace not registered), snapshot is `{}` and
       // `resolveSessionConfig`'s lazy fallback (meta ?? agent) covers it.
-      const lazyAgent = findAgentByWorkspacePath(agentDir) as AgentConfig | undefined;
-      const useLiveFollow = currentScenario.type === 'im' || currentScenario.type === 'agent-channel';
-      const lazySnapshot = lazyAgent
-        ? (useLiveFollow ? snapshotForImSession(lazyAgent) : snapshotForOwnedSession(lazyAgent))
-        : undefined;
-      const sessionMeta = createSessionMetadata(agentDir, lazySnapshot);
-      sessionMeta.id = sessionId;
-      sessionMeta.title = trimmed ? trimmed.slice(0, 40) : '图片消息';
-      if (sessionMeta.title.length < trimmed.length) {
-        sessionMeta.title += '...';
+      let title = trimmed ? trimmed.slice(0, 40) : '图片消息';
+      if (title.length < trimmed.length) {
+        title += '...';
       }
+      const { meta: sessionMeta, snapshotKind } = createMetadataForSessionId(
+        sessionId,
+        title,
+        currentScenario.type,
+      );
       await saveSessionMetadata(sessionMeta);
-      console.log(`[agent] session ${sessionId} persisted to SessionStore (lazy, scenario=${currentScenario.type}, snapshot=${lazyAgent ? (useLiveFollow ? 'im' : 'owned') : 'none'})`);
+      console.log(`[agent] session ${sessionId} persisted to SessionStore (lazy, scenario=${currentScenario.type}, snapshot=${snapshotKind})`);
     }
   } else {
     // Update session title from first real message if needed
@@ -9196,7 +9225,12 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           } else {
             broadcast('chat:content-block-stop', {
               index: streamEvent.index,
-              toolId: toolId || undefined
+              toolId: toolId || undefined,
+              // Block type lets the renderer mark a *text* block complete on stop, so
+              // the streaming tail-fade (Markdown rehypeStreamTail) clears once the
+              // model finishes the text — even when the turn keeps running (next tool /
+              // thinking). Without this the fade lingers on the last chars indefinitely.
+              type: streamIndexToBlockType.get(streamEvent.index),
             });
             handleContentBlockStop(streamEvent.index, toolId || undefined);
             // IM stream: signal text block end via event bus (Pattern B)

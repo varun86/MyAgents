@@ -1,21 +1,23 @@
 
 import { Check, Loader2 } from 'lucide-react';
 
-import type { TodoWriteInput, ToolUseSimple } from '@/types/chat';
+import type { ToolUseSimple } from '@/types/chat';
+
+import { getEffectiveTodoWriteTodos } from '@/utils/todoWriteState';
 
 interface TodoWriteToolProps {
   tool: ToolUseSimple;
 }
 
 export default function TodoWriteTool({ tool }: TodoWriteToolProps) {
-  const input = tool.parsedInput as TodoWriteInput;
+  const todos = getEffectiveTodoWriteTodos(tool);
 
-  if (!input || !Array.isArray(input.todos)) {
+  if (!todos) {
     return <div className="text-sm text-[var(--ink-muted)]">加载待办事项...</div>;
   }
 
-  const completedCount = input.todos.filter((t) => t.status === 'completed').length;
-  const totalCount = input.todos.length;
+  const completedCount = todos.filter((t) => t.status === 'completed').length;
+  const totalCount = todos.length;
 
   return (
     <div className="flex flex-col gap-3">
@@ -28,7 +30,7 @@ export default function TodoWriteTool({ tool }: TodoWriteToolProps) {
 
       {/* Todo Items with checkbox style */}
       <div className="space-y-1">
-        {input.todos.map((todo, index) => {
+        {todos.map((todo, index) => {
           const isCompleted = todo.status === 'completed';
           const isInProgress = todo.status === 'in_progress';
 

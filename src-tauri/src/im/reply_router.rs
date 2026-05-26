@@ -579,6 +579,15 @@ impl ReplyRouter {
             .and_then(|d| d.get("reason"))
             .and_then(|r| r.as_str())
             .unwrap_or("eviction");
+        let affected_request_ids: Option<std::collections::HashSet<String>> = event
+            .get("data")
+            .and_then(|d| d.get("requestIds"))
+            .and_then(|ids| ids.as_array())
+            .map(|ids| {
+                ids.iter()
+                    .filter_map(|id| id.as_str().map(ToString::to_string))
+                    .collect()
+            });
         ulog_warn!(
             "[reply-router] gap event observed reason={} dropped={:?} active_slots={}",
             reason, dropped_seqs, self.slots.len(),
@@ -588,10 +597,18 @@ impl ReplyRouter {
         // already-done slots (their UI is finalized).
         let chat_ids: Vec<String> = self
             .slots
-            .values()
-            .filter(|s| !s.is_done)
-            .map(|s| s.chat_id.clone())
+            .iter()
+            .filter(|(request_id, slot)| {
+                !slot.is_done
+                    && affected_request_ids
+                        .as_ref()
+                        .map_or(true, |ids| ids.contains(request_id.as_str()))
+            })
+            .map(|(_, slot)| slot.chat_id.clone())
             .collect();
+        if chat_ids.is_empty() {
+            return;
+        }
         let prefix = if reason == "session-reset" {
             "⚠️ 会话已重置，部分回复未送达"
         } else {
@@ -640,3 +657,177 @@ pub(crate) fn shared_router(pending_approvals: PendingApprovals) -> SharedReplyR
 // reference exists in this file (currently used via type imports above).
 #[allow(unused_imports)]
 use adapter::ImStreamAdapter as _ImStreamAdapter;
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex as StdMutex};
+
+    use serde_json::json;
+
+    use super::ReplyRouter;
+    use crate::im::adapter::{AdapterResult, ImAdapter, ImStreamAdapter};
+    use crate::im::types::ImSourceType;
+
+    #[derive(Default)]
+    struct RecordingAdapter {
+        sent_messages: StdMutex<Vec<(String, String)>>,
+    }
+
+    impl RecordingAdapter {
+        fn sent_messages(&self) -> Vec<(String, String)> {
+            self.sent_messages.lock().unwrap().clone()
+        }
+    }
+
+    impl ImAdapter for RecordingAdapter {
+        async fn verify_connection(&self) -> AdapterResult<String> {
+            Ok("test".to_string())
+        }
+
+        async fn register_commands(&self) -> AdapterResult<()> {
+            Ok(())
+        }
+
+        async fn listen_loop(&self, _shutdown_rx: tokio::sync::watch::Receiver<bool>) {}
+
+        async fn send_message(&self, chat_id: &str, text: &str) -> AdapterResult<()> {
+            self.sent_messages
+                .lock()
+                .unwrap()
+                .push((chat_id.to_string(), text.to_string()));
+            Ok(())
+        }
+
+        async fn ack_received(&self, _chat_id: &str, _message_id: &str) {}
+
+        async fn ack_processing(&self, _chat_id: &str, _message_id: &str) {}
+
+        async fn ack_clear(&self, _chat_id: &str, _message_id: &str) {}
+
+        async fn send_typing(&self, _chat_id: &str) {}
+    }
+
+    impl ImStreamAdapter for RecordingAdapter {
+        async fn send_message_returning_id(
+            &self,
+            chat_id: &str,
+            text: &str,
+        ) -> AdapterResult<Option<String>> {
+            self.send_message(chat_id, text).await?;
+            Ok(Some("sent-id".to_string()))
+        }
+
+        async fn edit_message(
+            &self,
+            _chat_id: &str,
+            _message_id: &str,
+            _text: &str,
+        ) -> AdapterResult<()> {
+            Ok(())
+        }
+
+        async fn delete_message(&self, _chat_id: &str, _message_id: &str) -> AdapterResult<()> {
+            Ok(())
+        }
+
+        fn max_message_length(&self) -> usize {
+            4096
+        }
+
+        async fn send_approval_card(
+            &self,
+            _chat_id: &str,
+            _request_id: &str,
+            _tool_name: &str,
+            _tool_input: &str,
+        ) -> AdapterResult<Option<String>> {
+            Ok(Some("approval-id".to_string()))
+        }
+
+        async fn update_approval_status(
+            &self,
+            _chat_id: &str,
+            _message_id: &str,
+            _status: &str,
+        ) -> AdapterResult<()> {
+            Ok(())
+        }
+
+        async fn send_photo(
+            &self,
+            _chat_id: &str,
+            _data: Vec<u8>,
+            _filename: &str,
+            _caption: Option<&str>,
+        ) -> AdapterResult<Option<String>> {
+            Ok(Some("photo-id".to_string()))
+        }
+
+        async fn send_file(
+            &self,
+            _chat_id: &str,
+            _data: Vec<u8>,
+            _filename: &str,
+            _mime_type: &str,
+            _caption: Option<&str>,
+        ) -> AdapterResult<Option<String>> {
+            Ok(Some("file-id".to_string()))
+        }
+
+        async fn finalize_message(
+            &self,
+            _chat_id: &str,
+            _message_id: &str,
+            _text: &str,
+        ) -> AdapterResult<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn scoped_gap_warns_only_affected_active_slots() {
+        let pending_approvals = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+        let mut router = ReplyRouter::new(pending_approvals);
+        router.register(
+            "active-request".to_string(),
+            "chat-active".to_string(),
+            "msg-active".to_string(),
+            ImSourceType::Private,
+            None,
+        );
+        router.register(
+            "other-request".to_string(),
+            "chat-other".to_string(),
+            "msg-other".to_string(),
+            ImSourceType::Private,
+            None,
+        );
+        let adapter = RecordingAdapter::default();
+
+        router
+            .dispatch(
+                &json!({
+                    "seq": 1,
+                    "requestId": null,
+                    "type": "gap",
+                    "data": {
+                        "droppedSeqs": [1, 42],
+                        "requestIds": ["other-request"]
+                    },
+                    "ts": 0
+                }),
+                &adapter,
+                0,
+            )
+            .await;
+
+        assert_eq!(
+            adapter.sent_messages(),
+            vec![(
+                "chat-other".to_string(),
+                "⚠️ 部分流式内容丢失（事件队列溢出）".to_string(),
+            )],
+        );
+    }
+}

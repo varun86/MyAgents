@@ -290,7 +290,7 @@ npm run build:web
 echo -e "${GREEN}✓ 前端和服务端构建完成${NC}"
 echo ""
 
-# Node.js 运行时目录（每个构建目标在循环中按架构下载）
+# Node.js staging 目录（每个构建目标在循环中按架构从 cache 同步）
 NODEJS_DIR="${PROJECT_DIR}/src-tauri/resources/nodejs"
 
 # ========================================
@@ -545,6 +545,18 @@ for TARGET in "${BUILD_TARGETS[@]}"; do
 
     echo -e "${GREEN}✓ $TARGET 构建完成${NC}"
 done
+
+# 双架构发布构建会按 target 重写 resources/nodejs。产物已经在各自
+# target 构建时复制完毕，收尾时把本地 staging 恢复成当前主机架构，
+# 避免后续 build_dev.sh / npm rebuild 先碰到另一种架构的 Node。
+if [[ "$(uname -m)" == "arm64" ]]; then
+    HOST_NODE_TARGET_ARCH="arm64"
+else
+    HOST_NODE_TARGET_ARCH="x64"
+fi
+echo ""
+echo -e "${CYAN}恢复 Node.js staging 到当前主机架构 (${HOST_NODE_TARGET_ARCH})...${NC}"
+"${PROJECT_DIR}/scripts/download_nodejs.sh" --target "$HOST_NODE_TARGET_ARCH"
 
 echo ""
 
