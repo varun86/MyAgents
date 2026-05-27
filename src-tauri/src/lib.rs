@@ -416,6 +416,9 @@ pub fn run() {
             // WeCom QR code commands (public API, not plugin gateway)
             commands::cmd_wecom_qr_generate,
             commands::cmd_wecom_qr_poll,
+            // Network diagnostics
+            commands::cmd_probe_provider_network,
+            commands::cmd_probe_proxy,
             // Model discovery
             commands::cmd_fetch_provider_models,
             // Terminal commands (embedded PTY)

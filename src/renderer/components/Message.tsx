@@ -194,6 +194,32 @@ const SYSTEM_TAG_MAP: Record<string, string> = {
   'CRON_TASK': '定时任务',
 };
 
+function renderWidgetSegments(text: string, isLoading: boolean): ReactNode {
+  const segments = parseWidgetTags(text);
+  return segments.map((seg, si) => {
+    if (seg.type === 'text') {
+      return (
+        <div key={`t-${si}`} className="flex justify-start w-full px-1 py-1 select-none">
+          <div className="w-full max-w-none text-[var(--ink)] select-text">
+            <Markdown>{seg.content}</Markdown>
+          </div>
+        </div>
+      );
+    }
+
+    return (
+      <div key={`w-${si}`} className="w-full px-1">
+        <WidgetRenderer
+          widgetCode={seg.code}
+          // Parser incompleteness means "more bytes may arrive" only while the turn is live.
+          isStreaming={isLoading && !seg.isComplete}
+          title={seg.title || 'widget'}
+        />
+      </div>
+    );
+  });
+}
+
 /**
  * Message component with memo optimization.
  * History messages won't re-render when streaming message updates.
@@ -413,15 +439,22 @@ const Message = memo(function Message({ message, isLoading = false, onRewind, on
 
   // Assistant message
   if (typeof message.content === 'string') {
+    const hasWidgets = hasWidgetTags(message.content);
     return (
       <div className="flex justify-start w-full px-4 py-2 select-none" data-role="assistant">
         <div className="w-full max-w-none">
-          <div className="text-[var(--ink)] select-text">
-            {/* Tail-fade only while text is the actively-streaming edge — `streamingTextActive`
-                clears on the text block's content-block-stop, so it doesn't linger during a
-                slow gap before the next block (string-content path). */}
-            <Markdown streaming={isLoading && !!message.streamingTextActive}>{message.content}</Markdown>
-          </div>
+          {hasWidgets ? (
+            <div className="w-full space-y-3">
+              {renderWidgetSegments(message.content, isLoading)}
+            </div>
+          ) : (
+            <div className="text-[var(--ink)] select-text">
+              {/* Tail-fade only while text is the actively-streaming edge — `streamingTextActive`
+                  clears on the text block's content-block-stop, so it doesn't linger during a
+                  slow gap before the next block (string-content path). */}
+              <Markdown streaming={isLoading && !!message.streamingTextActive}>{message.content}</Markdown>
+            </div>
+          )}
           {actionsReady && !isLoading && <AssistantActions message={message} onRetry={onRetry} onFork={onFork} />}
         </div>
       </div>
@@ -503,30 +536,9 @@ const Message = memo(function Message({ message, isLoading = false, onRewind, on
                 if (item.type === 'text' && item.text) {
                   // Check for <widget> tags in the text
                   if (hasWidgetTags(item.text)) {
-                    const segments = parseWidgetTags(item.text);
                     return (
                       <div key={index} className="w-full space-y-3">
-                        {segments.map((seg, si) => {
-                          if (seg.type === 'text') {
-                            return (
-                              <div key={`t-${si}`} className="flex justify-start w-full px-1 py-1 select-none">
-                                <div className="w-full max-w-none text-[var(--ink)] select-text">
-                                  <Markdown>{seg.content}</Markdown>
-                                </div>
-                              </div>
-                            );
-                          }
-                          // Widget segment — render seamlessly inline (no frame, no title header)
-                          return (
-                            <div key={`w-${si}`} className="w-full px-1">
-                              <WidgetRenderer
-                                widgetCode={seg.code}
-                                isStreaming={!seg.isComplete}
-                                title={seg.title || 'widget'}
-                              />
-                            </div>
-                          );
-                        })}
+                        {renderWidgetSegments(item.text, isLoading)}
                       </div>
                     );
                   }
