@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use tauri::{AppHandle, Manager, Runtime, State};
 
 use crate::sidecar::{
@@ -19,6 +20,9 @@ use crate::sidecar::{
 };
 use crate::logger;
 use crate::{ulog_error, ulog_info, ulog_warn};
+
+const NETWORK_PROBE_USER_AGENT: &str = "MyAgents-Network-Probe/1.0";
+const PROXY_CONNECTIVITY_TEST_URL: &str = "https://www.google.com/generate_204";
 
 // ============= Legacy Commands (for backward compatibility) =============
 
@@ -1693,6 +1697,360 @@ pub async fn cmd_wecom_qr_poll(scode: String, poll_index: Option<u32>) -> Result
             }
             Ok(WecomQrPollResult { status: "waiting".into(), bot_id: None, secret: None })
         }
+    }
+}
+
+// ============= Network Diagnostics =============
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NetworkProbeResult {
+    pub ok: bool,
+    pub stage: String,
+    pub kind: String,
+    pub message: String,
+    pub detail: Option<String>,
+    pub http_status: Option<u16>,
+    pub url: String,
+}
+
+fn network_probe_result(
+    ok: bool,
+    stage: &str,
+    kind: &str,
+    message: impl Into<String>,
+    detail: Option<String>,
+    http_status: Option<u16>,
+    url: impl Into<String>,
+) -> NetworkProbeResult {
+    NetworkProbeResult {
+        ok,
+        stage: stage.to_string(),
+        kind: kind.to_string(),
+        message: message.into(),
+        detail,
+        http_status,
+        url: url.into(),
+    }
+}
+
+fn is_loopback_http_url(url: &reqwest::Url) -> bool {
+    match url.host_str() {
+        Some(host) => {
+            let normalized = host
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .to_ascii_lowercase();
+            if normalized == "localhost"
+                || normalized == "localhost.localdomain"
+                || normalized.ends_with(".localhost")
+            {
+                return true;
+            }
+            normalized
+                .parse::<std::net::IpAddr>()
+                .map(|ip| ip.is_loopback())
+                .unwrap_or(false)
+        }
+        None => false,
+    }
+}
+
+#[cfg(test)]
+mod network_probe_tests {
+    use super::is_loopback_http_url;
+
+    fn parsed(url: &str) -> reqwest::Url {
+        reqwest::Url::parse(url).expect("test URL parses")
+    }
+
+    #[test]
+    fn detects_loopback_provider_urls() {
+        assert!(is_loopback_http_url(&parsed("http://localhost:11434/v1")));
+        assert!(is_loopback_http_url(&parsed("https://127.0.0.1:8443/v1")));
+        assert!(is_loopback_http_url(&parsed("http://[::1]:8080/v1")));
+        assert!(is_loopback_http_url(&parsed("http://lmstudio.localhost:1234")));
+    }
+
+    #[test]
+    fn leaves_external_provider_urls_on_proxy_path() {
+        assert!(!is_loopback_http_url(&parsed("https://api.example.com/v1")));
+        assert!(!is_loopback_http_url(&parsed("http://192.168.1.2:8080/v1")));
+    }
+}
+
+fn classify_reqwest_error(error: &reqwest::Error) -> &'static str {
+    if error.is_timeout() {
+        return "timeout";
+    }
+
+    let text = error.to_string().to_lowercase();
+    if text.contains("dns") || text.contains("resolve") || text.contains("name or service") {
+        return "dns_error";
+    }
+    if text.contains("certificate") || text.contains("tls") || text.contains("ssl") {
+        return "tls_error";
+    }
+    if text.contains("proxy") || text.contains("socks") {
+        return "proxy_error";
+    }
+    if error.is_connect() {
+        return "connect_error";
+    }
+    if error.is_builder() {
+        return "invalid_url";
+    }
+
+    "network_error"
+}
+
+async fn send_probe_request(
+    client: &reqwest::Client,
+    url: &str,
+    stage: &str,
+    failure_message: &str,
+) -> NetworkProbeResult {
+    match client
+        .get(url)
+        .header(reqwest::header::USER_AGENT, NETWORK_PROBE_USER_AGENT)
+        .send()
+        .await
+    {
+        Ok(response) => {
+            let status = response.status();
+            network_probe_result(
+                true,
+                stage,
+                "http_reachable",
+                "网络连接正常",
+                None,
+                Some(status.as_u16()),
+                url,
+            )
+        }
+        Err(error) => network_probe_result(
+            false,
+            stage,
+            classify_reqwest_error(&error),
+            failure_message,
+            Some(error.to_string()),
+            None,
+            url,
+        ),
+    }
+}
+
+/// Probe whether a provider base URL is reachable through the same proxy policy
+/// used by external Rust HTTP requests. Any HTTP status means the network path
+/// reached the provider; API-key validity is verified by the SDK in the next step.
+#[tauri::command]
+pub async fn cmd_probe_provider_network(url: String) -> Result<NetworkProbeResult, String> {
+    let parsed = match reqwest::Url::parse(&url) {
+        Ok(parsed) if parsed.scheme() == "http" || parsed.scheme() == "https" => parsed,
+        Ok(_) => {
+            return Ok(network_probe_result(
+                false,
+                "provider_http",
+                "invalid_url",
+                "供应商 Base URL 必须使用 http 或 https",
+                None,
+                None,
+                url,
+            ));
+        }
+        Err(error) => {
+            return Ok(network_probe_result(
+                false,
+                "provider_http",
+                "invalid_url",
+                "供应商 Base URL 无效",
+                Some(error.to_string()),
+                None,
+                url,
+            ));
+        }
+    };
+
+    let target_url = parsed.to_string();
+    ulog_info!("[network-probe] Probing provider URL {}", target_url);
+
+    let client = if is_loopback_http_url(&parsed) {
+        match crate::local_http::builder()
+            .timeout(Duration::from_secs(8))
+            .redirect(reqwest::redirect::Policy::limited(5))
+            .build()
+        {
+            Ok(client) => client,
+            Err(error) => {
+                return Ok(network_probe_result(
+                    false,
+                    "provider_http",
+                    "network_error",
+                    "本地供应商探测客户端创建失败",
+                    Some(error.to_string()),
+                    None,
+                    target_url,
+                ));
+            }
+        }
+    } else {
+        #[allow(clippy::disallowed_methods)]
+        let builder = reqwest::Client::builder()
+            .timeout(Duration::from_secs(8))
+            .redirect(reqwest::redirect::Policy::limited(5));
+        match crate::proxy_config::build_client_with_proxy(builder) {
+            Ok(client) => client,
+            Err(error) => {
+                return Ok(network_probe_result(
+                    false,
+                    "provider_http",
+                    "proxy_config_error",
+                    "网络代理配置无效，请检查代理设置",
+                    Some(error),
+                    None,
+                    target_url,
+                ));
+            }
+        }
+    };
+
+    Ok(send_probe_request(
+        &client,
+        &target_url,
+        "provider_http",
+        "当前网络无法连接供应商，请检查网络或配置代理",
+    )
+    .await)
+}
+
+/// Probe the proxy settings currently shown in Settings. This intentionally
+/// accepts explicit values instead of reading disk config so the UI can test
+/// the user's latest committed protocol / host / port immediately.
+#[tauri::command]
+pub async fn cmd_probe_proxy(
+    protocol: String,
+    host: String,
+    port: u16,
+) -> Result<NetworkProbeResult, String> {
+    let protocol = protocol.trim().to_lowercase();
+    let host = host.trim().to_string();
+    let proxy_url = format!("{}://{}:{}", protocol, host, port);
+
+    if !matches!(protocol.as_str(), "http" | "https" | "socks5") {
+        return Ok(network_probe_result(
+            false,
+            "local_proxy",
+            "invalid_proxy",
+            "代理协议无效，请选择 HTTP、HTTPS 或 SOCKS5",
+            None,
+            None,
+            proxy_url,
+        ));
+    }
+    if host.is_empty() || port == 0 {
+        return Ok(network_probe_result(
+            false,
+            "local_proxy",
+            "invalid_proxy",
+            "代理地址或端口无效",
+            None,
+            None,
+            proxy_url,
+        ));
+    }
+
+    ulog_info!(
+        "[network-probe] Probing proxy {} via {}",
+        proxy_url,
+        PROXY_CONNECTIVITY_TEST_URL
+    );
+
+    match tokio::time::timeout(
+        Duration::from_millis(1500),
+        tokio::net::TcpStream::connect((host.as_str(), port)),
+    )
+    .await
+    {
+        Ok(Ok(_stream)) => {}
+        Ok(Err(error)) => {
+            return Ok(network_probe_result(
+                false,
+                "local_proxy",
+                "proxy_unreachable",
+                "当前代理地址或端口没有检测到可用代理，请确认端口号与本地代理软件一致",
+                Some(error.to_string()),
+                None,
+                proxy_url,
+            ));
+        }
+        Err(_) => {
+            return Ok(network_probe_result(
+                false,
+                "local_proxy",
+                "timeout",
+                "当前代理地址或端口连接超时，请确认端口号与本地代理软件一致",
+                None,
+                None,
+                proxy_url,
+            ));
+        }
+    }
+
+    #[allow(clippy::disallowed_methods)]
+    let builder = reqwest::Client::builder()
+        .timeout(Duration::from_secs(8))
+        .redirect(reqwest::redirect::Policy::limited(5));
+    let proxy = match reqwest::Proxy::all(&proxy_url) {
+        Ok(proxy) => proxy.no_proxy(reqwest::NoProxy::from_string(
+            crate::proxy_config::LOCALHOST_NO_PROXY,
+        )),
+        Err(error) => {
+            return Ok(network_probe_result(
+                false,
+                "local_proxy",
+                "invalid_proxy",
+                "代理配置无效，请检查协议、地址和端口",
+                Some(error.to_string()),
+                None,
+                proxy_url,
+            ));
+        }
+    };
+    let client = match builder.proxy(proxy).build() {
+        Ok(client) => client,
+        Err(error) => {
+            return Ok(network_probe_result(
+                false,
+                "local_proxy",
+                "invalid_proxy",
+                "代理客户端创建失败，请检查代理配置",
+                Some(error.to_string()),
+                None,
+                proxy_url,
+            ));
+        }
+    };
+
+    let result = send_probe_request(
+        &client,
+        PROXY_CONNECTIVITY_TEST_URL,
+        "external_http",
+        "已检测到本地代理，但无法访问全球互联网，请检查代理软件节点或规则",
+    )
+    .await;
+
+    if result.ok {
+        Ok(network_probe_result(
+            true,
+            "external_http",
+            "http_reachable",
+            "代理可用，已能访问全球互联网",
+            result.detail,
+            result.http_status,
+            PROXY_CONNECTIVITY_TEST_URL,
+        ))
+    } else {
+        Ok(result)
     }
 }
 

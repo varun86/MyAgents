@@ -38,6 +38,12 @@ import {
 import { imEventBus, type ImEventType } from '../utils/im-event-bus';
 import { imRequestRegistry } from '../utils/im-request-registry';
 import { resolveLastRealUserMessagePreview } from '../utils/session-message-preview';
+import {
+  EXTERNAL_WATCHDOG_DEFAULT_TIMEOUT_MS,
+  externalRuntimeWatchdogTimeoutMs,
+  estimatedContextTokensFromMessages,
+  observedContextTokens,
+} from './external-watchdog-policy';
 
 // ─── Module state ───
 
@@ -170,6 +176,8 @@ function resetModuleState(): void {
   startingPromise = null;
   startingSessionId = null;
   if (watchdogTimer) { clearInterval(watchdogTimer); watchdogTimer = null; }
+  currentWatchdogTimeoutMs = EXTERNAL_WATCHDOG_DEFAULT_TIMEOUT_MS;
+  externalWatchdog.setTimeoutMs(EXTERNAL_WATCHDOG_DEFAULT_TIMEOUT_MS);
   lastRuntimeSessionId = '';
   lastModel = '';
   lastRuntimeReportedModel = '';
@@ -340,12 +348,45 @@ function flushAllPending(): void {
 // fix as the builtin watchdog. See utils/inactivity-watchdog.ts. (Previously a
 // reset-on-activity setTimeout, which fired on resume because its deadline
 // elapsed in wall-clock during sleep — a turn the runtime never actually hung.)
-const WATCHDOG_TIMEOUT_MS = 10 * 60 * 1000;
 const WATCHDOG_INTERVAL_MS = 30 * 1000;
-const externalWatchdog = new InactivityWatchdog({ timeoutMs: WATCHDOG_TIMEOUT_MS, intervalMs: WATCHDOG_INTERVAL_MS });
+const externalWatchdog = new InactivityWatchdog({
+  timeoutMs: EXTERNAL_WATCHDOG_DEFAULT_TIMEOUT_MS,
+  intervalMs: WATCHDOG_INTERVAL_MS,
+});
+let currentWatchdogTimeoutMs = EXTERNAL_WATCHDOG_DEFAULT_TIMEOUT_MS;
+
+function usageForWatchdogBudget(): MessageUsage | null {
+  const usage = currentTurnUsage ?? lastPersistedRuntimeUsageTotals;
+  if (currentTurnEstimatedInputTokens <= 0) return usage;
+
+  const observed = observedContextTokens(usage);
+  if (observed >= currentTurnEstimatedInputTokens) return usage;
+
+  return {
+    ...(usage ?? { outputTokens: 0 }),
+    inputTokens: Math.max(usage?.inputTokens ?? 0, currentTurnEstimatedInputTokens),
+    outputTokens: usage?.outputTokens ?? 0,
+    model: (usage?.model ?? lastRuntimeReportedModel) || lastModel || undefined,
+  };
+}
+
+function refreshWatchdogTimeout(): void {
+  const runtimeType = activeRuntime?.type ?? getCurrentRuntimeType();
+  const usageForBudget = usageForWatchdogBudget();
+  const nextTimeoutMs = externalRuntimeWatchdogTimeoutMs(runtimeType, usageForBudget);
+  if (nextTimeoutMs === currentWatchdogTimeoutMs) return;
+
+  currentWatchdogTimeoutMs = nextTimeoutMs;
+  externalWatchdog.setTimeoutMs(nextTimeoutMs);
+
+  const minutes = Math.round(nextTimeoutMs / 60_000);
+  const tokens = observedContextTokens(usageForBudget);
+  console.log(`[external-session] Watchdog: timeout adjusted to ${minutes} minutes for ${runtimeType} contextTokens=${tokens}`);
+}
 
 /** Record runtime activity (and start the interval on the first call of a turn). */
 function resetWatchdog(): void {
+  refreshWatchdogTimeout();
   externalWatchdog.markActivity();
   if (watchdogTimer) return; // already armed — markActivity above is the reset
   externalWatchdog.reset();
@@ -365,8 +406,9 @@ function resetWatchdog(): void {
     }
     if (!fire) return;
     clearWatchdog();
-    console.error('[external-session] Watchdog: no runtime activity for 10 minutes of active time, killing process');
-    broadcast('chat:agent-error', { message: 'External runtime timed out (no activity for 10 minutes)' });
+    const minutes = Math.round(currentWatchdogTimeoutMs / 60_000);
+    console.error(`[external-session] Watchdog: no runtime activity for ${minutes} minutes of active time, killing process`);
+    broadcast('chat:agent-error', { message: `External runtime timed out (no activity for ${minutes} minutes)` });
     broadcast('chat:message-error', 'External runtime timed out');
     fireImCallback('error', 'External runtime timed out');
     void stopExternalSession();
@@ -378,12 +420,25 @@ function clearWatchdog(): void {
   if (watchdogTimer) { clearInterval(watchdogTimer); watchdogTimer = null; }
 }
 
+function recordRuntimeActivity(): void {
+  if (currentTurnStartTime === 0 || turnCompleted) return;
+  resetWatchdog();
+}
+
 // ─── Turn outcome tracking (stale text protection for cron/heartbeat) ───
 let lastTurnSucceeded = false;
 
 // ─── Token usage accumulation ───
 type ExternalTurnUsage = MessageUsage & { semantics?: 'delta' | 'running_total' };
 let currentTurnUsage: ExternalTurnUsage | null = null;
+let currentTurnEstimatedInputTokens = 0;
+
+function seedTurnWatchdogEstimate(extraText = ''): void {
+  const runtimeType = activeRuntime?.type ?? getCurrentRuntimeType();
+  currentTurnEstimatedInputTokens = runtimeType === 'codex'
+    ? estimatedContextTokensFromMessages(allSessionMessages, extraText)
+    : 0;
+}
 
 /** Reset all per-turn accumulators */
 function resetTurnAccumulators(): void {
@@ -396,6 +451,7 @@ function resetTurnAccumulators(): void {
   pendingThinkingStartedAt = 0;
   pendingToolInputs.clear();
   currentTurnUsage = null;
+  currentTurnEstimatedInputTokens = 0;
 }
 
 function buildPersistedTurnUsage(): MessageUsage | undefined {
@@ -1028,13 +1084,10 @@ async function _doStartExternalSession(options: {
   lastTurnSucceeded = false;  // Reset — success only set after turn_complete
   resetTurnAccumulators();
   // Watchdog is per-turn, not per-process. Pre-warm (no initialMessage) leaves
-  // the process idle awaiting a user message — starting a 10-min timer here
-  // would fire a bogus "timed out" toast if the user takes >10 min to type.
-  // The real watchdog is armed when the first turn begins (Case 3 in
-  // sendExternalMessage, or the initialMessage block below).
-  if (options.initialMessage) {
-    resetWatchdog();
-  }
+  // the process idle awaiting a user message — starting a timer here would fire
+  // a bogus "timed out" toast if the user takes >10 min to type. The real
+  // watchdog is armed when the first turn begins (Case 3 in sendExternalMessage,
+  // or the initialMessage block below).
   currentTurnStartTime = 0;
   // Track latest config for resume
   if (options.model !== undefined) lastModel = options.model;
@@ -1060,6 +1113,8 @@ async function _doStartExternalSession(options: {
     earlyBroadcastedUserMsg = null;  // Consumed
     allSessionMessages.push(userMsg);
     resetTurnAccumulators();
+    seedTurnWatchdogEstimate();
+    resetWatchdog();
     currentTurnStartTime = Date.now();
 
     // Persist user message immediately (crash safety — don't wait for turn_complete)
@@ -1372,6 +1427,7 @@ export async function sendExternalMessage(
     turnCompleted = false;
     lastTurnSucceeded = false;  // Reset for this turn (prevents stale text on failure)
     resetTurnAccumulators();
+    seedTurnWatchdogEstimate();
     resetWatchdog();  // Start watchdog for this turn (Case 3 bypasses startExternalSession)
     currentTurnStartTime = Date.now();
 
@@ -2021,7 +2077,7 @@ function applyExternalToolResult(event: Extract<UnifiedEvent, { kind: 'tool_resu
       currentTurnAttachmentHints.push(hint);
     }
   }
-  resetWatchdog();
+  recordRuntimeActivity();
 }
 
 function autoDenyNonInteractiveRequest(event: Extract<UnifiedEvent, { kind: 'permission_request' }>): boolean {
@@ -2039,13 +2095,14 @@ function autoDenyNonInteractiveRequest(event: Extract<UnifiedEvent, { kind: 'per
 }
 
 function handleUnifiedEvent(event: UnifiedEvent): void {
+  recordRuntimeActivity();
+
   switch (event.kind) {
     case 'text_delta':
       broadcast('chat:message-chunk', event.text);
       currentAssistantText += event.text;
       pendingTextBuffer += event.text;
       fireImCallback('delta', event.text);
-      resetWatchdog();
       break;
 
     case 'text_stop':
@@ -2083,7 +2140,7 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
       pendingThinkingText += event.text;
       // Frontend expects { index, delta } — match builtin SSE shape
       broadcast('chat:thinking-chunk', { index: event.index, delta: event.text });
-      resetWatchdog();
+      recordRuntimeActivity();
       break;
 
     case 'thinking_stop':
@@ -2115,7 +2172,7 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
         toolId: event.toolUseId,
         delta: event.delta,
       });
-      resetWatchdog();  // Tool streaming is activity — prevent killing long-running tools
+      recordRuntimeActivity();  // Tool streaming is activity — prevent killing long-running tools
       break;
     }
 
@@ -2149,7 +2206,7 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
         toolUseId: event.toolUseId,
         delta: event.delta,
       });
-      resetWatchdog();
+      recordRuntimeActivity();
       break;
 
     case 'tool_result':
@@ -2190,7 +2247,7 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
         pendingId: event.pendingId,
         attachment: event.attachment,
       });
-      resetWatchdog();
+      recordRuntimeActivity();
       break;
     }
 
@@ -2250,7 +2307,7 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
       pendingExternalAskUserQuestions.delete(event.requestId);
       pendingExternalInteractiveRequests.delete(event.requestId);
       pendingPermissionSuggestions.delete(event.requestId);
-      resetWatchdog();
+      recordRuntimeActivity();
       break;
     }
 
@@ -2514,6 +2571,7 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
         modelUsage: event.modelUsage,
         semantics: event.semantics,
       };
+      recordRuntimeActivity();
       break;
 
     case 'log':
@@ -2577,7 +2635,7 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
               currentContentBlocks[toolBlockIdx].tool!.result = resultText.slice(0, 5000);
               currentContentBlocks[toolBlockIdx].tool!.isError = block.is_error === true;
             }
-            resetWatchdog();
+            recordRuntimeActivity();
           }
         }
         break;
@@ -2614,7 +2672,7 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
           broadcast('chat:message-chunk', text);
           currentAssistantText += text;
           pendingTextBuffer += text;
-          resetWatchdog();
+          recordRuntimeActivity();
         }
       }
       break;

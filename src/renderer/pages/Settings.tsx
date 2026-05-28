@@ -93,6 +93,28 @@ type _VerifyStatus = 'idle' | 'loading' | 'valid' | 'invalid';
 // Use shared type with verification state
 type SubscriptionStatus = SubscriptionStatusWithVerify;
 
+interface NetworkProbeResult {
+    ok: boolean;
+    stage: string;
+    kind: string;
+    message: string;
+    detail?: string;
+    httpStatus?: number;
+    url: string;
+}
+
+type ProxyProbeState =
+    | { status: 'idle' }
+    | { status: 'checking' }
+    | { status: 'ok'; message: string; detail?: string }
+    | { status: 'error'; message: string; detail?: string; stage?: string; kind?: string };
+
+interface ProviderVerifyError {
+    error: string;
+    detail?: string;
+    action?: 'proxy-settings';
+}
+
 // Custom provider form data
 interface CustomProviderForm {
     name: string;
@@ -123,6 +145,9 @@ const EMPTY_CUSTOM_FORM: CustomProviderForm = {
     maxOutputTokensParamName: 'max_tokens',
     upstreamFormat: 'chat_completions',
 };
+
+const MYAGENTS_GITHUB_URL = 'https://github.com/hAcKlyc/MyAgents';
+const MYAGENTS_RELEASES_URL = `${MYAGENTS_GITHUB_URL}/releases`;
 
 // Provider edit form data (for managing existing providers)
 interface ProviderEditForm {
@@ -228,6 +253,8 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
     };
 
     const [activeSection, setActiveSection] = useState<SettingsSection>(getInitialSection);
+    const proxySectionRef = useRef<HTMLDivElement>(null);
+    const [highlightProxySection, setHighlightProxySection] = useState(false);
     // Track whether Skills/Agents panels are in detail view (to hide the other panel)
     const [skillsInDetail, setSkillsInDetail] = useState(false);
     const [agentsInDetail, setAgentsInDetail] = useState(false);
@@ -308,6 +335,27 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
         }
     }, [initialSection]);
 
+    const navigateToProxySettings = useCallback(() => {
+        setActiveSection('general');
+        setHighlightProxySection(true);
+    }, []);
+
+    useEffect(() => {
+        if (activeSection !== 'general' || !highlightProxySection) return;
+
+        const scrollTimer = window.setTimeout(() => {
+            proxySectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }, 50);
+        const clearTimer = window.setTimeout(() => {
+            setHighlightProxySection(false);
+        }, 1800);
+
+        return () => {
+            window.clearTimeout(scrollTimer);
+            window.clearTimeout(clearTimer);
+        };
+    }, [activeSection, highlightProxySection]);
+
     // Propagate proxy config changes to all running Sidecars
     const prevProxyRef = useRef<string | undefined>(undefined);
     useEffect(() => {
@@ -338,6 +386,8 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
     const [proxyPortDraft, setProxyPortDraft] = useState<string>(
         () => String(config.proxySettings?.port || PROXY_DEFAULTS.port)
     );
+    const [proxyProbeState, setProxyProbeState] = useState<ProxyProbeState>({ status: 'idle' });
+    const proxyProbeGenerationRef = useRef(0);
     // Re-sync drafts when the committed proxy values change from elsewhere
     // (initial load, commit normalisation, external edit). No-op while the user
     // types, since we don't commit until blur/Enter so config doesn't change.
@@ -383,6 +433,58 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
         }
     }, [proxyPortDraft, config.proxySettings?.port, patchProxySettings]);
 
+    useEffect(() => {
+        if (!config.proxySettings?.enabled) {
+            proxyProbeGenerationRef.current += 1;
+            setProxyProbeState({ status: 'idle' });
+            return;
+        }
+
+        const protocol = config.proxySettings.protocol || PROXY_DEFAULTS.protocol;
+        const host = config.proxySettings.host || PROXY_DEFAULTS.host;
+        const port = config.proxySettings.port || PROXY_DEFAULTS.port;
+        const generation = proxyProbeGenerationRef.current + 1;
+        proxyProbeGenerationRef.current = generation;
+
+        setProxyProbeState({ status: 'checking' });
+        const timer = window.setTimeout(() => {
+            invoke<NetworkProbeResult>('cmd_probe_proxy', { protocol, host, port })
+                .then((result) => {
+                    if (proxyProbeGenerationRef.current !== generation) return;
+                    if (result.ok) {
+                        setProxyProbeState({
+                            status: 'ok',
+                            message: result.message,
+                            detail: result.httpStatus ? `${result.url} HTTP ${result.httpStatus}` : result.url,
+                        });
+                    } else {
+                        setProxyProbeState({
+                            status: 'error',
+                            message: result.message,
+                            detail: result.detail,
+                            stage: result.stage,
+                            kind: result.kind,
+                        });
+                    }
+                })
+                .catch((error) => {
+                    if (proxyProbeGenerationRef.current !== generation) return;
+                    setProxyProbeState({
+                        status: 'error',
+                        message: '代理检测失败，请稍后重试',
+                        detail: error instanceof Error ? error.message : String(error),
+                    });
+                });
+        }, 250);
+
+        return () => window.clearTimeout(timer);
+    }, [
+        config.proxySettings?.enabled,
+        config.proxySettings?.protocol,
+        config.proxySettings?.host,
+        config.proxySettings?.port,
+    ]);
+
     const [showCustomForm, setShowCustomForm] = useState(false);
     const [customForm, setCustomForm] = useState<CustomProviderForm>(EMPTY_CUSTOM_FORM);
     const [showProviderOrderDialog, setShowProviderOrderDialog] = useState(false);
@@ -408,7 +510,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
     );
     // UI-only loading state (not persisted)
     const [verifyLoading, setVerifyLoading] = useState<Record<string, boolean>>({});
-    const [verifyError, setVerifyError] = useState<Record<string, { error: string; detail?: string }>>({});
+    const [verifyError, setVerifyError] = useState<Record<string, ProviderVerifyError>>({});
     const [errorDetailOpenId, setErrorDetailOpenId] = useState<string | null>(null);
 
     // Dev-only: Logs panel
@@ -1854,6 +1956,35 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
         setVerifyError((prev) => { const next = { ...prev }; delete next[provider.id]; return next; });
 
         try {
+            const networkResult = await invoke<NetworkProbeResult>('cmd_probe_provider_network', {
+                url: provider.config.baseUrl,
+            });
+
+            // Stale check: if a newer verify was triggered while we were waiting, discard this result
+            if (verifyGenRef.current[provider.id] !== gen) {
+                console.log(`[verifyProvider] Discarding stale network result (gen=${gen}, current=${verifyGenRef.current[provider.id]})`);
+                return;
+            }
+
+            if (!networkResult.ok) {
+                await saveProviderVerifyStatus(provider.id, 'invalid');
+                const detailParts = [
+                    `stage=${networkResult.stage}`,
+                    `kind=${networkResult.kind}`,
+                    networkResult.detail,
+                ].filter(Boolean);
+                setVerifyError((prev) => ({
+                    ...prev,
+                    [provider.id]: {
+                        error: `当前网络无法连接 ${provider.name}，请检查网络或`,
+                        detail: detailParts.length > 0 ? detailParts.join('; ') : undefined,
+                        action: 'proxy-settings',
+                    },
+                }));
+                toastRef.current.error(`${provider.name}: 当前网络不可达，请检查代理设置`);
+                return;
+            }
+
             const result = await apiPostJson<{ success: boolean; error?: string; detail?: string }>('/api/provider/verify', {
                 baseUrl: provider.config.baseUrl,
                 apiKey,
@@ -2302,7 +2433,21 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
         return (
             <div className="flex items-start gap-1.5 pt-1.5 text-xs text-[var(--error)]">
                 <AlertCircle className="mt-0.5 h-3 w-3 shrink-0" />
-                <span className="min-w-0 break-words">{errObj.error}</span>
+                <span className="min-w-0 break-words">
+                    {errObj.error}
+                    {errObj.action === 'proxy-settings' && (
+                        <>
+                            <button
+                                type="button"
+                                onClick={navigateToProxySettings}
+                                className="mx-1 font-medium text-[var(--accent)] underline decoration-dotted underline-offset-2 transition-colors hover:text-[var(--accent-warm-hover)]"
+                            >
+                                配置代理
+                            </button>
+                            <span>。</span>
+                        </>
+                    )}
+                </span>
                 {errObj.detail && errObj.detail !== errObj.error && (
                     <div className="relative shrink-0">
                         <button
@@ -3054,7 +3199,14 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                             </div>
 
                             {/* Network Proxy Settings */}
-                            <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
+                            <div
+                                ref={proxySectionRef}
+                                className={`rounded-xl border bg-[var(--paper-elevated)] p-5 transition-all ${
+                                    highlightProxySection
+                                        ? 'border-[var(--accent)] shadow-[0_0_0_3px_var(--accent-warm-subtle)]'
+                                        : 'border-[var(--line)]'
+                                }`}
+                            >
                                 <h3 className="text-base font-medium text-[var(--ink)]">网络代理</h3>
                                 <p className="mt-1 text-xs text-[var(--ink-muted)]">
                                     配置 HTTP/SOCKS5 代理，用于外部 API 请求（如 Clash、V2Ray 等）
@@ -3149,8 +3301,34 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                             </code>
                                         </div>
 
+                                        {proxyProbeState.status !== 'idle' && (
+                                            <div
+                                                className={`flex items-start gap-1.5 rounded-lg px-3 py-2 text-xs ${
+                                                    proxyProbeState.status === 'error'
+                                                        ? 'bg-[var(--error-bg)] text-[var(--error)]'
+                                                        : proxyProbeState.status === 'ok'
+                                                            ? 'bg-[var(--success-bg)] text-[var(--success)]'
+                                                            : 'bg-[var(--info-bg)] text-[var(--info)]'
+                                                }`}
+                                                title={'detail' in proxyProbeState ? proxyProbeState.detail : undefined}
+                                            >
+                                                {proxyProbeState.status === 'checking' ? (
+                                                    <Loader2 className="mt-0.5 h-3.5 w-3.5 shrink-0 animate-spin" />
+                                                ) : proxyProbeState.status === 'ok' ? (
+                                                    <Check className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                                                ) : (
+                                                    <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                                                )}
+                                                <span className="min-w-0 break-words">
+                                                    {proxyProbeState.status === 'checking'
+                                                        ? '正在检测代理连通性...'
+                                                        : proxyProbeState.message}
+                                                </span>
+                                            </div>
+                                        )}
+
                                         <p className="text-[10px] text-[var(--ink-faint)]">
-                                            注意：修改后需要重启应用或切换标签页才能生效
+                                            修改后会自动应用到运行中的会话
                                         </p>
                                     </div>
                                 )}
@@ -3246,6 +3424,12 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                                 ) : '检查更新'}
                                             </button>
                                         )}
+                                        <ExternalLink
+                                            href={MYAGENTS_RELEASES_URL}
+                                            className="rounded-lg bg-[var(--paper-inset)] px-2 py-0.5 text-xs text-[var(--ink-secondary)] transition-colors hover:bg-[var(--paper-elevated)]"
+                                        >
+                                            更新记录
+                                        </ExternalLink>
                                     </div>
                                     <p className="mt-3 text-base text-[var(--ink-secondary)]">
                                         Your Intent, Amplified
@@ -3393,6 +3577,15 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                             className="mt-1 block text-[var(--accent)] hover:underline"
                                         >
                                             myagents.io@gmail.com
+                                        </ExternalLink>
+                                    </div>
+                                    <div>
+                                        <p className="text-xs font-medium uppercase tracking-wider text-[var(--ink-muted)]">GitHub</p>
+                                        <ExternalLink
+                                            href={MYAGENTS_GITHUB_URL}
+                                            className="mt-1 block text-[var(--accent)] hover:underline"
+                                        >
+                                            更新记录
                                         </ExternalLink>
                                     </div>
                                 </div>

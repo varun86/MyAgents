@@ -1,6 +1,19 @@
 // Hook: Poll agent statuses from Rust cmd_all_agents_status (5s interval)
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { isTauriEnvironment } from '@/utils/browserMock';
+import { listenWithCleanup } from '@/utils/tauriListen';
+
+export interface ActiveSessionData {
+  sessionKey: string;
+  sessionId: string;
+  sourceType: 'private' | 'group';
+  sourceId?: string;
+  sourceDisplayName?: string;
+  lastSenderName?: string;
+  workspacePath: string;
+  messageCount: number;
+  lastActive: string;
+}
 
 interface ChannelStatusData {
   channelId: string;
@@ -10,7 +23,7 @@ interface ChannelStatusData {
   botUsername?: string;
   uptimeSeconds: number;
   lastMessageAt?: string;
-  activeSessions: unknown[];
+  activeSessions: ActiveSessionData[];
   errorMessage?: string;
   restartCount: number;
   bufferedMessages: number;
@@ -33,6 +46,7 @@ export function useAgentStatuses(enabled = true) {
   const [statuses, setStatuses] = useState<AgentStatusMap>({});
   const [loading, setLoading] = useState(true);
   const isMountedRef = useRef(true);
+  const requestSeqRef = useRef(0);
   // Keep latest fetch fn in a ref so interval always calls current version
   const fetchRef = useRef<() => void>(() => {});
 
@@ -48,15 +62,16 @@ export function useAgentStatuses(enabled = true) {
     }
 
     const fetchStatuses = async () => {
+      const requestSeq = ++requestSeqRef.current;
       try {
         const { invoke } = await import('@tauri-apps/api/core');
         const result = await invoke<AgentStatusMap>('cmd_all_agents_status');
-        if (isMountedRef.current) {
+        if (isMountedRef.current && requestSeq === requestSeqRef.current) {
           setStatuses(result);
           setLoading(false);
         }
       } catch {
-        if (isMountedRef.current) {
+        if (isMountedRef.current && requestSeq === requestSeqRef.current) {
           setLoading(false);
         }
       }
@@ -65,8 +80,11 @@ export function useAgentStatuses(enabled = true) {
 
     fetchStatuses();
     const id = setInterval(fetchStatuses, POLL_INTERVAL_MS);
+    const ac = new AbortController();
+    void listenWithCleanup('agent:status-changed', fetchStatuses, ac.signal);
     return () => {
       isMountedRef.current = false;
+      ac.abort();
       clearInterval(id);
     };
   }, [enabled]);
