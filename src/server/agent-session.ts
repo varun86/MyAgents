@@ -2,7 +2,14 @@ import { randomUUID } from 'crypto';
 import { existsSync, readdirSync, symlinkSync, lstatSync, readFileSync, readlinkSync, rmSync } from 'fs';
 import { dirname, join, resolve, sep } from 'path';
 import { createRequire } from 'module';
-import { query, getSessionMessages as sdkGetSessionMessages, type Query, type SDKUserMessage, type AgentDefinition, type HookInput, type HookJSONOutput, type PostToolUseHookInput } from '@anthropic-ai/claude-agent-sdk';
+import { query, getSessionMessages as sdkGetSessionMessages, type Query, type SDKUserMessage, type AgentDefinition, type HookInput, type HookJSONOutput, type PostToolUseHookInput, type PermissionRequestHookInput } from '@anthropic-ai/claude-agent-sdk';
+import {
+  decideBackgroundAgentPermission,
+  isBackgroundAgentToolRequest,
+  backgroundAgentDenyMessage,
+  DEFAULT_BACKGROUND_AGENT_PERMISSION_MODE,
+  type BackgroundAgentPermissionMode,
+} from './utils/background-agent-permission';
 import { registerBridge as registerBridgeInRegistry, unregisterBridge as unregisterBridgeInRegistry, type UpstreamBridgeConfig } from './openai-bridge/bridge-registry';
 import { getScriptDir, getBundledNodeDir, getSystemNodeDirs, getBundledRuntimePath, getSystemNpxPaths, findExistingPath } from './utils/runtime';
 import { getCrossPlatformEnv, isSkillBlockedOnPlatform } from './utils/platform';
@@ -2123,6 +2130,35 @@ export function setSessionPermissionMode(mode: PermissionMode): void {
 
   // Notify frontend of the mode change so UI stays in sync
   broadcast('chat:permission-mode-changed', { permissionMode: mode });
+}
+
+/**
+ * Background-agent permission policy (issue #264). Controls what a
+ * `run_in_background` sub-agent may do when it hits a tool that the SDK can't
+ * auto-resolve. The SDK never calls our `canUseTool` for background sub-agents
+ * — it routes those decisions to the `PermissionRequest` hook (registered in
+ * startStreamingSession), which consults this value. Default 'inherit' (only
+ * already-granted tools run in the background; nothing wider).
+ *
+ * Pushed per-session by the frontend alongside the chat-send payload (mirrors
+ * `currentPermissionMode`). Never inferred from the model's run_in_background
+ * choice — only from this explicit user setting.
+ */
+let currentBackgroundAgentPermissionMode: BackgroundAgentPermissionMode = DEFAULT_BACKGROUND_AGENT_PERMISSION_MODE;
+
+export function getBackgroundAgentPermissionMode(): BackgroundAgentPermissionMode {
+  return currentBackgroundAgentPermissionMode;
+}
+
+/**
+ * Set the background-agent permission policy. Takes effect for the next
+ * background sub-agent permission decision — no SDK restart needed (the hook
+ * reads this module-level value live). Idempotent.
+ */
+export function setBackgroundAgentPermissionMode(mode: BackgroundAgentPermissionMode): void {
+  if (mode === currentBackgroundAgentPermissionMode) return;
+  console.log(`[agent] background-agent permission mode: ${currentBackgroundAgentPermissionMode} -> ${mode}`);
+  currentBackgroundAgentPermissionMode = mode;
 }
 
 /**
@@ -8312,6 +8348,75 @@ async function startStreamingSession(preWarm = false): Promise<void> {
                 };
               }
               return { continue: true };
+            },
+          ],
+        }],
+        // PermissionRequest hook (issue #264): the ONLY permission decision point
+        // for background (run_in_background) sub-agents. Runtime-verified: the SDK
+        // never calls canUseTool for async sub-agents; it fires this hook with
+        // `agent_id` (== the background task_id) and otherwise auto-denies. We use
+        // it to (a) let background agents inherit the user's session "always allow"
+        // grants and (b) honor an opt-in fullAgency policy — while returning
+        // passthrough for foreground (main thread + sync sub-agents) so the
+        // existing canUseTool card path stays authoritative and unchanged.
+        PermissionRequest: [{
+          hooks: [
+            async (input: HookInput): Promise<HookJSONOutput> => {
+              const permInput = input as PermissionRequestHookInput;
+              const agentId = permInput.agent_id;
+              const toolName = permInput.tool_name;
+              // Confirmed background sub-agent iff the SDK gave us an agent_id that
+              // matches a currently-running background task (task_id === agent_id).
+              // startedBackgroundTasks is populated from the task_started message on
+              // the iterator channel, while this hook fires on the control channel —
+              // two independent paths off the same subprocess. In practice task_started
+              // is emitted (and drained) before a sub-agent's first gated tool call, so
+              // the lookup resolves; but it is NOT formally ordered. A miss therefore
+              // degrades to passthrough → the SDK's own auto-deny — i.e. it can only
+              // fail toward *deny* (safe side), never toward a spurious allow, and at
+              // most affects a background agent's very first tool call at startup.
+              const isBackgroundAgent = isBackgroundAgentToolRequest(agentId, startedBackgroundTasks);
+              // MCP-enablement recheck for background agents (cross-review #264): the
+              // foreground canUseTool path denies tools whose MCP server the user has
+              // since disabled (checkMcpToolPermission). The background allow path must
+              // mirror that gate — otherwise a stale session "always allow" grant could
+              // let a background sub-agent reach a now-disabled MCP server. Only applies
+              // to confirmed background agents; foreground keeps its own canUseTool check.
+              if (isBackgroundAgent) {
+                const mcpCheck = checkMcpToolPermission(toolName);
+                if (!mcpCheck.allowed) {
+                  console.log(`[permission] background-agent ${toolName} denied (MCP disabled: ${mcpCheck.reason}, agentId=${agentId})`);
+                  return {
+                    hookSpecificOutput: {
+                      hookEventName: 'PermissionRequest' as const,
+                      decision: { behavior: 'deny' as const, message: mcpCheck.reason },
+                    },
+                  };
+                }
+              }
+              const decision = decideBackgroundAgentPermission({
+                isBackgroundAgent,
+                toolName,
+                sessionAllowsTool: sessionAlwaysAllowed.has(toolName),
+                policy: currentBackgroundAgentPermissionMode,
+              });
+              if (decision === 'passthrough') return {};
+              if (decision === 'allow') {
+                console.log(`[permission] background-agent ${toolName} allowed (mode=${currentBackgroundAgentPermissionMode}, agentId=${agentId})`);
+                return {
+                  hookSpecificOutput: {
+                    hookEventName: 'PermissionRequest' as const,
+                    decision: { behavior: 'allow' as const },
+                  },
+                };
+              }
+              console.log(`[permission] background-agent ${toolName} denied (mode=${currentBackgroundAgentPermissionMode}, agentId=${agentId})`);
+              return {
+                hookSpecificOutput: {
+                  hookEventName: 'PermissionRequest' as const,
+                  decision: { behavior: 'deny' as const, message: backgroundAgentDenyMessage(toolName) },
+                },
+              };
             },
           ],
         }],
