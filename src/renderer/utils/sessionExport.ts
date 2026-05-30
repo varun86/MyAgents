@@ -7,7 +7,7 @@
  */
 
 import { getSessionDetails } from '@/api/sessionClient';
-import { localDateStr, sanitizeFileName, downloadMarkdown } from '@/utils/markdownExport';
+import { localDateStr, sanitizeFileName, downloadMarkdown, exportHeader } from '@/utils/markdownExport';
 
 export interface SessionExportResult {
     ok: boolean;
@@ -48,7 +48,7 @@ export async function exportSessionAsMarkdown(sessionId: string): Promise<Sessio
         const dateStr = localDateStr();
 
         const lines: string[] = [];
-        lines.push(`<!-- Exported from MyAgents · ${dateStr} -->`);
+        lines.push(exportHeader(dateStr));
         lines.push(`<!-- Session: ${data.title} -->`);
         lines.push('');
 
