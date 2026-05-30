@@ -462,6 +462,13 @@ export function handleStreamResponse(
   const translator = new StreamTranslator(requestModel, translateReasoning);
   const sseParser = new SSEParser();
   if (!upstreamResp.body) {
+    // Detach the downstream-abort listener the main handler wired to
+    // request.signal before handing us lifecycle ownership. Every other exit
+    // path (done/error/cancel) calls detachDownstream(); this rare empty-body
+    // return must too, or the listener leaks for the request's lifetime.
+    if (downstreamSignal) {
+      try { downstreamSignal.removeEventListener('abort', onDownstreamAbort); } catch { /* ignore */ }
+    }
     return new Response('', { status: 200, headers: streamHeaders() });
   }
 
@@ -702,6 +709,11 @@ export function handleResponsesStreamResponse(
   const translator = new ResponsesStreamTranslator(requestModel);
   const sseParser = new SSEParser();
   if (!upstreamResp.body) {
+    // See handleStreamResponse: detach the request.signal listener so the rare
+    // empty-body return doesn't leak it.
+    if (downstreamSignal) {
+      try { downstreamSignal.removeEventListener('abort', onDownstreamAbort); } catch { /* ignore */ }
+    }
     return new Response('', { status: 200, headers: streamHeaders() });
   }
 
@@ -734,6 +746,11 @@ export function handleResponsesStreamResponse(
       const text = decoder.decode(chunk, { stream: true });
       const sseEvents = sseParser.feed(text);
       for (const sseEvent of sseEvents) {
+        // Intentional asymmetry vs the Chat path: the Responses translator
+        // finalizes inline on `response.completed`/`response.failed` (its real
+        // protocol terminators), so `[DONE]` — which isn't part of the OpenAI
+        // Responses streaming spec — is simply dropped here. The idle-timeout
+        // covers a (non-spec) provider that sends only `[DONE]`. See issue #277.
         if (sseEvent.data === '[DONE]') continue;
         try {
           controller.enqueue(JSON.parse(sseEvent.data) as ResponsesStreamEvent);

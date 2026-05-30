@@ -109,13 +109,11 @@ fn read_meta(meta_path: &Path) -> Option<CacheMeta> {
 }
 
 /// Decide whether to hit the network. PURE — testable.
-/// - Data file missing → always fetch (we have nothing to serve).
-/// - No meta / no timestamp → fetch.
-/// - Checked within `min_recheck_secs` → skip (throttle rapid restarts).
-fn should_fetch(meta: Option<&CacheMeta>, data_exists: bool, now: u64, min_recheck_secs: u64) -> bool {
-    if !data_exists {
-        return true;
-    }
+/// Throttle on the last ATTEMPT timestamp (meta is written on success AND
+/// failure), regardless of whether a cache body exists — otherwise a
+/// persistently-blocked GitHub (no proxy, offline) would re-hit the network on
+/// every launch because "no data → always fetch". Missing/zeroed meta → fetch.
+fn should_fetch(meta: Option<&CacheMeta>, now: u64, min_recheck_secs: u64) -> bool {
     match meta {
         Some(m) if m.fetched_at_secs > 0 => now.saturating_sub(m.fetched_at_secs) >= min_recheck_secs,
         _ => true,
@@ -125,7 +123,10 @@ fn should_fetch(meta: Option<&CacheMeta>, data_exists: bool, now: u64, min_reche
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let tmp = path.with_extension("tmp");
     fs::write(&tmp, bytes).map_err(|e| format!("write tmp failed: {e}"))?;
-    fs::rename(&tmp, path).map_err(|e| format!("rename failed: {e}"))?;
+    if let Err(e) = fs::rename(&tmp, path) {
+        let _ = fs::remove_file(&tmp); // don't leave a stale tmp behind (mirrors updater.rs)
+        return Err(format!("rename failed: {e}"));
+    }
     Ok(())
 }
 
@@ -158,35 +159,54 @@ async fn refresh_once() -> Result<RefreshOutcome, String> {
     let meta_path = dir.join(META_FILE);
 
     let meta = read_meta(&meta_path);
-    let data_exists = data_path.exists();
     let now = now_secs();
-    if !should_fetch(meta.as_ref(), data_exists, now, MIN_RECHECK_SECS) {
+    if !should_fetch(meta.as_ref(), now, MIN_RECHECK_SECS) {
         return Ok(RefreshOutcome::Throttled);
     }
 
+    let prev_etag = meta.and_then(|m| m.etag);
+    let result = fetch_and_store(&data_path, &meta_path, prev_etag.clone(), now).await;
+    if result.is_err() {
+        // Record the ATTEMPT so the throttle covers failures too — otherwise a
+        // blocked/offline GitHub (common without a proxy) gets re-hit on every
+        // launch. Preserve the prior etag so a later success can still 304.
+        let _ = write_meta(&meta_path, &CacheMeta { etag: prev_etag, fetched_at_secs: now });
+    }
+    result
+}
+
+/// Network half: conditional GET → handle 304 / 200, bounded read, validate,
+/// store. Writes meta on success (304 and 200). Errors propagate to the caller,
+/// which records the attempt timestamp.
+async fn fetch_and_store(
+    data_path: &Path,
+    meta_path: &Path,
+    prev_etag: Option<String>,
+    now: u64,
+) -> Result<RefreshOutcome, String> {
     let client = build_client()?;
     let mut req = client.get(LITELLM_URL);
     // Only send If-None-Match when we actually have the matching body on disk.
-    if data_exists {
-        if let Some(tag) = meta.as_ref().and_then(|m| m.etag.as_deref()) {
+    if data_path.exists() {
+        if let Some(tag) = prev_etag.as_deref() {
             req = req.header(reqwest::header::IF_NONE_MATCH, tag);
         }
     }
 
-    let resp = req.send().await.map_err(|e| format!("request failed: {e}"))?;
+    let mut resp = req.send().await.map_err(|e| format!("request failed: {e}"))?;
     let status = resp.status();
 
     if status == reqwest::StatusCode::NOT_MODIFIED {
         // Unchanged — keep the body, just record that we checked (so the 24h /
         // restart throttle advances). Preserve the existing etag.
-        let etag = meta.and_then(|m| m.etag);
-        write_meta(&meta_path, &CacheMeta { etag, fetched_at_secs: now })?;
+        write_meta(meta_path, &CacheMeta { etag: prev_etag, fetched_at_secs: now })?;
         return Ok(RefreshOutcome::NotModified);
     }
     if !status.is_success() {
         return Err(format!("upstream HTTP {status}"));
     }
 
+    // Fast reject when the length is advertised…
     if let Some(len) = resp.content_length() {
         if len > MAX_BYTES {
             return Err(format!("oversize body: content-length {len} > {MAX_BYTES}"));
@@ -197,18 +217,24 @@ async fn refresh_once() -> Result<RefreshOutcome, String> {
         .get(reqwest::header::ETAG)
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
-    let bytes = resp.bytes().await.map_err(|e| format!("read body failed: {e}"))?;
-    if bytes.len() as u64 > MAX_BYTES {
-        return Err(format!("oversize body: {} bytes > {MAX_BYTES}", bytes.len()));
+    // …and a hard bound while streaming, so a chunked response with no
+    // Content-Length (captive portal / hostile proxy) can't OOM us before the
+    // check. Abort as soon as the accumulator would exceed the cap.
+    let mut body: Vec<u8> = Vec::new();
+    while let Some(chunk) = resp.chunk().await.map_err(|e| format!("read body failed: {e}"))? {
+        if body.len() as u64 + chunk.len() as u64 > MAX_BYTES {
+            return Err(format!("oversize body: exceeds {MAX_BYTES} bytes"));
+        }
+        body.extend_from_slice(&chunk);
     }
     // Validate it's actually JSON before we let the sidecar trust it — a captive
     // portal / error page returned with 200 would otherwise poison the cache.
-    serde_json::from_slice::<serde_json::Value>(&bytes)
+    serde_json::from_slice::<serde_json::Value>(&body)
         .map_err(|e| format!("upstream returned non-JSON: {e}"))?;
 
-    write_atomic(&data_path, &bytes)?;
-    write_meta(&meta_path, &CacheMeta { etag: new_etag, fetched_at_secs: now })?;
-    ulog_info!("[litellm] cache updated ({} bytes)", bytes.len());
+    write_atomic(data_path, &body)?;
+    write_meta(meta_path, &CacheMeta { etag: new_etag, fetched_at_secs: now })?;
+    ulog_info!("[litellm] cache updated ({} bytes)", body.len());
     Ok(RefreshOutcome::Updated)
 }
 
@@ -250,20 +276,25 @@ mod tests {
     }
 
     #[test]
-    fn should_fetch_when_data_missing_regardless_of_meta() {
-        let fresh = CacheMeta { etag: Some("x".into()), fetched_at_secs: 1_000_000 };
-        // data missing → always fetch, even with a very recent meta
-        assert!(should_fetch(Some(&fresh), false, 1_000_010, MIN_RECHECK_SECS));
+    fn should_fetch_throttles_on_last_attempt_even_without_a_cache_body() {
+        // A recent ATTEMPT (success OR failure writes meta) throttles regardless
+        // of whether data exists — so offline/blocked GitHub isn't re-hit every
+        // launch. This is the #277-review fix (Codex finding #4).
+        let recent = CacheMeta { etag: Some("x".into()), fetched_at_secs: 1_000_000 };
+        assert!(!should_fetch(Some(&recent), 1_000_000 + 10, MIN_RECHECK_SECS));
+        // zeroed/garbage timestamp → fetch
+        let zero = CacheMeta { etag: None, fetched_at_secs: 0 };
+        assert!(should_fetch(Some(&zero), 1_000_000, MIN_RECHECK_SECS));
     }
 
     #[test]
-    fn should_fetch_respects_recheck_floor_when_data_present() {
+    fn should_fetch_respects_recheck_floor() {
         let meta = CacheMeta { etag: Some("x".into()), fetched_at_secs: 1_000_000 };
         // within the floor → skip
-        assert!(!should_fetch(Some(&meta), true, 1_000_000 + 10, MIN_RECHECK_SECS));
+        assert!(!should_fetch(Some(&meta), 1_000_000 + 10, MIN_RECHECK_SECS));
         // past the floor → fetch
-        assert!(should_fetch(Some(&meta), true, 1_000_000 + MIN_RECHECK_SECS, MIN_RECHECK_SECS));
-        // no meta but data present (manually placed file) → fetch
-        assert!(should_fetch(None, true, 1_000_000, MIN_RECHECK_SECS));
+        assert!(should_fetch(Some(&meta), 1_000_000 + MIN_RECHECK_SECS, MIN_RECHECK_SECS));
+        // never attempted → fetch
+        assert!(should_fetch(None, 1_000_000, MIN_RECHECK_SECS));
     }
 }

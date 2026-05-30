@@ -91,6 +91,21 @@ describe('parseLiteLLMCatalog', () => {
     expect(m.get('deepseek-chat')?.contextLength).toBe(131072); // bare id our presets use
   });
 
+  it('a literal key always beats a provider/model tail collision, regardless of entry order', () => {
+    // provider/model listed BEFORE the literal
+    const a = parseLiteLLMCatalog({
+      'azure/gpt-4': { max_input_tokens: 100, mode: 'chat' },
+      'gpt-4': { max_input_tokens: 8192, mode: 'chat' },
+    });
+    expect(a.get('gpt-4')?.contextLength).toBe(8192); // literal wins, not the 100 tail
+    // literal listed BEFORE provider/model
+    const b = parseLiteLLMCatalog({
+      'gpt-4': { max_input_tokens: 8192, mode: 'chat' },
+      'azure/gpt-4': { max_input_tokens: 100, mode: 'chat' },
+    });
+    expect(b.get('gpt-4')?.contextLength).toBe(8192); // still the literal
+  });
+
   it('skips entries with neither a context window nor an output limit', () => {
     const m = parseLiteLLMCatalog({ 'pricing-only': { input_cost_per_token: 0.0001, mode: 'chat' } });
     expect(m.has('pricing-only')).toBe(false);

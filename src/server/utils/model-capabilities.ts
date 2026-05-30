@@ -234,9 +234,12 @@ function loadPresetCustomModels(home: string): Record<string, unknown> | null {
 export function parseLiteLLMCatalog(raw: unknown): Map<string, ModelCapability> {
   const out = new Map<string, ModelCapability>();
   if (!raw || typeof raw !== 'object') return out;
-  const add = (id: string, cap: ModelCapability): void => {
-    if (id && !out.has(id)) out.set(id, cap);
-  };
+  // Two passes so a literal key always beats a provider-stripped tail,
+  // independent of Object.entries order: pass 1 claims every literal key, pass 2
+  // fills tails only for ids no literal key already took. (A single pass would
+  // let `provider/model` install the `model` tail before a later literal
+  // `model` could — the opposite of the intended precedence.)
+  const tailCandidates: Array<[string, ModelCapability]> = [];
   for (const [key, val] of Object.entries(raw as Record<string, unknown>)) {
     if (key === 'sample_spec') continue;
     if (!val || typeof val !== 'object') continue;
@@ -247,9 +250,12 @@ export function parseLiteLLMCatalog(raw: unknown): Map<string, ModelCapability> 
     const maxOutputTokens = coercePositiveFinite(e.max_output_tokens);
     if (!contextLength && !maxOutputTokens) continue;
     const cap: ModelCapability = { contextLength, maxOutputTokens, source: 'litellm' };
-    add(key, cap);
+    if (!out.has(key)) out.set(key, cap);
     const slash = key.lastIndexOf('/');
-    if (slash >= 0 && slash < key.length - 1) add(key.slice(slash + 1), cap);
+    if (slash >= 0 && slash < key.length - 1) tailCandidates.push([key.slice(slash + 1), cap]);
+  }
+  for (const [tail, cap] of tailCandidates) {
+    if (!out.has(tail)) out.set(tail, cap);
   }
   return out;
 }
