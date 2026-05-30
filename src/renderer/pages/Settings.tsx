@@ -3606,7 +3606,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                             href={MYAGENTS_GITHUB_URL}
                                             className="mt-1 block text-[var(--accent)] hover:underline"
                                         >
-                                            更新记录
+                                            github.com/hAcKlyc/MyAgents
                                         </ExternalLink>
                                     </div>
                                 </div>
