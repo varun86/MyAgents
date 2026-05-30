@@ -24,6 +24,7 @@ import type { ReactNode } from 'react';
 import type { SubagentToolCall, ToolInput, ToolUseSimple } from '@/types/chat';
 
 import { getEffectiveTodoWriteTodos } from '@/utils/todoWriteState';
+import { getTaskListSnapshot } from '@/utils/taskTodoState';
 
 // ===== MCP Server Name Registry =====
 // Module-level map updated by Chat.tsx when MCP config changes.
@@ -184,6 +185,37 @@ function getTodoWriteLabel(tool: ToolUseSimple): string {
   return 'Todo List';
 }
 
+// SDK 0.3.142+ incremental Task tools (TaskCreate/TaskUpdate/TaskGet/TaskList) —
+// compact badge labels. Distinct from the sub-agent launcher 'Task'.
+function getTaskTodoLabel(tool: ToolUseSimple): string {
+  switch (tool.name) {
+    case 'TaskCreate': {
+      const subject = getStringProp(tool.parsedInput, 'subject');
+      return subject ? `New: ${subject}` : 'New task';
+    }
+    case 'TaskUpdate': {
+      const status = getStringProp(tool.parsedInput, 'status');
+      const subject = getStringProp(tool.parsedInput, 'subject');
+      if (status === 'completed') return subject ? `Done: ${subject}` : 'Task done';
+      if (status === 'in_progress') return subject ? `Start: ${subject}` : 'Task started';
+      if (status === 'deleted') return subject ? `Drop: ${subject}` : 'Task dropped';
+      return subject ? `Update: ${subject}` : 'Update task';
+    }
+    case 'TaskGet':
+      return 'Get task';
+    case 'TaskList': {
+      const tasks = getTaskListSnapshot(tool);
+      if (tasks && tasks.length > 0) {
+        const completedCount = tasks.filter((t) => t.status === 'completed').length;
+        return `Tasks ${completedCount}/${tasks.length}`;
+      }
+      return 'Task List';
+    }
+    default:
+      return tool.name;
+  }
+}
+
 export interface ToolBadgeConfig {
   icon: ReactNode;
   colors: {
@@ -335,7 +367,12 @@ export function getToolBadgeConfig(toolName: string): ToolBadgeConfig {
           iconColor: 'text-indigo-500 dark:text-indigo-400'
         }
       };
+    // SDK 0.3.142+ Task tools share the task-list family styling (indigo + ListTodo).
     case 'TodoWrite':
+    case 'TaskCreate':
+    case 'TaskUpdate':
+    case 'TaskGet':
+    case 'TaskList':
       return {
         icon: <ListTodo className="size-4" />,
         colors: {
@@ -522,6 +559,11 @@ export function getToolLabel(tool: ToolUseSimple): string {
   if (tool.name === 'TodoWrite') {
     return getTodoWriteLabel(tool);
   }
+  // Task tools read result (TaskList) / input that may be absent mid-stream —
+  // handle before the `!parsedInput` early-return below.
+  if (tool.name === 'TaskCreate' || tool.name === 'TaskUpdate' || tool.name === 'TaskGet' || tool.name === 'TaskList') {
+    return getTaskTodoLabel(tool);
+  }
 
   if (!tool.parsedInput) {
     // Try to parse from inputJson if available
@@ -687,6 +729,11 @@ export function getToolExpandedLabel(tool: ToolUseSimple): string {
       return 'Bash Output';
     case 'TodoWrite':
       return 'Todo List';
+    case 'TaskCreate':
+    case 'TaskUpdate':
+    case 'TaskGet':
+    case 'TaskList':
+      return getTaskTodoLabel(tool);
     case 'Task':
     case 'Agent': {
       const description = getStringProp(tool.parsedInput, 'description');

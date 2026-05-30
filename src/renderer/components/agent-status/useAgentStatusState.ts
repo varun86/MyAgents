@@ -11,6 +11,7 @@ import { useEffect, useMemo, useState } from 'react';
 
 import type { AgentInput, Message } from '@/types/chat';
 import { getEffectiveTodoWriteTodos } from '@/utils/todoWriteState';
+import { accumulateTaskTodos, isTaskTodoTool, type TaskToolCall } from '@/utils/taskTodoState';
 import {
   BACKGROUND_TASK_STATUS_EVENT,
   getBackgroundTaskStatus,
@@ -70,6 +71,10 @@ export function useAgentStatusState(messages: Message[]): AgentStatusState {
   return useMemo<AgentStatusState>(() => {
     let todos: TodoItem[] = [];
     const subagents: SubagentStatus[] = [];
+    // SDK 0.3.142+ Task tools (TaskCreate/Update/Get/List), collected in order for
+    // the task-id accumulator. Used in preference to the legacy TodoWrite snapshot
+    // when present (a session uses one or the other, never both).
+    const taskCalls: TaskToolCall[] = [];
 
     // B1 兜底：历史里所有 task-notification 消息里的 toolUseId 都视为已完成。
     const completedBgFromHistory = collectCompletedBgToolIdsFromHistory(messages);
@@ -99,6 +104,11 @@ export function useAgentStatusState(messages: Message[]): AgentStatusState {
           continue;
         }
 
+        if (isTaskTodoTool(tool.name)) {
+          taskCalls.push({ name: tool.name, parsedInput: tool.parsedInput, result: tool.result });
+          continue;
+        }
+
         if (tool.name === 'Task' || tool.name === 'Agent') {
           const input = tool.parsedInput as AgentInput | undefined;
           const isBackground = input?.run_in_background === true;
@@ -120,6 +130,23 @@ export function useAgentStatusState(messages: Message[]): AgentStatusState {
             subagents.push(buildSubagentStatus(tool, input, 'sync'));
           }
         }
+      }
+    }
+
+    // SDK 0.3.142+ Task tools take precedence over the legacy TodoWrite snapshot.
+    // A session resumed across the upgrade can contain BOTH (old TodoWrite turns +
+    // new Task turns), so only override when the accumulator actually yields tasks
+    // — a lone TaskGet or a still-streaming TaskCreate must not blank out a prior
+    // TodoWrite list.
+    if (taskCalls.length > 0) {
+      const taskTodos = accumulateTaskTodos(taskCalls);
+      if (taskTodos.length > 0) {
+        todos = taskTodos.map(t => ({
+          content: t.content,
+          status: t.status,
+          activeForm: t.activeForm,
+          key: t.id,
+        }));
       }
     }
 

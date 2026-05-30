@@ -2978,10 +2978,13 @@ function getPermissionRules(mode: PermissionMode): PermissionRules {
           'Read', 'Glob', 'Grep', 'LS',           // Read operations
           'Edit', 'Write', 'MultiEdit',           // Write operations (acceptEdits)
           'NotebookEdit', 'TodoRead', 'TodoWrite', // Notebook/Todo operations
+          // SDK 0.3.142+ Task tools replaced TodoWrite — same bookkeeping nature,
+          // no host side effects, so auto-approve like TodoWrite did.
+          'TaskCreate', 'TaskUpdate', 'TaskGet', 'TaskList',
           'Skill'                                  // Skills - auto-approve skill invocations
         ],
         deniedTools: [],
-        // Bash, Task, WebFetch, WebSearch, mcp__* → need confirmation
+        // Bash, Task (sub-agent launcher), WebFetch, WebSearch, mcp__* → need confirmation
       };
     case 'plan':
       return {

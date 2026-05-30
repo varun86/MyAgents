@@ -15,6 +15,7 @@ import ReadTool from './tools/ReadTool';
 import SkillTool from './tools/SkillTool';
 import TaskTool from './tools/TaskTool';
 import TodoWriteTool from './tools/TodoWriteTool';
+import TaskTodoTool from './tools/TaskTodoTool';
 import ToolAttachmentGallery from './tools/ToolAttachmentGallery';
 import WebFetchTool from './tools/WebFetchTool';
 import WebSearchTool from './tools/WebSearchTool';
@@ -113,6 +114,13 @@ function renderToolBody(tool: ToolUseSimple): React.JSX.Element {
       return <TaskTool tool={tool} />;
     case 'TodoWrite':
       return <TodoWriteTool tool={tool} />;
+    // SDK 0.3.142+ incremental Task tools (replaced TodoWrite). NOTE: distinct from
+    // the sub-agent launcher 'Task'/'Agent' above — different tools, same word.
+    case 'TaskCreate':
+    case 'TaskUpdate':
+    case 'TaskGet':
+    case 'TaskList':
+      return <TaskTodoTool tool={tool} />;
     case 'WebFetch':
       return <WebFetchTool tool={tool} />;
     case 'WebSearch':
