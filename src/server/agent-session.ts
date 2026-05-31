@@ -2,7 +2,7 @@ import { randomUUID } from 'crypto';
 import { existsSync, readdirSync, symlinkSync, lstatSync, readFileSync, readlinkSync, rmSync } from 'fs';
 import { dirname, join, resolve, sep } from 'path';
 import { createRequire } from 'module';
-import { query, getSessionMessages as sdkGetSessionMessages, type Query, type SDKUserMessage, type AgentDefinition, type HookInput, type HookJSONOutput, type PostToolUseHookInput, type PermissionRequestHookInput } from '@anthropic-ai/claude-agent-sdk';
+import { query, getSessionMessages as sdkGetSessionMessages, forkSession as sdkForkSession, deleteSession as sdkDeleteSession, type Query, type SDKUserMessage, type AgentDefinition, type HookInput, type HookJSONOutput, type PostToolUseHookInput, type PermissionRequestHookInput } from '@anthropic-ai/claude-agent-sdk';
 import {
   decideBackgroundAgentPermission,
   isBackgroundAgentToolRequest,
@@ -17,6 +17,7 @@ import { ensureDirSync, isDirEntry } from './utils/fs-utils';
 import { getMyAgentsNpmGlobalBinDir, getMyAgentsNpmGlobalPrefix, scrubMyAgentsNpmPrefixEnv } from './utils/npm-prefix-env';
 import { applyContextWindowSuffix, lookupModelContextLength, modelSupportsModality } from './utils/model-capabilities';
 import { deriveReloadResumeAnchor, resolveEffectiveResumeAt } from './utils/rewind-anchor';
+import { buildForkUuidRemap, remapStoredSdkUuids } from './utils/fork-remap';
 import { InactivityWatchdog } from './utils/inactivity-watchdog';
 import { processImage, resizeToolImageContent, classifyImageError } from './utils/imageResize';
 import { writeBase64FilesToAgentDir } from './utils/workspace-files';
@@ -7445,6 +7446,92 @@ export async function rewindSession(userMessageId: string): Promise<{
  * Non-destructive — the current session remains untouched.
  * The new session uses SDK's forkSession option on first startup.
  */
+/**
+ * PRD 0.2.27 — eager fork via the standalone SDK `forkSession()` function (behind the
+ * MYAGENTS_EAGER_FORK flag; default OFF, the lazy forkFrom path stays the default). Creates
+ * the fork's SDK transcript up front, rebuilds the old→new sdkUuid map at SDK granularity,
+ * and re-stamps our copied rows so the forked session resumes as a plain session (no forkFrom
+ * state machine, no fork-at-tail degradation). Returns `ok:false` — caller falls back to the
+ * lazy path — on a turn-in-flight / not-yet-flushed anchor / SDK error / ANY structural
+ * mismatch, and cleans up the orphan SDK session on a post-fork failure. See
+ * specs/prd/prd_0.2.27_fork_standalone_migration.md.
+ */
+async function tryEagerFork(opts: {
+  sourceSdkSid: string;
+  anchorUuid: string;
+  dir: string;
+  forkedMessages: SessionMessage[];
+}): Promise<{ ok: true; newSid: string; remapped: SessionMessage[] } | { ok: false; reason: string }> {
+  const { sourceSdkSid, anchorUuid, dir, forkedMessages } = opts;
+  const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
+
+  // Flush gate ①: never eager-fork while the source session is BUSY (turn in flight /
+  // streaming / queued / mid-turn buffered) — its tail may be mid-write. Use isSessionBusy()
+  // (the single source of truth for "safe to mutate"), NOT isProcessing: isProcessing is true
+  // for an alive persistent subprocess even when idle, so gating on it would make the eager
+  // path unreachable in the normal (idle) fork flow — it would always fall back to lazy.
+  if (isSessionBusy()) return { ok: false, reason: 'source session is busy' };
+
+  // Flush gate ②: the anchor must already be flushed into the source SDK transcript; reuse
+  // that transcript (sliced to the anchor) as the LHS of the remap.
+  let srcSdk: Awaited<ReturnType<typeof sdkGetSessionMessages>>;
+  try {
+    srcSdk = await sdkGetSessionMessages(sourceSdkSid, { dir });
+  } catch (e) {
+    return { ok: false, reason: `source getSessionMessages failed: ${errMsg(e)}` };
+  }
+  const anchorIdx = srcSdk.findIndex(m => m.uuid === anchorUuid);
+  if (anchorIdx < 0) return { ok: false, reason: 'anchor not yet flushed to source SDK transcript' };
+  const srcSliced = srcSdk.slice(0, anchorIdx + 1);
+
+  // Re-check right before the SDK fork: a turn may have started during the getSessionMessages
+  // await (gate ① is not an atomic admission lock). This narrows the window; a concurrent
+  // append AFTER the anchor is additionally self-defending — the slice/remap is over the
+  // immutable up-to-anchor prefix, so any structural change makes buildForkUuidRemap return
+  // ok:false → clean fallback. (A full fork-admission lock is a pre-default-ON follow-up.)
+  if (isSessionBusy()) return { ok: false, reason: 'source became busy during fork prep' };
+
+  // Eager SDK fork (copies + remaps uuids into a new session file under `dir`).
+  let newSid: string;
+  try {
+    const res = await sdkForkSession(sourceSdkSid, { upToMessageId: anchorUuid, dir });
+    newSid = res.sessionId;
+  } catch (e) {
+    return { ok: false, reason: `sdkForkSession failed: ${errMsg(e)}` };
+  }
+
+  // From here the SDK fork file exists — clean it up on any failure before falling back.
+  // Guard `newSid !== sourceSdkSid` so cleanup can NEVER touch the source (defensive).
+  const fail = async (reason: string): Promise<{ ok: false; reason: string }> => {
+    if (newSid !== sourceSdkSid) {
+      try { await sdkDeleteSession(newSid, { dir }); } catch { /* orphan cleanup is best-effort */ }
+    }
+    return { ok: false, reason };
+  };
+
+  // Defensive: the SDK returns a fresh UUID, but never adopt an id that already names a
+  // MyAgents session (corrupt sessions.json / hypothetical SDK reuse) — clean up + fall back.
+  if (getSessionMetadata(newSid)) {
+    return fail(`fork id collides with an existing MyAgents session: ${newSid}`);
+  }
+
+  let forkSdk: Awaited<ReturnType<typeof sdkGetSessionMessages>>;
+  try {
+    forkSdk = await sdkGetSessionMessages(newSid, { dir });
+  } catch (e) {
+    return fail(`fork getSessionMessages failed: ${errMsg(e)}`);
+  }
+
+  const remap = buildForkUuidRemap(srcSliced, forkSdk);
+  if (!remap.ok) return fail(`uuid remap failed: ${remap.reason}`);
+
+  const applied = remapStoredSdkUuids(forkedMessages.map(m => m.sdkUuid), remap.map);
+  if (!applied.ok) return fail(`stored uuid re-stamp failed: ${applied.reason}`);
+  const remapped = forkedMessages.map((m, i) => ({ ...m, sdkUuid: applied.remapped[i] }));
+
+  return { ok: true, newSid, remapped };
+}
+
 export async function forkSession(assistantMessageId: string): Promise<{
   success: boolean;
   newSessionId?: string;
@@ -7513,7 +7600,7 @@ export async function forkSession(assistantMessageId: string): Promise<{
   const sourceTitle = sourceMeta?.title || 'Chat';
 
   try {
-    // 3. Create new session metadata with forkFrom.
+    // Common: inherited config snapshot + the copied message slice (both fork paths use them).
     // v0.1.69: Inherit the source session's snapshot (model/permission/mcp/provider/runtime).
     // Forking from a "locked" Desktop session yields a locked clone with the same config —
     // Branching off a conversation should not silently change AI behavior. The user can
@@ -7527,15 +7614,9 @@ export async function forkSession(assistantMessageId: string): Promise<{
       providerEnvJson: sourceMeta.providerEnvJson,
       configSnapshotAt: sourceMeta.configSnapshotAt,
     } : {};
-    const newSession = createSessionMetadata(currentAgentDir, inheritedSnapshot);
-    newSession.title = `🌿 ${sourceTitle}`;
-    newSession.titleSource = 'auto';
-    newSession.forkFrom = {
-      sourceSessionId,
-      messageUuid: targetMsg.sdkUuid,
-    };
 
-    // 4. Copy messages up to and including the fork point
+    // Copy messages up to and including the fork point (sdkUuid preserved here; the EAGER
+    // path re-stamps them to the fork's new uuids before persisting).
     const forkedMessages: SessionMessage[] = messageSource.slice(0, targetIndex + 1).map(m => ({
       id: m.id,
       role: m.role,
@@ -7551,30 +7632,72 @@ export async function forkSession(assistantMessageId: string): Promise<{
       metadata: m.metadata,
     }));
 
-    // 5. Persist new session.
-    // Pattern 3 §3.2.4 — fix #2 (forkSession parent cursor). Snapshot the
-    // parent's persist cursor + cache before invoking SessionStore writers
-    // for the FORKED session; restore them afterwards so a subsequent persist
-    // on the parent doesn't accidentally observe stale state from any code
-    // path that might mutate this module's locals during the fork. fork's
-    // saveSessionMessages writes to a different file under a different lock,
-    // so this is defensive — but cheap insurance against future regressions.
+    // Pattern 3 §3.2.4 — fix #2 (forkSession parent cursor). Snapshot the parent's persist
+    // cursor + cache before invoking SessionStore writers for the FORKED session; restore
+    // them afterwards so a subsequent persist on the parent doesn't observe stale state.
     const parentPersistCursorSnapshot = lastPersistedIndex;
     const parentPersistCacheSnapshot = persistedSessionMessageCache.slice();
+    const restoreParentPersistState = () => {
+      if (lastPersistedIndex !== parentPersistCursorSnapshot) {
+        console.warn(`[agent] forkSession: parent persist cursor drifted (${parentPersistCursorSnapshot} → ${lastPersistedIndex}); restoring`);
+        lastPersistedIndex = parentPersistCursorSnapshot;
+      }
+      if (persistedSessionMessageCache.length !== parentPersistCacheSnapshot.length) {
+        persistedSessionMessageCache.length = 0;
+        for (const m of parentPersistCacheSnapshot) persistedSessionMessageCache.push(m);
+      }
+    };
 
+    // PRD 0.2.27 — EAGER fork (behind MYAGENTS_EAGER_FORK; default OFF). Create the SDK fork
+    // up front + re-stamp our rows' sdkUuids, so the fork resumes as a plain session with NO
+    // forkFrom state machine (#134/#135) and NO fork-at-tail degradation (#220). Any decline
+    // (turn in flight / anchor not flushed / structural mismatch) cleanly falls back below.
+    if (process.env.MYAGENTS_EAGER_FORK === '1') {
+      const eager = await tryEagerFork({
+        sourceSdkSid: sourceMeta?.sdkSessionId ?? sourceSessionId,
+        anchorUuid: targetMsg.sdkUuid,
+        dir: currentAgentDir,
+        forkedMessages,
+      });
+      if (eager.ok) {
+        // Unified session: use the SDK's returned fork id as OUR session id AND sdkSessionId,
+        // so switchToSession (`sessionMeta.sdkSessionId` → sessionRegistered=true) resumes the
+        // already-created SDK fork file on first start instead of trying to create it (which
+        // would collide). No forkFrom. (Codex review #5.)
+        const newSession = createSessionMetadata(currentAgentDir, inheritedSnapshot);
+        newSession.id = eager.newSid;
+        newSession.sdkSessionId = eager.newSid;
+        newSession.unifiedSession = true;
+        newSession.title = `🌿 ${sourceTitle}`;
+        newSession.titleSource = 'auto';
+        try {
+          await saveSessionMetadata(newSession);
+          await saveSessionMessages(newSession.id, eager.remapped);
+        } catch (persistErr) {
+          // Persist threw AFTER the SDK fork file was created — clean up the orphan SDK
+          // transcript so we don't leak it, then let the outer catch surface the failure.
+          try { await sdkDeleteSession(eager.newSid, { dir: currentAgentDir }); } catch { /* best-effort */ }
+          throw persistErr;
+        }
+        restoreParentPersistState();
+        console.log(`[agent] forked session (EAGER) ${sourceSessionId} → ${newSession.id} at ${assistantMessageId}, ${eager.remapped.length} messages, sdkUuids remapped`);
+        return { success: true, newSessionId: newSession.id, agentDir: currentAgentDir, title: newSession.title };
+      }
+      console.warn(`[agent] eager fork declined (${eager.reason}) — falling back to lazy forkFrom path`);
+    }
+
+    // Default: lazy fork — write forkFrom + copied rows (old uuids); the SDK fork is
+    // materialized at the forked session's first startup via query({ forkSession: true }).
+    const newSession = createSessionMetadata(currentAgentDir, inheritedSnapshot);
+    newSession.title = `🌿 ${sourceTitle}`;
+    newSession.titleSource = 'auto';
+    newSession.forkFrom = {
+      sourceSessionId,
+      messageUuid: targetMsg.sdkUuid,
+    };
     await saveSessionMetadata(newSession);
     await saveSessionMessages(newSession.id, forkedMessages);
-
-    // Restore parent persistence state (no-op in normal flow; defends against
-    // future cross-talk if forkSession ever needs to run a parent write too).
-    if (lastPersistedIndex !== parentPersistCursorSnapshot) {
-      console.warn(`[agent] forkSession: parent persist cursor drifted (${parentPersistCursorSnapshot} → ${lastPersistedIndex}); restoring`);
-      lastPersistedIndex = parentPersistCursorSnapshot;
-    }
-    if (persistedSessionMessageCache.length !== parentPersistCacheSnapshot.length) {
-      persistedSessionMessageCache.length = 0;
-      for (const m of parentPersistCacheSnapshot) persistedSessionMessageCache.push(m);
-    }
+    restoreParentPersistState();
 
     console.log(`[agent] forked session ${sourceSessionId} → ${newSession.id} at message ${assistantMessageId} (sdkUuid: ${targetMsg.sdkUuid}), ${forkedMessages.length} messages copied`);
 
