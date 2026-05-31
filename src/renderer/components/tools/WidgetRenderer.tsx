@@ -130,12 +130,20 @@ export default function WidgetRenderer({ widgetCode, isStreaming, title }: Widge
             openExternal(String(e.data.href));
           }
           break;
+
+        case 'widget:error':
+          // A script inside the sandboxed widget failed (commonly malformed JS
+          // from a weaker model). The iframe shows an inline notice; mirror it
+          // here so it also lands in the main console / app logs for debugging
+          // instead of being invisible inside the sandbox.
+          console.warn(`[widget] script failed to run (title=${title || 'untitled'}):`, e.data.message);
+          break;
       }
     }
 
     window.addEventListener('message', onMessage);
     return () => window.removeEventListener('message', onMessage);
-  }, [widgetCode, isStreaming, sendToIframe, cacheKey]);
+  }, [widgetCode, isStreaming, sendToIframe, cacheKey, title]);
 
   // Theme change observer — push updated CSS vars to iframe when dark/light mode toggles
   useEffect(() => {
