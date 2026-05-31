@@ -9,6 +9,10 @@ import type {
   GrepInput,
   NotebookEditInput,
   TodoWriteInput,
+  TaskCreateInput,
+  TaskUpdateInput,
+  TaskGetInput,
+  TaskListInput,
   WebFetchInput,
   WebSearchInput
 } from '@anthropic-ai/claude-agent-sdk/sdk-tools';
@@ -30,6 +34,10 @@ export type {
   GlobInput,
   GrepInput,
   TodoWriteInput,
+  TaskCreateInput,
+  TaskUpdateInput,
+  TaskGetInput,
+  TaskListInput,
   WebFetchInput,
   WebSearchInput,
   NotebookEditInput
@@ -44,6 +52,10 @@ export type ToolInput =
   | GlobInput
   | GrepInput
   | TodoWriteInput
+  | TaskCreateInput
+  | TaskUpdateInput
+  | TaskGetInput
+  | TaskListInput
   | WebFetchInput
   | WebSearchInput
   | NotebookEditInput;

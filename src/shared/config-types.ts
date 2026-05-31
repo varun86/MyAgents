@@ -409,6 +409,10 @@ export interface AppConfig {
   showDevTools: boolean; // 显示开发者工具 (Logs/System Info)
   multiAgentRuntime?: boolean; // 多 Agent Runtime 模式（开发者，默认关闭）
   experimentalSplitView?: boolean; // 实验性：文件预览在右侧分屏而非弹窗
+  /** 开发者：定期从 LiteLLM (GitHub) 拉取 model_prices_and_context_window.json，
+   *  作为模型 contextLength/maxOutputTokens 的最低优先级兜底数据源。缺省视同 true。
+   *  抓取在 Rust 侧（启动条件检查 + 24h interval，ETag/If-None-Match 增量）。 */
+  liteLLMModelDataRefresh?: boolean;
   // General settings
   autoStart: boolean; // 开机启动
   /** PRD 0.2.16 全局唤起快捷键。缺省视同 enabled=true + 默认键。
@@ -554,16 +558,17 @@ const ANTHROPIC_MODELS: ModelEntity[] = [
   // on every turn (reproduced 2026-05-07). Opus 4.x stays at 1M because
   // Anthropic enables 1M-by-default on Opus subscription tiers.
   { model: 'claude-sonnet-4-6', modelName: 'Claude Sonnet 4.6', modelSeries: 'claude', contextLength: 200_000, maxOutputTokens: 64_000, inputModalities: ['text', 'image'] },
+  { model: 'claude-opus-4-8', modelName: 'Claude Opus 4.8', modelSeries: 'claude', contextLength: 1_000_000, maxOutputTokens: 128_000, inputModalities: ['text', 'image'] },
   { model: 'claude-opus-4-7', modelName: 'Claude Opus 4.7', modelSeries: 'claude', contextLength: 1_000_000, maxOutputTokens: 128_000, inputModalities: ['text', 'image'] },
   { model: 'claude-opus-4-6', modelName: 'Claude Opus 4.6', modelSeries: 'claude', contextLength: 1_000_000, maxOutputTokens: 128_000, inputModalities: ['text', 'image'] },
   { model: 'claude-haiku-4-5', modelName: 'Claude Haiku 4.5', modelSeries: 'claude', contextLength: 200_000, maxOutputTokens: 64_000, inputModalities: ['text', 'image'] },
 ];
 
-/** Anthropic 官方默认别名（对齐 SDK 0.2.111 内置默认：opus47/sonnet46/haiku45）。
+/** Anthropic 官方默认别名（对齐 SDK 0.3.158 内置默认：opus48/sonnet46/haiku45）。
  *  显式 pin 可避免未来 SDK 默认变动时用户体验突变。 */
 const ANTHROPIC_ALIASES = {
   sonnet: 'claude-sonnet-4-6',
-  opus: 'claude-opus-4-7',
+  opus: 'claude-opus-4-8',
   haiku: 'claude-haiku-4-5',
 } as const;
 
@@ -1145,6 +1150,7 @@ export const DEFAULT_CONFIG: AppConfig = {
   theme: 'system',
   minimizeToTray: true,   // 默认开启最小化到托盘
   showDevTools: false,
+  liteLLMModelDataRefresh: true, // 默认开启 LiteLLM 模型数据兜底刷新（开发者可关）
   autoStart: false,       // 默认不开启开机启动
   osNotifications: true,  // 默认开启系统通知
   notificationSound: true, // 默认开启通知声音
