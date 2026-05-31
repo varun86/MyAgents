@@ -16,6 +16,7 @@ import { getCrossPlatformEnv, isSkillBlockedOnPlatform } from './utils/platform'
 import { ensureDirSync, isDirEntry } from './utils/fs-utils';
 import { getMyAgentsNpmGlobalBinDir, getMyAgentsNpmGlobalPrefix, scrubMyAgentsNpmPrefixEnv } from './utils/npm-prefix-env';
 import { applyContextWindowSuffix, lookupModelContextLength, modelSupportsModality } from './utils/model-capabilities';
+import { deriveReloadResumeAnchor, resolveEffectiveResumeAt } from './utils/rewind-anchor';
 import { InactivityWatchdog } from './utils/inactivity-watchdog';
 import { processImage, resizeToolImageContent, classifyImageError } from './utils/imageResize';
 import { writeBase64FilesToAgentDir } from './utils/workspace-files';
@@ -1132,6 +1133,14 @@ let sessionRegistered = false;
 
 // 时间回溯：对话截断后，下次 query 需携带 resumeSessionAt 截断 SDK 对话历史
 let pendingResumeSessionAt: string | undefined;
+// PRD 0.2.27 — cold-reload window-B anchor. Captured at LOAD time (loadMessagesFromStorage)
+// from the DURABLE persisted tail, NOT re-derived at query time: a direct-send pushes the
+// new user row into messages[] (agent-session.ts ~6866) before startStreamingSession runs,
+// which would flip the tail to a user message and defeat the tail-is-assistant gate exactly
+// in the "rewind → reopen → ask" flow. Capturing at load freezes the truncated tail before
+// any new send. Lifecycle mirrors pendingResumeSessionAt: set on load, consumed on
+// system_init, cleared on reject / session switch / reset.
+let pendingReloadAnchor: string | undefined;
 // 时间回溯进行中 — 阻止 enqueueUserMessage 并发写入
 let rewindPromise: Promise<unknown> | null = null;
 
@@ -5686,6 +5695,12 @@ function loadMessagesFromStorage(storedMessages: SessionMessage[]): void {
     }
   }
 
+  // PRD 0.2.27 — capture the cold-reload window-B anchor NOW, from the durable persisted
+  // tail (before any new direct-send user row is appended). Always assigned (value or
+  // undefined) so it never carries a stale value from a prior load. Consumed by the next
+  // startStreamingSession. See deriveReloadResumeAnchor + the `pendingReloadAnchor` decl.
+  pendingReloadAnchor = deriveReloadResumeAnchor(messages, currentSessionUuids);
+
   // Seed Bridge thought_signature cache from persisted tool_use blocks
   // (Gemini thinking models require round-tripping this field; the cache is lost on sidecar restart)
   const thoughtSigEntries: Array<{ id: string; thought_signature: string }> = [];
@@ -5758,6 +5773,7 @@ export async function resetSession(): Promise<void> {
   // 4. Clear SDK resume state - CRITICAL: prevents SDK from resuming old context!
   sessionRegistered = false;
   pendingResumeSessionAt = undefined; // Prevent leaking rewind state to new session
+  pendingReloadAnchor = undefined;   // PRD 0.2.27 — symmetric reset (don't leak reload anchor across sessions)
   messageResolver = null;
   systemInitInfo = null; // Clear old system info so new session gets fresh init
   sdkControlReady = false; // Subprocess gone — must re-confirm via initializationResult on next pre-warm
@@ -5845,6 +5861,7 @@ async function recoverFromStaleSession(): Promise<void> {
     //    identity is preserved end-to-end.
     sessionRegistered = false;
     pendingResumeSessionAt = undefined;
+    pendingReloadAnchor = undefined; // PRD 0.2.27 — symmetric reset
 
     // 3. Reset SDK ready signal + pre-warm bookkeeping (mirrors resetSession
     //    steps 5-7 but does NOT clear messages/permissions/sessionId).
@@ -6084,6 +6101,7 @@ export async function switchToSession(targetSessionId: string): Promise<boolean>
   isProcessing = false;
   sessionRegistered = false; // Will re-set from sessionMeta below
   pendingResumeSessionAt = undefined; // Prevent leaking rewind state to different session
+  pendingReloadAnchor = undefined;   // PRD 0.2.27 — symmetric reset
   messageResolver = null;
   setSessionState('idle');
   systemInitInfo = null;
@@ -7693,6 +7711,10 @@ async function startStreamingSession(preWarm = false): Promise<void> {
   // Declared outside try so finally can clean up
   let startupTimeoutId: ReturnType<typeof setTimeout> | undefined;
   let apiWatchdogId: ReturnType<typeof setInterval> | undefined;
+  // PRD 0.2.27 — query-scoped copy of the reloadAnchor this start actually sent. Local
+  // (not module) so a late catch from THIS invocation evicts the right uuid even if a
+  // newer session has since re-armed the module-level pendingReloadAnchor.
+  let sentReloadAnchor: string | undefined;
 
   // Background sub-agents started in this session but not yet terminal, keyed by
   // task_id. Entries are removed when a terminal task_notification/task_updated is
@@ -7853,9 +7875,20 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     // is the truer expression of what the user wants the fork to contain
     // (otherwise the rewind would be cosmetic UI truncation while the
     // SDK still seeds the full fork-point context).
-    const effectiveResumeAt = forkMode
-      ? (rewindResumeAt ?? forkResumeAt)
-      : rewindResumeAt;
+    // PRD 0.2.27 window-B reconcile: on a COLD reload (resume from history, non-fork, no
+    // in-process rewind anchor), pin the SDK to the durable tail captured at LOAD time
+    // (pendingReloadAnchor) so a rewind that was never materialized into a new SDK branch
+    // before the process died still takes effect for the AI. Captured at load (not derived
+    // here) because a direct-send already pushed the new user row into messages[] before
+    // this runs (~6866). No-op in the normal case (tail == SDK newest leaf → slice keeps
+    // all). Lowest priority — an in-process rewind anchor still wins (resolveEffectiveResumeAt),
+    // so existing rewind behavior is byte-for-byte unchanged. See specs/prd/prd_0.2.27_rewind_reload_durability.md.
+    const reloadAnchor = (!forkMode && !rewindResumeAt && resumeFrom) ? pendingReloadAnchor : undefined;
+    // Capture into a query-scoped local so a LATE catch from a previous (aborted) start
+    // can't mis-attribute the eviction against a newer session's anchor (module state races).
+    sentReloadAnchor = reloadAnchor;
+
+    const effectiveResumeAt = resolveEffectiveResumeAt({ forkMode, rewindResumeAt, forkResumeAt, reloadAnchor });
 
     const mcpStatus = currentMcpServers === null ? 'auto' : currentMcpServers.length === 0 ? 'disabled' : `enabled(${currentMcpServers.length})`;
     console.log(`[agent] starting query with model: ${currentModel ?? 'default'}, permissionMode: ${currentPermissionMode} -> SDK: ${sdkPermissionMode}, MCP: ${mcpStatus}, ${resumeFrom ? `resume: ${resumeFrom}` : `sessionId: ${effectiveSdkSessionId}`}${effectiveResumeAt ? `, resumeSessionAt: ${effectiveResumeAt}` : ''}${forkMode ? `, FORK mode (forkPoint: ${forkResumeAt}${rewindResumeAt && rewindResumeAt !== forkResumeAt ? `, rewind→${rewindResumeAt}` : ''})` : ''}`);
@@ -8833,6 +8866,10 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           console.log(`[agent] system_init received — rewind anchor consumed: ${pendingResumeSessionAt}`);
           pendingResumeSessionAt = undefined;
         }
+        // PRD 0.2.27 — system_init means the load-captured reloadAnchor (if any) was
+        // accepted by the SDK and the session is now truncated correctly; consume it so a
+        // later restart/turn doesn't re-apply a now-stale truncation point.
+        pendingReloadAnchor = undefined;
 
         // Save SDK session_id and verify unified session status
         if (nextSystemInit.session_id) {
@@ -10079,17 +10116,39 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     if (errorMessage.includes('No message found with message.uuid')
       && (sessionRegistered || pendingResumeSessionAt !== undefined)) {
       const rejectedUuid = pendingResumeSessionAt;
-      console.warn(`[agent] resumeSessionAt UUID rejected by SDK — clearing rewind anchor, retry will resume with full history`);
       pendingResumeSessionAt = undefined;
       // Evict the rejected UUID from currentSessionUuids so subsequent rewinds don't
       // re-accept it via the OR logic. Without this, the stale UUID stays in the cache
       // and a future rewind to the same point would re-trigger the same SDK error.
+      // Only log/evict when there was an ACTUAL rewind anchor: on a reloadAnchor rejection
+      // this branch still enters (sessionRegistered=true) with rejectedUuid===undefined —
+      // the reloadAnchor branch below owns + logs that case, so stay quiet here (no
+      // misleading "clearing rewind anchor" line on the high-stakes cold-reload path).
       if (rejectedUuid) {
+        console.warn(`[agent] resumeSessionAt UUID rejected by SDK — clearing rewind anchor, retry will resume with full history`);
         currentSessionUuids.delete(rejectedUuid);
       }
       // Don't modify sessionRegistered — session exists, just the UUID is invalid.
       // Don't return — let pre-warm retry (finally block) handle recovery.
       // For non-pre-warm (user message triggered): fall through to error broadcast.
+    }
+
+    // PRD 0.2.27 reloadAnchor "No message found" recovery (decision 6). The cold-reload
+    // anchor (pendingReloadAnchor, captured at LOAD) can be stale if compact/snip removed
+    // that uuid from the SDK transcript. The pre-warm retry does NOT reload, so it would
+    // reuse the same pendingReloadAnchor → SDK rejects again. Break the loop like the rewind
+    // branch: evict the uuid from currentSessionUuids (so a future re-load's
+    // deriveReloadResumeAnchor `.has()` gate also fails) AND clear the captured anchor
+    // (generation-guarded — only if a newer start hasn't replaced it). Uses the query-scoped
+    // `sentReloadAnchor`, not the module var, so a late catch from an aborted start can't
+    // evict against a newer session. Retry resumes with full history (window-B reconcile
+    // skipped this round; self-heals once the user continues and a newer leaf is written).
+    if (errorMessage.includes('No message found with message.uuid') && sentReloadAnchor) {
+      console.warn(`[agent] reloadAnchor UUID ${sentReloadAnchor} rejected by SDK — evicting from currentSessionUuids so retry resumes with full history (no re-derive loop)`);
+      currentSessionUuids.delete(sentReloadAnchor);
+      // Clear the load-captured anchor only if it's still THIS query's — a newer load/start
+      // may have already replaced it; don't wipe a newer session's pending anchor.
+      if (pendingReloadAnchor === sentReloadAnchor) pendingReloadAnchor = undefined;
     }
 
     // Fork-mode "No message found" recovery (issue #220). The durable anchor here lives
