@@ -19,6 +19,7 @@ import { applyContextWindowSuffix, lookupModelContextLength, modelSupportsModali
 import { modelAliasEnvChangesForModel, resolveSessionModelAliases, type ModelAliases } from './utils/model-aliases';
 import { deriveReloadResumeAnchor, resolveEffectiveResumeAt } from './utils/rewind-anchor';
 import { buildForkUuidRemap, remapStoredSdkUuids } from './utils/fork-remap';
+import { decideInFlightActionOnResult } from './utils/inflight-terminal';
 import { isEmptySuccessfulSdkResult, isRecoveredAssistantMessageError } from './utils/sdk-turn-outcome';
 import { InactivityWatchdog } from './utils/inactivity-watchdog';
 import { processImage, resizeToolImageContent, classifyImageError } from './utils/imageResize';
@@ -646,6 +647,12 @@ let isStreamingMessage = false;
 // Post-interrupt turn-completion signal: resolves when for-await loop receives a `result` message.
 // Used by interruptCurrentResponse() to verify the SDK subprocess actually stopped after interrupt().
 let postInterruptTurnEndResolve: (() => void) | null = null;
+// Issue #289 — set by handleMessageComplete when a force-send surfaced the in-flight item and
+// the SDK is about to drain it into a NEW turn. interruptCurrentResponse() reads it to SKIP the
+// redundant trailing handleMessageStopped() (handleMessageComplete is the full turn-end handler;
+// the trailing call would undo the streaming re-arm + double-pop the IM request → the racy
+// "idle gap" Codex flagged). One-shot: consumed by interruptCurrentResponse().
+let forceDrainTurnStarting = false;
 // Count of MCP tool_use blocks emitted by the model in the current turn that
 // haven't seen their matching tool_result yet. Read by the post-interrupt
 // force-close path to disambiguate diagnostics: >0 strongly suggests a hung
@@ -676,6 +683,12 @@ let promotedItemInFlight = false;
 // retract it. The "lockstep yield" pattern (one in-flight at a time)
 // keeps subsequent queue items cancellable until they are promoted.
 let inFlightToCliId: string | null = null;
+// Issue #289 — when set to the in-flight queueId, a force-send ("立即发送") is in progress
+// for that item: it interrupts the current turn precisely so the SDK drains + processes the
+// queued command, so the graceful-interrupt `result` MUST SURFACE the item (queue:started)
+// instead of dropping it (queue:cancelled). Distinct from `isInterruptingResponse` (which is
+// also true for a plain stop). Cleared whenever the in-flight slot is cleared.
+let forceSurfaceInFlightId: string | null = null;
 // (v0.2.12) Metadata for the currently in-flight queue item. We stash
 // messageText / attachments / requestId at yield time because the
 // MessageQueueItem closes over the generator and we no longer have
@@ -698,6 +711,18 @@ type InFlightMetadata = {
   mirrorImages?: MirrorImage[];
 };
 let inFlightMetadata: InFlightMetadata | null = null;
+
+/**
+ * Clear the in-flight queued-command slot. Keeps the three coupled fields in lockstep so a
+ * future clear site can't forget the #289 force flag (which, if left stale, would be checked
+ * against a later in-flight item in handleMessageComplete). Callers that need the prior value
+ * (e.g. the queueId / metadata / forced-ness) MUST capture it before calling.
+ */
+function clearInFlightSlot(): void {
+  inFlightToCliId = null;
+  inFlightMetadata = null;
+  forceSurfaceInFlightId = null;
+}
 
 // ===== Desktop → IM mirror state (PRD 0.2.14 Phase C) =====
 //
@@ -1398,8 +1423,7 @@ async function handleQueuedCommandReplay(
     },
   });
 
-  inFlightToCliId = null;
-  inFlightMetadata = null;
+  clearInFlightSlot();
   promoteNextFromPending();
 }
 
@@ -1419,8 +1443,7 @@ function abortPersistentSession(): void {
   shouldAbortSession = true;
   // (v0.2.12) Clear in-flight CLI tracking — recovery session starts clean
   // and any rescued pending items will be re-yielded by the new generator.
-  inFlightToCliId = null;
-  inFlightMetadata = null;
+  clearInFlightSlot();
   promotedItemInFlight = false;
   // Subprocess is about to die — rescue pending items so the recovery session
   // re-delivers them instead of losing them with the dead stdin buffer.
@@ -4959,12 +4982,25 @@ function handleMessageComplete(): void {
   if (inFlightToCliId !== null) {
     const stale = inFlightToCliId;
     const meta = inFlightMetadata;
-    inFlightToCliId = null;
-    inFlightMetadata = null;
-    if (isInterruptingResponse) {
+    // Issue #289 — a force-send ("立即发送") of THIS item must SURFACE it (the SDK drains +
+    // processes it post-abort), unlike a plain stop which drops it. Capture before clearing.
+    const forced = forceSurfaceInFlightId === stale;
+    clearInFlightSlot();
+    const inFlightAction = decideInFlightActionOnResult({
+      isInterrupting: isInterruptingResponse,
+      forced,
+      hasMeta: !!meta,
+    });
+    if (inFlightAction === 'drop') {
       broadcast('queue:cancelled', { queueId: stale });
       console.log(`[agent] In-flight queue item ${stale} dropped at graceful interrupt result — broadcast queue:cancelled`);
-    } else if (meta) {
+    } else if (inFlightAction === 'surface' && meta) {
+      // Issue #289 — a FORCE surface means the SDK is draining this item into a NEW turn;
+      // tell interruptCurrentResponse() to skip its redundant trailing handleMessageStopped()
+      // (which would undo the streaming re-arm below + double-pop the IM request → idle gap).
+      // The natural turn-end fallback does NOT go through interruptCurrentResponse, so only
+      // set it for the forced case.
+      if (forced) forceDrainTurnStarting = true;
       const userMessage: MessageWire = {
         id: String(messageSequence++),
         role: 'user',
@@ -4978,7 +5014,7 @@ function handleMessageComplete(): void {
       if (meta.source === 'desktop') {
         fireDesktopUserMirror(meta.messageText, meta.mirrorImages);
       }
-      console.log(`[agent] queue:started fallback at turn-end (no mid-turn replay), queueId=${stale}`);
+      console.log(`[agent] In-flight queue item ${stale} surfaced via queue:started (${forced ? 'force-send #289' : 'turn-end fallback, no mid-turn replay'})`);
       broadcast('queue:started', {
         queueId: stale,
         userMessage: {
@@ -5119,8 +5155,7 @@ function handleMessageStopped(): void {
   // graceful-interrupt branch.
   if (inFlightToCliId !== null) {
     const droppedQueueId = inFlightToCliId;
-    inFlightToCliId = null;
-    inFlightMetadata = null;
+    clearInFlightSlot();
     broadcast('queue:cancelled', { queueId: droppedQueueId });
     console.log(`[agent] In-flight queue item ${droppedQueueId} dropped on stop — broadcast queue:cancelled`);
   }
@@ -5183,8 +5218,7 @@ function handleMessageError(error: string): void {
   // surface queue:cancelled — see handleMessageStopped for rationale.
   if (inFlightToCliId !== null) {
     const droppedQueueId = inFlightToCliId;
-    inFlightToCliId = null;
-    inFlightMetadata = null;
+    clearInFlightSlot();
     broadcast('queue:cancelled', { queueId: droppedQueueId });
     console.log(`[agent] In-flight queue item ${droppedQueueId} dropped on error — broadcast queue:cancelled`);
   }
@@ -7159,11 +7193,21 @@ export async function interruptCurrentResponse(reason: CancelReason = 'user'): P
       }
     }
 
-    broadcast('chat:message-stopped', null);
-    handleMessageStopped();
+    // Issue #289 — if the graceful-interrupt `result` already ran handleMessageComplete and
+    // it FORCE-surfaced the in-flight item, the turn-end is fully handled and the SDK is
+    // draining that item into a new turn. Calling handleMessageStopped() here would undo the
+    // streaming re-arm and double-pop the IM request (a racy idle window). Skip it; a plain
+    // stop (flag unset) still tears down normally.
+    if (forceDrainTurnStarting) {
+      forceDrainTurnStarting = false;
+    } else {
+      broadcast('chat:message-stopped', null);
+      handleMessageStopped();
+    }
     return true;
   } finally {
     isInterruptingResponse = false;
+    forceDrainTurnStarting = false; // defensive: never leak into a later interrupt
   }
 }
 
@@ -7311,6 +7355,12 @@ export async function forceExecuteQueueItem(queueId: string): Promise<boolean> {
   }
 
   if (isSessionActive()) {
+    // Issue #289: if the target is already in-flight to the CLI, mark it so the
+    // graceful-interrupt `result` SURFACES it (it's about to be drained + processed
+    // by the SDK) instead of dropping it from the UI like a plain stop would.
+    if (isInFlight) {
+      forceSurfaceInFlightId = queueId;
+    }
     await interruptCurrentResponse();
   } else {
     // Session 已死：generator 不存在，无人消费队列。
@@ -10498,8 +10548,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
       console.log(`[agent] finally: rescuing ${pendingMidTurnQueue.length} pending mid-turn item(s) into messageQueue`);
       rescuePendingToQueue();
     }
-    inFlightToCliId = null;
-    inFlightMetadata = null;
+    clearInFlightSlot();
 
     // Queue lifecycle invariant: messageQueue survives session restarts by default.
     // Any drain decision belongs to the caller that triggered the exit, not here:
