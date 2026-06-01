@@ -2,7 +2,11 @@
  * Sandbox iframe receiver HTML for Generative UI widgets.
  *
  * This HTML is injected as the iframe's `srcdoc`. It:
- * - Sets a strict CSP (only 4 CDN domains for scripts, no connect-src)
+ * - Sets a strict CSP: 4 CDN domains for scripts, no connect-src, and Google
+ *   Fonts (fonts.googleapis.com stylesheet + fonts.gstatic.com woff2 — both hops
+ *   needed) for decorative web fonts. On WebKit THIS meta CSP governs the iframe
+ *   (the parent app CSP isn't inherited); on Chromium/WebView2 the srcdoc also
+ *   intersects the parent CSP, so tauri.conf.json must list the same font hosts.
  * - Listens for postMessage commands: widget:update (streaming), widget:finalize (final)
  * - Reports height changes back to the parent via widget:resize
  * - Intercepts link clicks and forwards them to the parent via widget:link
@@ -15,7 +19,7 @@ export function buildSandboxHtml(cssVarsBlock: string): string {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://unpkg.com https://esm.sh; img-src data: https:; font-src https://cdn.jsdelivr.net https://cdnjs.cloudflare.com;">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline' https://fonts.googleapis.com; script-src 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://unpkg.com https://esm.sh; img-src data: https:; font-src https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://fonts.gstatic.com;">
 <style>
 ${cssVarsBlock}
 *, *::before, *::after { box-sizing: border-box; }

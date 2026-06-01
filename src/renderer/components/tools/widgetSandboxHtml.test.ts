@@ -35,3 +35,26 @@ describe('widget sandbox failure handling', () => {
     expect(html).toMatch(/try\s*{[\s\S]*replaceChild[\s\S]*catch/);
   });
 });
+
+describe('widget sandbox CSP allowlist', () => {
+  // A widget that <link>s a Google Fonts stylesheet (the AI reaches for these for
+  // decorative Chinese fonts — Noto Serif SC / ZCOOL XiaoWei / Ma Shan Zheng) needs
+  // TWO hops allowed: the CSS host in style-src AND the woff2 host in font-src. Miss
+  // either and the font is blocked (CSP console error) and silently falls back to the
+  // system stack — the 万历 widget incident. On WebKit this meta CSP is authoritative;
+  // the parent CSP in tauri.conf.json must stay in sync for Chromium/WebView2.
+  it('allows the Google Fonts stylesheet host in style-src', () => {
+    expect(html).toMatch(/style-src[^;]*https:\/\/fonts\.googleapis\.com/);
+  });
+
+  it('allows the Google Fonts woff2 host in font-src', () => {
+    expect(html).toMatch(/font-src[^;]*https:\/\/fonts\.gstatic\.com/);
+  });
+
+  it('keeps connect-src locked down (no fetch/XHR/WS exfil from widgets)', () => {
+    // default-src 'none' with no connect-src override = network requests blocked.
+    // Allowing fonts must NOT have loosened this.
+    expect(html).toContain("default-src 'none'");
+    expect(html).not.toContain('connect-src');
+  });
+});
