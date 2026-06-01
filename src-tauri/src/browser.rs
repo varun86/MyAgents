@@ -121,6 +121,19 @@ pub(crate) fn spawn_external_open(url: &str) {
     }
 }
 
+/// A webview's container bounds are "degenerate" when width or height is
+/// non-positive. The renderer positions the OS-level webview over a React div
+/// via `getBoundingClientRect()`, and that div momentarily reports 0×N (or
+/// 0×0 when `display:none`) while the split panel slides in behind a 300ms
+/// width transition. Applying such bounds collapses the webview and floats it
+/// over the chat area (issue #290). The renderer already filters these, but we
+/// re-check here so no caller can poison the cached geometry that `SHOW`
+/// restores from. NaN is non-finite, so it's caught too.
+fn is_degenerate_bounds(width: f64, height: f64) -> bool {
+    let usable = width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0;
+    !usable
+}
+
 /// Parse a URL string that may be an absolute file path or an http(s) URL.
 /// Handles both Unix (`/Users/...`) and Windows (`C:\Users\...`) paths.
 fn parse_url_or_path(url: &str) -> Result<Url, String> {
@@ -179,6 +192,23 @@ pub async fn cmd_browser_create(
         "[browser] cmd_browser_create: tab={} url={} pos=({},{}) size={}x{}",
         tab_id, url, x, y, width, height
     );
+
+    // Clamp degenerate bounds up to a 1px floor so the OS webview is never born
+    // collapsed and — critically — the cached `last_width/height` (which SHOW
+    // restores from) can never be seeded with zeros (issue #290). The renderer
+    // already defers creation until the container is laid out, so this only
+    // fires for an unexpected/future caller; the post-create ResizeObserver
+    // immediately corrects the size. NaN/non-finite are caught by the same
+    // guard since they aren't `> 0.0`.
+    let (width, height) = if is_degenerate_bounds(width, height) {
+        ulog_info!(
+            "[browser] cmd_browser_create: clamping degenerate bounds {}x{} to 1px floor for tab {}",
+            width, height, tab_id
+        );
+        (width.max(1.0), height.max(1.0))
+    } else {
+        (width, height)
+    };
 
     // Prevent duplicate creation
     {
@@ -422,6 +452,21 @@ pub async fn cmd_browser_resize(
     width: f64,
     height: f64,
 ) -> Result<(), String> {
+    // Drop degenerate resizes (width/height ≤ 0) instead of collapsing the
+    // webview and caching zeros that a later SHOW would restore (issue #290).
+    // Keep the last good geometry untouched so the next valid resize wins.
+    if is_degenerate_bounds(width, height) {
+        ulog_info!(
+            "[browser] cmd_browser_resize: ignoring degenerate bounds for tab {} — pos=({},{}) size={}x{}",
+            tab_id,
+            x,
+            y,
+            width,
+            height
+        );
+        return Ok(());
+    }
+
     let mut sessions = state.sessions.lock().await;
     let session = sessions
         .get_mut(&tab_id)
@@ -533,5 +578,29 @@ pub async fn close_all_browsers(state: &Arc<BrowserManager>, app: &AppHandle) {
     }
     if count > 0 {
         ulog_info!("[browser] Closed {} browser(s) on shutdown", count);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_degenerate_bounds;
+
+    // Issue #290: the renderer can hand us a 0-width container reading while
+    // the split panel's width transition is mid-flight. These must be rejected
+    // so the OS webview is never collapsed / mis-positioned over the chat.
+    #[test]
+    fn degenerate_bounds_are_rejected() {
+        assert!(is_degenerate_bounds(0.0, 662.0)); // the exact bug read
+        assert!(is_degenerate_bounds(640.0, 0.0));
+        assert!(is_degenerate_bounds(0.0, 0.0));
+        assert!(is_degenerate_bounds(-1.0, 600.0));
+        assert!(is_degenerate_bounds(600.0, -1.0));
+        assert!(is_degenerate_bounds(f64::NAN, 600.0));
+    }
+
+    #[test]
+    fn real_bounds_are_accepted() {
+        assert!(!is_degenerate_bounds(694.0, 662.0));
+        assert!(!is_degenerate_bounds(1.0, 1.0));
     }
 }

@@ -84,7 +84,8 @@ EXCEPTION: Chart.js <canvas> cannot use CSS variables — use hex from color pal
 - D3.js: https://cdn.jsdelivr.net/npm/d3@7
 - Mermaid: https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js
 - Lucide: https://unpkg.com/lucide@latest
-- Any package from: cdn.jsdelivr.net, cdnjs.cloudflare.com, unpkg.com, esm.sh`;
+- Any package from: cdn.jsdelivr.net, cdnjs.cloudflare.com, unpkg.com, esm.sh
+- Web fonts: Google Fonts only — <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=..."> (e.g. 'Noto Serif SC', 'ZCOOL XiaoWei', 'Ma Shan Zheng'). Request ONLY weights 400 & 600 (per the font-weight rule). Always include a system fallback in font-family so it degrades gracefully offline.`;
 
 const SECTION_PALETTE = `# Color Palette — 7 ramps, 7 stops each
 

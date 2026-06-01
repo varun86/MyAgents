@@ -545,7 +545,7 @@ import {
 import { decodeProviderEnvSnapshot, findAgentByWorkspacePath, findProvider, getAllMcpServers, getEffectiveMcpServers, isProviderDisabled, loadConfig, resolveImProviderEnv, resolveProviderEnv } from './utils/admin-config';
 import { snapshotForOwnedSession } from './utils/session-snapshot';
 import { resolveSessionConfig } from './utils/resolve-session-config';
-import { resolveLastRealUserMessagePreview, shrinkSessionMessageForClient, shrinkSessionMessagesForClient } from './utils/session-message-preview';
+import { resolveLastRealUserMessagePreview, shrinkSessionMessageForClient, shrinkSessionMessagesForClient, shrinkReplayContentForClient } from './utils/session-message-preview';
 import type { AgentConfig } from '../shared/types/agent';
 import type { SessionMetadata } from './types/session';
 import { initLogger, getLoggerDiagnostics, withLogContext, setStdioBrokenProbe } from './logger';
@@ -583,6 +583,9 @@ import {
   shouldUseExternalRuntime,
   sendExternalMessage,
   enqueueExternalSendForDesktop,
+  forceExecuteExternalQueueItem,
+  cancelExternalQueueItem,
+  getExternalQueueStatus,
   respondExternalPermission,
   respondExternalAskUserQuestion,
   hasPendingExternalAskUserQuestion,
@@ -2149,11 +2152,17 @@ async function main() {
         const streamingId = getStreamingAssistantId();
         allMessages.forEach((message) => {
           if (streamingId && message.id === streamingId) return; // skip streaming message
-          // Strip Playwright tool results from replay to avoid sending large base64 data to frontend
-          const stripped = typeof message.content !== 'string'
-            ? { ...message, content: stripPlaywrightResults(message.content) }
-            : message;
-          client.send('chat:message-replay', { message: stripped });
+          // Strip Playwright tool results, then cap each replayed message at the
+          // 256KB inline limit (parity with the REST /sessions/:id path's
+          // shrinkSessionMessagesForClient). Without the cap a multi-MB persisted
+          // message (e.g. a Codex sub-agent fan-out turn, 757 blocks) ships as one
+          // oversized chat:message-replay SSE event, breaks the SSE→Tauri-IPC
+          // handoff, and truncates restored history at the first oversized message.
+          const strippedContent = typeof message.content !== 'string'
+            ? stripPlaywrightResults(message.content)
+            : message.content;
+          const content = shrinkReplayContentForClient(strippedContent);
+          client.send('chat:message-replay', { message: { ...message, content } });
         });
         client.send('chat:logs', { lines: getLogLines() });
         if (shouldUseExternalRuntime()) {
@@ -2229,7 +2238,12 @@ async function main() {
             permissionMode,
             model: model ?? undefined,
           };
-          void enqueueExternalSendForDesktop(text, images, permissionMode, model ?? undefined, sendCtx)
+          // Synchronous decide: a mid-turn send is QUEUED (returns a queueId now); an idle send
+          // dispatches fire-and-forget (no queueId → becomes a bubble). Hand the queueId back so
+          // the renderer reconciles its optimistic pill, then fire-and-forget the dispatch for
+          // error surfacing (the dispatch may block up to 5min on a long turn — must not await).
+          const sent = enqueueExternalSendForDesktop(text, images, permissionMode, model ?? undefined, sendCtx);
+          sent.dispatch
             .then((result) => {
               if (!result.queued && result.error) {
                 console.error(`[chat] external send failed: ${result.error}`);
@@ -2241,7 +2255,7 @@ async function main() {
               console.error(`[chat] external send threw: ${msg}`);
               broadcast('chat:agent-error', { message: msg });
             });
-          return jsonResponse({ success: true, queued: true });
+          return jsonResponse({ success: true, queued: true, queueId: sent.queueId });
         }
 
         // ─── Builtin Runtime (existing path) ───
@@ -2491,7 +2505,9 @@ async function main() {
         if (!queueId) {
           return jsonResponse({ success: false, error: 'queueId is required' }, 400);
         }
-        const cancelledText = cancelQueueItem(queueId);
+        const cancelledText = shouldUseExternalRuntime()
+          ? cancelExternalQueueItem(queueId)
+          : cancelQueueItem(queueId);
         if (cancelledText === null) {
           return jsonResponse({ success: false, error: 'Queue item not found' }, 404);
         }
@@ -2506,7 +2522,9 @@ async function main() {
           return jsonResponse({ success: false, error: 'queueId is required' }, 400);
         }
         try {
-          const result = await forceExecuteQueueItem(queueId);
+          const result = shouldUseExternalRuntime()
+            ? await forceExecuteExternalQueueItem(queueId)
+            : await forceExecuteQueueItem(queueId);
           if (!result) {
             return jsonResponse({ success: false, error: 'Queue item not found' }, 404);
           }
@@ -2521,7 +2539,7 @@ async function main() {
 
       // Get queue status
       if (pathname === '/chat/queue/status' && request.method === 'GET') {
-        return jsonResponse({ success: true, queue: getQueueStatus() });
+        return jsonResponse({ success: true, queue: shouldUseExternalRuntime() ? getExternalQueueStatus() : getQueueStatus() });
       }
 
       // Poll background task output file for live stats

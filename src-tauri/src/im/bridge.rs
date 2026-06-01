@@ -957,10 +957,54 @@ fn find_bridge_script<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> Op
     None
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OpenClawBridgeStateEnv {
+    state_dir: PathBuf,
+    oauth_dir: PathBuf,
+    config_path: PathBuf,
+}
+
+fn openclaw_bridge_state_env(state_dir: &Path) -> OpenClawBridgeStateEnv {
+    OpenClawBridgeStateEnv {
+        state_dir: state_dir.to_path_buf(),
+        oauth_dir: state_dir.join("credentials"),
+        config_path: state_dir.join("openclaw.json"),
+    }
+}
+
+fn path_env_value(path: &Path) -> String {
+    path.to_string_lossy().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn openclaw_bridge_state_env_scopes_runtime_files_under_channel_dir() {
+        let base = std::env::temp_dir()
+            .join("myagents-test")
+            .join(".myagents")
+            .join("agents")
+            .join("agent-1")
+            .join("channels")
+            .join("channel-1")
+            .join("openclaw-state");
+
+        let env = openclaw_bridge_state_env(&base);
+
+        assert_eq!(env.state_dir, base);
+        assert_eq!(env.config_path, env.state_dir.join("openclaw.json"));
+        assert_eq!(env.oauth_dir, env.state_dir.join("credentials"));
+        assert!(!path_env_value(&env.state_dir).contains(".openclaw"));
+    }
+}
+
 /// Spawn a plugin bridge Bun process
 pub async fn spawn_plugin_bridge<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
     plugin_dir: &str,
+    bridge_state_dir: &Path,
     port: u16,
     rust_port: u16,
     bot_id: &str,
@@ -977,6 +1021,30 @@ pub async fn spawn_plugin_bridge<R: tauri::Runtime>(
     let config_json = plugin_config
         .map(|v| v.to_string())
         .unwrap_or_else(|| "{}".to_string());
+
+    let state_env = openclaw_bridge_state_env(bridge_state_dir);
+    tokio::fs::create_dir_all(&state_env.state_dir)
+        .await
+        .map_err(|e| {
+            format!(
+                "Failed to create OpenClaw bridge state dir {}: {}",
+                state_env.state_dir.display(),
+                e
+            )
+        })?;
+    tokio::fs::create_dir_all(&state_env.oauth_dir)
+        .await
+        .map_err(|e| {
+            format!(
+                "Failed to create OpenClaw bridge credentials dir {}: {}",
+                state_env.oauth_dir.display(),
+                e
+            )
+        })?;
+    ulog_info!(
+        "[bridge] OpenClaw runtime state scoped to {}",
+        state_env.state_dir.display()
+    );
 
     // ── Shim integrity + freshness check ──
     // 1. If node_modules/openclaw/ is missing → re-install (covers
@@ -1074,7 +1142,21 @@ pub async fn spawn_plugin_bridge<R: tauri::Runtime>(
         .arg("--bot-id")
         .arg(bot_id)
         // Pass config via env var to avoid leaking secrets in `ps` process listing
-        .env("BRIDGE_PLUGIN_CONFIG", &config_json);
+        .env("BRIDGE_PLUGIN_CONFIG", &config_json)
+        // Keep plugin runtime state per MyAgents channel. QR-login plugins such
+        // as Weixin include local tokens from this state when asking the
+        // platform for a QR code; falling back to ~/.openclaw makes separate
+        // workspaces look like the same OpenClaw instance.
+        //
+        // Var names verified against upstream OpenClaw consumers (do not pattern-match):
+        //   OPENCLAW_STATE_DIR  → src/utils.ts resolveConfigDir (highest-priority override; drives isolation)
+        //   OPENCLAW_CONFIG_PATH → src/utils.ts (explicit config-file pointer; expects a *.json file path)
+        //   OPENCLAW_OAUTH_DIR  → src/config/paths.ts
+        // (Dropped CLAWDBOT_STATE_DIR — removed upstream in 6b9915a106, now 0 consumers; and the bare
+        //  OPENCLAW_CONFIG, which was never read — the consumed name is OPENCLAW_CONFIG_PATH.)
+        .env("OPENCLAW_STATE_DIR", path_env_value(&state_env.state_dir))
+        .env("OPENCLAW_CONFIG_PATH", path_env_value(&state_env.config_path))
+        .env("OPENCLAW_OAUTH_DIR", path_env_value(&state_env.oauth_dir));
 
     // Working directory: prefer the plugin_dir (so Node's ESM resolver
     // walks up from there to find both `node_modules/tsx` AND the plugin's

@@ -2,7 +2,7 @@ import { randomUUID } from 'crypto';
 import { existsSync, readdirSync, symlinkSync, lstatSync, readFileSync, readlinkSync, rmSync } from 'fs';
 import { dirname, join, resolve, sep } from 'path';
 import { createRequire } from 'module';
-import { query, getSessionMessages as sdkGetSessionMessages, type Query, type SDKUserMessage, type AgentDefinition, type HookInput, type HookJSONOutput, type PostToolUseHookInput, type PermissionRequestHookInput } from '@anthropic-ai/claude-agent-sdk';
+import { query, getSessionMessages as sdkGetSessionMessages, forkSession as sdkForkSession, deleteSession as sdkDeleteSession, type Query, type SDKUserMessage, type AgentDefinition, type HookInput, type HookJSONOutput, type PostToolUseHookInput, type PermissionRequestHookInput } from '@anthropic-ai/claude-agent-sdk';
 import {
   decideBackgroundAgentPermission,
   isBackgroundAgentToolRequest,
@@ -16,6 +16,11 @@ import { getCrossPlatformEnv, isSkillBlockedOnPlatform } from './utils/platform'
 import { ensureDirSync, isDirEntry } from './utils/fs-utils';
 import { getMyAgentsNpmGlobalBinDir, getMyAgentsNpmGlobalPrefix, scrubMyAgentsNpmPrefixEnv } from './utils/npm-prefix-env';
 import { applyContextWindowSuffix, lookupModelContextLength, modelSupportsModality } from './utils/model-capabilities';
+import { modelAliasEnvChangesForModel, resolveSessionModelAliases, type ModelAliases } from './utils/model-aliases';
+import { deriveReloadResumeAnchor, resolveEffectiveResumeAt } from './utils/rewind-anchor';
+import { buildForkUuidRemap, remapStoredSdkUuids } from './utils/fork-remap';
+import { decideInFlightActionOnResult } from './utils/inflight-terminal';
+import { isEmptySuccessfulSdkResult, isRecoveredAssistantMessageError } from './utils/sdk-turn-outcome';
 import { InactivityWatchdog } from './utils/inactivity-watchdog';
 import { processImage, resizeToolImageContent, classifyImageError } from './utils/imageResize';
 import { writeBase64FilesToAgentDir } from './utils/workspace-files';
@@ -51,7 +56,7 @@ import {
   isLiveFollowScenario,
   type SessionMaterializationScenario,
 } from './utils/session-materialization';
-import { findAgentByWorkspacePath } from './utils/admin-config';
+import { findAgentByWorkspacePath, loadConfig as loadAdminConfig } from './utils/admin-config';
 import type { AgentConfig } from '../shared/types/agent';
 import { broadcast } from './sse';
 import {
@@ -536,7 +541,8 @@ type RestartReason =
   | 'provider'     // setSessionProviderEnv — provider env (baseUrl, apiKey, etc.) changed
   | 'proxy'        // triggerProxyRestart — HTTP proxy changed via Settings
   | 'oauth'        // MCP OAuth token acquired/refreshed
-  | 'model-window' // setSessionModel — contextLength crossed a boundary, need to reinject CLAUDE_CODE_AUTO_COMPACT_WINDOW
+  | 'model-window'  // setSessionModel — contextLength crossed a boundary, need to reinject CLAUDE_CODE_AUTO_COMPACT_WINDOW
+  | 'model-aliases' // setSessionModel — collapsed provider aliases now target a different active model
   | 'plugins';     // PRD 0.2.17 — Claude plugin install / uninstall / toggle
 
 // Deferred config restart: config changes during an active turn / pre-warm
@@ -641,6 +647,12 @@ let isStreamingMessage = false;
 // Post-interrupt turn-completion signal: resolves when for-await loop receives a `result` message.
 // Used by interruptCurrentResponse() to verify the SDK subprocess actually stopped after interrupt().
 let postInterruptTurnEndResolve: (() => void) | null = null;
+// Issue #289 — set by handleMessageComplete when a force-send surfaced the in-flight item and
+// the SDK is about to drain it into a NEW turn. interruptCurrentResponse() reads it to SKIP the
+// redundant trailing handleMessageStopped() (handleMessageComplete is the full turn-end handler;
+// the trailing call would undo the streaming re-arm + double-pop the IM request → the racy
+// "idle gap" Codex flagged). One-shot: consumed by interruptCurrentResponse().
+let forceDrainTurnStarting = false;
 // Count of MCP tool_use blocks emitted by the model in the current turn that
 // haven't seen their matching tool_result yet. Read by the post-interrupt
 // force-close path to disambiguate diagnostics: >0 strongly suggests a hung
@@ -671,6 +683,12 @@ let promotedItemInFlight = false;
 // retract it. The "lockstep yield" pattern (one in-flight at a time)
 // keeps subsequent queue items cancellable until they are promoted.
 let inFlightToCliId: string | null = null;
+// Issue #289 — when set to the in-flight queueId, a force-send ("立即发送") is in progress
+// for that item: it interrupts the current turn precisely so the SDK drains + processes the
+// queued command, so the graceful-interrupt `result` MUST SURFACE the item (queue:started)
+// instead of dropping it (queue:cancelled). Distinct from `isInterruptingResponse` (which is
+// also true for a plain stop). Cleared whenever the in-flight slot is cleared.
+let forceSurfaceInFlightId: string | null = null;
 // (v0.2.12) Metadata for the currently in-flight queue item. We stash
 // messageText / attachments / requestId at yield time because the
 // MessageQueueItem closes over the generator and we no longer have
@@ -693,6 +711,18 @@ type InFlightMetadata = {
   mirrorImages?: MirrorImage[];
 };
 let inFlightMetadata: InFlightMetadata | null = null;
+
+/**
+ * Clear the in-flight queued-command slot. Keeps the three coupled fields in lockstep so a
+ * future clear site can't forget the #289 force flag (which, if left stale, would be checked
+ * against a later in-flight item in handleMessageComplete). Callers that need the prior value
+ * (e.g. the queueId / metadata / forced-ness) MUST capture it before calling.
+ */
+function clearInFlightSlot(): void {
+  inFlightToCliId = null;
+  inFlightMetadata = null;
+  forceSurfaceInFlightId = null;
+}
 
 // ===== Desktop → IM mirror state (PRD 0.2.14 Phase C) =====
 //
@@ -914,12 +944,6 @@ let prePlanPermissionMode: PermissionMode | null = null;
 // Current model for the session (updates on each user message if changed)
 let currentModel: string | undefined = undefined;
 // Provider environment config (baseUrl, apiKey, authType) for third-party providers
-export type ModelAliases = {
-  sonnet?: string;
-  opus?: string;
-  haiku?: string;
-};
-
 export type ProviderEnv = {
   baseUrl?: string;
   apiKey?: string;
@@ -1014,7 +1038,7 @@ function resolveActiveSessionUpstreamConfig(): UpstreamBridgeConfig {
   // when the session bridge is registered; that's a registration error
   // upstream of us. Defensive: empty-string baseUrl + no model → bridge
   // handler will fail the upstream call with a clear error.
-  const aliases = currentProviderEnv?.modelAliases;
+  const aliases = resolveSessionModelAliases(currentProviderEnv?.modelAliases, currentModel);
   return {
     baseUrl: currentProviderEnv?.baseUrl ?? '',
     apiKey: currentProviderEnv?.apiKey ?? '',
@@ -1107,7 +1131,7 @@ export function startOneShotBridge(
     throw new Error('startOneShotBridge called with non-OpenAI provider — caller should not need a bridge');
   }
   const token = randomUUID();
-  const aliases = providerEnv.modelAliases;
+  const aliases = resolveSessionModelAliases(providerEnv.modelAliases, modelOverride);
   const snapshot: UpstreamBridgeConfig = {
     baseUrl: providerEnv.baseUrl ?? '',
     apiKey: providerEnv.apiKey ?? '',
@@ -1132,6 +1156,14 @@ let sessionRegistered = false;
 
 // 时间回溯：对话截断后，下次 query 需携带 resumeSessionAt 截断 SDK 对话历史
 let pendingResumeSessionAt: string | undefined;
+// PRD 0.2.27 — cold-reload window-B anchor. Captured at LOAD time (loadMessagesFromStorage)
+// from the DURABLE persisted tail, NOT re-derived at query time: a direct-send pushes the
+// new user row into messages[] (agent-session.ts ~6866) before startStreamingSession runs,
+// which would flip the tail to a user message and defeat the tail-is-assistant gate exactly
+// in the "rewind → reopen → ask" flow. Capturing at load freezes the truncated tail before
+// any new send. Lifecycle mirrors pendingResumeSessionAt: set on load, consumed on
+// system_init, cleared on reject / session switch / reset.
+let pendingReloadAnchor: string | undefined;
 // 时间回溯进行中 — 阻止 enqueueUserMessage 并发写入
 let rewindPromise: Promise<unknown> | null = null;
 
@@ -1391,8 +1423,7 @@ async function handleQueuedCommandReplay(
     },
   });
 
-  inFlightToCliId = null;
-  inFlightMetadata = null;
+  clearInFlightSlot();
   promoteNextFromPending();
 }
 
@@ -1412,8 +1443,7 @@ function abortPersistentSession(): void {
   shouldAbortSession = true;
   // (v0.2.12) Clear in-flight CLI tracking — recovery session starts clean
   // and any rescued pending items will be re-yielded by the new generator.
-  inFlightToCliId = null;
-  inFlightMetadata = null;
+  clearInFlightSlot();
   promotedItemInFlight = false;
   // Subprocess is about to die — rescue pending items so the recovery session
   // re-delivers them instead of losing them with the dead stdin buffer.
@@ -1507,6 +1537,10 @@ let currentTurnStartTime: number | null = null;
 let currentTurnToolCount = 0;
 // Whether the current turn produced any visible assistant text output
 let currentTurnHasOutput = false;
+// SDK assistant messages can carry a provisional .error even when the final
+// SDK result later succeeds. Keep it turn-local until the authoritative result.
+let currentTurnHadAssistantMessageError = false;
+let currentTurnLastAssistantMessageError: string | null = null;
 // Whether the current turn observed any non-init SDK frame (assistant /
 // user / tool_result / stream_event / result / rate_limit_event etc.).
 // Cheaper signal than currentTurnHasOutput — flips on the FIRST substantive
@@ -1600,6 +1634,8 @@ function resetTurnUsage(): void {
   currentTurnStartTime = null;
   currentTurnToolCount = 0;
   currentTurnHasOutput = false;
+  currentTurnHadAssistantMessageError = false;
+  currentTurnLastAssistantMessageError = null;
   turnHadSubstantiveActivity = false;
   currentTurnTextBlocks.length = 0;
   // Note: currentTurnInboxMeta is NOT reset here — it's bound on dequeue
@@ -2230,6 +2266,7 @@ export function setSessionModel(model: string): void {
   if (model === currentModel) return;
 
   const oldModel = currentModel;
+  const aliasEnvChanged = modelAliasEnvChangesForModel(currentProviderEnv?.modelAliases, oldModel, model);
   currentModel = model;
   console.log(`[agent] session model set: ${oldModel ?? 'undefined'} -> ${model}`);
 
@@ -2262,6 +2299,21 @@ export function setSessionModel(model: string): void {
     if (querySession) {
       console.log(`[agent] model window changed (${oldCtx ?? 'SDK-default'} → ${newCtx ?? 'SDK-default'}) → schedule deferred restart to reinject CLAUDE_CODE_AUTO_COMPACT_WINDOW`);
       scheduleDeferredRestart('model-window');
+    }
+  }
+
+  // ANTHROPIC_DEFAULT_*_MODEL is also baked into the SDK subprocess env.
+  // querySession.setModel() updates the parent model only; SDK built-in
+  // subagents such as Explore keep resolving their own model aliases from
+  // those env vars until the subprocess is respawned.
+  if (aliasEnvChanged && querySession) {
+    if (isTurnInFlight()) {
+      console.log('[agent] model aliases changed during active turn -> schedule deferred restart to reinject ANTHROPIC_DEFAULT_*_MODEL');
+      scheduleDeferredRestart('model-aliases');
+    } else {
+      console.log('[agent] model aliases changed while idle/pre-warming -> aborting session to reinject ANTHROPIC_DEFAULT_*_MODEL');
+      abortPersistentSession();
+      schedulePreWarm();
     }
   }
 }
@@ -3029,7 +3081,8 @@ const pendingPermissions = new Map<string, {
 }>();
 
 // AskUserQuestion types - import from shared
-import type { AskUserQuestionInput } from '../shared/types/askUserQuestion';
+import type { AskUserQuestionInput, AskUserQuestion } from '../shared/types/askUserQuestion';
+import { withQuestionTextAnswerKeys } from '../shared/types/askUserQuestion';
 export type { AskUserQuestionInput, AskUserQuestion, AskUserQuestionOption } from '../shared/types/askUserQuestion';
 
 // PlanMode types - import from shared
@@ -4242,7 +4295,8 @@ export function buildClaudeSessionEnv(
   // For third-party providers, set ANTHROPIC_DEFAULT_*_MODEL so the SDK resolves aliases
   // to provider-specific model IDs (e.g., "sonnet" → "deepseek-chat" instead of "claude-sonnet-4-6").
   // Hoisted above the OpenAI early return so both protocol paths benefit.
-  const aliases = effectiveProviderEnv?.modelAliases;
+  const resolvedModel = modelOverride ?? currentModel;
+  const aliases = resolveSessionModelAliases(effectiveProviderEnv?.modelAliases, resolvedModel);
   if (aliases) {
     // _MODEL is what SDK feeds into getContextWindowForModel(); for 1M-window
     // alias targets we MUST tag it with [1m] so the SDK takes the 1M path.
@@ -4296,7 +4350,6 @@ export function buildClaudeSessionEnv(
   // case (primary model hits its own 128K ceiling) is what this fixes;
   // sub-agents on a smaller window would be further over-capped, not
   // under-capped.
-  const resolvedModel = modelOverride ?? currentModel;
   const modelContextLength = lookupModelContextLength(resolvedModel);
   if (modelContextLength && modelContextLength > 0) {
     env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = String(modelContextLength);
@@ -4929,12 +4982,25 @@ function handleMessageComplete(): void {
   if (inFlightToCliId !== null) {
     const stale = inFlightToCliId;
     const meta = inFlightMetadata;
-    inFlightToCliId = null;
-    inFlightMetadata = null;
-    if (isInterruptingResponse) {
+    // Issue #289 — a force-send ("立即发送") of THIS item must SURFACE it (the SDK drains +
+    // processes it post-abort), unlike a plain stop which drops it. Capture before clearing.
+    const forced = forceSurfaceInFlightId === stale;
+    clearInFlightSlot();
+    const inFlightAction = decideInFlightActionOnResult({
+      isInterrupting: isInterruptingResponse,
+      forced,
+      hasMeta: !!meta,
+    });
+    if (inFlightAction === 'drop') {
       broadcast('queue:cancelled', { queueId: stale });
       console.log(`[agent] In-flight queue item ${stale} dropped at graceful interrupt result — broadcast queue:cancelled`);
-    } else if (meta) {
+    } else if (inFlightAction === 'surface' && meta) {
+      // Issue #289 — a FORCE surface means the SDK is draining this item into a NEW turn;
+      // tell interruptCurrentResponse() to skip its redundant trailing handleMessageStopped()
+      // (which would undo the streaming re-arm below + double-pop the IM request → idle gap).
+      // The natural turn-end fallback does NOT go through interruptCurrentResponse, so only
+      // set it for the forced case.
+      if (forced) forceDrainTurnStarting = true;
       const userMessage: MessageWire = {
         id: String(messageSequence++),
         role: 'user',
@@ -4948,7 +5014,7 @@ function handleMessageComplete(): void {
       if (meta.source === 'desktop') {
         fireDesktopUserMirror(meta.messageText, meta.mirrorImages);
       }
-      console.log(`[agent] queue:started fallback at turn-end (no mid-turn replay), queueId=${stale}`);
+      console.log(`[agent] In-flight queue item ${stale} surfaced via queue:started (${forced ? 'force-send #289' : 'turn-end fallback, no mid-turn replay'})`);
       broadcast('queue:started', {
         queueId: stale,
         userMessage: {
@@ -5089,8 +5155,7 @@ function handleMessageStopped(): void {
   // graceful-interrupt branch.
   if (inFlightToCliId !== null) {
     const droppedQueueId = inFlightToCliId;
-    inFlightToCliId = null;
-    inFlightMetadata = null;
+    clearInFlightSlot();
     broadcast('queue:cancelled', { queueId: droppedQueueId });
     console.log(`[agent] In-flight queue item ${droppedQueueId} dropped on stop — broadcast queue:cancelled`);
   }
@@ -5153,8 +5218,7 @@ function handleMessageError(error: string): void {
   // surface queue:cancelled — see handleMessageStopped for rationale.
   if (inFlightToCliId !== null) {
     const droppedQueueId = inFlightToCliId;
-    inFlightToCliId = null;
-    inFlightMetadata = null;
+    clearInFlightSlot();
     broadcast('queue:cancelled', { queueId: droppedQueueId });
     console.log(`[agent] In-flight queue item ${droppedQueueId} dropped on error — broadcast queue:cancelled`);
   }
@@ -5686,6 +5750,12 @@ function loadMessagesFromStorage(storedMessages: SessionMessage[]): void {
     }
   }
 
+  // PRD 0.2.27 — capture the cold-reload window-B anchor NOW, from the durable persisted
+  // tail (before any new direct-send user row is appended). Always assigned (value or
+  // undefined) so it never carries a stale value from a prior load. Consumed by the next
+  // startStreamingSession. See deriveReloadResumeAnchor + the `pendingReloadAnchor` decl.
+  pendingReloadAnchor = deriveReloadResumeAnchor(messages, currentSessionUuids);
+
   // Seed Bridge thought_signature cache from persisted tool_use blocks
   // (Gemini thinking models require round-tripping this field; the cache is lost on sidecar restart)
   const thoughtSigEntries: Array<{ id: string; thought_signature: string }> = [];
@@ -5758,6 +5828,7 @@ export async function resetSession(): Promise<void> {
   // 4. Clear SDK resume state - CRITICAL: prevents SDK from resuming old context!
   sessionRegistered = false;
   pendingResumeSessionAt = undefined; // Prevent leaking rewind state to new session
+  pendingReloadAnchor = undefined;   // PRD 0.2.27 — symmetric reset (don't leak reload anchor across sessions)
   messageResolver = null;
   systemInitInfo = null; // Clear old system info so new session gets fresh init
   sdkControlReady = false; // Subprocess gone — must re-confirm via initializationResult on next pre-warm
@@ -5845,6 +5916,7 @@ async function recoverFromStaleSession(): Promise<void> {
     //    identity is preserved end-to-end.
     sessionRegistered = false;
     pendingResumeSessionAt = undefined;
+    pendingReloadAnchor = undefined; // PRD 0.2.27 — symmetric reset
 
     // 3. Reset SDK ready signal + pre-warm bookkeeping (mirrors resetSession
     //    steps 5-7 but does NOT clear messages/permissions/sessionId).
@@ -6084,6 +6156,7 @@ export async function switchToSession(targetSessionId: string): Promise<boolean>
   isProcessing = false;
   sessionRegistered = false; // Will re-set from sessionMeta below
   pendingResumeSessionAt = undefined; // Prevent leaking rewind state to different session
+  pendingReloadAnchor = undefined;   // PRD 0.2.27 — symmetric reset
   messageResolver = null;
   setSessionState('idle');
   systemInitInfo = null;
@@ -6195,7 +6268,20 @@ async function applySessionConfig(newModel?: string, newPermissionMode?: Permiss
   // applySessionConfig invocation that runs concurrently also drains via
   // pendingSetModelPromise.
   if (newModel && newModel !== currentModel) {
+    const aliasEnvChanged = modelAliasEnvChangesForModel(currentProviderEnv?.modelAliases, currentModel, newModel);
     try {
+      if (aliasEnvChanged) {
+        const oldModel = currentModel;
+        currentModel = newModel;
+        console.log(`[agent] runtime model aliases changed (${oldModel ?? 'undefined'} -> ${newModel}) -> restarting session to reinject ANTHROPIC_DEFAULT_*_MODEL`);
+        abortPersistentSession();
+        await awaitSessionTermination(10_000, 'applySessionConfig/modelAliasChange');
+        querySession = null;
+        isProcessing = false;
+        setSessionState('idle');
+        resetAbortFlag();
+        return;
+      }
       await dispatchSetModelToSdk(newModel);
       currentModel = newModel;
       console.log(`[agent] runtime model switched to: ${newModel}`);
@@ -7107,11 +7193,21 @@ export async function interruptCurrentResponse(reason: CancelReason = 'user'): P
       }
     }
 
-    broadcast('chat:message-stopped', null);
-    handleMessageStopped();
+    // Issue #289 — if the graceful-interrupt `result` already ran handleMessageComplete and
+    // it FORCE-surfaced the in-flight item, the turn-end is fully handled and the SDK is
+    // draining that item into a new turn. Calling handleMessageStopped() here would undo the
+    // streaming re-arm and double-pop the IM request (a racy idle window). Skip it; a plain
+    // stop (flag unset) still tears down normally.
+    if (forceDrainTurnStarting) {
+      forceDrainTurnStarting = false;
+    } else {
+      broadcast('chat:message-stopped', null);
+      handleMessageStopped();
+    }
     return true;
   } finally {
     isInterruptingResponse = false;
+    forceDrainTurnStarting = false; // defensive: never leak into a later interrupt
   }
 }
 
@@ -7259,6 +7355,12 @@ export async function forceExecuteQueueItem(queueId: string): Promise<boolean> {
   }
 
   if (isSessionActive()) {
+    // Issue #289: if the target is already in-flight to the CLI, mark it so the
+    // graceful-interrupt `result` SURFACES it (it's about to be drained + processed
+    // by the SDK) instead of dropping it from the UI like a plain stop would.
+    if (isInFlight) {
+      forceSurfaceInFlightId = queueId;
+    }
     await interruptCurrentResponse();
   } else {
     // Session 已死：generator 不存在，无人消费队列。
@@ -7427,6 +7529,92 @@ export async function rewindSession(userMessageId: string): Promise<{
  * Non-destructive — the current session remains untouched.
  * The new session uses SDK's forkSession option on first startup.
  */
+/**
+ * PRD 0.2.27 — eager fork via the standalone SDK `forkSession()` function (gated by
+ * AppConfig.eagerFork, a developer toggle in Settings→About, DEFAULT ON; off → lazy forkFrom
+ * path). Creates the fork's SDK transcript up front, rebuilds the old→new sdkUuid map at SDK granularity,
+ * and re-stamps our copied rows so the forked session resumes as a plain session (no forkFrom
+ * state machine, no fork-at-tail degradation). Returns `ok:false` — caller falls back to the
+ * lazy path — on a turn-in-flight / not-yet-flushed anchor / SDK error / ANY structural
+ * mismatch, and cleans up the orphan SDK session on a post-fork failure. See
+ * specs/prd/prd_0.2.27_fork_standalone_migration.md.
+ */
+async function tryEagerFork(opts: {
+  sourceSdkSid: string;
+  anchorUuid: string;
+  dir: string;
+  forkedMessages: SessionMessage[];
+}): Promise<{ ok: true; newSid: string; remapped: SessionMessage[] } | { ok: false; reason: string }> {
+  const { sourceSdkSid, anchorUuid, dir, forkedMessages } = opts;
+  const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
+
+  // Flush gate ①: never eager-fork while the source session is BUSY (turn in flight /
+  // streaming / queued / mid-turn buffered) — its tail may be mid-write. Use isSessionBusy()
+  // (the single source of truth for "safe to mutate"), NOT isProcessing: isProcessing is true
+  // for an alive persistent subprocess even when idle, so gating on it would make the eager
+  // path unreachable in the normal (idle) fork flow — it would always fall back to lazy.
+  if (isSessionBusy()) return { ok: false, reason: 'source session is busy' };
+
+  // Flush gate ②: the anchor must already be flushed into the source SDK transcript; reuse
+  // that transcript (sliced to the anchor) as the LHS of the remap.
+  let srcSdk: Awaited<ReturnType<typeof sdkGetSessionMessages>>;
+  try {
+    srcSdk = await sdkGetSessionMessages(sourceSdkSid, { dir });
+  } catch (e) {
+    return { ok: false, reason: `source getSessionMessages failed: ${errMsg(e)}` };
+  }
+  const anchorIdx = srcSdk.findIndex(m => m.uuid === anchorUuid);
+  if (anchorIdx < 0) return { ok: false, reason: 'anchor not yet flushed to source SDK transcript' };
+  const srcSliced = srcSdk.slice(0, anchorIdx + 1);
+
+  // Re-check right before the SDK fork: a turn may have started during the getSessionMessages
+  // await (gate ① is not an atomic admission lock). This narrows the window; a concurrent
+  // append AFTER the anchor is additionally self-defending — the slice/remap is over the
+  // immutable up-to-anchor prefix, so any structural change makes buildForkUuidRemap return
+  // ok:false → clean fallback. (A full fork-admission lock is a pre-default-ON follow-up.)
+  if (isSessionBusy()) return { ok: false, reason: 'source became busy during fork prep' };
+
+  // Eager SDK fork (copies + remaps uuids into a new session file under `dir`).
+  let newSid: string;
+  try {
+    const res = await sdkForkSession(sourceSdkSid, { upToMessageId: anchorUuid, dir });
+    newSid = res.sessionId;
+  } catch (e) {
+    return { ok: false, reason: `sdkForkSession failed: ${errMsg(e)}` };
+  }
+
+  // From here the SDK fork file exists — clean it up on any failure before falling back.
+  // Guard `newSid !== sourceSdkSid` so cleanup can NEVER touch the source (defensive).
+  const fail = async (reason: string): Promise<{ ok: false; reason: string }> => {
+    if (newSid !== sourceSdkSid) {
+      try { await sdkDeleteSession(newSid, { dir }); } catch { /* orphan cleanup is best-effort */ }
+    }
+    return { ok: false, reason };
+  };
+
+  // Defensive: the SDK returns a fresh UUID, but never adopt an id that already names a
+  // MyAgents session (corrupt sessions.json / hypothetical SDK reuse) — clean up + fall back.
+  if (getSessionMetadata(newSid)) {
+    return fail(`fork id collides with an existing MyAgents session: ${newSid}`);
+  }
+
+  let forkSdk: Awaited<ReturnType<typeof sdkGetSessionMessages>>;
+  try {
+    forkSdk = await sdkGetSessionMessages(newSid, { dir });
+  } catch (e) {
+    return fail(`fork getSessionMessages failed: ${errMsg(e)}`);
+  }
+
+  const remap = buildForkUuidRemap(srcSliced, forkSdk);
+  if (!remap.ok) return fail(`uuid remap failed: ${remap.reason}`);
+
+  const applied = remapStoredSdkUuids(forkedMessages.map(m => m.sdkUuid), remap.map);
+  if (!applied.ok) return fail(`stored uuid re-stamp failed: ${applied.reason}`);
+  const remapped = forkedMessages.map((m, i) => ({ ...m, sdkUuid: applied.remapped[i] }));
+
+  return { ok: true, newSid, remapped };
+}
+
 export async function forkSession(assistantMessageId: string): Promise<{
   success: boolean;
   newSessionId?: string;
@@ -7495,7 +7683,7 @@ export async function forkSession(assistantMessageId: string): Promise<{
   const sourceTitle = sourceMeta?.title || 'Chat';
 
   try {
-    // 3. Create new session metadata with forkFrom.
+    // Common: inherited config snapshot + the copied message slice (both fork paths use them).
     // v0.1.69: Inherit the source session's snapshot (model/permission/mcp/provider/runtime).
     // Forking from a "locked" Desktop session yields a locked clone with the same config —
     // Branching off a conversation should not silently change AI behavior. The user can
@@ -7509,15 +7697,9 @@ export async function forkSession(assistantMessageId: string): Promise<{
       providerEnvJson: sourceMeta.providerEnvJson,
       configSnapshotAt: sourceMeta.configSnapshotAt,
     } : {};
-    const newSession = createSessionMetadata(currentAgentDir, inheritedSnapshot);
-    newSession.title = `🌿 ${sourceTitle}`;
-    newSession.titleSource = 'auto';
-    newSession.forkFrom = {
-      sourceSessionId,
-      messageUuid: targetMsg.sdkUuid,
-    };
 
-    // 4. Copy messages up to and including the fork point
+    // Copy messages up to and including the fork point (sdkUuid preserved here; the EAGER
+    // path re-stamps them to the fork's new uuids before persisting).
     const forkedMessages: SessionMessage[] = messageSource.slice(0, targetIndex + 1).map(m => ({
       id: m.id,
       role: m.role,
@@ -7533,30 +7715,78 @@ export async function forkSession(assistantMessageId: string): Promise<{
       metadata: m.metadata,
     }));
 
-    // 5. Persist new session.
-    // Pattern 3 §3.2.4 — fix #2 (forkSession parent cursor). Snapshot the
-    // parent's persist cursor + cache before invoking SessionStore writers
-    // for the FORKED session; restore them afterwards so a subsequent persist
-    // on the parent doesn't accidentally observe stale state from any code
-    // path that might mutate this module's locals during the fork. fork's
-    // saveSessionMessages writes to a different file under a different lock,
-    // so this is defensive — but cheap insurance against future regressions.
+    // Pattern 3 §3.2.4 — fix #2 (forkSession parent cursor). Snapshot the parent's persist
+    // cursor + cache before invoking SessionStore writers for the FORKED session; restore
+    // them afterwards so a subsequent persist on the parent doesn't observe stale state.
     const parentPersistCursorSnapshot = lastPersistedIndex;
     const parentPersistCacheSnapshot = persistedSessionMessageCache.slice();
+    const restoreParentPersistState = () => {
+      if (lastPersistedIndex !== parentPersistCursorSnapshot) {
+        console.warn(`[agent] forkSession: parent persist cursor drifted (${parentPersistCursorSnapshot} → ${lastPersistedIndex}); restoring`);
+        lastPersistedIndex = parentPersistCursorSnapshot;
+      }
+      if (persistedSessionMessageCache.length !== parentPersistCacheSnapshot.length) {
+        persistedSessionMessageCache.length = 0;
+        for (const m of parentPersistCacheSnapshot) persistedSessionMessageCache.push(m);
+      }
+    };
 
+    // PRD 0.2.27 — EAGER fork (AppConfig.eagerFork, developer toggle in Settings→About, DEFAULT
+    // ON; flip off → lazy path). Create the SDK fork up front + re-stamp our rows' sdkUuids, so
+    // the fork resumes as a plain session with NO forkFrom state machine (#134/#135) and NO
+    // fork-at-tail degradation (#220). Any decline (source busy / anchor not flushed / structural
+    // mismatch) cleanly falls back below. Read disk-first (config.json is authoritative; fork is
+    // a rare user action so a sync read is fine). Missing field ⇒ on.
+    if (loadAdminConfig().eagerFork !== false) {
+      const eager = await tryEagerFork({
+        sourceSdkSid: sourceMeta?.sdkSessionId ?? sourceSessionId,
+        anchorUuid: targetMsg.sdkUuid,
+        dir: currentAgentDir,
+        forkedMessages,
+      });
+      if (eager.ok) {
+        // Unified session: use the SDK's returned fork id as OUR session id AND sdkSessionId,
+        // so switchToSession (`sessionMeta.sdkSessionId` → sessionRegistered=true) resumes the
+        // already-created SDK fork file on first start instead of trying to create it (which
+        // would collide). No forkFrom. (Codex review #5.)
+        const newSession = createSessionMetadata(currentAgentDir, inheritedSnapshot);
+        newSession.id = eager.newSid;
+        newSession.sdkSessionId = eager.newSid;
+        newSession.unifiedSession = true;
+        newSession.title = `🌿 ${sourceTitle}`;
+        newSession.titleSource = 'auto';
+        try {
+          await saveSessionMetadata(newSession);
+          await saveSessionMessages(newSession.id, eager.remapped);
+        } catch (persistErr) {
+          // Persist threw AFTER the SDK fork file was created — clean up the orphan SDK
+          // transcript so we don't leak it, then let the outer catch surface the failure.
+          try { await sdkDeleteSession(eager.newSid, { dir: currentAgentDir }); } catch { /* best-effort */ }
+          // Restore the parent's persist cursor/cache on this exit too, so EVERY path out of the
+          // eager block leaves the invariant uniform — defensive against a future SessionStore
+          // writer that touches these module globals (harmless today, asymmetric otherwise).
+          restoreParentPersistState();
+          throw persistErr;
+        }
+        restoreParentPersistState();
+        console.log(`[agent] forked session (EAGER) ${sourceSessionId} → ${newSession.id} at ${assistantMessageId}, ${eager.remapped.length} messages, sdkUuids remapped`);
+        return { success: true, newSessionId: newSession.id, agentDir: currentAgentDir, title: newSession.title };
+      }
+      console.warn(`[agent] eager fork declined (${eager.reason}) — falling back to lazy forkFrom path`);
+    }
+
+    // Default: lazy fork — write forkFrom + copied rows (old uuids); the SDK fork is
+    // materialized at the forked session's first startup via query({ forkSession: true }).
+    const newSession = createSessionMetadata(currentAgentDir, inheritedSnapshot);
+    newSession.title = `🌿 ${sourceTitle}`;
+    newSession.titleSource = 'auto';
+    newSession.forkFrom = {
+      sourceSessionId,
+      messageUuid: targetMsg.sdkUuid,
+    };
     await saveSessionMetadata(newSession);
     await saveSessionMessages(newSession.id, forkedMessages);
-
-    // Restore parent persistence state (no-op in normal flow; defends against
-    // future cross-talk if forkSession ever needs to run a parent write too).
-    if (lastPersistedIndex !== parentPersistCursorSnapshot) {
-      console.warn(`[agent] forkSession: parent persist cursor drifted (${parentPersistCursorSnapshot} → ${lastPersistedIndex}); restoring`);
-      lastPersistedIndex = parentPersistCursorSnapshot;
-    }
-    if (persistedSessionMessageCache.length !== parentPersistCacheSnapshot.length) {
-      persistedSessionMessageCache.length = 0;
-      for (const m of parentPersistCacheSnapshot) persistedSessionMessageCache.push(m);
-    }
+    restoreParentPersistState();
 
     console.log(`[agent] forked session ${sourceSessionId} → ${newSession.id} at message ${assistantMessageId} (sdkUuid: ${targetMsg.sdkUuid}), ${forkedMessages.length} messages copied`);
 
@@ -7693,6 +7923,10 @@ async function startStreamingSession(preWarm = false): Promise<void> {
   // Declared outside try so finally can clean up
   let startupTimeoutId: ReturnType<typeof setTimeout> | undefined;
   let apiWatchdogId: ReturnType<typeof setInterval> | undefined;
+  // PRD 0.2.27 — query-scoped copy of the reloadAnchor this start actually sent. Local
+  // (not module) so a late catch from THIS invocation evicts the right uuid even if a
+  // newer session has since re-armed the module-level pendingReloadAnchor.
+  let sentReloadAnchor: string | undefined;
 
   // Background sub-agents started in this session but not yet terminal, keyed by
   // task_id. Entries are removed when a terminal task_notification/task_updated is
@@ -7853,9 +8087,20 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     // is the truer expression of what the user wants the fork to contain
     // (otherwise the rewind would be cosmetic UI truncation while the
     // SDK still seeds the full fork-point context).
-    const effectiveResumeAt = forkMode
-      ? (rewindResumeAt ?? forkResumeAt)
-      : rewindResumeAt;
+    // PRD 0.2.27 window-B reconcile: on a COLD reload (resume from history, non-fork, no
+    // in-process rewind anchor), pin the SDK to the durable tail captured at LOAD time
+    // (pendingReloadAnchor) so a rewind that was never materialized into a new SDK branch
+    // before the process died still takes effect for the AI. Captured at load (not derived
+    // here) because a direct-send already pushed the new user row into messages[] before
+    // this runs (~6866). No-op in the normal case (tail == SDK newest leaf → slice keeps
+    // all). Lowest priority — an in-process rewind anchor still wins (resolveEffectiveResumeAt),
+    // so existing rewind behavior is byte-for-byte unchanged. See specs/prd/prd_0.2.27_rewind_reload_durability.md.
+    const reloadAnchor = (!forkMode && !rewindResumeAt && resumeFrom) ? pendingReloadAnchor : undefined;
+    // Capture into a query-scoped local so a LATE catch from a previous (aborted) start
+    // can't mis-attribute the eviction against a newer session's anchor (module state races).
+    sentReloadAnchor = reloadAnchor;
+
+    const effectiveResumeAt = resolveEffectiveResumeAt({ forkMode, rewindResumeAt, forkResumeAt, reloadAnchor });
 
     const mcpStatus = currentMcpServers === null ? 'auto' : currentMcpServers.length === 0 ? 'disabled' : `enabled(${currentMcpServers.length})`;
     console.log(`[agent] starting query with model: ${currentModel ?? 'default'}, permissionMode: ${currentPermissionMode} -> SDK: ${sdkPermissionMode}, MCP: ${mcpStatus}, ${resumeFrom ? `resume: ${resumeFrom}` : `sessionId: ${effectiveSdkSessionId}`}${effectiveResumeAt ? `, resumeSessionAt: ${effectiveResumeAt}` : ''}${forkMode ? `, FORK mode (forkPoint: ${forkResumeAt}${rewindResumeAt && rewindResumeAt !== forkResumeAt ? `, rewind→${rewindResumeAt}` : ''})` : ''}`);
@@ -8236,11 +8481,15 @@ async function startStreamingSession(preWarm = false): Promise<void> {
               interrupt: true,
             };
           }
-          // Return with answers filled in
+          // Return with answers filled in. SDK 0.3.158's AskUserQuestion tool
+          // looks each answer up by question TEXT (see withQuestionTextAnswerKeys);
+          // our renderer keys by index, so we must alias them here or the model is
+          // told "The user did not answer the questions." (0.2.119→0.3.158 regression).
           const inputWithAnswers = input as Record<string, unknown>;
+          const askQuestions = (inputWithAnswers as { questions?: AskUserQuestion[] }).questions;
           return {
             behavior: 'allow' as const,
-            updatedInput: { ...inputWithAnswers, answers }
+            updatedInput: { ...inputWithAnswers, answers: withQuestionTextAnswerKeys(askQuestions, answers) }
           };
         }
 
@@ -8833,6 +9082,10 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           console.log(`[agent] system_init received — rewind anchor consumed: ${pendingResumeSessionAt}`);
           pendingResumeSessionAt = undefined;
         }
+        // PRD 0.2.27 — system_init means the load-captured reloadAnchor (if any) was
+        // accepted by the SDK and the session is now truncated correctly; consume it so a
+        // later restart/turn doesn't re-apply a now-stale truncation point.
+        pendingReloadAnchor = undefined;
 
         // Save SDK session_id and verify unified session status
         if (nextSystemInit.session_id) {
@@ -9032,8 +9285,14 @@ async function startStreamingSession(preWarm = false): Promise<void> {
       if (!isApiRetry) {
         const agentError = extractAgentError(sdkMessage);
         if (agentError) {
-          lastAgentError = agentError;
-          broadcast('chat:agent-error', { message: agentError });
+          if (sdkMessage.type === 'assistant') {
+            currentTurnHadAssistantMessageError = true;
+            currentTurnLastAssistantMessageError = agentError;
+            console.warn('[agent] SDK assistant message reported provisional error; waiting for result frame:', agentError);
+          } else {
+            lastAgentError = agentError;
+            broadcast('chat:agent-error', { message: agentError });
+          }
         }
       }
       if (shouldAbortSession) {
@@ -9704,10 +9963,11 @@ async function startStreamingSession(preWarm = false): Promise<void> {
             cacheCreationInputTokens?: number;
           }>;
         };
+        const resultText = resultMessage.result || '';
 
         // Forward SDK error results to IM callback (prevents "(No Response)")
         if (resultMessage.is_error) {
-          const rawError = resultMessage.result || resultMessage.errors?.join('; ') || '';
+          const rawError = resultText || resultMessage.errors?.join('; ') || currentTurnLastAssistantMessageError || '';
           // Detect image content error — reset session to clear polluted history
           // (applies to both IM and desktop: prevents all subsequent messages from failing)
           // Pattern 1: malformed image block (e.g., wrong content type)
@@ -9741,37 +10001,6 @@ async function startStreamingSession(preWarm = false): Promise<void> {
               imRequestRegistry.setStatus(failedReq, 'failed');
               imRequestRegistry.unregister(failedReq);
             }
-          }
-        }
-
-        // Surface SDK-level errors that produced no assistant output (e.g. "Unknown skill: xxx").
-        // These results have non-empty result text but no visible assistant text was streamed.
-        // Without this, the user sees nothing — the message just silently completes.
-        // Only show agent-error for is_error results — non-error results from non-streaming
-        // providers are handled in the assistant message handler above.
-        const resultText = resultMessage.result || '';
-        if (resultText && !currentTurnHasOutput && !currentTurnToolCount) {
-          if (resultMessage.is_error) {
-            console.warn('[agent] SDK error result with no streamed output, showing as agent-error:', resultText);
-            broadcast('chat:agent-error', { message: resultText });
-          } else {
-            // Non-error result text that wasn't captured by streaming or assistant handler
-            // (safety net — should rarely trigger after the assistant handler fix above)
-            console.warn('[agent] SDK non-error result with no streamed output, showing as message:', resultText);
-            // Handler first (same pattern as streamed text path)
-            appendTextChunk(resultText);
-            broadcast('chat:message-chunk', resultText);
-          }
-          // Forward to IM event bus (prevents "(No Response)" for SDK failures).
-          // Pattern B+G: pop the head request — the upcoming handleMessageComplete
-          // for this turn will find the head already cleared and skip duplicate
-          // emission. Defensive against handleMessageComplete not running for
-          // is_error / no-output results.
-          emitImEvent('complete', resultText);
-          const completedReq = popPendingRequest();
-          if (completedReq) {
-            imRequestRegistry.setStatus(completedReq, 'completed');
-            imRequestRegistry.unregister(completedReq);
           }
         }
 
@@ -9837,6 +10066,60 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         // Calculate duration for analytics
         const durationMs = currentTurnStartTime ? Date.now() - currentTurnStartTime : 0;
 
+        // Surface SDK-level errors that produced no assistant output (e.g. "Unknown skill: xxx").
+        // These results have non-empty result text but no visible assistant text was streamed.
+        // Without this, the user sees nothing — the message just silently completes.
+        // Only show agent-error for is_error results — non-error results from non-streaming
+        // providers are handled in the assistant message handler above.
+        const hasResultText = resultText.trim().length > 0;
+        const resultErrorText = (hasResultText ? resultText : '') || resultMessage.errors?.join('; ') || currentTurnLastAssistantMessageError || '';
+        const noOutputResultText = resultMessage.is_error ? resultErrorText : (hasResultText ? resultText : '');
+        if (noOutputResultText && !currentTurnHasOutput && !currentTurnToolCount) {
+          if (resultMessage.is_error) {
+            console.warn('[agent] SDK error result with no streamed output, showing as agent-error:', resultErrorText);
+            lastAgentError = resultErrorText;
+            broadcast('chat:agent-error', { message: resultErrorText });
+          } else if (resultText) {
+            // Non-error result text that wasn't captured by streaming or assistant handler
+            // (safety net — should rarely trigger after the assistant handler fix above)
+            console.warn('[agent] SDK non-error result with no streamed output, showing as message:', resultText);
+            // Handler first (same pattern as streamed text path)
+            appendTextChunk(resultText);
+            broadcast('chat:message-chunk', resultText);
+            currentTurnHasOutput = true;
+          }
+          // Forward to IM event bus (prevents "(No Response)" for SDK failures).
+          // Pattern B+G: pop the head request — the upcoming handleMessageComplete
+          // for this turn will find the head already cleared and skip duplicate
+          // emission. Defensive against handleMessageComplete not running for
+          // is_error / no-output results.
+          emitImEvent('complete', noOutputResultText);
+          const completedReq = popPendingRequest();
+          if (completedReq) {
+            imRequestRegistry.setStatus(completedReq, 'completed');
+            imRequestRegistry.unregister(completedReq);
+          }
+        }
+
+        const emptySuccessfulResult = isEmptySuccessfulSdkResult({
+          isError: resultMessage.is_error,
+          result: resultText,
+          terminalReason: resultMessage.terminal_reason,
+          hasVisibleOutput: currentTurnHasOutput,
+          toolCount: currentTurnToolCount,
+          outputTokens: currentTurnUsage.outputTokens,
+        });
+        const recoveredAssistantMessageError = isRecoveredAssistantMessageError({
+          hadAssistantMessageError: currentTurnHadAssistantMessageError,
+          isError: resultMessage.is_error,
+          terminalReason: resultMessage.terminal_reason,
+          emptySuccessfulResult,
+        });
+
+        if (recoveredAssistantMessageError && currentTurnLastAssistantMessageError) {
+          console.log('[agent] SDK assistant message error recovered by successful result:', currentTurnLastAssistantMessageError);
+        }
+
         // Find the last assistant message's sdkUuid to piggyback on message-complete.
         // This avoids the ID mismatch problem: frontend streaming messages use Date.now()
         // IDs while backend uses messageSequence IDs, so the separate chat:message-sdk-uuid
@@ -9854,72 +10137,97 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           console.log(`[agent][terminal_reason] ${resultMessage.terminal_reason} scenario=${currentScenario.type} model=${currentTurnUsage.model ?? 'unknown'} duration_ms=${durationMs} tool_count=${currentTurnToolCount}`);
         }
 
-        console.log('[agent][sdk] Broadcasting chat:message-complete');
-        // Include usage data for frontend analytics tracking + assistant sdkUuid for fork button
-        broadcast('chat:message-complete', {
-          model: currentTurnUsage.model,
-          input_tokens: currentTurnUsage.inputTokens,
-          output_tokens: currentTurnUsage.outputTokens,
-          cache_read_tokens: currentTurnUsage.cacheReadTokens,
-          cache_creation_tokens: currentTurnUsage.cacheCreationTokens,
-          tool_count: currentTurnToolCount,
-          duration_ms: durationMs,
-          // SDK 0.2.91+ terminal_reason — 前端映射为中文 banner/toast。
-          // 未设置时前端按 `completed` 处理（不显示额外提示）。
-          terminal_reason: resultMessage.terminal_reason,
-          // Piggyback sdkUuid + real message ID so fork button works immediately after streaming.
-          // Frontend streaming messages use Date.now() IDs that don't match backend messageSequence IDs.
-          assistant_sdk_uuid: lastAssistant?.sdkUuid,
-          assistant_message_id: lastAssistant?.id,
-        });
+        if (emptySuccessfulResult) {
+          const emptyResultError = 'AI 未返回任何内容，但 SDK 将本轮标记为完成。请在当前会话重试；如果使用第三方兼容供应商，建议切换模型、减少上下文或压缩后重试。';
+          console.warn(`[agent][empty_result] model=${currentTurnUsage.model ?? 'unknown'} terminal_reason=${resultMessage.terminal_reason ?? 'none'} input=${currentTurnUsage.inputTokens} output=${currentTurnUsage.outputTokens} duration_ms=${durationMs} provisional_error=${currentTurnLastAssistantMessageError ?? 'none'}`);
+          lastAgentError = emptyResultError;
+          broadcast('chat:message-error', emptyResultError);
+          handleMessageError(emptyResultError);
+          if (currentTurnInboxMeta) {
+            const replyMeta = currentTurnInboxMeta;
+            currentTurnInboxMeta = undefined;
+            const replyText = currentTurnTextBlocks.join('').trim();
+            currentTurnTextBlocks.length = 0;
+            void import('./inbox/reply-deliver').then(({ deliverInboxReply }) =>
+              deliverInboxReply(sessionId, replyMeta, {
+                text: replyText,
+                error: {
+                  code: 'turn_failed',
+                  message: emptyResultError,
+                },
+              }),
+            ).catch((err) =>
+              console.error('[inbox] empty-result reply pushback failed:', err),
+            );
+          }
+        } else {
+          console.log('[agent][sdk] Broadcasting chat:message-complete');
+          // Include usage data for frontend analytics tracking + assistant sdkUuid for fork button
+          broadcast('chat:message-complete', {
+            model: currentTurnUsage.model,
+            input_tokens: currentTurnUsage.inputTokens,
+            output_tokens: currentTurnUsage.outputTokens,
+            cache_read_tokens: currentTurnUsage.cacheReadTokens,
+            cache_creation_tokens: currentTurnUsage.cacheCreationTokens,
+            tool_count: currentTurnToolCount,
+            duration_ms: durationMs,
+            // SDK 0.2.91+ terminal_reason — 前端映射为中文 banner/toast。
+            // 未设置时前端按 `completed` 处理（不显示额外提示）。
+            terminal_reason: resultMessage.terminal_reason,
+            // Piggyback sdkUuid + real message ID so fork button works immediately after streaming.
+            // Frontend streaming messages use Date.now() IDs that don't match backend messageSequence IDs.
+            assistant_sdk_uuid: lastAssistant?.sdkUuid,
+            assistant_message_id: lastAssistant?.id,
+          });
 
-        // Server-side unified analytics: covers all sources (desktop/cron/im).
-        // PRD 0.2.19 — `session_id` lets analytics join this back to the renderer's
-        // `session_new` event to reconstruct full per-session funnels (entry surface
-        // → first message → token cost → tool usage → outcome).
-        trackServer('ai_turn_complete', {
-          source: currentScenario.type,
-          session_id: sessionId,
-          platform: currentScenario.type === 'im' ? currentScenario.platform : null,
-          runtime: 'builtin',
-          model: currentTurnUsage.model ?? null,
-          input_tokens: currentTurnUsage.inputTokens,
-          output_tokens: currentTurnUsage.outputTokens,
-          cache_read_tokens: currentTurnUsage.cacheReadTokens,
-          cache_creation_tokens: currentTurnUsage.cacheCreationTokens,
-          tool_count: currentTurnToolCount,
-          duration_ms: durationMs,
-        });
+          // Server-side unified analytics: covers all sources (desktop/cron/im).
+          // PRD 0.2.19 — `session_id` lets analytics join this back to the renderer's
+          // `session_new` event to reconstruct full per-session funnels (entry surface
+          // → first message → token cost → tool usage → outcome).
+          trackServer('ai_turn_complete', {
+            source: currentScenario.type,
+            session_id: sessionId,
+            platform: currentScenario.type === 'im' ? currentScenario.platform : null,
+            runtime: 'builtin',
+            model: currentTurnUsage.model ?? null,
+            input_tokens: currentTurnUsage.inputTokens,
+            output_tokens: currentTurnUsage.outputTokens,
+            cache_read_tokens: currentTurnUsage.cacheReadTokens,
+            cache_creation_tokens: currentTurnUsage.cacheCreationTokens,
+            tool_count: currentTurnToolCount,
+            duration_ms: durationMs,
+          });
 
-        handleMessageComplete();
+          handleMessageComplete();
 
-        // PRD 0.2.18 Session Inbox — turn-end reply pushback.
-        // If this turn was triggered by an inbox message with replyBack=true,
-        // collect the turn's text + error and push back to caller session.
-        // Fire-and-forget: don't await (network errors logged but not surfaced).
-        if (currentTurnInboxMeta) {
-          const replyMeta = currentTurnInboxMeta;
-          // Clear immediately to prevent the next turn from inheriting (per-turn
-          // semantics — multiple inbox messages each get their own binding).
-          currentTurnInboxMeta = undefined;
-          const replyText = currentTurnTextBlocks.join('').trim();
-          currentTurnTextBlocks.length = 0;
-          const replyError = resultMessage.is_error
-            ? {
-                code: 'turn_failed',
-                message:
-                  resultMessage.result ||
-                  (resultMessage.errors?.join('; ') ?? 'turn ended with error'),
-              }
-            : undefined;
-          void import('./inbox/reply-deliver').then(({ deliverInboxReply }) =>
-            deliverInboxReply(sessionId, replyMeta, {
-              text: replyText,
-              error: replyError,
-            }),
-          ).catch((err) =>
-            console.error('[inbox] result-handler reply pushback failed:', err),
-          );
+          // PRD 0.2.18 Session Inbox — turn-end reply pushback.
+          // If this turn was triggered by an inbox message with replyBack=true,
+          // collect the turn's text + error and push back to caller session.
+          // Fire-and-forget: don't await (network errors logged but not surfaced).
+          if (currentTurnInboxMeta) {
+            const replyMeta = currentTurnInboxMeta;
+            // Clear immediately to prevent the next turn from inheriting (per-turn
+            // semantics — multiple inbox messages each get their own binding).
+            currentTurnInboxMeta = undefined;
+            const replyText = currentTurnTextBlocks.join('').trim();
+            currentTurnTextBlocks.length = 0;
+            const replyError = resultMessage.is_error
+              ? {
+                  code: 'turn_failed',
+                  message:
+                    resultMessage.result ||
+                    (resultMessage.errors?.join('; ') ?? 'turn ended with error'),
+                }
+              : undefined;
+            void import('./inbox/reply-deliver').then(({ deliverInboxReply }) =>
+              deliverInboxReply(sessionId, replyMeta, {
+                text: replyText,
+                error: replyError,
+              }),
+            ).catch((err) =>
+              console.error('[inbox] result-handler reply pushback failed:', err),
+            );
+          }
         }
 
         // PRD #134 — clear `forkFrom` only once we've VERIFIED the SDK has
@@ -10079,17 +10387,39 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     if (errorMessage.includes('No message found with message.uuid')
       && (sessionRegistered || pendingResumeSessionAt !== undefined)) {
       const rejectedUuid = pendingResumeSessionAt;
-      console.warn(`[agent] resumeSessionAt UUID rejected by SDK — clearing rewind anchor, retry will resume with full history`);
       pendingResumeSessionAt = undefined;
       // Evict the rejected UUID from currentSessionUuids so subsequent rewinds don't
       // re-accept it via the OR logic. Without this, the stale UUID stays in the cache
       // and a future rewind to the same point would re-trigger the same SDK error.
+      // Only log/evict when there was an ACTUAL rewind anchor: on a reloadAnchor rejection
+      // this branch still enters (sessionRegistered=true) with rejectedUuid===undefined —
+      // the reloadAnchor branch below owns + logs that case, so stay quiet here (no
+      // misleading "clearing rewind anchor" line on the high-stakes cold-reload path).
       if (rejectedUuid) {
+        console.warn(`[agent] resumeSessionAt UUID rejected by SDK — clearing rewind anchor, retry will resume with full history`);
         currentSessionUuids.delete(rejectedUuid);
       }
       // Don't modify sessionRegistered — session exists, just the UUID is invalid.
       // Don't return — let pre-warm retry (finally block) handle recovery.
       // For non-pre-warm (user message triggered): fall through to error broadcast.
+    }
+
+    // PRD 0.2.27 reloadAnchor "No message found" recovery (decision 6). The cold-reload
+    // anchor (pendingReloadAnchor, captured at LOAD) can be stale if compact/snip removed
+    // that uuid from the SDK transcript. The pre-warm retry does NOT reload, so it would
+    // reuse the same pendingReloadAnchor → SDK rejects again. Break the loop like the rewind
+    // branch: evict the uuid from currentSessionUuids (so a future re-load's
+    // deriveReloadResumeAnchor `.has()` gate also fails) AND clear the captured anchor
+    // (generation-guarded — only if a newer start hasn't replaced it). Uses the query-scoped
+    // `sentReloadAnchor`, not the module var, so a late catch from an aborted start can't
+    // evict against a newer session. Retry resumes with full history (window-B reconcile
+    // skipped this round; self-heals once the user continues and a newer leaf is written).
+    if (errorMessage.includes('No message found with message.uuid') && sentReloadAnchor) {
+      console.warn(`[agent] reloadAnchor UUID ${sentReloadAnchor} rejected by SDK — evicting from currentSessionUuids so retry resumes with full history (no re-derive loop)`);
+      currentSessionUuids.delete(sentReloadAnchor);
+      // Clear the load-captured anchor only if it's still THIS query's — a newer load/start
+      // may have already replaced it; don't wipe a newer session's pending anchor.
+      if (pendingReloadAnchor === sentReloadAnchor) pendingReloadAnchor = undefined;
     }
 
     // Fork-mode "No message found" recovery (issue #220). The durable anchor here lives
@@ -10222,8 +10552,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
       console.log(`[agent] finally: rescuing ${pendingMidTurnQueue.length} pending mid-turn item(s) into messageQueue`);
       rescuePendingToQueue();
     }
-    inFlightToCliId = null;
-    inFlightMetadata = null;
+    clearInFlightSlot();
 
     // Queue lifecycle invariant: messageQueue survives session restarts by default.
     // Any drain decision belongs to the caller that triggered the exit, not here:

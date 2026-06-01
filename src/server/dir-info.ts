@@ -19,7 +19,19 @@ import type {
   ExpandDirectoryResult
 } from '../shared/dir-types';
 
-const DEFAULT_IGNORES = new Set(['.git', 'node_modules', 'out', 'dist', 'tmp']);
+// Explorer-style hard hidden names. Keep this intentionally small: build
+// outputs and dependency folders are real project files in a VS Code-like
+// explorer, so performance should come from lazy expansion rather than making
+// those directories disappear. Must match workspace_files/tree.rs.
+const DEFAULT_IGNORES = new Set([
+  '.git',
+  '.hg',
+  '.svn',
+  'CVS',
+  '.DS_Store',
+  'Thumbs.db',
+  'desktop.ini'
+]);
 
 // Default limits for directory scanning
 const DEFAULT_INFO_MAX_DEPTH = 3;

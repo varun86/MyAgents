@@ -302,7 +302,54 @@ function shrinkStructuredContentForClient(content: string): string | null {
     return output;
   });
 
-  return JSON.stringify(minimalBlocks);
+  const minimalStr = JSON.stringify(minimalBlocks);
+  if (utf8Size(minimalStr) <= CLIENT_MESSAGE_INLINE_MAX_BYTES) return minimalStr;
+
+  // Extreme block COUNT (e.g. a Codex sub-agent fan-out turn with 700+ tool
+  // blocks): even minimal per-block content sums above the cap. Drop a middle
+  // window of blocks — keep a leading + trailing slice plus an omission marker —
+  // so the result stays a structured block ARRAY AND is guaranteed under cap.
+  // Without this final guard, callers would ship an over-cap payload and the
+  // SSE/IPC transport would break exactly as the original bug did.
+  const capped = capBlockCountForHistory(minimalBlocks, CLIENT_MESSAGE_INLINE_MAX_BYTES);
+  const cappedStr = JSON.stringify(capped);
+  // Defensive: if even the capped window somehow exceeds the cap, return null so
+  // the caller falls back to the plain head/tail preview (always under cap).
+  return utf8Size(cappedStr) <= CLIENT_MESSAGE_INLINE_MAX_BYTES ? cappedStr : null;
+}
+
+/**
+ * Keep a leading + trailing slice of already-minimal blocks that fits under
+ * `maxBytes`, with a marker block recording how many were omitted. Greedy from
+ * both ends against a 90% budget (leaves headroom for the marker + array commas).
+ */
+function capBlockCountForHistory(
+  blocks: Record<string, unknown>[],
+  maxBytes: number,
+): Record<string, unknown>[] {
+  const budget = Math.floor(maxBytes * 0.9);
+  const sizeOf = (b: Record<string, unknown>) => utf8Size(JSON.stringify(b)) + 1; // +1 for the comma
+  const head: Record<string, unknown>[] = [];
+  const tail: Record<string, unknown>[] = [];
+  let used = 2; // the surrounding []
+  let lo = 0;
+  let hi = blocks.length - 1;
+  let takeHead = true;
+  while (lo <= hi) {
+    const block = takeHead ? blocks[lo] : blocks[hi];
+    const cost = sizeOf(block);
+    if (used + cost > budget) break;
+    used += cost;
+    if (takeHead) { head.push(block); lo++; } else { tail.unshift(block); hi--; }
+    takeHead = !takeHead; // alternate so we keep both the start and the end of the turn
+  }
+  const omitted = hi - lo + 1;
+  if (omitted <= 0) return [...head, ...tail];
+  const marker: Record<string, unknown> = {
+    type: 'text',
+    text: `\n... [history display truncated: ${omitted} of ${blocks.length} blocks omitted to fit the UI; full content is preserved in the local session file] ...\n`,
+  };
+  return [...head, marker, ...tail];
 }
 
 function shrinkPlainContentForClient(content: string, size: number): string {
@@ -335,4 +382,44 @@ export function shrinkSessionMessageForClient(message: SessionMessage): SessionM
 
 export function shrinkSessionMessagesForClient(messages: SessionMessage[]): SessionMessage[] {
   return messages.map(shrinkSessionMessageForClient);
+}
+
+/**
+ * Shrink a `/chat/stream` replay message's `content` to the same
+ * CLIENT_MESSAGE_INLINE_MAX_BYTES the REST `/sessions/:id` path enforces, while
+ * PRESERVING the shape: a structured `ContentBlock[]` stays an array (so the
+ * renderer keeps its block UI), a plain string stays a string.
+ *
+ * Why this exists: the cold-restore SSE replay (`chat:message-replay`) ships each
+ * persisted message in full. A multi-MB single message — e.g. a Codex sub-agent
+ * fan-out turn with hundreds of tool blocks — would cross the SSE → Rust proxy →
+ * Tauri-IPC boundary as ONE oversized event, breaking the stream so every later
+ * message is lost and restored history truncates at the first oversized message.
+ * The REST path already caps via `shrinkSessionMessageForClient` (string-shaped);
+ * this is the shape-preserving sibling for the replay path.
+ */
+export function shrinkReplayContentForClient(content: string | unknown[]): string | unknown[] {
+  let serialized: string;
+  try {
+    serialized = typeof content === 'string' ? content : JSON.stringify(content);
+  } catch {
+    return content; // un-serializable (shouldn't happen for stored content) — leave as-is
+  }
+  if (utf8Size(serialized) <= CLIENT_MESSAGE_INLINE_MAX_BYTES) return content;
+
+  if (Array.isArray(content)) {
+    // Structured blocks: reuse the string shrinker (progressive passes + minimal
+    // fallback), then re-parse so the renderer still receives a block ARRAY.
+    const shrunk = shrinkStructuredContentForClient(serialized);
+    if (shrunk !== null) {
+      try {
+        const reparsed = JSON.parse(shrunk) as unknown;
+        if (Array.isArray(reparsed)) return reparsed;
+      } catch { /* fall through to plain preview */ }
+    }
+    return shrinkPlainContentForClient(serialized, utf8Size(serialized));
+  }
+
+  // Plain string content (or structured-as-string): mirror shrinkSessionMessageForClient.
+  return shrinkStructuredContentForClient(content) ?? shrinkPlainContentForClient(content, utf8Size(content));
 }
