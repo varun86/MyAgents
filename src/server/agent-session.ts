@@ -2,7 +2,7 @@ import { randomUUID } from 'crypto';
 import { existsSync, readdirSync, symlinkSync, lstatSync, readFileSync, readlinkSync, rmSync } from 'fs';
 import { dirname, join, resolve, sep } from 'path';
 import { createRequire } from 'module';
-import { query, getSessionMessages as sdkGetSessionMessages, forkSession as sdkForkSession, deleteSession as sdkDeleteSession, type Query, type SDKUserMessage, type AgentDefinition, type HookInput, type HookJSONOutput, type PostToolUseHookInput, type PermissionRequestHookInput } from '@anthropic-ai/claude-agent-sdk';
+import { query, getSessionMessages as sdkGetSessionMessages, forkSession as sdkForkSession, deleteSession as sdkDeleteSession, type Query, type SDKUserMessage, type AgentDefinition, type HookInput, type HookJSONOutput, type PreToolUseHookInput, type PostToolUseHookInput, type PermissionRequestHookInput } from '@anthropic-ai/claude-agent-sdk';
 import {
   decideBackgroundAgentPermission,
   isBackgroundAgentToolRequest,
@@ -20,6 +20,7 @@ import { modelAliasEnvChangesForModel, resolveSessionModelAliases, type ModelAli
 import { deriveReloadResumeAnchor, resolveEffectiveResumeAt } from './utils/rewind-anchor';
 import { buildForkUuidRemap, remapStoredSdkUuids } from './utils/fork-remap';
 import { decideInFlightActionOnResult } from './utils/inflight-terminal';
+import { shouldBlockToolInPlanMode, planModeDenyMessage, PLAN_MODE_READONLY_TOOLS, PLAN_MODE_HOST_INTERACTION_TOOLS } from './utils/plan-mode-gate';
 import { isEmptySuccessfulSdkResult, isRecoveredAssistantMessageError } from './utils/sdk-turn-outcome';
 import { InactivityWatchdog } from './utils/inactivity-watchdog';
 import { processImage, resizeToolImageContent, classifyImageError } from './utils/imageResize';
@@ -3040,7 +3041,9 @@ function getPermissionRules(mode: PermissionMode): PermissionRules {
       };
     case 'plan':
       return {
-        allowedTools: ['Read', 'Glob', 'Grep', 'LS'], // Read-only
+        // Read-only allowlist — shared with the plan-mode PreToolUse gate
+        // (plan-mode-gate.ts) so canUseTool and the hard hook can't drift. #295
+        allowedTools: [...PLAN_MODE_READONLY_TOOLS],
         deniedTools: ['*'], // Everything else denied in plan mode
       };
     case 'fullAgency':
@@ -8303,7 +8306,9 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         // tools that require explicit human review (AskUserQuestion, EnterPlanMode, ExitPlanMode).
         // This guard catches the case where the SDK didn't honor setPermissionMode('bypassPermissions')
         // — e.g., pre-warm started with acceptEdits and the mid-session mode switch was ignored.
-        const USER_INTERACTION_TOOLS = ['AskUserQuestion', 'EnterPlanMode', 'ExitPlanMode'];
+        // Shared with the plan-mode PreToolUse gate so both paths exempt the
+        // same control-transfer tools (plan-mode-gate.ts).
+        const USER_INTERACTION_TOOLS = PLAN_MODE_HOST_INTERACTION_TOOLS as readonly string[];
         if (currentPermissionMode === 'fullAgency' && !USER_INTERACTION_TOOLS.includes(toolName)) {
           console.debug(`[permission] fullAgency fast-path: auto-approved ${toolName}`);
           return {
@@ -8607,6 +8612,36 @@ async function startStreamingSession(preWarm = false): Promise<void> {
       // Claude API rejects images exceeding 8000px per dimension; MCP tools (e.g. browser screenshots)
       // can produce arbitrarily large images that bypass our user-upload resize pipeline.
       hooks: {
+        // PreToolUse hook (#295): hard-enforce plan mode's read-only guarantee.
+        // We always pass `allowDangerouslySkipPermissions: true` (so fullAgency's
+        // bypassPermissions can be switched to mid-session), which sets the native
+        // CLI's `isBypassPermissionsModeAvailable=true`. The CLI's resolver then
+        // returns "allow" for EVERY tool in plan mode and never emits a
+        // can_use_tool control request — so our plan-mode rules in canUseTool are
+        // silently skipped and writes (Bash rm -rf, Edit, …) execute unchecked.
+        // PreToolUse hooks run BEFORE that resolver and a `deny` is honored
+        // regardless, so this is the only place that can restore the guarantee
+        // while keeping the flag. It reads currentPermissionMode live → covers
+        // every plan-entry path (agent config / UI toggle / AI EnterPlanMode).
+        // See plan-mode-gate.ts for the full root-cause writeup.
+        PreToolUse: [{
+          hooks: [
+            async (input: HookInput): Promise<HookJSONOutput> => {
+              const pre = input as PreToolUseHookInput;
+              if (!shouldBlockToolInPlanMode(pre.tool_name, currentPermissionMode)) {
+                return {}; // not plan mode, or a read-only / control-transfer tool → normal flow
+              }
+              console.log(`[permission] plan-mode hard gate denied: ${pre.tool_name} (mode=${currentPermissionMode})`);
+              return {
+                hookSpecificOutput: {
+                  hookEventName: 'PreToolUse' as const,
+                  permissionDecision: 'deny' as const,
+                  permissionDecisionReason: planModeDenyMessage(pre.tool_name),
+                },
+              };
+            },
+          ],
+        }],
         PostToolUse: [{
           hooks: [
             async (input: HookInput, _toolUseId: string | undefined, options: { signal: AbortSignal }): Promise<HookJSONOutput> => {
