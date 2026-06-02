@@ -736,13 +736,23 @@ export function resolveWorkspaceConfig(
   // session snapshot → Agent → Project → global default. Pre-warm uses this
   // before the first user message, so plan/fullAgency cannot rely on a later
   // in-place SDK mode switch.
+  // Deliberate divergence from the renderer's UI fallback (which defaults a
+  // missing defaultPermissionMode to 'plan'): headless pre-warm for IM/cron
+  // sessions must default to 'auto' (classify, non-blocking), NOT 'plan'
+  // (read-only) — defaulting headless sessions to plan would make them refuse
+  // every write before the first user message. Only reachable on a brand-new
+  // empty config; once the UI has run, config.defaultPermissionMode is set.
   const permissionMode = asBuiltinPermissionMode(sessionMeta?.permissionMode)
     ?? asBuiltinPermissionMode(agent?.permissionMode)
     ?? asBuiltinPermissionMode(project?.permissionMode)
     ?? asBuiltinPermissionMode(config.defaultPermissionMode)
     ?? 'auto';
 
-  if (mcpServers.length > 0 || providerEnv || model || permissionMode) {
+  // Gate on the signals that indicate a real workspace match — NOT permissionMode,
+  // which now always resolves to a non-empty string ('auto' fallback) and would
+  // make this log fire on every call (incl. no-match). Stay silent when nothing
+  // resolved, as before.
+  if (mcpServers.length > 0 || providerEnv || model || agent) {
     const source = sessionMeta?.configSnapshotAt ? 'session-snapshot' : 'agent';
     console.log(
       `[admin-config] resolveWorkspaceConfig (${source}): ` +
