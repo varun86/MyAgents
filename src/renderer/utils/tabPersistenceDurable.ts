@@ -16,6 +16,15 @@
 // config.json (configStore.safeWriteJson / safeLoadJson), so durability does
 // not depend on WebView flush timing. Best-effort throughout: any failure
 // degrades to the localStorage path and never breaks restart or boot.
+//
+// SINGLE-WRITER ASSUMPTION: unlike config.json this file deliberately does NOT
+// take `withConfigLock`. It is written by exactly one process (the renderer) and
+// the only caller that could overlap the write — the aborted-restart cleanup —
+// now AWAITs its clear (App.tsx handleRestartAndUpdate), so the three operations
+// (persist-before-restart / clear-on-abort / load-and-clear-on-boot) never
+// interleave. This holds only while MyAgents is single-window/single-renderer;
+// if multi-window ever lands, move these ops behind a lock or into a Rust command
+// with locked read-clear-write semantics.
 
 import { join } from '@tauri-apps/api/path';
 import { remove, exists } from '@tauri-apps/plugin-fs';
@@ -83,14 +92,19 @@ export async function clearOpenTabsDurable(): Promise<void> {
  *  deserializer so the same validation + dedup invariants apply as localStorage. */
 export async function loadAndClearOpenTabsDurable(): Promise<PersistedTabState | null> {
     if (isBrowserDevMode()) return null;
+    const path = await durablePath();
     try {
-        const path = await durablePath();
         const raw = await safeLoadJson<unknown>(path);
-        await clearDurable(path);
         if (raw == null) return null;
         return deserializeTabs(JSON.stringify(raw));
     } catch (err) {
         console.warn('[tabs] durable load failed:', err);
         return null;
+    } finally {
+        // Consume-once: clear in `finally` so a throw from safeLoadJson /
+        // deserializeTabs still removes the snapshot + its .bak/.tmp siblings.
+        // If they lingered, safeLoadJson's transparent .bak/.tmp recovery could
+        // resurrect a stale tab set on a later, unrelated boot.
+        await clearDurable(path);
     }
 }

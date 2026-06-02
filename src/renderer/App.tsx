@@ -509,13 +509,19 @@ export default function App() {
     // consumes the backstop and adopts it only if localStorage came up empty.
     flushOpenTabsNow();
     await persistOpenTabsDurable(tabsRef.current, activeTabIdRef.current);
-    const outcome = await restartAndUpdateRef.current();
-    if (outcome !== 'ok') {
-      // Restart aborted (network / version / install error) — the process is
-      // staying alive, so drop the durable handoff we just wrote; the live
-      // localStorage stays the source of truth and the backstop must not
-      // resurrect this now-frozen snapshot on a later boot.
-      void clearOpenTabsDurable();
+    let outcome: Awaited<ReturnType<typeof restartAndUpdateRef.current>> | undefined;
+    try {
+      outcome = await restartAndUpdateRef.current();
+    } finally {
+      // Drop the durable handoff UNLESS the restart is actually proceeding
+      // (outcome 'ok' → the process is exiting and boot will consume it). Any
+      // non-'ok' outcome OR a thrown error means the process stays alive, so the
+      // backstop we wrote just before must not resurrect this now-frozen snapshot
+      // on a later boot. Awaited (not fire-and-forget) so it can't race a retry's
+      // fresh persist, and placed in `finally` so an uncaught throw still clears.
+      if (outcome !== 'ok') {
+        await clearOpenTabsDurable();
+      }
     }
     if (outcome === 'network-error') {
       toastRef.current?.error('无法验证更新（网络异常），请稍后重试');
