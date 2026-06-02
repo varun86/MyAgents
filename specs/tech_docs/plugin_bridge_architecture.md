@@ -75,12 +75,15 @@ Rust spawn_plugin_bridge()
    └─ 不通过 → 自动重新安装 shim
 3. spawn(node, script, --plugin-dir, --port, --rust-port, --bot-id)
    └─ 敏感配置通过 BRIDGE_PLUGIN_CONFIG 环境变量传递（不暴露到 ps）
+   └─ 注入 per-channel OpenClaw 状态目录（OPENCLAW_STATE_DIR / OPENCLAW_CONFIG_PATH / OPENCLAW_OAUTH_DIR；名字以上游 utils.ts/paths.ts 实际消费者为准）
    └─ 注入 proxy_config 环境变量
 4. stdout/stderr → 统一日志（过滤 heartbeat 噪音）
 5. Health check: GET /health × 30 次, 500ms 间隔, 最多 15s
   ↓
 Bridge HTTP Server 就绪
 ```
+
+OpenClaw 插件安装目录保持共享（`~/.myagents/openclaw-plugins/<plugin_id>`），但运行时状态必须按 MyAgents Channel 隔离：Agent Channel 使用 `~/.myagents/agents/<agentId>/channels/<channelId>/openclaw-state`，legacy IM Bot 使用 `~/.myagents/im_bots/<botId>/openclaw-state`。不要让 Bridge 回落到上游默认的 `~/.openclaw`；二维码登录类插件（例如 Weixin）会把本地 token list 带给平台，如果多个工作区共享这份状态，平台会把它们识别为同一个 OpenClaw 实例。
 
 ### Phase 3: 插件加载与注册
 

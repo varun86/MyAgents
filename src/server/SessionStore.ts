@@ -455,7 +455,23 @@ export async function appendSessionMessage(sessionId: string, message: SessionMe
  * The stats update is performed inside withSessionsLock to prevent TOCTOU races
  * where another process could modify sessions.json between our read and write.
  */
-export async function saveSessionMessages(sessionId: string, messages: SessionMessage[]): Promise<void> {
+/**
+ * Persist the cumulative message array for a session.
+ *
+ * `opts.allowShrink` (default true) gates the rewind/retry shrink-rewrite: when
+ * `messages.length < existingCount` the file is rewritten to the shorter array
+ * (deleting the tail). That is correct for an INTENTIONAL truncation (builtin
+ * rewind, external retry) but catastrophic if a caller ever passes a partial /
+ * truncated array (e.g. a failed cold-load). Append-only callers MUST pass
+ * `allowShrink: false` so a spurious short array refuses to delete on-disk data
+ * instead of silently nuking it.
+ */
+export async function saveSessionMessages(
+    sessionId: string,
+    messages: SessionMessage[],
+    opts?: { allowShrink?: boolean },
+): Promise<void> {
+    const allowShrink = opts?.allowShrink ?? true;
     ensureStorageDir();
 
     const filePath = getSessionFilePath(sessionId);
@@ -477,10 +493,17 @@ export async function saveSessionMessages(sessionId: string, messages: SessionMe
                 existingCount = getCachedLineCount(sessionId, filePath);
             }
 
-            // Detect rewind truncation: in-memory messages shrank (e.g., after rewind)
-            // Must rewrite entire JSONL file to match the truncated state
+            // Detect shrink: in-memory messages are fewer than what's on disk.
+            // Only an INTENTIONAL truncation (rewind / retry) may rewrite the file
+            // to the shorter state. An append-only caller seeing this means its
+            // in-memory array is partial (failed/truncated load) — rewriting would
+            // delete the on-disk tail, so we refuse and keep the durable copy.
             if (messages.length < existingCount) {
-                console.log(`[SessionStore] Rewind detected: messages.length=${messages.length} < existingCount=${existingCount}, rewriting JSONL for session ${sessionId}`);
+                if (!allowShrink) {
+                    console.error(`[SessionStore] REFUSING shrink-rewrite for session ${sessionId}: in-memory ${messages.length} < on-disk ${existingCount} but allowShrink=false (likely a partial/failed load). Keeping the on-disk file intact, skipping write.`);
+                    return;
+                }
+                console.log(`[SessionStore] Intentional truncation: messages.length=${messages.length} < existingCount=${existingCount}, rewriting JSONL for session ${sessionId}`);
                 const fullContent = messages.map(msg => JSON.stringify(msg)).join('\n') + (messages.length > 0 ? '\n' : '');
                 writeFileSync(filePath, fullContent, 'utf-8');
                 lineCountCache.set(sessionId, messages.length);

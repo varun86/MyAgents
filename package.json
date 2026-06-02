@@ -2,7 +2,7 @@
   "name": "myagents",
   "description": "MyAgents - Desktop Claude Code for everyone. AI-powered productivity, not just for developers.",
   "type": "module",
-  "version": "0.2.26",
+  "version": "0.2.27",
   "license": "Apache-2.0",
   "packageManager": "npm@10.8.2",
   "engines": {
@@ -74,6 +74,7 @@
     "@xterm/addon-web-links": "^0.12.0",
     "@xterm/xterm": "^6.0.0",
     "adm-zip": "^0.5.16",
+    "chart.js": "^4.4.7",
     "cron-parser": "^5.5.0",
     "cronstrue": "^3.13.0",
     "docx-preview": "^0.3.7",
@@ -121,10 +122,10 @@
   },
   "devDependencies": {
     "@anthropic-ai/sdk": "^0.100.1",
-    "@modelcontextprotocol/sdk": "^1.29.0",
     "@eslint/compat": "^2.0.0",
     "@eslint/js": "^9.39.0",
     "@ianvs/prettier-plugin-sort-imports": "^4.7.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@tailwindcss/typography": "^0.5.19",
     "@tailwindcss/vite": "^4.1.17",
     "@tauri-apps/cli": "^2.9.6",

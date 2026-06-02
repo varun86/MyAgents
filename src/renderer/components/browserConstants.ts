@@ -12,3 +12,30 @@
 // statically pulling BrowserPanel into its chunk and defeating the
 // `React.lazy()` split.
 export const BROWSER_BLANK_URL = 'data:text/html;charset=utf-8,%3Chtml%3E%3C%2Fhtml%3E';
+
+// Minimum container width/height (CSS px) before we let the OS-level browser
+// webview be created or resized to match it.
+//
+// Why this guard exists (issue #290): the split panel's container is laid out
+// behind a 300ms `transition-[width]` on the chat area. The instant the panel
+// becomes visible the right-hand container is still ~0 px wide, so a naive
+// `getBoundingClientRect()` read in the create effect captures `width: 0`. A
+// webview born at width 0 — or a stray `resize(0,0,0,0)` from a transient
+// display:none read — collapses the OS overlay and leaves it mis-positioned
+// over the chat area instead of the right panel. Treat any sub-pixel bound as
+// "not laid out yet" and refuse to push it down to Rust.
+const MIN_BROWSER_BOUNDS_PX = 1;
+
+/**
+ * True when a container's measured bounds are real enough to position the
+ * native browser webview over them. Rejects 0/NaN/negative dimensions that
+ * appear mid-transition or while the container is `display:none`.
+ */
+export function hasUsableBrowserBounds(width: number, height: number): boolean {
+  return (
+    Number.isFinite(width) &&
+    Number.isFinite(height) &&
+    width >= MIN_BROWSER_BOUNDS_PX &&
+    height >= MIN_BROWSER_BOUNDS_PX
+  );
+}

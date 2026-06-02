@@ -4,6 +4,7 @@ import {
   CLIENT_MESSAGE_INLINE_MAX_BYTES,
   resolveLastRealUserMessagePreview,
   shrinkSessionMessageForClient,
+  shrinkReplayContentForClient,
 } from './session-message-preview';
 import type { SessionMessage } from '../types/session';
 
@@ -161,6 +162,60 @@ describe('session-message-preview', () => {
     ]);
 
     expect(result).toEqual({ found: true, preview: '执行任务：# GitHub Issue 自动化处理' });
+  });
+
+  // ── shrinkReplayContentForClient (PRD 0.2.27 — /chat/stream replay 256KB cap) ──
+  describe('shrinkReplayContentForClient', () => {
+    it('passes through small string content by reference', () => {
+      const s = 'short reply';
+      expect(shrinkReplayContentForClient(s)).toBe(s);
+    });
+
+    it('passes through small ContentBlock[] content by reference', () => {
+      const blocks = [{ type: 'text', text: 'hi' }];
+      expect(shrinkReplayContentForClient(blocks)).toBe(blocks);
+    });
+
+    it('shrinks an oversized ContentBlock[] but KEEPS the array shape (renderer needs blocks)', () => {
+      // Mirrors a Codex sub-agent fan-out turn: many tool blocks with huge results.
+      const blocks = Array.from({ length: 400 }, (_, i) => ({
+        type: 'tool_use',
+        tool: { id: `call_${i}`, name: 'Bash', result: 'output-'.repeat(2000), isLoading: false },
+      }));
+      const out = shrinkReplayContentForClient(blocks);
+
+      expect(Array.isArray(out)).toBe(true); // shape preserved — NOT a JSON string
+      const arr = out as Array<{ type: string; tool?: { id?: string; name?: string } }>;
+      expect(arr[0].type).toBe('tool_use');
+      expect(arr[0].tool?.name).toBe('Bash');
+      // Whole serialized payload is now under the inline cap → safe to ship as one SSE event.
+      expect(Buffer.byteLength(JSON.stringify(out), 'utf8')).toBeLessThanOrEqual(CLIENT_MESSAGE_INLINE_MAX_BYTES);
+    });
+
+    it('guarantees under-cap (array shape) even at extreme block counts where minimal blocks alone exceed the cap', () => {
+      // 900 tool blocks: even the minimal per-block form (id/name/result≤256B) sums
+      // > 256KB. This is the real 757-block Codex fan-out class that the first fix
+      // pass missed (Codex review HIGH). Must still come back under cap AS AN ARRAY.
+      const blocks = Array.from({ length: 900 }, (_, i) => ({
+        type: 'tool_use',
+        tool: { id: `call_${i}`, name: 'Bash', result: 'output-'.repeat(2000), isLoading: false },
+      }));
+      const out = shrinkReplayContentForClient(blocks);
+
+      expect(Array.isArray(out)).toBe(true);
+      expect(Buffer.byteLength(JSON.stringify(out), 'utf8')).toBeLessThanOrEqual(CLIENT_MESSAGE_INLINE_MAX_BYTES);
+      // An omission marker block is present so the user knows content was dropped.
+      const arr = out as Array<{ type: string; text?: string }>;
+      expect(arr.some(b => b.type === 'text' && (b.text ?? '').includes('blocks omitted'))).toBe(true);
+    });
+
+    it('shrinks oversized plain string content to a bounded preview string', () => {
+      const big = `HEAD-${'z'.repeat(CLIENT_MESSAGE_INLINE_MAX_BYTES)}-TAIL`;
+      const out = shrinkReplayContentForClient(big);
+      expect(typeof out).toBe('string');
+      expect(out as string).toContain('too large for inline display');
+      expect(Buffer.byteLength(out as string, 'utf8')).toBeLessThan(CLIENT_MESSAGE_INLINE_MAX_BYTES);
+    });
   });
 
   it('keeps heartbeat and memory-update system reminders out of previews', () => {

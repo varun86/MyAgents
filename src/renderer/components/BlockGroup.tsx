@@ -1,6 +1,6 @@
 
 import { MoreHorizontal } from 'lucide-react';
-import { memo, useState } from 'react';
+import { memo, useCallback, useState } from 'react';
 import type { ContentBlock } from '@/types/chat';
 import ProcessRow from './ProcessRow';
 
@@ -22,6 +22,11 @@ const BlockGroup = memo(function BlockGroup({
 }: BlockGroupProps) {
   const [isUnfolded, setIsUnfolded] = useState(false);
 
+  // When the user expands any row, pin the group open (same effect as clicking
+  // 「展开全部」) so the auto-fold never unmounts the row they just opened and
+  // silently drops its expanded state. Stable identity keeps ProcessRow's memo.
+  const handleChildExpand = useCallback(() => setIsUnfolded(true), []);
+
   if (blocks.length === 0) return null;
 
   const isStreamingActive = isStreaming && isLatestActiveSection;
@@ -42,6 +47,7 @@ const BlockGroup = memo(function BlockGroup({
               index={i}
               totalBlocks={blocks.length}
               isStreaming={isStreamingActive}
+              onUserExpand={handleChildExpand}
             />
           ))}
 
@@ -62,6 +68,7 @@ const BlockGroup = memo(function BlockGroup({
                       index={index}
                       totalBlocks={blocks.length}
                       isStreaming={isStreamingActive}
+                      onUserExpand={handleChildExpand}
                     />
                   );
                 })}
@@ -106,6 +113,7 @@ const BlockGroup = memo(function BlockGroup({
                 index={index}
                 totalBlocks={blocks.length}
                 isStreaming={isStreamingActive}
+                onUserExpand={handleChildExpand}
               />
             );
           })}
@@ -125,6 +133,7 @@ const BlockGroup = memo(function BlockGroup({
             index={index}
             totalBlocks={blocks.length}
             isStreaming={isStreamingActive}
+            onUserExpand={handleChildExpand}
           />
         ))}
       </div>

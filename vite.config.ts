@@ -48,6 +48,12 @@ export default defineConfig({
       // ONLY the bare `pdfjs-dist` specifier is rewritten — subpath imports like
       // `pdfjs-dist/legacy/build/pdf.worker.min.mjs?url` must pass through untouched.
       { find: /^pdfjs-dist$/, replacement: resolve(__dirname, 'node_modules/pdfjs-dist/legacy/build/pdf.mjs') },
+      // chart.js doesn't expose its UMD bundle via package `exports` (only the
+      // ESM `.`/`./auto`/`./helpers`), so a bare `chart.js/dist/chart.umd.js?raw`
+      // import is rejected by Node/Vite resolution. Alias the exact dist file so
+      // it can be `?raw`-imported and inline-injected into widgets (see
+      // widgetLibraries.ts). Lookahead keeps the trailing `?raw` query intact.
+      { find: /^chartjs-umd-source(?=$|\?)/, replacement: resolve(__dirname, 'node_modules/chart.js/dist/chart.umd.js') },
     ]
   },
   // Define environment variables for client code

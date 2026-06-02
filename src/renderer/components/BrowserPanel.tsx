@@ -15,7 +15,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listenWithCleanup } from '@/utils/tauriListen';
 import { ChevronLeft, ChevronRight, Code2, RotateCw, ExternalLink, Loader2, Globe, X } from 'lucide-react';
 import { openExternal } from '@/utils/openExternal';
-import { BROWSER_BLANK_URL } from '@/components/browserConstants';
+import { BROWSER_BLANK_URL, hasUsableBrowserBounds } from '@/components/browserConstants';
 import { useBrowserOverlayGuard } from '@/hooks/useBrowserOverlayGuard';
 import { useToast } from '@/components/Toast';
 import Tip from '@/components/Tip';
@@ -116,11 +116,11 @@ export default function BrowserPanel({
     if (!el) return;
 
     let cancelled = false;
+    let pendingObserver: ResizeObserver | null = null;
 
-    if (!browserAlive && !creatingRef.current) {
+    const createWithRect = (rect: DOMRect) => {
       creatingRef.current = true;
       lastRequestedUrlRef.current = url;
-      const rect = el.getBoundingClientRect();
 
       invoke('cmd_browser_create', {
         tabId, url,
@@ -153,12 +153,37 @@ export default function BrowserPanel({
           }
         })
         .finally(() => { creatingRef.current = false; });
+    };
+
+    if (!browserAlive && !creatingRef.current) {
+      const rect = el.getBoundingClientRect();
+      if (hasUsableBrowserBounds(rect.width, rect.height)) {
+        createWithRect(rect);
+      } else {
+        // The container isn't laid out yet — the split panel slides in behind
+        // the chat area's 300ms `transition-[width]`, so right now it's ~0px
+        // wide. Creating the webview against these bounds collapses it to
+        // width 0 and floats it over the chat area (issue #290). Wait for the
+        // container to gain real dimensions, then create. The post-create
+        // ResizeObserver effect tracks the remainder of the transition to the
+        // final size.
+        pendingObserver = new ResizeObserver(() => {
+          if (cancelled || creatingRef.current) return;
+          const r = el.getBoundingClientRect();
+          if (hasUsableBrowserBounds(r.width, r.height)) {
+            pendingObserver?.disconnect();
+            pendingObserver = null;
+            createWithRect(r);
+          }
+        });
+        pendingObserver.observe(el);
+      }
     } else if (browserAlive && url !== lastRequestedUrlRef.current) {
       lastRequestedUrlRef.current = url;
       invoke('cmd_browser_navigate', { tabId, url }).catch(() => {});
     }
 
-    return () => { cancelled = true; };
+    return () => { cancelled = true; pendingObserver?.disconnect(); };
   }, [url, browserAlive, tabId, onBrowserCreated, onCreateFailed]);
 
   // ── Listen for URL/loading events from Rust ──
@@ -195,6 +220,9 @@ export default function BrowserPanel({
 
     const syncBounds = () => {
       const rect = el.getBoundingClientRect();
+      // Skip degenerate reads (mid-transition or display:none) so a transient
+      // 0-size never gets cached in Rust and restored on the next SHOW (#290).
+      if (!hasUsableBrowserBounds(rect.width, rect.height)) return;
       invoke('cmd_browser_resize', {
         tabId, x: rect.x, y: rect.y,
         width: rect.width, height: rect.height,
@@ -237,10 +265,13 @@ export default function BrowserPanel({
       const el = containerRef.current;
       if (el) {
         const rect = el.getBoundingClientRect();
-        invoke('cmd_browser_resize', {
-          tabId, x: rect.x, y: rect.y,
-          width: rect.width, height: rect.height,
-        }).catch(() => {});
+        // Same #290 guard: never push a 0-size down on show.
+        if (hasUsableBrowserBounds(rect.width, rect.height)) {
+          invoke('cmd_browser_resize', {
+            tabId, x: rect.x, y: rect.y,
+            width: rect.width, height: rect.height,
+          }).catch(() => {});
+        }
       }
     } else {
       invoke('cmd_browser_hide', { tabId }).catch(() => {});

@@ -12,7 +12,8 @@ import {
     getToolBadgeConfig,
     getToolLabel,
     getToolMainLabel,
-    getToolSummaryNode
+    getToolSummaryNode,
+    isSubagentContainerTool
 } from '@/components/tools/toolBadgeConfig';
 import ToolUse from '@/components/ToolUse';
 import type { ContentBlock } from '@/types/chat';
@@ -22,13 +23,18 @@ interface ProcessRowProps {
     index: number;
     totalBlocks: number;
     isStreaming?: boolean;
+    // Called when the user EXPANDS this row. The parent BlockGroup uses it to
+    // suppress its auto-fold for the turn — otherwise folding would unmount a
+    // row the user deliberately opened and silently lose its expanded state.
+    onUserExpand?: () => void;
 }
 
 const ProcessRow = memo(function ProcessRow({
     block,
     index,
     totalBlocks,
-    isStreaming = false
+    isStreaming = false,
+    onUserExpand
 }: ProcessRowProps) {
     // User manually toggled state (null = not toggled, true/false = user choice)
     const [userToggled, setUserToggled] = useState<boolean | null>(null);
@@ -50,7 +56,7 @@ const ProcessRow = memo(function ProcessRow({
     const isTool = block.type === 'tool_use' || block.type === 'server_tool_use';
     const isServerTool = block.type === 'server_tool_use';
     const isLastBlock = index === totalBlocks - 1;
-    const isTaskTool = isTool && !isServerTool && (block.tool?.name === 'Task' || block.tool?.name === 'Agent');
+    const isTaskTool = isTool && !isServerTool && !!block.tool?.name && isSubagentContainerTool(block.tool.name);
 
     // Thinking: 没有 isComplete 且正在 streaming 才是 active（避免历史消息计时器永跑）
     const isThinkingActive = isThinking && block.isComplete !== true && isStreaming;
@@ -153,18 +159,20 @@ const ProcessRow = memo(function ProcessRow({
         (isTool && block.tool && (block.tool.inputJson || block.tool.result || block.tool.isLoading || block.tool.subagentCalls?.length));
 
     // 派生展开状态（无 useEffect，避免无限循环）
-    // 规则：
-    // 1. 如果用户手动切换过，使用用户的选择
-    // 2. 否则，thinking 块在 active 时自动展开
-    // 3. tool 块默认不展开
-    const isExpanded = userToggled !== null
-        ? userToggled
-        : (isThinking && isThinkingActive);
+    // thinking 与 tool 块都默认折叠，只由用户手动点击展开。
+    // thinking 块刻意不再随 streaming 自动展开、完成后自动收起——那个"展开→收起"
+    // 会在流式时让页面上下跳动，体验差。折叠态仍通过 "思考中… (Xs)" 标签 + active
+    // 指示实时反馈思考进行中（见 isThinkingActive / mainLabel），不影响可感知性。
+    const isExpanded = userToggled ?? false;
 
     // Handle user click
     const handleToggle = () => {
         if (!hasContent) return;
+        const willExpand = userToggled !== true; // null / false → this click opens it
         setUserToggled(prev => prev === null ? true : !prev);
+        // Signal the parent group on EXPAND so it can pin its layout (stop the
+        // auto-fold that would unmount this row and drop the just-opened state).
+        if (willExpand) onUserExpand?.();
     };
 
     const handleCopyThinking = () => {

@@ -998,11 +998,11 @@ pub fn run() {
             });
             ulog_info!("[App] Agent channel health monitor spawned");
 
-            // Start background update check (5 second delay to let app initialize)
+            // Start background update check (60s delay, then stale updater temp cleanup)
             ulog_info!("[App] Setup complete, spawning background update check task...");
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                ulog_info!("[App] Background update task started, waiting 5 seconds...");
+                ulog_info!("[App] Background update task started, waiting 60 seconds before stale Windows updater temp cleanup and update check...");
                 updater::check_update_on_startup(app_handle).await;
                 ulog_info!("[App] Background update task completed");
             });

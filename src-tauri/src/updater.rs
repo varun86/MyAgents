@@ -2,7 +2,7 @@
 // Provides silent background update checking, downloading, and installation
 //
 // Flow:
-// 1. App starts → wait 5s → check for update
+// 1. App starts → wait 60s → cleanup stale Windows updater temp dirs → check for update
 // 2. If update available → silently download in background (user unaware)
 // 3. Download complete → emit event to show "Restart to Update" button in titlebar
 // 4. User clicks button → restart and apply update
@@ -19,6 +19,8 @@ use crate::proxy_config;
 use crate::ulog_info;
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(any(target_os = "windows", test))]
+use std::time::{Duration, SystemTime};
 use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_updater::{Update, UpdaterExt};
 
@@ -26,6 +28,9 @@ use crate::sidecar::ManagedSidecar;
 
 /// Global flag to prevent concurrent update checks/downloads
 static UPDATE_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+
+#[cfg(any(target_os = "windows", test))]
+const WINDOWS_UPDATER_TEMP_DIR_GRACE: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Track the version of the latest downloaded update (latest-wins: skip re-download if same)
 static DOWNLOADED_VERSION: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
@@ -46,7 +51,7 @@ static DOWNLOADED_VERSION: std::sync::Mutex<Option<String>> = std::sync::Mutex::
 /// strictly safer than a network call (which can be intercepted/timed-out).
 ///
 /// Falls back to a fresh `check()` when the cache is empty (e.g., user
-/// clicked the startup pending-update dialog before the 5s background check
+/// clicked the startup pending-update dialog before the startup background check
 /// had a chance to populate the cache).
 static LATEST_UPDATE: std::sync::Mutex<Option<Update>> = std::sync::Mutex::new(None);
 
@@ -167,6 +172,209 @@ fn is_version_greater(remote: &str, current: &str) -> bool {
     false // equal
 }
 
+#[cfg(any(target_os = "windows", test))]
+#[derive(Debug, Default, PartialEq, Eq)]
+struct UpdaterTempCleanupStats {
+    matched: usize,
+    removed: usize,
+    skipped_fresh: usize,
+    skipped_non_dir: usize,
+    skipped_reparse_or_symlink: usize,
+    failed: usize,
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn is_semver_like(version: &str) -> bool {
+    fn is_numeric_identifier(part: &str) -> bool {
+        !part.is_empty()
+            && part.chars().all(|c| c.is_ascii_digit())
+            && (part.len() == 1 || !part.starts_with('0'))
+    }
+
+    fn is_valid_identifier(part: &str, allow_numeric_leading_zero: bool) -> bool {
+        if part.is_empty() || !part.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+            return false;
+        }
+        allow_numeric_leading_zero
+            || !part.chars().all(|c| c.is_ascii_digit())
+            || is_numeric_identifier(part)
+    }
+
+    let (without_build, build) = match version.split_once('+') {
+        Some((base, build)) => (base, Some(build)),
+        None => (version, None),
+    };
+    if build.is_some_and(|build| {
+        build.is_empty()
+            || build
+                .split('.')
+                .any(|part| !is_valid_identifier(part, true))
+    }) {
+        return false;
+    }
+
+    let (core, prerelease) = match without_build.split_once('-') {
+        Some((core, prerelease)) => (core, Some(prerelease)),
+        None => (without_build, None),
+    };
+    if prerelease.is_some_and(|prerelease| {
+        prerelease.is_empty()
+            || prerelease
+                .split('.')
+                .any(|part| !is_valid_identifier(part, false))
+    }) {
+        return false;
+    }
+
+    let mut parts = core.split('.');
+    let Some(major) = parts.next() else { return false };
+    let Some(minor) = parts.next() else { return false };
+    let Some(patch) = parts.next() else { return false };
+    if parts.next().is_some() {
+        return false;
+    }
+    [major, minor, patch].iter().all(|part| is_numeric_identifier(part))
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn parse_windows_updater_temp_dir_version<'a>(name: &'a str, app_name: &str) -> Option<&'a str> {
+    let rest = name.strip_prefix(app_name)?.strip_prefix('-')?;
+    let (version, suffix) = rest.split_once("-updater-")?;
+    if suffix.is_empty() || !is_semver_like(version) {
+        return None;
+    }
+    Some(version)
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn metadata_is_reparse_or_symlink(metadata: &std::fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        false
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn cleanup_stale_windows_updater_temp_dirs_in(
+    temp_root: &std::path::Path,
+    app_name: &str,
+    now: SystemTime,
+    grace: Duration,
+) -> Result<UpdaterTempCleanupStats, String> {
+    let entries = std::fs::read_dir(temp_root)
+        .map_err(|e| format!("Failed to read temp dir '{}': {}", temp_root.display(), e))?;
+    let mut stats = UpdaterTempCleanupStats::default();
+
+    for entry_result in entries {
+        let entry = match entry_result {
+            Ok(entry) => entry,
+            Err(_) => {
+                stats.failed += 1;
+                continue;
+            }
+        };
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Some(_version) = parse_windows_updater_temp_dir_version(name, app_name) else {
+            continue;
+        };
+        stats.matched += 1;
+
+        let path = entry.path();
+        let metadata = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(_) => {
+                stats.failed += 1;
+                continue;
+            }
+        };
+        if metadata_is_reparse_or_symlink(&metadata) {
+            stats.skipped_reparse_or_symlink += 1;
+            continue;
+        }
+        if !metadata.is_dir() {
+            stats.skipped_non_dir += 1;
+            continue;
+        }
+
+        let modified = metadata.modified().or_else(|_| metadata.created());
+        let Ok(modified) = modified else {
+            stats.failed += 1;
+            continue;
+        };
+        let Ok(age) = now.duration_since(modified) else {
+            stats.skipped_fresh += 1;
+            continue;
+        };
+        if age < grace {
+            stats.skipped_fresh += 1;
+            continue;
+        }
+
+        match std::fs::remove_dir_all(&path) {
+            Ok(()) => stats.removed += 1,
+            Err(_) => stats.failed += 1,
+        }
+    }
+
+    Ok(stats)
+}
+
+#[cfg(target_os = "windows")]
+async fn cleanup_stale_windows_updater_temp_dirs(app: &AppHandle) {
+    let app_name = app.package_info().name.clone();
+    let temp_root = std::env::temp_dir();
+    let temp_root_for_cleanup = temp_root.clone();
+    let cleanup_result = tauri::async_runtime::spawn_blocking(move || {
+        cleanup_stale_windows_updater_temp_dirs_in(
+            &temp_root_for_cleanup,
+            &app_name,
+            SystemTime::now(),
+            WINDOWS_UPDATER_TEMP_DIR_GRACE,
+        )
+    })
+    .await;
+
+    match cleanup_result {
+        Ok(Ok(stats)) => {
+            if stats.matched > 0 || stats.failed > 0 {
+                logger::info(
+                    app,
+                    format!(
+                        "[Updater] Windows temp GC scanned '{}': matched={}, removed={}, fresh={}, non_dir={}, reparse_or_symlink={}, failed={}",
+                        temp_root.display(),
+                        stats.matched,
+                        stats.removed,
+                        stats.skipped_fresh,
+                        stats.skipped_non_dir,
+                        stats.skipped_reparse_or_symlink,
+                        stats.failed
+                    ),
+                );
+            }
+        }
+        Ok(Err(e)) => {
+            logger::error(app, format!("[Updater] Windows temp GC skipped: {}", e));
+        }
+        Err(e) => {
+            logger::error(app, format!("[Updater] Windows temp GC task failed: {}", e));
+        }
+    }
+}
+
 /// RAII guard to reset UPDATE_IN_PROGRESS on drop
 struct UpdateGuard;
 
@@ -228,6 +436,9 @@ pub async fn check_update_on_startup(app: AppHandle) {
     // updater HTTPS round-trip racing the user's first action. Periodic
     // checks (every 30 min) catch up after this initial window.
     tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+
+    #[cfg(target_os = "windows")]
+    cleanup_stale_windows_updater_temp_dirs(&app).await;
 
     logger::info(&app, "[Updater] Starting background update check...");
 
@@ -556,7 +767,7 @@ pub fn check_pending_update(app: AppHandle) -> Option<String> {
                 // Pending update exists → warm the LATEST_UPDATE cache in the
                 // background so a click on the startup pending dialog can hit
                 // the network-free install path. Without this, the user would
-                // race the 5s `check_update_on_startup` delay and a fast click
+                // race the `check_update_on_startup` delay and a fast click
                 // would still hit `resolve_update_with_retries`.
                 let app_for_warmup = app.clone();
                 tauri::async_runtime::spawn(async move {
@@ -690,7 +901,7 @@ pub async fn install_pending_update(
 
 /// Build an `Update` via `updater.check()` with retries — used as the fallback
 /// when no cached Update is available (e.g., user clicked startup pending dialog
-/// before the 5s background check populated the cache).
+/// before the startup background check populated the cache).
 ///
 /// Each attempt uses the user's proxy config. Retries with 1s linear backoff.
 /// Maps tauri-plugin-updater errors to caller-friendly strings:
@@ -869,4 +1080,127 @@ pub async fn test_update_connectivity(app: AppHandle) -> Result<String, String> 
     logger::info(&app, format!("[Updater] Test result:\n{}", result));
 
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_windows_updater_temp_dir_names() {
+        assert_eq!(
+            parse_windows_updater_temp_dir_version("MyAgents-0.2.27-updater-abcd", "MyAgents"),
+            Some("0.2.27")
+        );
+        assert_eq!(
+            parse_windows_updater_temp_dir_version(
+                "MyAgents-1.2.3-beta.1+build.7-updater-random",
+                "MyAgents"
+            ),
+            Some("1.2.3-beta.1+build.7")
+        );
+
+        assert_eq!(
+            parse_windows_updater_temp_dir_version("Other-0.2.27-updater-abcd", "MyAgents"),
+            None
+        );
+        assert_eq!(
+            parse_windows_updater_temp_dir_version("MyAgents-0.2-updater-abcd", "MyAgents"),
+            None
+        );
+        assert_eq!(
+            parse_windows_updater_temp_dir_version("MyAgents-01.2.3-updater-abcd", "MyAgents"),
+            None
+        );
+        assert_eq!(
+            parse_windows_updater_temp_dir_version("MyAgents-0.2.27-updater-", "MyAgents"),
+            None
+        );
+        assert_eq!(
+            parse_windows_updater_temp_dir_version("MyAgents-1.2.3--updater-abcd", "MyAgents"),
+            None
+        );
+        assert_eq!(
+            parse_windows_updater_temp_dir_version("MyAgents-1.2.3+-updater-abcd", "MyAgents"),
+            None
+        );
+        assert_eq!(
+            parse_windows_updater_temp_dir_version("MyAgents-1.2.3-01-updater-abcd", "MyAgents"),
+            None
+        );
+        assert_eq!(
+            parse_windows_updater_temp_dir_version("MyAgents-0.2.27", "MyAgents"),
+            None
+        );
+    }
+
+    #[test]
+    fn cleanup_removes_only_stale_owned_updater_dirs() {
+        let root = tempfile::tempdir().unwrap();
+        let owned_dir = root.path().join("MyAgents-0.2.9-updater-old");
+        let owned_file = root.path().join("MyAgents-0.2.10-updater-file");
+        let other_dir = root.path().join("Other-0.2.9-updater-old");
+        std::fs::create_dir(&owned_dir).unwrap();
+        std::fs::write(&owned_file, b"not a dir").unwrap();
+        std::fs::create_dir(&other_dir).unwrap();
+
+        let stats = cleanup_stale_windows_updater_temp_dirs_in(
+            root.path(),
+            "MyAgents",
+            SystemTime::now() + Duration::from_secs(25 * 60 * 60),
+            WINDOWS_UPDATER_TEMP_DIR_GRACE,
+        )
+        .unwrap();
+
+        assert_eq!(stats.matched, 2);
+        assert_eq!(stats.removed, 1);
+        assert_eq!(stats.skipped_non_dir, 1);
+        assert!(!owned_dir.exists());
+        assert!(owned_file.exists());
+        assert!(other_dir.exists());
+    }
+
+    #[test]
+    fn cleanup_keeps_fresh_owned_updater_dirs() {
+        let root = tempfile::tempdir().unwrap();
+        let fresh_dir = root.path().join("MyAgents-0.2.9-updater-fresh");
+        std::fs::create_dir(&fresh_dir).unwrap();
+
+        let stats = cleanup_stale_windows_updater_temp_dirs_in(
+            root.path(),
+            "MyAgents",
+            SystemTime::now(),
+            WINDOWS_UPDATER_TEMP_DIR_GRACE,
+        )
+        .unwrap();
+
+        assert_eq!(stats.matched, 1);
+        assert_eq!(stats.removed, 0);
+        assert_eq!(stats.skipped_fresh, 1);
+        assert!(fresh_dir.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_skips_symlinked_updater_dirs() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("target");
+        let link = root.path().join("MyAgents-0.2.9-updater-link");
+        std::fs::create_dir(&target).unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let stats = cleanup_stale_windows_updater_temp_dirs_in(
+            root.path(),
+            "MyAgents",
+            SystemTime::now() + Duration::from_secs(25 * 60 * 60),
+            WINDOWS_UPDATER_TEMP_DIR_GRACE,
+        )
+        .unwrap();
+
+        assert_eq!(stats.matched, 1);
+        assert_eq!(stats.removed, 0);
+        assert_eq!(stats.skipped_reparse_or_symlink, 1);
+        assert!(std::fs::symlink_metadata(&link).is_ok());
+        assert!(target.exists());
+    }
 }

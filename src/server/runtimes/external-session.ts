@@ -15,9 +15,11 @@ import type { ToolAttachment } from '../../shared/types/tool-attachment';
 import { StaleRuntimeSessionError } from './types';
 import { awaitInFlightSaves, rebuildAttachmentRegistryFromBlocks, trackInFlightSave } from './tool-attachments';
 import { maybeSpill, type LargeValueRef } from '../utils/large-value-store';
-import type { AskUserQuestionInput } from '../../shared/types/askUserQuestion';
+import type { AskUserQuestionInput, AskUserQuestion } from '../../shared/types/askUserQuestion';
+import { withQuestionTextAnswerKeys } from '../../shared/types/askUserQuestion';
 import { getExternalRuntime, getCurrentRuntimeType, isExternalRuntime } from './factory';
 import { resolveCodexWorkspaceInstructions } from './workspace-instructions';
+import { shouldQueueExternalSend, canDrainExternalQueue } from './external-queue-policy';
 import type { RuntimeType } from '../../shared/types/runtime';
 import { deriveSessionTitle } from '../../shared/sessionTitle';
 import { isPendingSessionId } from '../../shared/constants';
@@ -105,6 +107,19 @@ interface PersistContentBlock {
     // PRD 0.2.15 — rich-media attachments. Persisted with the tool block so
     // history replay can re-render images without re-running the tool.
     attachments?: ToolAttachment[];
+    // PRD 0.2.27 — nested tool calls emitted by a sub-agent (Codex collab-agent),
+    // mirroring builtin's ToolUse.subagentCalls. Persisted with the parent spawn
+    // card so history replay re-renders the nesting. Shape matches the renderer's
+    // SubagentToolCall (src/renderer/types/chat.ts) so the JSON parse path is shared.
+    subagentCalls?: Array<{
+      id: string;
+      name: string;
+      input: Record<string, unknown>;
+      inputJson?: string;
+      result?: string;
+      isLoading?: boolean;
+      isError?: boolean;
+    }>;
   };
   thinking?: string;
   thinkingStartedAt?: number;
@@ -120,6 +135,11 @@ let pendingThinkingIndex = 0;       // index of current thinking block
 let pendingThinkingActive = false;  // reasoning block started, even if no delta text arrived yet
 let pendingThinkingStartedAt = 0;   // timestamp for duration calculation / history reopen parity
 const pendingToolInputs = new Map<string, { name: string; inputJson: string }>(); // toolUseId → input accumulator
+// PRD 0.2.27 — sub-agent (Codex collab-agent) tool → parent spawn card id.
+// Populated from UnifiedEvent.subAgent on tool_use_start; consulted on later
+// input/result events to route them to the same parent. Mirrors builtin's
+// childToolToParent (agent-session.ts). Cleared on turn/session reset.
+const childToolToParent = new Map<string, string>(); // subagent toolUseId → parentToolUseId
 type ExternalSessionState = 'idle' | 'running' | 'error';
 type ExternalPendingInteractiveRequest =
   | {
@@ -156,6 +176,42 @@ let earlyBroadcastedUserMsg: SessionMessage | null = null;
 // existing direct sendExternalMessage await semantics (they're already
 // serialized at the caller level by single-flight cron/heartbeat loops).
 let externalDesktopSendTail: Promise<unknown> = Promise.resolve();
+// ─── External mid-turn message queue (turn-level injection model; mirrors the builtin SDK) ───
+// Codex/CC/Gemini are turn-level: each send starts a NEW turn (no mid-tool-call injection like
+// the builtin SDK's queued_command). A desktop message typed WHILE a turn is running is HELD
+// here (a pill via queue:added) instead of sent; at turn end it's surfaced (queue:started) +
+// sent. Force-send interrupts the current turn so the same turn-end drain runs it now. See
+// external-queue-policy.ts for the (pure) defer/drain decisions.
+interface ExternalQueueItem {
+  queueId: string;
+  text: string;
+  images?: ImagePayload[];
+  permissionMode?: string;
+  model?: string;
+  context: ExternalSendContext;
+}
+const externalMessageQueue: ExternalQueueItem[] = [];
+let externalQueueSeq = 0;
+// Parity with the builtin queue cap (agent-session.ts). Guards against an unbounded queue.
+const EXTERNAL_MAX_QUEUE_SIZE = 50;
+// Monotonic suffix for surfaced user-message ids so two messages minted in the same
+// millisecond (enqueue idle path vs turn-end drain) don't collide → frontend de-dup drop.
+let externalUserMsgSeq = 0;
+
+/**
+ * Clear all queued desktop messages and broadcast queue:cancelled per item (so the renderer
+ * removes the pills). MUST be called wherever the session is torn down or switched — a stale
+ * queued item would otherwise (a) orphan its pill forever and (b) be drained into the NEW
+ * session at its next turn end, injecting old text + old context (cross-session contamination).
+ * Mirrors the builtin drainQueueWithCancellation (agent-session.ts).
+ */
+function clearExternalQueueWithCancellation(): void {
+  if (externalMessageQueue.length === 0) return;
+  for (const item of externalMessageQueue) {
+    broadcast('queue:cancelled', { queueId: item.queueId });
+  }
+  externalMessageQueue.length = 0;
+}
 // Deferred runtimeSessionId: set when session_init fires before metadata exists (pre-warm).
 // Consumed by registerSessionMetadataIfNew to patch runtimeSessionId onto newly created metadata.
 // Includes forSessionId to prevent cross-session contamination if session switches between set and consume.
@@ -194,6 +250,7 @@ function resetModuleState(): void {
   pendingThinkingActive = false;
   pendingThinkingStartedAt = 0;
   pendingToolInputs.clear();
+  childToolToParent.clear();
   pendingPermissionSuggestions.clear();
   drainPendingInteractiveRequestsAsExpired('reset');
   pendingExternalAskUserQuestions.clear();
@@ -203,6 +260,9 @@ function resetModuleState(): void {
   isPrewarmingSession = false;
   earlyBroadcastedUserMsg = null;
   deferredRuntimeSessionId = null;
+  // Issue #289-followup — a queued desktop message MUST NOT survive a session switch/reset:
+  // it would otherwise drain into the new session with the old session's text + context.
+  clearExternalQueueWithCancellation();
 }
 
 /**
@@ -235,6 +295,113 @@ function drainPendingInteractiveRequestsAsExpired(reason: 'stop' | 'error' | 're
       console.warn(`[external-session] broadcast ask-user-question:expired for ${requestId} failed:`, e);
     }
   }
+}
+
+/** Find a persisted tool_use block by id (newest first), or null. PRD 0.2.27. */
+function findExternalToolBlockById(toolUseId: string): PersistContentBlock | null {
+  for (let i = currentContentBlocks.length - 1; i >= 0; i--) {
+    const block = currentContentBlocks[i];
+    if (block.type === 'tool_use' && block.tool?.id === toolUseId) return block;
+  }
+  return null;
+}
+
+/** Find/create a sub-agent call entry under its parent spawn card. PRD 0.2.27.
+ *  Returns null when the parent card isn't (yet) in currentContentBlocks. */
+function upsertSubagentCall(
+  parentToolUseId: string,
+  call: { id: string; name: string; input: Record<string, unknown>; inputJson?: string },
+): NonNullable<NonNullable<PersistContentBlock['tool']>['subagentCalls']>[number] | null {
+  const parent = findExternalToolBlockById(parentToolUseId);
+  if (!parent?.tool) return null;
+  if (!parent.tool.subagentCalls) parent.tool.subagentCalls = [];
+  const existing = parent.tool.subagentCalls.find((c) => c.id === call.id);
+  if (existing) {
+    existing.name = call.name;
+    existing.input = call.input;
+    existing.inputJson = call.inputJson;
+    return existing;
+  }
+  const created = { ...call, isLoading: true };
+  parent.tool.subagentCalls.push(created);
+  return created;
+}
+
+// ─── Sub-agent (Codex collab-agent) tool routing (PRD 0.2.27) ───
+// Mirrors the builtin SDK's chat:subagent-* path. A tool stamped with
+// event.subAgent nests under its parent spawn card instead of the flat
+// transcript. Reuses the existing subagent SSE events + frontend nesting +
+// TaskTool render — no new SSE events, no new components.
+
+/**
+ * Try to nest a sub-agent tool under its parent spawn card. Returns true if it
+ * nested, false if the parent card isn't in currentContentBlocks yet — in which
+ * case the caller MUST fall back to flat rendering (never drop the call). The
+ * routing is LATCHED here: childToolToParent is set only on a successful nest,
+ * and all later input/stop/result events route purely off that map — so a tool
+ * can never flat-then-nest flip mid-stream.
+ */
+function handleSubagentToolUseStart(
+  parentToolUseId: string,
+  event: Extract<UnifiedEvent, { kind: 'tool_use_start' }>,
+): boolean {
+  const inputJson = event.input ? JSON.stringify(event.input, null, 2) : '';
+  const call = upsertSubagentCall(parentToolUseId, {
+    id: event.toolUseId,
+    name: event.toolName,
+    input: event.input ?? {},
+    inputJson,
+  });
+  if (!call) return false; // parent spawn card not persisted yet → caller renders flat
+  childToolToParent.set(event.toolUseId, parentToolUseId);
+  pendingToolInputs.set(event.toolUseId, { name: event.toolName, inputJson });
+  broadcast('chat:subagent-tool-use', {
+    parentToolUseId,
+    tool: {
+      id: event.toolUseId,
+      name: event.toolName,
+      input: event.input ?? {},
+      // streamIndex is informational for nested calls; the frontend keys by id.
+      streamIndex: 0,
+    },
+  });
+  recordRuntimeActivity();
+  return true;
+}
+
+function finalizeSubagentToolInput(parentToolUseId: string, toolUseId: string): void {
+  const entry = pendingToolInputs.get(toolUseId);
+  if (!entry) return;
+  let parsed: Record<string, unknown> = {};
+  try { parsed = JSON.parse(entry.inputJson); } catch { /* keep empty */ }
+  const parent = findExternalToolBlockById(parentToolUseId);
+  const call = parent?.tool?.subagentCalls?.find((c) => c.id === toolUseId);
+  if (call) { call.input = parsed; call.inputJson = entry.inputJson; }
+  pendingToolInputs.delete(toolUseId);
+}
+
+function applySubagentToolResult(
+  parentToolUseId: string,
+  event: Extract<UnifiedEvent, { kind: 'tool_result' }>,
+): void {
+  const parent = findExternalToolBlockById(parentToolUseId);
+  const call = parent?.tool?.subagentCalls?.find((c) => c.id === event.toolUseId);
+  if (call) {
+    call.result = event.content;
+    call.isError = event.isError ?? false;
+    call.isLoading = false;
+  }
+  // External runtimes deliver tool results as a single event (no streaming),
+  // so go straight to *-complete (the frontend's -start/-complete both update
+  // the same call; -complete also clears the loading spinner).
+  broadcast('chat:subagent-tool-result-complete', {
+    parentToolUseId,
+    toolUseId: event.toolUseId,
+    content: event.content,
+    isError: event.isError ?? false,
+  });
+  childToolToParent.delete(event.toolUseId);
+  recordRuntimeActivity();
 }
 
 /** Flush accumulated text into a text content block */
@@ -453,6 +620,7 @@ function resetTurnAccumulators(): void {
   pendingThinkingActive = false;
   pendingThinkingStartedAt = 0;
   pendingToolInputs.clear();
+  childToolToParent.clear();
   currentTurnUsage = null;
   currentTurnEstimatedInputTokens = 0;
 }
@@ -1120,8 +1288,10 @@ async function _doStartExternalSession(options: {
     resetWatchdog();
     currentTurnStartTime = Date.now();
 
-    // Persist user message immediately (crash safety — don't wait for turn_complete)
-    try { await saveSessionMessages(options.sessionId, allSessionMessages); }
+    // Persist user message immediately (crash safety — don't wait for turn_complete).
+    // Append-only: allSessionMessages only grows here, so forbid the shrink-rewrite
+    // (a shorter array would mean a partial load — never delete the on-disk tail).
+    try { await saveSessionMessages(options.sessionId, allSessionMessages, { allowShrink: false }); }
     catch (err) { console.error('[external-session] Failed to persist user message:', err); }
 
     // Register session in history index (mirrors agent-session.ts enqueueUserMessage logic)
@@ -1448,9 +1618,9 @@ export async function sendExternalMessage(
     // have to register here when the first actual message arrives via Case 3.
     await registerSessionMetadataIfNew(lastSessionId, lastWorkspacePath, text, 'first message after pre-warm', lastScenario);
 
-    // Persist user message immediately (crash safety)
+    // Persist user message immediately (crash safety). Append-only → forbid shrink.
     if (lastSessionId) {
-      try { await saveSessionMessages(lastSessionId, allSessionMessages); }
+      try { await saveSessionMessages(lastSessionId, allSessionMessages, { allowShrink: false }); }
       catch (err) { console.error('[external-session] Failed to persist user message:', err); }
     }
 
@@ -1492,20 +1662,125 @@ export function enqueueExternalSendForDesktop(
   permissionMode: string | undefined,
   model: string | undefined,
   context: ExternalSendContext,
-): Promise<{ queued: boolean; error?: string }> {
+): { queued: boolean; queueId?: string; dispatch: Promise<{ queued: boolean; error?: string }> } {
+  // Mid-turn defer: external runtimes are turn-level (a send = a new turn), so while a turn
+  // is running (or items are already queued) HOLD this as a queue pill instead of surfacing
+  // an out-of-order bubble + starting a 2nd turn. The turn-end drain surfaces + sends it.
+  // Return the queueId SYNCHRONOUSLY so /chat/send can hand it back to the renderer, which
+  // reconciles its optimistic `opt-` pill with this real queueId (exactly like the builtin
+  // path) — without it the optimistic pill would orphan + a stray bubble would appear.
+  if (shouldQueueExternalSend(externalSessionState, externalMessageQueue.length)) {
+    if (externalMessageQueue.length >= EXTERNAL_MAX_QUEUE_SIZE) {
+      return { queued: false, dispatch: Promise.resolve({ queued: false, error: '排队消息已达上限，请稍后再发' }) };
+    }
+    const queueId = `xq-${Date.now()}-${externalQueueSeq++}`;
+    externalMessageQueue.push({ queueId, text, images, permissionMode, model, context });
+    broadcast('queue:added', { queueId, messageText: text.slice(0, 100), isInFlight: false });
+    return { queued: true, queueId, dispatch: Promise.resolve({ queued: true }) };
+  }
+
+  // Idle path: surface + send immediately (unchanged behavior). No queueId — this becomes a
+  // bubble, not a pill (the renderer only created an optimistic pill while streaming).
   const userMsg: SessionMessage = {
-    id: `user-${Date.now()}`,
+    id: `user-${Date.now()}-${externalUserMsgSeq++}`,
     role: 'user',
     content: text,
     timestamp: new Date().toISOString(),
   };
   broadcast('chat:message-replay', { message: userMsg });
 
-  const task = externalDesktopSendTail.then(() =>
+  const dispatch = externalDesktopSendTail.then(() =>
     sendExternalMessage(text, images, permissionMode, model, context, userMsg)
   );
+  externalDesktopSendTail = dispatch.catch(() => undefined);
+  return { queued: true, dispatch };
+}
+
+/**
+ * Turn-end drain (one item) — surface the next queued message as a bubble (queue:started) and
+ * send it (a fresh turn). Guarded by canDrainExternalQueue so it only fires when idle with a
+ * pending item. Called via setTimeout(0) right after the turn-end idle so it never races
+ * chat:message-complete on the SSE wire (see persistTurnResult idle-ordering notes).
+ */
+function drainExternalQueueAfterTurn(): void {
+  if (!canDrainExternalQueue(externalSessionState, externalMessageQueue.length)) return;
+  const item = externalMessageQueue.shift();
+  if (!item) return;
+  // Reserve the turn synchronously: the drained item is GUARANTEED to start a turn, but the
+  // chained sendExternalMessage only flips state to 'running' after awaiting metadata/save.
+  // Without this, a send arriving in that window sees state='idle' + queueLength=0 and would
+  // surface an out-of-order bubble (the exact UX this fixes). Flip now so it re-queues instead.
+  setExternalSessionState('running');
+  const userMsg: SessionMessage = {
+    id: `user-${Date.now()}-${externalUserMsgSeq++}`,
+    role: 'user',
+    content: item.text,
+    timestamp: new Date().toISOString(),
+  };
+  // Surface the bubble now (turn end) — mirrors the builtin queue:started fallback.
+  broadcast('queue:started', {
+    queueId: item.queueId,
+    userMessage: { id: userMsg.id, role: 'user', content: item.text, timestamp: userMsg.timestamp },
+  });
+  // Send (serialized), adopting the surfaced bubble so sendExternalMessage doesn't re-broadcast.
+  const task = externalDesktopSendTail.then(() =>
+    sendExternalMessage(item.text, item.images, item.permissionMode, item.model, item.context, userMsg)
+  );
   externalDesktopSendTail = task.catch(() => undefined);
-  return task;
+  // Surface a drained-send failure the same way /chat/send does for the initial dispatch —
+  // otherwise the pill has already become a bubble but the error is silently swallowed.
+  void task
+    .then((result) => {
+      if (result && !result.queued && result.error) {
+        broadcast('chat:agent-error', { message: result.error });
+      }
+    })
+    .catch((err) => broadcast('chat:agent-error', { message: err instanceof Error ? err.message : String(err) }));
+}
+
+/**
+ * Force-execute a queued external item ("立即发送"): move it to the FRONT, then run it ASAP.
+ * Three cases:
+ *   - running + runtime CAN interrupt a turn (Codex `interruptTurn`): interrupt now → the
+ *     resulting turn/completed → turn_complete → persistTurnResult → idle → drain runs it
+ *     immediately (true force). Process stays alive.
+ *   - running + runtime CANNOT interrupt mid-turn (Claude Code `-p`; Gemini until its
+ *     session/cancel→turn-end flow is verified): DEGRADE to move-to-front — the item is now
+ *     first, so the NATURAL turn-end drain runs it next (not truly "immediate", but it does
+ *     run, ahead of everything else). drainExternalQueueAfterTurn() is a no-op here (state is
+ *     'running'); the turn-end hook handles it.
+ *   - idle (no turn in flight): drain directly now.
+ * Mirrors the builtin forceExecuteQueueItem (move-to-front + interrupt; turn-end drain surfaces).
+ */
+export async function forceExecuteExternalQueueItem(queueId: string): Promise<boolean> {
+  const idx = externalMessageQueue.findIndex(q => q.queueId === queueId);
+  if (idx < 0) return false;
+  if (idx > 0) {
+    const [item] = externalMessageQueue.splice(idx, 1);
+    externalMessageQueue.unshift(item);
+  }
+  if (externalSessionState === 'running' && activeProcess && activeRuntime?.interruptTurn) {
+    await activeRuntime.interruptTurn(activeProcess);
+  } else {
+    // Idle → drain now. Running-without-interrupt → no-op; the moved-to-front item runs at the
+    // next turn-end drain.
+    drainExternalQueueAfterTurn();
+  }
+  return true;
+}
+
+/** Cancel a queued external item (the pill ✕). Returns the removed text, or null if not found. */
+export function cancelExternalQueueItem(queueId: string): string | null {
+  const idx = externalMessageQueue.findIndex(q => q.queueId === queueId);
+  if (idx < 0) return null;
+  const [item] = externalMessageQueue.splice(idx, 1);
+  broadcast('queue:cancelled', { queueId });
+  return item.text;
+}
+
+/** Current external queue (for /chat/queue/status). Mirrors builtin getQueueStatus shape. */
+export function getExternalQueueStatus(): Array<{ id: string; messagePreview: string }> {
+  return externalMessageQueue.map(q => ({ id: q.queueId, messagePreview: q.text.slice(0, 100) }));
 }
 
 /**
@@ -1582,7 +1857,12 @@ export async function respondExternalAskUserQuestion(
       );
     } else {
       console.log(`[external-session] AskUserQuestion answered for requestId=${requestId}`);
-      const updatedInput = { ...pending.input, answers };
+      // CC is the same SDK 0.3.158 binary as builtin: it looks answers up by
+      // question TEXT, so alias the renderer's index-keyed answers (see
+      // withQuestionTextAnswerKeys). The superset keeps the original id/index
+      // keys intact, so Codex's own response builder (codex.ts) is unaffected.
+      const askQuestions = (pending.input as { questions?: AskUserQuestion[] }).questions;
+      const updatedInput = { ...pending.input, answers: withQuestionTextAnswerKeys(askQuestions, answers) };
       await activeRuntime.respondPermission(activeProcess, requestId, 'allow_once', undefined, undefined, updatedInput);
     }
     // Delete only after successful delivery — if respondPermission throws
@@ -1680,6 +1960,10 @@ export async function stopExternalSession(): Promise<boolean> {
     // PRD 0.2.18 — clear inbox meta on hard stop (user clicked stop / runtime
     // killed mid-turn). Push session_aborted reply so caller doesn't hang.
     clearInboxMetaOnRejection('session_aborted', 'external runtime session was stopped before turn completed');
+    // Drop queued desktop messages on a hard stop (user clicked Stop) — otherwise the pills
+    // orphan and, with state now 'idle' + queueLength>0, the next send queues behind stale
+    // items that nothing will ever drain (no turn is running) → the session wedges.
+    clearExternalQueueWithCancellation();
     setExternalSessionState('idle');
   }
 }
@@ -1934,10 +2218,12 @@ async function persistTurnResult(): Promise<void> {
       resetTurnAccumulators();
     }
 
-    // Save cumulative messages to disk (saveSessionMessages uses .slice(existingCount) to append)
+    // Save cumulative messages to disk (saveSessionMessages uses .slice(existingCount) to append).
+    // Append-only at turn end → forbid the shrink-rewrite (guards against a partial
+    // in-memory array ever deleting the on-disk tail).
     if (allSessionMessages.length > 0 && lastSessionId) {
       try {
-        await saveSessionMessages(lastSessionId, allSessionMessages);
+        await saveSessionMessages(lastSessionId, allSessionMessages, { allowShrink: false });
         const { found: foundRealUserMessage, preview: lastMessagePreview } =
           resolveLastRealUserMessagePreview(allSessionMessages);
         await updateSessionMetadata(lastSessionId, {
@@ -2015,6 +2301,10 @@ async function persistTurnResult(): Promise<void> {
       imRequestRegistry.unregister(activeRequestId);
     }
     activeRequestId = null;
+    // Mid-turn queue drain: a turn just ended (completed OR interrupted via force) → surface +
+    // send the next queued desktop message. Deferred to the next macrotask so queue:started
+    // never races chat:message-complete / chat:status idle on the SSE wire.
+    setTimeout(() => drainExternalQueueAfterTurn(), 0);
   }
 }
 
@@ -2153,6 +2443,12 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
       break;
 
     case 'tool_use_start':
+      // PRD 0.2.27 — sub-agent tool nests under its spawn card. If the parent
+      // card isn't persisted yet, handleSubagentToolUseStart returns false and
+      // we fall through to flat rendering (never drop the call).
+      if (event.subAgent && handleSubagentToolUseStart(event.subAgent.parentToolUseId, event)) {
+        break;
+      }
       flushPendingText();  // Close any open text block before tool use
       pendingToolInputs.set(event.toolUseId, {
         name: event.toolName,
@@ -2167,6 +2463,20 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
       break;
 
     case 'tool_input_delta': {
+      // Route by the LATCHED map (set only when the start actually nested) — not
+      // by event.subAgent — so a start that fell back to flat keeps its deltas flat.
+      const parentForInput = childToolToParent.get(event.toolUseId);
+      if (parentForInput) {
+        const toolEntry = pendingToolInputs.get(event.toolUseId);
+        if (toolEntry) toolEntry.inputJson += event.delta;
+        broadcast('chat:subagent-tool-input-delta', {
+          parentToolUseId: parentForInput,
+          toolId: event.toolUseId,
+          delta: event.delta,
+        });
+        recordRuntimeActivity();
+        break;
+      }
       const toolEntry = pendingToolInputs.get(event.toolUseId);
       if (toolEntry) {
         toolEntry.inputJson += event.delta;
@@ -2180,6 +2490,13 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
     }
 
     case 'tool_use_stop': {
+      // PRD 0.2.27 — sub-agent tool: finalize its nested input, no flat block / stop.
+      // Routed by the latched map (consistent with how the start was rendered).
+      const parentForStop = childToolToParent.get(event.toolUseId);
+      if (parentForStop) {
+        finalizeSubagentToolInput(parentForStop, event.toolUseId);
+        break;
+      }
       // Finalize tool use block from accumulated input
       const entry = pendingToolInputs.get(event.toolUseId);
       if (entry) {
@@ -2204,16 +2521,35 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
       break;
     }
 
-    case 'tool_result_delta':
+    case 'tool_result_delta': {
+      const parentForResultDelta = childToolToParent.get(event.toolUseId);
+      if (parentForResultDelta) {
+        broadcast('chat:subagent-tool-result-delta', {
+          parentToolUseId: parentForResultDelta,
+          toolUseId: event.toolUseId,
+          delta: event.delta,
+        });
+        recordRuntimeActivity();
+        break;
+      }
       broadcast('chat:tool-result-delta', {
         toolUseId: event.toolUseId,
         delta: event.delta,
       });
       recordRuntimeActivity();
       break;
+    }
 
     case 'tool_result':
       {
+        // PRD 0.2.27 — sub-agent tool result nests under its spawn card. Handled
+        // synchronously (no spill/attachments path — matches builtin subagent
+        // results which are plain text). Routed by the latched map.
+        const subParent = childToolToParent.get(event.toolUseId);
+        if (subParent) {
+          applySubagentToolResult(subParent, event);
+          break;
+        }
         const normalized = normalizeExternalToolResultForSse(event)
           .then(applyExternalToolResult)
           .catch((err) => {
@@ -2554,6 +2890,9 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
       // chat:message-complete (see persistInFlight comment above).
       if (!persistInFlight) {
         setExternalSessionState('idle');
+        // Drain queued desktop messages on a failed turn too, so pills don't stick (the next
+        // item resumes a fresh process via sendExternalMessage Case 2 if needed).
+        setTimeout(() => drainExternalQueueAfterTurn(), 0);
       }
       // Clean up module state — prevents stuck sessions on CC crash
       isRunning = false;

@@ -21,15 +21,21 @@ const DEFAULT_TREE_MAX_ENTRIES: usize = 10_000;
 const DEFAULT_EXPAND_MAX_DEPTH: usize = 3;
 const DEFAULT_EXPAND_MAX_ENTRIES: usize = 1_000;
 
-/// Default ignore set — must match `dir-info.ts::DEFAULT_IGNORES` so a
-/// directory hidden in chat-tab is also hidden in launcher.
+/// Explorer-style hard hidden names — must match `dir-info.ts::DEFAULT_IGNORES`
+/// so a directory hidden in chat-tab is also hidden in launcher.
+///
+/// Keep this list intentionally small. Build outputs and dependency folders
+/// are real project files in a VS Code-like explorer; performance is handled by
+/// lazy expansion, not by making those directories disappear.
 fn default_ignores() -> HashSet<&'static str> {
     let mut set = HashSet::new();
     set.insert(".git");
-    set.insert("node_modules");
-    set.insert("out");
-    set.insert("dist");
-    set.insert("tmp");
+    set.insert(".hg");
+    set.insert(".svn");
+    set.insert("CVS");
+    set.insert(".DS_Store");
+    set.insert("Thumbs.db");
+    set.insert("desktop.ini");
     set
 }
 
@@ -326,23 +332,52 @@ mod tests {
         fs::create_dir_all(root.join("src/renderer")).unwrap();
         fs::create_dir_all(root.join("src-tauri")).unwrap();
         fs::create_dir_all(root.join("node_modules/foo")).unwrap();
+        fs::create_dir_all(root.join("dist/app")).unwrap();
+        fs::create_dir_all(root.join("out")).unwrap();
+        fs::create_dir_all(root.join("tmp")).unwrap();
+        fs::create_dir_all(root.join(".git")).unwrap();
+        fs::create_dir_all(root.join(".hg")).unwrap();
+        fs::create_dir_all(root.join(".svn")).unwrap();
+        fs::create_dir_all(root.join("CVS")).unwrap();
         fs::write(root.join("README.md"), "").unwrap();
         fs::write(root.join("src/index.ts"), "").unwrap();
         fs::write(root.join("src/renderer/App.tsx"), "").unwrap();
         fs::write(root.join("src-tauri/main.rs"), "").unwrap();
         fs::write(root.join("node_modules/foo/leaf.js"), "").unwrap();
+        fs::write(root.join("dist/app/index.js"), "").unwrap();
+        fs::write(root.join("out/report.txt"), "").unwrap();
+        fs::write(root.join("tmp/note.txt"), "").unwrap();
+        fs::write(root.join(".git/config"), "").unwrap();
+        fs::write(root.join(".hg/hgrc"), "").unwrap();
+        fs::write(root.join(".svn/entries"), "").unwrap();
+        fs::write(root.join("CVS/Root"), "").unwrap();
+        fs::write(root.join(".DS_Store"), "").unwrap();
+        fs::write(root.join("Thumbs.db"), "").unwrap();
+        fs::write(root.join("desktop.ini"), "").unwrap();
     }
 
     #[tokio::test]
-    async fn skips_ignored_dirs() {
+    async fn applies_explorer_style_ignores() {
         let ws = make_test_workspace("tree_ignore");
         write_tree(&ws);
         let res = cmd_workspace_dir_tree(ws.to_string_lossy().to_string())
             .await
             .unwrap();
-        // node_modules MUST not appear at any depth.
         let dump = serde_json::to_string(&res.tree).unwrap();
-        assert!(!dump.contains("node_modules"));
+        // VCS internals and OS metadata should stay out of the explorer.
+        assert!(!dump.contains(".git"));
+        assert!(!dump.contains(".hg"));
+        assert!(!dump.contains(".svn"));
+        assert!(!dump.contains("CVS"));
+        assert!(!dump.contains(".DS_Store"));
+        assert!(!dump.contains("Thumbs.db"));
+        assert!(!dump.contains("desktop.ini"));
+        // Build outputs and dependency folders are real project files; show
+        // them and rely on lazy expansion for performance.
+        assert!(dump.contains("node_modules"));
+        assert!(dump.contains("dist"));
+        assert!(dump.contains("out"));
+        assert!(dump.contains("tmp"));
         assert!(dump.contains("README.md"));
         assert!(dump.contains("App.tsx"));
         let _ = fs::remove_dir_all(&ws);

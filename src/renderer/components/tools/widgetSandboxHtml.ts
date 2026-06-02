@@ -2,7 +2,11 @@
  * Sandbox iframe receiver HTML for Generative UI widgets.
  *
  * This HTML is injected as the iframe's `srcdoc`. It:
- * - Sets a strict CSP (only 4 CDN domains for scripts, no connect-src)
+ * - Sets a strict CSP: 4 CDN domains for scripts, no connect-src, and Google
+ *   Fonts (fonts.googleapis.com stylesheet + fonts.gstatic.com woff2 — both hops
+ *   needed) for decorative web fonts. On WebKit THIS meta CSP governs the iframe
+ *   (the parent app CSP isn't inherited); on Chromium/WebView2 the srcdoc also
+ *   intersects the parent CSP, so tauri.conf.json must list the same font hosts.
  * - Listens for postMessage commands: widget:update (streaming), widget:finalize (final)
  * - Reports height changes back to the parent via widget:resize
  * - Intercepts link clicks and forwards them to the parent via widget:link
@@ -15,7 +19,7 @@ export function buildSandboxHtml(cssVarsBlock: string): string {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://unpkg.com https://esm.sh; img-src data: https:; font-src https://cdn.jsdelivr.net https://cdnjs.cloudflare.com;">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline' https://fonts.googleapis.com; script-src 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://unpkg.com https://esm.sh; img-src data: https:; font-src https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://fonts.gstatic.com;">
 <style>
 ${cssVarsBlock}
 *, *::before, *::after { box-sizing: border-box; }
@@ -118,6 +122,56 @@ label { font-size: 12px; font-weight: 600; color: var(--widget-text-secondary); 
     }
   });
 
+  // Surface a widget script failure instead of rendering a silent blank box.
+  //
+  // A weaker / non-Claude model routinely emits a widget whose inline JS is
+  // malformed — e.g. an unbalanced brace in a Chart config (DeepSeek shipped a
+  // chart whose options object was missing one closing brace). The parse or
+  // runtime error is thrown INSIDE this
+  // sandboxed iframe, so it never reaches the parent [REACT] console or the
+  // app's unified log: the user just sees an empty box with no clue why, and a
+  // maintainer burns a long investigation rediscovering "the model wrote broken
+  // JS". We can't fix the model's code, but we can make the failure visible
+  // (an inline notice) and resilient (one bad script no longer aborts the rest
+  // of the widget). The error is also forwarded to the parent so it lands in
+  // the main console / logs.
+  var widgetErrored = false;
+  var errorReports = 0;
+  function showWidgetError(msg) {
+    var text = String(msg || 'script error');
+    // Bound parent-log spam: a widget whose error repeats (e.g. throws every
+    // animation frame) shouldn't flood the main console — surface the first few.
+    if (errorReports < 3) {
+      errorReports++;
+      try { window.parent.postMessage({ type: 'widget:error', message: text }, '*'); } catch (e) {}
+    }
+    if (widgetErrored) return; // one notice per widget, even if several scripts fail
+    widgetErrored = true;
+    var note = document.createElement('div');
+    note.setAttribute('data-widget-error', '');
+    note.style.cssText = 'margin-top:8px;padding:8px 12px;border-radius:8px;font-size:12px;line-height:1.5;'
+      + 'background:var(--widget-bg-inset);border:1px solid var(--widget-border);color:var(--widget-text-muted);';
+    // Engines often mask the detail to a generic "Script error." for sandboxed
+    // scripts, so lead with a self-explanatory line and append whatever detail
+    // the engine did give.
+    note.textContent = '⚠️ 这个组件的脚本没能运行（通常是模型生成的代码有语法错误）：' + text;
+    root.appendChild(note);
+    reportHeight();
+  }
+  // Most engines report a dynamically-inserted inline script's parse error (and
+  // any runtime error) asynchronously on window 'error' rather than throwing at
+  // the insertion site; this catches those. The synchronous-throw engines
+  // (WebKit) are covered by the try/catch around replaceChild in runScripts.
+  window.addEventListener('error', function(e) {
+    showWidgetError(e && e.message ? e.message : 'script error');
+  });
+  // Async failures (e.g. a widget that fetches data and the promise rejects)
+  // don't reach the 'error' listener — surface those too.
+  window.addEventListener('unhandledrejection', function(e) {
+    var r = e && e.reason;
+    showWidgetError(r && r.message ? r.message : 'unhandled promise rejection');
+  });
+
   // Execute script tags in document order (innerHTML doesn't run them).
   //
   // A DOM-inserted <script src> loads ASYNCHRONOUSLY and does NOT block the
@@ -167,7 +221,14 @@ label { font-size: 12px; font-weight: 600; color: var(--widget-text-secondary); 
         old.parentNode.replaceChild(s, old);
       } else {
         s.textContent = old.textContent;
-        old.parentNode.replaceChild(s, old); // inline scripts run synchronously
+        try {
+          old.parentNode.replaceChild(s, old); // inline scripts run synchronously
+        } catch (err) {
+          // WebKit throws a malformed inline script's SyntaxError synchronously
+          // at insertion. Catch it so this widget's remaining scripts still run
+          // and the failure shows as a notice rather than a blank box.
+          showWidgetError(err && err.message ? err.message : 'script error');
+        }
         runNext();
       }
     }
