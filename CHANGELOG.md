@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.2.28] - Unreleased
+
+### Fixed
+
+- **「重启更新」后标签页恢复更可靠**（[#232](https://github.com/hAcKlyc/MyAgents/issues/232) 加固）：标签恢复此前只写 localStorage，而 WebView 把 localStorage 落盘是异步的——点「重启更新」时进程被立即强制退出（Windows 走 NSIS `exit(0)`、macOS 走 `relaunch()`），最后一次写入可能还没落盘就丢了，导致重启后标签没恢复。现在在退出前额外把标签快照 fsync 落盘到 `~/.myagents/open-tabs.json`（复用 config.json 的原子写），重启时若 localStorage 读到空就从这个兜底快照恢复，用完即删。
+
+---
+
 ## [0.2.27] - 2026-06-02
 
 > 本版聚焦外部 Runtime（尤其 Codex）的多 agent 体验与超长会话稳定性：Codex 子 agent 的工具调用现在像内置 Task 一样折叠展示；外部 Runtime 支持回合中途排队消息；修复了包含大量工具输出的超长会话重开后内容截断的问题；生成式 UI 图表内置、更稳定。
