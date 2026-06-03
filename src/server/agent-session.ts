@@ -23,6 +23,7 @@ import { decideInFlightActionOnResult } from './utils/inflight-terminal';
 import { shouldBlockToolInPlanMode, planModeDenyMessage, isPlanModeInEffect, PLAN_MODE_READONLY_TOOLS, PLAN_MODE_HOST_INTERACTION_TOOLS } from './utils/plan-mode-gate';
 import { isEmptySuccessfulSdkResult, isRecoveredAssistantMessageError } from './utils/sdk-turn-outcome';
 import { InactivityWatchdog } from './utils/inactivity-watchdog';
+import { WATCHDOG_RESUME_REMINDER, planWatchdogAutoResume, shouldAdoptPendingContinueIntoScheduledAutoResume, shouldConsumePendingContinueAfterAbort, shouldDeferPendingContinueToScheduledAutoResume, shouldPrependWatchdogAutoResume } from './utils/watchdog-auto-resume';
 import { processImage, resizeToolImageContent, classifyImageError } from './utils/imageResize';
 import { writeBase64FilesToAgentDir } from './utils/workspace-files';
 import { ensureGitignorePattern } from './utils/gitignore';
@@ -1576,15 +1577,19 @@ let currentTurnInboxMeta: import('./inbox/types').InboxTurnMeta | undefined = un
 // inbox reply pushback to assemble the reply body. Reset at turn start.
 const currentTurnTextBlocks: string[] = [];
 
-// ─── Delayed Continue (watchdog-driven session resume) ────────────────────
+// ─── Watchdog Auto Resume (watchdog-driven session resume) ────────────────
 //
 // When the inactivity watchdog (`apiWatchdogId` setInterval below the
 // SDK for-await loop) aborts a turn that produced real output, the
-// SessionMetadata gets `pendingContinueAfterAbort=true`. The next
-// `enqueueUserMessage` call against this session reads the flag,
-// synchronously test-and-sets the per-session guard, recursively
-// enqueues a single system-reminder turn, then (on success) clears
-// the disk flag and marks the per-process cap.
+// SessionMetadata gets `pendingContinueAfterAbort=true` and the sidecar
+// schedules one automatic system-reminder turn after the old SDK process
+// finishes tearing down. The disk flag remains the crash/restart fallback:
+// the next `enqueueUserMessage` call against this session can still consume
+// it if the auto task never got to run or released ownership without success.
+//
+// Both paths synchronously test-and-set the per-session guard, accept a single
+// system-reminder turn, mark the per-process cap, then best-effort clear the
+// disk flag.
 //
 // `consumingPendingContinueSessions` is a per-session synchronous lock
 // preventing two concurrent enqueueUserMessage callers against the SAME
@@ -1593,6 +1598,12 @@ const currentTurnTextBlocks: string[] = [];
 // block each other — cross-review caught the global lock as a real
 // correctness issue (second session would silently skip consume).
 const consumingPendingContinueSessions = new Set<string>();
+
+// In-process ownership marker for the automatic post-watchdog task. While this
+// is set, the disk flag is not available to next-enqueue fallback consumers;
+// manual messages that arrive during abort teardown must queue behind the
+// scheduled auto-resume reminder instead of stealing the flag.
+const scheduledWatchdogAutoResumeSessions = new Set<string>();
 
 // Cap auto-Continue at exactly ONE injection per sessionId per sidecar
 // process lifetime. Without this cap, the chain
@@ -1605,23 +1616,16 @@ const consumingPendingContinueSessions = new Set<string>();
 // guarantee that the user's "避免循环重试" requirement holds even under
 // the partial-output-then-hang scenario.
 //
-// The Set is added to ONLY after a successful reminder enqueue (post-await,
+// The Set is added after a successful reminder enqueue (post-await,
 // post-session-switch-verification). If the reminder rejects (queue full)
-// or a switchToSession races, neither the disk flag nor this Set is
-// updated — the next legit enqueue on the original session re-attempts.
+// or a switchToSession races, neither the disk flag nor this Set is updated.
+// If clearing the disk flag fails after accept, this Set still blocks duplicate
+// reminder injection for the rest of this sidecar process.
 //
 // New sidecar process = new Set = one fresh auto-Continue allowed (e.g.,
 // user opens an aborted-cron session hours later in chat). That's
 // intentional, matching the spec.
 const autoResumeInjectedSessions = new Set<string>();
-
-// Synthetic user-turn content injected by the Delayed Continue path.
-// Kept short and in English: the SDK's system-reminder convention
-// expects compact, model-readable instructions, not verbose user-facing
-// copy. Sent as a user turn (no special metadata) so it appears in
-// session history exactly once and is durable across sidecar restarts.
-const WATCHDOG_RESUME_REMINDER =
-  '<system-reminder>The previous turn was aborted by the inactivity watchdog (10-minute timeout). Resume from existing context and complete the unfinished task.</system-reminder>';
 
 function resetTurnUsage(): void {
   currentTurnUsage = {
@@ -6339,6 +6343,182 @@ export type EnqueueResult = {
   error?: string;    // present when queue is full or other rejection
 };
 
+async function enqueueWatchdogResumeReminderAtQueueFront(): Promise<EnqueueResult> {
+  const trimmed = WATCHDOG_RESUME_REMINDER;
+  resetTurnUsage();
+  currentTurnStartTime = Date.now();
+
+  const userMessage: MessageWire = {
+    id: String(messageSequence++),
+    role: 'user',
+    content: trimmed,
+    timestamp: new Date().toISOString(),
+  };
+  messages.push(userMessage);
+  broadcast('chat:message-replay', { message: userMessage });
+  await persistMessagesToStorage();
+  clearMirrorState();
+
+  const queueItem: MessageQueueItem = {
+    id: randomUUID(),
+    message: { role: 'user', content: [{ type: 'text', text: trimmed }] },
+    messageText: trimmed,
+    wasQueued: false,
+    resolve: () => {},
+  };
+
+  console.log('[agent] Watchdog auto-resume inserted reminder at recovery queue front');
+  preWarmFailCount = 0;
+  messageQueue.unshift(queueItem);
+  setSessionState((systemInitInfo || sdkControlReady) ? 'running' : 'starting');
+  setTimeout(() => {
+    startStreamingSession().catch((error) => {
+      console.error('[agent] failed to start watchdog auto-resume session', error);
+    });
+  }, 0);
+
+  return { queued: false };
+}
+
+async function consumePendingContinueAfterAbort(
+  sessionIdSnapshot: string,
+  permissionMode: PermissionMode | undefined,
+  model: string | undefined,
+  providerEnv: ProviderEnv | 'subscription' | undefined,
+  trigger: 'next-enqueue' | 'watchdog-auto',
+  allowMissingPendingFlag = false,
+): Promise<boolean> {
+  const meta = getSessionMetadata(sessionIdSnapshot);
+  const hasPendingContinue = Boolean(meta?.pendingContinueAfterAbort || allowMissingPendingFlag);
+  const alreadyConsuming = consumingPendingContinueSessions.has(sessionIdSnapshot);
+  const alreadyAutoResumed = autoResumeInjectedSessions.has(sessionIdSnapshot);
+  const scheduledAutoResume = scheduledWatchdogAutoResumeSessions.has(sessionIdSnapshot);
+  if (shouldAdoptPendingContinueIntoScheduledAutoResume({
+    trigger,
+    pendingContinueAfterAbort: hasPendingContinue,
+    sessionTerminating: shouldAbortSession,
+    consuming: alreadyConsuming,
+    alreadyAutoResumed,
+    scheduledAutoResume,
+  })) {
+    console.log(`[agent] ${trigger}: adopting pendingContinueAfterAbort into scheduled watchdog auto-resume for terminating session ${sessionIdSnapshot}`);
+    scheduleWatchdogAutoResumeAfterAbort(sessionIdSnapshot, {
+      allowMissingPendingFlag,
+    });
+    return false;
+  }
+
+  const deferToScheduledAutoResume = shouldDeferPendingContinueToScheduledAutoResume({
+    trigger,
+    scheduledAutoResume,
+  });
+  if (!shouldConsumePendingContinueAfterAbort({
+    pendingContinueAfterAbort: hasPendingContinue,
+    consuming: alreadyConsuming,
+    alreadyAutoResumed,
+    deferToScheduledAutoResume,
+  })) {
+    if (deferToScheduledAutoResume) {
+      console.log(`[agent] ${trigger}: pendingContinueAfterAbort deferred to scheduled watchdog auto-resume for session ${sessionIdSnapshot}`);
+    }
+    return false;
+  }
+
+  consumingPendingContinueSessions.add(sessionIdSnapshot); // sync test-and-set
+  try {
+    console.log(`[agent] ${trigger}: consuming pendingContinueAfterAbort for session ${sessionIdSnapshot}, injecting reminder turn`);
+    const reminderResult = shouldPrependWatchdogAutoResume({
+      sessionActive: isSessionActive(),
+      sessionTerminating: shouldAbortSession,
+    })
+      ? await enqueueWatchdogResumeReminderAtQueueFront()
+      : await enqueueUserMessage(
+          WATCHDOG_RESUME_REMINDER,
+          undefined,        // images
+          permissionMode,   // inherit caller/current permission mode
+          model,            // inherit caller/current model
+          providerEnv,      // inherit caller/current provider env
+          undefined,        // metadata - synthetic, no source attribution
+          undefined,        // requestId - synthetic, no IM trace
+          undefined,        // inboxMeta - synthetic, no inbox pushback
+        );
+
+    if (sessionId !== sessionIdSnapshot) {
+      // switchToSession raced between our call and the recursive enqueue's
+      // resetPromise wait — reminder went to the new session. Preserve the
+      // original session's flag for retry; do NOT clear it or mark the
+      // per-process cap.
+      console.error(`[agent] Reminder enqueue raced session switch ${sessionIdSnapshot} -> ${sessionId}; flag for ${sessionIdSnapshot} preserved for retry`);
+      return false;
+    }
+
+    if (reminderResult.error) {
+      // Queue rejection — preserve flag for retry, same rationale.
+      console.error(`[agent] Reminder enqueue rejected (${reminderResult.error}); flag for ${sessionIdSnapshot} preserved for retry`);
+      return false;
+    }
+
+    // Success path — reminder is in the right session's queue. The same-process
+    // cap is authoritative after accept; clearing the disk crash-fallback flag
+    // is best-effort, because a write failure must not allow duplicate reminder
+    // injection in this process.
+    autoResumeInjectedSessions.add(sessionIdSnapshot);
+    try {
+      const updated = await updateSessionMetadata(sessionIdSnapshot, { pendingContinueAfterAbort: false });
+      if (!updated || updated.pendingContinueAfterAbort) {
+        console.error(`[agent] Failed to clear pendingContinueAfterAbort for session ${sessionIdSnapshot}; same-process cap remains active`);
+      }
+    } catch (e) {
+      console.error(`[agent] Failed to clear pendingContinueAfterAbort for session ${sessionIdSnapshot}; same-process cap remains active`, e);
+    }
+    return true;
+  } catch (e) {
+    console.error('[agent] Failed to inject Continue reminder turn:', e);
+    return false;
+  } finally {
+    consumingPendingContinueSessions.delete(sessionIdSnapshot);
+  }
+}
+
+function scheduleWatchdogAutoResumeAfterAbort(
+  sessionIdSnapshot: string,
+  opts: { allowMissingPendingFlag?: boolean } = {},
+): void {
+  scheduledWatchdogAutoResumeSessions.add(sessionIdSnapshot);
+  console.log(`[agent] Watchdog: scheduling auto-resume for session ${sessionIdSnapshot} after abort`);
+  void (async () => {
+    try {
+      await awaitSessionTermination(10_000, 'watchdogAutoResume');
+      if (sessionId !== sessionIdSnapshot) {
+        console.warn(`[agent] Watchdog auto-resume skipped: session switched ${sessionIdSnapshot} -> ${sessionId}`);
+        return;
+      }
+
+      // The abort flag belongs to the SDK subprocess that just terminated.
+      // Clear it before the synthetic turn enters enqueueUserMessage, otherwise
+      // the reminder is treated as a mid-abort queued item and waits for an
+      // unrelated future recovery trigger.
+      resetAbortFlag();
+
+      const consumed = await consumePendingContinueAfterAbort(
+        sessionIdSnapshot,
+        currentPermissionMode,
+        currentModel,
+        undefined, // undefined means "keep current provider env"
+        'watchdog-auto',
+        opts.allowMissingPendingFlag === true,
+      );
+      if (!consumed) {
+        console.log(`[agent] Watchdog auto-resume skipped: no consumable pending flag for session ${sessionIdSnapshot}`);
+      }
+    } catch (e) {
+      console.error('[agent] Watchdog auto-resume failed:', e);
+    } finally {
+      scheduledWatchdogAutoResumeSessions.delete(sessionIdSnapshot);
+    }
+  })();
+}
+
 export async function enqueueUserMessage(
   text: string,
   images?: ImagePayload[],
@@ -6380,8 +6560,10 @@ export async function enqueueUserMessage(
   // If the previous turn on this session was aborted by the inactivity
   // watchdog *and* produced real model output, the SessionMetadata
   // carries `pendingContinueAfterAbort=true`. Inject one system-reminder
-  // user-turn *before* the caller's actual message so the model resumes
-  // from existing context.
+  // user-turn *before* the caller's actual message on crash/retry fallback.
+  // When the same-process scheduled auto-resume owns the flag, this path
+  // intentionally defers so the post-teardown task can prepend the reminder
+  // ahead of any rescued manual messages.
   //
   // Invariants (cross-review hardened):
   //
@@ -6395,12 +6577,12 @@ export async function enqueueUserMessage(
   //     global. Two different sessions consuming their own flags
   //     concurrently must not block each other.
   //
-  //  3. Clear-on-SUCCESS — disk flag is cleared and per-process cap is
-  //     marked ONLY after the recursive enqueue succeeds AND we verify
-  //     no session switch raced through. If the recursive enqueue
-  //     rejects (queue full) or `sessionId !== sessionIdSnapshot`
-  //     post-await, leave the flag set so the next legit enqueue on
-  //     the original session re-attempts.
+  //  3. Accept-on-SUCCESS — per-process cap is marked after the reminder
+  //     enqueue succeeds AND we verify no session switch raced through. The
+  //     disk flag is then cleared best-effort; if that write fails, the cap
+  //     still prevents same-process duplicate reminders. If the enqueue rejects
+  //     (queue full) or `sessionId !== sessionIdSnapshot` post-await, leave the
+  //     flag set so the next legit enqueue on the original session re-attempts.
   //
   //  4. The recursive `enqueueUserMessage` itself awaits resetPromise,
   //     so a switchToSession running between this call and the recursive
@@ -6409,50 +6591,15 @@ export async function enqueueUserMessage(
   //     check catches that case; we can't un-enqueue the reminder but
   //     we MUST preserve the original session's flag for retry.
   const sessionIdSnapshot = sessionId;
-  if (
-    !consumingPendingContinueSessions.has(sessionIdSnapshot) &&
-    !autoResumeInjectedSessions.has(sessionIdSnapshot)
-  ) {
-    const meta = getSessionMetadata(sessionIdSnapshot);
-    if (meta?.pendingContinueAfterAbort) {
-      consumingPendingContinueSessions.add(sessionIdSnapshot); // sync test-and-set
-      try {
-        console.log(`[agent] Consuming pendingContinueAfterAbort for session ${sessionIdSnapshot}, injecting reminder turn`);
-        const reminderResult = await enqueueUserMessage(
-          WATCHDOG_RESUME_REMINDER,
-          undefined,        // images
-          permissionMode,   // inherit caller's permission mode
-          model,            // inherit caller's model
-          providerEnv,      // inherit caller's provider env
-          undefined,        // metadata — synthetic, no source attribution
-          undefined,        // requestId — synthetic, no IM trace
-          undefined,        // inboxMeta — synthetic, no inbox pushback
-        );
-
-        if (sessionId !== sessionIdSnapshot) {
-          // switchToSession raced between our call and the recursive
-          // enqueue's resetPromise wait — reminder went to the new
-          // session. Preserve the original session's flag for retry;
-          // do NOT clear it or mark the per-process cap.
-          console.error(`[agent] Reminder enqueue raced session switch ${sessionIdSnapshot} → ${sessionId}; flag for ${sessionIdSnapshot} preserved for retry`);
-        } else if (reminderResult.error) {
-          // Queue rejection — preserve flag for retry, same rationale.
-          console.error(`[agent] Reminder enqueue rejected (${reminderResult.error}); flag for ${sessionIdSnapshot} preserved for retry`);
-        } else {
-          // Success path — reminder is in the right session's queue.
-          // Clear disk flag + mark per-process cap, both against the
-          // snapshot (not module-level) so a switch race after this
-          // point still targets the correct session.
-          await updateSessionMetadata(sessionIdSnapshot, { pendingContinueAfterAbort: false });
-          autoResumeInjectedSessions.add(sessionIdSnapshot);
-        }
-      } catch (e) {
-        console.error('[agent] Failed to inject Continue reminder turn:', e);
-      } finally {
-        consumingPendingContinueSessions.delete(sessionIdSnapshot);
-      }
-    }
-  }
+  await consumePendingContinueAfterAbort(
+    sessionIdSnapshot,
+    permissionMode,
+    model,
+    providerEnv,
+    'next-enqueue',
+  );
+  const holdForWatchdogRecovery = scheduledWatchdogAutoResumeSessions.has(sessionIdSnapshot)
+    || messageQueue.some(item => item.messageText === WATCHDOG_RESUME_REMINDER);
 
   // Session is "busy" if AI is streaming OR there are pending messages in
   // any of the three queues. This prevents config changes and turn-usage
@@ -6899,7 +7046,11 @@ export async function enqueueUserMessage(
     // lives in CLI's commandQueue at a time so subsequent items stay
     // cancellable in pendingMidTurnQueue until this one is consumed
     // (signalled by SDKUserMessageReplay) and we promote the next.
-    if (inFlightToCliId === null) {
+    if (holdForWatchdogRecovery) {
+      messageQueue.push(queueItem);
+      console.log(`[agent] Message queued behind watchdog recovery reminder: queueId=${queueId} requestId=${requestId ?? '-'} text="${trimmed.slice(0, 50)}"`);
+      broadcast('queue:added', { queueId, messageText: trimmed.slice(0, 100), isInFlight: false });
+    } else if (inFlightToCliId === null) {
       // No in-flight queue item — this becomes the in-flight one. Yield
       // immediately so CLI receives it and the next mid-turn drain
       // (query.ts:1570 at any tool break) attaches it to the model's
@@ -9022,13 +9173,28 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         // for the file write to complete before the sidecar tears down
         // (cron sidecars in particular shut down ~1s after abort).
         const watchdogSessionId = sessionId;
-        if (turnHadSubstantiveActivity) {
+        const autoResumePlan = planWatchdogAutoResume({
+          turnHadSubstantiveActivity,
+          alreadyAutoResumed: autoResumeInjectedSessions.has(watchdogSessionId),
+        });
+        if (autoResumePlan.scheduleAutoResume) {
+          scheduledWatchdogAutoResumeSessions.add(watchdogSessionId);
+        }
+        let pendingContinuePersisted = false;
+        if (autoResumePlan.persistPendingContinue) {
           try {
-            await updateSessionMetadata(watchdogSessionId, { pendingContinueAfterAbort: true });
-            console.log(`[agent] Watchdog: marked session ${watchdogSessionId} pendingContinueAfterAbort=true (turnHadSubstantiveActivity=true)`);
+            const updated = await updateSessionMetadata(watchdogSessionId, { pendingContinueAfterAbort: true });
+            pendingContinuePersisted = updated?.pendingContinueAfterAbort === true;
+            if (pendingContinuePersisted) {
+              console.log(`[agent] Watchdog: marked session ${watchdogSessionId} pendingContinueAfterAbort=true (turnHadSubstantiveActivity=true)`);
+            } else {
+              console.error(`[agent] Watchdog: failed to persist pendingContinueAfterAbort for session ${watchdogSessionId}`);
+            }
           } catch (e) {
             console.error('[agent] Watchdog: failed to persist pendingContinueAfterAbort:', e);
           }
+        } else if (autoResumeInjectedSessions.has(watchdogSessionId)) {
+          console.log(`[agent] Watchdog: auto-resume already injected for session ${watchdogSessionId} - skipping pendingContinueAfterAbort`);
         } else {
           console.log(`[agent] Watchdog: turn had no substantive SDK activity — skipping pendingContinueAfterAbort`);
         }
@@ -9038,6 +9204,11 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         });
         broadcast('chat:message-error', '响应超时');
         abortPersistentSession();
+        if (autoResumePlan.scheduleAutoResume) {
+          scheduleWatchdogAutoResumeAfterAbort(watchdogSessionId, {
+            allowMissingPendingFlag: !pendingContinuePersisted,
+          });
+        }
       }
     }, API_WATCHDOG_INTERVAL_MS);
 
