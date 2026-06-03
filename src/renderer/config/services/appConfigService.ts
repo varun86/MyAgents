@@ -59,9 +59,12 @@ export function migrateOsNotificationsField(config: AppConfig): AppConfig {
         raw['osNotifications'] = legacy;
         delete raw['cronNotifications'];
         _osNotificationsMigrationDone = true;
-        saveAppConfig(config).catch(err => {
-            console.error('[configService] Failed to persist osNotifications migration:', err);
-        });
+        // Cross-review (#0.2.29) — IN-MEMORY ONLY, do NOT fire-and-forget
+        // saveAppConfig here. This runs inside loadAppConfig, which
+        // atomicModifyConfig calls while holding withConfigLock; a queued save
+        // would land AFTER the modifier's write and clobber it with this
+        // pre-modifier snapshot. The disk heals on the next real config write
+        // (same strategy as the #301 normalizeStringifiedJsonFields below).
         return config;
     }
     // Already had osNotifications (or no legacy field) — strip dead field
@@ -91,9 +94,10 @@ export function migrateImBotConfig(config: AppConfig): AppConfig {
         };
         config.imBotConfigs = [migrated];
         delete config.imBotConfig;
-        saveAppConfig(config).catch(err => {
-            console.error('[configService] Failed to persist imBotConfig migration:', err);
-        });
+        // Cross-review (#0.2.29) — IN-MEMORY ONLY (see migrateOsNotificationsField):
+        // this also runs inside loadAppConfig, so a fire-and-forget save races
+        // atomicModifyConfig's withConfigLock and clobbers the modifier write.
+        // Disk heals on the next real config write.
     }
     return config;
 }

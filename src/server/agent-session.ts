@@ -6343,7 +6343,9 @@ export type EnqueueResult = {
   error?: string;    // present when queue is full or other rejection
 };
 
-async function enqueueWatchdogResumeReminderAtQueueFront(): Promise<EnqueueResult> {
+async function enqueueWatchdogResumeReminderAtQueueFront(
+  sessionIdSnapshot: string,
+): Promise<EnqueueResult> {
   const trimmed = WATCHDOG_RESUME_REMINDER;
   resetTurnUsage();
   currentTurnStartTime = Date.now();
@@ -6357,6 +6359,21 @@ async function enqueueWatchdogResumeReminderAtQueueFront(): Promise<EnqueueResul
   messages.push(userMessage);
   broadcast('chat:message-replay', { message: userMessage });
   await persistMessagesToStorage();
+
+  // Cross-review (#0.2.29) — a `switchToSession` can land inside the await
+  // above (it runs `clearMessageState()` + reassigns module-level `sessionId`).
+  // If it did, unshifting this reminder into `messageQueue` and starting a
+  // stream now would inject the ORIGINAL session's reminder into the NEW
+  // session and start streaming on it. Bail with an error BEFORE any queue
+  // mutation so the caller (`consumePendingContinueAfterAbort`) preserves the
+  // original session's pendingContinueAfterAbort flag for retry — same rationale
+  // as the post-await sessionId guard the caller already applies to the
+  // recursive enqueue path.
+  if (sessionId !== sessionIdSnapshot) {
+    console.error(`[agent] Watchdog auto-resume reminder raced session switch ${sessionIdSnapshot} -> ${sessionId}; aborting reminder injection, flag preserved for retry`);
+    return { queued: false, error: 'session switched during watchdog reminder persist' };
+  }
+
   clearMirrorState();
 
   const queueItem: MessageQueueItem = {
@@ -6431,7 +6448,7 @@ async function consumePendingContinueAfterAbort(
       sessionActive: isSessionActive(),
       sessionTerminating: shouldAbortSession,
     })
-      ? await enqueueWatchdogResumeReminderAtQueueFront()
+      ? await enqueueWatchdogResumeReminderAtQueueFront(sessionIdSnapshot)
       : await enqueueUserMessage(
           WATCHDOG_RESUME_REMINDER,
           undefined,        // images

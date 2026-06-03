@@ -9199,7 +9199,19 @@ description: >
           } else {
             // Clear any stale agent error first so the post-turn check reflects THIS turn.
             getAndClearLastAgentError();
-            await enqueueUserMessage(prompt, [], 'fullAgency', getSessionModel(), getSessionProviderEnv());
+            const enq = await enqueueUserMessage(prompt, [], 'fullAgency', getSessionModel(), getSessionProviderEnv());
+            // Cross-review (#0.2.29) — the external branch above gates on `!ext.queued`;
+            // this builtin branch previously discarded the enqueue result, so a rejected
+            // enqueue (e.g. `{ queued:false, error:'Queue full (max 10)' }` — which does
+            // NOT set lastAgentError) fell through to `turnOk = !getAndClearLastAgentError()`
+            // = true and falsely reported `completed` though the prompt never ran. Reachable
+            // for MANUAL updates (the busy gate only skips `isAuto`). Discriminate on `.error`,
+            // NOT `!queued`: a successful direct-send into an idle session also returns
+            // `{ queued:false }` (no error), which is the common memory-update case.
+            if (enq.error) {
+              console.warn(`[memory-update] Builtin enqueue rejected: ${enq.error}`);
+              return jsonResponse({ status: 'error', reason: enq.error }, 500);
+            }
             if (!(await waitForSessionIdle(MEMORY_UPDATE_TIMEOUT_MS, 1000))) {
               console.warn('[memory-update] AI memory update timed out (60 min)');
               return jsonResponse({ status: 'timeout' });

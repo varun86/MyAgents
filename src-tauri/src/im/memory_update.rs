@@ -333,7 +333,7 @@ async fn update_single_session<R: Runtime>(
                 Ok(()) // Still count as attempted — don't retry immediately
             }
             "skipped" => Err(format!("Skipped: {:?}", resp.reason)),
-            // The Bun endpoint now reports a genuinely failed turn (e.g. an external
+            // The sidecar endpoint now reports a genuinely failed turn (e.g. an external
             // session whose runtime rejected the turn) as status="error" instead of
             // falsely reporting "completed". Surface it as a real failure so it does
             // NOT count toward the updated tally.
