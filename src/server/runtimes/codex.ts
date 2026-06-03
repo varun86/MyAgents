@@ -110,6 +110,13 @@ function objectValue(value: unknown): Record<string, unknown> {
   return isRecord(value) ? value : {};
 }
 
+function codexTraceId(params: Record<string, unknown>, fallbackItemId?: string, suffix?: string): string | undefined {
+  const itemId = stringValue(params.itemId) ?? fallbackItemId;
+  if (!itemId) return undefined;
+  const threadId = stringValue(params.threadId);
+  return [threadId, itemId, suffix].filter((part): part is string => !!part).join('::');
+}
+
 // ─── Temp image directory for Codex (which requires file paths, not base64) ───
 const TEMP_IMG_DIR = join(
   process.env.HOME || process.env.USERPROFILE || '/tmp',
@@ -670,11 +677,140 @@ export function computeSubAgentScope(
   return { parentToolUseId, nickname: meta?.nickname, role: meta?.role };
 }
 
-/** Tool-bearing UnifiedEvent kinds eligible for sub-agent scoping. */
-function isToolScopedEvent(
+/**
+ * Resolve non-spawn collab-agent control actions (`wait`, `sendInput`,
+ * `closeAgent`, future control tools) to the spawn card(s) they operate on.
+ *
+ * These actions are emitted on the MAIN thread, so thread-based scoping returns
+ * null. Their `receiverThreadIds` are references to already-spawned child
+ * threads; use those references to nest the control action inside the existing
+ * spawn trace instead of rendering a second top-level CollabAgent card.
+ */
+export function resolveCollabAgentControlParents(
+  tool: string | undefined,
+  receiverThreadIds: string[] | undefined,
+  threadToCard: ReadonlyMap<string, string>,
+  threadToParent: ReadonlyMap<string, string>,
+): string[] {
+  if (!tool || tool === 'spawnAgent' || !Array.isArray(receiverThreadIds)) return [];
+
+  const parents: string[] = [];
+  const seen = new Set<string>();
+  for (const receiverThreadId of receiverThreadIds) {
+    if (typeof receiverThreadId !== 'string' || !receiverThreadId) continue;
+    const parentToolUseId = resolveTopLevelSpawnCard(receiverThreadId, threadToCard, threadToParent);
+    if (!parentToolUseId || seen.has(parentToolUseId)) continue;
+    seen.add(parentToolUseId);
+    parents.push(parentToolUseId);
+  }
+  return parents;
+}
+
+export function subagentControlToolUseId(toolUseId: string, parentToolUseId: string): string {
+  return `${toolUseId}::subagent-control::${parentToolUseId}`;
+}
+
+type CollabAgentItemLike = {
+  id: string;
+  tool?: string;
+  status?: string;
+  prompt?: string;
+  model?: string;
+  senderThreadId?: string;
+  receiverThreadIds?: string[];
+};
+
+function isCollabAgentError(item: CollabAgentItemLike): boolean {
+  return item.status === 'failed';
+}
+
+function buildCollabAgentInput(item: CollabAgentItemLike): Record<string, unknown> | undefined {
+  const input: Record<string, unknown> = {};
+  if (item.tool) input.tool = item.tool;
+  if (item.status) input.status = item.status;
+  if (item.prompt) input.prompt = item.prompt;
+  if (item.model) input.model = item.model;
+  if (item.senderThreadId) input.senderThreadId = item.senderThreadId;
+  if (Array.isArray(item.receiverThreadIds)) input.receiverThreadIds = item.receiverThreadIds;
+  return Object.keys(input).length > 0 ? input : undefined;
+}
+
+function buildCollabAgentResultContent(item: CollabAgentItemLike): string {
+  const parts: string[] = [];
+  if (item.tool) parts.push(`Tool: ${item.tool}`);
+  if (item.status) parts.push(`Status: ${item.status}`);
+  if (item.prompt) parts.push(`Prompt: ${item.prompt}`);
+  if (item.model) parts.push(`Model: ${item.model}`);
+  if (item.senderThreadId) parts.push(`From: ${item.senderThreadId}`);
+  if (Array.isArray(item.receiverThreadIds) && item.receiverThreadIds.length > 0) {
+    parts.push(`To: ${item.receiverThreadIds.join(', ')}`);
+  }
+  return parts.join('\n') || 'Collab agent invoked';
+}
+
+export function buildCollabAgentControlStartEvents(
+  item: CollabAgentItemLike,
+  parentToolUseIds: readonly string[],
+): UnifiedEvent[] {
+  if (item.tool === 'spawnAgent' || parentToolUseIds.length === 0) return [];
+  const input = buildCollabAgentInput(item);
+  return parentToolUseIds.map((parentToolUseId) => ({
+    kind: 'tool_use_start' as const,
+    toolUseId: subagentControlToolUseId(item.id, parentToolUseId),
+    toolName: 'CollabAgent',
+    input,
+    subAgent: { parentToolUseId },
+  }));
+}
+
+export function buildCollabAgentControlCompletedEvents(
+  item: CollabAgentItemLike,
+  parentToolUseIds: readonly string[],
+  options: { includeStart?: boolean } = {},
+): UnifiedEvent[] {
+  const input = buildCollabAgentInput(item);
+  const content = buildCollabAgentResultContent(item);
+  const isError = isCollabAgentError(item) ? true : undefined;
+  if (item.tool === 'spawnAgent' || parentToolUseIds.length === 0) {
+    return [
+      { kind: 'tool_use_start', toolUseId: item.id, toolName: 'CollabAgent', input },
+      { kind: 'tool_use_stop', toolUseId: item.id },
+      { kind: 'tool_result', toolUseId: item.id, content, isError },
+    ];
+  }
+
+  const includeStart = options.includeStart ?? true;
+  return parentToolUseIds.flatMap((parentToolUseId) => {
+    const toolUseId = subagentControlToolUseId(item.id, parentToolUseId);
+    const subAgent: SubAgentScope = { parentToolUseId };
+    return [
+      ...(includeStart ? [{ kind: 'tool_use_start' as const, toolUseId, toolName: 'CollabAgent', input, subAgent }] : []),
+      { kind: 'tool_use_stop' as const, toolUseId, subAgent },
+      { kind: 'tool_result' as const, toolUseId, content, subAgent, isError },
+    ];
+  });
+}
+
+export function resolveCollabControlCompletionRoute(
+  latchedParents: readonly string[] | undefined,
+  resolvedParents: readonly string[],
+): { parentToolUseIds: string[]; includeStart: boolean } {
+  if (latchedParents && latchedParents.length > 0) {
+    return { parentToolUseIds: [...latchedParents], includeStart: false };
+  }
+  return { parentToolUseIds: [...resolvedParents], includeStart: true };
+}
+
+/** UnifiedEvent kinds eligible for sub-agent scoping. */
+function isSubAgentScopedEvent(
   event: UnifiedEvent,
-): event is Extract<UnifiedEvent, { kind: 'tool_use_start' | 'tool_input_delta' | 'tool_use_stop' | 'tool_result_delta' | 'tool_result' }> {
-  return event.kind === 'tool_use_start'
+): event is Extract<UnifiedEvent, { subAgent?: SubAgentScope }> {
+  return event.kind === 'text_delta'
+    || event.kind === 'text_stop'
+    || event.kind === 'thinking_start'
+    || event.kind === 'thinking_delta'
+    || event.kind === 'thinking_stop'
+    || event.kind === 'tool_use_start'
     || event.kind === 'tool_input_delta'
     || event.kind === 'tool_use_stop'
     || event.kind === 'tool_result_delta'
@@ -883,6 +1019,10 @@ class CodexProcess implements RuntimeProcess {
   subThreadToParent = new Map<string, string>();
   // Child threadId → { nickname, role } (from thread/started). Decorative labels.
   subThreadMeta = new Map<string, { nickname?: string; role?: string }>();
+  // Non-spawn collab control tool id → resolved parent spawn card ids. Started
+  // notifications may have receiverThreadIds while completed notifications may
+  // omit them (or vice versa), so latch the route for the item lifetime.
+  collabControlToolParents = new Map<string, string[]>();
 
   workspacePath = '';
   model = '';
@@ -1687,7 +1827,7 @@ export class CodexRuntime implements AgentRuntime {
       );
       if (scope) {
         for (const event of events) {
-          if (isToolScopedEvent(event)) event.subAgent = scope;
+          if (isSubAgentScopedEvent(event) && !event.subAgent) event.subAgent = scope;
         }
       }
       for (const event of events) wrappedOnEvent(event);
@@ -2073,6 +2213,7 @@ export class CodexRuntime implements AgentRuntime {
         codexProc.subThreadToCard.clear();
         codexProc.subThreadToParent.clear();
         codexProc.subThreadMeta.clear();
+        codexProc.collabControlToolParents.clear();
         if (turn?.status === 'failed') {
           return {
             kind: 'session_complete',
@@ -2090,7 +2231,7 @@ export class CodexRuntime implements AgentRuntime {
         if (itemId && text) {
           codexProc.agentMessageTextById.set(itemId, (codexProc.agentMessageTextById.get(itemId) || '') + text);
         }
-        return { kind: 'text_delta', text };
+        return { kind: 'text_delta', text, traceId: codexTraceId(p, itemId) };
       }
 
       // ── Reasoning streaming ──
@@ -2099,6 +2240,7 @@ export class CodexRuntime implements AgentRuntime {
           kind: 'thinking_delta',
           text: (p.delta as string) || '',
           index: (p.summaryIndex as number) || 0,
+          traceId: codexTraceId(p, undefined, `summary:${(p.summaryIndex as number) || 0}`),
         };
 
       case 'item/reasoning/textDelta':
@@ -2107,6 +2249,7 @@ export class CodexRuntime implements AgentRuntime {
           kind: 'thinking_delta',
           text: (p.delta as string) || '',
           index: (p.contentIndex as number) || 0,
+          traceId: codexTraceId(p, undefined, `content:${(p.contentIndex as number) || 0}`),
         };
 
       // ── Plan streaming ──
@@ -2116,6 +2259,7 @@ export class CodexRuntime implements AgentRuntime {
           kind: 'thinking_delta',
           text: (p.delta as string) || '',
           index: 0,
+          traceId: codexTraceId(p, undefined, 'plan'),
         };
 
       // ── Tool/item lifecycle ──
@@ -2130,7 +2274,7 @@ export class CodexRuntime implements AgentRuntime {
           changes?: Array<{ path: string }>;
           commandActions?: unknown[];
           source?: string; namespace?: string | null;
-          senderThreadId?: string; receiverThreadIds?: string[]; prompt?: string; model?: string;
+          senderThreadId?: string; receiverThreadIds?: string[]; prompt?: string; model?: string; status?: string;
         } | undefined;
         if (!item) return null;
         switch (item.type) {
@@ -2193,23 +2337,33 @@ export class CodexRuntime implements AgentRuntime {
             // started; item/completed is authoritative. Only `spawnAgent` creates
             // the relationship (wait/closeAgent/sendInput reference existing ones).
             recordSpawnAgentChildThreads(codexProc, item.tool, item.id, item.receiverThreadIds);
-            const input: Record<string, unknown> = {};
-            if (item.tool) input.tool = item.tool;
-            if (item.prompt) input.prompt = item.prompt;
-            if (item.model) input.model = item.model;
-            if (item.senderThreadId) input.senderThreadId = item.senderThreadId;
-            if (Array.isArray(item.receiverThreadIds)) input.receiverThreadIds = item.receiverThreadIds;
+            const controlParents = resolveCollabAgentControlParents(
+              item.tool,
+              item.receiverThreadIds,
+              codexProc.subThreadToCard,
+              codexProc.subThreadToParent,
+            );
+            if (controlParents.length > 0) {
+              codexProc.collabControlToolParents.set(item.id, controlParents);
+              return buildCollabAgentControlStartEvents(item, controlParents);
+            }
+            if (item.tool && item.tool !== 'spawnAgent') {
+              // Defer unresolved control actions until item/completed. Completion
+              // can either resolve and nest them, or emit one complete flat card
+              // when Codex never reports receiverThreadIds.
+              return null;
+            }
             return {
               kind: 'tool_use_start',
               toolUseId: item.id,
               toolName: 'CollabAgent',
-              input: Object.keys(input).length > 0 ? input : undefined,
+              input: buildCollabAgentInput(item),
             };
           }
           case 'plan':
             // PRD 0.2.15 — `plan` items stream via item/plan/delta as thinking_delta.
             // We need a thinking_start so the frontend opens a thinking block.
-            return { kind: 'thinking_start', index: 0 };
+            return { kind: 'thinking_start', index: 0, traceId: codexTraceId(p, item.id, 'plan') };
           case 'webSearch': {
             return {
               kind: 'tool_use_start',
@@ -2229,7 +2383,7 @@ export class CodexRuntime implements AgentRuntime {
           case 'imageGeneration':
             return { kind: 'tool_use_start', toolUseId: item.id, toolName: 'ImageGeneration' };
           case 'reasoning':
-            return { kind: 'thinking_start', index: 0 };
+            return { kind: 'thinking_start', index: 0, traceId: codexTraceId(p, item.id, 'reasoning') };
           case 'agentMessage':
           case 'userMessage':
           case 'contextCompaction':
@@ -2465,24 +2619,39 @@ export class CodexRuntime implements AgentRuntime {
             // re-map: started → thinking_start (synthesized at parseNotification
             // started branch below), completed → thinking_stop here. Text comes
             // through item/plan/delta as thinking_delta already.
-            return { kind: 'thinking_stop', index: 0 };
+            return { kind: 'thinking_stop', index: 0, traceId: codexTraceId(p, item.id, 'plan') };
           }
           case 'collabAgentToolCall': {
             // PRD 0.2.15 — multi-agent collab tool was completely dropped before.
             // PRD 0.2.27 — authoritative spawn card↔child-thread link (receiverThreadIds
             // is populated by completion time).
             recordSpawnAgentChildThreads(codexProc, item.tool, item.id, item.receiverThreadIds);
-            const parts: string[] = [];
-            if (item.tool) parts.push(`Tool: ${item.tool}`);
-            if (item.prompt) parts.push(`Prompt: ${item.prompt}`);
-            if (item.model) parts.push(`Model: ${item.model}`);
-            if (item.senderThreadId) parts.push(`From: ${item.senderThreadId}`);
-            if (Array.isArray(item.receiverThreadIds) && item.receiverThreadIds.length > 0) {
-              parts.push(`To: ${item.receiverThreadIds.join(', ')}`);
+            const resolvedParents = resolveCollabAgentControlParents(
+              item.tool,
+              item.receiverThreadIds,
+              codexProc.subThreadToCard,
+              codexProc.subThreadToParent,
+            );
+            const route = resolveCollabControlCompletionRoute(
+              codexProc.collabControlToolParents.get(item.id),
+              resolvedParents,
+            );
+            codexProc.collabControlToolParents.delete(item.id);
+
+            if (item.tool && item.tool !== 'spawnAgent') {
+              return buildCollabAgentControlCompletedEvents(item, route.parentToolUseIds, {
+                includeStart: route.includeStart,
+              });
             }
+
             return [
               { kind: 'tool_use_stop', toolUseId: item.id },
-              { kind: 'tool_result', toolUseId: item.id, content: parts.join('\n') || 'Collab agent invoked' },
+              {
+                kind: 'tool_result',
+                toolUseId: item.id,
+                content: buildCollabAgentResultContent(item),
+                isError: isCollabAgentError(item) ? true : undefined,
+              },
             ];
           }
           case 'enteredReviewMode':
@@ -2501,7 +2670,7 @@ export class CodexRuntime implements AgentRuntime {
             return { kind: 'log', level: 'info', message: '[codex] Hook prompt fragment injected' };
           }
           case 'reasoning':
-            return { kind: 'thinking_stop', index: 0 };
+            return { kind: 'thinking_stop', index: 0, traceId: codexTraceId(p, item.id, 'reasoning') };
           case 'agentMessage': {
             const finalText = typeof item.text === 'string' ? item.text : '';
             const streamedText = codexProc.agentMessageTextById.get(item.id) || '';
@@ -2511,8 +2680,8 @@ export class CodexRuntime implements AgentRuntime {
               if (!streamedText) {
                 console.log(`[codex] agentMessage completed without delta; backfilling ${finalText.length} chars`);
                 return [
-                  { kind: 'text_delta', text: finalText },
-                  { kind: 'text_stop' },
+                  { kind: 'text_delta', text: finalText, traceId: codexTraceId(p, item.id) },
+                  { kind: 'text_stop', traceId: codexTraceId(p, item.id) },
                 ];
               }
 
@@ -2520,13 +2689,13 @@ export class CodexRuntime implements AgentRuntime {
                 const tail = finalText.slice(streamedText.length);
                 console.log(`[codex] agentMessage completed with missing tail; backfilling ${tail.length} chars`);
                 return [
-                  { kind: 'text_delta', text: tail },
-                  { kind: 'text_stop' },
+                  { kind: 'text_delta', text: tail, traceId: codexTraceId(p, item.id) },
+                  { kind: 'text_stop', traceId: codexTraceId(p, item.id) },
                 ];
               }
             }
 
-            return { kind: 'text_stop' };
+            return { kind: 'text_stop', traceId: codexTraceId(p, item.id) };
           }
           case 'userMessage':
           case 'contextCompaction':

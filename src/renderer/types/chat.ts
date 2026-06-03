@@ -69,6 +69,11 @@ export interface SubagentToolCall {
   result?: string;
   isLoading?: boolean;
   isError?: boolean;
+  // Rich-media produced by a nested sub-agent tool (e.g. Codex child running
+  // image_generation). Rendered via ToolAttachmentGallery, mirroring the parent
+  // tool's `attachments`. Kept in sync with the server persist type in
+  // external-session.ts (PersistContentBlock.tool.subagentCalls).
+  attachments?: ToolAttachment[];
 }
 
 export interface ToolResultMeta {

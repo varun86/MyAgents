@@ -73,6 +73,7 @@ import type { LogEntry } from '@/types/log';
 import BugReportOverlay from '@/components/BugReportOverlay';
 import SettingsHelperInbox from '@/components/SettingsHelperInbox';
 import ShortcutRecorder from '@/components/ShortcutRecorder';
+import { VISIBLE_APP_SHORTCUTS } from '@/utils/appShortcuts';
 import { DEFAULT_SUMMON_ACCELERATOR } from '../../shared/config-types';
 import ProviderEnableOrderDialog from '@/components/ProviderEnableOrderDialog';
 
@@ -83,7 +84,7 @@ function parsePositiveInt(value: string): number | undefined {
 }
 
 // Settings sub-sections
-type SettingsSection = 'general' | 'providers' | 'mcp' | 'skills' | 'sub-agents' | 'plugins' | 'agent' | 'usage-stats' | 'about';
+type SettingsSection = 'general' | 'shortcuts' | 'providers' | 'mcp' | 'skills' | 'sub-agents' | 'plugins' | 'agent' | 'usage-stats' | 'about';
 
 import type { SubscriptionStatusWithVerify } from '@/types/subscription';
 
@@ -199,7 +200,7 @@ interface SettingsProps {
     onRestartAndUpdate?: () => void;
 }
 
-const VALID_SECTIONS: SettingsSection[] = ['general', 'providers', 'mcp', 'skills', 'sub-agents', 'plugins', 'agent', 'usage-stats', 'about'];
+const VALID_SECTIONS: SettingsSection[] = ['general', 'shortcuts', 'providers', 'mcp', 'skills', 'sub-agents', 'plugins', 'agent', 'usage-stats', 'about'];
 
 // Memoized component for model tag list to avoid recreating presetModelIds on every render
 /** Default args for Playwright MCP: persistent profile mode (preserves login state, single-session) */
@@ -270,6 +271,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
     // silently in browser dev where invoke returns no useful value.
     const [summonEnabled, setSummonEnabled] = useState(true);
     const [summonAccelerator, setSummonAccelerator] = useState(DEFAULT_SUMMON_ACCELERATOR);
+    const isMac = useMemo(() => navigator.platform.toLowerCase().includes('mac'), []);
     useEffect(() => {
         if (!isTauriEnvironment()) return;
         invoke<{ enabled: boolean; accelerator: string }>('cmd_get_global_summon_shortcut')
@@ -2564,6 +2566,15 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                         通用设置
                     </button>
                     <button
+                        onClick={() => setActiveSection('shortcuts')}
+                        className={`w-full rounded-lg px-3 py-2.5 text-left text-base font-medium transition-colors ${activeSection === 'shortcuts'
+                            ? 'settings-nav-active bg-[var(--hover-bg)] text-[var(--ink)]'
+                            : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
+                            }`}
+                    >
+                        快捷键
+                    </button>
+                    <button
                         onClick={() => setActiveSection('about')}
                         className={`w-full rounded-lg px-3 py-2.5 text-left text-base font-medium transition-colors ${activeSection === 'about'
                             ? 'settings-nav-active bg-[var(--hover-bg)] text-[var(--ink)]'
@@ -2922,6 +2933,137 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                 {/* Other sections use narrower layout */}
                 <div className={`mx-auto max-w-xl px-8 py-8 ${['skills', 'agents', 'plugins', 'providers', 'mcp'].includes(activeSection) ? 'hidden' : ''}`}>
 
+                    {activeSection === 'shortcuts' && (
+                        <div className="space-y-6">
+                            <div>
+                                <h2 className="text-lg font-semibold text-[var(--ink)]">快捷键</h2>
+                                <p className="mt-1 text-sm text-[var(--ink-muted)]">
+                                    管理消息发送与全局唤起快捷键
+                                </p>
+                            </div>
+
+                            {/* 消息发送 — applies to every "AI conversation" composer:
+                                主对话框 / AI 小助理 / 问题反馈 (shared via utils/chatSendKey). */}
+                            <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
+                                <h3 className="text-base font-medium text-[var(--ink)]">消息发送</h3>
+                                <p className="mt-1 text-xs text-[var(--ink-muted)]">
+                                    设置在对话、AI 小助理、问题反馈中如何用键盘发送消息
+                                </p>
+                                <div className="mt-4 flex items-center justify-between">
+                                    <div className="flex-1 pr-4">
+                                        <p className="text-sm font-medium text-[var(--ink)]">发送快捷键</p>
+                                        <p className="text-xs text-[var(--ink-muted)]">
+                                            {(config.chatSendShortcut ?? 'enter') === 'modEnter'
+                                                ? `${isMac ? '⌘' : 'Ctrl'} + Enter 发送，Enter 换行`
+                                                : 'Enter 发送，Shift + Enter 换行'}
+                                        </p>
+                                    </div>
+                                    <div className="flex gap-0.5 rounded-full bg-[var(--paper-inset)] p-0.5">
+                                        {([
+                                            { value: 'enter', label: 'Enter' },
+                                            { value: 'modEnter', label: `${isMac ? '⌘' : 'Ctrl'} + Enter` },
+                                        ] as const).map((opt) => (
+                                            <button
+                                                key={opt.value}
+                                                onClick={() => void updateConfig({ chatSendShortcut: opt.value })}
+                                                className={`rounded-full px-3 py-1 text-xs font-medium transition-all ${
+                                                    (config.chatSendShortcut ?? 'enter') === opt.value
+                                                        ? 'bg-[var(--paper-elevated)] text-[var(--ink)] shadow-sm'
+                                                        : 'text-[var(--ink-muted)] hover:text-[var(--ink-secondary)]'
+                                                }`}
+                                            >
+                                                {opt.label}
+                                            </button>
+                                        ))}
+                                    </div>
+                                </div>
+                            </div>
+
+                            {/* Global Summon Shortcut (PRD 0.2.16) — relocated here from
+                                通用设置 in 0.2.29 so all keyboard shortcuts live together. */}
+                            <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
+                                <h3 className="text-base font-medium text-[var(--ink)]">全局唤起快捷键</h3>
+                                <p className="mt-1 text-xs text-[var(--ink-muted)]">
+                                    在任何应用中按下快捷键，快速唤起 MyAgents 并自动定位到启动页输入框。再按一次隐藏窗口。
+                                </p>
+
+                                {/* Enable toggle */}
+                                <div className="mt-4 flex items-center justify-between">
+                                    <div className="flex-1 pr-4">
+                                        <p className="text-sm font-medium text-[var(--ink)]">启用快捷键</p>
+                                        <p className="text-xs text-[var(--ink-muted)]">
+                                            {isTauriEnvironment() ? '关闭后该快捷键不再被注册' : '仅桌面版有效'}
+                                        </p>
+                                    </div>
+                                    <button
+                                        onClick={() => void applySummonShortcut({ enabled: !summonEnabled, accelerator: summonAccelerator })}
+                                        disabled={!isTauriEnvironment()}
+                                        className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${
+                                            !isTauriEnvironment() ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'
+                                        } ${
+                                            summonEnabled
+                                                ? 'bg-[var(--accent)]'
+                                                : 'bg-[var(--line-strong)]'
+                                        }`}
+                                    >
+                                        <span
+                                            className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-[var(--toggle-thumb)] shadow transition-transform ${
+                                                summonEnabled ? 'translate-x-5' : 'translate-x-0'
+                                            }`}
+                                        />
+                                    </button>
+                                </div>
+
+                                {/* Shortcut recorder + reset */}
+                                <div className="mt-4 flex items-center justify-between">
+                                    <div className="flex-1 pr-4">
+                                        <p className="text-sm font-medium text-[var(--ink)]">当前快捷键</p>
+                                        <p className="text-xs text-[var(--ink-muted)]">点击右侧键位修改</p>
+                                    </div>
+                                    <div className="flex items-center gap-2">
+                                        <ShortcutRecorder
+                                            value={summonAccelerator}
+                                            onChange={(accel) => void applySummonShortcut({ enabled: summonEnabled, accelerator: accel })}
+                                            disabled={!isTauriEnvironment() || !summonEnabled}
+                                        />
+                                        <button
+                                            type="button"
+                                            onClick={() => void applySummonShortcut({ enabled: summonEnabled, accelerator: DEFAULT_SUMMON_ACCELERATOR })}
+                                            disabled={!isTauriEnvironment() || !summonEnabled || summonAccelerator === DEFAULT_SUMMON_ACCELERATOR}
+                                            className={`text-xs text-[var(--ink-muted)] hover:text-[var(--ink)] transition-colors ${
+                                                (!isTauriEnvironment() || !summonEnabled || summonAccelerator === DEFAULT_SUMMON_ACCELERATOR)
+                                                    ? 'opacity-40 cursor-not-allowed'
+                                                    : 'cursor-pointer'
+                                            }`}
+                                            title="恢复默认快捷键"
+                                        >
+                                            重置默认
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+
+                            {/* 应用快捷键 reference — read-only, sourced from the same
+                                APP_SHORTCUTS table App.tsx dispatches from (no drift). */}
+                            <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
+                                <h3 className="text-base font-medium text-[var(--ink)]">应用快捷键</h3>
+                                <p className="mt-1 text-xs text-[var(--ink-muted)]">
+                                    以下快捷键在应用内全局生效（暂不支持自定义）
+                                </p>
+                                <div className="mt-4 space-y-2.5">
+                                    {VISIBLE_APP_SHORTCUTS.map((s) => (
+                                        <div key={s.id} className="flex items-center justify-between gap-4">
+                                            <p className="text-sm text-[var(--ink-secondary)]">{s.label}</p>
+                                            <kbd className="shrink-0 rounded-md border border-[var(--line)] bg-[var(--paper-inset)] px-2 py-0.5 font-mono text-xs text-[var(--ink-muted)]">
+                                                {s.keys?.(isMac)}
+                                            </kbd>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
                     {activeSection === 'general' && (
                         <div className="space-y-6">
                             <div>
@@ -3016,69 +3158,6 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                                 {mode === 'system' ? '跟随系统' : mode === 'light' ? '日间模式' : '夜间模式'}
                                             </button>
                                         ))}
-                                    </div>
-                                </div>
-                            </div>
-
-                            {/* Global Summon Shortcut (PRD 0.2.16) */}
-                            <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
-                                <h3 className="text-base font-medium text-[var(--ink)]">全局唤起快捷键</h3>
-                                <p className="mt-1 text-xs text-[var(--ink-muted)]">
-                                    在任何应用中按下快捷键，快速唤起 MyAgents 并自动定位到启动页输入框。再按一次隐藏窗口。
-                                </p>
-
-                                {/* Enable toggle */}
-                                <div className="mt-4 flex items-center justify-between">
-                                    <div className="flex-1 pr-4">
-                                        <p className="text-sm font-medium text-[var(--ink)]">启用快捷键</p>
-                                        <p className="text-xs text-[var(--ink-muted)]">
-                                            {isTauriEnvironment() ? '关闭后该快捷键不再被注册' : '仅桌面版有效'}
-                                        </p>
-                                    </div>
-                                    <button
-                                        onClick={() => void applySummonShortcut({ enabled: !summonEnabled, accelerator: summonAccelerator })}
-                                        disabled={!isTauriEnvironment()}
-                                        className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${
-                                            !isTauriEnvironment() ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'
-                                        } ${
-                                            summonEnabled
-                                                ? 'bg-[var(--accent)]'
-                                                : 'bg-[var(--line-strong)]'
-                                        }`}
-                                    >
-                                        <span
-                                            className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-[var(--toggle-thumb)] shadow transition-transform ${
-                                                summonEnabled ? 'translate-x-5' : 'translate-x-0'
-                                            }`}
-                                        />
-                                    </button>
-                                </div>
-
-                                {/* Shortcut recorder + reset */}
-                                <div className="mt-4 flex items-center justify-between">
-                                    <div className="flex-1 pr-4">
-                                        <p className="text-sm font-medium text-[var(--ink)]">当前快捷键</p>
-                                        <p className="text-xs text-[var(--ink-muted)]">点击右侧键位修改</p>
-                                    </div>
-                                    <div className="flex items-center gap-2">
-                                        <ShortcutRecorder
-                                            value={summonAccelerator}
-                                            onChange={(accel) => void applySummonShortcut({ enabled: summonEnabled, accelerator: accel })}
-                                            disabled={!isTauriEnvironment() || !summonEnabled}
-                                        />
-                                        <button
-                                            type="button"
-                                            onClick={() => void applySummonShortcut({ enabled: summonEnabled, accelerator: DEFAULT_SUMMON_ACCELERATOR })}
-                                            disabled={!isTauriEnvironment() || !summonEnabled || summonAccelerator === DEFAULT_SUMMON_ACCELERATOR}
-                                            className={`text-xs text-[var(--ink-muted)] hover:text-[var(--ink)] transition-colors ${
-                                                (!isTauriEnvironment() || !summonEnabled || summonAccelerator === DEFAULT_SUMMON_ACCELERATOR)
-                                                    ? 'opacity-40 cursor-not-allowed'
-                                                    : 'cursor-pointer'
-                                            }`}
-                                            title="恢复默认快捷键"
-                                        >
-                                            重置默认
-                                        </button>
                                     </div>
                                 </div>
                             </div>

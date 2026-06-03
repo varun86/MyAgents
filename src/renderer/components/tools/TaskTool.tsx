@@ -3,6 +3,7 @@ import type { AgentInput, BackgroundTaskStats, SubagentToolCall, ToolUseSimple, 
 
 import Markdown from '@/components/Markdown';
 import { formatDuration } from '@/components/tools/toolBadgeConfig';
+import ToolAttachmentGallery from '@/components/tools/ToolAttachmentGallery';
 import { ExpandableResult } from '@/components/tools/utils';
 import { useTabApiOptional } from '@/context/TabContext';
 import { useBackgroundTaskPolling } from '@/hooks/useBackgroundTaskPolling';
@@ -434,6 +435,12 @@ const SubagentCallItem = memo(function SubagentCallItem({ call }: { call: Subage
             className="rounded-md bg-[var(--paper-inset)]/50 p-2 text-[10px] text-[var(--ink-secondary)]"
           />
         </div>
+      )}
+
+      {/* Rich-media produced by the nested sub-agent tool (Codex child
+          image_generation etc.) — same uniform gallery as top-level tools. */}
+      {call.attachments && call.attachments.length > 0 && (
+        <ToolAttachmentGallery attachments={call.attachments} />
       )}
     </div>
   );

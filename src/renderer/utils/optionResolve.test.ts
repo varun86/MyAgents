@@ -2,11 +2,109 @@ import { describe, expect, it } from 'vitest';
 
 import {
   isExistingSessionSwitch,
+  isPinnedProviderUnavailable,
   isResetSessionBirth,
   resolveBuiltinPermissionMode,
   resolveLauncherProvider,
   shouldDegradedLoad,
+  shouldResetModelOnProviderChange,
 } from './optionResolve';
+
+describe('isPinnedProviderUnavailable (#300)', () => {
+  const base = {
+    isOwnedSession: true,
+    isExternalRuntime: false,
+    selectedProviderId: 'skywork-ai',
+    resolvedProviderId: 'deepseek', // resolveProvider fell back to first-available
+    providersLoaded: true,
+  };
+
+  it('flags the bug: owned session pinned skywork-ai but resolver fell back to deepseek', () => {
+    expect(isPinnedProviderUnavailable(base)).toBe(true);
+  });
+
+  it('is false when the resolved provider matches the pinned one (available)', () => {
+    expect(isPinnedProviderUnavailable({ ...base, resolvedProviderId: 'skywork-ai' })).toBe(false);
+  });
+
+  it('does NOT false-positive while config is still loading (no providers yet)', () => {
+    // providers empty + nothing resolved would otherwise look like a fallback.
+    expect(
+      isPinnedProviderUnavailable({ ...base, providersLoaded: false, resolvedProviderId: undefined }),
+    ).toBe(false);
+  });
+
+  it('does not apply to fresh/unlocked tabs — they keep the first-available fallback', () => {
+    expect(isPinnedProviderUnavailable({ ...base, isOwnedSession: false })).toBe(false);
+  });
+
+  it('does not apply to external runtimes (no providerId to pin)', () => {
+    expect(isPinnedProviderUnavailable({ ...base, isExternalRuntime: true })).toBe(false);
+  });
+
+  it('is false when the session pinned no provider', () => {
+    expect(
+      isPinnedProviderUnavailable({ ...base, selectedProviderId: undefined, resolvedProviderId: 'deepseek' }),
+    ).toBe(false);
+  });
+
+  it('treats "nothing resolved" (no provider available at all) as unavailable for a pinned owned session', () => {
+    expect(isPinnedProviderUnavailable({ ...base, resolvedProviderId: undefined })).toBe(true);
+  });
+});
+
+describe('shouldResetModelOnProviderChange (#300)', () => {
+  it('does NOT reset a still-valid pinned model (the availability-flip regression)', () => {
+    // unavailable→available flip re-resolves currentProvider to the pinned skywork
+    // provider; skywork-ai/skyclaw-v1 IS in its list → must not be stomped.
+    expect(
+      shouldResetModelOnProviderChange({
+        providerType: 'thirdParty',
+        providerModels: ['skywork-ai/skyclaw-v1', 'skywork-ai/skyclaw-mini'],
+        selectedModel: 'skywork-ai/skyclaw-v1',
+      }),
+    ).toBe(false);
+  });
+
+  it('resets when the selected model is genuinely absent from the provider', () => {
+    expect(
+      shouldResetModelOnProviderChange({
+        providerType: 'thirdParty',
+        providerModels: ['deepseek-v4-pro', 'deepseek-v4-flash'],
+        selectedModel: 'skywork-ai/skyclaw-v1', // not a deepseek model
+      }),
+    ).toBe(true);
+  });
+
+  it('never resets for subscription providers (cannot validate)', () => {
+    expect(
+      shouldResetModelOnProviderChange({
+        providerType: 'subscription',
+        providerModels: undefined,
+        selectedModel: 'claude-sonnet-4-6',
+      }),
+    ).toBe(false);
+  });
+
+  it('never resets when the provider has no known model list', () => {
+    expect(
+      shouldResetModelOnProviderChange({ providerType: 'thirdParty', providerModels: [], selectedModel: 'x' }),
+    ).toBe(false);
+    expect(
+      shouldResetModelOnProviderChange({ providerType: 'thirdParty', providerModels: undefined, selectedModel: 'x' }),
+    ).toBe(false);
+  });
+
+  it('does not reset when no model is selected yet', () => {
+    expect(
+      shouldResetModelOnProviderChange({
+        providerType: 'thirdParty',
+        providerModels: ['a', 'b'],
+        selectedModel: undefined,
+      }),
+    ).toBe(false);
+  });
+});
 
 describe('resolveBuiltinPermissionMode (#244)', () => {
   it('falls back to the agent config before the project sync runs (the bug)', () => {

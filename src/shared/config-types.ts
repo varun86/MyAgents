@@ -406,6 +406,10 @@ export interface AppConfig {
   // UI preferences
   theme: 'light' | 'dark' | 'system';
   minimizeToTray: boolean;
+  /** 对话输入框发送键偏好。缺省视同 'enter'（Enter 发送，Shift+Enter 换行）。
+   *  'modEnter' 则 ⌘/Ctrl+Enter 发送、Enter 换行。统一作用于全部"和 AI 对话"的
+   *  输入：主对话框 / AI 小助理 / 问题反馈（见 utils/chatSendKey.ts）。 */
+  chatSendShortcut?: 'enter' | 'modEnter';
   showDevTools: boolean; // 显示开发者工具 (Logs/System Info)
   multiAgentRuntime?: boolean; // 多 Agent Runtime 模式（开发者，默认关闭）
   experimentalSplitView?: boolean; // 实验性：文件预览在右侧分屏而非弹窗
