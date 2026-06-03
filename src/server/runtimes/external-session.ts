@@ -119,6 +119,11 @@ export interface PersistContentBlock {
       result?: string;
       isLoading?: boolean;
       isError?: boolean;
+      // Cross-review (#0.2.29) — rich-media attachments emitted by a nested
+      // sub-agent tool (e.g. Codex child running image_generation). Mirrors the
+      // parent tool's `attachments`; kept in sync with the renderer's
+      // SubagentToolCall so history replay re-renders the nested gallery.
+      attachments?: ToolAttachment[];
     }>;
   };
   thinking?: string;
@@ -147,6 +152,12 @@ const childToolToParent = new Map<string, string>(); // subagent toolUseId → p
 // block is persisted, so known sub-agent events do not degrade to flat rendering
 // because of notification ordering.
 const pendingSubagentCallsByParent = new Map<string, PersistSubagentCall[]>(); // parentToolUseId → calls
+// Cross-review (#0.2.29) — a sub-agent tool's rich-media attachments are emitted as
+// pendingId placeholders, fulfilled by a LATER async `tool_attachment_update` that
+// arrives after applySubagentToolResult has already deleted childToolToParent. Keep
+// the child→parent link here (only for results that carried attachments) so the late
+// update can route back to the owning sub-agent call. Cleared on turn/session reset.
+const subagentAttachmentParents = new Map<string, string>(); // subagent toolUseId → parentToolUseId
 const subagentTraceBuffers = new Map<string, string>(); // synthetic message/thinking trace id → text
 type ExternalSessionState = 'idle' | 'running' | 'error';
 type ExternalPendingInteractiveRequest =
@@ -260,6 +271,7 @@ function resetModuleState(): void {
   pendingToolInputs.clear();
   childToolToParent.clear();
   pendingSubagentCallsByParent.clear();
+  subagentAttachmentParents.clear();
   subagentTraceBuffers.clear();
   pendingPermissionSuggestions.clear();
   drainPendingInteractiveRequestsAsExpired('reset');
@@ -423,10 +435,15 @@ function applySubagentToolResult(
   event: Extract<UnifiedEvent, { kind: 'tool_result' }>,
 ): void {
   const call = findSubagentCall(parentToolUseId, event.toolUseId);
+  const hasAttachments = !!(event.attachments && event.attachments.length > 0);
   if (call) {
     call.result = event.content;
     call.isError = event.isError ?? false;
     call.isLoading = false;
+    // Cross-review (#0.2.29) — carry rich-media attachments so a nested sub-agent
+    // tool (e.g. Codex child image_generation) renders its gallery instead of
+    // dropping the image. These are pendingId placeholders fulfilled below.
+    if (hasAttachments) call.attachments = event.attachments;
   }
   // External runtimes deliver tool results as a single event (no streaming),
   // so go straight to *-complete (the frontend's -start/-complete both update
@@ -436,7 +453,12 @@ function applySubagentToolResult(
     toolUseId: event.toolUseId,
     content: event.content,
     isError: event.isError ?? false,
+    attachments: event.attachments,
   });
+  // Keep the child→parent link alive (past the childToolToParent.delete below) so
+  // the async `tool_attachment_update` that fulfills these placeholders can route
+  // back to this sub-agent call. Cleared on turn/session reset.
+  if (hasAttachments) subagentAttachmentParents.set(event.toolUseId, parentToolUseId);
   childToolToParent.delete(event.toolUseId);
   recordRuntimeActivity();
 }
@@ -752,6 +774,7 @@ function resetTurnAccumulators(): void {
   pendingToolInputs.clear();
   childToolToParent.clear();
   pendingSubagentCallsByParent.clear();
+  subagentAttachmentParents.clear();
   subagentTraceBuffers.clear();
   currentTurnUsage = null;
   currentTurnEstimatedInputTokens = 0;
@@ -2811,6 +2834,26 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
 
     case 'tool_attachment_update': {
       // Async fulfillment of a placeholder attachment (PRD 0.2.15 §4.7.1).
+      // Cross-review (#0.2.29) — a sub-agent tool's attachment lives on a nested
+      // SubagentToolCall, not a top-level block, so the scan below can't see it.
+      // Route it to the owning sub-agent call (findSubagentCall checks both the
+      // persisted parent block and the pending map) + a subagent-scoped broadcast.
+      const subAttParent = subagentAttachmentParents.get(event.toolUseId);
+      if (subAttParent) {
+        const subCall = findSubagentCall(subAttParent, event.toolUseId);
+        if (subCall?.attachments) {
+          const ai = subCall.attachments.findIndex(a => a.pendingId === event.pendingId);
+          if (ai >= 0) subCall.attachments[ai] = event.attachment;
+        }
+        broadcast('chat:subagent-tool-attachment-update', {
+          parentToolUseId: subAttParent,
+          toolUseId: event.toolUseId,
+          pendingId: event.pendingId,
+          attachment: event.attachment,
+        });
+        recordRuntimeActivity();
+        break;
+      }
       // Find the persisted tool block and replace the matching placeholder in-place,
       // then broadcast the same shape so the frontend can patch the rendered gallery.
       for (let i = currentContentBlocks.length - 1; i >= 0; i--) {

@@ -2283,7 +2283,7 @@ export default function TabProvider({
             }
 
             case 'chat:subagent-tool-result-complete': {
-                const payload = data as { parentToolUseId: string; toolUseId: string; content: string; isError?: boolean };
+                const payload = data as { parentToolUseId: string; toolUseId: string; content: string; isError?: boolean; attachments?: import('@/types/chat').ToolAttachment[] };
                 // Drain pending RAF deltas before terminal payload.
                 const bufKey = `${payload.parentToolUseId}::${payload.toolUseId}`;
                 if (pendingSubagentToolResultDeltasRef.current.has(bufKey)) {
@@ -2295,9 +2295,36 @@ export default function TabProvider({
                     return applySubagentCallsUpdate(prev, payload.parentToolUseId, (calls) => {
                         const updatedCalls = calls.map(call =>
                             call.id === payload.toolUseId
-                                ? { ...call, result: payload.content, isError: payload.isError, isLoading: false }
+                                ? { ...call, result: payload.content, isError: payload.isError, isLoading: false, attachments: payload.attachments ?? call.attachments }
                                 : call
                         );
+                        return { calls: updatedCalls };
+                    }) ?? prev;
+                });
+                break;
+            }
+
+            case 'chat:subagent-tool-attachment-update': {
+                // Cross-review (#0.2.29) — async fulfillment of a nested sub-agent
+                // tool's placeholder attachment (mirrors chat:tool-attachment-update
+                // for top-level tools). Replace the matching pendingId in-place.
+                const payload = data as {
+                    parentToolUseId: string;
+                    toolUseId: string;
+                    pendingId: string;
+                    attachment: import('@/types/chat').ToolAttachment;
+                };
+                setStreamingMessage(prev => {
+                    if (!prev) return prev;
+                    return applySubagentCallsUpdate(prev, payload.parentToolUseId, (calls) => {
+                        const updatedCalls = calls.map(call => {
+                            if (call.id !== payload.toolUseId || !call.attachments) return call;
+                            const idx = call.attachments.findIndex(a => a.pendingId === payload.pendingId);
+                            if (idx === -1) return call;
+                            const next = [...call.attachments];
+                            next[idx] = payload.attachment;
+                            return { ...call, attachments: next };
+                        });
                         return { calls: updatedCalls };
                     }) ?? prev;
                 });
