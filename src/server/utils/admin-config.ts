@@ -712,6 +712,15 @@ export function resolveWorkspaceConfig(
   // the providerId still resolves cleanly today, the session's intent was the snapshot
   // value (e.g., a custom baseUrl that has since been edited at the agent level).
   // EXCEPT when providerId is globally disabled — decodeProviderEnvSnapshot enforces this.
+  //
+  // #300 residual: a session whose providerId was changed BEFORE the renderer fix
+  // (persistInputOption.ts clears providerEnvJson on providerId change) can hold a
+  // providerEnvJson belonging to the OLD provider (e.g. deepseek creds under a
+  // skywork-ai providerId). For such pre-fix snapshots this branch still hands the
+  // stale env to headless/pre-warm callers. It cannot be auto-distinguished from a
+  // legitimately-frozen custom baseUrl (the blob carries no providerId tag), so it is
+  // NOT auto-healed here; the session self-heals on its next provider/model change.
+  // See issue #300 — a desktop-scoped scrub migration is the follow-up if needed.
   if (sessionMeta?.providerEnvJson) {
     const decoded = decodeProviderEnvSnapshot(sessionMeta.providerEnvJson, providerId, config);
     if (decoded) providerEnv = decoded;

@@ -102,6 +102,11 @@ export interface SessionSnapshotPatch {
   permissionMode?: string;
   mcpEnabledServers?: string[];
   enabledPluginIds?: string[];
+  /** #300 — credential snapshot. `null` clears it so the sidecar re-resolves the
+   *  env live from `providerId`. Set to null whenever providerId changes (the old
+   *  frozen env belongs to the OLD provider). Never sets a concrete value here —
+   *  this helper has no access to credentials and live re-resolution is correct. */
+  providerEnvJson?: string | null;
 }
 
 /**
@@ -241,7 +246,18 @@ function buildSnapshotPatch(params: PersistInputOptionParams): SessionSnapshotPa
   const patch: SessionSnapshotPatch = {};
   const { fields, isExternalRuntime } = params;
 
-  if (fields.providerId !== undefined) patch.providerId = fields.providerId;
+  if (fields.providerId !== undefined) {
+    patch.providerId = fields.providerId;
+    // #300: the session's frozen `providerEnvJson` was captured for the OLD
+    // provider. Once providerId changes it is stale credentials (e.g. a deepseek
+    // baseUrl/apiKey/modelAliases blob living under a skywork-ai providerId).
+    // resolveWorkspaceConfig treats "snapshot env wins" (admin-config.ts), so on
+    // a headless handover (IM / cron / pre-warm) that stale blob would override
+    // the freshly-resolved env and send to the wrong upstream. Clear it so the
+    // sidecar re-resolves the env live from the new providerId. Only on provider
+    // change — a model-only change keeps the same provider's frozen env.
+    patch.providerEnvJson = null;
+  }
   // Snapshot.model is the session's "current model" regardless of runtime —
   // pre-PRD-0.2.7 Chat persisted to it via the unified `model` field. Now
   // that callers split by runtime, we have to write whichever one applies

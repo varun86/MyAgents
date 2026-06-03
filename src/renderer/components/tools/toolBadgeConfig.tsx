@@ -131,6 +131,17 @@ function getSubagentCallLabel(call: SubagentToolCall, maxLength = 35): string {
       }
       break;
     }
+    case 'CollabAgent': {
+      const action = getSubagentStringProp(call, 'tool');
+      label = action ? (COLLAB_ACTION_LABELS[action] ?? action) : 'Sub-agent control';
+      break;
+    }
+    case 'AgentMessage':
+      label = 'Agent message';
+      break;
+    case 'Thinking':
+      label = 'Thinking';
+      break;
     case 'Glob': {
       const pattern = getSubagentStringProp(call, 'pattern');
       if (pattern) {

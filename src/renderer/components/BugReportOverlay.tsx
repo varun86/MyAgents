@@ -10,6 +10,8 @@ import OverlayBackdrop from '@/components/OverlayBackdrop';
 import { HelperModelPicker, resolveInitialHelperModel } from '@/components/HelperModelPicker';
 import { useImageAttachments } from '@/hooks/useImageAttachments';
 import { dispatchHelperRequest } from '@/utils/dispatchHelperRequest';
+import { useChatComposerKeydown } from '@/hooks/useChatComposerKeydown';
+import { sendHintLabel } from '@/utils/chatSendKey';
 
 interface BugReportOverlayProps {
     onClose: () => void;
@@ -98,19 +100,17 @@ export default function BugReportOverlay({
         onClose();
     }, [canSubmit, description, selectedProviderId, selectedModel, appVersion, images, onClose]);
 
-    // Ctrl/Cmd+Enter to submit
-    const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
-        if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
-            e.preventDefault();
-            handleSubmit();
-        }
-    }, [handleSubmit]);
+    // Send-key behavior follows the user's chatSendShortcut preference (shared
+    // with the main chat box). The hook also supplies the IME composition
+    // handlers this overlay previously lacked. handleSubmit self-guards.
+    const { onKeyDown: handleKeyDown, onCompositionStart, onCompositionEnd, sendShortcut } =
+        useChatComposerKeydown(handleSubmit);
 
     const isMac = navigator.platform.toLowerCase().includes('mac');
     const getSubmitTitle = () => {
         if (!hasContent) return '请输入问题描述或添加图片';
         if (!hasValidModel) return '请先在设置中配置模型';
-        return isMac ? '发送 (⌘Enter)' : '发送 (Ctrl+Enter)';
+        return sendHintLabel(sendShortcut, isMac);
     };
 
     return (
@@ -162,6 +162,8 @@ export default function BugReportOverlay({
                             value={description}
                             onChange={(e) => setDescription(e.target.value)}
                             onKeyDown={handleKeyDown}
+                            onCompositionStart={onCompositionStart}
+                            onCompositionEnd={onCompositionEnd}
                             onPaste={pasteHandler}
                             placeholder="描述您遇到的问题、提出您的意见或建议"
                             className="w-full resize-none border-0 bg-transparent px-4 py-3 text-[13px] text-[var(--ink)] placeholder:text-[var(--ink-muted)]/50 focus:outline-none"

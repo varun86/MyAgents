@@ -80,19 +80,21 @@ export interface SessionMetadata {
     /**
      * Delayed Continue — set ONLY when the inactivity watchdog
      * (`agent-session.ts` setInterval at the watchdog block) aborts a turn
-     * that produced at least one SDK event. The next user-message enqueue
-     * into this session (Chat / IM / inbox / heartbeat / cron-resume — any
-     * entry that funnels through `enqueueUserMessage`) consumes the flag,
-     * clears it, and pre-injects a single `<system-reminder>` turn asking
-     * the model to resume from existing context.
+     * that produced at least one SDK event. The owning sidecar schedules an
+     * automatic consume after the aborted subprocess terminates; the next
+     * user-message enqueue into this session (Chat / IM / inbox / heartbeat /
+     * cron-resume — any entry that funnels through `enqueueUserMessage`) can
+     * also consume the flag as a crash/restart fallback. Consumption clears it
+     * and pre-injects a single `<system-reminder>` turn asking the model to
+     * resume from existing context.
      *
-     * Clear-on-dispatch — set to `false` (or removed) BEFORE the reminder
-     * is enqueued, not after the reminder turn completes. That guarantees
-     * **at most one** auto-Continue per abort, even if the reminder turn
-     * itself watchdog-aborts. Other abort paths (user ESC, config switch,
-     * provider switch, deferred restart, error fallbacks) MUST NOT set
-     * this flag — the touchpoint is exactly one line inside the watchdog
-     * callback.
+     * Clear-on-accept — set to `false` (or removed) after the reminder is
+     * accepted into the right session's dispatch path, not after the reminder
+     * turn completes. That guarantees **at most one** auto-Continue per abort,
+     * even if the reminder turn itself watchdog-aborts. Other abort paths
+     * (user ESC, config switch, provider switch, deferred restart, error
+     * fallbacks) MUST NOT set this flag — the touchpoint is exactly one line
+     * inside the watchdog callback.
      */
     pendingContinueAfterAbort?: boolean;
 }

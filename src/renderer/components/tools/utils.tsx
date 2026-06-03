@@ -1,6 +1,7 @@
 import { cloneElement, isValidElement, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 
+import { useFileAction } from '@/context/FileActionContext';
 import type { ToolUseSimple } from '@/types/chat';
 
 import {
@@ -88,6 +89,8 @@ export function ToolHeader({ icon, label, toolName, tool }: ToolHeaderProps) {
   );
 }
 
+const MONO_BASE_CLASS = 'font-mono text-sm tracking-tight text-[var(--ink)]';
+
 export function MonoText({
   children,
   className = ''
@@ -96,19 +99,54 @@ export function MonoText({
   className?: string;
 }) {
   return (
-    <code
-      className={`font-mono text-sm tracking-tight text-[var(--ink)] ${className}`}
-    >
+    <code className={`${MONO_BASE_CLASS} ${className}`}>
       {children}
     </code>
   );
 }
 
+const FILE_PATH_BOX_CLASS = 'rounded border border-[var(--line-subtle)] bg-[var(--paper-inset)]/50 px-1.5 py-0.5';
+
+/**
+ * File-path chip rendered by file tools (Write / Edit / Read / NotebookEdit).
+ *
+ * When rendered inside a Chat (FileActionContext available) and the path
+ * resolves to a real file/folder, the chip becomes interactive — dashed
+ * underline + click / right-click context menu (预览 / 引用 / 打开 / 打开所在文件夹),
+ * matching how inline file paths in AI text behave (see markdown/InlineCode.tsx,
+ * which shares the same FileActionContext). Outside Chat, or while the path is
+ * still unresolved / does not exist, it renders as a plain monospace chip.
+ */
 export function FilePath({ path }: { path: string }) {
+  const fileAction = useFileAction(); // null outside Chat
+  // Triggers a batched existence check; returns cached result or null (pending).
+  const pathInfo = fileAction?.checkPath(path) ?? null;
+
+  if (!fileAction || !pathInfo?.exists) {
+    return <MonoText className={FILE_PATH_BOX_CLASS}>{path}</MonoText>;
+  }
+
+  const openMenu = (x: number, y: number) =>
+    fileAction.openFileMenu(x, y, path, pathInfo.type);
+
   return (
-    <MonoText className="rounded border border-[var(--line-subtle)] bg-[var(--paper-inset)]/50 px-1.5 py-0.5">
+    <code
+      className={`${MONO_BASE_CLASS} ${FILE_PATH_BOX_CLASS} cursor-pointer underline decoration-dashed decoration-[var(--ink-muted)] underline-offset-2 transition-colors hover:border-[var(--ink-muted)] hover:bg-[var(--accent-warm-subtle)]`}
+      onClick={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const rect = e.currentTarget.getBoundingClientRect();
+        openMenu(rect.left, rect.bottom + 4);
+      }}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        openMenu(e.clientX, e.clientY);
+      }}
+      title={pathInfo.type === 'dir' ? `文件夹: ${path}` : `文件: ${path}`}
+    >
       {path}
-    </MonoText>
+    </code>
   );
 }
 

@@ -20,6 +20,7 @@ import {
     mockLoadConfig,
     mockSaveConfig,
 } from '@/utils/browserMock';
+import { normalizeStringifiedJsonFields } from './configNormalize';
 import { type ImBotConfig, DEFAULT_IM_BOT_CONFIG } from '../../../shared/types/im';
 // Agent migration is triggered from ConfigProvider after both config + projects are loaded
 import { isDebugMode } from '@/utils/debug';
@@ -58,9 +59,12 @@ export function migrateOsNotificationsField(config: AppConfig): AppConfig {
         raw['osNotifications'] = legacy;
         delete raw['cronNotifications'];
         _osNotificationsMigrationDone = true;
-        saveAppConfig(config).catch(err => {
-            console.error('[configService] Failed to persist osNotifications migration:', err);
-        });
+        // Cross-review (#0.2.29) — IN-MEMORY ONLY, do NOT fire-and-forget
+        // saveAppConfig here. This runs inside loadAppConfig, which
+        // atomicModifyConfig calls while holding withConfigLock; a queued save
+        // would land AFTER the modifier's write and clobber it with this
+        // pre-modifier snapshot. The disk heals on the next real config write
+        // (same strategy as the #301 normalizeStringifiedJsonFields below).
         return config;
     }
     // Already had osNotifications (or no legacy field) — strip dead field
@@ -90,9 +94,10 @@ export function migrateImBotConfig(config: AppConfig): AppConfig {
         };
         config.imBotConfigs = [migrated];
         delete config.imBotConfig;
-        saveAppConfig(config).catch(err => {
-            console.error('[configService] Failed to persist imBotConfig migration:', err);
-        });
+        // Cross-review (#0.2.29) — IN-MEMORY ONLY (see migrateOsNotificationsField):
+        // this also runs inside loadAppConfig, so a fire-and-forget save races
+        // atomicModifyConfig's withConfigLock and clobbers the modifier write.
+        // Disk heals on the next real config write.
     }
     return config;
 }
@@ -123,6 +128,20 @@ export async function loadAppConfig(): Promise<AppConfig> {
             // legacy field is masked and we can no longer distinguish "user
             // had cron on" from "user had cron off".
             const migrated = migrateOsNotificationsField(loaded);
+            // Heal any agent `providerEnvJson`/`mcpServersJson` that was persisted
+            // as a raw object instead of a stringified JSON (issue #301), so no
+            // consumer — the renderer's `cmd_start_agent_channel` payload or the
+            // merged config — ever sees the wrong shape. Done before the
+            // dynamicDefault merge (agents live in `loaded`).
+            //
+            // Deliberately IN-MEMORY ONLY — we do NOT persist here. A
+            // fire-and-forget `saveAppConfig` from `loadAppConfig` races with
+            // `atomicModifyConfig` (which calls `loadAppConfig` while holding
+            // `withConfigLock`): the queued save would land after the modifier's
+            // write and clobber it. The disk heals opportunistically on the next
+            // real config write (its `before` snapshot is taken post-normalize),
+            // and the independent Rust reader normalizes the same way at boot.
+            normalizeStringifiedJsonFields(migrated);
             const merged = { ...dynamicDefault, ...migrated };
             return migrateImBotConfig(merged);
         }

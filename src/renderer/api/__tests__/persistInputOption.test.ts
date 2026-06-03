@@ -36,10 +36,49 @@ describe('persistInputOptionChange — disk write fanout', () => {
       providerId: 'deepseek',
       model: 'deepseek-chat',
     });
+    // #300: a providerId change also clears the frozen providerEnvJson so the
+    // sidecar re-resolves the env live from the new providerId (no stale creds).
     expect(m.patchSnapshot).toHaveBeenCalledWith({
       providerId: 'deepseek',
       model: 'deepseek-chat',
+      providerEnvJson: null,
     });
+  });
+
+  it('#300: clears snapshot providerEnvJson when providerId changes', async () => {
+    const m = makeMocks();
+    await persistInputOptionChange({
+      workspaceId: 'ws-1',
+      agentId: 'agent-1',
+      isExternalRuntime: false,
+      // Switching to skywork-ai: the old session's frozen deepseek env must not
+      // survive under the new providerId (the inconsistency behind the 402 bug).
+      fields: { providerId: 'skywork-ai', builtinModel: 'skywork-ai/skyclaw-v1' },
+      patchProject: m.patchProject,
+      patchAgentConfig: m.patchAgentConfig,
+      patchSnapshot: m.patchSnapshot,
+    });
+    expect(m.patchSnapshot).toHaveBeenCalledWith({
+      providerId: 'skywork-ai',
+      model: 'skywork-ai/skyclaw-v1',
+      providerEnvJson: null,
+    });
+  });
+
+  it('#300: does NOT touch providerEnvJson on a model-only change (same provider keeps its frozen env)', async () => {
+    const m = makeMocks();
+    await persistInputOptionChange({
+      workspaceId: 'ws-1',
+      agentId: 'agent-1',
+      isExternalRuntime: false,
+      fields: { builtinModel: 'deepseek-v4-pro' }, // no providerId → provider unchanged
+      patchProject: m.patchProject,
+      patchAgentConfig: m.patchAgentConfig,
+      patchSnapshot: m.patchSnapshot,
+    });
+    const snapshotArg = m.patchSnapshot.mock.calls[0][0];
+    expect(snapshotArg).toEqual({ model: 'deepseek-v4-pro' });
+    expect('providerEnvJson' in snapshotArg).toBe(false);
   });
 
   it('writes builtin permission to agent.permissionMode (NOT runtimeConfig)', async () => {

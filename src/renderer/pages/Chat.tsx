@@ -61,7 +61,7 @@ import { CC_MODELS, CC_PERMISSION_MODES, CODEX_PERMISSION_MODES, GEMINI_PERMISSI
 import type { RuntimeType, RuntimeDetections, RuntimeConfig } from '../../shared/types/runtime';
 import type { InitialMessage } from '@/types/tab';
 import { shouldAutoSendInitialMessage } from '@/utils/initialMessageAutoSend';
-import { resolveBuiltinPermissionMode } from '@/utils/optionResolve';
+import { resolveBuiltinPermissionMode, isPinnedProviderUnavailable, shouldResetModelOnProviderChange } from '@/utils/optionResolve';
 // CronTaskConfig type is used via useCronTask hook
 
 import type { RichDocKind } from '../../shared/fileTypes';
@@ -1570,6 +1570,19 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     && !sessionMeta.configSnapshotAt
     && !isImSource(sessionMeta.source);
 
+  // #300 — the session pinned a provider (selectedProviderId) but resolveProvider
+  // silently fell back to a different one because the pinned provider is
+  // unavailable (no API key / disabled / deleted). Drives both the "don't stomp
+  // the pinned model" guards below and the send block, so the renderer never
+  // silently routes an owned session onto — and bills — the wrong provider.
+  const pinnedProviderUnavailable = isPinnedProviderUnavailable({
+    isOwnedSession,
+    isExternalRuntime,
+    selectedProviderId,
+    resolvedProviderId: currentProvider?.id,
+    providersLoaded: providers.length > 0,
+  });
+
   /**
    * Patch one or more snapshot fields on the current session and mirror the update
    * into TabContext so `sessionMeta`-driven derivations (see the sync effect above)
@@ -1690,10 +1703,24 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       providerInitRef.current = false;
       return;
     }
+    // #300: when the pinned provider is unavailable, `currentProvider` is a
+    // silent first-available fallback (e.g. deepseek). Judging — let alone
+    // resetting — the pinned model against the fallback's model list is exactly
+    // the bug. Leave it; the send guard surfaces the unavailability instead.
+    if (pinnedProviderUnavailable) return;
+    // #300: reset ONLY when the model is genuinely invalid for the resolved
+    // provider. Resetting unconditionally on every `currentProvider.id` change
+    // stomped a still-valid pinned model on the apiKeys-load availability flip
+    // (unavailable→available), discarding the user's per-session model choice.
+    if (!shouldResetModelOnProviderChange({
+      providerType: currentProvider?.type,
+      providerModels: currentProvider?.models?.map(m => m.model),
+      selectedModel,
+    })) return;
     if (currentProvider?.primaryModel) {
       setSelectedModel(currentProvider.primaryModel);
     }
-  }, [currentProvider?.id, currentProvider?.primaryModel]);
+  }, [currentProvider?.id, currentProvider?.primaryModel, currentProvider?.models, currentProvider?.type, selectedModel, pinnedProviderUnavailable]);
 
   // One-time sync: apply project-stored settings after useConfig finishes async load.
   // useState initializers run with currentProject=undefined (useConfig loads asynchronously),
@@ -1774,6 +1801,12 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   // 若 selectedModel 不在当前 provider 的 models 中（如模型已被删除），回退到 primaryModel 并更新项目
   useEffect(() => {
     if (!currentProject || !currentProvider || joinedExistingSidecarRef.current) return;
+    // #300: `currentProvider` here is the fallback provider, NOT the session's
+    // pinned one — the pinned model legitimately isn't in its model list. Without
+    // this guard the effect would "heal" the model to the fallback provider's
+    // primaryModel AND persist it to project/agent, permanently corrupting the
+    // user's choice. Leave it; the send guard surfaces the unavailability instead.
+    if (pinnedProviderUnavailable) return;
     if (currentProvider.type === 'subscription' || !Array.isArray(currentProvider.models) || currentProvider.models.length === 0) return;
     if (!selectedModel) return;
     const modelIds = currentProvider.models.map((m) => m.model);
@@ -1787,7 +1820,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps -- only react to specific sub-properties, not full object refs
-  }, [currentProject?.id, currentProvider?.id, currentProvider?.models, currentProvider?.primaryModel, selectedModel, patchProject]);
+  }, [currentProject?.id, currentProvider?.id, currentProvider?.models, currentProvider?.primaryModel, selectedModel, patchProject, pinnedProviderUnavailable]);
 
   // Unified model-push effect — single source of truth for `/api/model/set`.
   //
@@ -2213,6 +2246,18 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       return false;  // Signal SimpleChatInput NOT to clear the input
     }
 
+    // #300: the session pinned a provider that is no longer available (missing
+    // API key / disabled / deleted). resolveProvider would silently fall back to a
+    // DIFFERENT provider and bill it (the reported 402 from the very provider the
+    // user switched away from). Refuse to send and tell the user how to fix it,
+    // instead of routing to the wrong provider and resetting their model.
+    if (pinnedProviderUnavailable) {
+      toastRef.current.error(
+        `当前会话指定的 Provider「${selectedProviderId}」不可用（缺少 API Key 或已被禁用）。请在设置中补充密钥，或在模型选择器中切换 Provider 后再发送。`,
+      );
+      return false;
+    }
+
     // Queue limit: max 5 queued messages.
     // (issue #174) 'starting' is also busy — SDK subprocess is launching but
     // hasn't sent system_init yet. Including it prevents the queue cap from
@@ -2314,7 +2359,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps -- toastRef/currentProviderRef/apiKeysRef/cronStateRef are refs (stable); scrollToBottom/setMessages/setIsLoading/setSessionState are stable
-  }, [sessionState, isLoading, queuedMessages.length, startCronTask, sendMessage, effectivePermissionMode, effectiveModel, isExternalRuntime, isCrossRuntimeSession, scrollToBottom]);
+  }, [sessionState, isLoading, queuedMessages.length, startCronTask, sendMessage, effectivePermissionMode, effectiveModel, isExternalRuntime, isCrossRuntimeSession, scrollToBottom, pinnedProviderUnavailable, selectedProviderId]);
 
   // Ref-stabilize handleSendMessage for handleRetry (avoids frequent re-creation)
   const handleSendMessageRef = useRef(handleSendMessage);

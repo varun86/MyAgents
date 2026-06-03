@@ -23,6 +23,8 @@ import Tip from '@/components/Tip';
 import { useConfigData } from '@/config/useConfigData';
 import { useConfigActions } from '@/config/useConfigActions';
 import { ensureSelfAwarenessWorkspace } from '@/config/configService';
+import { useChatComposerKeydown } from '@/hooks/useChatComposerKeydown';
+import { sendKeyHint } from '@/utils/chatSendKey';
 
 const PLACEHOLDER =
     '告诉 AI 小助理想做什么，配模型、加 MCP、查问题、吐槽反馈，提出你的要求，附上网页链接或截图，小助理都能帮你直接搞定！';
@@ -156,11 +158,6 @@ export default function SettingsHelperInbox({
     const canSend = hasContent && hasValidModel && !isSending;
 
     const isMac = useMemo(() => navigator.platform.toLowerCase().includes('mac'), []);
-    const submitTip = useMemo(() => {
-        if (!hasContent) return { label: '请输入想做的事或附上图片', shortcut: undefined };
-        if (!hasValidModel) return { label: '请先配置模型', shortcut: undefined };
-        return { label: '发送', shortcut: isMac ? '⌘ Enter' : 'Ctrl Enter' };
-    }, [hasContent, hasValidModel, isMac]);
 
     const handleSend = useCallback(() => {
         if (!canSend) return;
@@ -190,15 +187,17 @@ export default function SettingsHelperInbox({
         }, 400);
     }, [canSend, text, picked, appVersion, images, clearImages]);
 
-    const handleKeyDown = useCallback(
-        (e: React.KeyboardEvent) => {
-            if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
-                e.preventDefault();
-                handleSend();
-            }
-        },
-        [handleSend],
-    );
+    // Send-key behavior follows the user's chatSendShortcut preference (shared
+    // with the main chat box). The hook also supplies the IME composition
+    // handlers this inbox previously lacked. handleSend self-guards on canSend.
+    const { onKeyDown: handleKeyDown, onCompositionStart, onCompositionEnd, sendShortcut } =
+        useChatComposerKeydown(handleSend);
+
+    const submitTip = useMemo(() => {
+        if (!hasContent) return { label: '请输入想做的事或附上图片', shortcut: undefined };
+        if (!hasValidModel) return { label: '请先配置模型', shortcut: undefined };
+        return { label: '发送', shortcut: sendKeyHint(sendShortcut, isMac).shortcut };
+    }, [hasContent, hasValidModel, isMac, sendShortcut]);
 
     return (
         <div className="mb-8">
@@ -252,6 +251,8 @@ export default function SettingsHelperInbox({
                         value={text}
                         onChange={(e) => setText(e.target.value)}
                         onKeyDown={handleKeyDown}
+                        onCompositionStart={onCompositionStart}
+                        onCompositionEnd={onCompositionEnd}
                         onPaste={pasteHandler}
                         placeholder={PLACEHOLDER}
                         rows={4}

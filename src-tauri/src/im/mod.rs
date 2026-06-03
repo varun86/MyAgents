@@ -4171,6 +4171,115 @@ fn find_missing_startable_agent_channels(
 mod agent_monitor_tests {
     use super::*;
 
+    /// Issue #301: a legacy/hand-edited config can persist `providerEnvJson` /
+    /// `mcpServersJson` as a raw JSON object instead of a stringified blob, which
+    /// fails the strict `AgentConfigRust` parse with
+    /// `invalid type: map, expected a string`. The Value-level normalizer heals it
+    /// before deserialization. Shared fixture with the TS twin test:
+    /// `src/shared/__fixtures__/dirtyConfig301.json`.
+    #[test]
+    fn normalize_coerces_object_stringified_json_fields() {
+        let fixture = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../src/shared/__fixtures__/dirtyConfig301.json"
+        ));
+        let mut value: serde_json::Value = serde_json::from_str(fixture).unwrap();
+
+        // Before: the strict parse of the dirty agent fails (the #301 symptom).
+        assert!(
+            serde_json::from_value::<types::AgentConfigRust>(value["agents"][0].clone()).is_err(),
+            "fixture's dirty agent should fail a strict parse before normalization"
+        );
+
+        assert!(normalize_stringified_json_value(&mut value));
+
+        // After: the object fields are strings that round-trip to the original JSON.
+        let dirty = &value["agents"][0];
+        assert!(dirty["providerEnvJson"].is_string());
+        assert!(dirty["mcpServersJson"].is_string());
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(dirty["providerEnvJson"].as_str().unwrap())
+                .unwrap(),
+            serde_json::json!({
+                "baseUrl": "https://api.example.com",
+                "apiKey": "sk-agent-test",
+                "authType": "auth_token"
+            })
+        );
+        assert!(dirty["channels"][0]["overrides"]["providerEnvJson"].is_string());
+
+        // And the strict parse now succeeds.
+        assert!(
+            serde_json::from_value::<types::AgentConfigRust>(value["agents"][0].clone()).is_ok(),
+            "strict parse should succeed after normalization"
+        );
+
+        // Idempotent on a clean config, and already-stringified values are untouched.
+        assert!(!normalize_stringified_json_value(&mut value));
+        assert_eq!(
+            value["agents"][1]["providerEnvJson"].as_str().unwrap(),
+            "{\"baseUrl\":\"https://clean.example.com\",\"apiKey\":\"sk-clean\"}"
+        );
+    }
+
+    /// Non-string scalar values are dropped, matching the TS twin
+    /// `coerceJsonStringField` (which `delete`s number/bool). Keeps the two
+    /// normalizers in sync per the "MUST stay in sync" contract.
+    #[test]
+    fn normalize_drops_non_string_scalar_fields() {
+        let mut value = serde_json::json!({
+            "agents": [{
+                "id": "a", "name": "A", "enabled": true, "workspacePath": "/w",
+                "providerEnvJson": 42,
+                "mcpServersJson": true
+            }]
+        });
+        assert!(normalize_stringified_json_value(&mut value));
+        let agent = &value["agents"][0];
+        assert!(agent.get("providerEnvJson").is_none());
+        assert!(agent.get("mcpServersJson").is_none());
+        // String / absent are untouched → second pass is a no-op.
+        assert!(!normalize_stringified_json_value(&mut value));
+    }
+
+    /// `salvage_agents_from_value` signals recovery (`None`) only when the
+    /// `agents` value is present-but-unusable, and salvages valid entries from a
+    /// mixed array.
+    #[test]
+    fn salvage_agents_signals_recovery_correctly() {
+        let keys = std::collections::HashMap::new();
+        let valid = serde_json::json!({
+            "id": "a", "name": "A", "enabled": true, "workspacePath": "/w"
+        });
+        let malformed = serde_json::json!({ "id": "b" }); // missing required fields
+
+        // Absent / empty array → Some([]) (legitimately no agents; do NOT recover).
+        assert_eq!(
+            salvage_agents_from_value(&serde_json::json!({}), &keys).map(|v| v.len()),
+            Some(0)
+        );
+        assert_eq!(
+            salvage_agents_from_value(&serde_json::json!({ "agents": [] }), &keys)
+                .map(|v| v.len()),
+            Some(0)
+        );
+
+        // Mixed array → salvage the valid one.
+        let mixed = serde_json::json!({ "agents": [valid.clone(), malformed.clone()] });
+        assert_eq!(
+            salvage_agents_from_value(&mixed, &keys).map(|v| v.len()),
+            Some(1)
+        );
+
+        // Every entry malformed → None (recover).
+        let all_bad = serde_json::json!({ "agents": [malformed.clone(), malformed.clone()] });
+        assert!(salvage_agents_from_value(&all_bad, &keys).is_none());
+
+        // `agents` present but not an array → None (recover).
+        let non_array = serde_json::json!({ "agents": { "oops": true } });
+        assert!(salvage_agents_from_value(&non_array, &keys).is_none());
+    }
+
     fn agent_config_with_weixin_channel(enabled: bool) -> Vec<types::AgentConfigRust> {
         serde_json::from_value(json!([{
             "id": "agent-1",
@@ -4368,20 +4477,28 @@ fn read_im_configs_from_disk() -> Vec<(String, ImConfig)> {
             Ok(c) => c,
             Err(_) => continue,
         };
-        let app_config: PartialAppConfig = match serde_json::from_str(strip_bom(&content)) {
+        let label = ["main", "bak", "tmp"][i];
+        // Repair stringified-JSON fields persisted as raw objects (issue #301)
+        // before the strict parse — PartialAppConfig also deserializes
+        // `agents: Vec<AgentConfigRust>`, so an object `providerEnvJson` on any
+        // agent would otherwise fail this whole parse too.
+        let app_config: PartialAppConfig = match serde_json::from_str::<serde_json::Value>(
+            strip_bom(&content),
+        )
+        .map_err(|e| e.to_string())
+        .and_then(|mut value| {
+            normalize_stringified_json_value(&mut value);
+            serde_json::from_value::<PartialAppConfig>(value).map_err(|e| e.to_string())
+        }) {
             Ok(c) => c,
             Err(e) => {
-                let label = ["main", "bak", "tmp"][i];
                 ulog_warn!("[im] Config {} file corrupted, trying next: {}", label, e);
                 continue;
             }
         };
 
         if i > 0 {
-            ulog_warn!(
-                "[im] Recovered config from {} file",
-                ["main", "bak", "tmp"][i]
-            );
+            ulog_warn!("[im] Recovered config from {} file", label);
         }
 
         return parse_bot_entries(app_config);
@@ -4614,6 +4731,118 @@ fn preset_provider_meta(provider_id: &str) -> Option<PresetProviderMeta> {
 
 // ===== Agent Config Disk Read/Write (v0.1.41) =====
 
+/// Coerce "stringified JSON" config fields (`providerEnvJson`, `mcpServersJson`)
+/// that were persisted as raw JSON objects/arrays back into strings, at the
+/// `serde_json::Value` level, BEFORE strict typed deserialization.
+///
+/// `AgentConfigRust` declares these as `Option<String>` (they hold a *serialized*
+/// JSON blob). A legacy write path or a hand-edit can leave one as an object,
+/// which makes a strict parse fail with `invalid type: map, expected a string`
+/// (issue #301) — that single bad field would otherwise blank the WHOLE config
+/// parse and stop ALL agent channels from auto-starting. Stringifying the object
+/// is lossless: it is exactly what the string is meant to contain.
+///
+/// MUST stay in sync with the TypeScript twin `normalizeStringifiedJsonFields`
+/// (`src/renderer/config/services/configNormalize.ts`). Shared regression
+/// fixture: `src/shared/__fixtures__/dirtyConfig301.json`.
+fn normalize_stringified_json_value(value: &mut serde_json::Value) -> bool {
+    // Object/array → stringify (the field's intended serialized form);
+    // other non-string scalars (number/bool) → drop (not a valid blob, and
+    // feeding a bogus string to a downstream parse just moves the failure).
+    // String / null / absent → leave untouched. Mirrors the TS twin's
+    // `coerceJsonStringField` exactly.
+    fn coerce(obj: &mut serde_json::Map<String, serde_json::Value>, field: &str) -> bool {
+        // Compute the action while the immutable borrow from `get` is live, then
+        // mutate after it ends (the bool result holds no borrow).
+        if matches!(
+            obj.get(field),
+            Some(serde_json::Value::Object(_)) | Some(serde_json::Value::Array(_))
+        ) {
+            let stringified = obj.get(field).unwrap().to_string();
+            obj.insert(field.to_string(), serde_json::Value::String(stringified));
+            true
+        } else if matches!(
+            obj.get(field),
+            Some(serde_json::Value::Number(_)) | Some(serde_json::Value::Bool(_))
+        ) {
+            obj.remove(field);
+            true
+        } else {
+            false
+        }
+    }
+
+    let mut changed = false;
+    if let Some(agents) = value.get_mut("agents").and_then(|v| v.as_array_mut()) {
+        for agent in agents.iter_mut() {
+            let Some(obj) = agent.as_object_mut() else {
+                continue;
+            };
+            changed |= coerce(obj, "providerEnvJson");
+            changed |= coerce(obj, "mcpServersJson");
+            if let Some(channels) = obj.get_mut("channels").and_then(|v| v.as_array_mut()) {
+                for ch in channels.iter_mut() {
+                    if let Some(ov) = ch.get_mut("overrides").and_then(|v| v.as_object_mut()) {
+                        changed |= coerce(ov, "providerEnvJson");
+                    }
+                }
+            }
+        }
+    }
+    changed
+}
+
+/// Parse `agents[]` from an already-normalized config Value into typed
+/// `AgentConfigRust`, salvaging individually-valid entries so one malformed
+/// agent can't blank the whole fleet's auto-start (the failure class that made
+/// #301 severe).
+///
+/// Returns:
+///   - `Some(vec)` — the agents to use. `vec` is empty when `agents` is absent
+///     or an empty array (legitimately "no agents"; the caller should NOT fall
+///     through to a recovery candidate — that matches legacy behaviour).
+///   - `None` — `agents` is present but unusable (not an array, or every entry
+///     failed a strict parse). The caller should try the next recovery candidate
+///     (.bak/.tmp) rather than accept an empty fleet.
+fn salvage_agents_from_value(
+    value: &serde_json::Value,
+    api_keys: &std::collections::HashMap<String, String>,
+) -> Option<Vec<AgentConfigRust>> {
+    match value.get("agents") {
+        // Absent → no agents configured; nothing to recover.
+        None => Some(Vec::new()),
+        Some(serde_json::Value::Array(arr)) => {
+            if arr.is_empty() {
+                return Some(Vec::new());
+            }
+            let mut agents: Vec<AgentConfigRust> = Vec::with_capacity(arr.len());
+            for (ai, a) in arr.iter().enumerate() {
+                match serde_json::from_value::<AgentConfigRust>(a.clone()) {
+                    Ok(mut agent) => {
+                        // Rebuild providerEnvJson for agents/channels that have a
+                        // providerId but no providerEnvJson (same as
+                        // parse_bot_entries does for legacy bots).
+                        migrate_agent_provider_env(&mut agent, api_keys);
+                        agents.push(agent);
+                    }
+                    Err(e) => {
+                        ulog_warn!("[agent] Skipping malformed agent[{}]: {}", ai, e);
+                    }
+                }
+            }
+            // Every entry failed → treat this candidate as unusable so the caller
+            // can fall through to a recovery file.
+            if agents.is_empty() {
+                None
+            } else {
+                Some(agents)
+            }
+        }
+        // `agents` present but not an array → corrupt shape → recover.
+        Some(_) => None,
+    }
+}
+
 /// Read Agent configs from disk. Falls back to reading imBotConfigs and converting.
 fn read_agent_configs_from_disk() -> Vec<AgentConfigRust> {
     let home = match dirs::home_dir() {
@@ -4634,40 +4863,45 @@ fn read_agent_configs_from_disk() -> Vec<AgentConfigRust> {
             Ok(c) => c,
             Err(_) => continue,
         };
-        let app_config: PartialAppConfig = match serde_json::from_str(strip_bom(&content)) {
-            Ok(c) => c,
+        let label = ["main", "bak", "tmp"][i];
+        // Parse loosely first so we can repair stringified-JSON fields persisted
+        // as raw objects (issue #301) BEFORE the strict typed parse below.
+        let mut value: serde_json::Value = match serde_json::from_str(strip_bom(&content)) {
+            Ok(v) => v,
             Err(e) => {
-                let label = ["main", "bak", "tmp"][i];
                 ulog_warn!(
-                    "[agent] Config {} file corrupted, trying next: {}",
+                    "[agent] Config {} file corrupted (invalid JSON), trying next: {}",
                     label,
                     e
                 );
                 continue;
             }
         };
+        normalize_stringified_json_value(&mut value);
 
-        if i > 0 {
-            ulog_warn!(
-                "[agent] Recovered config from {} file",
-                ["main", "bak", "tmp"][i]
-            );
-        }
+        let api_keys: std::collections::HashMap<String, String> = value
+            .get("providerApiKeys")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
 
-        if !app_config.agents.is_empty() {
-            let mut agents = app_config.agents;
-            let api_keys = app_config.provider_api_keys;
-            // Migration: rebuild providerEnvJson for agents/channels that have
-            // providerId but no providerEnvJson (same as parse_bot_entries does for legacy bots)
-            for agent in &mut agents {
-                migrate_agent_provider_env(agent, &api_keys);
+        match salvage_agents_from_value(&value, &api_keys) {
+            Some(agents) => {
+                if i > 0 {
+                    ulog_warn!("[agent] Recovered config from {} file", label);
+                }
+                return agents;
             }
-            return agents;
+            None => {
+                // `agents` is present but unusable (not an array, or every entry
+                // failed a strict parse). Fall through to the next recovery
+                // candidate (.bak/.tmp), mirroring the pre-#301 behaviour.
+                ulog_warn!(
+                    "[agent] {} config has no usable agents, trying next candidate",
+                    label
+                );
+                continue;
+            }
         }
-
-        // Fallback: if no agents[], try converting from imBotConfigs (migration)
-        // This is handled by the TS frontend migration, but provide a Rust fallback too
-        return Vec::new();
     }
 
     Vec::new()

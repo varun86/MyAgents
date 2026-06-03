@@ -9,6 +9,8 @@ import { useImagePreview } from '@/context/ImagePreviewContext';
 import { type SessionState } from '@/context/TabContext';
 import { useWorkspaceFileService } from '@/hooks/useWorkspaceFileService';
 import { type PermissionMode, PERMISSION_MODES, type Provider, type ProviderVerifyStatus, getModelDisplayName } from '@/config/types';
+import { useConfigData } from '@/config/useConfigData';
+import { resolveEnterKeyAction, sendHintLabel } from '@/utils/chatSendKey';
 import SlashCommandMenu, { type SlashCommand, filterAndSortCommands } from './SlashCommandMenu';
 import QueuedMessagesPanel from './QueuedMessageBubble';
 import CronTaskStatusBar from './cron/CronTaskStatusBar';
@@ -389,6 +391,15 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   const canSendMessage = isExternalRuntime || isCurrentProviderAvailable;
   const canSendMessageRef = useRef(canSendMessage);
   canSendMessageRef.current = canSendMessage;
+
+  // Send-key preference (Enter vs ⌘/Ctrl+Enter). Shared with AI 小助理 / 问题反馈
+  // via @/utils/chatSendKey. Mirrored to a ref so the big handleKeyDown callback
+  // reads the latest value without re-binding (its deps are intentionally pinned).
+  const { config } = useConfigData();
+  const sendShortcut = config.chatSendShortcut ?? 'enter';
+  const sendShortcutRef = useRef(sendShortcut);
+  sendShortcutRef.current = sendShortcut;
+  const isMac = useMemo(() => navigator.platform.toLowerCase().includes('mac'), []);
 
   // PRD 0.2.7: input no longer touches sidecar HTTP directly — workspace file
   // IO and slash command listing all go through `useWorkspaceFileService`
@@ -1555,19 +1566,20 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
     // Normal send - but NOT during IME composition (e.g., Chinese input)
     // Check both event.nativeEvent.isComposing (standard) and event.keyCode === 229 (legacy)
     //
-    // Chat-mode keyboard contract: plain Enter sends, Shift+Enter inserts
-    // a newline. (Thought mode has its own editor — ThoughtInput — with
-    // Cmd/Ctrl+Enter commit and no pass-through through this component.)
+    // Chat-mode keyboard contract is now user-configurable via the
+    // chatSendShortcut preference (resolveEnterKeyAction, shared with AI 小助理 /
+    // 问题反馈). 'enter' → bare Enter sends; 'modEnter' → ⌘/Ctrl+Enter sends.
+    // The triple IME guard (#123) is preserved: a composition commit arrives as
+    // Enter and must never send. (Thought mode has its own ThoughtInput editor
+    // and does not pass through here.)
     if (event.key === 'Enter' && !isComposingRef.current && !event.nativeEvent.isComposing && event.keyCode !== 229) {
-      const isCmdEnter = event.metaKey || event.ctrlKey;
-      const isPlainEnter = !event.shiftKey && !isCmdEnter;
-      const shouldSend = isPlainEnter;
-      if (shouldSend) {
+      if (resolveEnterKeyAction(event, sendShortcutRef.current) === 'send') {
         event.preventDefault();
         if ((inputValue.trim() || images.length > 0) && canSendMessageRef.current) {
           handleSend();
         }
       }
+      // 'newline' → fall through, the browser inserts the newline.
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- textareaRef is stable
   }, [cyclePermissionMode, undoStack, fileService, showSlashMenu, filteredSlashCommands, slashSearchQuery, selectedSlashIndex, slashPosition, showFileSearch, fileSearchResults, selectedFileIndex, inputValue, atPosition, fileSearchQuery, images.length, handleSend, handleSkillSelect, mentionTab, thoughtResults]);
@@ -2521,7 +2533,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                   onClick={handleSend}
                   disabled={!canSendMessage || (!inputValue.trim() && images.length === 0)}
                   className="rounded-lg bg-[var(--accent)] p-2 text-white transition-colors hover:bg-[var(--accent-warm-hover)] disabled:bg-[var(--ink-muted)]/15 disabled:text-[var(--ink-muted)]/60"
-                  title={!canSendMessage ? '请前往设置页面设置模型供应商' : '发送'}
+                  title={!canSendMessage ? '请前往设置页面设置模型供应商' : sendHintLabel(sendShortcut, isMac)}
                 >
                   <Send className="h-4 w-4" />
                 </button>
