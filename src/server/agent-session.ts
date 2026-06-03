@@ -6217,8 +6217,21 @@ export async function switchToSession(targetSessionId: string): Promise<boolean>
         currentPermissionMode = resolved.permissionMode as PermissionMode;
         console.log(`[agent] switchToSession: restored permissionMode=${resolved.permissionMode}`);
       }
+      // #300: also restore model + provider env from the TARGET session's snapshot.
+      // Previously only permissionMode was restored, so the pre-warm scheduled below
+      // spawned the switched-to session's subprocess carrying the PREVIOUS session's
+      // currentModel / currentProviderEnv (e.g. a deepseek session's env bleeding into
+      // a skywork session). Replace unconditionally so the prior session's values
+      // never leak. Fail closed on the env: when the pinned providerId no longer
+      // resolves, `resolved.providerEnv` is undefined and we clear it rather than keep
+      // the prior session's credentials. The renderer's per-message providerEnv + model
+      // push still override on send for desktop Tabs; this fixes the headless/pre-warm
+      // window and any non-renderer caller.
+      currentModel = resolved.model;
+      currentProviderEnv = resolved.providerEnv;
+      console.log(`[agent] switchToSession: restored model=${resolved.model ?? 'default'}, provider=${resolved.providerEnv?.baseUrl ?? 'subscription/none'}`);
     } catch (error) {
-      console.warn('[agent] switchToSession: permission self-resolution failed:', error);
+      console.warn('[agent] switchToSession: config self-resolution failed:', error);
     }
   }
 

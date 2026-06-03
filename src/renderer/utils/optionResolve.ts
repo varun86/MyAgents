@@ -133,6 +133,65 @@ export function shouldDegradedLoad(args: {
 }
 
 /**
+ * #300 — an owned session pinned a provider, but `resolveProvider` had to fall
+ * back to a DIFFERENT provider because the pinned one is unavailable (missing
+ * API key / disabled / deleted). In that state the renderer must NOT:
+ *   - silently route to / bill the fallback provider (the reported 402: the
+ *     session was reset onto deepseek, whose balance the user had just fled), or
+ *   - let the model-sync effects overwrite the pinned model with the fallback
+ *     provider's primaryModel.
+ *
+ * Scoped deliberately:
+ *   - `isOwnedSession` only — a fresh/unlocked tab intentionally keeps
+ *     `resolveProvider`'s first-available fallback (a sane default when the
+ *     agent's configured provider was deleted). The bug is specific to a session
+ *     that *froze* its own provider choice.
+ *   - builtin runtime only — external runtimes (Codex/CC/Gemini) carry no
+ *     providerId, so there is nothing to pin or fall back from.
+ *   - `providersLoaded` gate — during useConfig()'s async load `providers` is
+ *     empty and `resolvedProviderId` is transiently undefined; without this gate
+ *     every owned session would false-positive on first paint.
+ */
+export function isPinnedProviderUnavailable(args: {
+  isOwnedSession: boolean;
+  isExternalRuntime: boolean;
+  selectedProviderId: string | undefined;
+  resolvedProviderId: string | undefined;
+  providersLoaded: boolean;
+}): boolean {
+  if (args.isExternalRuntime || !args.isOwnedSession) return false;
+  if (!args.providersLoaded) return false;
+  if (!args.selectedProviderId) return false;
+  return args.resolvedProviderId !== args.selectedProviderId;
+}
+
+/**
+ * #300 — should the deferred provider-change effect reset `selectedModel` to the
+ * resolved provider's primaryModel?
+ *
+ * The old effect reset UNCONDITIONALLY on any `currentProvider.id` change, which
+ * stomped a still-valid pinned model whenever `currentProvider` re-resolved —
+ * notably on the credentials-load availability flip (`apiKeys` start empty, so a
+ * pinned provider transiently resolves as unavailable→available and the effect
+ * fired with a perfectly valid model). Reset ONLY when the selected model is
+ * genuinely absent from the resolved provider's model list — the same validity
+ * rule the model-validation effect uses, so the two agree. Subscription providers
+ * and providers with no known model list are never reset (we can't validate, so
+ * we must not clobber). Caller still gates on `!isPinnedProviderUnavailable` so a
+ * fallback provider's model list is never used to judge the pinned model.
+ */
+export function shouldResetModelOnProviderChange(args: {
+  providerType: string | undefined;
+  providerModels: string[] | undefined;
+  selectedModel: string | undefined;
+}): boolean {
+  if (args.providerType === 'subscription') return false;
+  if (!args.providerModels || args.providerModels.length === 0) return false;
+  if (!args.selectedModel) return false;
+  return !args.providerModels.includes(args.selectedModel);
+}
+
+/**
  * True only for the backend-minted session that belongs to an explicit "new
  * chat" reset/adoption. This remains true even after sendMessage clears
  * `isNewSessionRef` before the backend emits system-init, so the first live
