@@ -87,13 +87,13 @@ export interface SubAgentScope {
  */
 export type UnifiedEvent =
   // === Text streaming ===
-  | { kind: 'text_delta'; text: string }
-  | { kind: 'text_stop' }
+  | { kind: 'text_delta'; text: string; traceId?: string; subAgent?: SubAgentScope }
+  | { kind: 'text_stop'; traceId?: string; subAgent?: SubAgentScope }
 
   // === Thinking/reasoning streaming ===
-  | { kind: 'thinking_start'; index: number }
-  | { kind: 'thinking_delta'; text: string; index: number }
-  | { kind: 'thinking_stop'; index: number }
+  | { kind: 'thinking_start'; index: number; traceId?: string; subAgent?: SubAgentScope }
+  | { kind: 'thinking_delta'; text: string; index: number; traceId?: string; subAgent?: SubAgentScope }
+  | { kind: 'thinking_stop'; index: number; traceId?: string; subAgent?: SubAgentScope }
 
   // === Tool use ===
   // `subAgent` (optional, Codex-only today): when set, the session layer nests

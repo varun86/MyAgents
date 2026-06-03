@@ -50,6 +50,20 @@ describe('CollabAgent labels', () => {
     // getSubagentCallLabel(Bash with command) → first part of the command
     expect(label).toBe('ls');
   });
+  it('compact label shows nested collab control actions while running', () => {
+    const label = getToolLabel(collabTool({
+      isLoading: true,
+      subagentCalls: [{ id: 'wait-1', name: 'CollabAgent', input: { tool: 'wait' }, isLoading: true }],
+    }));
+    expect(label).toBe('等待子 Agent');
+  });
+  it('compact label shows nested sub-agent message traces while running', () => {
+    const label = getToolLabel(collabTool({
+      isLoading: true,
+      subagentCalls: [{ id: 'msg-1', name: 'AgentMessage', input: {}, result: 'hello', isLoading: true }],
+    }));
+    expect(label).toBe('Agent message');
+  });
 });
 
 describe('TaskTool renders a CollabAgent card with a nested trace', () => {

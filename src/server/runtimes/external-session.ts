@@ -84,7 +84,7 @@ let currentTurnStartTime = 0;
 // Mirrors the builtin runtime's ContentBlock[] pattern so that session history
 // preserves thinking, tool_use, and text blocks (not just flattened text).
 // The frontend's JSON parse path (TabProvider.tsx:1969) handles this format.
-interface PersistContentBlock {
+export interface PersistContentBlock {
   type: 'text' | 'tool_use' | 'thinking';
   text?: string;
   tool?: {
@@ -128,6 +128,8 @@ interface PersistContentBlock {
   isComplete?: boolean;
 }
 
+export type PersistSubagentCall = NonNullable<NonNullable<PersistContentBlock['tool']>['subagentCalls']>[number];
+
 let currentContentBlocks: PersistContentBlock[] = [];
 let pendingTextBuffer = '';         // text_delta accumulator between block boundaries
 let pendingThinkingText = '';       // thinking_delta accumulator for current thinking block
@@ -140,6 +142,12 @@ const pendingToolInputs = new Map<string, { name: string; inputJson: string }>()
 // input/result events to route them to the same parent. Mirrors builtin's
 // childToolToParent (agent-session.ts). Cleared on turn/session reset.
 const childToolToParent = new Map<string, string>(); // subagent toolUseId → parentToolUseId
+// Subagent calls can arrive before the parent spawn tool has been finalized into
+// currentContentBlocks. Keep them here and attach them when that parent tool_use
+// block is persisted, so known sub-agent events do not degrade to flat rendering
+// because of notification ordering.
+const pendingSubagentCallsByParent = new Map<string, PersistSubagentCall[]>(); // parentToolUseId → calls
+const subagentTraceBuffers = new Map<string, string>(); // synthetic message/thinking trace id → text
 type ExternalSessionState = 'idle' | 'running' | 'error';
 type ExternalPendingInteractiveRequest =
   | {
@@ -251,6 +259,8 @@ function resetModuleState(): void {
   pendingThinkingStartedAt = 0;
   pendingToolInputs.clear();
   childToolToParent.clear();
+  pendingSubagentCallsByParent.clear();
+  subagentTraceBuffers.clear();
   pendingPermissionSuggestions.clear();
   drainPendingInteractiveRequestsAsExpired('reset');
   pendingExternalAskUserQuestions.clear();
@@ -306,25 +316,58 @@ function findExternalToolBlockById(toolUseId: string): PersistContentBlock | nul
   return null;
 }
 
-/** Find/create a sub-agent call entry under its parent spawn card. PRD 0.2.27.
- *  Returns null when the parent card isn't (yet) in currentContentBlocks. */
-function upsertSubagentCall(
-  parentToolUseId: string,
-  call: { id: string; name: string; input: Record<string, unknown>; inputJson?: string },
-): NonNullable<NonNullable<PersistContentBlock['tool']>['subagentCalls']>[number] | null {
-  const parent = findExternalToolBlockById(parentToolUseId);
-  if (!parent?.tool) return null;
-  if (!parent.tool.subagentCalls) parent.tool.subagentCalls = [];
-  const existing = parent.tool.subagentCalls.find((c) => c.id === call.id);
+function mergeSubagentCall(calls: PersistSubagentCall[], call: { id: string; name: string; input: Record<string, unknown>; inputJson?: string }): PersistSubagentCall {
+  const existing = calls.find((c) => c.id === call.id);
   if (existing) {
     existing.name = call.name;
     existing.input = call.input;
     existing.inputJson = call.inputJson;
     return existing;
   }
-  const created = { ...call, isLoading: true };
-  parent.tool.subagentCalls.push(created);
+  const created: PersistSubagentCall = { ...call, isLoading: true };
+  calls.push(created);
   return created;
+}
+
+function attachPendingSubagentCalls(parentToolUseId: string, parentTool: NonNullable<PersistContentBlock['tool']>): void {
+  const pending = pendingSubagentCallsByParent.get(parentToolUseId);
+  if (!pending || pending.length === 0) return;
+  if (!parentTool.subagentCalls) parentTool.subagentCalls = [];
+  for (const call of pending) {
+    const existing = parentTool.subagentCalls.find((c) => c.id === call.id);
+    if (existing) Object.assign(existing, call);
+    else parentTool.subagentCalls.push(call);
+  }
+  pendingSubagentCallsByParent.delete(parentToolUseId);
+}
+
+function findSubagentCall(parentToolUseId: string, toolUseId: string): PersistSubagentCall | null {
+  const parent = findExternalToolBlockById(parentToolUseId);
+  const persisted = parent?.tool?.subagentCalls?.find((c) => c.id === toolUseId);
+  if (persisted) return persisted;
+  return pendingSubagentCallsByParent.get(parentToolUseId)?.find((c) => c.id === toolUseId) ?? null;
+}
+
+/** Find/create a sub-agent call entry under its parent spawn card. PRD 0.2.27.
+ *  If the parent card is still streaming and not yet in currentContentBlocks, the
+ *  call is cached and attached when the parent tool_use block is finalized. */
+function upsertSubagentCall(
+  parentToolUseId: string,
+  call: { id: string; name: string; input: Record<string, unknown>; inputJson?: string },
+): PersistSubagentCall {
+  const parent = findExternalToolBlockById(parentToolUseId);
+  if (parent?.tool) {
+    attachPendingSubagentCalls(parentToolUseId, parent.tool);
+    if (!parent.tool.subagentCalls) parent.tool.subagentCalls = [];
+    return mergeSubagentCall(parent.tool.subagentCalls, call);
+  }
+
+  let pending = pendingSubagentCallsByParent.get(parentToolUseId);
+  if (!pending) {
+    pending = [];
+    pendingSubagentCallsByParent.set(parentToolUseId, pending);
+  }
+  return mergeSubagentCall(pending, call);
 }
 
 // ─── Sub-agent (Codex collab-agent) tool routing (PRD 0.2.27) ───
@@ -334,25 +377,22 @@ function upsertSubagentCall(
 // TaskTool render — no new SSE events, no new components.
 
 /**
- * Try to nest a sub-agent tool under its parent spawn card. Returns true if it
- * nested, false if the parent card isn't in currentContentBlocks yet — in which
- * case the caller MUST fall back to flat rendering (never drop the call). The
- * routing is LATCHED here: childToolToParent is set only on a successful nest,
- * and all later input/stop/result events route purely off that map — so a tool
- * can never flat-then-nest flip mid-stream.
+ * Nest a sub-agent tool under its parent spawn card. The routing is LATCHED here:
+ * childToolToParent is set on start, and all later input/stop/result events route
+ * purely off that map — so a tool can never flat-then-nest flip mid-stream.
  */
 function handleSubagentToolUseStart(
   parentToolUseId: string,
   event: Extract<UnifiedEvent, { kind: 'tool_use_start' }>,
-): boolean {
-  const inputJson = event.input ? JSON.stringify(event.input, null, 2) : '';
-  const call = upsertSubagentCall(parentToolUseId, {
+): void {
+  const hasInput = event.input && Object.keys(event.input).length > 0;
+  const inputJson = hasInput ? JSON.stringify(event.input, null, 2) : '';
+  upsertSubagentCall(parentToolUseId, {
     id: event.toolUseId,
     name: event.toolName,
     input: event.input ?? {},
     inputJson,
   });
-  if (!call) return false; // parent spawn card not persisted yet → caller renders flat
   childToolToParent.set(event.toolUseId, parentToolUseId);
   pendingToolInputs.set(event.toolUseId, { name: event.toolName, inputJson });
   broadcast('chat:subagent-tool-use', {
@@ -366,7 +406,6 @@ function handleSubagentToolUseStart(
     },
   });
   recordRuntimeActivity();
-  return true;
 }
 
 function finalizeSubagentToolInput(parentToolUseId: string, toolUseId: string): void {
@@ -374,8 +413,7 @@ function finalizeSubagentToolInput(parentToolUseId: string, toolUseId: string): 
   if (!entry) return;
   let parsed: Record<string, unknown> = {};
   try { parsed = JSON.parse(entry.inputJson); } catch { /* keep empty */ }
-  const parent = findExternalToolBlockById(parentToolUseId);
-  const call = parent?.tool?.subagentCalls?.find((c) => c.id === toolUseId);
+  const call = findSubagentCall(parentToolUseId, toolUseId);
   if (call) { call.input = parsed; call.inputJson = entry.inputJson; }
   pendingToolInputs.delete(toolUseId);
 }
@@ -384,8 +422,7 @@ function applySubagentToolResult(
   parentToolUseId: string,
   event: Extract<UnifiedEvent, { kind: 'tool_result' }>,
 ): void {
-  const parent = findExternalToolBlockById(parentToolUseId);
-  const call = parent?.tool?.subagentCalls?.find((c) => c.id === event.toolUseId);
+  const call = findSubagentCall(parentToolUseId, event.toolUseId);
   if (call) {
     call.result = event.content;
     call.isError = event.isError ?? false;
@@ -402,6 +439,84 @@ function applySubagentToolResult(
   });
   childToolToParent.delete(event.toolUseId);
   recordRuntimeActivity();
+}
+
+type SubagentTraceName = 'AgentMessage' | 'Thinking';
+
+function subagentTraceToolUseId(parentToolUseId: string, traceId: string, name: SubagentTraceName): string {
+  return `${name}::${traceId}::${parentToolUseId}`;
+}
+
+function ensureSubagentTraceCall(
+  parentToolUseId: string,
+  toolUseId: string,
+  name: SubagentTraceName,
+): void {
+  if (childToolToParent.has(toolUseId)) return;
+  handleSubagentToolUseStart(parentToolUseId, {
+    kind: 'tool_use_start',
+    toolUseId,
+    toolName: name,
+  });
+  subagentTraceBuffers.set(toolUseId, '');
+}
+
+function appendSubagentTraceDelta(
+  event: Extract<UnifiedEvent, { kind: 'text_delta' | 'thinking_delta' }>,
+  name: SubagentTraceName,
+): boolean {
+  if (!event.subAgent || !event.traceId) return false;
+  const parentToolUseId = event.subAgent.parentToolUseId;
+  const toolUseId = subagentTraceToolUseId(parentToolUseId, event.traceId, name);
+  ensureSubagentTraceCall(parentToolUseId, toolUseId, name);
+
+  const previous = subagentTraceBuffers.get(toolUseId) ?? '';
+  subagentTraceBuffers.set(toolUseId, previous + event.text);
+  const call = findSubagentCall(parentToolUseId, toolUseId);
+  if (call) {
+    call.result = (call.result ?? '') + event.text;
+    call.isLoading = true;
+  }
+
+  broadcast('chat:subagent-tool-result-delta', {
+    parentToolUseId,
+    toolUseId,
+    delta: event.text,
+  });
+  recordRuntimeActivity();
+  return true;
+}
+
+function startSubagentTrace(
+  event: Extract<UnifiedEvent, { kind: 'thinking_start' }>,
+  name: SubagentTraceName,
+): boolean {
+  if (!event.subAgent || !event.traceId) return false;
+  const parentToolUseId = event.subAgent.parentToolUseId;
+  const toolUseId = subagentTraceToolUseId(parentToolUseId, event.traceId, name);
+  ensureSubagentTraceCall(parentToolUseId, toolUseId, name);
+  return true;
+}
+
+function completeSubagentTrace(
+  event: Extract<UnifiedEvent, { kind: 'text_stop' | 'thinking_stop' }>,
+  name: SubagentTraceName,
+): boolean {
+  if (!event.subAgent || !event.traceId) return false;
+  const parentToolUseId = event.subAgent.parentToolUseId;
+  const toolUseId = subagentTraceToolUseId(parentToolUseId, event.traceId, name);
+  const latchedParent = childToolToParent.get(toolUseId);
+  if (!latchedParent) return true; // scoped stop with no emitted content; swallow it
+
+  const content = subagentTraceBuffers.get(toolUseId) ?? findSubagentCall(parentToolUseId, toolUseId)?.result ?? '';
+  pendingToolInputs.delete(toolUseId);
+  subagentTraceBuffers.delete(toolUseId);
+  applySubagentToolResult(latchedParent, {
+    kind: 'tool_result',
+    toolUseId,
+    content,
+  });
+  return true;
 }
 
 /** Flush accumulated text into a text content block */
@@ -495,9 +610,22 @@ function flushAllPending(): void {
   flushPendingThinking(true);
   // Flush any uncompleted tool uses (interrupted mid-stream)
   for (const [toolId, entry] of pendingToolInputs) {
+    const subagentParent = childToolToParent.get(toolId);
+    if (subagentParent) {
+      finalizeSubagentToolInput(subagentParent, toolId);
+      const content = subagentTraceBuffers.get(toolId) ?? findSubagentCall(subagentParent, toolId)?.result ?? 'Interrupted';
+      subagentTraceBuffers.delete(toolId);
+      applySubagentToolResult(subagentParent, {
+        kind: 'tool_result',
+        toolUseId: toolId,
+        content,
+        isError: content === 'Interrupted' ? true : undefined,
+      });
+      continue;
+    }
     let parsedInput: Record<string, unknown> = {};
     try { parsedInput = JSON.parse(entry.inputJson); } catch { /* keep empty */ }
-    currentContentBlocks.push({
+    const block: PersistContentBlock = {
       type: 'tool_use',
       tool: {
         id: toolId,
@@ -506,7 +634,9 @@ function flushAllPending(): void {
         inputJson: entry.inputJson,
         streamIndex: currentContentBlocks.length,
       },
-    });
+    };
+    if (block.tool) attachPendingSubagentCalls(toolId, block.tool);
+    currentContentBlocks.push(block);
   }
   pendingToolInputs.clear();
 }
@@ -621,6 +751,8 @@ function resetTurnAccumulators(): void {
   pendingThinkingStartedAt = 0;
   pendingToolInputs.clear();
   childToolToParent.clear();
+  pendingSubagentCallsByParent.clear();
+  subagentTraceBuffers.clear();
   currentTurnUsage = null;
   currentTurnEstimatedInputTokens = 0;
 }
@@ -992,31 +1124,75 @@ export function getExternalSessionPermissionMode(): string | null {
   return lastPermissionMode || null;
 }
 
-function buildCurrentAssistantSnapshotContent(): string | null {
-  const blocks: PersistContentBlock[] = currentContentBlocks.map((block) => ({
+export interface ExternalAssistantSnapshotState {
+  contentBlocks: readonly PersistContentBlock[];
+  pendingTextBuffer: string;
+  pendingThinkingBlock: PersistContentBlock | null;
+  pendingToolInputs: ReadonlyMap<string, { name: string; inputJson: string }>;
+  childToolToParent: ReadonlyMap<string, string>;
+  pendingSubagentCallsByParent: ReadonlyMap<string, readonly PersistSubagentCall[]>;
+  currentAssistantText: string;
+}
+
+function cloneSubagentCall(call: PersistSubagentCall): PersistSubagentCall {
+  return {
+    ...call,
+    input: { ...call.input },
+  };
+}
+
+function clonePersistContentBlock(block: PersistContentBlock): PersistContentBlock {
+  return {
     ...block,
     ...(block.tool ? {
       tool: {
         ...block.tool,
         input: { ...block.tool.input },
         ...(block.tool.resultMeta ? { resultMeta: { ...block.tool.resultMeta } } : {}),
+        ...(block.tool.subagentCalls ? { subagentCalls: block.tool.subagentCalls.map(cloneSubagentCall) } : {}),
       },
     } : {}),
-  }));
+  };
+}
 
-  if (pendingTextBuffer) {
-    blocks.push({ type: 'text', text: pendingTextBuffer });
+function attachPendingSubagentCallsToSnapshot(
+  parentToolUseId: string,
+  parentTool: NonNullable<PersistContentBlock['tool']>,
+  pendingCallsByParent: ReadonlyMap<string, readonly PersistSubagentCall[]>,
+): void {
+  const pending = pendingCallsByParent.get(parentToolUseId);
+  if (!pending || pending.length === 0) return;
+  if (!parentTool.subagentCalls) parentTool.subagentCalls = [];
+  for (const pendingCall of pending) {
+    const call = cloneSubagentCall(pendingCall);
+    const existing = parentTool.subagentCalls.find((c) => c.id === call.id);
+    if (existing) Object.assign(existing, call);
+    else parentTool.subagentCalls.push(call);
+  }
+}
+
+export function buildExternalAssistantSnapshotContent(state: ExternalAssistantSnapshotState): string | null {
+  const blocks: PersistContentBlock[] = state.contentBlocks.map((block) => {
+    const cloned = clonePersistContentBlock(block);
+    if (cloned.tool) {
+      attachPendingSubagentCallsToSnapshot(cloned.tool.id, cloned.tool, state.pendingSubagentCallsByParent);
+    }
+    return cloned;
+  });
+
+  if (state.pendingTextBuffer) {
+    blocks.push({ type: 'text', text: state.pendingTextBuffer });
   }
 
-  const pendingThinkingBlock = buildPendingThinkingBlock(false);
-  if (pendingThinkingBlock) {
-    blocks.push(pendingThinkingBlock);
+  if (state.pendingThinkingBlock) {
+    blocks.push(clonePersistContentBlock(state.pendingThinkingBlock));
   }
 
-  for (const [toolId, entry] of pendingToolInputs) {
+  for (const [toolId, entry] of state.pendingToolInputs) {
+    if (state.childToolToParent.has(toolId)) continue;
     let parsedInput: Record<string, unknown> = {};
     try { parsedInput = JSON.parse(entry.inputJson); } catch { /* keep empty */ }
-    blocks.push({
+    const block: PersistContentBlock = {
       type: 'tool_use',
       tool: {
         id: toolId,
@@ -1026,18 +1202,34 @@ function buildCurrentAssistantSnapshotContent(): string | null {
         isLoading: true,
         streamIndex: blocks.length,
       },
-    });
+    };
+    if (block.tool) {
+      attachPendingSubagentCallsToSnapshot(toolId, block.tool, state.pendingSubagentCallsByParent);
+    }
+    blocks.push(block);
   }
 
   if (blocks.length > 0) {
     return JSON.stringify(blocks);
   }
 
-  if (currentAssistantText.trim()) {
-    return currentAssistantText;
+  if (state.currentAssistantText.trim()) {
+    return state.currentAssistantText;
   }
 
   return null;
+}
+
+function buildCurrentAssistantSnapshotContent(): string | null {
+  return buildExternalAssistantSnapshotContent({
+    contentBlocks: currentContentBlocks,
+    pendingTextBuffer,
+    pendingThinkingBlock: buildPendingThinkingBlock(false),
+    pendingToolInputs,
+    childToolToParent,
+    pendingSubagentCallsByParent,
+    currentAssistantText,
+  });
 }
 
 export function getExternalLiveAssistantMessage(): SessionMessage | null {
@@ -2424,6 +2616,9 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
 
   switch (event.kind) {
     case 'text_delta':
+      if (appendSubagentTraceDelta(event, 'AgentMessage')) {
+        break;
+      }
       broadcast('chat:message-chunk', event.text);
       currentAssistantText += event.text;
       pendingTextBuffer += event.text;
@@ -2431,6 +2626,9 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
       break;
 
     case 'text_stop':
+      if (completeSubagentTrace(event, 'AgentMessage')) {
+        break;
+      }
       // Text block ended — flush accumulated text into a content block
       console.log(`[external-session] text_stop: accumulated ${currentAssistantText.length} chars`);
       flushPendingText();
@@ -2442,6 +2640,9 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
       break;
 
     case 'thinking_start':
+      if (startSubagentTrace(event, 'Thinking')) {
+        break;
+      }
       flushPendingText();  // Close any open text block before thinking
       if (pendingThinkingActive) {
         // Defensive close: a new reasoning block implies the previous one ended,
@@ -2457,6 +2658,9 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
       break;
 
     case 'thinking_delta':
+      if (appendSubagentTraceDelta(event, 'Thinking')) {
+        break;
+      }
       if (!pendingThinkingActive) {
         pendingThinkingActive = true;
         pendingThinkingIndex = event.index;
@@ -2469,6 +2673,9 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
       break;
 
     case 'thinking_stop':
+      if (completeSubagentTrace(event, 'Thinking')) {
+        break;
+      }
       flushPendingThinking(true);
       // Emit content-block-stop so frontend closes the thinking block
       broadcast('chat:content-block-stop', { index: event.index, type: 'thinking' });
@@ -2476,9 +2683,10 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
 
     case 'tool_use_start':
       // PRD 0.2.27 — sub-agent tool nests under its spawn card. If the parent
-      // card isn't persisted yet, handleSubagentToolUseStart returns false and
-      // we fall through to flat rendering (never drop the call).
-      if (event.subAgent && handleSubagentToolUseStart(event.subAgent.parentToolUseId, event)) {
+      // card is still streaming, the call is cached and attached when the parent
+      // tool_use block is finalized; known sub-agent events never render flat.
+      if (event.subAgent) {
+        handleSubagentToolUseStart(event.subAgent.parentToolUseId, event);
         break;
       }
       flushPendingText();  // Close any open text block before tool use
@@ -2495,8 +2703,8 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
       break;
 
     case 'tool_input_delta': {
-      // Route by the LATCHED map (set only when the start actually nested) — not
-      // by event.subAgent — so a start that fell back to flat keeps its deltas flat.
+      // Route by the LATCHED map (set when the start nested), not by event.subAgent,
+      // so all events for one tool stay on the same rendering path.
       const parentForInput = childToolToParent.get(event.toolUseId);
       if (parentForInput) {
         const toolEntry = pendingToolInputs.get(event.toolUseId);
@@ -2534,7 +2742,7 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
       if (entry) {
         let parsedInput: Record<string, unknown> = {};
         try { parsedInput = JSON.parse(entry.inputJson); } catch { /* keep empty */ }
-        currentContentBlocks.push({
+        const block: PersistContentBlock = {
           type: 'tool_use',
           tool: {
             id: event.toolUseId,
@@ -2543,7 +2751,9 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
             inputJson: entry.inputJson,
             streamIndex: currentContentBlocks.length,
           },
-        });
+        };
+        if (block.tool) attachPendingSubagentCalls(event.toolUseId, block.tool);
+        currentContentBlocks.push(block);
         pendingToolInputs.delete(event.toolUseId);
       }
       broadcast('chat:content-block-stop', {

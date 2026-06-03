@@ -13,6 +13,11 @@ import {
   recordSpawnAgentChildThreads,
   computeSubAgentScope,
   isChildThreadLifecycleMethod,
+  resolveCollabAgentControlParents,
+  subagentControlToolUseId,
+  buildCollabAgentControlStartEvents,
+  buildCollabAgentControlCompletedEvents,
+  resolveCollabControlCompletionRoute,
 } from '../runtimes/codex';
 
 describe('resolveTopLevelSpawnCard', () => {
@@ -181,6 +186,131 @@ describe('computeSubAgentScope', () => {
       nickname: undefined,
       role: undefined,
     });
+  });
+});
+
+describe('resolveCollabAgentControlParents', () => {
+  it('maps main-thread wait/send/close receiver threads back to their spawn cards', () => {
+    const cards = new Map([['child', 'spawn-card']]);
+    const parents = new Map([['child', 'main']]);
+
+    expect(resolveCollabAgentControlParents('wait', ['child'], cards, parents)).toEqual(['spawn-card']);
+    expect(resolveCollabAgentControlParents('sendInput', ['child'], cards, parents)).toEqual(['spawn-card']);
+    expect(resolveCollabAgentControlParents('closeAgent', ['child'], cards, parents)).toEqual(['spawn-card']);
+  });
+
+  it('deduplicates multiple receiver threads that resolve to the same top-level spawn card', () => {
+    const cards = new Map([['child', 'spawn-card'], ['grandchild', 'nested-card']]);
+    const parents = new Map([['child', 'main'], ['grandchild', 'child']]);
+
+    expect(resolveCollabAgentControlParents('wait', ['child', 'grandchild'], cards, parents)).toEqual(['spawn-card']);
+  });
+
+  it('preserves order when one control action targets multiple spawn cards', () => {
+    const cards = new Map([['a', 'spawn-a'], ['b', 'spawn-b']]);
+    const parents = new Map([['a', 'main'], ['b', 'main']]);
+
+    expect(resolveCollabAgentControlParents('wait', ['b', 'a'], cards, parents)).toEqual(['spawn-b', 'spawn-a']);
+  });
+
+  it('returns empty for spawnAgent and unknown receivers', () => {
+    const cards = new Map([['child', 'spawn-card']]);
+    const parents = new Map([['child', 'main']]);
+
+    expect(resolveCollabAgentControlParents('spawnAgent', ['child'], cards, parents)).toEqual([]);
+    expect(resolveCollabAgentControlParents('wait', ['missing'], cards, parents)).toEqual([]);
+  });
+});
+
+describe('collab control event builders', () => {
+  it('uses a stable per-parent synthetic id for nested control events', () => {
+    expect(subagentControlToolUseId('wait-1', 'spawn-a')).toBe('wait-1::subagent-control::spawn-a');
+    expect(subagentControlToolUseId('wait-1', 'spawn-a')).not.toBe(subagentControlToolUseId('wait-1', 'spawn-b'));
+  });
+
+  it('builds nested start events for resolved non-spawn control actions', () => {
+    const events = buildCollabAgentControlStartEvents({
+      id: 'wait-1',
+      tool: 'wait',
+      receiverThreadIds: ['child'],
+    }, ['spawn-card']);
+
+    expect(events).toEqual([{
+      kind: 'tool_use_start',
+      toolUseId: 'wait-1::subagent-control::spawn-card',
+      toolName: 'CollabAgent',
+      input: { tool: 'wait', receiverThreadIds: ['child'] },
+      subAgent: { parentToolUseId: 'spawn-card' },
+    }]);
+  });
+
+  it('builds nested completion events for resolved control actions', () => {
+    const events = buildCollabAgentControlCompletedEvents({
+      id: 'close-1',
+      tool: 'closeAgent',
+      receiverThreadIds: ['child'],
+    }, ['spawn-card']);
+
+    expect(events.map((event) => event.kind)).toEqual(['tool_use_start', 'tool_use_stop', 'tool_result']);
+    expect(events.every((event) => 'subAgent' in event && event.subAgent?.parentToolUseId === 'spawn-card')).toBe(true);
+    expect(events.every((event) => 'toolUseId' in event && event.toolUseId === 'close-1::subagent-control::spawn-card')).toBe(true);
+  });
+
+  it('omits duplicate start when the control action already started under a latched parent', () => {
+    const route = resolveCollabControlCompletionRoute(['spawn-a', 'spawn-b'], ['spawn-a']);
+    const events = buildCollabAgentControlCompletedEvents({
+      id: 'wait-1',
+      tool: 'wait',
+      receiverThreadIds: ['a'],
+    }, route.parentToolUseIds, { includeStart: route.includeStart });
+
+    expect(route).toEqual({ parentToolUseIds: ['spawn-a', 'spawn-b'], includeStart: false });
+    expect(events.map((event) => event.kind)).toEqual(['tool_use_stop', 'tool_result', 'tool_use_stop', 'tool_result']);
+    expect(events.map((event) => 'toolUseId' in event ? event.toolUseId : null)).toEqual([
+      'wait-1::subagent-control::spawn-a',
+      'wait-1::subagent-control::spawn-a',
+      'wait-1::subagent-control::spawn-b',
+      'wait-1::subagent-control::spawn-b',
+    ]);
+  });
+
+  it('includes start when a control action first resolves on completion', () => {
+    const route = resolveCollabControlCompletionRoute(undefined, ['spawn-card']);
+    const events = buildCollabAgentControlCompletedEvents({
+      id: 'wait-1',
+      tool: 'wait',
+    }, route.parentToolUseIds, { includeStart: route.includeStart });
+
+    expect(route).toEqual({ parentToolUseIds: ['spawn-card'], includeStart: true });
+    expect(events.map((event) => event.kind)).toEqual(['tool_use_start', 'tool_use_stop', 'tool_result']);
+  });
+
+  it('marks failed collab control results as errors', () => {
+    const events = buildCollabAgentControlCompletedEvents({
+      id: 'wait-failed',
+      tool: 'wait',
+      status: 'failed',
+    }, ['spawn-card']);
+
+    const result = events.find((event) => event.kind === 'tool_result');
+    expect(result).toMatchObject({
+      kind: 'tool_result',
+      isError: true,
+      content: 'Tool: wait\nStatus: failed',
+    });
+  });
+
+  it('falls back to one complete flat card when Codex never reports control receivers', () => {
+    const events = buildCollabAgentControlCompletedEvents({
+      id: 'wait-orphan',
+      tool: 'wait',
+    }, []);
+
+    expect(events).toEqual([
+      { kind: 'tool_use_start', toolUseId: 'wait-orphan', toolName: 'CollabAgent', input: { tool: 'wait' } },
+      { kind: 'tool_use_stop', toolUseId: 'wait-orphan' },
+      { kind: 'tool_result', toolUseId: 'wait-orphan', content: 'Tool: wait' },
+    ]);
   });
 });
 
