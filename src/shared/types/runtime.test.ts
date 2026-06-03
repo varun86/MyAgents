@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest';
 
-import { normalizeRuntime, resolveEffectiveRuntime } from './runtime';
+import { normalizeRuntime, resolveEffectiveRuntime, getMaxPermissionForRuntime, VALID_RUNTIMES, type RuntimeType } from './runtime';
 
 describe('normalizeRuntime', () => {
   test('passes through valid runtimes', () => {
@@ -58,5 +58,31 @@ describe('resolveEffectiveRuntime', () => {
     expect(resolveEffectiveRuntime(currentAgentConfig, true)).toBe('gemini'); // config view
     // The authoritative value for an existing session would be the frozen
     // 'codex' — which lives in session metadata, not derivable from this fn.
+  });
+});
+
+describe('getMaxPermissionForRuntime — unattended max-agency mode per runtime', () => {
+  // The unattended memory-update / heartbeat turns inject system work (git commit,
+  // file writes) and MUST run at each runtime's maximum agency so tool use never
+  // blocks on an approval no human will answer. If any of these regress to a
+  // non-bypass mode, /api/memory/update on that runtime would hang to its 60-min
+  // timeout instead of completing. (memory-update external-routing fix.)
+  test('maps each runtime to its bypass / full-access mode', () => {
+    expect(getMaxPermissionForRuntime('builtin')).toBe('fullAgency');
+    expect(getMaxPermissionForRuntime('claude-code')).toBe('bypassPermissions');
+    expect(getMaxPermissionForRuntime('codex')).toBe('no-restrictions');
+    expect(getMaxPermissionForRuntime('gemini')).toBe('yolo');
+  });
+
+  test('returns a non-empty mode for every known runtime', () => {
+    for (const rt of VALID_RUNTIMES as readonly RuntimeType[]) {
+      const mode = getMaxPermissionForRuntime(rt);
+      expect(typeof mode).toBe('string');
+      expect(mode.length).toBeGreaterThan(0);
+    }
+  });
+
+  test('falls back to builtin fullAgency for an unknown runtime', () => {
+    expect(getMaxPermissionForRuntime('something-else' as RuntimeType)).toBe('fullAgency');
   });
 });

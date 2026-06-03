@@ -614,7 +614,7 @@ import {
   popLastUserMessageForRetry,
 } from './runtimes/external-session';
 import type { ImagePayload } from './runtimes/types';
-import { VALID_RUNTIMES, resolveCronPermissionMode } from '../shared/types/runtime';
+import { VALID_RUNTIMES, resolveCronPermissionMode, getMaxPermissionForRuntime } from '../shared/types/runtime';
 import type { RuntimeConfig, RuntimeType } from '../shared/types/runtime';
 // PRD 0.2.18 Session Inbox — sanitize helper for cron envelope wrapping
 import { neutralizeInboxStructuralTags, sanitizeInboxLabel } from './inbox/sanitize-label';
@@ -9129,8 +9129,11 @@ description: >
           // during a single long turn, so this check is the authoritative one.
           // Manual updates (user clicked the button) bypass — explicit user
           // intent is allowed to queue behind the active turn as expected.
-          const { isSessionBusy, enqueueUserMessage, waitForSessionIdle, getSessionModel, getSessionProviderEnv } = await import('./agent-session');
-          if (isAuto && isSessionBusy()) {
+          // Busy gate is runtime-aware: external (Codex/CC/Gemini) sessions track
+          // in-flight work via isExternalSessionActive(); builtin via isSessionBusy().
+          const useExternal = shouldUseExternalRuntime();
+          const { isSessionBusy, enqueueUserMessage, waitForSessionIdle, getSessionModel, getSessionProviderEnv, getAndClearLastAgentError } = await import('./agent-session');
+          if (isAuto && (useExternal ? isExternalSessionActive() : isSessionBusy())) {
             console.log('[memory-update] Skipped: session busy (auto)');
             return jsonResponse({ status: 'skipped', reason: 'session_busy' });
           }
@@ -9159,23 +9162,61 @@ description: >
 
           const prompt = `<system-reminder>\n<MEMORY_UPDATE>\n${promptContent}\n\nCurrent time: ${now}\n\n完成所有记忆维护操作后（包括文件读写和 git 操作），仅回复 MEMORY_UPDATE_OK，不要输出其他内容。\n</MEMORY_UPDATE>\n</system-reminder>`;
 
-          // Inject as user message — memory update is unattended, bypass all permissions
-          // so Bash/file tools (git commit, file writes) don't block waiting for approval.
-          // Pass current model + providerEnv to avoid triggering provider-switch logic.
-          await enqueueUserMessage(prompt, [], 'fullAgency', getSessionModel(), getSessionProviderEnv());
-
-          // Wait synchronously for AI completion (60 min timeout — same as background tasks).
-          // Memory update can be slow for large sessions: loading 100K+ token context,
-          // reading multiple log/topic files, writing updates, git commit+push.
-          const completed = await waitForSessionIdle(3600000, 1000);
-
-          if (completed) {
-            console.log(`[memory-update] AI completed memory update (source=${payload.source})`);
-            return jsonResponse({ status: 'completed' });
+          // Inject + run the <MEMORY_UPDATE> turn on the session's ACTUAL runtime.
+          // Memory update is unattended, so it always runs at the runtime's max agency
+          // (builtin 'fullAgency' / Codex 'no-restrictions' / CC 'bypassPermissions' /
+          // Gemini 'yolo') so Bash/file tools (git commit, file writes) don't block on
+          // approval.
+          //
+          // Routing is load-bearing: an external (Codex/CC/Gemini) session driven
+          // through the builtin SDK path asks Claude Code to *resume* a session it never
+          // created → "No conversation found with session ID" → 0 turns, no assistant
+          // output, leaving an orphaned <MEMORY_UPDATE> user bubble and the memory
+          // silently NOT updated. Every other injection endpoint (heartbeat, chat/send,
+          // cron) already branches on shouldUseExternalRuntime(); this one had missed it.
+          //
+          // 60 min timeout — memory update is slow for large sessions (loading 100K+
+          // token context, reading log/topic files, writing updates, git commit+push).
+          const MEMORY_UPDATE_TIMEOUT_MS = 3600000;
+          let turnOk: boolean;
+          if (useExternal) {
+            const runtimeType = getActiveRuntimeType();
+            const ext = await sendExternalMessage(prompt, undefined, undefined, undefined, {
+              sessionId: getSessionId(),
+              workspacePath: currentAgentDir,
+              scenario: { type: 'desktop' },
+              permissionMode: getMaxPermissionForRuntime(runtimeType),
+            });
+            if (!ext.queued) {
+              console.warn(`[memory-update] External enqueue failed (${runtimeType}): ${ext.error}`);
+              return jsonResponse({ status: 'error', reason: ext.error ?? 'external_enqueue_failed' }, 500);
+            }
+            if (!(await waitForExternalSessionIdle(MEMORY_UPDATE_TIMEOUT_MS, 1000))) {
+              console.warn('[memory-update] AI memory update timed out (60 min)');
+              return jsonResponse({ status: 'timeout' });
+            }
+            turnOk = didLastTurnSucceed();
           } else {
-            console.warn('[memory-update] AI memory update timed out (10 min)');
-            return jsonResponse({ status: 'timeout' });
+            // Clear any stale agent error first so the post-turn check reflects THIS turn.
+            getAndClearLastAgentError();
+            await enqueueUserMessage(prompt, [], 'fullAgency', getSessionModel(), getSessionProviderEnv());
+            if (!(await waitForSessionIdle(MEMORY_UPDATE_TIMEOUT_MS, 1000))) {
+              console.warn('[memory-update] AI memory update timed out (60 min)');
+              return jsonResponse({ status: 'timeout' });
+            }
+            turnOk = !getAndClearLastAgentError();
           }
+
+          // Gate `completed` on the turn actually succeeding. Previously this reported
+          // success purely from waitForSessionIdle returning, so a turn that errored out
+          // (the cross-runtime resume failure above, or any SDK/API error) still logged
+          // false success — and Rust recorded "Session … updated successfully".
+          if (turnOk) {
+            console.log(`[memory-update] AI completed memory update (source=${payload.source}, runtime=${useExternal ? getActiveRuntimeType() : 'builtin'})`);
+            return jsonResponse({ status: 'completed' });
+          }
+          console.warn('[memory-update] AI memory update turn failed (no assistant output / agent error)');
+          return jsonResponse({ status: 'error', reason: 'turn_failed' });
         } catch (error) {
           console.error('[memory-update] Error:', error);
           return jsonResponse(
