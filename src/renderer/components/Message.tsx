@@ -9,6 +9,7 @@ import { useToastOptional } from '@/components/Toast';
 import WidgetRenderer from '@/components/tools/WidgetRenderer';
 import { parseWidgetTags, hasWidgetTags } from '@/components/tools/widgetTagParser';
 import Tip from '@/components/Tip';
+import ToolAttachmentGallery from '@/components/tools/ToolAttachmentGallery';
 import { buildReplyMarkdown, downloadMarkdown, localDateStr } from '@/utils/markdownExport';
 import { useImagePreview } from '@/context/ImagePreviewContext';
 import type { ContentBlock, Message as MessageType } from '@/types/chat';
@@ -589,6 +590,18 @@ const Message = memo(function Message({ message, isLoading = false, onRewind, on
 
               // Group of thinking/tool blocks
               const isLatestActiveSection = index === lastBlockGroupIndex;
+              // Hoist rich-media attachments OUT of the collapsible tool window
+              // (BlockGroup → ProcessRow) into the message flow, so generated
+              // audio / image render as standalone, always-visible cards in the
+              // conversation rather than buried inside the folded tool body
+              // (PRD 0.2.30 bug). Sub-agent (Task) attachments live on
+              // subagentCalls and are rendered inside TaskTool — not here — so
+              // pulling top-level `tool.attachments` never double-renders them.
+              const groupAttachments = item.flatMap((b) =>
+                (b.type === 'tool_use' || b.type === 'server_tool_use')
+                  ? (b.tool?.attachments ?? [])
+                  : []
+              );
               return (
                 <Fragment key={`group-${index}`}>
                   <BlockGroup
@@ -596,6 +609,11 @@ const Message = memo(function Message({ message, isLoading = false, onRewind, on
                     isLatestActiveSection={isLatestActiveSection}
                     isStreaming={isAssistantStreaming}
                   />
+                  {groupAttachments.length > 0 && (
+                    <div className="px-1">
+                      <ToolAttachmentGallery attachments={groupAttachments} />
+                    </div>
+                  )}
                   {index === exitPlanModeGroupIndex && exitPlanModeSlot}
                 </Fragment>
               );

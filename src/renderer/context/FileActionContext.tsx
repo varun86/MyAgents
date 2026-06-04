@@ -44,6 +44,10 @@ export interface FileActionContextValue {
   cacheVersion: number;
   /** Open the context menu for a resolved path. */
   openFileMenu: (x: number, y: number, path: string, pathType: 'file' | 'dir') => void;
+  /** Workspace root, for resolving workspace-relative paths to absolute (e.g. the
+   *  inline audio play button, whose player needs an absolute path). May be null
+   *  outside a workspace. */
+  workspacePath: string | null;
 }
 
 export interface FileLinkActionContextValue {
@@ -389,7 +393,8 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
     checkPath,
     cacheVersion,
     openFileMenu,
-  }), [checkPath, cacheVersion, openFileMenu]);
+    workspacePath,
+  }), [checkPath, cacheVersion, openFileMenu, workspacePath]);
 
   const linkActionValue = useMemo<FileLinkActionContextValue>(() => ({
     openFileLink,

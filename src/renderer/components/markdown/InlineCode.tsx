@@ -9,6 +9,7 @@ import { useFileAction } from '@/context/FileActionContext';
 import { isAudioPath } from '@/utils/audioPlayer';
 import { useAudioPlayer } from '@/hooks/useAudioPlayer';
 import { looksLikeFilePath } from '@/utils/pathDetection';
+import { resolveAgainstWorkspace } from '@/utils/workspaceFileLinks';
 import { Play, Square } from 'lucide-react';
 
 interface InlineCodeProps {
@@ -95,10 +96,17 @@ export default function InlineCode({ children }: InlineCodeProps) {
 
     // Only wrap in span when audio button is needed, preserving DOM structure for non-audio paths
     if (isAudio) {
+        // The audio player ultimately calls cmd_read_file_base64, which REQUIRES
+        // an absolute path ("Path must be absolute" otherwise). The model writes
+        // workspace-relative paths (e.g. myagents_files/generated_audio/x.mp3),
+        // so resolve against the workspace root before playback — otherwise the
+        // button silently no-ops (the original bug). Fallback to the raw text only
+        // when there's no workspace (then it was likely already absolute).
+        const audioPath = resolveAgainstWorkspace(text, fileAction.workspacePath) ?? text;
         return (
             <span className="inline-flex items-center">
                 {codeEl}
-                <AudioPlayButton filePath={text} />
+                <AudioPlayButton filePath={audioPath} />
             </span>
         );
     }
