@@ -71,6 +71,7 @@ import { setAmbientLogContext, clearAmbientLogContextField } from './logger-cont
 import { beginTurn as beginTurnAbort, endTurn as endTurnAbort, abortTurn as abortTurnAbort } from './utils/turn-abort';
 import type { CancelReason } from './utils/cancellation';
 import { localTimestamp } from '../shared/logTime';
+import { isAbortedTerminalReason } from '../shared/terminalReason';
 import { trackServer } from './analytics';
 import { getCurrentRuntimeType, isExternalRuntime } from './runtimes/factory';
 import { resolveLastRealUserMessagePreview } from './utils/session-message-preview';
@@ -10225,6 +10226,21 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         };
         const resultText = resultMessage.result || '';
 
+        // #307: did the user/system just abort this turn (stop button, config-change
+        // restart, session takeover)? The SDK wraps an abort as an is_error result
+        // whose `result` text is the internal parser diagnostic
+        // ("[ede_diagnostic] result_type=user ..."). That string must never reach a
+        // user — not the desktop error banner, not the IM error reply. We detect the
+        // abort two ways because terminal_reason can be MISSING when the interrupt
+        // lands between yields (see the terminal_reason field comment above):
+        //   1. terminal_reason starts with 'aborted_' (the normal abort result), or
+        //   2. an interrupt is actively in progress (isInterruptingResponse).
+        // NOT shouldSurfaceTerminalReason() — that returns false for a *missing*
+        // reason too, which would wrongly swallow legitimate no-terminal_reason
+        // errors from third-party providers.
+        const isAbortResult =
+          isAbortedTerminalReason(resultMessage.terminal_reason) || isInterruptingResponse;
+
         // Forward SDK error results to IM callback (prevents "(No Response)")
         if (resultMessage.is_error) {
           const rawError = resultText || resultMessage.errors?.join('; ') || currentTurnLastAssistantMessageError || '';
@@ -10251,7 +10267,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
             shouldResetSessionAfterError = true;
             shouldResetReason = 'stale';
           }
-          if (pendingRequestIds.length > 0) {
+          if (pendingRequestIds.length > 0 && !isAbortResult) {
             const errorText = localizeImError(rawError);
             console.warn('[agent] SDK result is_error, forwarding to IM bus:', errorText);
             emitImEvent('error', errorText);
@@ -10261,6 +10277,12 @@ async function startStreamingSession(preWarm = false): Promise<void> {
               imRequestRegistry.setStatus(failedReq, 'failed');
               imRequestRegistry.unregister(failedReq);
             }
+          } else if (pendingRequestIds.length > 0 && isAbortResult) {
+            // #307: an aborted IM turn must NOT push the internal diagnostic to the
+            // IM peer as an error. handleMessageComplete() below runs for is_error
+            // aborts (isEmptySuccessfulSdkResult is false when is_error), so it
+            // emits the IM 'complete' event and pops/unregisters the pending request.
+            console.log('[agent] Suppressing IM error forward for aborted turn (handleMessageComplete will finalize)');
           }
         }
 
@@ -10334,7 +10356,14 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         const hasResultText = resultText.trim().length > 0;
         const resultErrorText = (hasResultText ? resultText : '') || resultMessage.errors?.join('; ') || currentTurnLastAssistantMessageError || '';
         const noOutputResultText = resultMessage.is_error ? resultErrorText : (hasResultText ? resultText : '');
-        if (noOutputResultText && !currentTurnHasOutput && !currentTurnToolCount) {
+        // #307: skip the no-output error/banner block for aborts (isAbortResult
+        // computed above). On abort the only "result text" is the SDK's internal
+        // parser diagnostic; surfacing it via the is_error branch below would show
+        // that scary internal string in the red error banner. The turn instead flows
+        // to handleMessageComplete() below carrying terminal_reason='aborted_streaming',
+        // which the frontend renders as the normal inline "已停止" feedback (banner
+        // suppressed by describeTerminalReason).
+        if (noOutputResultText && !currentTurnHasOutput && !currentTurnToolCount && !isAbortResult) {
           if (resultMessage.is_error) {
             console.warn('[agent] SDK error result with no streamed output, showing as agent-error:', resultErrorText);
             lastAgentError = resultErrorText;

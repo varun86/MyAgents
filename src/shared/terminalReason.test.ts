@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   describeTerminalReason,
+  isAbortedTerminalReason,
   shouldRecordTurnForTitle,
   shouldSurfaceTerminalReason,
 } from './terminalReason';
@@ -58,6 +59,35 @@ describe('shouldSurfaceTerminalReason', () => {
     expect(shouldSurfaceTerminalReason(undefined)).toBe(false);
     expect(shouldSurfaceTerminalReason('prompt_too_long')).toBe(true);
     expect(shouldSurfaceTerminalReason('some_future_reason')).toBe(true);
+  });
+});
+
+describe('isAbortedTerminalReason — #307 abort detection', () => {
+  it('returns true ONLY for aborted_* reasons (incl. future ones)', () => {
+    expect(isAbortedTerminalReason('aborted_streaming')).toBe(true);
+    expect(isAbortedTerminalReason('aborted_tools')).toBe(true);
+    expect(isAbortedTerminalReason('aborted_init')).toBe(true); // future-proof prefix match
+  });
+
+  it('returns FALSE for missing / non-string input — the #307 trap', () => {
+    // This is why shouldSurfaceTerminalReason() CANNOT be reused as an abort
+    // predicate: it returns false for missing reasons too, which would wrongly
+    // suppress legitimate non-abort errors (third-party 4xx/5xx) that carry no
+    // terminal_reason. isAbortedTerminalReason must NOT classify "missing" as abort.
+    expect(isAbortedTerminalReason(undefined)).toBe(false);
+    expect(isAbortedTerminalReason(null)).toBe(false);
+    expect(isAbortedTerminalReason('')).toBe(false);
+    expect(isAbortedTerminalReason(42)).toBe(false);
+    expect(isAbortedTerminalReason({})).toBe(false);
+  });
+
+  it('returns false for completed and every non-abort reason', () => {
+    expect(isAbortedTerminalReason('completed')).toBe(false);
+    expect(isAbortedTerminalReason('prompt_too_long')).toBe(false);
+    expect(isAbortedTerminalReason('blocking_limit')).toBe(false);
+    expect(isAbortedTerminalReason('model_error')).toBe(false);
+    expect(isAbortedTerminalReason('max_turns')).toBe(false);
+    expect(isAbortedTerminalReason('some_future_reason')).toBe(false);
   });
 });
 

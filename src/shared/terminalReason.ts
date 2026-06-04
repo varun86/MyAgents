@@ -112,7 +112,7 @@ const MAP: Record<TerminalReason, TerminalReasonInfo> = {
 export function describeTerminalReason(reason: unknown): TerminalReasonInfo | null {
   if (typeof reason !== 'string' || reason.length === 0) return null;
   if (reason === 'completed') return null;
-  if (reason.startsWith('aborted_')) return null;
+  if (isAbortedTerminalReason(reason)) return null;
   const info = MAP[reason as TerminalReason];
   if (info) return info;
   // 未知 reason — 返回通用占位，避免前端 switch 穷举
@@ -126,6 +126,24 @@ export function describeTerminalReason(reason: unknown): TerminalReasonInfo | nu
 /** 便捷判断：该 reason 是否应该打扰用户（banner/toast）。 */
 export function shouldSurfaceTerminalReason(reason: unknown): boolean {
   return describeTerminalReason(reason) !== null;
+}
+
+/**
+ * 该 result 是否是"用户/系统主动中止"（`aborted_streaming` / `aborted_tools` /
+ * 未来任意 `aborted_*`）。
+ *
+ * 与 `shouldSurfaceTerminalReason` 的关键区别：本函数只对 abort 返回 true，
+ * 对**缺失 / 未知 / 其它非 abort** 一律返回 false。`shouldSurfaceTerminalReason`
+ * 对缺失 reason 也返回 false（因为 describeTerminalReason 把 undefined 也归为
+ * "无需展示"），所以**不能**用它来判断"是不是 abort"——否则会把所有没带
+ * terminal_reason 的合法错误（第三方供应商 4xx/5xx 等）误判成 abort 一起吞掉。
+ *
+ * #307：用户点停止后，SDK 把本轮包成 is_error result，result 文本是内部解析器
+ * 诊断串 `[ede_diagnostic] result_type=user ...`。结果处理器据此判断"这是中止，
+ * 不是真失败"，跳过 chat:agent-error，避免把内部诊断当报错横幅弹给用户。
+ */
+export function isAbortedTerminalReason(reason: unknown): boolean {
+  return typeof reason === 'string' && reason.startsWith('aborted_');
 }
 
 /**

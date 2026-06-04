@@ -20,6 +20,7 @@ import { withQuestionTextAnswerKeys } from '../../shared/types/askUserQuestion';
 import { getExternalRuntime, getCurrentRuntimeType, isExternalRuntime } from './factory';
 import { resolveCodexWorkspaceInstructions } from './workspace-instructions';
 import { shouldQueueExternalSend, canDrainExternalQueue } from './external-queue-policy';
+import { decideSessionCompleteErrorAction } from './external-abort-policy';
 import type { RuntimeType } from '../../shared/types/runtime';
 import { deriveSessionTitle } from '../../shared/sessionTitle';
 import { isPendingSessionId } from '../../shared/constants';
@@ -54,6 +55,17 @@ let activeProcess: RuntimeProcess | null = null;
 let activeRuntime: AgentRuntime | null = null;
 let isRunning = false;
 let turnCompleted = false;
+// #307: set true while stopExternalSession() is tearing down the process (user
+// pressed Stop / config-change restart / session takeover). When the killed
+// subprocess then emits its terminal session_complete (subtype='error' from the
+// non-zero exit, or an error_during_execution result), the session_complete
+// handler consults this flag to SUPPRESS the chat:agent-error / chat:message-error
+// banner — an abort we initiated is not a real failure. Mirrors the builtin path's
+// isAbortedTerminalReason()/isInterruptingResponse gate. terminal_reason alone is
+// insufficient here: CC `-p` has no mid-turn interrupt, so Stop = SIGTERM kill,
+// whose synthetic session_complete carries no terminal_reason. Consumed (reset to
+// false) the first time the handler reads it, with a backstop reset at session start.
+let userRequestedExternalStop = false;
 let startingPromise: Promise<void> | null = null;  // Guard against concurrent startExternalSession
 // Target sessionId of the in-flight startExternalSession. Set the moment
 // startExternalSession is called (before _doStartExternalSession's spawn-and-handshake
@@ -249,6 +261,7 @@ function resetModuleState(): void {
   activeRuntime = null;
   isRunning = false;
   turnCompleted = false;
+  userRequestedExternalStop = false; // #307: backstop reset — never leak a pending stop into a fresh session
   startingPromise = null;
   startingSessionId = null;
   if (watchdogTimer) { clearInterval(watchdogTimer); watchdogTimer = null; }
@@ -2116,6 +2129,11 @@ export async function cancelExternalImRequest(
 export async function stopExternalSession(): Promise<boolean> {
   clearWatchdog();
   if (!activeProcess || !activeRuntime) return false;
+  // #307: mark this teardown as intentional BEFORE killing the process, so the
+  // session_complete the kill triggers is recognized as an abort (not a failure)
+  // and its error banner is suppressed. Set before the await — the exit handler
+  // can fire its session_complete during stopSession().
+  userRequestedExternalStop = true;
   try {
     await activeRuntime.stopSession(activeProcess);
     return true;
@@ -3155,9 +3173,20 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
         // Repro: user reported "Gemini process exited with code 137" toast after
         // leaving a session idle for 26 minutes with no interaction. See
         // ~/Downloads/myagents-logs-2026-04-14T17-28-53.txt final session_complete line.
-        const isIdleExit = turnCompleted && !currentAssistantText.trim();
-        if (isIdleExit) {
+        // #307: consume the intentional-stop flag (read-and-clear) so a single stop
+        // suppresses exactly one session_complete; later genuine errors still surface.
+        const wasUserStop = userRequestedExternalStop;
+        userRequestedExternalStop = false;
+        const errorAction = decideSessionCompleteErrorAction({
+          turnCompleted,
+          hasAssistantText: !!currentAssistantText.trim(),
+          userRequestedStop: wasUserStop,
+        });
+        if (errorAction === 'ignore-idle') {
           console.log(`[external-session] Ignoring idle-exit "${errorMessage}" — process was between turns; next message will auto-resume`);
+        } else if (errorAction === 'suppress-user-stop') {
+          console.log(`[external-session] Suppressing error banner for user-initiated stop (was: "${errorMessage}")`);
+          resetTurnAccumulators(); // Prevent stale content leaking into next turn
         } else {
           broadcast('chat:agent-error', { message: errorMessage });
           broadcast('chat:message-error', errorMessage);
