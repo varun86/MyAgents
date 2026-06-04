@@ -327,6 +327,20 @@ export async function probeAnthropicProviderDirect(args: {
             messages: [{ role: 'user', content: '1' }],
           }),
           signal: probeSignal,
+          // Don't follow redirects (review #1): a legit-looking https baseUrl
+          // that 302s to an internal address would otherwise let this probe
+          // reach intranet/metadata endpoints and reflect the body into `detail`.
+          // We deliberately do NOT scheme/private-net-block the baseUrl itself
+          // (unlike downloadAndSaveUrl's prompt-controlled URLs): the provider
+          // baseUrl is USER-CONFIGURED settings and legitimately points at
+          // localhost / LAN for self-hosted models (Ollama, LM Studio, vLLM,
+          // local Anthropic-compatible proxies). Blocking those would break
+          // verification for a config the SDK connects to anyway in normal use —
+          // the probe is byte-equivalent to that real connection. Refusing
+          // redirects closes the one vector (host says https, hops internal)
+          // without that regression; it's diagnostic-only so a refused redirect
+          // just yields less detail, never a false verdict.
+          redirect: 'error',
         };
         if (proxyUrl) {
           agent = new ProxyAgent(proxyUrl);

@@ -37,6 +37,21 @@ const EXTERNAL_TIMEOUT_MS = 30_000;
 /** Max chars per user/assistant message when building context */
 const PER_MESSAGE_LIMIT = 200;
 
+/**
+ * Security (review #2): the title turn must NOT be able to run any tool — its
+ * sole input is (indirect-injection-prone) transcript text. Claude Code is the
+ * one external runtime that honours `--disallowed-tools` (claude-code.ts:382),
+ * so we strip the full built-in surface there. Codex/Gemini don't consume this
+ * list, so they're constrained via a read-only / approval-required permission
+ * mode instead (see `titlePermissionMode`). Listing every built-in name (rather
+ * than relying on permission mode) removes the tools from the model's context
+ * entirely, so even bypassPermissions has nothing to auto-execute. */
+const TITLE_GEN_DISALLOWED_TOOLS = [
+  'Task', 'Bash', 'BashOutput', 'KillShell', 'Glob', 'Grep', 'Read', 'Edit',
+  'MultiEdit', 'Write', 'NotebookEdit', 'WebFetch', 'WebSearch', 'TodoWrite',
+  'SlashCommand', 'ExitPlanMode', 'AskUserQuestion',
+];
+
 const SYSTEM_PROMPT = `You are a session title generator for a chat app. Weeks later the user will
 scan a long list of past sessions — your title must let them INSTANTLY
 recognize which task this was, and tell it apart from similar ones.
@@ -193,6 +208,16 @@ async function generateTitleInner(
         includePartialMessages: false,
         persistSession: false,
         mcpServers: {},
+        // Security (review #2): title generation is a PURE-TEXT task whose only
+        // input is (attacker-influenceable) transcript text. Running it at
+        // bypassPermissions with built-in tools available means an indirect
+        // prompt injection in the transcript could make the title model emit a
+        // Bash/Write tool_use that then executes with NO approval. `tools: []`
+        // is the SDK-native "disable ALL built-in tools" (sdk.d.ts:1360), and
+        // `mcpServers:{}` already removes MCP tools — together there is nothing
+        // to invoke, so bypassPermissions becomes moot. The model can still
+        // produce the title text (tools are orthogonal to generation).
+        tools: [],
         // Wrap with [1m] when contextLength ≥1M so SDK uses the 1M path even for
         // a one-shot title-gen subprocess. SDK strips the suffix before the wire.
         ...(model ? { model: applyContextWindowSuffix(model) } : {}),
@@ -267,15 +292,25 @@ function createFreshRuntime(type: RuntimeType): AgentRuntime {
 }
 
 /**
- * Force the most permissive / no-prompt mode for each runtime so the title
- * turn never blocks on permission requests. Title generation is text-only,
- * the LLM should not invoke tools, but we still bypass approval to be safe.
+ * Pick the LEAST-capable per-runtime mode that still lets a pure-text turn
+ * complete without blocking. Title generation is text-only; the previous code
+ * forced the MOST permissive mode (fullAgency/full-auto/yolo) "to be safe",
+ * which was backwards — it made an injected tool_use execute with no approval
+ * (review #2). The happy text path needs no tools, so:
+ *   - claude-code → fullAgency, but `TITLE_GEN_DISALLOWED_TOOLS` strips every
+ *     tool from context (the real guard for CC; bypass is then moot).
+ *   - codex       → 'suggest' = read-only sandbox (codex.ts:1082): an injected
+ *     command can't touch the FS/network, and approval='untrusted' surfaces a
+ *     permission_request that the caller settles+kills (no execution).
+ *   - gemini      → 'default' = approval-required (NOT yolo): a tool attempt
+ *     raises a permission_request → settled+killed; text still streams freely.
+ * Any tool attempt therefore degrades to "no title", never to execution.
  */
 function titlePermissionMode(runtimeType: RuntimeType): string {
   switch (runtimeType) {
-    case 'claude-code': return 'fullAgency';  // → bypassPermissions
-    case 'codex': return 'full-auto';         // → approvalPolicy=never + sandbox=workspace-write
-    case 'gemini': return 'yolo';             // → ACP yolo mode
+    case 'claude-code': return 'fullAgency';  // tools stripped via disallowedTools
+    case 'codex': return 'suggest';           // → approval=untrusted + sandbox=read-only
+    case 'gemini': return 'default';          // → approval-required (no yolo)
     default: return 'auto';
   }
 }
@@ -335,6 +370,9 @@ export async function generateTitleExternal(
     systemPromptAppend: SYSTEM_PROMPT,
     ...(model ? { model } : {}),
     permissionMode: titlePermissionMode(runtimeType),
+    // Strip all tools from the model's context (Claude Code honours this;
+    // Codex/Gemini are constrained by the read-only/approval mode above).
+    disallowedTools: TITLE_GEN_DISALLOWED_TOOLS,
     maxTurns: 1,
     // Placeholder — title-gen passes its own systemPromptAppend and explicit permissionMode,
     // so scenario-driven branches in each runtime (default-mode/L2-prompt) never fire.

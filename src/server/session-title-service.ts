@@ -70,12 +70,20 @@ export async function generateAndApplyTitle(
   }
   if (!title) return null;
 
-  // TOCTOU re-check: a user rename may have landed during the (multi-second) LLM
-  // call. Never clobber a manual title.
+  // TOCTOU close (review #3): a user rename may have landed during the
+  // (multi-second) LLM call. A plain read-then-write still races — the rename
+  // could land between this read and the write acquiring the lock — so the
+  // titleSource check is ALSO enforced inside updateSessionMetadata's lock via
+  // the precondition. The cheap read here just skips a doomed write early.
   const fresh = getSessionMetadata(sessionId);
   if (!fresh || fresh.titleSource === 'user') return null;
 
-  await updateSessionMetadata(sessionId, { title, titleSource: 'auto' });
+  const applied = await updateSessionMetadata(
+    sessionId,
+    { title, titleSource: 'auto' },
+    (current) => current.titleSource !== 'user',
+  );
+  if (!applied) return null; // user renamed inside the window — leave it.
   // Renderer consumes this to update the tab header + refresh session-list
   // surfaces. Scoped naturally: the broadcast reaches only this session's
   // sidecar SSE connection (Tab-scoped isolation).

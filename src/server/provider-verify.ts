@@ -108,8 +108,9 @@ async function verifyViaSdk(
     : undefined;
 
   // Compose the structured failure result shared by the timeout + no-result
-  // branches: gather bridge signals (strong/weak), fire the lazy diagnostic,
-  // and build an always-present `detail` via the pure composers.
+  // branches: gather bridge signals (strong/weak), consume the already-running
+  // diagnostic (started concurrently above), and build an always-present
+  // `detail` via the pure composers.
   const buildTimeoutLikeFailure = async (
     reason: 'timeout' | 'no_result',
   ): Promise<{ success: false; error: string; detail: string }> => {
@@ -420,10 +421,12 @@ export async function verifyProviderViaSdk(
       // verifyViaSdk.opts.upstreamBaseUrlForDiagnostics docstring.
       upstreamBaseUrlForDiagnostics: apiProtocol === 'openai' ? baseUrl : undefined,
       detailContext: { baseUrl, apiProtocol: apiProtocol ?? 'anthropic' },
-      // Anthropic-protocol only: a DIAGNOSTIC-ONLY direct probe, fired lazily on
-      // the timeout/no-result branch to enrich `detail` with the provider's real
-      // status+body. Never flips the verdict (Node undici ≠ SDK native binary on
-      // proxy semantics). OpenAI is already covered by the authoritative pre-probe.
+      // Anthropic-protocol only: a DIAGNOSTIC-ONLY direct probe. Started
+      // CONCURRENTLY with the SDK at call entry (verifyViaSdk), but CONSUMED
+      // only by the timeout/no-result branch to enrich `detail` with the
+      // provider's real status+body. Never flips the verdict (Node undici ≠ SDK
+      // native binary on proxy semantics). OpenAI is already covered by the
+      // authoritative pre-probe.
       diagnostic: apiProtocol === 'openai'
         ? undefined
         : (signal) => probeAnthropicProviderDirect({ providerEnv, model, getProxyForUrl, signal }),

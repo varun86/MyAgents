@@ -25,7 +25,7 @@ import { lstat, readFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { saveToolAttachment } from './tool-attachments';
-import type { ToolAttachment, ToolAttachmentKind } from '../../shared/types/tool-attachment';
+import { MAX_TOOL_ATTACHMENT_BYTES, type ToolAttachment, type ToolAttachmentKind } from '../../shared/types/tool-attachment';
 
 const EDGE_TTS_TOOL = 'mcp__edge-tts__text_to_speech';
 const GEMINI_GENERATE = 'mcp__gemini-image__generate_image';
@@ -182,6 +182,15 @@ export async function buildBuiltinMediaAttachments(
       const st = await lstat(spec.filePath);
       if (st.isSymbolicLink() || !st.isFile()) {
         console.warn(`[builtin-media] not a regular file (symlink?), skip: ${spec.filePath}`);
+        continue;
+      }
+      // Size gate BEFORE readFile (review #4): saveToolAttachment enforces the
+      // 25MB cap, but only AFTER we've read the whole file + base64-expanded it
+      // (~1.33x), so an oversized file would briefly peak at ~2.3x its size in
+      // memory before being rejected. We already have `st` from lstat — reject
+      // up front so a pathological file never gets fully loaded.
+      if (st.size > MAX_TOOL_ATTACHMENT_BYTES) {
+        console.warn(`[builtin-media] file exceeds ${MAX_TOOL_ATTACHMENT_BYTES} bytes (${st.size}), skip: ${spec.filePath}`);
         continue;
       }
       const bytes = await readFile(spec.filePath);
