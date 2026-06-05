@@ -1,7 +1,16 @@
 import { lazy, Suspense, useCallback, useMemo, useState } from 'react';
+import type { ChangeEvent, KeyboardEvent } from 'react';
 import { ChevronDown } from 'lucide-react';
 import type { HeartbeatConfig, ActiveHoursConfig } from '../../../../shared/types/im';
 import { DEFAULT_HEARTBEAT_CONFIG } from '../../../../shared/types/im';
+import { retainFocusOnMouseDown } from '@/utils/focusRetention';
+import {
+    HEARTBEAT_INTERVAL_MAX,
+    HEARTBEAT_INTERVAL_MIN,
+    commitHeartbeatIntervalDraft,
+    isHeartbeatIntervalCustom,
+    resolveHeartbeatIntervalInputValue,
+} from './heartbeatIntervalInput';
 
 const FilePreviewModal = lazy(() => import('../../FilePreviewModal'));
 
@@ -12,6 +21,8 @@ const INTERVAL_PRESETS = [
     { label: '1 小时', value: 60 },
     { label: '4 小时', value: 240 },
 ];
+
+const INTERVAL_PRESET_VALUES = INTERVAL_PRESETS.map(p => p.value);
 
 const COMMON_TIMEZONES = [
     { label: 'Asia/Shanghai (UTC+8)', value: 'Asia/Shanghai' },
@@ -121,7 +132,53 @@ export default function HeartbeatConfigCard({
         await open(parentDir);
     }, [previewFile]);
 
-    const isCustomInterval = !INTERVAL_PRESETS.some(p => p.value === config.intervalMinutes);
+    // Local draft for the custom-interval input. `null` = not editing → display
+    // derives from the persisted value. While editing, the draft owns the
+    // displayed text so partial digits (e.g. "1" on the way to "10", "5" on the
+    // way to "50") don't get swallowed by the clamp or collapsed into a preset
+    // match. See issue #310 and ./heartbeatIntervalInput.ts.
+    const [customDraft, setCustomDraft] = useState<string | null>(null);
+    const isCustomInterval = isHeartbeatIntervalCustom(
+        config.intervalMinutes,
+        INTERVAL_PRESET_VALUES,
+    );
+    const customInputValue = resolveHeartbeatIntervalInputValue(
+        customDraft,
+        config.intervalMinutes,
+        INTERVAL_PRESET_VALUES,
+    );
+
+    const handleCustomFocus = useCallback(() => {
+        setCustomDraft(prev =>
+            prev ?? (isCustomInterval ? String(config.intervalMinutes) : ''),
+        );
+    }, [isCustomInterval, config.intervalMinutes]);
+
+    const handleCustomChange = useCallback((e: ChangeEvent<HTMLInputElement>) => {
+        setCustomDraft(e.target.value);
+    }, []);
+
+    const handleCustomBlur = useCallback(() => {
+        if (customDraft === null) return;
+        const result = commitHeartbeatIntervalDraft(customDraft);
+        if (result.kind === 'commit' && result.value !== config.intervalMinutes) {
+            update({ intervalMinutes: result.value });
+        }
+        setCustomDraft(null);
+    }, [customDraft, config.intervalMinutes, update]);
+
+    const handleCustomKeyDown = useCallback((e: KeyboardEvent<HTMLInputElement>) => {
+        if (e.key === 'Enter') (e.currentTarget as HTMLInputElement).blur();
+    }, []);
+
+    const selectPreset = useCallback(
+        (value: number) => {
+            setCustomDraft(null);
+            update({ intervalMinutes: value });
+        },
+        [update],
+    );
+
     const selectedTz = COMMON_TIMEZONES.find(tz => tz.value === config.activeHours?.timezone);
 
     return (
@@ -184,7 +241,22 @@ export default function HeartbeatConfigCard({
                                 <button
                                     key={preset.value}
                                     type="button"
-                                    onClick={() => update({ intervalMinutes: preset.value })}
+                                    // Retain focus on the custom <input> when a
+                                    // preset is left-clicked: preventing the
+                                    // mousedown's default focus transfer means
+                                    // the input never blurs mid-click, so its
+                                    // blur-commit can't race the preset write
+                                    // (no draft is committed then immediately
+                                    // overwritten). retainFocusOnMouseDown is
+                                    // left-button only, so the typed draft is
+                                    // never silently lost: a left-button
+                                    // drag-off keeps focus (draft survives,
+                                    // commits on the eventual blur); a
+                                    // right-click is not prevented, so the input
+                                    // blurs and commits the draft normally. See
+                                    // issue #310.
+                                    onMouseDown={retainFocusOnMouseDown}
+                                    onClick={() => selectPreset(preset.value)}
                                     className={`rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
                                         config.intervalMinutes === preset.value
                                             ? 'bg-[var(--accent)] text-white'
@@ -198,16 +270,14 @@ export default function HeartbeatConfigCard({
                             <div className="flex items-center gap-1">
                                 <input
                                     type="number"
-                                    min={5}
-                                    max={1440}
-                                    value={isCustomInterval ? config.intervalMinutes : ''}
+                                    min={HEARTBEAT_INTERVAL_MIN}
+                                    max={HEARTBEAT_INTERVAL_MAX}
+                                    value={customInputValue}
                                     placeholder="自定义"
-                                    onChange={e => {
-                                        const val = parseInt(e.target.value, 10);
-                                        if (!isNaN(val) && val >= 5) {
-                                            update({ intervalMinutes: val });
-                                        }
-                                    }}
+                                    onFocus={handleCustomFocus}
+                                    onChange={handleCustomChange}
+                                    onBlur={handleCustomBlur}
+                                    onKeyDown={handleCustomKeyDown}
                                     className={`w-20 rounded-lg border px-2 py-1.5 text-xs ${
                                         isCustomInterval
                                             ? 'border-[var(--accent)] bg-[var(--accent)]/10'
