@@ -53,26 +53,30 @@ export default function ToolAudioAttachment({ attachment }: Props) {
   }, [menuOpen]);
 
   const savedPath = attachment.savedPath;
+  // Playback uses savedPath (the restart-safe trusted-root copy); "open path"
+  // targets the ORIGINAL generated file (sourcePath) the card advertises, so
+  // what the user sees and what the menu opens are the same file (PRD 0.2.31 ③).
+  const openPath = attachment.sourcePath ?? attachment.savedPath;
 
   const reveal = useCallback(async () => {
     setMenuOpen(false);
-    if (!savedPath) return;
+    if (!openPath) return;
     try {
-      await fileService.openPathExternal({ fullPath: savedPath });
+      await fileService.openPathExternal({ fullPath: openPath });
     } catch (err) {
       console.error('[ToolAudioAttachment] reveal failed:', err);
     }
-  }, [fileService, savedPath]);
+  }, [fileService, openPath]);
 
   const openDefault = useCallback(async () => {
     setMenuOpen(false);
-    if (!savedPath) return;
+    if (!openPath) return;
     try {
-      await fileService.openPathWithDefault({ fullPath: savedPath });
+      await fileService.openPathWithDefault({ fullPath: openPath });
     } catch (err) {
       console.error('[ToolAudioAttachment] open-with-default failed:', err);
     }
-  }, [fileService, savedPath]);
+  }, [fileService, openPath]);
 
   // Placeholder (async save in flight — e.g. Codex audio).
   if (attachment.pendingId && !attachment.refPath) {
@@ -108,7 +112,7 @@ export default function ToolAudioAttachment({ attachment }: Props) {
             {format} 音频
           </div>
         )}
-        {savedPath && (
+        {openPath && (
           <div className="relative" ref={menuRef}>
             <button
               type="button"

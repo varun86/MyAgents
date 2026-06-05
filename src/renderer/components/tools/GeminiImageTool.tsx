@@ -1,78 +1,18 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import type { ToolUseSimple } from '@/types/chat';
 import { CollapsibleTool } from './CollapsibleTool';
-import { ToolHeader, unwrapMcpResult } from './utils';
+import { ToolHeader } from './utils';
 import { useImagePreview } from '@/context/ImagePreviewContext';
 import { readLocalFileAsBlobUrl } from '@/utils/audioPlayer';
+import { parseGeminiImageResult, imageMimeFromPath } from '../../../shared/builtinMediaResult';
 
 interface GeminiImageToolProps {
   tool: ToolUseSimple;
 }
 
-/** Parse structured fields from the tool result text */
-function parseToolResult(result: string | undefined): {
-  contextId?: string;
-  filePath?: string;
-  resolution?: string;
-  aspectRatio?: string;
-  model?: string;
-  description?: string;
-  editCount?: number;
-  isEdit: boolean;
-  error?: string;
-} {
-  if (!result) return { isEdit: false };
-
-  // Unwrap JSON-encoded MCP content array if present
-  const unwrapped = unwrapMcpResult(result);
-  if (unwrapped !== result) return parseToolResult(unwrapped);
-
-  const lines = result.split('\n');
-  const fields: Record<string, string> = {};
-
-  for (const line of lines) {
-    const match = line.match(/^(\w+):\s*(.+)$/);
-    if (match) {
-      fields[match[1]] = match[2].trim();
-    }
-  }
-
-  // Extract edit count from "图片已编辑（第 N 次修改）"
-  const editMatch = result.match(/第\s*(\d+)\s*次修改/);
-  const editCount = editMatch ? parseInt(editMatch[1], 10) : undefined;
-
-  // Detect if it's an edit operation
-  const isEdit = result.includes('图片已编辑');
-
-  // Check for errors
-  const isError = result.startsWith('Error');
-
-  // Extract description after "图片描述:" line
-  const descMatch = result.match(/图片描述:\s*(.+?)(?:\n\n|$)/s);
-  const description = descMatch?.[1]?.trim() || fields['description'];
-
-  return {
-    contextId: fields['contextId'],
-    filePath: fields['filePath'],
-    resolution: fields['resolution']?.split('|')[0]?.trim(),
-    aspectRatio: fields['aspectRatio'] || fields['resolution']?.split('|')[1]?.replace('aspectRatio:', '')?.trim(),
-    model: fields['model'],
-    description,
-    editCount,
-    isEdit,
-    error: isError ? result : undefined,
-  };
-}
-
-/** Infer MIME type from image file extension */
-function imageMime(filePath: string): string {
-  const ext = filePath.split('.').pop()?.toLowerCase();
-  const map: Record<string, string> = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif' };
-  return map[ext ?? ''] ?? 'image/png';
-}
-
 export default function GeminiImageTool({ tool }: GeminiImageToolProps) {
-  const parsed = parseToolResult(tool.result);
+  // PRD 0.2.31 — shared single-source parser (server + this card use the same one).
+  const parsed = parseGeminiImageResult(tool.result);
   const { openPreview } = useImagePreview();
   // PRD 0.2.30 — when the image is surfaced via the first-class attachment
   // pipeline (ToolAttachmentGallery renders it in-flow below this card), the card
@@ -101,7 +41,7 @@ export default function GeminiImageTool({ tool }: GeminiImageToolProps) {
     const filePath = parsed.filePath;
     let cancelled = false;
 
-    readLocalFileAsBlobUrl(filePath, imageMime(filePath), '/api/image')
+    readLocalFileAsBlobUrl(filePath, imageMimeFromPath(filePath), '/api/image')
       .then(url => {
         if (cancelled) {
           if (url.startsWith('blob:')) URL.revokeObjectURL(url);
