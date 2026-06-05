@@ -3,6 +3,7 @@ import type { ReactNode } from 'react';
 
 import { useFileAction } from '@/context/FileActionContext';
 import type { ToolUseSimple } from '@/types/chat';
+import { toWorkspaceRelativePath } from '@/utils/workspaceFileLinks';
 
 import {
   getThinkingBadgeConfig,
@@ -119,15 +120,26 @@ const FILE_PATH_BOX_CLASS = 'rounded border border-[var(--line-subtle)] bg-[var(
  */
 export function FilePath({ path }: { path: string }) {
   const fileAction = useFileAction(); // null outside Chat
+  // File tools (Write/Edit/Read/NotebookEdit) emit ABSOLUTE `file_path` values,
+  // but the workspace existence-check + read commands only accept
+  // workspace-relative paths (Rust `resolve_inside_workspace` rejects absolute
+  // paths outright → the chip would always collapse to a plain box). Normalize
+  // an in-workspace absolute path to the same relative form inline AI-text
+  // paths already use, so the existence check resolves and the menu actions
+  // (预览/引用/打开/打开所在文件夹) work. Falls back to the raw path — which stays
+  // a plain chip — when it's outside the workspace or no workspace is known.
+  const actionPath = (fileAction?.workspacePath
+    ? toWorkspaceRelativePath(path, fileAction.workspacePath)
+    : null) ?? path;
   // Triggers a batched existence check; returns cached result or null (pending).
-  const pathInfo = fileAction?.checkPath(path) ?? null;
+  const pathInfo = fileAction?.checkPath(actionPath) ?? null;
 
   if (!fileAction || !pathInfo?.exists) {
     return <MonoText className={FILE_PATH_BOX_CLASS}>{path}</MonoText>;
   }
 
   const openMenu = (x: number, y: number) =>
-    fileAction.openFileMenu(x, y, path, pathInfo.type);
+    fileAction.openFileMenu(x, y, actionPath, pathInfo.type);
 
   return (
     <code

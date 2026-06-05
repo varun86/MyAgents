@@ -108,7 +108,22 @@ function hasUnsupportedScheme(raw: string): boolean {
   return /^[a-z][a-z0-9+\-.]*:/i.test(raw);
 }
 
-function toWorkspaceRelativePath(rawPath: string, workspacePath: string): string | null {
+/**
+ * Normalize a path to its workspace-relative form.
+ *
+ * - Absolute path inside the workspace → relative (e.g.
+ *   `/ws/src/a.ts` → `src/a.ts`); absolute path outside the workspace,
+ *   or equal to the workspace root, → `null`.
+ * - Relative path that looks like a file reference → cleaned relative; other
+ *   relative inputs → `null`.
+ *
+ * File-tool cards (Write/Edit/Read/NotebookEdit) carry ABSOLUTE `file_path`
+ * values, but the workspace existence-check + read commands only accept
+ * workspace-relative paths (Rust `resolve_inside_workspace` rejects absolute
+ * paths outright). Callers normalize here so absolute and relative paths flow
+ * through the same backend path, matching how inline AI-text paths behave.
+ */
+export function toWorkspaceRelativePath(rawPath: string, workspacePath: string): string | null {
   const path = rawPath.trim();
   if (!path) return null;
 
