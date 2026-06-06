@@ -53,4 +53,15 @@ describe('buildChatFlipPatch — chat-flip invariants (instant-nav D1)', () => {
         const without = buildChatFlipPatch(base, { agentDir: '/ws/a', sessionId: 's1', title: 'A' });
         expect('joinedExistingSidecar' in without).toBe(false);
     });
+
+    it('explicit joinedExistingSidecar:false overrides a stale prior true (config-stomping guard)', () => {
+        // The new-session instant-nav flip MUST pass `false` (not omit it), or a
+        // reused tab that previously joined a sidecar would keep `true` → Chat
+        // skips MCP/agents/model push + adopts disk config over the user's picks.
+        const patch = buildChatFlipPatch(
+            { ...base, joinedExistingSidecar: true },
+            { agentDir: '/ws/a', sessionId: 's1', title: 'A', joinedExistingSidecar: false },
+        );
+        expect(patch.joinedExistingSidecar).toBe(false);
+    });
 });

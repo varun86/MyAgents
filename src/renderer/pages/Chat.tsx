@@ -1019,8 +1019,15 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
 
     const autoSend = async () => {
       try {
-        // 1. Sync MCP configuration
-        if (launchMessage.mcpEnabledServers?.length) {
+        // 1. Sync MCP configuration. Push whenever the launcher provided a
+        // selection ARRAY — including an empty one: `[]` means "user explicitly
+        // disabled all MCP" and MUST be pushed so the first turn doesn't fall
+        // back to disk file-config (re-enabling servers the user just turned
+        // off). Only `undefined` (no selection info) is skipped — the standalone
+        // isConnected-gated MCP effect covers that case. (Previously gated on
+        // `?.length`, which dropped the explicit-disable push → first-turn
+        // config-stomping when the Chat mounts before the standalone push lands.)
+        if (launchMessage.mcpEnabledServers) {
           const allServers = await getAllMcpServers();
           syncMcpServerNames(allServers);
           const globalEnabled = await getEnabledMcpServerIds();

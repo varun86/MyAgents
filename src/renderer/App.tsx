@@ -1384,7 +1384,14 @@ export default function App() {
         setTabs((prev) =>
           prev.map((t) =>
             t.id === targetTabId
-              ? buildChatFlipPatch(t, { agentDir: project.path, sessionId: effectiveSessionId, title: flipTitle, initialMessage })
+              // joinedExistingSidecar: false is EXPLICIT (not omitted) — a new
+              // session always spawns a fresh sidecar (not joined). Omitting it
+              // would let buildChatFlipPatch preserve the tab's PRIOR value, and
+              // a reused tab (joined a session → back to launcher → new chat in
+              // the same tab) would keep a stale `true` → Chat skips MCP/agents/
+              // model push + the adoption effect overwrites the user's launcher
+              // selections with the fresh sidecar's disk config (config-stomping).
+              ? buildChatFlipPatch(t, { agentDir: project.path, sessionId: effectiveSessionId, title: flipTitle, initialMessage, joinedExistingSidecar: false })
               : t
           )
         );

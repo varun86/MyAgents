@@ -139,9 +139,12 @@ export function createNewTab(): Tab {
 }
 
 /**
- * Build the tab patch that flips a tab into the **chat** view. Centralizes the
- * "open chat" shape used by every launch/switch path (App.handleLaunchProject /
- * handleSwitchSession / spawnTabForExistingSession).
+ * Build the tab patch that flips a tab into the **chat** view — the canonical
+ * "open chat" shape. Adopted by the instant-nav launch flips
+ * (App.handleLaunchProject); other inline `view:'chat'` flip sites
+ * (handleSwitchSession / spawnTabForExistingSession / Scenario-2 attach) should
+ * migrate to it. NOTE: the D1 type-guarantee below holds only where this helper
+ * is used — inline flips elsewhere are not yet type-guarded.
  *
  * **D1 (instant-nav) — enforced by the type:** a chat flip MUST carry a truthy
  * `sessionId` (a real backend id, or a `pending-<tabId>` placeholder). If it
