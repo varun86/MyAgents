@@ -15,9 +15,15 @@ interface SeekBarProps {
   /** Called with the new ratio (0..1) on click / drag. */
   onSeek: (ratio: number) => void;
   className?: string;
+  /**
+   * Track (unfilled) background class. Defaults to the faint `--line`; pass a
+   * more visible token (e.g. `bg-[var(--paper-inset)]`) when the bar sits on an
+   * elevated card so the groove reads as a real progress track, not empty space.
+   */
+  trackClass?: string;
 }
 
-export default function SeekBar({ ratio, seekable, onSeek, className }: SeekBarProps) {
+export default function SeekBar({ ratio, seekable, onSeek, className, trackClass = 'bg-[var(--line)]' }: SeekBarProps) {
   const trackRef = useRef<HTMLDivElement>(null);
   const draggingRef = useRef(false);
 
@@ -55,7 +61,7 @@ export default function SeekBar({ ratio, seekable, onSeek, className }: SeekBarP
   return (
     <div
       ref={trackRef}
-      className={`relative h-1.5 rounded-full bg-[var(--line)] ${seekable ? 'cursor-pointer' : ''} ${className ?? ''}`}
+      className={`relative h-1.5 rounded-full ${trackClass} ${seekable ? 'cursor-pointer' : ''} ${className ?? ''}`}
       onClick={handleClick}
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
@@ -69,7 +75,7 @@ export default function SeekBar({ ratio, seekable, onSeek, className }: SeekBarP
       />
       {seekable && (
         <div
-          className="absolute top-1/2 size-3 -translate-y-1/2 rounded-full bg-[var(--accent)] shadow-sm ring-2 ring-white/80"
+          className="absolute top-1/2 size-3 -translate-y-1/2 rounded-full bg-[var(--accent)] shadow-sm ring-2 ring-[var(--paper-elevated)]"
           style={{ left: `calc(${pct} - 6px)` }}
         />
       )}
