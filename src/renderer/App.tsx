@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useState, useRef, memo, lazy, Suspense } from 'react';
 import { flushSync } from 'react-dom';
-import ChatBootOverlay from '@/components/ChatBootOverlay';
 import { arrayMove } from '@dnd-kit/sortable';
 
 import {
@@ -241,7 +240,7 @@ export const MemoizedTabContent = memo(function TabContent({
           onUnreadChange={(hasUnread) => onUpdateUnread(tab.id, hasUnread)}
           onSessionIdChange={(newSessionId) => onUpdateSessionId(tab.id, newSessionId)}
         >
-          <Suspense fallback={<ChatBootOverlay />}>
+          <Suspense fallback={PAGE_FALLBACK}>
             <Chat
               onBack={onBack}
               onSwitchSession={(sessionId) => onSwitchSession(tab.id, sessionId)}
