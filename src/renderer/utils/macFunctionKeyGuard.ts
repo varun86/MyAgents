@@ -54,11 +54,11 @@ let installed = false;
 // setter directly bypasses React's value tracker, which is what
 // preserves the legitimate `onChange` for mixed-content cases.
 const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
-  HTMLInputElement.prototype,
+  typeof HTMLInputElement !== 'undefined' ? HTMLInputElement.prototype : {},
   'value',
 )?.set;
 const nativeTextareaValueSetter = Object.getOwnPropertyDescriptor(
-  HTMLTextAreaElement.prototype,
+  typeof HTMLTextAreaElement !== 'undefined' ? HTMLTextAreaElement.prototype : {},
   'value',
 )?.set;
 
@@ -78,7 +78,13 @@ const FUNCTION_KEY_NAMES: ReadonlySet<string> = new Set([
   'Insert',
 ]);
 
+export function shouldInstallMacFunctionKeyGuard(platform?: string): boolean {
+  const value = platform ?? (typeof navigator !== 'undefined' ? navigator.platform : '');
+  return value.toLowerCase().includes('mac');
+}
+
 export function installMacFunctionKeyGuard(): void {
+  if (!shouldInstallMacFunctionKeyGuard()) return;
   if (installed) return;
   installed = true;
   document.addEventListener('beforeinput', onBeforeInput, { capture: true });

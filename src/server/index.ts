@@ -4572,11 +4572,12 @@ async function main() {
           // that can exceed the 64KB pipe buffer on large log sets and deadlock the
           // child waiting for us to read.
           if (isWin) {
-            // PowerShell Compress-Archive
-            const proc = subprocessSpawn(['powershell', '-Command',
-              `Compress-Archive -Path '${filePaths.join("','")}' -DestinationPath '${zipPath}' -Force`
-            ], { stdout: 'ignore', stderr: 'ignore' });
-            await proc.exited;
+            const { default: AdmZip } = await import('adm-zip');
+            const zip = new AdmZip();
+            for (const filePath of filePaths) {
+              zip.addLocalFile(filePath);
+            }
+            zip.writeZip(zipPath);
           } else {
             // macOS/Linux: zip command
             const proc = subprocessSpawn(['zip', '-j', zipPath, ...filePaths], {

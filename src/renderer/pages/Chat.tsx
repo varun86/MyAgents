@@ -333,9 +333,14 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   useEffect(() => { if (!isSplitViewEnabled) setSplitFile(null); }, [isSplitViewEnabled]);
   const [splitRatio, setSplitRatio] = useState(0.5); // 0-1, left panel fraction
   const [isDraggingSplit, setIsDraggingSplit] = useState(false);
+  const [isSplitWidthTransitioning, setIsSplitWidthTransitioning] = useState(false);
   const isDraggingSplitRef = useRef(false);
   const splitRatioRef = useRef(splitRatio);
   splitRatioRef.current = splitRatio;
+  const isWindowsPlatform = useMemo(
+    () => typeof navigator !== 'undefined' && navigator.platform.toLowerCase().includes('win'),
+    [],
+  );
   // Store drag listeners in refs so unmount cleanup can remove them
   const dragMoveRef = useRef<((ev: MouseEvent) => void) | null>(null);
   const dragUpRef = useRef<(() => void) | null>(null);
@@ -395,6 +400,27 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   // Should the terminal component stay mounted? (for xterm.js state preservation)
   const terminalMounted = terminalAlive || (terminalPinned && splitActiveView === 'terminal');
 
+  const splitWidthTransitionTimerRef = useRef<number | null>(null);
+  const startSplitWidthTransitionSuspension = useCallback(() => {
+    if (!isWindowsPlatform) return;
+    setIsSplitWidthTransitioning(true);
+    if (splitWidthTransitionTimerRef.current !== null) {
+      window.clearTimeout(splitWidthTransitionTimerRef.current);
+    }
+    splitWidthTransitionTimerRef.current = window.setTimeout(() => {
+      setIsSplitWidthTransitioning(false);
+      splitWidthTransitionTimerRef.current = null;
+    }, 320);
+  }, [isWindowsPlatform]);
+  useEffect(() => () => {
+    if (splitWidthTransitionTimerRef.current !== null) {
+      window.clearTimeout(splitWidthTransitionTimerRef.current);
+    }
+  }, []);
+  const startBrowserSplitTransitionIfNeeded = useCallback(() => {
+    if (!splitPanelVisible) startSplitWidthTransitionSuspension();
+  }, [splitPanelVisible, startSplitWidthTransitionSuspension]);
+
   // When split view is active or layout is narrow, workspace uses overlay drawer
   const shouldUseWorkspaceOverlay = isNarrowLayout || (isSplitViewEnabled && splitPanelVisible);
 
@@ -439,6 +465,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       // file.path is relative to agentDir — construct absolute path for Rust
       const sep = agentDir?.includes('\\') ? '\\' : '/';
       const absPath = agentDir ? `${agentDir}${sep}${file.path}` : file.path;
+      startBrowserSplitTransitionIfNeeded();
       setBrowserUrl(absPath);
       setSplitActiveView('browser');
     } else {
@@ -446,7 +473,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       setSplitActiveView('file');
     }
     // Keep workspace open — user can dismiss it manually
-  }, [isSplitViewEnabled, agentDir]);
+  }, [isSplitViewEnabled, agentDir, startBrowserSplitTransitionIfNeeded]);
 
   // Open terminal in split panel (called from DirectoryPanel header button)
   const handleOpenTerminal = useCallback(() => {
@@ -457,18 +484,20 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
 
   // Open a URL in the embedded browser panel
   const handleOpenInBrowserPanel = useCallback((url: string) => {
+    startBrowserSplitTransitionIfNeeded();
     setBrowserUrl(url);
     setSplitActiveView('browser');
-  }, []);
+  }, [startBrowserSplitTransitionIfNeeded]);
 
   // Open empty browser from toolbar button.
   // First click → create blank webview (BROWSER_BLANK_URL is a data: URL, not
   // about:blank — see browserConstants.ts for why). Subsequent clicks just
   // switch view (URL preserved).
   const handleOpenBrowser = useCallback(() => {
+    startBrowserSplitTransitionIfNeeded();
     setBrowserUrl((prev) => prev ?? BROWSER_BLANK_URL);
     setSplitActiveView('browser');
-  }, []);
+  }, [startBrowserSplitTransitionIfNeeded]);
 
   const handleBrowserCreated = useCallback(() => setBrowserAlive(true), []);
   const handleBrowserCreateFailed = useCallback(() => {
@@ -3967,6 +3996,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
                     url={browserUrl}
                     isVisible={isActive && splitPanelVisible && splitActiveView === 'browser'}
                     isDraggingSplit={isDraggingSplit}
+                    isSplitTransitioning={isSplitWidthTransitioning}
                     browserAlive={browserAlive}
                     sourceFile={browserSourceFile}
                     workspace={agentDir}

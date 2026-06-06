@@ -1,6 +1,6 @@
 /**
  * Widget library resolution — replace a CDN `<script src>` for a small, trusted
- * set of charting/diagram libraries (Chart.js today) with the app's locally
+ * set of charting/diagram libraries with the app's locally
  * BUNDLED source, injected INLINE, before the widget runs.
  *
  * Why inline (not a local `src=`): the widget iframe is
@@ -35,11 +35,6 @@ export interface WidgetLibrary {
   load: () => Promise<string>;
 }
 
-// Only Chart.js is bundled today. D3 / Mermaid / Lucide — the other CDN libs the
-// widget contract names — are NOT here yet, so widgets using them still load from
-// CDN and remain blank on Windows/WebView2 (same inherited-CSP root cause). Add
-// them as registry rows when needed (Mermaid is already an app dep and handled by
-// the chat's fenced-block renderer, so it's rarely needed inside a widget).
 const LIBRARIES: WidgetLibrary[] = [
   {
     name: 'chart.js',
@@ -51,6 +46,16 @@ const LIBRARIES: WidgetLibrary[] = [
     // package `exports` don't expose the UMD); `?raw` yields the source text,
     // lazy-loaded as its own chunk and module-cached.
     load: () => import('chartjs-umd-source?raw').then((m) => m.default),
+  },
+  {
+    name: 'd3',
+    test: (src) => /(?:\/d3\/|[/@]d3@|\/d3(?:\.v\d+)?(?:\.min)?\.js(?:[?#]|$))/i.test(src),
+    load: () => import('d3-umd-source?raw').then((m) => m.default),
+  },
+  {
+    name: 'lucide',
+    test: (src) => /(?:\/lucide\/|[/@]lucide@|\/lucide(?:\.min)?\.js(?:[?#]|$))/i.test(src),
+    load: () => import('lucide-umd-source?raw').then((m) => m.default),
   },
 ];
 

@@ -5,27 +5,34 @@
  * usage that mis-fits the new endpoint shape and bypasses attachment-aware
  * permission checks.
  *
- * The endpoint `/api/attachment/tool/<sid>/<tid>/<file>` returns CORS-allowed
- * bytes for both browser dev and Tauri WebKit. <img src=…> directly fetches
- * the URL — CSP `img-src` already permits http(s).
+ * Browser dev fetches `/api/attachment/tool/<sid>/<tid>/<file>` through the
+ * Vite proxy. Tauri uses `myagents://tool-attachment/...` so WebKit/WebView2
+ * stay inside the configured `img-src` protocol allow-list.
  */
 
 import { useEffect, useState } from 'react';
-import { getSessionPort } from '@/api/tauriClient';
 import { isTauriEnvironment } from '@/utils/browserMock';
 import type { ToolAttachment } from '../../shared/types/tool-attachment';
+
+const TOOL_ATTACHMENT_API_PREFIX = '/api/attachment/tool/';
+const TOOL_ATTACHMENT_PROTOCOL_PREFIX = 'myagents://tool-attachment/';
+
+export function resolveTauriToolAttachmentUrl(refPath: string): string | null {
+  if (!refPath.startsWith(TOOL_ATTACHMENT_API_PREFIX)) return null;
+  return `${TOOL_ATTACHMENT_PROTOCOL_PREFIX}${refPath.slice(TOOL_ATTACHMENT_API_PREFIX.length)}`;
+}
 
 /**
  * Resolve a refPath to a fetchable URL for the current session.
  *
- * - Tauri: lookup sidecar port via getSessionPort → http://127.0.0.1:PORT/refPath
+ * - Tauri: myagents://tool-attachment/<sid>/<tid>/<file>
  * - Browser dev: relative refPath (vite proxy handles it)
  *
  * Returns null while resolving (caller shows a loading skeleton).
  */
 export async function resolveToolAttachmentUrl(
   attachment: ToolAttachment,
-  sessionId: string | null,
+  _sessionId: string | null,
 ): Promise<string | null> {
   // Placeholder still pending — caller renders skeleton.
   if (attachment.pendingId && !attachment.refPath) return null;
@@ -38,10 +45,10 @@ export async function resolveToolAttachmentUrl(
     return attachment.refPath;
   }
 
-  if (!sessionId) return null;
-  const port = await getSessionPort(sessionId);
-  if (port === null) return null;
-  return `http://127.0.0.1:${port}${attachment.refPath}`;
+  const protocolUrl = resolveTauriToolAttachmentUrl(attachment.refPath);
+  if (protocolUrl) return protocolUrl;
+
+  return null;
 }
 
 /**

@@ -54,6 +54,8 @@ export default defineConfig({
       // it can be `?raw`-imported and inline-injected into widgets (see
       // widgetLibraries.ts). Lookahead keeps the trailing `?raw` query intact.
       { find: /^chartjs-umd-source(?=$|\?)/, replacement: resolve(__dirname, 'node_modules/chart.js/dist/chart.umd.js') },
+      { find: /^d3-umd-source(?=$|\?)/, replacement: resolve(__dirname, 'node_modules/d3/dist/d3.min.js') },
+      { find: /^lucide-umd-source(?=$|\?)/, replacement: resolve(__dirname, 'node_modules/lucide/dist/umd/lucide.min.js') },
     ]
   },
   // Define environment variables for client code
