@@ -133,24 +133,20 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
     // Idle-scheduled so it never competes with first paint.
     useEffect(() => {
         if (!isActive) return;
-        const warm = () => { void import('@/pages/Chat').catch(() => { /* non-fatal: the real lazy() will retry on open */ }); };
-        const w = window as unknown as {
-            requestIdleCallback?: (cb: () => void, opts?: { timeout?: number }) => number;
-            cancelIdleCallback?: (id: number) => void;
-        };
-        // Warm WITHIN 200ms even if the thread is busy — this is load-bearing.
-        // Plain requestIdleCallback (no timeout) was the bug: the Launcher's
-        // initial data fetches (task-center 6-way fetch, config) keep the thread
-        // busy long enough that idle never fired before the user clicked a
-        // workspace card, so the FIRST launch paid a ~800ms cold Chat-chunk load
-        // (measured: flip→Chat-mount 827ms cold vs ~25ms warm). The timeout makes
-        // the preload deterministic; WKWebView (no requestIdleCallback) → setTimeout.
-        if (typeof w.requestIdleCallback === 'function') {
-            const id = w.requestIdleCallback(warm, { timeout: 200 });
-            return () => w.cancelIdleCallback?.(id);
-        }
-        const t = setTimeout(warm, 100);
-        return () => clearTimeout(t);
+        // Warm the Chat chunk IMMEDIATELY (useEffect is post-paint, so this never
+        // blocks the Launcher's first paint). NOT requestIdleCallback: idle keeps
+        // losing the race — the Launcher's initial data fetches (task-center 6-way,
+        // config) keep the thread busy, and the user clicks a workspace card within
+        // ~0.7s, before the ~800ms cold Chat-chunk finishes. Measured: 1st launch
+        // flip→Chat-mount ~900ms cold vs ~25ms warm. Starting the fetch the instant
+        // the Launcher mounts gives it the most head start. Logs bracket the load so
+        // we can see whether it beats the click. Only Chat (not the route graph).
+        let cancelled = false;
+        console.log('[Launcher] Chat-chunk preload START');
+        void import('@/pages/Chat')
+            .then(() => { if (!cancelled) console.log('[Launcher] Chat-chunk preload DONE'); })
+            .catch(() => { /* non-fatal: the real lazy() retries on open */ });
+        return () => { cancelled = true; };
     }, [isActive]);
 
     // Sync selectedWorkspace when visible projects change (e.g., after first project is added,
