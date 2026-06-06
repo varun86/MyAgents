@@ -219,7 +219,7 @@ export default function CustomTitleBar({
                         <span className="h-3.5 w-px bg-[var(--accent-warm-muted)]" />
                         <button
                             onClick={onDismissRestore}
-                            className="flex h-full items-center rounded-r-full px-2 text-[var(--ink-muted)] transition-colors hover:text-[var(--ink)]"
+                            className="flex h-full items-center rounded-r-full px-2 text-[var(--ink-muted)] transition-colors hover:bg-[var(--accent-warm-muted)] hover:text-[var(--ink)] active:scale-95"
                             title="忽略"
                         >
                             <X className="h-3 w-3" />
