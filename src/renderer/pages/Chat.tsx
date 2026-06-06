@@ -16,6 +16,7 @@ import SessionMenuButton, { type BotChannelCandidate } from '@/components/Sessio
 import { FileActionProvider } from '@/context/FileActionContext';
 import SimpleChatInput, { type ImageAttachment, type SimpleChatInputHandle } from '@/components/SimpleChatInput';
 import AgentStatusPanel from '@/components/agent-status/AgentStatusPanel';
+import ChatBootOverlay from '@/components/ChatBootOverlay';
 import QueryNavigator from '@/components/chat/QueryNavigator';
 import ChatSearchPanel from '@/components/ChatSearchPanel';
 import { useChatSearch, isHighlightApiSupported } from '@/hooks/useChatSearch';
@@ -624,8 +625,13 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   // Track permission mode before AI-triggered plan mode (for restore on ExitPlanMode)
   const prePlanPermissionModeRef = useRef<PermissionMode | null>(null);
 
-  // Startup overlay state (for auto-send from Launcher)
-  const [showStartupOverlay, setShowStartupOverlay] = useState(!!initialMessage);
+  // Boot overlay — the in-page half of the unified "AI 启动中" loading state. Shown
+  // for any new chat entry: launcher send (initialMessage) OR a workspace-card / new
+  // session still on a pending-<tabId> id. App paints the IDENTICAL ChatBootOverlay
+  // as the deferred-mount placeholder BEFORE this subtree mounts, so the
+  // placeholder → in-page handoff is seamless and the user sees ONE continuous
+  // loading state from the Launcher→Chat flip to session-ready.
+  const [showStartupOverlay, setShowStartupOverlay] = useState(() => !!initialMessage || isPendingSessionId(sessionId));
 
   // Time rewind state
   const [rewindTarget, setRewindTarget] = useState<{
@@ -1199,10 +1205,15 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       || sessionState === 'starting'
       || streamingMessage
       || agentError
+      // Workspace-card / no-auto-send entry: there is no turn to wait for, so the
+      // chat is "ready" the moment the session connects (SSE up). The
+      // initialMessage path keeps waiting for the turn (conditions above) so the
+      // overlay doesn't flash an empty chat before the auto-sent message lands.
+      || (isConnected && !hadInitialMessage.current)
     ) {
       setShowStartupOverlay(false);
     }
-  }, [showStartupOverlay, sessionState, streamingMessage, agentError]);
+  }, [showStartupOverlay, sessionState, streamingMessage, agentError, isConnected]);
 
   // Safety timeout (30s) — covers prewarm failures / unresponsive backend.
   // Prevents the overlay from sticking forever if neither sessionState nor
@@ -3358,15 +3369,10 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
             subtitle="非图片文件将复制到 myagents_files 并自动引用"
           />
 
-          {/* Startup overlay when launching from Launcher with initial message */}
-          {showStartupOverlay && (
-            <div className="absolute inset-0 z-30 flex items-center justify-center bg-[var(--paper)]/80 backdrop-blur-sm">
-              <div className="flex flex-col items-center gap-3">
-                <Loader2 className="h-6 w-6 animate-spin text-[var(--ink-muted)]" />
-                <p className="text-sm text-[var(--ink-muted)]">AI 启动中</p>
-              </div>
-            </div>
-          )}
+          {/* Unified boot overlay — identical to App's deferred-mount placeholder,
+              so the placeholder → in-page handoff is seamless: ONE continuous
+              "AI 启动中" state from the Launcher→Chat flip through the sidecar boot. */}
+          {showStartupOverlay && <ChatBootOverlay />}
 
           {/* SDK 0.2.91+ terminal_reason banner. For error-severity reasons that
               already surface via agentError (image_error / model_error), suppress
