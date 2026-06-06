@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { isPerfEnabled } from './perfMark';
 
 describe('isPerfEnabled — perf-mark gating', () => {
-    it('is enabled in the dev build regardless of localStorage', () => {
+    it('is enabled in a dev/debug build (DEV or VITE_DEBUG_MODE) regardless of localStorage', () => {
         expect(isPerfEnabled(true, () => null)).toBe(true);
         expect(isPerfEnabled(true, () => '0')).toBe(true);
     });

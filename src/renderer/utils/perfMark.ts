@@ -1,7 +1,10 @@
 /**
  * Renderer perf instrumentation (P0). No-op unless enabled, so call sites are
- * safe to leave in production. Enabled in the Vite dev build, or when
- * `localStorage['myagents:perf'] === '1'` (lets us profile a production build).
+ * safe to leave in production. Enabled in dev (Vite dev server) OR a debug build
+ * (build_dev.sh sets VITE_DEBUG_MODE=true — the same signals as @/utils/debug's
+ * isDebugMode()), OR when `localStorage['myagents:perf'] === '1'` (to profile a
+ * production build). The env is read directly here, rather than importing
+ * debug.ts, to avoid its `__DEBUG_MODE__` vite-define global under unit tests.
  *
  * Two outputs when enabled: (1) `performance.mark/measure` for the devtools
  * Performance panel; (2) a stable `[perf] trace=renderer phase=...` line emitted
@@ -15,9 +18,9 @@
 
 import { formatPerfLine, type PerfTraceDetail } from '../../shared/perfTrace';
 
-/** Pure gating decision — unit-tested directly (env/localStorage injected). */
-export function isPerfEnabled(isDev: boolean, lsGet: (key: string) => string | null): boolean {
-    if (isDev) return true;
+/** Pure gating decision — unit-tested directly (debug-flag/localStorage injected). */
+export function isPerfEnabled(isDebug: boolean, lsGet: (key: string) => string | null): boolean {
+    if (isDebug) return true;
     try {
         return lsGet('myagents:perf') === '1';
     } catch {
@@ -26,7 +29,7 @@ export function isPerfEnabled(isDev: boolean, lsGet: (key: string) => string | n
 }
 
 const ENABLED = isPerfEnabled(
-    Boolean(import.meta.env?.DEV),
+    Boolean(import.meta.env?.DEV) || import.meta.env?.VITE_DEBUG_MODE === 'true',
     (key) => (typeof localStorage !== 'undefined' ? localStorage.getItem(key) : null),
 );
 
