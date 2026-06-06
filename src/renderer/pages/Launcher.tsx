@@ -135,14 +135,21 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
         if (!isActive) return;
         const warm = () => { void import('@/pages/Chat').catch(() => { /* non-fatal: the real lazy() will retry on open */ }); };
         const w = window as unknown as {
-            requestIdleCallback?: (cb: () => void) => number;
+            requestIdleCallback?: (cb: () => void, opts?: { timeout?: number }) => number;
             cancelIdleCallback?: (id: number) => void;
         };
+        // Warm WITHIN 200ms even if the thread is busy — this is load-bearing.
+        // Plain requestIdleCallback (no timeout) was the bug: the Launcher's
+        // initial data fetches (task-center 6-way fetch, config) keep the thread
+        // busy long enough that idle never fired before the user clicked a
+        // workspace card, so the FIRST launch paid a ~800ms cold Chat-chunk load
+        // (measured: flip→Chat-mount 827ms cold vs ~25ms warm). The timeout makes
+        // the preload deterministic; WKWebView (no requestIdleCallback) → setTimeout.
         if (typeof w.requestIdleCallback === 'function') {
-            const id = w.requestIdleCallback(warm);
+            const id = w.requestIdleCallback(warm, { timeout: 200 });
             return () => w.cancelIdleCallback?.(id);
         }
-        const t = setTimeout(warm, 800);
+        const t = setTimeout(warm, 100);
         return () => clearTimeout(t);
     }, [isActive]);
 
