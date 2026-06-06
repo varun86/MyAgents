@@ -643,6 +643,13 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
 
   // Refs for one-time project settings sync (see effect after provider change effect)
   const hadInitialMessage = useRef(!!initialMessage);
+  // For a launcher-handoff tab (has initialMessage), autoSend owns the INITIAL
+  // MCP push — it pushes the user's per-session launcher selection, which may
+  // differ from the workspace default. The mount MCP effect skips its initial
+  // push while this is true so the two pushers can't race and stomp the launcher
+  // choice; autoSend clears it after its MCP block, handing later config-change
+  // re-pushes back to the mount effect. (codex review: dual MCP-push race.)
+  const launcherOwnsInitialMcpRef = useRef(hadInitialMessage.current);
   const projectSyncedRef = useRef(false);
 
   // Ref for input focus
@@ -1019,15 +1026,15 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
 
     const autoSend = async () => {
       try {
-        // 1. Sync MCP configuration. Push whenever the launcher provided a
-        // selection ARRAY — including an empty one: `[]` means "user explicitly
-        // disabled all MCP" and MUST be pushed so the first turn doesn't fall
-        // back to disk file-config (re-enabling servers the user just turned
-        // off). Only `undefined` (no selection info) is skipped — the standalone
-        // isConnected-gated MCP effect covers that case. (Previously gated on
-        // `?.length`, which dropped the explicit-disable push → first-turn
-        // config-stomping when the Chat mounts before the standalone push lands.)
-        if (launchMessage.mcpEnabledServers) {
+        // 1. Sync MCP configuration. autoSend is the authoritative INITIAL MCP
+        // pusher for launcher-handoff tabs (the mount MCP effect skips its initial
+        // push for these — see launcherOwnsInitialMcpRef). Push only when the
+        // launcher enabled ≥1 server; disable-all (`[]`) / undefined need no push:
+        // the sidecar has no config-file fallback (`currentMcpServers ?? []` in
+        // agent-session.ts), so an absent push already yields no MCP — and pushing
+        // `[]` after the sidecar pre-warmed with `null` could trip a fingerprint
+        // diff → abort/restart for no benefit.
+        if (launchMessage.mcpEnabledServers?.length) {
           const allServers = await getAllMcpServers();
           syncMcpServerNames(allServers);
           const globalEnabled = await getEnabledMcpServerIds();
@@ -1036,6 +1043,9 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
           );
           await apiPost('/api/mcp/set', { servers: effective });
         }
+        // Hand later config-change MCP pushes back to the mount effect now that
+        // autoSend has applied the launcher's initial selection.
+        launcherOwnsInitialMcpRef.current = false;
 
         // 1b. PRD 0.2.17 — Sync plugin selection (Launcher → new Tab handoff).
         // Both `setWorkspaceEnabledPlugins` local state AND a session-enable
@@ -1485,13 +1495,21 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
         // isConnected false→true transition (isConnected is in the deps), so a
         // freshly-spawned / reconnected / respawned sidecar always re-receives
         // the MCP set — in-process MCP state dies with the old sidecar process
-        // (mirrors the model-push pattern below). Without this gate the single
-        // mount-time push could land before the sidecar is reachable, or never
-        // when the Chat mounts BEFORE the sidecar is ready (the instant-nav
-        // case) → the first turn falls back to disk file-config = wrong MCP set
-        // (#300/#301 config-stomping class). Local state (setMcpServers etc.)
-        // above is display-only and intentionally NOT gated.
+        // (mirrors the model-push pattern below). The sidecar NEVER falls back to
+        // a config file (buildSdkMcpServers uses `currentMcpServers ?? []` — see
+        // agent-session.ts), so a missing push = the SDK runs with NO MCP (the
+        // user's enabled servers silently absent), and a late push after pre-warm
+        // fingerprints can trigger an abort + ~30s restart. Local state
+        // (setMcpServers etc.) above is display-only, intentionally NOT gated.
+        // (#300/#301 config-stomping class.)
         if (!isConnected) return;
+
+        // Launcher-handoff tabs: autoSend owns the INITIAL push (the user's
+        // per-session launcher MCP selection, which may differ from the workspace
+        // default computed below). Skip here so the two pushers don't race and
+        // stomp the launcher choice; autoSend clears the ref after its MCP block,
+        // so later config-change re-runs of this effect push normally.
+        if (launcherOwnsInitialMcpRef.current) return;
 
         // CRITICAL: Always sync effective MCP servers to backend on initial load
         // This ensures the Agent SDK has correct MCP config (including empty = no MCP)

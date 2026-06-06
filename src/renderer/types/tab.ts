@@ -163,6 +163,12 @@ export function buildChatFlipPatch(
         joinedExistingSidecar?: boolean;
     },
 ): Tab {
+    // D1 runtime backstop: `sessionId: string` blocks `null` at compile time but
+    // not `''`. A falsy sessionId here is a permanent blank tab (TabProvider's SSE
+    // connect effect never fires), so fail loud rather than strand the tab.
+    if (!fields.sessionId) {
+        throw new Error('buildChatFlipPatch: sessionId must be a non-empty id (D1) — flipping to chat without one strands the tab');
+    }
     return {
         ...tab,
         agentDir: fields.agentDir,
