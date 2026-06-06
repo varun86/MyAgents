@@ -97,6 +97,8 @@ AppImage 和 deb 内部都包含：
 | mino 默认工作区 | `resources/mino/` |
 | bundled skills / agents | `resources/bundled-skills/` / `resources/bundled-agents/` |
 
+`resources/mino/` 只承载默认工作区的文件内容。Mino project 的 Agent 默认开启、heartbeat、memory 自动更新等产品策略不写入外部 Mino 模板仓库，而是由应用内 `src/shared/config-types.ts::PRESET_TEMPLATES[].agentDefaults` 声明，Launcher / Config migration 在创建 `AgentConfig` 时复制这些默认值。
+
 **不内置**：
 - `git` — 大多数发行版默认安装；缺失时 Claude Code 工具会降级
 - `bash` / 核心 POSIX 工具 — 系统自带
