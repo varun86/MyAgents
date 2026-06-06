@@ -638,6 +638,12 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
     const [pendingDefaultPath, setPendingDefaultPath] = useState('');
 
     const handleLaunch = useCallback((project: Project, sessionId?: string) => {
+        // Mark the TRUE click moment (before any state set / handler latency) so
+        // the unified log shows card_click → launch_start → launch_flip →
+        // useCronTask(chat mount) → launch_ensured — i.e. the real click→chat-painted
+        // timeline, independent of the chunk cache.
+        perfMark('card_click');
+        console.log(`[Launcher] CARD CLICK project=${project.id} sessionId=${sessionId ?? 'NEW'}`);
         setLaunchingProjectId(project.id);
         // Update lastOpened timestamp (async, don't block launch)
         touchProject(project.id).catch((err) => {
