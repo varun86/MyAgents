@@ -170,6 +170,19 @@ interface DirectoryPanelProps {
   onQuoteFile?: (path: string) => void;
   /** FilePreviewModal selection-quote: append `@<path>#L<start>[-L<end>] ` to chat input. */
   onQuoteSelection?: (path: string, startLine: number, endLine: number) => void;
+  /** External "reveal in tree" request (e.g. from the chat path context menu).
+   *  When the `id` changes, the panel locates the path in the tree — expands
+   *  ancestors, selects it, scrolls it into view — reusing the search-reveal
+   *  path. Declarative (vs an imperative handle) so it also works when the panel
+   *  was just mounted by opening the workspace: `handleRevealSearchResultInTree`
+   *  polls for node meta, so it waits out the initial tree load. */
+  externalRevealRequest?: { id: number; path: string } | null;
+  /** Called once the panel has picked up an `externalRevealRequest` (by id) so
+   *  the host can clear it. REQUIRED for correctness: the request lives in the
+   *  host (survives this panel's unmount when the workspace collapses), while the
+   *  consume-dedup is component-local — without clearing, reopening the panel
+   *  would replay the stale reveal. */
+  onExternalRevealHandled?: (id: number) => void;
   /** Enabled sub-agent definitions (from Chat.tsx) */
   enabledAgents?: Record<
     string,
@@ -305,6 +318,8 @@ const DirectoryPanel = memo(
       onInsertReference,
       onQuoteFile,
       onQuoteSelection,
+      externalRevealRequest,
+      onExternalRevealHandled,
       enabledAgents,
       enabledSkills,
       enabledCommands,
@@ -964,7 +979,9 @@ const DirectoryPanel = memo(
         if (targetResult.status === "cancelled") {
           return;
         }
-        if (targetResult.status !== "found" || targetResult.meta.data.type !== "file") {
+        // Accept files AND dirs — search hits are files, but the chat path menu
+        // can reveal a directory too (locate + select + scroll, no auto-expand).
+        if (targetResult.status !== "found") {
           toast.error("文件不存在或已删除");
           return;
         }
@@ -978,6 +995,22 @@ const DirectoryPanel = memo(
       },
       [expandDir, openPath, toast, waitForNodeMeta],
     );
+
+    // External reveal (chat path context menu → Chat → here). Fires once per id.
+    // handleRevealSearchResultInTree polls for node meta, so this is robust even
+    // when the panel was just mounted by opening the workspace (tree still loading).
+    const lastExternalRevealIdRef = useRef<number | null>(null);
+    useEffect(() => {
+      if (!externalRevealRequest || lastExternalRevealIdRef.current === externalRevealRequest.id) {
+        return;
+      }
+      lastExternalRevealIdRef.current = externalRevealRequest.id;
+      // Kick off the reveal (captures the path), then tell the host to clear the
+      // request so a later panel reopen (which remounts this panel + resets the
+      // dedup ref) doesn't replay this stale reveal.
+      void handleRevealSearchResultInTree(externalRevealRequest.path);
+      onExternalRevealHandled?.(externalRevealRequest.id);
+    }, [externalRevealRequest, onExternalRevealHandled, handleRevealSearchResultInTree]);
     // Bridge: `rawRefresh` (declared above `useWorkspaceTreeModel`) reads
     // expansion state through this ref. Mirror via useEffect so we don't
     // write a ref during render — matches the project's other ref-mirror

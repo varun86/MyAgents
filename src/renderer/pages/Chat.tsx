@@ -673,6 +673,23 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   // Ref for DirectoryPanel to trigger refresh
   const directoryPanelRef = useRef<DirectoryPanelHandle>(null);
 
+  // "在文件目录中展示" from the chat path context menu. Opening the workspace
+  // panel (if collapsed) mounts DirectoryPanel; the declarative request prop is
+  // consumed there (its reveal helper polls for node meta, so it waits out the
+  // initial tree load — no ref-timing race).
+  const [treeExternalReveal, setTreeExternalReveal] = useState<{ id: number; path: string } | null>(null);
+  const treeExternalRevealIdRef = useRef(0);
+  const handleRevealInTree = useCallback((path: string) => {
+    setShowWorkspace(true);
+    setTreeExternalReveal({ id: ++treeExternalRevealIdRef.current, path });
+  }, []);
+  // Consume-once: clear after the panel picks it up, so reopening the workspace
+  // panel later doesn't replay a stale reveal (the panel remounts + resets its
+  // local dedup). Codex review catch.
+  const handleExternalRevealHandled = useCallback((id: number) => {
+    setTreeExternalReveal((prev) => (prev?.id === id ? null : prev));
+  }, []);
+
   // Per-tab persistence for the file-tree view state (expand set + loaded tree).
   // Chat is a per-tab instance kept mounted for the tab's lifetime, so holding
   // this here lets the file tree keep its expansion across the workspace panel's
@@ -3529,6 +3546,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
             onFilePreviewExternal={isSplitViewEnabled && !isNarrowLayout ? handleSplitFilePreview : undefined}
             onQuoteFile={handleQuoteFile}
             onQuoteSelection={handleQuoteFileSelection}
+            onRevealInTree={handleRevealInTree}
           >
             <MessageList
               historyMessages={historyMessages}
@@ -3688,6 +3706,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
               onInsertReference={handleInsertReference}
               onQuoteFile={handleQuoteFile}
               onQuoteSelection={handleQuoteFileSelection}
+              externalRevealRequest={treeExternalReveal}
+              onExternalRevealHandled={handleExternalRevealHandled}
               enabledAgents={enabledAgents}
               enabledSkills={enabledSkills}
               enabledCommands={enabledCommands}
