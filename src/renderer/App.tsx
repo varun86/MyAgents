@@ -46,9 +46,10 @@ const PAGE_FALLBACK = <div className="h-full w-full bg-[var(--paper)]" />;
  *  (Chat carries the markdown chain). Keeps first paint light while making later
  *  navigation instant — preload is load-bearing for "no new transition". */
 function preloadRoutes(): void {
-    void importChat();
-    void importSettings();
-    void importTaskCenter();
+    const onErr = (err: unknown) => console.warn('[preloadRoutes] route chunk preload failed', err);
+    void importChat().catch(onErr);
+    void importSettings().catch(onErr);
+    void importTaskCenter().catch(onErr);
 }
 import {
   type Project,

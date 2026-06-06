@@ -141,14 +141,9 @@ export function computeCronBotInfoMap(agents: AgentConfig[]): Map<string, { name
 }
 
 /** `taskList` is Tauri-only; browser dev mode returns [] silently. */
-async function safeTaskList(): Promise<Task[]> {
-    if (!taskCenterAvailable()) return [];
-    try {
-        return await taskList({});
-    } catch (err) {
-        console.warn('[taskCenterStore] taskList failed', err);
-        return [];
-    }
+async function fetchTaskList(): Promise<Task[]> {
+    if (!taskCenterAvailable()) return []; // non-Tauri / unavailable → legitimately empty
+    return taskList({}); // in Tauri: let failures REJECT so callers preserve the prior slice (not blank it)
 }
 
 // ===== Store internals =====
@@ -179,6 +174,7 @@ const listeners = new Set<() => void>();
 const deletedSessionIds = new Set<string>(); // cross-instance tombstones
 
 let started = false;
+let lifecycleGen = 0; // bumped on stop — an in-flight fetch captured before a stop must not apply state or retry
 let retryTimer: ReturnType<typeof setTimeout> | null = null;
 let intervalTimer: ReturnType<typeof setInterval> | null = null;
 const refreshTimers: Record<string, ReturnType<typeof setTimeout> | null> = {};
@@ -257,12 +253,15 @@ function setState(patch: Partial<StoreState>): void {
 
 async function fetchData(retryCount = 0, silent = false): Promise<void> {
     const requestSeq = startRequest('all');
+    const gen = lifecycleGen;
     if (retryCount === 0 && !silent) setState({ isLoading: true, error: null });
 
     try {
-        // Per-source success tracking: a PARTIAL failure must not blank a good
-        // slice — we keep the prior value for any source that failed.
-        const ok = { sessions: true, cron: true, tasks: true, bg: true, agents: true, status: true };
+        // getSessions is the CRITICAL slice: NOT caught, so a sessions failure
+        // rejects the whole fetch → retry/error (an initial total failure must
+        // not become a silent empty state). The other sources are best-effort:
+        // a PARTIAL failure preserves the prior slice (`ok.*` false → skipped).
+        const ok = { cron: true, tasks: true, bg: true, agents: true, status: true };
         const agentStatusPromise = isTauriEnvironment()
             ? import('@tauri-apps/api/core')
                 .then(({ invoke }) => invoke<AgentStatusMap>('cmd_all_agents_status'))
@@ -270,22 +269,33 @@ async function fetchData(retryCount = 0, silent = false): Promise<void> {
             : Promise.resolve({} as AgentStatusMap);
 
         const [sessionsData, cronData, newTasks, bgSessions, agentStatusResult, appConfig] = await Promise.all([
-            getSessions().catch(() => { ok.sessions = false; return state.sessions; }),
+            getSessions(),
             getAllCronTasks().catch(() => { ok.cron = false; return state.cronTasks; }),
-            safeTaskList().catch(() => { ok.tasks = false; return state.tasks; }),
+            fetchTaskList().catch(() => { ok.tasks = false; return state.tasks; }),
             getBackgroundSessions().catch(() => { ok.bg = false; return state.backgroundSessionIds; }),
             agentStatusPromise,
             loadAppConfig().catch(() => { ok.agents = false; return null; }),
         ]);
 
+        if (gen !== lifecycleGen) return; // store stopped (last subscriber left) mid-fetch
         if (!isLatest('all', requestSeq)) return; // superseded by a newer full fetch
 
+        // Prune tombstones the backend no longer returns (delete is now durable)
+        // so the set can't grow unbounded.
+        if (deletedSessionIds.size > 0) {
+            const liveIds = new Set(sessionsData.map((s) => s.id));
+            for (const id of [...deletedSessionIds]) if (!liveIds.has(id)) deletedSessionIds.delete(id);
+        }
+
+        // Per-slice latest-wins: skip a slice whose scope was refreshed by a
+        // newer PARTIAL request that already landed (its scope seq moved past
+        // this full request) — otherwise an older full fetch would clobber it.
         const patch: Partial<StoreState> = {};
-        if (ok.sessions) patch.sessions = sortSessionsByLastActive(filterTombstoned(sessionsData, deletedSessionIds));
-        if (ok.cron) patch.cronTasks = cronData;
-        if (ok.tasks) patch.tasks = newTasks;
-        if (ok.bg) patch.backgroundSessionIds = bgSessions;
-        if (ok.status) patch.agentStatuses = agentStatusResult;
+        if (isLatest('sessions', requestSeq)) patch.sessions = sortSessionsByLastActive(filterTombstoned(sessionsData, deletedSessionIds));
+        if (ok.cron && isLatest('cronTasks', requestSeq)) patch.cronTasks = cronData;
+        if (ok.tasks && isLatest('tasks', requestSeq)) patch.tasks = newTasks;
+        if (ok.bg && isLatest('backgroundSessions', requestSeq)) patch.backgroundSessionIds = bgSessions;
+        if (ok.status && isLatest('agentStatuses', requestSeq)) patch.agentStatuses = agentStatusResult;
         if (ok.agents) patch.agents = appConfig?.agents ?? [];
         patch.isLoading = false;
         if (!silent) patch.error = null;
@@ -293,6 +303,7 @@ async function fetchData(retryCount = 0, silent = false): Promise<void> {
         lastFullFetchAt = Date.now();
         perfMark(RENDERER_PERF_PHASE.tabDataReady, { surface: 'taskcenter' });
     } catch (err) {
+        if (gen !== lifecycleGen) return; // stopped mid-fetch → don't retry with zero subscribers
         console.error('[taskCenterStore] Failed to load data:', err);
         if (!silent && retryCount < MAX_AUTO_RETRIES) {
             retryTimer = setTimeout(() => { void fetchData(retryCount + 1, silent); }, RETRY_DELAY_MS);
@@ -318,7 +329,8 @@ function refreshCronTasksNow(): void {
 }
 function refreshTasksNow(): void {
     const s = startRequest('tasks');
-    void safeTaskList().then((data) => { if (isLatest('tasks', s)) setState({ tasks: data }); });
+    void fetchTaskList().then((data) => { if (isLatest('tasks', s)) setState({ tasks: data }); })
+        .catch((err) => console.warn('[taskCenterStore] refresh tasks failed:', err));
 }
 function refreshBackgroundNow(): void {
     const s = startRequest('backgroundSessions');
@@ -427,6 +439,7 @@ function maybeStop(): void {
     // No live subscribers → stop background work, but KEEP data warm so the next
     // mount is still instant.
     started = false;
+    lifecycleGen++; // invalidate any in-flight fetch so it won't apply state or schedule a retry after stop
     cleanupTauriListeners?.();
     cleanupTauriListeners = null;
     if (intervalTimer) { clearInterval(intervalTimer); intervalTimer = null; }
