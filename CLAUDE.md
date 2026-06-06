@@ -64,6 +64,7 @@
 | 系统代理 / SOCKS5 桥接 | `tech_docs/proxy_config.md` |
 | 统一日志 | `tech_docs/unified_logging.md` |
 | Windows 编码约束（路径前缀 / 进程 / CSP） | `tech_docs/windows_platform.md` |
+| Windows 跨端兼容验证 / WebView2(Chromium) 实测排查（CSP 继承 / 滚动条 / OS 子 webview / DPR） | `tech_docs/windows_cross_platform_review.md` |
 | Linux 构建与分发 | `guides/linux_build_guide.md` |
 | 构建问题排查 | `guides/build_troubleshooting.md` |
 | 自动更新机制 | `tech_docs/auto_update.md` |
