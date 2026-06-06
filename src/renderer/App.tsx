@@ -1420,6 +1420,14 @@ export default function App() {
             setActiveTabId(targetTabId);
           }
         });
+        // Measure the actual PAINT (double-rAF fires after the browser paints) vs
+        // the flushSync commit above. card_click → chat_painted = the TRUE
+        // click→visible time the user perceives; the other marks are commit-only
+        // (React updated the DOM) and can't see how long the browser took to draw.
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          perfMark('chat_painted', { tabId: targetTabId });
+          console.log(`[App][launch] chat_painted target=${targetTabId} (browser painted the flip)`);
+        }));
       }
 
       const result = await ensureSessionSidecar(effectiveSessionId, project.path, 'tab', targetTabId);
