@@ -560,10 +560,10 @@ export class SseConnection {
 
     /**
      * Get the server URL for this connection
-     * Session-centric: first try to get port from sessionId, then fallback to tabId lookup
+     * Session-centric: first try a ready session port, then fallback to the tab URL waiter.
      */
     private async getServerUrl(): Promise<string> {
-        // Session-centric: try to get port from sessionId first
+        // Session-centric: try to get a ready port from sessionId first.
         const sessionId = this.sessionIdRef?.current;
         if (sessionId) {
             const port = await getSessionPort(sessionId);

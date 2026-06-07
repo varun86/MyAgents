@@ -795,6 +795,71 @@ mod lifecycle_contract_tests {
         let third = manager.next_generation("session-a");
         assert!(third > second);
     }
+
+    fn spawn_test_child() -> Child {
+        #[cfg(windows)]
+        let mut cmd = {
+            let mut cmd = crate::process_cmd::new("powershell");
+            cmd.args(["-NoProfile", "-Command", "Start-Sleep -Seconds 60"]);
+            cmd
+        };
+
+        #[cfg(not(windows))]
+        let mut cmd = {
+            let mut cmd = crate::process_cmd::new("sleep");
+            cmd.arg("60");
+            cmd
+        };
+
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn test child")
+    }
+
+    fn insert_test_sidecar(manager: &mut SidecarManager, session_id: &str, state: SidecarState) {
+        manager.insert_sidecar(
+            session_id,
+            SessionSidecar {
+                process: spawn_test_child(),
+                port: 31418,
+                session_id: session_id.to_string(),
+                workspace_path: PathBuf::from("/tmp/workspace"),
+                state,
+                owners: owners(vec![SidecarOwner::Tab("tab-a".to_string())]),
+                created_at: std::time::Instant::now(),
+                runtime: None,
+            },
+        );
+    }
+
+    #[test]
+    fn session_port_is_not_exposed_until_sidecar_is_healthy() {
+        let mut manager = SidecarManager::new();
+        insert_test_sidecar(&mut manager, "session-a", SidecarState::Starting);
+
+        assert_eq!(manager.get_session_port("session-a"), None);
+
+        manager
+            .get_session_sidecar_mut("session-a")
+            .expect("session sidecar")
+            .state = SidecarState::Healthy;
+
+        assert_eq!(manager.get_session_port("session-a"), Some(31418));
+    }
+
+    #[test]
+    fn generation_for_requires_current_sidecar_entry() {
+        let mut manager = SidecarManager::new();
+        insert_test_sidecar(&mut manager, "session-a", SidecarState::Healthy);
+        let generation = manager.generation_for("session-a").expect("current generation");
+
+        manager.remove_sidecar("session-a");
+
+        assert_eq!(manager.current_generation("session-a"), generation);
+        assert_eq!(manager.generation_for("session-a"), None);
+    }
 }
 
 pub struct SessionSidecar {
@@ -828,6 +893,11 @@ impl SessionSidecar {
     /// Is this sidecar healthy and ready to accept requests?
     pub fn is_reusable(&self) -> bool {
         matches!(self.state, SidecarState::Healthy)
+    }
+
+    /// Is this sidecar both marked healthy and still alive?
+    pub fn is_ready_for_requests(&mut self) -> bool {
+        !self.is_dead() && self.is_reusable()
     }
 
     /// Is this sidecar still starting up? (process alive, `wait_for_health` in progress)
@@ -1107,7 +1177,11 @@ impl SidecarManager {
     /// or `None` if no sidecar is currently bound to that session_id.
     /// Returning `Option` (not 0) makes "never existed" explicit at call sites.
     pub fn generation_for(&self, session_id: &str) -> Option<u64> {
-        self.sidecar_generations.get(session_id).copied()
+        if self.sidecars.contains_key(session_id) {
+            self.sidecar_generations.get(session_id).copied()
+        } else {
+            None
+        }
     }
 
     /// True if a sidecar with this `(session_id, generation)` is currently
@@ -1386,14 +1460,22 @@ impl SidecarManager {
 
     // ============= Session-Centric Sidecar API (v0.1.11) =============
 
-    /// Get the port for a Session's Sidecar
-    pub fn get_session_port(&self, session_id: &str) -> Option<u16> {
-        self.sidecars.get(session_id).map(|s| s.port)
+    /// Get the port for a Session's Sidecar only after it is ready to serve requests.
+    ///
+    /// Renderer HTTP/SSE callers treat this port as directly usable. Returning a
+    /// `Starting` sidecar here exposes a port before Node has finished binding
+    /// and `/health/ready`, which can strand restored tabs in a failed load.
+    pub fn get_session_port(&mut self, session_id: &str) -> Option<u16> {
+        self.sidecars.get_mut(session_id).and_then(|s| {
+            if s.is_ready_for_requests() {
+                Some(s.port)
+            } else {
+                None
+            }
+        })
     }
 
     /// Check if a Session has an active Sidecar (Starting or Healthy)
-    /// Reserved for future use (e.g., debugging, health checks)
-    #[allow(dead_code)]
     pub fn has_session_sidecar(&mut self, session_id: &str) -> bool {
         if let Some(sidecar) = self.sidecars.get_mut(session_id) {
             !sidecar.is_dead()
@@ -2577,7 +2659,7 @@ pub fn get_tab_server_url(manager: &ManagedSidecarManager, tab_id: &str) -> Resu
     if let Some((session_id, port)) = activation_session {
         // Verify the sidecar is still healthy in Session-centric storage
         let is_healthy = manager_guard.sidecars.get_mut(&session_id)
-            .map(|s| s.is_reusable())
+            .map(|s| s.is_ready_for_requests())
             .unwrap_or(false)
             || manager_guard.instances.values_mut()
                 .any(|i| i.port == port && i.is_running());
@@ -2618,7 +2700,7 @@ pub fn get_tab_sidecar_status(manager: &ManagedSidecarManager, tab_id: &str) -> 
     if let Some((session_id, port, workspace_path)) = activation_info {
         // Check if the sidecar is healthy in Session-centric storage
         let is_running = manager_guard.sidecars.get_mut(&session_id)
-            .map(|s| s.is_reusable())
+            .map(|s| s.is_ready_for_requests())
             .unwrap_or(false)
             || manager_guard.instances.values_mut()
                 .any(|i| i.port == port && i.is_running());
@@ -3044,7 +3126,7 @@ pub async fn forward_terminal_events_to_renderer(
                 // emitting an empty list — an empty list would tell the
                 // renderer "no sessions are live, clear every tab", which is
                 // a destructive fallback exactly when our state is most
-                // uncertain. The renderer's defensive `getSessionPort` check
+                // uncertain. The renderer's defensive `hasSessionSidecar` check
                 // in `handleLaunchProject` jump-to-tab still saves the user
                 // if they do click into a stale binding before our next
                 // event arrives. (Codex review WARN-1.)
@@ -3449,34 +3531,29 @@ pub fn ensure_session_sidecar_with_runtime_override<R: Runtime>(
 
         if post_gen != pre_gen {
             // Generation changed: another thread replaced the sidecar during our HTTP check.
-            // Reuse the replacement if it's alive (Healthy or Starting).
+            // Re-enter the normal ensure path for the replacement instead of returning its
+            // port directly. The replacement may still be Starting; the normal path knows
+            // how to wait for /health/ready and also re-verifies Healthy sidecars over HTTP.
             ulog_info!(
                 "[sidecar] Session {} generation changed ({} → {}) during HTTP check on port {}, checking replacement",
                 session_id, pre_gen, post_gen, port
             );
             if let Some(sidecar) = manager_guard.sidecars.get_mut(session_id) {
                 if !sidecar.is_dead() {
-                    // Replacement alive (Healthy or Starting) — reuse
                     ulog_info!(
-                        "[sidecar] Session {} replacement on port {} is {:?}, adding owner and returning",
+                        "[sidecar] Session {} replacement on port {} is {:?}, retrying ensure",
                         session_id, sidecar.port, sidecar.state
                     );
                     validate_sidecar_runtime_invariant(session_id, sidecar.runtime.as_deref(), "reuse-replacement");
-                    sidecar.add_owner(owner.clone());
-                    emit_perf_trace(
-                        PerfTrace::new(PerfTraceName::SidecarBoot, "ensure_done")
-                            .duration_ms(elapsed_ms(ensure_started))
-                            .session_id(Some(session_id))
-                            .runtime(Some(normalize_runtime_name(sidecar.runtime.as_deref())))
-                            .status("ok")
-                            .detail("port", sidecar.port)
-                            .detail("is_new", false)
-                            .detail("reuse", "replacement"),
+                    drop(manager_guard);
+                    return ensure_session_sidecar_with_runtime_override(
+                        app_handle,
+                        manager,
+                        session_id,
+                        workspace_path,
+                        owner,
+                        runtime_override,
                     );
-                    return Ok(EnsureSidecarResult {
-                        port: sidecar.port,
-                        is_new: false,
-                    });
                 }
             }
             // Replacement sidecar process also dead — fall through to create
@@ -3535,6 +3612,29 @@ pub fn ensure_session_sidecar_with_runtime_override<R: Runtime>(
                 session_id
             );
         } else {
+            if wait_for_starting {
+                // We joined a sidecar that another owner was already starting.
+                // Our independent readiness timeout must not kill or replace
+                // that startup; the original creator may still be inside its
+                // longer TCP+ready boot window. Detach only the owner we added.
+                ulog_warn!(
+                    "[sidecar] Session {} starting Sidecar on port {} did not become ready for joining owner {:?}; preserving original startup",
+                    session_id, port, owner
+                );
+                let should_stop = if let Some(sidecar) = manager_guard.sidecars.get_mut(session_id) {
+                    sidecar.port == port && sidecar.remove_owner(&owner)
+                } else {
+                    false
+                };
+                if should_stop {
+                    manager_guard.remove_sidecar(session_id);
+                    manager_guard.clear_generation(session_id);
+                }
+                return Err(format!(
+                    "Session {} sidecar on port {} is still starting",
+                    session_id, port
+                ));
+            }
             // Same generation, HTTP unhealthy — safe to remove (no one replaced it)
             ulog_warn!(
                 "[sidecar] Session {} Sidecar process alive but HTTP unresponsive on port {}, removing",
@@ -3608,14 +3708,18 @@ fn create_new_session_sidecar<R: Runtime>(
     if let Some(existing) = manager_guard.sidecars.get_mut(session_id) {
         if !existing.is_dead() {
             ulog_info!(
-                "[sidecar] Session {} already has a {:?} sidecar on port {} (created by another thread), reusing",
+                "[sidecar] Session {} already has a {:?} sidecar on port {} (created by another thread), retrying ensure",
                 session_id, existing.state, existing.port
             );
-            existing.add_owner(owner);
-            return Ok(EnsureSidecarResult {
-                port: existing.port,
-                is_new: false,
-            });
+            drop(manager_guard);
+            return ensure_session_sidecar_with_runtime_override(
+                app_handle,
+                manager,
+                session_id,
+                workspace_path,
+                owner,
+                runtime_override.map(str::to_string),
+            );
         }
         // Exists but process dead — remove before creating fresh
         manager_guard.remove_sidecar(session_id);
@@ -3991,8 +4095,26 @@ pub fn get_session_sidecar_port(
     manager: &ManagedSidecarManager,
     session_id: &str,
 ) -> Result<Option<u16>, String> {
-    let manager_guard = manager.lock().map_err(|e| e.to_string())?;
+    let mut manager_guard = manager.lock().map_err(|e| e.to_string())?;
     Ok(manager_guard.get_session_port(session_id))
+}
+
+/// Check whether a Session has a live Sidecar entry, including one still starting.
+pub fn has_session_sidecar(
+    manager: &ManagedSidecarManager,
+    session_id: &str,
+) -> Result<bool, String> {
+    let mut manager_guard = manager.lock().map_err(|e| e.to_string())?;
+    Ok(manager_guard.has_session_sidecar(session_id))
+}
+
+/// Get the current sidecar generation for a Session, if Rust still tracks one.
+pub fn get_session_generation(
+    manager: &ManagedSidecarManager,
+    session_id: &str,
+) -> Result<Option<u64>, String> {
+    let manager_guard = manager.lock().map_err(|e| e.to_string())?;
+    Ok(manager_guard.generation_for(session_id))
 }
 
 // ============= Session-Centric Tauri Commands =============
@@ -4057,7 +4179,7 @@ pub fn cmd_release_session_sidecar(
     release_session_sidecar(&state, &sessionId, &owner)
 }
 
-/// Get the port for a Session's Sidecar
+/// Get the ready port for a Session's Sidecar.
 #[tauri::command]
 #[allow(non_snake_case)]
 pub fn cmd_get_session_port(
@@ -4065,6 +4187,26 @@ pub fn cmd_get_session_port(
     sessionId: String,
 ) -> Result<Option<u16>, String> {
     get_session_sidecar_port(&state, &sessionId)
+}
+
+/// Check whether a Session has a live Sidecar entry, including Starting.
+#[tauri::command]
+#[allow(non_snake_case)]
+pub fn cmd_has_session_sidecar(
+    state: tauri::State<'_, ManagedSidecarManager>,
+    sessionId: String,
+) -> Result<bool, String> {
+    has_session_sidecar(&state, &sessionId)
+}
+
+/// Get the current sidecar generation for a Session, if any.
+#[tauri::command]
+#[allow(non_snake_case)]
+pub fn cmd_get_session_generation(
+    state: tauri::State<'_, ManagedSidecarManager>,
+    sessionId: String,
+) -> Result<Option<u64>, String> {
+    get_session_generation(&state, &sessionId)
 }
 
 /// Upgrade a session ID (e.g., from "pending-xxx" to real session ID)

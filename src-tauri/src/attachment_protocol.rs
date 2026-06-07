@@ -237,7 +237,7 @@ fn session_sidecar_port<R: Runtime>(
     session_id: &str,
 ) -> Option<u16> {
     let manager = ctx.app_handle().try_state::<ManagedSidecarManager>()?;
-    let guard = manager.lock().ok()?;
+    let mut guard = manager.lock().ok()?;
     guard.get_session_port(session_id)
 }
 

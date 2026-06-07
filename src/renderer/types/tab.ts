@@ -104,7 +104,7 @@ export interface Tab {
     initialMessage?: InitialMessage;  // Launcher → Chat auto-send message
     // Note: cronTaskId and sidecarPort are no longer stored in Tab.
     // Sidecar lifecycle is now managed by SidecarManager's Owner model.
-    // Use getSessionPort(sessionId) to get the port when needed.
+    // Use getSessionPort(sessionId) to get the ready port when needed.
     sidecarConfigDisposition: SidecarConfigDisposition;  // push | adopt | pending — see type doc
     /** Runtime-only (never persisted). 'cold' = restored from a previous
      *  session on startup but not yet activated: App renders it as lightweight

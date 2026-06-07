@@ -137,7 +137,7 @@ interface TabProviderProps {
     /** Callback when unread state changes (message completed on non-active tab) */
     onUnreadChange?: (hasUnread: boolean) => void;
     // Note: sidecarPort prop removed - now using Session-centric Sidecar (Owner model)
-    // Port is dynamically retrieved via getSessionPort(sessionId)
+    // Ready port is dynamically retrieved via getSessionPort(sessionId)
 }
 
 /**
@@ -183,7 +183,7 @@ function mergeAttachmentsByPendingId(
 }
 
 async function getBaseUrl(tabId: string, sessionId?: string | null): Promise<string> {
-    // Session-centric: try to get port from sessionId first
+    // Session-centric: try to get a ready port from sessionId first.
     if (sessionId) {
         const port = await getSessionPort(sessionId);
         if (port !== null) {
@@ -619,7 +619,7 @@ export default function TabProvider({
         setRuntimeDiagnostics(null);
         clearInteractiveState();
         // NOTE: Do NOT clear currentSessionId here. The old session ID is the only way
-        // to find the still-running sidecar via getSessionPort(). Setting it to null
+        // to find the ready sidecar port via getSessionPort(). Setting it to null
         // causes all subsequent API calls to fail ("No running sidecar for tab") because
         // getBaseUrl skips session-centric lookup when sessionId is null, and the tab-based
         // fallback also fails. The history dropdown naturally shows no selection when the
@@ -2723,7 +2723,7 @@ export default function TabProvider({
             // may have bound a new port, and direct `getTabServerUrl(tabId)`
             // consumers (Markdown, FileAction, DirectoryPanel) would otherwise
             // hit the stale cached URL forever. SSE / session-keyed HTTP auto
-            // pick the new port via `getSessionPort`, but tab-keyed callers
+            // pick the new ready port via `getSessionPort`, but tab-keyed callers
             // need an explicit bust. This keeps the pit-of-success guarantee
             // symmetric across startup AND mid-session recovery.
             resetTabServerUrlCache(tabId);

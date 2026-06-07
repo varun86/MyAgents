@@ -45,6 +45,12 @@ struct MemoryUpdateResponse {
     reason: Option<String>,
 }
 
+enum MemoryUpdateSidecarTarget {
+    Ready(u16),
+    BoundButNotReady,
+    Missing,
+}
+
 /// Check conditions and spawn a batch memory update task if all gates pass.
 /// Called at the end of HeartbeatRunner::run_once().
 pub async fn check_and_spawn<R: Runtime>(
@@ -284,33 +290,48 @@ async fn update_single_session<R: Runtime>(
     let memory_update_key = format!("memory_update:{}:{}", agent_id, session_id);
     let owner = SidecarOwner::Agent(memory_update_key.clone());
 
-    // Check if sidecar already has a port (existing sidecar)
-    let existing_port = {
-        let mgr = sidecar_manager.lock().map_err(|e| format!("lock: {}", e))?;
-        mgr.get_session_port(session_id)
+    // Only create a temporary sidecar when no entry is bound at all. A
+    // bound-but-not-ready sidecar may belong to a Tab/Cron/IM owner that is
+    // still booting or awaiting health-monitor recovery; memory update must
+    // not drive ensure's replacement/removal paths for that owner.
+    let target = {
+        let mut mgr = sidecar_manager.lock().map_err(|e| format!("lock: {}", e))?;
+        if let Some(port) = mgr.get_session_port(session_id) {
+            MemoryUpdateSidecarTarget::Ready(port)
+        } else if mgr.generation_for(session_id).is_some() {
+            MemoryUpdateSidecarTarget::BoundButNotReady
+        } else {
+            MemoryUpdateSidecarTarget::Missing
+        }
     };
 
-    let (port, was_temp) = if let Some(port) = existing_port {
-        (port, false)
-    } else {
-        // Need to start a temporary sidecar via spawn_blocking (ensure_session_sidecar is blocking)
-        let ah = app_handle.clone();
-        let sm = Arc::clone(sidecar_manager);
-        let sid = session_id.to_string();
-        let ws = workspace_path.to_string();
-        let own = owner.clone();
+    let (port, was_temp) = match target {
+        MemoryUpdateSidecarTarget::Ready(port) => (port, false),
+        MemoryUpdateSidecarTarget::BoundButNotReady => {
+            return Err("Session sidecar is not ready; deferring memory update".to_string());
+        }
+        MemoryUpdateSidecarTarget::Missing => {
+            // Need to start a temporary sidecar via spawn_blocking (ensure_session_sidecar is blocking)
+            let ah = app_handle.clone();
+            let sm = Arc::clone(sidecar_manager);
+            let sid = session_id.to_string();
+            let ws = workspace_path.to_string();
+            let own = owner.clone();
 
-        let result = tokio::task::spawn_blocking(move || {
-            let workspace = PathBuf::from(&ws);
-            sidecar::ensure_session_sidecar(&ah, &sm, &sid, &workspace, own)
-        })
-        .await
-        .map_err(|e| format!("spawn_blocking: {}", e))?
-        .map_err(|e| format!("ensure_sidecar: {}", e))?;
+            let result = tokio::task::spawn_blocking(move || {
+                let workspace = PathBuf::from(&ws);
+                sidecar::ensure_session_sidecar(&ah, &sm, &sid, &workspace, own)
+            })
+            .await
+            .map_err(|e| format!("spawn_blocking: {}", e))?
+            .map_err(|e| format!("ensure_sidecar: {}", e))?;
 
-        // Sync AI config to the new sidecar
-        sync_ai_config_to_port(result.port, current_model, current_provider_env, mcp_servers_json).await;
-        (result.port, true)
+            // Sync AI config only for a sidecar this memory-update turn created.
+            if result.is_new {
+                sync_ai_config_to_port(result.port, current_model, current_provider_env, mcp_servers_json).await;
+            }
+            (result.port, true)
+        }
     };
 
     // POST /api/memory/update — release temp sidecar on ALL exit paths
