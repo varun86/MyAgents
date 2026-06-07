@@ -31,6 +31,14 @@ export interface ToolAttachment {
    */
   savedPath?: string;
 
+  /**
+   * 原始产物路径（PRD 0.2.31）。`savedPath` 是 trusted-root 的**副本**（用于渲染/重启可解析）；
+   * `sourcePath` 是工具实际写出的**原始**文件（如 `~/.myagents/generated_audio/xxx.mp3`），
+   * 也是工具卡 meta 展示的那条路径。「在文件管理器中显示 / 用默认应用打开」优先用它，
+   * 让"看到的路径"和"打开的路径"一致。仅 builtin 媒体附件设置；其它来源留空。
+   */
+  sourcePath?: string;
+
   sizeBytes?: number;
 
   /** 图片像素宽（如已知） */

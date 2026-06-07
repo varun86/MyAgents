@@ -1,46 +1,64 @@
 /**
- * ToolAudioAttachment — single audio attachment renderer (PRD 0.2.30).
- *
- * Owns the in-flow, card-style audio surface for any tool that emits an `audio`
+ * ToolAudioAttachment — compact, single-row audio card for an `audio`
  * ToolAttachment (builtin edge-tts, Codex mcpToolCall audio). Mounted by
- * ToolAttachmentGallery after the tool card, so the player lives in the
- * conversation flow rather than buried inside the collapsible tool body.
+ * ToolAttachmentGallery in the message flow (PRD 0.2.30). 0.2.31 redesign "V1":
  *
- * Layout: [▶ player bar] + a compact meta line (format · size) + caption +
- * a "more" menu (reveal in file manager / open with default app).
+ *   ┌────────────────────────────────────────────────┐
+ *   │ (▶)  ▭▭▭▭▭▭▭▭▭▭▭▭▭▭▭▭▭▭▭▭   0:03 / 0:23   ⋯ │
+ *   └────────────────────────────────────────────────┘
  *
- * Playback reuses the global `audioPlayer.ts` singleton via AudioPlayerBar,
- * keyed on `savedPath` (absolute local path = the trusted-root copy).
+ * Card presence comes from the border / radius / subtle shadow, NOT height —
+ * a single row keeps it a quiet inline artifact, not a hero element. Secondary
+ * actions (skip ±5s, reveal/open the file) live in the ⋯ menu.
+ *
+ * Playback reuses the global `audioPlayer.ts` singleton via `useAudioPlayer`
+ * (one audio at a time), keyed on `savedPath` (the restart-safe trusted-root
+ * copy). The menu's open-path actions target `sourcePath` (the original
+ * generated file the tool card advertises) so what's shown == what's opened.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { MoreHorizontal, FolderOpen, ExternalLink } from 'lucide-react';
+import { MoreHorizontal, FolderOpen, ExternalLink, Play, Pause, RotateCcw, RotateCw } from 'lucide-react';
 
 import { useWorkspaceFileService } from '@/hooks/useWorkspaceFileService';
-import AudioPlayerBar from './AudioPlayerBar';
+import { useFileAction } from '@/context/FileActionContext';
+import { useAudioPlayer } from '@/hooks/useAudioPlayer';
+import { formatPlaybackTime } from '@/utils/audioPlayer';
+import SeekBar from './SeekBar';
 import type { ToolAttachment } from '../../../shared/types/tool-attachment';
 
 interface Props {
   attachment: ToolAttachment;
 }
 
-function formatSize(bytes?: number): string | null {
-  if (!bytes || bytes <= 0) return null;
-  if (bytes < 1024) return `${bytes}B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
-}
+const SKIP_SECONDS = 5;
 
-/** 'audio/mpeg' → 'MP3', 'audio/mp4' → 'M4A', fallback to subtype upper-cased. */
-function formatLabel(mimeType: string): string {
-  const sub = mimeType.split('/')[1]?.toLowerCase() ?? '';
-  const map: Record<string, string> = { mpeg: 'MP3', mp4: 'M4A', 'x-wav': 'WAV', wav: 'WAV', ogg: 'OGG', webm: 'WEBM', aac: 'AAC', opus: 'OPUS' };
-  return map[sub] ?? (sub ? sub.toUpperCase() : 'AUDIO');
-}
+const CARD_SHELL =
+  'flex w-full max-w-[440px] items-center gap-3 rounded-[14px] border border-[var(--line)] bg-[var(--paper-elevated)] px-3.5 py-3 shadow-[var(--shadow-xs)]';
 
 export default function ToolAudioAttachment({ attachment }: Props) {
   const fileService = useWorkspaceFileService(null);
+  // The chat's workspace root. `openPath` (sourcePath) may live under the
+  // workspace (e.g. `<workspace>/myagents_files/...`) on a non-home drive
+  // (`/Volumes/work`, `D:\`). Rust `validate_external_open_path` only allows
+  // home/tmp/workspace prefixes, so without threading the workspace the menu
+  // silently fails for workspaces outside `~`/`tmp`. FileActionContext already
+  // carries it for the inline play button; reuse it (null outside Chat → home/tmp).
+  const workspacePath = useFileAction()?.workspacePath ?? null;
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
+
+  const savedPath = attachment.savedPath;
+  // Playback uses the trusted-root copy; "open path" targets the ORIGINAL file.
+  const openPath = attachment.sourcePath ?? attachment.savedPath;
+
+  // Hook is called unconditionally (React rules); '' is never "current".
+  const { isPlaying, isCurrent, toggle, progress, duration, seek } = useAudioPlayer(savedPath ?? '');
+
+  const seekable = isCurrent && duration > 0;
+  const skip = useCallback((delta: number) => {
+    if (!seekable) return;
+    seek(Math.max(0, Math.min(duration, progress + delta)));
+  }, [seekable, seek, duration, progress]);
 
   // Close the overflow menu on any outside mousedown.
   useEffect(() => {
@@ -52,100 +70,133 @@ export default function ToolAudioAttachment({ attachment }: Props) {
     return () => document.removeEventListener('mousedown', onDown);
   }, [menuOpen]);
 
-  const savedPath = attachment.savedPath;
-
   const reveal = useCallback(async () => {
     setMenuOpen(false);
-    if (!savedPath) return;
+    if (!openPath) return;
     try {
-      await fileService.openPathExternal({ fullPath: savedPath });
+      await fileService.openPathExternal({ fullPath: openPath, workspace: workspacePath });
     } catch (err) {
       console.error('[ToolAudioAttachment] reveal failed:', err);
     }
-  }, [fileService, savedPath]);
+  }, [fileService, openPath, workspacePath]);
 
   const openDefault = useCallback(async () => {
     setMenuOpen(false);
-    if (!savedPath) return;
+    if (!openPath) return;
     try {
-      await fileService.openPathWithDefault({ fullPath: savedPath });
+      await fileService.openPathWithDefault({ fullPath: openPath, workspace: workspacePath });
     } catch (err) {
       console.error('[ToolAudioAttachment] open-with-default failed:', err);
     }
-  }, [fileService, savedPath]);
+  }, [fileService, openPath, workspacePath]);
 
   // Placeholder (async save in flight — e.g. Codex audio).
   if (attachment.pendingId && !attachment.refPath) {
     return (
-      <div className="flex h-12 w-full max-w-[400px] items-center rounded-lg border border-dashed border-[var(--paper-line)] bg-[var(--paper-inset)]/40 px-3 text-sm text-[var(--ink-muted)]">
+      <div className={`${CARD_SHELL} text-sm text-[var(--ink-muted)]`}>
         <span className="animate-pulse">音频生成中…</span>
       </div>
     );
   }
 
-  // Error sentinel. (Optional-chain defensively: refPath is typed string, but a
-  // partial/placeholder object shouldn't crash the message render.)
+  // Error sentinel. (Optional-chain defensively against a partial object.)
   if (attachment.refPath?.startsWith('error://')) {
     return (
-      <div className="flex h-12 w-full max-w-[400px] items-center rounded-lg border border-rose-300/50 bg-rose-50/30 px-3 text-xs text-rose-600 dark:bg-rose-900/10 dark:text-rose-300">
+      <div className="flex w-full max-w-[440px] items-center rounded-[14px] border border-rose-300/50 bg-rose-50/30 px-3.5 py-3 text-xs text-rose-600 dark:bg-rose-900/10 dark:text-rose-300">
         <span>⚠️ 音频渲染失败：{attachment.refPath.slice('error://'.length)}</span>
       </div>
     );
   }
 
-  const format = formatLabel(attachment.mimeType);
-  const size = formatSize(attachment.sizeBytes);
-  const metaLine = [format, size].filter(Boolean).join(' · ');
-
-  return (
-    <div className="flex flex-col gap-1">
-      <div className="flex items-center gap-1.5">
-        {savedPath ? (
-          <AudioPlayerBar filePath={savedPath} />
-        ) : (
-          // No local path on this sidecar — degrade to a meta-only chip.
-          <div className="flex h-9 items-center rounded-lg bg-[var(--paper-inset)] px-3 text-xs text-[var(--ink-muted)]">
-            {format} 音频
-          </div>
-        )}
-        {savedPath && (
-          <div className="relative" ref={menuRef}>
-            <button
-              type="button"
-              aria-label="更多"
-              onClick={() => setMenuOpen(o => !o)}
-              className="flex size-7 items-center justify-center rounded-full text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink-secondary)]"
-            >
-              <MoreHorizontal className="size-4" />
-            </button>
-            {menuOpen && (
-              <div className="absolute right-0 top-8 z-50 min-w-[160px] overflow-hidden rounded-lg border border-[var(--paper-line)] bg-[var(--paper)] py-1 shadow-lg">
-                <button
-                  type="button"
-                  onClick={reveal}
-                  className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-[var(--ink-secondary)] transition-colors hover:bg-[var(--paper-inset)]"
-                >
-                  <FolderOpen className="size-3.5" /> 在文件管理器中显示
-                </button>
-                <button
-                  type="button"
-                  onClick={openDefault}
-                  className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-[var(--ink-secondary)] transition-colors hover:bg-[var(--paper-inset)]"
-                >
-                  <ExternalLink className="size-3.5" /> 用默认应用打开
-                </button>
-              </div>
-            )}
-          </div>
-        )}
-      </div>
-      {(metaLine || attachment.caption) && (
-        <div className="max-w-[400px] text-[10px] text-[var(--ink-muted)]">
-          {metaLine && <span className="tabular-nums">{metaLine}</span>}
-          {metaLine && attachment.caption && <span className="opacity-50"> · </span>}
-          {attachment.caption && <span className="line-clamp-2">{attachment.caption}</span>}
+  const moreMenu = openPath ? (
+    <div className="relative shrink-0" ref={menuRef}>
+      <button
+        type="button"
+        aria-label="更多"
+        onClick={() => setMenuOpen(o => !o)}
+        className="flex size-7 items-center justify-center rounded-full text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink-secondary)]"
+      >
+        <MoreHorizontal className="size-4" />
+      </button>
+      {menuOpen && (
+        <div className="absolute right-0 top-9 z-50 min-w-[168px] overflow-hidden rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] py-1 shadow-[var(--shadow-md)]">
+          {/* Skip ±5s — stay open so the user can tap repeatedly; disabled until loaded. */}
+          <button
+            type="button"
+            onClick={() => skip(-SKIP_SECONDS)}
+            disabled={!seekable}
+            className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-[var(--ink-secondary)] transition-colors hover:bg-[var(--paper-inset)] disabled:cursor-default disabled:opacity-40 disabled:hover:bg-transparent"
+          >
+            <RotateCcw className="size-3.5" /> 后退 5 秒
+          </button>
+          <button
+            type="button"
+            onClick={() => skip(SKIP_SECONDS)}
+            disabled={!seekable}
+            className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-[var(--ink-secondary)] transition-colors hover:bg-[var(--paper-inset)] disabled:cursor-default disabled:opacity-40 disabled:hover:bg-transparent"
+          >
+            <RotateCw className="size-3.5" /> 前进 5 秒
+          </button>
+          <div className="my-1 h-px bg-[var(--line-subtle)]" />
+          <button
+            type="button"
+            onClick={reveal}
+            className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-[var(--ink-secondary)] transition-colors hover:bg-[var(--paper-inset)]"
+          >
+            <FolderOpen className="size-3.5" /> 在文件管理器中显示
+          </button>
+          <button
+            type="button"
+            onClick={openDefault}
+            className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-[var(--ink-secondary)] transition-colors hover:bg-[var(--paper-inset)]"
+          >
+            <ExternalLink className="size-3.5" /> 用默认应用打开
+          </button>
         </div>
       )}
+    </div>
+  ) : null;
+
+  // No local path on this sidecar — degrade to a compact meta + menu row.
+  if (!savedPath) {
+    return (
+      <div className={`${CARD_SHELL} justify-between text-xs text-[var(--ink-muted)]`}>
+        <span>音频</span>
+        {moreMenu}
+      </div>
+    );
+  }
+
+  return (
+    <div className={CARD_SHELL}>
+      {/* play / pause */}
+      <button
+        type="button"
+        aria-label={isPlaying ? '暂停' : '播放'}
+        onClick={toggle}
+        className="flex size-10 shrink-0 items-center justify-center rounded-full bg-[var(--accent)] text-white transition-colors hover:bg-[var(--accent-warm-hover)] active:scale-95"
+      >
+        {isPlaying
+          ? <Pause className="size-4 fill-current" />
+          : <Play className="size-[18px] fill-current ml-0.5" />
+        }
+      </button>
+
+      {/* progress fills the middle */}
+      <SeekBar
+        ratio={seekable ? progress / duration : 0}
+        seekable={seekable}
+        onSeek={(r) => seek(r * duration)}
+        trackClass="bg-[var(--paper-inset)]"
+        className="flex-1"
+      />
+
+      {/* time */}
+      <span className="shrink-0 font-mono text-[11px] tabular-nums text-[var(--ink-muted)]">
+        {isCurrent ? formatPlaybackTime(progress) : '0:00'} / {seekable ? formatPlaybackTime(duration) : '--:--'}
+      </span>
+
+      {moreMenu}
     </div>
   );
 }

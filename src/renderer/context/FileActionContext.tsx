@@ -6,7 +6,7 @@
  *
  * Only provided inside Chat; Settings / other pages get null from useFileAction().
  */
-import { AtSign, ExternalLink, Eye, FolderOpen } from 'lucide-react';
+import { AtSign, ExternalLink, Eye, FolderOpen, LocateFixed } from 'lucide-react';
 import {
   createContext,
   lazy,
@@ -25,6 +25,7 @@ import type { ContextMenuItem } from '@/components/ContextMenu';
 import { useImagePreview } from '@/context/ImagePreviewContext';
 import { useWorkspaceFileService } from '@/hooks/useWorkspaceFileService';
 import { getRichDocKind, isImageFile, isPreviewable, type RichDocKind } from '../../shared/fileTypes';
+import type { FilePreviewFocusTarget } from '@/types/filePreview';
 import { resolveWorkspaceFileLinkTarget } from '@/utils/workspaceFileLinks';
 
 // Lazy load FilePreviewModal (heavy: includes SyntaxHighlighter + Monaco)
@@ -44,6 +45,10 @@ export interface FileActionContextValue {
   cacheVersion: number;
   /** Open the context menu for a resolved path. */
   openFileMenu: (x: number, y: number, path: string, pathType: 'file' | 'dir') => void;
+  /** Workspace root, for resolving workspace-relative paths to absolute (e.g. the
+   *  inline audio play button, whose player needs an absolute path). May be null
+   *  outside a workspace. */
+  workspacePath: string | null;
 }
 
 export interface FileLinkActionContextValue {
@@ -69,6 +74,7 @@ interface FileActionProviderProps {
     path: string;
     richDocKind?: RichDocKind;
     initialLineNumber?: number;
+    focusTarget?: FilePreviewFocusTarget;
   }) => void;
   /** Append `@<path> ` to chat input — wired to FilePreviewModal's「引用文件」button.
    *  Distinct from `onInsertReference` (cursor-insert, no trailing space) — the toolbar
@@ -77,6 +83,10 @@ interface FileActionProviderProps {
   /** Append `@<path>#L<start>[-L<end>] ` to chat input — wired to FilePreviewModal's
    *  Monaco selection-quote affordance. */
   onQuoteSelection?: (path: string, startLine: number, endLine: number) => void;
+  /** Reveal a workspace-relative path in the right-side directory tree (expand
+   *  ancestors + select + scroll into view). Reuses the same mechanism as the
+   *  search panel's「在文件目录中展示」. When omitted, the menu item is hidden. */
+  onRevealInTree?: (path: string) => void;
 }
 
 // ---------- Context ----------
@@ -96,7 +106,7 @@ export function useFileLinkAction(): FileLinkActionContextValue | null {
 
 const BATCH_DELAY_MS = 50;
 
-export function FileActionProvider({ children, workspacePath, onInsertReference, refreshTrigger, onFilePreviewExternal, onQuoteFile, onQuoteSelection }: FileActionProviderProps) {
+export function FileActionProvider({ children, workspacePath, onInsertReference, refreshTrigger, onFilePreviewExternal, onQuoteFile, onQuoteSelection, onRevealInTree }: FileActionProviderProps) {
   const fileService = useWorkspaceFileService(workspacePath);
   const { openPreview: openImagePreview } = useImagePreview();
 
@@ -106,6 +116,9 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
 
   const onFilePreviewExternalRef = useRef(onFilePreviewExternal);
   onFilePreviewExternalRef.current = onFilePreviewExternal;
+
+  const onRevealInTreeRef = useRef(onRevealInTree);
+  onRevealInTreeRef.current = onRevealInTree;
 
   // Stabilise fileService so async closures see the latest service without
   // re-binding callbacks. Mirrors the React-stability rules pattern used
@@ -207,14 +220,26 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
     path: string;
     richDocKind?: RichDocKind;
     initialLineNumber?: number;
+    focusTarget?: FilePreviewFocusTarget;
     isLoading: boolean;
     error: string | null;
   } | null>(null);
+
+  const previewFocusRequestIdRef = useRef(0);
+
+  const createFocusTarget = useCallback((lineNumber?: number) => {
+    if (!lineNumber) return undefined;
+    return {
+      requestId: ++previewFocusRequestIdRef.current,
+      lineNumber,
+    } satisfies FilePreviewFocusTarget;
+  }, []);
 
   const handlePreview = useCallback((path: string, options?: { initialLineNumber?: number }): boolean => {
     const fileName = path.split(/[/\\]/).pop() ?? path;
     const svc = fileServiceRef.current;
     if (!svc.isAvailable) return false;
+    const focusTarget = createFocusTarget(options?.initialLineNumber);
 
     const richDocKind = getRichDocKind(fileName);
     if (richDocKind) {
@@ -225,6 +250,7 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
         path,
         richDocKind,
         initialLineNumber: options?.initialLineNumber,
+        focusTarget,
       };
       if (onFilePreviewExternalRef.current) {
         onFilePreviewExternalRef.current(fileData);
@@ -279,6 +305,7 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
             size: resp.size,
             path,
             initialLineNumber: options?.initialLineNumber,
+            focusTarget,
           });
         } catch (err) {
           if (!isMountedRef.current) return;
@@ -289,6 +316,7 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
             size: 0,
             path,
             initialLineNumber: options?.initialLineNumber,
+            focusTarget,
             isLoading: false,
             error: err instanceof Error ? err.message : 'Failed to load file',
           });
@@ -304,6 +332,7 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
       size: 0,
       path,
       initialLineNumber: options?.initialLineNumber,
+      focusTarget,
       isLoading: true,
       error: null,
     });
@@ -319,7 +348,7 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
       }
     })();
     return true;
-  }, [openImagePreview]);
+  }, [createFocusTarget, openImagePreview]);
 
   const openFileLink = useCallback((href: string): boolean => {
     if (!fileServiceRef.current.isAvailable) return false;
@@ -344,6 +373,10 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
 
   const handleOpenInFinder = useCallback((path: string) => {
     void fileServiceRef.current.openInFinder({ path }).catch(() => {});
+  }, []);
+
+  const handleRevealInTree = useCallback((path: string) => {
+    onRevealInTreeRef.current?.(path);
   }, []);
 
   // Build menu items
@@ -381,15 +414,26 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
       onClick: () => handleOpenInFinder(path),
     });
 
+    // Reveal in the right-side directory tree — only when the host wired it up
+    // (i.e. a workspace tree exists to reveal into). Works for files and dirs.
+    if (onRevealInTreeRef.current) {
+      items.push({
+        label: '在文件目录中展示',
+        icon: <LocateFixed className="h-4 w-4" />,
+        onClick: () => handleRevealInTree(path),
+      });
+    }
+
     return items;
-  }, [menuState, handlePreview, handleReference, handleOpenWithDefault, handleOpenInFinder]);
+  }, [menuState, handlePreview, handleReference, handleOpenWithDefault, handleOpenInFinder, handleRevealInTree]);
 
   // ---------- Context value ----------
   const contextValue = useMemo<FileActionContextValue>(() => ({
     checkPath,
     cacheVersion,
     openFileMenu,
-  }), [checkPath, cacheVersion, openFileMenu]);
+    workspacePath,
+  }), [checkPath, cacheVersion, openFileMenu, workspacePath]);
 
   const linkActionValue = useMemo<FileLinkActionContextValue>(() => ({
     openFileLink,
@@ -427,6 +471,7 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
               // skips the fetch (preview text/code still works).
               workspacePath={workspacePath}
               initialLineNumber={previewFile.initialLineNumber}
+              focusTarget={previewFile.focusTarget}
               onClose={() => setPreviewFile(null)}
               onRenamed={(newPath, newName) => {
                 // Update local preview state so subsequent saves target the new

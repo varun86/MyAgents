@@ -1077,3 +1077,21 @@ interface ChannelConfig {
  // ... credentials per type
 }
 ```
+
+### Mino 模板与 Agent 默认能力
+
+Mino 默认工作区的"文件内容模板"和 MyAgents 的"产品级 Agent 默认策略"是两层：
+
+| 层 | 权威来源 | 职责 |
+|----|----------|------|
+| 文件内容模板 | `resources/mino/`（来自外部 Mino 模板仓库/打包资源） | 初始化工作区里的 Markdown、配置文件、示例内容 |
+| 产品默认能力 | `src/shared/config-types.ts::PRESET_TEMPLATES[].agentDefaults` | 声明新建 builtin Mino project 时 Agent 是否默认开启，以及 heartbeat / memory 默认参数 |
+
+`Project` 会记录 `templateId` / `templateSource`。只有 `templateSource === 'builtin'` 且模板本身带 `agentDefaults` 时，`buildAgentForProject()` 才会把这些默认策略复制进 `AgentConfig`。用户模板即使复用了 `mino` 这个 id，也不会自动继承 builtin 默认能力。
+
+关键不变式：
+- 新建 project / 启动补齐历史 project 的 Agent 配置必须走 `buildAgentForProject()`，避免 Launcher、ConfigProvider、migration 路径分叉。
+- `ensureAllProjectsHaveAgent()` 只负责保证每个 project 有一个基础 Agent；对 builtin Mino project 会应用 `agentDefaults`，并把 `project.isAgent` 标为 true。
+- `agentDefaults.enabled = true` 只表示这个 workspace 的 Agent 能力默认打开；它不自动创建 Channel，也不绕过运行时门槛。
+- Rust 启动 Channel / heartbeat 仍以 `agent.enabled && channel.enabled && credentials` 为准。没有 channel 或 credential 时不会产生外部 IM 连接。
+- 后续如果要让用户模板也配置默认能力，需要新增用户可见的模板编辑能力和持久化 schema；不能把产品 builtin 默认值隐式套到 user template。

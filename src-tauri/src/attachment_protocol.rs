@@ -1,26 +1,23 @@
 // Custom `myagents://` URI scheme for binary attachment delivery.
 //
-// Replaces the previous architecture where GET /sessions/:id embedded every
-// image attachment as a base64 data URL in the JSON body — that synchronously
-// read files on the Bun event loop, bloated the response 1.33×, and forced
-// both Bun and the WebView to round-trip 50-100MB strings through JSON.
+// Regular user attachments are served directly from the app data directory.
+// Tool attachments are proxied to the session sidecar because the sidecar owns
+// the external-attachment registry and path validation logic.
 //
-// Now the server only returns attachment metadata; `<img src="myagents://...">`
-// triggers this handler which serves bytes directly through WebKit's resource
-// pipeline. Zero JSON, zero base64, zero main-thread blocking.
-//
-// URL form:
+// URL forms:
 //   macOS / Linux: myagents://attachment/<sessionId>/<filename.ext>
 //   Windows:       http://myagents.localhost/attachment/<sessionId>/<filename.ext>
-// The Windows form is what Tauri 2 auto-rewrites custom schemes to; the parser
-// accepts either by anchoring on "attachment/" in the URI string.
+//   macOS / Linux: myagents://tool-attachment/<sessionId>/<turnId>/<filename.ext>
+//   Windows:       http://myagents.localhost/tool-attachment/<sessionId>/<turnId>/<filename.ext>
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use tauri::http::{Request, Response, StatusCode};
-use tauri::{Runtime, UriSchemeContext, UriSchemeResponder};
+use tauri::{Manager, Runtime, UriSchemeContext, UriSchemeResponder};
 
 use crate::app_dirs::myagents_data_dir;
+use crate::sidecar::ManagedSidecarManager;
 
 fn attachments_root() -> Option<PathBuf> {
     myagents_data_dir().map(|d| d.join("attachments"))
@@ -59,20 +56,44 @@ fn empty(status: StatusCode) -> Response<Vec<u8>> {
         .unwrap()
 }
 
-fn extract_relative_path(uri: &str) -> Option<String> {
-    // Accept both "myagents://attachment/<rel>" and "http://myagents.localhost/attachment/<rel>".
-    let marker = "attachment/";
+fn extract_path_after_marker(uri: &str, marker: &str) -> Option<String> {
     let idx = uri.find(marker)?;
     let rest = &uri[idx + marker.len()..];
-    // Strip query string and fragment.
     let rest = rest.split('?').next().unwrap_or(rest);
     let rest = rest.split('#').next().unwrap_or(rest);
     if rest.is_empty() {
         return None;
     }
-    // Crude URL decode — attachments are saved with UUID filenames, so %-sequences
-    // are rare, but Chinese file names may appear in custom uploads.
     Some(percent_decode(rest))
+}
+
+fn extract_relative_path(uri: &str) -> Option<String> {
+    extract_path_after_marker(uri, "://attachment/")
+        .or_else(|| extract_path_after_marker(uri, "/attachment/"))
+}
+
+fn extract_tool_attachment_segments(uri: &str) -> Option<(String, String, String)> {
+    let rel = extract_path_after_marker(uri, "://tool-attachment/")
+        .or_else(|| extract_path_after_marker(uri, "/tool-attachment/"))?;
+    let segments: Vec<&str> = rel.split('/').collect();
+    if segments.len() != 3 || segments.iter().any(|segment| has_unsafe_segment(segment)) {
+        return None;
+    }
+    Some((
+        segments[0].to_string(),
+        segments[1].to_string(),
+        segments[2].to_string(),
+    ))
+}
+
+fn has_unsafe_segment(segment: &str) -> bool {
+    segment.is_empty()
+        || segment == "."
+        || segment == ".."
+        || segment.contains("..")
+        || segment
+            .chars()
+            .any(|ch| ch < ' ' || ch == '/' || ch == '\\')
 }
 
 fn percent_decode(input: &str) -> String {
@@ -93,6 +114,19 @@ fn percent_decode(input: &str) -> String {
     String::from_utf8(out).unwrap_or_else(|_| input.to_string())
 }
 
+fn percent_encode_path_segment(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for &byte in input.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char)
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
 fn hex(b: u8) -> Option<u8> {
     match b {
         b'0'..=b'9' => Some(b - b'0'),
@@ -102,7 +136,7 @@ fn hex(b: u8) -> Option<u8> {
     }
 }
 
-fn build_response(request: &Request<Vec<u8>>) -> Response<Vec<u8>> {
+fn build_attachment_response(request: &Request<Vec<u8>>) -> Response<Vec<u8>> {
     let uri_str = request.uri().to_string();
     let Some(rel) = extract_relative_path(&uri_str) else {
         return empty(StatusCode::NOT_FOUND);
@@ -113,8 +147,6 @@ fn build_response(request: &Request<Vec<u8>>) -> Response<Vec<u8>> {
     };
     let candidate = root.join(&rel);
 
-    // Path traversal guard: resolve to canonical paths and require containment.
-    // If the file doesn't exist yet, canonicalize() fails — treat as not found.
     let canonical = match candidate.canonicalize() {
         Ok(p) => p,
         Err(_) => return empty(StatusCode::NOT_FOUND),
@@ -137,23 +169,102 @@ fn build_response(request: &Request<Vec<u8>>) -> Response<Vec<u8>> {
         .status(StatusCode::OK)
         .header("Content-Type", mime)
         .header("Content-Length", bytes.len().to_string())
-        // Attachment files are immutable once written (UUID-named), so long cache is safe.
         .header("Cache-Control", "public, max-age=31536000, immutable")
         .header("Access-Control-Allow-Origin", "*")
         .body(bytes)
         .unwrap()
 }
 
-/// Async URI scheme handler. File I/O runs on Tauri's pooled blocking executor
-/// so a large image read never blocks the webview thread, and rapid scrolling
-/// through a paginated gallery doesn't spawn one fresh OS thread per request.
+fn build_tool_attachment_response(
+    port: u16,
+    session_id: &str,
+    turn_id: &str,
+    filename: &str,
+) -> Response<Vec<u8>> {
+    let url = format!(
+        "http://127.0.0.1:{}/api/attachment/tool/{}/{}/{}",
+        port,
+        percent_encode_path_segment(session_id),
+        percent_encode_path_segment(turn_id),
+        percent_encode_path_segment(filename)
+    );
+
+    let client = match crate::local_http::blocking_builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+    {
+        Ok(client) => client,
+        Err(_) => return empty(StatusCode::BAD_GATEWAY),
+    };
+
+    let response = match client.get(url).send() {
+        Ok(response) => response,
+        Err(_) => return empty(StatusCode::BAD_GATEWAY),
+    };
+
+    let status =
+        StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .to_string();
+    let cache_control = response
+        .headers()
+        .get(reqwest::header::CACHE_CONTROL)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+
+    let bytes = match response.bytes() {
+        Ok(bytes) => bytes.to_vec(),
+        Err(_) => return empty(StatusCode::BAD_GATEWAY),
+    };
+
+    let mut builder = Response::builder()
+        .status(status)
+        .header("Content-Type", content_type)
+        .header("Content-Length", bytes.len().to_string())
+        .header("Access-Control-Allow-Origin", "*");
+    if let Some(cache_control) = cache_control {
+        builder = builder.header("Cache-Control", cache_control);
+    }
+    builder.body(bytes).unwrap()
+}
+
+fn session_sidecar_port<R: Runtime>(
+    ctx: &UriSchemeContext<'_, R>,
+    session_id: &str,
+) -> Option<u16> {
+    let manager = ctx.app_handle().try_state::<ManagedSidecarManager>()?;
+    let guard = manager.lock().ok()?;
+    guard.get_session_port(session_id)
+}
+
+/// Async URI scheme handler. File I/O and loopback HTTP run on Tauri's pooled
+/// blocking executor so large reads never block the webview thread.
 pub fn handle<R: Runtime>(
-    _ctx: UriSchemeContext<'_, R>,
+    ctx: UriSchemeContext<'_, R>,
     request: Request<Vec<u8>>,
     responder: UriSchemeResponder,
 ) {
+    let uri_str = request.uri().to_string();
+    if let Some((session_id, turn_id, filename)) = extract_tool_attachment_segments(&uri_str) {
+        let port = session_sidecar_port(&ctx, &session_id);
+        tauri::async_runtime::spawn_blocking(move || {
+            let response = match port {
+                Some(port) => {
+                    build_tool_attachment_response(port, &session_id, &turn_id, &filename)
+                }
+                None => empty(StatusCode::NOT_FOUND),
+            };
+            responder.respond(response);
+        });
+        return;
+    }
+
     tauri::async_runtime::spawn_blocking(move || {
-        let response = build_response(&request);
+        let response = build_attachment_response(&request);
         responder.respond(response);
     });
 }
@@ -188,5 +299,50 @@ mod tests {
     #[test]
     fn rejects_non_attachment_uri() {
         assert!(extract_relative_path("myagents://other/foo").is_none());
+    }
+
+    #[test]
+    fn regular_attachment_rejects_tool_attachment_uri() {
+        assert!(extract_relative_path("myagents://tool-attachment/s/t/file.png").is_none());
+    }
+
+    #[test]
+    fn extracts_tool_macos_form() {
+        let r =
+            extract_tool_attachment_segments("myagents://tool-attachment/s/t/file.png").unwrap();
+        assert_eq!(
+            r,
+            ("s".to_string(), "t".to_string(), "file.png".to_string())
+        );
+    }
+
+    #[test]
+    fn extracts_tool_windows_form() {
+        let r = extract_tool_attachment_segments(
+            "http://myagents.localhost/tool-attachment/s/t/file.png",
+        )
+        .unwrap();
+        assert_eq!(
+            r,
+            ("s".to_string(), "t".to_string(), "file.png".to_string())
+        );
+    }
+
+    #[test]
+    fn tool_attachment_rejects_unsafe_segment() {
+        assert!(
+            extract_tool_attachment_segments("myagents://tool-attachment/s/%2e%2e/file.png",)
+                .is_none()
+        );
+        assert!(
+            extract_tool_attachment_segments("myagents://tool-attachment/s/t/bad%5Cname.png",)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn percent_encodes_path_segment() {
+        assert_eq!(percent_encode_path_segment("a b.png"), "a%20b.png");
+        assert_eq!(percent_encode_path_segment("a+b.png"), "a%2Bb.png");
     }
 }

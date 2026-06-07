@@ -26,6 +26,7 @@ interface BrowserPanelProps {
   /** Whether this panel should be visible (includes isActive + splitActiveView + splitPanelVisible) */
   isVisible: boolean;
   isDraggingSplit: boolean;
+  isSplitTransitioning?: boolean;
   browserAlive: boolean;
   /** When previewing a local file, stores its metadata for editor toggle */
   sourceFile?: { name: string; content: string; size: number; path: string } | null;
@@ -57,6 +58,7 @@ export default function BrowserPanel({
   url,
   isVisible,
   isDraggingSplit,
+  isSplitTransitioning = false,
   browserAlive,
   sourceFile,
   workspace,
@@ -217,6 +219,7 @@ export default function BrowserPanel({
   useEffect(() => {
     const el = containerRef.current;
     if (!el || !browserAlive) return;
+    if (isSplitTransitioning) return;
 
     const syncBounds = () => {
       const rect = el.getBoundingClientRect();
@@ -238,7 +241,7 @@ export default function BrowserPanel({
       observer.disconnect();
       window.removeEventListener('resize', syncBounds);
     };
-  }, [browserAlive, tabId]);
+  }, [browserAlive, isSplitTransitioning, tabId]);
 
   // Blank-state detection.
   //
@@ -259,7 +262,8 @@ export default function BrowserPanel({
   // ── Consolidated show/hide ──
   useEffect(() => {
     if (!browserAlive) return;
-    const shouldShow = isVisible && !isDraggingSplit && !overlayDetected && !isBlankPage;
+    const nativeViewSuspended = isDraggingSplit || isSplitTransitioning;
+    const shouldShow = isVisible && !nativeViewSuspended && !overlayDetected && !isBlankPage;
     if (shouldShow) {
       invoke('cmd_browser_show', { tabId }).catch(() => {});
       const el = containerRef.current;
@@ -276,7 +280,7 @@ export default function BrowserPanel({
     } else {
       invoke('cmd_browser_hide', { tabId }).catch(() => {});
     }
-  }, [isVisible, isDraggingSplit, overlayDetected, browserAlive, isBlankPage, tabId]);
+  }, [isVisible, isDraggingSplit, isSplitTransitioning, overlayDetected, browserAlive, isBlankPage, tabId]);
 
   // ── Cleanup on unmount ──
   useEffect(() => {
@@ -482,7 +486,7 @@ export default function BrowserPanel({
           </button>
         )}
 
-        {isDraggingSplit && browserAlive && !isBlankPage && (
+        {(isDraggingSplit || isSplitTransitioning) && browserAlive && !isBlankPage && (
           <div className="absolute inset-0 z-10 flex items-center justify-center bg-[var(--paper)]/80 backdrop-blur-md">
             <div className="flex flex-col items-center gap-2 text-[var(--ink-subtle)]">
               <Globe className="h-5 w-5" />

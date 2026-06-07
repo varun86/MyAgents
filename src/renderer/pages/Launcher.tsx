@@ -5,7 +5,10 @@
  */
 
 import { FolderPlus, LayoutTemplate, Loader2 } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, lazy, Suspense } from 'react';
+
+import { perfMark } from '@/utils/perfMark';
+import { RENDERER_PERF_PHASE } from '../../shared/perfTrace';
 import { open } from '@tauri-apps/plugin-dialog';
 
 import { track } from '@/analytics';
@@ -14,12 +17,14 @@ import { useToast } from '@/components/Toast';
 import { UnifiedLogsPanel } from '@/components/UnifiedLogsPanel';
 import PathInputDialog from '@/components/PathInputDialog';
 import ConfirmDialog from '@/components/ConfirmDialog';
-import TaskCenterOverlay from '@/components/TaskCenterOverlay';
+// P1: click-opened overlays — lazy so their subtrees (which transitively pull
+// Markdown → mermaid/katex/syntax-highlighter) leave the eager entry chunk.
+const TaskCenterOverlay = lazy(() => import('@/components/TaskCenterOverlay'));
 import { AddWorkspaceMenu, BrandSection, RecentTasks, TemplateLibraryDialog, WorkspaceCard, WorkspaceEditDialog } from '@/components/launcher';
-import WorkspaceConfigPanel from '@/components/WorkspaceConfigPanel';
+const WorkspaceConfigPanel = lazy(() => import('@/components/WorkspaceConfigPanel'));
 import { useConfig } from '@/hooks/useConfig';
 import { useTaskCenterData } from '@/hooks/useTaskCenterData';
-import { type Project, type PermissionMode, type McpServerDefinition, isProviderEnabled } from '@/config/types';
+import { type Project, type PermissionMode, type McpServerDefinition, type WorkspaceTemplate, isProviderEnabled } from '@/config/types';
 import { CUSTOM_EVENTS } from '../../shared/constants';
 import {
     getAllMcpServers,
@@ -113,6 +118,36 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
     const [selectedWorkspace, setSelectedWorkspace] = useState<Project | null>(() =>
         resolveDefaultWorkspace(visibleProjects)
     );
+
+    // P0/P4: mark when the Launcher shell first commits, for the new-tab timeline
+    // (new_tab_reveal → tab_shell_painted → tab_data_ready).
+    useEffect(() => {
+        perfMark(RENDERER_PERF_PHASE.tabShellPainted, { surface: 'launcher' });
+    }, []);
+
+    // A6 (instant-nav): warm the lazy Chat chunk while the user is on the
+    // Launcher — opening a chat IS the Launcher's purpose, so the Launcher→Chat
+    // flip should never hit a cold lazy chunk (paper Suspense flash). Only Chat,
+    // NOT the whole route graph — a blind preload of every route caused the
+    // WKWebView "preloaded but not used" warning storm removed in c465b2a9.
+    // Idle-scheduled so it never competes with first paint.
+    useEffect(() => {
+        if (!isActive) return;
+        // Warm the Chat chunk IMMEDIATELY (useEffect is post-paint, so this never
+        // blocks the Launcher's first paint). NOT requestIdleCallback: idle keeps
+        // losing the race — the Launcher's initial data fetches (task-center 6-way,
+        // config) keep the thread busy, and the user clicks a workspace card within
+        // ~0.7s, before the ~800ms cold Chat-chunk finishes. Measured: 1st launch
+        // flip→Chat-mount ~900ms cold vs ~25ms warm. Starting the fetch the instant
+        // the Launcher mounts gives it the most head start. Logs bracket the load so
+        // we can see whether it beats the click. Only Chat (not the route graph).
+        let cancelled = false;
+        console.log('[Launcher] Chat-chunk preload START');
+        void import('@/pages/Chat')
+            .then(() => { if (!cancelled) console.log('[Launcher] Chat-chunk preload DONE'); })
+            .catch(() => { /* non-fatal: the real lazy() retries on open */ });
+        return () => { cancelled = true; };
+    }, [isActive]);
 
     // Sync selectedWorkspace when visible projects change (e.g., after first project is added,
     // or after patchProject updates a project's settings from Chat tab)
@@ -603,6 +638,12 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
     const [pendingDefaultPath, setPendingDefaultPath] = useState('');
 
     const handleLaunch = useCallback((project: Project, sessionId?: string) => {
+        // Mark the TRUE click moment (before any state set / handler latency) so
+        // the unified log shows card_click → launch_start → launch_flip →
+        // useCronTask(chat mount) → launch_ensured — i.e. the real click→chat-painted
+        // timeline, independent of the chunk cache.
+        perfMark('card_click');
+        console.log(`[Launcher] CARD CLICK project=${project.id} sessionId=${sessionId ?? 'NEW'}`);
         setLaunchingProjectId(project.id);
         // Update lastOpened timestamp (async, don't block launch)
         touchProject(project.id).catch((err) => {
@@ -700,20 +741,16 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
         }
     };
 
-    const handleCreateFromTemplate = useCallback(async (path: string, icon?: string, displayName?: string) => {
-        const project = await addProject(path);
-        track('workspace_create', { source: icon ? 'template' : 'blank' });
-        const updates: { icon?: string; displayName?: string } = {};
-        if (icon) updates.icon = icon;
-        if (displayName) updates.displayName = displayName;
-        if (Object.keys(updates).length > 0) {
-            try {
-                await patchProject(project.id, updates);
-            } catch (err) {
-                console.warn('[Launcher] Failed to patch template metadata, workspace created without icon/name:', err);
-            }
-        }
-    }, [addProject, patchProject]);
+    const handleCreateFromTemplate = useCallback(async (path: string, template: WorkspaceTemplate, displayName?: string) => {
+        await addProject(path, {
+            icon: template.icon,
+            displayName,
+            templateId: template.id,
+            templateSource: template.isBuiltin ? 'builtin' : 'user',
+            agentDefaults: template.isBuiltin ? template.agentDefaults : undefined,
+        });
+        track('workspace_create', { source: 'template' });
+    }, [addProject]);
 
     const handleEditProject = useCallback(async (projectId: string, updates: { displayName?: string; icon?: string }) => {
         await patchProject(projectId, updates);
@@ -932,13 +969,15 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
 
             {/* Task Center Overlay */}
             {showOverlay && (
-                <TaskCenterOverlay
-                    projects={visibleProjects}
-                    onOpenTask={handleOverlayOpenTask}
-                    onClose={handleCloseOverlay}
-                    taskCenterData={taskCenterData}
-                    initialMode={overlayMode}
-                />
+                <Suspense fallback={null}>
+                    <TaskCenterOverlay
+                        projects={visibleProjects}
+                        onOpenTask={handleOverlayOpenTask}
+                        onClose={handleCloseOverlay}
+                        taskCenterData={taskCenterData}
+                        initialMode={overlayMode}
+                    />
+                </Suspense>
             )}
 
             {/* Template Library Dialog */}
@@ -961,12 +1000,14 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
 
             {/* Agent Config Overlay */}
             {agentOverlay && (
-                <WorkspaceConfigPanel
-                    agentDir={agentOverlay.workspacePath}
-                    onClose={handleCloseAgentOverlay}
-                    initialTab={agentOverlay.initialTab}
-                    onRequestInit={handleRequestInitFromAgentOverlay}
-                />
+                <Suspense fallback={null}>
+                    <WorkspaceConfigPanel
+                        agentDir={agentOverlay.workspacePath}
+                        onClose={handleCloseAgentOverlay}
+                        initialTab={agentOverlay.initialTab}
+                        onRequestInit={handleRequestInitFromAgentOverlay}
+                    />
+                </Suspense>
             )}
         </div>
     );

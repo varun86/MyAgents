@@ -16,28 +16,11 @@ import SkillTool from './tools/SkillTool';
 import TaskTool from './tools/TaskTool';
 import TodoWriteTool from './tools/TodoWriteTool';
 import TaskTodoTool from './tools/TaskTodoTool';
-import ToolAttachmentGallery from './tools/ToolAttachmentGallery';
 import WebFetchTool from './tools/WebFetchTool';
 import WebSearchTool from './tools/WebSearchTool';
 import WriteTool from './tools/WriteTool';
 import CronTaskCard from './scheduled-tasks/CronTaskCard';
 
-/**
- * Tools whose specialized component renders its OWN media (so ToolUse skips the
- * outer ToolAttachmentGallery to avoid duplicate rendering). PRD 0.2.15 Review B5.
- *
- * PRD 0.2.30 — emptied: builtin edge-tts/gemini-image now emit first-class
- * `attachments[]`, and their specialized cards are attachment-aware (they only
- * render embedded media as a legacy fallback when a result carries no
- * attachments). With attachments present the gallery owns the media; with none
- * present there are no attachments to gate, so `showGallery` is false either way
- * and there's no double-render. Kept as an extension point for future tools.
- */
-const TOOLS_THAT_OWN_GALLERY_PREFIXES: string[] = [];
-
-function ownsAttachmentGallery(toolName: string): boolean {
-  return TOOLS_THAT_OWN_GALLERY_PREFIXES.some(p => toolName.startsWith(p));
-}
 
 /** Parse cron tool result JSON, returning structured data for card rendering or null on failure */
 function parseCronResult(result: string): { taskId: string; name?: string; scheduleDesc?: string; nextExecutionAt?: string } | null {
@@ -80,15 +63,12 @@ export default function ToolUse({ tool: rawTool }: ToolUseProps) {
   // Specialized components (cron card, WebSearch, TaskTool, etc.) parse structured
   // JSON from result — clamping would corrupt the JSON and break rich UI.
   const tool = clampResult(rawTool);
-  const body = renderToolBody(tool);
-  const showGallery = tool.attachments && tool.attachments.length > 0 && !ownsAttachmentGallery(tool.name);
-  if (!showGallery) return body;
-  return (
-    <>
-      {body}
-      <ToolAttachmentGallery attachments={tool.attachments!} />
-    </>
-  );
+  // NOTE: tool.attachments are NOT rendered here. ToolUse lives inside
+  // ProcessRow's collapsible body (BlockGroup), so rendering rich-media here
+  // buried the player inside the folded tool window (PRD 0.2.30 bug). The
+  // gallery is now hoisted to the message flow in Message.tsx, so generated
+  // audio/image render as standalone, always-visible in-flow cards.
+  return renderToolBody(tool);
 }
 
 function renderToolBody(tool: ToolUseSimple): React.JSX.Element {

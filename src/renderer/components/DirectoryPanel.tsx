@@ -8,6 +8,7 @@ import {
   FolderOpen,
   FolderPlus,
   GitBranch,
+  LocateFixed,
   NotebookPen,
   Pencil,
   RefreshCw,
@@ -66,13 +67,27 @@ import { useImagePreview } from "@/context/ImagePreviewContext";
 import { useToast } from "@/components/Toast";
 import { type Provider } from "@/config/types";
 import { isDebugMode } from "@/utils/debug";
-import { listenWithCleanup } from "@/utils/tauriListen";
+import { useWorkspaceChangeSignal } from "@/hooks/useWorkspaceChangeSignal";
 import { shortenPathForDisplay } from "@/utils/pathDetection";
+import { isMarkdownFile } from "@/utils/languageUtils";
 
 import ConfirmDialog from "./ConfirmDialog";
 import ContextMenu, { type ContextMenuItem } from "./ContextMenu";
-import { searchWorkspaceFiles, refreshWorkspaceFileIndex, type FileSearchHit } from "@/api/searchClient";
+import { searchWorkspaceFiles, refreshWorkspaceFileIndex, type FileMatchLine, type FileSearchHit } from "@/api/searchClient";
 import FileSearchResults from "./search/FileSearchResults";
+import type { FilePreviewFocusTarget } from "@/types/filePreview";
+import {
+  activeTargetStillExists,
+  ancestorDirectoryPaths,
+  defaultExpandedFilesForHits,
+  firstMatchLine,
+  mergeExpandedFilesAfterRefresh,
+  normalizeFileSearchHits,
+  type ActiveSearchTarget,
+} from "@/utils/workspaceSearchNavigation";
+
+const SEARCH_REFRESH_DELAY_MS = 250;
+const REVEAL_NODE_WAIT_FRAMES = 180;
 
 function useDebounce<T>(value: T, delay: number): T {
   const [debouncedValue, setDebouncedValue] = useState<T>(value);
@@ -95,6 +110,7 @@ import {
   applyChildrenMap,
   collectFreshUpdates,
   mergeLazyChildren,
+  treeNodeEqual,
 } from "./workspace-tree/treeMerge";
 import type { VisibleTreeRow } from "./workspace-tree/treeTypes";
 
@@ -154,6 +170,19 @@ interface DirectoryPanelProps {
   onQuoteFile?: (path: string) => void;
   /** FilePreviewModal selection-quote: append `@<path>#L<start>[-L<end>] ` to chat input. */
   onQuoteSelection?: (path: string, startLine: number, endLine: number) => void;
+  /** External "reveal in tree" request (e.g. from the chat path context menu).
+   *  When the `id` changes, the panel locates the path in the tree — expands
+   *  ancestors, selects it, scrolls it into view — reusing the search-reveal
+   *  path. Declarative (vs an imperative handle) so it also works when the panel
+   *  was just mounted by opening the workspace: `handleRevealSearchResultInTree`
+   *  polls for node meta, so it waits out the initial tree load. */
+  externalRevealRequest?: { id: number; path: string } | null;
+  /** Called once the panel has picked up an `externalRevealRequest` (by id) so
+   *  the host can clear it. REQUIRED for correctness: the request lives in the
+   *  host (survives this panel's unmount when the workspace collapses), while the
+   *  consume-dedup is component-local — without clearing, reopening the panel
+   *  would replay the stale reveal. */
+  onExternalRevealHandled?: (id: number) => void;
   /** Enabled sub-agent definitions (from Chat.tsx) */
   enabledAgents?: Record<
     string,
@@ -203,6 +232,8 @@ interface DirectoryPanelProps {
       richDocKind?: RichDocKind;
       /** Optional initial line for text/code previews (from search or Markdown file links). */
       initialLineNumber?: number;
+      /** Re-applied preview focus target from workspace search navigation. */
+      focusTarget?: FilePreviewFocusTarget;
     },
     options?: { initialEditMode?: boolean },
   ) => void;
@@ -224,6 +255,8 @@ type FilePreview = {
   richDocKind?: RichDocKind;
   /** Optional initial line for text/code previews (from search or Markdown file links). */
   initialLineNumber?: number;
+  /** Re-applied preview focus target from workspace search navigation. */
+  focusTarget?: FilePreviewFocusTarget;
   /** When set, FilePreviewModal opens in markdown edit mode directly.
    *  Wired by 「新建笔记」 so a fresh empty `note-…md` skips the rendered-
    *  preview empty-state and lands the cursor in Monaco. */
@@ -235,6 +268,12 @@ type ContextMenuState = {
   y: number;
   node: DirectoryTreeNode | null; // null means root directory
   isMultiSelect?: boolean; // true when multiple nodes are selected
+} | null;
+
+type SearchResultContextMenuState = {
+  x: number;
+  y: number;
+  hit: FileSearchHit;
 } | null;
 
 type DialogState = {
@@ -249,6 +288,16 @@ function getFolderName(path: string): string {
   const normalized = path.replace(/\\/g, "/").replace(/\/+$/, "");
   const parts = normalized.split("/");
   return parts[parts.length - 1] || "Workspace";
+}
+
+function waitForTreeFrame(): Promise<void> {
+  return new Promise((resolve) => {
+    if (typeof window !== "undefined" && window.requestAnimationFrame) {
+      window.requestAnimationFrame(() => resolve());
+    } else {
+      setTimeout(resolve, 0);
+    }
+  });
 }
 
 const DirectoryPanel = memo(
@@ -269,6 +318,8 @@ const DirectoryPanel = memo(
       onInsertReference,
       onQuoteFile,
       onQuoteSelection,
+      externalRevealRequest,
+      onExternalRevealHandled,
       enabledAgents,
       enabledSkills,
       enabledCommands,
@@ -363,52 +414,150 @@ const DirectoryPanel = memo(
     const [isSearchMode, setIsSearchMode] = useState(false);
     const [searchQuery, setSearchQuery] = useState("");
     const [isSearching, setIsSearching] = useState(false);
+    const [isRefreshingSearch, setIsRefreshingSearch] = useState(false);
     const [searchResults, setSearchResults] = useState<FileSearchHit[]>([]);
     const [expandedFiles, setExpandedFiles] = useState<Set<string>>(new Set());
+    const [activeSearchTarget, setActiveSearchTarget] =
+      useState<ActiveSearchTarget | null>(null);
+    const [searchContextMenu, setSearchContextMenu] =
+      useState<SearchResultContextMenuState>(null);
+    const [treeRevealRequest, setTreeRevealRequest] = useState<{
+      id: number;
+      path: string;
+    } | null>(null);
     const searchInputRef = useRef<HTMLInputElement>(null);
+    const searchRequestIdRef = useRef(0);
+    const searchRefreshRef = useRef<{ workspace: string; promise: Promise<[number, number]> } | null>(null);
+    const searchResultsRef = useRef<FileSearchHit[]>([]);
+    const previewFocusRequestIdRef = useRef(0);
+    const treeRevealRequestIdRef = useRef(0);
 
     const debouncedSearchQuery = useDebounce(searchQuery, 300);
+
+    useEffect(() => {
+      searchResultsRef.current = searchResults;
+    }, [searchResults]);
+
+    useEffect(() => {
+      if (isSearchMode) {
+        setTreeRevealRequest(null);
+      }
+    }, [isSearchMode]);
 
     // Image preview context
     const { openPreview } = useImagePreview();
 
-    // When entering search mode, incrementally refresh the Tantivy file index
-    // against the current filesystem. `refreshWorkspaceFileIndex` walks metadata
-    // only and re-indexes just the files whose mtime/size changed — cheap on a
-    // warm cache, full-build on cold. This picks up any files the AI / user
-    // created since the last session without paying the 20s full-reindex cost.
-    useEffect(() => {
-      if (isSearchMode) {
-        refreshWorkspaceFileIndex(agentDir).catch(() => {});
-      }
-    }, [isSearchMode, agentDir]);
+    const refreshSearchIndex = useCallback(() => {
+      const current = searchRefreshRef.current;
+      if (current?.workspace === agentDir) return current.promise;
+      const entry = {
+        workspace: agentDir,
+        promise: refreshWorkspaceFileIndex(agentDir),
+      };
+      entry.promise = entry.promise.finally(() => {
+        if (searchRefreshRef.current === entry) {
+          searchRefreshRef.current = null;
+        }
+      });
+      searchRefreshRef.current = entry;
+      return entry.promise;
+    }, [agentDir]);
 
-    // Trigger search
+    // Trigger search. Stale-while-revalidate: query the currently-available
+    // index first so the panel gets pixels on screen quickly, then refresh the
+    // index in the background and re-run the same query only if files changed.
+    // refresh/create/search all share the same Rust file-index queue, so tab
+    // open prewarm or empty-mode refreshes must not sit in front of the user's
+    // actual query on large workspaces.
     useEffect(() => {
-      if (!isSearchMode) return;
-      if (debouncedSearchQuery.trim() === "") {
-        setSearchResults([]);
+      if (!isSearchMode) {
+        searchRequestIdRef.current += 1;
+        searchRefreshRef.current = null;
         setIsSearching(false);
+        setIsRefreshingSearch(false);
+        setActiveSearchTarget(null);
+        setSearchContextMenu(null);
         return;
       }
-      let isMounted = true;
+      const query = debouncedSearchQuery.trim();
+      if (query === "") {
+        searchRequestIdRef.current += 1;
+        setSearchResults([]);
+        setIsSearching(false);
+        setIsRefreshingSearch(false);
+        setExpandedFiles(new Set());
+        setActiveSearchTarget(null);
+        setSearchContextMenu(null);
+        return;
+      }
+      const requestId = searchRequestIdRef.current + 1;
+      searchRequestIdRef.current = requestId;
       const runSearch = async () => {
         setIsSearching(true);
+        setIsRefreshingSearch(false);
+        setSearchResults([]);
+        setExpandedFiles(new Set());
+        setActiveSearchTarget(null);
+        setSearchContextMenu(null);
         try {
-          const result = await searchWorkspaceFiles(debouncedSearchQuery, agentDir);
-          if (isMounted) {
-            setSearchResults(result.hits);
-            setExpandedFiles(new Set(result.hits.map(h => h.path)));
+          const result = await searchWorkspaceFiles(query, agentDir);
+          if (searchRequestIdRef.current === requestId) {
+            const hits = normalizeFileSearchHits(result.hits);
+            setSearchResults(hits);
+            setExpandedFiles(defaultExpandedFilesForHits(hits));
+            setActiveSearchTarget((prev) =>
+              activeTargetStillExists(prev, hits) ? prev : null,
+            );
           }
         } catch (err) {
-          console.error("File search failed:", err);
+          if (searchRequestIdRef.current === requestId) {
+            console.error("File search failed:", err);
+            setSearchResults([]);
+            setExpandedFiles(new Set());
+          }
+          return;
         } finally {
-          if (isMounted) setIsSearching(false);
+          if (searchRequestIdRef.current === requestId) {
+            setIsSearching(false);
+          }
+        }
+
+        await new Promise<void>(resolve => setTimeout(resolve, SEARCH_REFRESH_DELAY_MS));
+        if (searchRequestIdRef.current !== requestId) return;
+        setIsRefreshingSearch(true);
+        try {
+          const [, changedFiles] = await refreshSearchIndex();
+          if (searchRequestIdRef.current !== requestId) return;
+          if (changedFiles > 0) {
+            const refreshed = await searchWorkspaceFiles(query, agentDir);
+            if (searchRequestIdRef.current === requestId) {
+              const previousHits = searchResultsRef.current;
+              const hits = normalizeFileSearchHits(refreshed.hits);
+              setSearchResults(hits);
+              setExpandedFiles((prev) =>
+                mergeExpandedFilesAfterRefresh(
+                  prev,
+                  previousHits,
+                  hits,
+                ),
+              );
+              setActiveSearchTarget((prev) =>
+                activeTargetStillExists(prev, hits) ? prev : null,
+              );
+            }
+          }
+        } catch (err) {
+          if (searchRequestIdRef.current === requestId) {
+            console.error("File search refresh failed:", err);
+          }
+        } finally {
+          if (searchRequestIdRef.current === requestId) {
+            setIsRefreshingSearch(false);
+          }
         }
       };
       runSearch();
-      return () => { isMounted = false; };
-    }, [debouncedSearchQuery, agentDir, isSearchMode]);
+    }, [debouncedSearchQuery, agentDir, refreshSearchIndex, isSearchMode]);
 
     // Toast for notifications
     const toast = useToast();
@@ -425,6 +574,7 @@ const DirectoryPanel = memo(
     // invoke. The hook is identical to the one SimpleChatInput uses, just with
     // the additional Phase D operations (dirTree, dirExpand, readPreview, etc.).
     const fileService = useWorkspaceFileService(agentDir ?? null);
+    const workspaceChangeSignal = useWorkspaceChangeSignal(agentDir ?? null, fileService.isAvailable);
 
     // Narrow mode collapse state (for responsive layout)
     const [isNarrowMode, setIsNarrowMode] = useState(false);
@@ -487,9 +637,9 @@ const DirectoryPanel = memo(
     // watcher event (AI tool completion, Monaco save, external edits), so
     // invalidating would thrash the Tantivy index and force a full rebuild of
     // ~1000+ files on every keystroke in the search box while the agent is
-    // actively writing files. The search index is invalidated in a dedicated
-    // effect that fires ONLY when search mode is entered, so each search
-    // session gets a fresh index exactly once.
+    // actively writing files. File search refreshes the index from the
+    // foreground query path; background refreshes must not jump ahead of that
+    // query on the Rust file-index queue.
     const rawRefresh = useCallback(() => {
       setError(null);
       const reqId = ++refreshReqIdRef.current;
@@ -541,6 +691,25 @@ const DirectoryPanel = memo(
               ? mergeLazyChildren(data.tree, prev.tree)
               : data.tree;
             const merged = applyChildrenMap(base, updates);
+            // Idempotent commit: most refreshes (fs watcher on a file-content
+            // edit, `.git`/temp churn, a change inside a collapsed subtree, the
+            // 120s poll, a tool-complete bump) leave the *displayed* tree
+            // unchanged even though `dirTree()` returned fresh objects. Keeping
+            // the previous reference when nothing visible changed stops
+            // `visibleRows` / react-virtuoso from reconciling an identical list
+            // — the "frequent flicker" users saw while files were being written.
+            // `DirectoryTreeNode` has no volatile fields, so structural equality
+            // == display equality; the depth-capped `summary` moves with the
+            // skeleton, so when the tree is equal we reuse `prev.tree` (stable
+            // rows) and only refresh the lightweight summary if it shifted.
+            if (prev && treeNodeEqual(prev.tree, merged)) {
+              const summarySame =
+                prev.summary.totalFiles === data.summary.totalFiles &&
+                prev.summary.totalDirs === data.summary.totalDirs &&
+                prev.truncated === data.truncated &&
+                prev.root === data.root;
+              return summarySame ? prev : { ...data, tree: prev.tree };
+            }
             return { ...data, tree: merged };
           });
 
@@ -672,49 +841,12 @@ const DirectoryPanel = memo(
       }
     }, [refreshTrigger, refresh]);
 
-    // PRD 0.2.7 Phase D: Tauri-side workspace fs watcher.
-    //
-    // Pre-PRD-0.2.7 the sidecar emitted SSE `agent:files-changed` from a Node
-    // chokidar watcher and DirectoryPanel listened via the SSE proxy. Phase D
-    // moves the watch to Rust (notify-debouncer-full) so the panel works
-    // without a sidecar; the event hops Tauri-side via `app.emit` and the
-    // renderer subscribes through `@tauri-apps/api/event::listen`.
-    //
-    // Lifecycle: start the watch on mount (or when agentDir changes), stop on
-    // unmount. The Rust side ref-counts, so multiple panels on the same
-    // workspace share one OS watch.
+    // PRD 0.2.7 Phase D: Tauri-side workspace fs watcher. The hook owns the
+    // token lifecycle; this panel interprets the coarse signal as "refresh the
+    // tree" and keeps the existing debounce.
     useEffect(() => {
-      if (!fileService.isAvailable) return;
-      const ac = new AbortController();
-      let token: string | null = null;
-
-      (async () => {
-        try {
-          // Phase D.5 — single round-trip returns the token (held for stop)
-          // and the eventKey (used for the listen subscription).
-          const handle = await fileService.watchStart();
-          if (ac.signal.aborted) {
-            // Race: unmount fired during the await — release immediately.
-            await fileService.watchStop({ token: handle.token }).catch(() => {});
-            return;
-          }
-          token = handle.token;
-          await listenWithCleanup(`workspace:files-changed:${handle.eventKey}`, () => {
-            // Coarse signal — refresh re-fetches the whole tree (debounced).
-            refreshRef.current();
-          }, ac.signal);
-        } catch (err) {
-          console.warn("[DirectoryPanel] watch start failed:", err);
-        }
-      })();
-
-      return () => {
-        ac.abort();
-        if (token) {
-          fileService.watchStop({ token }).catch(() => {});
-        }
-      };
-    }, [fileService]);
+      if (workspaceChangeSignal > 0) refreshRef.current();
+    }, [workspaceChangeSignal]);
 
     // Safety-net polling: catch anything the file watcher might miss.
     // With the watcher active, this is a fallback — 120s is sufficient.
@@ -798,6 +930,87 @@ const DirectoryPanel = memo(
       // once on mount; see WorkspaceTreePersistedState).
       initialOpenPaths: persistedTreeStateRef?.current.openPaths,
     });
+    const nodeMetaByPathRef = useRef(nodeMetaByPath);
+    useEffect(() => {
+      nodeMetaByPathRef.current = nodeMetaByPath;
+    }, [nodeMetaByPath]);
+
+    const waitForNodeMeta = useCallback(
+      async (path: string, requestId: number) => {
+        for (let attempt = 0; attempt < REVEAL_NODE_WAIT_FRAMES; attempt += 1) {
+          if (requestId !== treeRevealRequestIdRef.current) {
+            return { status: "cancelled" as const };
+          }
+          const meta = nodeMetaByPathRef.current.get(path);
+          if (meta) {
+            return { status: "found" as const, meta };
+          }
+          await waitForTreeFrame();
+        }
+        return { status: "missing" as const };
+      },
+      [],
+    );
+
+    const handleRevealSearchResultInTree = useCallback(
+      async (path: string) => {
+        const requestId = ++treeRevealRequestIdRef.current;
+        const ancestors = ancestorDirectoryPaths(path);
+
+        for (const ancestor of ancestors) {
+          const result = await waitForNodeMeta(ancestor, requestId);
+          if (result.status === "cancelled") {
+            return;
+          }
+          if (result.status !== "found" || result.meta.data.type !== "dir") {
+            toast.error("文件不存在或已删除");
+            return;
+          }
+
+          const meta = result.meta;
+          openPath(ancestor);
+          if (meta.data.loaded === false) {
+            await expandDir(ancestor);
+          }
+          await waitForTreeFrame();
+        }
+
+        const targetResult = await waitForNodeMeta(path, requestId);
+        if (targetResult.status === "cancelled") {
+          return;
+        }
+        // Accept files AND dirs — search hits are files, but the chat path menu
+        // can reveal a directory too (locate + select + scroll, no auto-expand).
+        if (targetResult.status !== "found") {
+          toast.error("文件不存在或已删除");
+          return;
+        }
+
+        setIsSearchMode(false);
+        setSearchContextMenu(null);
+        setContextMenu(null);
+        setSelectedNodes([targetResult.meta.data]);
+        lastClickedPathRef.current = path;
+        setTreeRevealRequest({ id: requestId, path });
+      },
+      [expandDir, openPath, toast, waitForNodeMeta],
+    );
+
+    // External reveal (chat path context menu → Chat → here). Fires once per id.
+    // handleRevealSearchResultInTree polls for node meta, so this is robust even
+    // when the panel was just mounted by opening the workspace (tree still loading).
+    const lastExternalRevealIdRef = useRef<number | null>(null);
+    useEffect(() => {
+      if (!externalRevealRequest || lastExternalRevealIdRef.current === externalRevealRequest.id) {
+        return;
+      }
+      lastExternalRevealIdRef.current = externalRevealRequest.id;
+      // Kick off the reveal (captures the path), then tell the host to clear the
+      // request so a later panel reopen (which remounts this panel + resets the
+      // dedup ref) doesn't replay this stale reveal.
+      void handleRevealSearchResultInTree(externalRevealRequest.path);
+      onExternalRevealHandled?.(externalRevealRequest.id);
+    }, [externalRevealRequest, onExternalRevealHandled, handleRevealSearchResultInTree]);
     // Bridge: `rawRefresh` (declared above `useWorkspaceTreeModel`) reads
     // expansion state through this ref. Mirror via useEffect so we don't
     // write a ref during render — matches the project's other ref-mirror
@@ -918,31 +1131,82 @@ const DirectoryPanel = memo(
       }
     };
 
-    const handleSearchItemClick = async (path: string, initialLineNumber?: number) => {
-      const myReq = ++previewReqIdRef.current;
-      setIsPreviewLoading(true);
-      try {
-        const payload = await fileService.readPreview({ path });
-        if (myReq !== previewReqIdRef.current) return; // superseded
-        const fileData = { ...payload, path, initialLineNumber };
-        if (onFilePreviewExternal) {
-          onFilePreviewExternal(fileData);
-        } else {
-          setPreview(fileData);
-          setPreviewError(null);
+    const handleSearchItemClick = useCallback(
+      async (path: string, focusTarget?: FilePreviewFocusTarget) => {
+        const myReq = ++previewReqIdRef.current;
+        setIsPreviewLoading(true);
+        try {
+          const payload = await fileService.readPreview({ path });
+          if (myReq !== previewReqIdRef.current) return; // superseded
+          const initialEditMode = !!focusTarget && isMarkdownFile(payload.name);
+          const fileData = {
+            ...payload,
+            path,
+            initialLineNumber: focusTarget?.lineNumber,
+            focusTarget,
+            initialEditMode,
+          };
+          if (onFilePreviewExternal) {
+            onFilePreviewExternal(
+              fileData,
+              initialEditMode ? { initialEditMode: true } : undefined,
+            );
+          } else {
+            setPreview(fileData);
+            setPreviewError(null);
+          }
+        } catch (err) {
+          if (myReq !== previewReqIdRef.current) return; // superseded
+          if (onFilePreviewExternal) {
+            toast.error("文件预览失败");
+          } else {
+            setPreview(null);
+            setPreviewError(
+              err instanceof Error ? err.message : "Failed to preview file.",
+            );
+          }
+        } finally {
+          if (myReq === previewReqIdRef.current) setIsPreviewLoading(false);
         }
-      } catch (err) {
-        if (myReq !== previewReqIdRef.current) return; // superseded
-        if (onFilePreviewExternal) {
-          toast.error("文件预览失败");
+      },
+      [fileService, onFilePreviewExternal, toast],
+    );
+
+    const createSearchFocusTarget = useCallback(
+      (
+        lineNumber: number,
+        highlights?: [number, number][],
+      ): FilePreviewFocusTarget => ({
+        requestId: ++previewFocusRequestIdRef.current,
+        lineNumber,
+        query: debouncedSearchQuery.trim() || undefined,
+        highlights,
+      }),
+      [debouncedSearchQuery],
+    );
+
+    const handlePreviewSearchHit = useCallback(
+      (hit: FileSearchHit, match?: FileMatchLine) => {
+        const targetLine = match?.lineNumber ?? firstMatchLine(hit);
+        if (targetLine) {
+          const focusTarget = createSearchFocusTarget(
+            targetLine,
+            match?.highlights ?? hit.matches[0]?.highlights,
+          );
+          setActiveSearchTarget({
+            kind: "match",
+            path: hit.path,
+            lineNumber: targetLine,
+            requestId: focusTarget.requestId,
+          });
+          void handleSearchItemClick(hit.path, focusTarget);
         } else {
-          setPreview(null);
-          setPreviewError(err instanceof Error ? err.message : "Failed to preview file.");
+          setActiveSearchTarget({ kind: "file", path: hit.path });
+          void handleSearchItemClick(hit.path);
         }
-      } finally {
-        if (myReq === previewReqIdRef.current) setIsPreviewLoading(false);
-      }
-    };
+      },
+      [createSearchFocusTarget, handleSearchItemClick],
+    );
 
     const handleImagePreview = async (node: DirectoryTreeNode) => {
       if (node.type !== "file") return;
@@ -1408,6 +1672,14 @@ const DirectoryPanel = memo(
       }
     };
 
+    const handleOpenSearchResultInFinder = async (path: string) => {
+      try {
+        await fileService.openInFinder({ path });
+      } catch {
+        toast.error("打开所在文件夹失败");
+      }
+    };
+
     const handleOpenWithDefault = async (path: string) => {
       try {
         await fileService.openWithDefault({ path });
@@ -1432,6 +1704,26 @@ const DirectoryPanel = memo(
         .then(() => toast.success(label))
         .catch(() => toast.error("复制失败"));
     };
+
+    const getSearchResultContextMenuItems = (
+      hit: FileSearchHit,
+    ): ContextMenuItem[] => [
+      {
+        label: "预览",
+        icon: <Eye className="h-4 w-4" />,
+        onClick: () => handlePreviewSearchHit(hit),
+      },
+      {
+        label: "在文件目录中展示",
+        icon: <LocateFixed className="h-4 w-4" />,
+        onClick: () => void handleRevealSearchResultInTree(hit.path),
+      },
+      {
+        label: "打开所在文件夹",
+        icon: <FolderOpen className="h-4 w-4" />,
+        onClick: () => void handleOpenSearchResultInFinder(hit.path),
+      },
+    ];
 
     const handleRename = async (oldPath: string, newName: string) => {
       try {
@@ -2093,8 +2385,10 @@ const DirectoryPanel = memo(
                   <FileSearchResults
                     results={searchResults}
                     isLoading={isSearching}
+                    isRefreshing={isRefreshingSearch}
                     query={debouncedSearchQuery}
                     expandedFiles={expandedFiles}
+                    activeTarget={activeSearchTarget}
                     onToggleFile={(path) => {
                       setExpandedFiles((prev) => {
                         const next = new Set(prev);
@@ -2103,21 +2397,20 @@ const DirectoryPanel = memo(
                         return next;
                       });
                     }}
-                    onFileClick={(path) => handleSearchItemClick(path)}
-                    onMatchClick={(path, line) => handleSearchItemClick(path, line)}
-                    onContextMenu={(e, path) => {
-                      const findInTree = (nodes: DirectoryTreeNode[], p: string): DirectoryTreeNode | null => {
-                        for (const n of nodes) {
-                           if (n.path === p) return n;
-                           if (n.children && n.type === "dir") {
-                               const res = findInTree(n.children, p);
-                               if (res) return res;
-                           }
-                        }
-                        return null;
-                      };
-                      const n = findInTree(directoryInfo?.tree.children || [], path);
-                      if (n) handleContextMenu(e, n);
+                    onFileClick={(hit) => handlePreviewSearchHit(hit)}
+                    onRevealInTree={(hit) => {
+                      void handleRevealSearchResultInTree(hit.path);
+                    }}
+                    onMatchClick={(hit, match) =>
+                      handlePreviewSearchHit(hit, match)
+                    }
+                    onContextMenu={(e, hit) => {
+                      setContextMenu(null);
+                      setSearchContextMenu({
+                        x: e.clientX,
+                        y: e.clientY,
+                        hit,
+                      });
                     }}
                   />
                 ) : (
@@ -2147,6 +2440,12 @@ const DirectoryPanel = memo(
                       internalDropTarget={internalDropTarget}
                       activeDragPaths={activeDragItem?.paths ?? []}
                       initialScrollTop={treeScrollTopRef.current}
+                      revealRequest={treeRevealRequest}
+                      onRevealHandled={(id) => {
+                        setTreeRevealRequest((prev) =>
+                          prev?.id === id ? null : prev,
+                        );
+                      }}
                       getStickyAncestors={getStickyAncestors}
                       onCloseAncestorPath={closePath}
                       onScrollTopChange={(scrollTop) => {
@@ -2318,6 +2617,15 @@ const DirectoryPanel = memo(
           />
         )}
 
+        {searchContextMenu && (
+          <ContextMenu
+            x={searchContextMenu.x}
+            y={searchContextMenu.y}
+            items={getSearchResultContextMenuItems(searchContextMenu.hit)}
+            onClose={() => setSearchContextMenu(null)}
+          />
+        )}
+
         {/* Rename Dialog */}
         {dialog?.type === "rename" && dialog.node && (
           <RenameDialog
@@ -2408,6 +2716,13 @@ const DirectoryPanel = memo(
                 workspacePath={agentDir}
                 initialEditMode={preview?.initialEditMode}
                 initialLineNumber={preview?.initialLineNumber}
+                focusTarget={preview?.focusTarget}
+                externalRefreshSignal={refreshTrigger}
+                onExternalContentUpdated={(updated) => {
+                  setPreview((prev) => prev && prev.path === updated.path
+                    ? { ...prev, name: updated.name, content: updated.content, size: updated.size, initialEditMode: undefined }
+                    : prev);
+                }}
                 onClose={() => {
                   setPreview(null);
                   setPreviewError(null);

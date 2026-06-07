@@ -9,7 +9,8 @@ import { useFileAction } from '@/context/FileActionContext';
 import { isAudioPath } from '@/utils/audioPlayer';
 import { useAudioPlayer } from '@/hooks/useAudioPlayer';
 import { looksLikeFilePath } from '@/utils/pathDetection';
-import { Play, Square } from 'lucide-react';
+import { resolveAgainstWorkspace } from '@/utils/workspaceFileLinks';
+import { Play, Pause } from 'lucide-react';
 
 interface InlineCodeProps {
     children: React.ReactNode;
@@ -29,19 +30,19 @@ function extractText(node: React.ReactNode): string {
     return '';
 }
 
-/** Inline play/stop button for audio file paths */
+/** Inline play/pause button for audio file paths */
 function AudioPlayButton({ filePath }: { filePath: string }) {
-    const { isActive, toggle } = useAudioPlayer(filePath);
+    const { isPlaying, toggle } = useAudioPlayer(filePath);
 
     return (
         <button
             type="button"
             onClick={(e) => { e.preventDefault(); e.stopPropagation(); toggle(); }}
             className="ml-1 inline-flex size-[18px] shrink-0 items-center justify-center rounded-full bg-[var(--accent)] text-white transition-colors hover:bg-[var(--accent-warm-hover)] align-middle"
-            title={isActive ? '停止播放' : '播放音频'}
+            title={isPlaying ? '暂停' : '播放音频'}
         >
-            {isActive
-                ? <Square className="size-2 fill-current" />
+            {isPlaying
+                ? <Pause className="size-2.5 fill-current" />
                 : <Play className="size-2.5 fill-current ml-px" />
             }
         </button>
@@ -95,10 +96,17 @@ export default function InlineCode({ children }: InlineCodeProps) {
 
     // Only wrap in span when audio button is needed, preserving DOM structure for non-audio paths
     if (isAudio) {
+        // The audio player ultimately calls cmd_read_file_base64, which REQUIRES
+        // an absolute path ("Path must be absolute" otherwise). The model writes
+        // workspace-relative paths (e.g. myagents_files/generated_audio/x.mp3),
+        // so resolve against the workspace root before playback — otherwise the
+        // button silently no-ops (the original bug). Fallback to the raw text only
+        // when there's no workspace (then it was likely already absolute).
+        const audioPath = resolveAgainstWorkspace(text, fileAction.workspacePath) ?? text;
         return (
             <span className="inline-flex items-center">
                 {codeEl}
-                <AudioPlayButton filePath={text} />
+                <AudioPlayButton filePath={audioPath} />
             </span>
         );
     }
