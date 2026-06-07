@@ -1,13 +1,14 @@
 import { resolve } from 'path';
 import { defineConfig } from 'vitest/config';
 
-// MUST mirror vite.config.ts `resolve.alias`. `chartjs-umd-source` aliases
-// chart.js's UMD dist (not exposed via its package `exports`) so widgetLibraries
-// can `?raw`-import it; without it the dom project fails to resolve the import
+// MUST mirror vite.config.ts `resolve.alias` for raw-imported widget libraries;
+// otherwise the dom project fails to resolve widgetLibraries dynamic imports
 // when it renders WidgetRenderer. Lookahead keeps the trailing `?raw` query.
 const alias = [
   { find: '@', replacement: resolve(__dirname, 'src/renderer') },
   { find: /^chartjs-umd-source(?=$|\?)/, replacement: resolve(__dirname, 'node_modules/chart.js/dist/chart.umd.js') },
+  { find: /^d3-umd-source(?=$|\?)/, replacement: resolve(__dirname, 'node_modules/d3/dist/d3.min.js') },
+  { find: /^lucide-umd-source(?=$|\?)/, replacement: resolve(__dirname, 'node_modules/lucide/dist/umd/lucide.min.js') },
 ];
 
 // Two test projects, split by what a test TOUCHES — so the dev loop gets a

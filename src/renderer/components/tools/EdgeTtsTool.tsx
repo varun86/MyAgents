@@ -1,69 +1,16 @@
 import type { ToolUseSimple } from '@/types/chat';
 import { CollapsibleTool } from './CollapsibleTool';
-import { ToolHeader, unwrapMcpResult } from './utils';
+import { ToolHeader } from './utils';
 import AudioPlayerBar from './AudioPlayerBar';
+import { parseEdgeTtsResult } from '../../../shared/builtinMediaResult';
 
 interface EdgeTtsToolProps {
   tool: ToolUseSimple;
 }
 
-/** Parse structured fields from the tool result text */
-function parseToolResult(result: string | undefined): {
-  filePath?: string;
-  voice?: string;
-  duration?: string;
-  format?: string;
-  size?: string;
-  rate?: string;
-  volume?: string;
-  pitch?: string;
-  textPreview?: string;
-  error?: string;
-  isVoiceList: boolean;
-} {
-  if (!result) return { isVoiceList: false };
-
-  // Unwrap JSON-encoded MCP content array if present
-  const unwrapped = unwrapMcpResult(result);
-  if (unwrapped !== result) return parseToolResult(unwrapped);
-
-  // Check if it's a voice list result
-  if (result.includes('Found ') && result.includes('voice(s)')) {
-    return { isVoiceList: true };
-  }
-
-  // Check for errors
-  if (result.startsWith('Error')) {
-    return { error: result, isVoiceList: false };
-  }
-
-  const lines = result.split('\n');
-  const fields: Record<string, string> = {};
-
-  for (const line of lines) {
-    const match = line.match(/^(\w+):\s*(.+)$/);
-    if (match) {
-      fields[match[1]] = match[2].trim();
-    }
-  }
-
-  return {
-    filePath: fields['filePath'],
-    voice: fields['voice'],
-    duration: fields['duration'],
-    format: fields['format'],
-    size: fields['size'],
-    rate: fields['rate'],
-    volume: fields['volume'],
-    pitch: fields['pitch'],
-    textPreview: fields['textPreview'],
-    error: undefined,
-    isVoiceList: false,
-  };
-}
-
 export default function EdgeTtsTool({ tool }: EdgeTtsToolProps) {
-  const parsed = parseToolResult(tool.result);
+  // PRD 0.2.31 — shared single-source parser (server + this card use the same one).
+  const parsed = parseEdgeTtsResult(tool.result);
 
   const isListVoices = tool.name.includes('list_voices');
   const toolLabel = isListVoices ? '查询语音' : '语音合成';

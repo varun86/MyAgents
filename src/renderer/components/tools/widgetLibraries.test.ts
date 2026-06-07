@@ -24,6 +24,25 @@ describe('detectWidgetLibraries', () => {
     ).toEqual(['chart.js']);
   });
 
+  it('detects D3 from cdnjs and jsdelivr URLs', () => {
+    expect(
+      detectWidgetLibraries(
+        '<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>' +
+        '<script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>',
+      ).map((l) => l.name),
+    ).toEqual(['d3']);
+  });
+
+  it('detects standalone Lucide without matching lucide-react', () => {
+    expect(
+      detectWidgetLibraries('<script src="https://cdn.jsdelivr.net/npm/lucide@0.554.0/dist/umd/lucide.min.js"></script>')
+        .map((l) => l.name),
+    ).toEqual(['lucide']);
+    expect(
+      detectWidgetLibraries('<script src="https://cdn.jsdelivr.net/npm/lucide-react@0.554.0/dist/umd/lucide-react.min.js"></script>'),
+    ).toEqual([]);
+  });
+
   it('does NOT match an unrelated *chart.js filename (no false positive)', () => {
     expect(detectWidgetLibraries('<script src="https://example.com/barchart.js"></script>')).toEqual([]);
   });
@@ -38,6 +57,14 @@ describe('detectWidgetLibraries', () => {
       '<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>';
     expect(detectWidgetLibraries(code)).toHaveLength(1);
   });
+
+  it('returns registered libraries in first-seen order', () => {
+    const code =
+      '<script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>' +
+      '<script src="https://cdn.jsdelivr.net/npm/lucide@0.554.0/dist/umd/lucide.min.js"></script>' +
+      '<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.js"></script>';
+    expect(detectWidgetLibraries(code).map((l) => l.name)).toEqual(['d3', 'lucide', 'chart.js']);
+  });
 });
 
 describe('inlineWidgetLibraries', () => {
@@ -50,6 +77,24 @@ describe('inlineWidgetLibraries', () => {
     expect(out).toContain('data-inlined-lib="chart.js"');
     expect(out).toContain('window.Chart=function(){};'); // bundled source injected
     expect(out).toContain('new Chart()'); // widget's own inline script preserved
+  });
+
+  it('replaces D3 and Lucide CDN scripts independently', () => {
+    const code =
+      '<script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>' +
+      '<script src="https://cdn.jsdelivr.net/npm/lucide@0.554.0/dist/umd/lucide.min.js"></script>';
+    const out = inlineWidgetLibraries(
+      code,
+      new Map([
+        ['d3', 'window.d3={};'],
+        ['lucide', 'window.lucide={};'],
+      ]),
+    );
+    expect(out).toContain('data-inlined-lib="d3"');
+    expect(out).toContain('data-inlined-lib="lucide"');
+    expect(out).toContain('window.d3={};');
+    expect(out).toContain('window.lucide={};');
+    expect(out).not.toContain('cdn.jsdelivr.net');
   });
 
   it('escapes </script> in the source so it cannot break out of the inline tag', () => {

@@ -35,6 +35,32 @@ export function resolveWorkspaceFileLinkTarget(
     : { path: relativePath };
 }
 
+/**
+ * Resolve a (possibly workspace-relative) path to an ABSOLUTE path against the
+ * given workspace root. Returns the input unchanged when it is already
+ * absolute, or `null` when it is relative and no workspace is known (or the
+ * relative path escapes the workspace via `..`).
+ *
+ * Why: model-authored chat text usually contains workspace-relative paths
+ * (e.g. `myagents_files/generated_audio/tts_x.mp3`). Absolute-path-only
+ * consumers — notably the audio player's `cmd_read_file_base64`, which rejects
+ * any non-absolute path with "Path must be absolute" — need them resolved
+ * first. Joins with `/`; Rust `PathBuf` normalizes mixed separators on Windows.
+ */
+export function resolveAgainstWorkspace(
+  rawPath: string,
+  workspacePath: string | null | undefined,
+): string | null {
+  const path = rawPath?.trim();
+  if (!path) return null;
+  if (isAbsolutePath(path)) return path;
+  const workspace = workspacePath?.trim();
+  if (!workspace) return null;
+  const rel = normalizeRelativePath(path); // collapses ./ .. ; null if it escapes
+  if (!rel) return null;
+  return `${stripTrailingSlash(workspace)}/${rel}`;
+}
+
 function stripHashLine(raw: string): { base: string; line?: number } {
   const hashIndex = raw.indexOf('#');
   if (hashIndex < 0) return { base: raw };
@@ -82,7 +108,22 @@ function hasUnsupportedScheme(raw: string): boolean {
   return /^[a-z][a-z0-9+\-.]*:/i.test(raw);
 }
 
-function toWorkspaceRelativePath(rawPath: string, workspacePath: string): string | null {
+/**
+ * Normalize a path to its workspace-relative form.
+ *
+ * - Absolute path inside the workspace → relative (e.g.
+ *   `/ws/src/a.ts` → `src/a.ts`); absolute path outside the workspace,
+ *   or equal to the workspace root, → `null`.
+ * - Relative path that looks like a file reference → cleaned relative; other
+ *   relative inputs → `null`.
+ *
+ * File-tool cards (Write/Edit/Read/NotebookEdit) carry ABSOLUTE `file_path`
+ * values, but the workspace existence-check + read commands only accept
+ * workspace-relative paths (Rust `resolve_inside_workspace` rejects absolute
+ * paths outright). Callers normalize here so absolute and relative paths flow
+ * through the same backend path, matching how inline AI-text paths behave.
+ */
+export function toWorkspaceRelativePath(rawPath: string, workspacePath: string): string | null {
   const path = rawPath.trim();
   if (!path) return null;
 

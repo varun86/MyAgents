@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { resolveWorkspaceFileLinkTarget } from './workspaceFileLinks';
+import { resolveWorkspaceFileLinkTarget, resolveAgainstWorkspace } from './workspaceFileLinks';
 
 const WORKSPACE = '/Users/zhihu/Documents/project/MyAgents';
 
@@ -61,5 +61,44 @@ describe('resolveWorkspaceFileLinkTarget', () => {
 
   it('rejects relative traversal that escapes workspace root', () => {
     expect(resolveWorkspaceFileLinkTarget('../outside.ts', WORKSPACE)).toBeNull();
+  });
+});
+
+describe('resolveAgainstWorkspace', () => {
+  it('joins a workspace-relative path to an absolute path', () => {
+    expect(resolveAgainstWorkspace('myagents_files/generated_audio/tts_x.mp3', WORKSPACE))
+      .toBe('/Users/zhihu/Documents/project/MyAgents/myagents_files/generated_audio/tts_x.mp3');
+  });
+
+  it('normalizes ./ and collapses redundant segments', () => {
+    expect(resolveAgainstWorkspace('./a/b.mp3', WORKSPACE)).toBe(`${WORKSPACE}/a/b.mp3`);
+    expect(resolveAgainstWorkspace('a/./b/../c.mp3', WORKSPACE)).toBe(`${WORKSPACE}/a/c.mp3`);
+  });
+
+  it('passes an already-absolute path through unchanged (posix)', () => {
+    expect(resolveAgainstWorkspace('/Users/me/.myagents/generated/x.mp3', WORKSPACE))
+      .toBe('/Users/me/.myagents/generated/x.mp3');
+  });
+
+  it('passes an already-absolute Windows path through unchanged', () => {
+    expect(resolveAgainstWorkspace('C:\\Users\\me\\x.mp3', 'C:\\ws')).toBe('C:\\Users\\me\\x.mp3');
+  });
+
+  it('joins under a Windows workspace (forward-slashed; PathBuf normalizes)', () => {
+    expect(resolveAgainstWorkspace('audio/x.mp3', 'C:\\Users\\me\\ws'))
+      .toBe('C:/Users/me/ws/audio/x.mp3');
+  });
+
+  it('returns null for a relative path with no workspace', () => {
+    expect(resolveAgainstWorkspace('audio/x.mp3', null)).toBeNull();
+    expect(resolveAgainstWorkspace('audio/x.mp3', '')).toBeNull();
+  });
+
+  it('returns null when the relative path escapes the workspace root', () => {
+    expect(resolveAgainstWorkspace('../../etc/passwd', WORKSPACE)).toBeNull();
+  });
+
+  it('returns null for empty input', () => {
+    expect(resolveAgainstWorkspace('', WORKSPACE)).toBeNull();
   });
 });

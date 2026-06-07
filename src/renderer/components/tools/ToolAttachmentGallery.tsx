@@ -1,9 +1,12 @@
 /**
  * ToolAttachmentGallery — uniform renderer for all rich-media tool attachments.
  *
- * PRD 0.2.15 §4.8. Mounted by ToolUse.tsx after the specialized tool body so
- * any tool (Codex image_generation, MCP gemini-image, future Gemini/CC) that
- * emits ToolAttachment[] gets the same UI treatment with zero per-tool code.
+ * PRD 0.2.15 §4.8. Mounted by Message.tsx in the message flow (after each
+ * BlockGroup), NOT inside the collapsible tool body — so any tool (Codex
+ * image_generation, MCP gemini-image, builtin edge-tts, future Gemini/CC) that
+ * emits ToolAttachment[] renders a standalone, always-visible in-flow card with
+ * zero per-tool code (PRD 0.2.30 moved it out of ToolUse/ProcessRow, where it
+ * was buried inside the folded tool window).
  *
  * Kind dispatch is intentionally small; new kinds slot into the switch.
  */
@@ -36,7 +39,7 @@ export default function ToolAttachmentGallery({ attachments }: Props) {
             return (
               <div
                 key={key}
-                className="rounded border border-[var(--paper-line)] bg-[var(--paper-inset)]/30 px-3 py-2 text-xs text-[var(--ink-secondary)]"
+                className="rounded border border-[var(--line)] bg-[var(--paper-inset)]/30 px-3 py-2 text-xs text-[var(--ink-secondary)]"
               >
                 <div className="font-medium">{a.mimeType}</div>
                 {a.caption ? <div className="mt-1 line-clamp-2 text-[var(--ink-muted)]">{a.caption}</div> : null}

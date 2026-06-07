@@ -30,9 +30,16 @@ import { FileActionProvider } from '@/context/FileActionContext';
 import { FilePath } from './utils';
 
 const WORKSPACE = '/Users/zhihu/Documents/project/MyAgents';
-const FILE_PATH = `${WORKSPACE}/src/renderer/components/tools/utils.tsx`;
-const DIR_PATH = `${WORKSPACE}/src/renderer/components/tools`;
-const MISSING_PATH = `${WORKSPACE}/src/renderer/components/tools/gone.ts`;
+// File-tool cards carry ABSOLUTE file_path values (what the chip displays),
+// but the existence check + menu actions must run against the WORKSPACE-RELATIVE
+// form — the backend resolver rejects absolute paths. These pairs lock that
+// in: the chip shows `*_PATH`, the backend is hit with `REL_*`.
+const REL_FILE = 'src/renderer/components/tools/utils.tsx';
+const FILE_PATH = `${WORKSPACE}/${REL_FILE}`;
+const REL_DIR = 'src/renderer/components/tools';
+const DIR_PATH = `${WORKSPACE}/${REL_DIR}`;
+const REL_MISSING = 'src/renderer/components/tools/gone.ts';
+const MISSING_PATH = `${WORKSPACE}/${REL_MISSING}`;
 
 function renderFilePath(path: string) {
   render(
@@ -50,7 +57,7 @@ describe('FilePath tool chip — clickable file paths', () => {
   });
 
   it('renders a real file as an interactive chip and opens the action menu on click', async () => {
-    mocks.checkPaths.mockResolvedValue({ results: { [FILE_PATH]: { exists: true, type: 'file' } } });
+    mocks.checkPaths.mockResolvedValue({ results: { [REL_FILE]: { exists: true, type: 'file' } } });
     renderFilePath(FILE_PATH);
 
     // First paint is a plain chip; becomes interactive after the batched existence check resolves.
@@ -59,7 +66,10 @@ describe('FilePath tool chip — clickable file paths', () => {
       expect(el).toHaveClass('cursor-pointer');
       return el;
     });
+    // The chip still DISPLAYS the absolute path (what the tool card emits)…
     expect(chip.getAttribute('title')).toBe(`文件: ${FILE_PATH}`);
+    // …but the backend existence check ran against the workspace-relative form.
+    expect(mocks.checkPaths).toHaveBeenCalledWith({ paths: [REL_FILE] });
 
     fireEvent.click(chip);
 
@@ -69,12 +79,42 @@ describe('FilePath tool chip — clickable file paths', () => {
     expect(screen.getByText('打开')).toBeInTheDocument();
     expect(screen.getByText('打开所在文件夹')).toBeInTheDocument();
 
+    // 引用 inserts the relative path, matching inline-path @-mention behavior.
     fireEvent.click(screen.getByText('引用'));
-    expect(mocks.onInsertReference).toHaveBeenCalledWith([FILE_PATH]);
+    expect(mocks.onInsertReference).toHaveBeenCalledWith([REL_FILE]);
+  });
+
+  // Regression for the shipped-but-dead 0.2.29 feature: file-tool cards carry
+  // ABSOLUTE file_path values, and the Rust resolver rejects absolute paths, so
+  // the chip silently stayed plain. The earlier test mocked checkPaths keyed by
+  // the absolute path and never caught it. This pins the normalization.
+  it('normalizes an in-workspace absolute path to relative before the existence check', async () => {
+    mocks.checkPaths.mockResolvedValue({ results: { [REL_FILE]: { exists: true, type: 'file' } } });
+    renderFilePath(FILE_PATH);
+
+    await waitFor(() => expect(mocks.checkPaths).toHaveBeenCalled());
+    // The absolute path is NEVER sent to the backend — only the relative form is.
+    expect(mocks.checkPaths).toHaveBeenCalledWith({ paths: [REL_FILE] });
+    expect(mocks.checkPaths).not.toHaveBeenCalledWith({ paths: [FILE_PATH] });
+  });
+
+  it('leaves an absolute path OUTSIDE the workspace as a plain chip', async () => {
+    const OUTSIDE = '/etc/passwd';
+    mocks.checkPaths.mockResolvedValue({ results: {} });
+    renderFilePath(OUTSIDE);
+
+    await waitFor(() => expect(mocks.checkPaths).toHaveBeenCalled());
+    // Can't be made workspace-relative → passed through as-is → backend reports
+    // not-found → stays a plain chip with no menu.
+    expect(mocks.checkPaths).toHaveBeenCalledWith({ paths: [OUTSIDE] });
+    const chip = screen.getByText(OUTSIDE);
+    expect(chip).not.toHaveClass('cursor-pointer');
+    fireEvent.click(chip);
+    expect(screen.queryByText('预览')).not.toBeInTheDocument();
   });
 
   it('keeps a non-existent path as a plain chip with no menu', async () => {
-    mocks.checkPaths.mockResolvedValue({ results: { [MISSING_PATH]: { exists: false, type: 'file' } } });
+    mocks.checkPaths.mockResolvedValue({ results: { [REL_MISSING]: { exists: false, type: 'file' } } });
     renderFilePath(MISSING_PATH);
 
     // Wait for the existence check to flush, then assert it stayed plain.
@@ -88,7 +128,7 @@ describe('FilePath tool chip — clickable file paths', () => {
   });
 
   it('omits 预览 for directories and labels them as folders', async () => {
-    mocks.checkPaths.mockResolvedValue({ results: { [DIR_PATH]: { exists: true, type: 'dir' } } });
+    mocks.checkPaths.mockResolvedValue({ results: { [REL_DIR]: { exists: true, type: 'dir' } } });
     renderFilePath(DIR_PATH);
 
     const chip = await waitFor(() => {

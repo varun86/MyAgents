@@ -1,4 +1,6 @@
-import { useCallback, useEffect, useState, useRef, memo } from 'react';
+import { useCallback, useEffect, useState, useRef, memo, lazy, Suspense } from 'react';
+import { flushSync } from 'react-dom';
+import ChatBootOverlay from '@/components/ChatBootOverlay';
 import { arrayMove } from '@dnd-kit/sortable';
 
 import {
@@ -26,18 +28,38 @@ import { useHelperAgentModelDefaults } from '@/hooks/useHelperAgentModelDefaults
 import { useConfig } from '@/hooks/useConfig';
 import { useThemeEffect } from '@/hooks/useTheme';
 import { useTabSwipeGesture } from '@/hooks/useTabSwipeGesture';
-import Chat from '@/pages/Chat';
-import Launcher from '@/pages/Launcher';
-import Settings from '@/pages/Settings';
-import TaskCenter from '@/pages/TaskCenter';
+import Launcher from '@/pages/Launcher'; // eager: default first view → no cold-start fallback
+// Route-split (P1): heavy / non-initial pages load on demand. lazy-Chat moves the
+// entire markdown/mermaid/katex/syntax-highlighter chain out of the entry chunk
+// (reachable only via Chat). Launcher stays eager (default first view → no
+// cold-start fallback).
+//
+// NOTE: we deliberately do NOT idle-preload these. A blind idle preload made
+// WKWebView warn "<chunk> was preloaded but not used within a few seconds" for
+// the whole route graph on every startup, AND eagerly pulled Monaco/Markdown
+// (several MB) at boot even when the user never opened those pages. In Tauri the
+// chunks are LOCAL assets, so first-open is fast and just shows the same paper
+// Suspense fallback the deferred-mount placeholder already uses. (If first Chat
+// open ever feels slow, add a targeted preload on launch intent — not a blind
+// idle preload of every route.)
+const Chat = lazy(() => import('@/pages/Chat'));
+const Settings = lazy(() => import('@/pages/Settings'));
+const TaskCenter = lazy(() => import('@/pages/TaskCenter'));
+
+/** Layout-compatible Suspense fallback for a lazy page chunk — same paper fill
+ *  as the deferred-mount placeholder, so a chunk-load is never a jarring blank. */
+const PAGE_FALLBACK = <div className="h-full w-full bg-[var(--paper)]" />;
 import {
   type Project,
 } from '@/config/types';
-import { type Tab, type InitialMessage, createNewTab, getFolderName, MAX_TABS } from '@/types/tab';
-import { buildRestoredTabs, saveOpenTabs, hydratePersistedState, pickDurableOverride } from '@/utils/tabPersistence';
+import { type Tab, type InitialMessage, type SidecarConfigDisposition, createNewTab, getFolderName, buildChatFlipPatch, MAX_TABS } from '@/types/tab';
+import { buildRestoredTabs, saveOpenTabs, hydratePersistedState, pickDurableOverride, shouldOfferRestore, planRestoreTabs } from '@/utils/tabPersistence';
 import { persistOpenTabsDurable, loadAndClearOpenTabsDurable, clearOpenTabsDurable } from '@/utils/tabPersistenceDurable';
+import { consumeCleanExitMarker } from '@/utils/lastExitMarker';
 import { tabContentKind, isRestoreAbandoned } from '@/utils/tabContentKind';
 import { runAfterNextPaint } from '@/utils/afterPaint';
+import { perfMark } from '@/utils/perfMark';
+import { RENDERER_PERF_PHASE } from '../shared/perfTrace';
 import type { ImageAttachment } from '@/components/SimpleChatInput';
 import { getAllCronTasks, getTabCronTask, updateCronTaskTab } from '@/api/cronTaskClient';
 import { type CronRecoverySummaryPayload, type CronTaskRecoveredPayload, CRON_EVENTS } from '@/types/cronEvents';
@@ -122,6 +144,7 @@ interface TabContentProps {
   // Chat callbacks
   onBack: () => Promise<void>;
   onSwitchSession: (tabId: string, sessionId: string) => Promise<void>;
+  onOpenSessionInNewTab: (tabId: string, sessionId: string, title: string) => Promise<void>;
   onNewSession: (tabId: string) => Promise<boolean>;
   onUpdateGenerating: (tabId: string, isGenerating: boolean) => void;
   onUpdateTitle: (tabId: string, title: string) => void;
@@ -130,7 +153,7 @@ interface TabContentProps {
   onForkSession: (tabId: string, newSessionId: string, agentDir: string, title: string, initialMessage?: string) => void;
   onUpdateSessionId: (tabId: string, newSessionId: string) => Promise<void>;
   onClearInitialMessage: (tabId: string) => void;
-  onClearJoinedExistingSidecar: (tabId: string) => void;
+  onSidecarConfigAdopted: (tabId: string) => void;
   // Settings callbacks
   onSettingsSectionChange: () => void;
   updateReady: boolean;
@@ -151,9 +174,9 @@ interface TabContentProps {
 // tab renders a placeholder and never mounts TabProvider.
 export const MemoizedTabContent = memo(function TabContent({
   tab, isActive, isLoading, error, isDeferredMount,
-  onLaunchProject, onBack, onSwitchSession, onNewSession,
+  onLaunchProject, onBack, onSwitchSession, onOpenSessionInNewTab, onNewSession,
   onUpdateGenerating, onUpdateTitle, onUpdateUnread, onRenameSession, onForkSession, onUpdateSessionId, onClearInitialMessage,
-  onClearJoinedExistingSidecar,
+  onSidecarConfigAdopted,
   settingsInitialSection, settingsInitialMcpId, settingsInitialSelect, onSettingsSectionChange,
   updateReady, updateVersion, updateChecking, updateDownloading, updateInstalling, updatePreparing,
   onCheckForUpdate, onRestartAndUpdate,
@@ -179,23 +202,27 @@ export const MemoizedTabContent = memo(function TabContent({
           isActive={isActive}
         />
       ) : kind === 'settings' ? (
-        <Settings
-          initialSection={settingsInitialSection}
-          initialMcpId={settingsInitialMcpId}
-          initialSelect={settingsInitialSelect}
-          onSectionChange={onSettingsSectionChange}
-          isActive={isActive}
-          updateReady={updateReady}
-          updateVersion={updateVersion}
-          updateChecking={updateChecking}
-          updateDownloading={updateDownloading}
-          updateInstalling={updateInstalling}
-          updatePreparing={updatePreparing}
-          onCheckForUpdate={onCheckForUpdate}
-          onRestartAndUpdate={onRestartAndUpdate}
-        />
+        <Suspense fallback={PAGE_FALLBACK}>
+          <Settings
+            initialSection={settingsInitialSection}
+            initialMcpId={settingsInitialMcpId}
+            initialSelect={settingsInitialSelect}
+            onSectionChange={onSettingsSectionChange}
+            isActive={isActive}
+            updateReady={updateReady}
+            updateVersion={updateVersion}
+            updateChecking={updateChecking}
+            updateDownloading={updateDownloading}
+            updateInstalling={updateInstalling}
+            updatePreparing={updatePreparing}
+            onCheckForUpdate={onCheckForUpdate}
+            onRestartAndUpdate={onRestartAndUpdate}
+          />
+        </Suspense>
       ) : kind === 'taskcenter' ? (
-        <TaskCenter isActive={isActive} pendingIntent={taskCenterPendingIntent} />
+        <Suspense fallback={PAGE_FALLBACK}>
+          <TaskCenter isActive={isActive} pendingIntent={taskCenterPendingIntent} />
+        </Suspense>
       ) : kind === 'cold' ? (
         // Restored-but-not-yet-activated chat tab (Issue #232). Render only a
         // cheap placeholder — crucially NO TabProvider, so no SSE connect, no
@@ -214,18 +241,21 @@ export const MemoizedTabContent = memo(function TabContent({
           onUnreadChange={(hasUnread) => onUpdateUnread(tab.id, hasUnread)}
           onSessionIdChange={(newSessionId) => onUpdateSessionId(tab.id, newSessionId)}
         >
-          <Chat
-            onBack={onBack}
-            onSwitchSession={(sessionId) => onSwitchSession(tab.id, sessionId)}
-            onNewSession={() => onNewSession(tab.id)}
-            initialMessage={tab.initialMessage}
-            onInitialMessageConsumed={() => onClearInitialMessage(tab.id)}
-            joinedExistingSidecar={tab.joinedExistingSidecar}
-            onJoinedExistingSidecarHandled={() => onClearJoinedExistingSidecar(tab.id)}
-            sessionTitle={tab.title}
-            onRenameSession={(newTitle: string) => onRenameSession(tab.id, newTitle)}
-            onForkSession={(newSessionId: string, agentDir: string, title: string, initialMessage?: string) => onForkSession(tab.id, newSessionId, agentDir, title, initialMessage)}
-          />
+          <Suspense fallback={<ChatBootOverlay />}>
+            <Chat
+              onBack={onBack}
+              onSwitchSession={(sessionId) => onSwitchSession(tab.id, sessionId)}
+              onOpenSessionInNewTab={(sessionId, title) => onOpenSessionInNewTab(tab.id, sessionId, title)}
+              onNewSession={() => onNewSession(tab.id)}
+              initialMessage={tab.initialMessage}
+              onInitialMessageConsumed={() => onClearInitialMessage(tab.id)}
+              sidecarConfigDisposition={tab.sidecarConfigDisposition}
+              onSidecarConfigAdopted={() => onSidecarConfigAdopted(tab.id)}
+              sessionTitle={tab.title}
+              onRenameSession={(newTitle: string) => onRenameSession(tab.id, newTitle)}
+              onForkSession={(newSessionId: string, agentDir: string, title: string, initialMessage?: string) => onForkSession(tab.id, newSessionId, agentDir, title, initialMessage)}
+            />
+          </Suspense>
         </TabProvider>
       )}
     </div>
@@ -303,18 +333,24 @@ export default function App() {
 
   // Multi-tab state.
   //
-  // Restore previously-open chat tabs after a restart / update (Issue #232).
-  // buildRestoredTabs() reads localStorage and hydrates them flagged
-  // `restoreState:'cold'` — they render as lightweight tab chrome only, with NO
-  // TabProvider / sidecar / SSE, until first activation (see activateRestoredTab
-  // + MemoizedTabContent). Falls back to a fresh launcher tab when nothing is
-  // stored. Validation that each session/workspace still exists happens lazily
-  // at activation (canRestoreSession), decoupled from global sidecar readiness.
-  const [restoredInitialState] = useState(() => buildRestoredTabs());
-  const [tabs, setTabs] = useState<Tab[]>(() => restoredInitialState?.tabs ?? [createNewTab()]);
-  const [activeTabId, setActiveTabId] = useState<string | null>(
-    () => restoredInitialState?.activeTabId ?? tabs[0]?.id ?? null,
-  );
+  // Startup behaviour (Issue #309): boot is ALWAYS a clean new launcher — we no
+  // longer auto-restore the previous session. Restoring is opt-in via the
+  // title-bar "恢复对话" pill, surfaced only when the last exit was NOT a
+  // deliberate quit (i.e. a crash or an update-restart — see the boot-decision
+  // effect below). `buildRestoredTabs()` still runs synchronously here to
+  // CAPTURE the prior session's restorable tabs BEFORE the post-commit persist
+  // effect overwrites localStorage with this fresh launcher; the captured set
+  // becomes the pill's restore candidate, hydrated `restoreState:'cold'` (no
+  // TabProvider / sidecar until first activation — see MemoizedTabContent).
+  const [restoreCandidate] = useState(() => buildRestoredTabs());
+  const [tabs, setTabs] = useState<Tab[]>(() => [createNewTab()]);
+  const [activeTabId, setActiveTabId] = useState<string | null>(() => tabs[0]?.id ?? null);
+
+  // "恢复对话" pill (Issue #309). `restorePillCount > 0` shows it; the resolved
+  // candidate is held in a ref (NOT localStorage — the persist effect clears
+  // that on the fresh boot) so the user can still restore after starting work.
+  const restoreCandidateRef = useRef<{ tabs: Tab[]; activeTabId: string | null } | null>(null);
+  const [restorePillCount, setRestorePillCount] = useState(0);
 
   // Refs for stable callback access (avoids re-creating callbacks when tabs/activeTabId change)
   const tabsRef = useRef(tabs);
@@ -359,51 +395,62 @@ export default function App() {
     };
   }, [flushOpenTabsNow]);
 
-  // Durable-handoff recovery (Issue #232 hardening). localStorage is the primary
-  // restore source (read synchronously above for instant first paint), but its
-  // asynchronous WebView disk-flush can be lost to the abrupt update-restart
-  // exit (NSIS exit(0) / relaunch()). handleRestartAndUpdate fsyncs a durable
-  // ~/.myagents/open-tabs.json backstop right before that exit; here we CONSUME
-  // it on boot (read-then-delete) and adopt it ONLY when the localStorage read
-  // came up EMPTY (pickDurableOverride) — the exact case that produces the
-  // reported "no tabs at all" symptom.
-  //
-  // Deliberately NOT a full "durable always wins": when localStorage DID restore
-  // we trust it. In the rare partial-loss window (localStorage flushed an older
-  // snapshot but lost the final setItem before the abrupt exit) this restores a
-  // tab set that is one structural change stale — e.g. a tab closed in the last
-  // sub-second before clicking 重启更新 may reappear. That residue is accepted:
-  // adopting durable unconditionally would re-mount + re-activate the healthy
-  // boot path on EVERY update, which is a far worse, ever-present cost than a
-  // rare one-tab discrepancy. (Codex review — known, bounded limitation.)
-  //
-  // Guards: the ref keeps it single-shot under StrictMode's double-invoke (the
-  // file is deleted on read, so a second pass is a no-op anyway); and we only
-  // adopt while the tab list is still the pristine boot list — if the user opened
-  // or switched a tab during the async read, their live state wins.
-  const durableHandoffConsumedRef = useRef(false);
+  // Boot startup-behaviour decision (Issue #309). Boot already rendered a fresh
+  // launcher (no auto-restore); here we decide whether to OFFER restoring the
+  // previous session via the title-bar pill, by the EXIT REASON:
+  //   - Resolve the snapshot: the synchronous localStorage capture
+  //     (restoreCandidate) wins; the fsync durable backstop — written by
+  //     handleRestartAndUpdate right before the abrupt update-restart, where the
+  //     async WebView localStorage flush can be lost — fills in when the local
+  //     read came up EMPTY (pickDurableOverride).
+  //   - Read the Rust clean-exit marker: PRESENT means the user deliberately
+  //     quit (Cmd+Q / Dock / tray) → boot fresh, no pill. ABSENT means a crash
+  //     or an update-restart → offer to restore (preserves the #232 intent as an
+  //     opt-in, kills the #309 "stop force-restoring my session" complaint).
+  // Single-shot under StrictMode via the ref; loadAndClearOpenTabsDurable +
+  // consumeCleanExitMarker both delete on read, so a second pass is a no-op.
+  const bootDecisionRef = useRef(false);
   useEffect(() => {
-    if (durableHandoffConsumedRef.current) return;
-    durableHandoffConsumedRef.current = true;
+    if (bootDecisionRef.current) return;
+    bootDecisionRef.current = true;
     void (async () => {
       const durable = await loadAndClearOpenTabsDurable();
-      const override = pickDurableOverride(restoredInitialState != null, durable);
-      if (!override) return;
-      // We only adopt onto the pristine empty-boot fallback (one launcher tab).
-      // If the user opened/switched a tab during the async read — or anything
-      // else replaced that lone launcher — their live state wins, so bail rather
-      // than clobber it. (Content check, not reference: a no-op setTabs must not
-      // produce a false negative that defeats recovery.)
-      const live = tabsRef.current;
-      if (live.length !== 1 || live[0]?.view !== 'launcher') return;
-      const { tabs: recovered, activeTabId: recoveredActive } = hydratePersistedState(override);
-      console.warn(
-        `[App] localStorage tab restore was empty; recovered ${recovered.length} tab(s) from durable backstop`,
-      );
-      setTabs(recovered);
-      setActiveTabId(recoveredActive ?? recovered[0]?.id ?? null);
+      const override = pickDurableOverride(restoreCandidate != null, durable);
+      const candidate = override ? hydratePersistedState(override) : restoreCandidate;
+      const lastExitWasClean = await consumeCleanExitMarker();
+      if (candidate && shouldOfferRestore(lastExitWasClean, candidate.tabs.length)) {
+        restoreCandidateRef.current = candidate;
+        setRestorePillCount(candidate.tabs.length);
+      }
     })();
-  }, [restoredInitialState]);
+  }, [restoreCandidate]);
+
+  // "恢复对话" pill — restore the previous session on click. Replaces a still-
+  // pristine lone launcher; otherwise APPENDS (deduped by sessionId, capped at
+  // MAX_TABS) so it never disturbs work the user already started this session.
+  // Restored tabs are "cold" (hydratePersistedState) — no sidecar until the user
+  // actually activates one.
+  const handleRestoreLastSession = useCallback(() => {
+    const candidate = restoreCandidateRef.current;
+    setRestorePillCount(0);
+    restoreCandidateRef.current = null;
+    if (!candidate || candidate.tabs.length === 0) return;
+    // planRestoreTabs computes the merged list AND the surviving active id from
+    // the same merge, so the active tab is always present in the list (no
+    // divergent-base setState — see the helper's doc). Plan against the live
+    // tabs via the ref to avoid a stale closure.
+    const plan = planRestoreTabs(tabsRef.current, candidate);
+    if (!plan) return;
+    track('restore_last_session', { count: candidate.tabs.length });
+    setTabs(plan.tabs);
+    setActiveTabId(plan.activeTabId);
+  }, []);
+
+  // ✕ on the pill — dismiss without restoring (don't nag again this session).
+  const handleDismissRestore = useCallback(() => {
+    setRestorePillCount(0);
+    restoreCandidateRef.current = null;
+  }, []);
 
   // Deferred-mount set for freshly created tabs. A tab whose id is in here
   // renders only a placeholder (see MemoizedTabContent), so clicking "+" /
@@ -437,6 +484,7 @@ export default function App() {
   // await a Sidecar and wire up SSE before the Chat is usable, so their mount
   // cannot be hidden behind a placeholder — they intentionally do not use this.
   const openNewTabDeferred = useCallback((newTab: Tab) => {
+    perfMark(RENDERER_PERF_PHASE.newTabReveal, { tabId: newTab.id }); // P0: new-tab timeline anchor
     setDeferredMountTabIds((prev) => {
       if (prev.has(newTab.id)) return prev;
       const next = new Set(prev);
@@ -1129,6 +1177,8 @@ export default function App() {
 
     try {
       const activeTab = tabsRef.current.find(t => t.id === activeTabId);
+      perfMark('launch_start', { tabId: activeTabId });
+      console.log(`[App][launch] START active=${activeTabId} view=${activeTab?.view} hasSession=${!!activeTab?.sessionId} target-sessionId=${sessionId ?? 'NEW'}`);
 
       if (sessionId) {
         const cfg = configRef.current;
@@ -1243,7 +1293,7 @@ export default function App() {
                   sessionId,
                   view: 'chat',
                   title: project.displayName || getFolderName(project.path),
-                  joinedExistingSidecar: !result.isNew,
+                  sidecarConfigDisposition: result.isNew ? 'push' : 'adopt',
                 }
                 : t
             )
@@ -1258,9 +1308,17 @@ export default function App() {
         }
       } else {
         // ========================================
-        // New session: current Tab has running cron task
+        // New session: current Tab has running cron task → open in a new tab
         // ========================================
-        const currentTabCronTask = await getTabCronTask(activeTabId);
+        // Only a tab WITH a session can own a running cron task. A launcher /
+        // fresh tab (no sessionId) can't — so skip the getTabCronTask IPC for it.
+        // That await is load-bearing for instant-nav: awaiting it yields to React,
+        // which paints the workspace card's loading spinner BEFORE the flushSync
+        // flip runs — so even with flushSync the user sees a brief card spinner.
+        // Skipping it for the launcher case keeps the whole pre-flip path
+        // synchronous → the flip lands in the same click tick → no spinner.
+        const currentTabCronTask = activeTab?.sessionId ? await getTabCronTask(activeTabId) : null;
+        console.log(`[App][launch] cron-check ${activeTab?.sessionId ? `status=${currentTabCronTask?.status ?? 'none'}` : 'skipped(no-session)'}`);
         if (currentTabCronTask && currentTabCronTask.status === 'running') {
           console.log(`[App] Scenario 3: Current tab ${activeTabId} has running cron task ${currentTabCronTask.id}, creating new tab`);
 
@@ -1322,7 +1380,69 @@ export default function App() {
         setPendingSurface(targetTabId, pendingSurfaceForLaunch);
       }
 
+      // INSTANT-NAV: flip to the chat shell BEFORE awaiting the sidecar boot, so the
+      // user lands in Chat instantly (the boot runs under the "AI 启动中" overlay).
+      // `effectiveSessionId` is truthy (D1): a real history id, or a `pending-<tabId>`
+      // for new sessions → TabProvider's SSE connect fires and Chat mounts now.
+      //
+      // `getSessionPort` is a PAINT-TIMING hint ONLY, never a config-correctness
+      // input: null ⇒ flip instant (no live sidecar to wait on); non-null ⇒ flip
+      // after the (fast) ensure. The actual push-vs-adopt disposition is ALWAYS
+      // decided by the single post-ensure resolver below using the authoritative
+      // `result.isNew` (under the Rust manager lock). So even if getSessionPort is
+      // wrong/raced/IPC-errored, the worst case is a mis-timed flip, never a config
+      // stomp — that is what removed the Phase B TOCTOU. New sessions flip 'push'
+      // immediately (a pending-<tabId> id is provably fresh — no creator can target
+      // it); history flips 'pending' until the resolver runs.
+      const instantNav = !sessionId;
+      const flipInstant = instantNav || (!!sessionId && (await getSessionPort(sessionId)) === null);
+      const flipTitle = project.displayName || getFolderName(project.path);
+      if (flipInstant) {
+        perfMark('launch_flip', { tabId: targetTabId });
+        console.log(`[App][launch] FLIP(flushSync) target=${targetTabId} active=${activeTabId} (chat shell should paint now)`);
+        // flushSync is LOAD-BEARING here, not an optimization. A plain setState
+        // before `await ensureSessionSidecar` does NOT paint early: React batches
+        // this promise-continuation update and coalesces it with the post-ensure
+        // updates, so the chat shell only mounts AFTER the ~780ms sidecar boot
+        // (verified via logs: TabProvider/Chat mount-effects fired only after
+        // ensure_done). flushSync forces a synchronous render+commit of the chat
+        // shell NOW, before we await the cold boot — that IS the instant-nav.
+        flushSync(() => {
+          setTabs((prev) =>
+            prev.map((t) =>
+              t.id === targetTabId
+                // Disposition: a NEW session (pending-<tabId> id) is provably fresh
+                // — no Rust-side creator can target a pending id — so 'push'. A
+                // HISTORY session flips 'pending': push-vs-adopt is unknown until
+                // ensure resolves (getSessionPort is racy — a cron/IM/restart creator
+                // can spawn between the check and ensure), and the single post-ensure
+                // resolver below decides it from the authoritative result.isNew.
+                // Hard-coding a guess here is exactly the #300/#301 stomp we removed.
+                // initialMessage only on the new-session ('push') branch. A 'pending'
+                // tab must NOT carry one: autoSend gates on initialMessage and its
+                // MCP/plugin pushes are not disposition-gated, so a pending tab with a
+                // message would stomp a soon-to-be-'adopt' sidecar. History opens have
+                // no initialMessage today; this makes the invariant structural.
+                ? buildChatFlipPatch(t, { agentDir: project.path, sessionId: effectiveSessionId, title: flipTitle, initialMessage: instantNav ? initialMessage : undefined, sidecarConfigDisposition: instantNav ? 'push' : 'pending' })
+                : t
+            )
+          );
+          if (targetTabId !== activeTabId) {
+            setActiveTabId(targetTabId);
+          }
+        });
+        // Measure the actual PAINT (double-rAF fires after the browser paints) vs
+        // the flushSync commit above. card_click → chat_painted = the TRUE
+        // click→visible time the user perceives; the other marks are commit-only
+        // (React updated the DOM) and can't see how long the browser took to draw.
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          perfMark('chat_painted', { tabId: targetTabId });
+          console.log(`[App][launch] chat_painted target=${targetTabId} (browser painted the flip)`);
+        }));
+      }
+
       const result = await ensureSessionSidecar(effectiveSessionId, project.path, 'tab', targetTabId);
+      perfMark('launch_ensured', { tabId: targetTabId });
       console.log(`[App] Session Sidecar ensured: port=${result.port}, isNew=${result.isNew}`);
 
       // Cancel background completion AFTER Tab is registered as an owner.
@@ -1339,28 +1459,32 @@ export default function App() {
       // Always use effectiveSessionId to ensure session_activations has entry for this Tab
       await activateSession(effectiveSessionId, targetTabId, null, result.port, project.path, false);
 
-      // Update tab state with effectiveSessionId (matches the Sidecar's session)
-      // For new sessions, this is "pending-{tabId}" until backend creates the real session
-      setTabs((prev) =>
-        prev.map((t) =>
-          t.id === targetTabId
-            ? {
-              ...t,
-              agentDir: project.path,
-              sessionId: effectiveSessionId,
-              view: 'chat',
-              title: project.displayName || getFolderName(project.path),
-              // Only set initialMessage when explicitly provided (from Launcher send).
-              // Omitting undefined prevents overwriting a prior initialMessage in race conditions.
-              ...(initialMessage ? { initialMessage } : {}),
-              joinedExistingSidecar: !result.isNew,
-            }
-            : t
-        )
-      );
-
-      if (targetTabId !== activeTabId) {
-        setActiveTabId(targetTabId);
+      // SINGLE RESOLVER — the authoritative join-vs-fresh decision comes ONLY from
+      // result.isNew (decided under the Rust manager lock), never from a pre-ensure
+      // prediction. This is what closes the Phase B TOCTOU config-stomp.
+      const resolved: SidecarConfigDisposition = result.isNew ? 'push' : 'adopt';
+      if (!flipInstant) {
+        // Non-instant (live/stale history): this IS the first flip, after ensure.
+        setTabs((prev) =>
+          prev.map((t) =>
+            t.id === targetTabId
+              ? buildChatFlipPatch(t, { agentDir: project.path, sessionId: effectiveSessionId, title: flipTitle, initialMessage, sidecarConfigDisposition: resolved })
+              : t
+          )
+        );
+        if (targetTabId !== activeTabId) {
+          setActiveTabId(targetTabId);
+        }
+      } else {
+        // Instant path already flipped (and may have auto-sent initialMessage).
+        // Resolve ONLY the disposition — do NOT re-run buildChatFlipPatch, which
+        // would re-attach initialMessage and risk a double-send. 'pending'→push|adopt
+        // for history; for a new session result.isNew is always true → 'push' (no-op).
+        setTabs((prev) =>
+          prev.map((t) =>
+            t.id === targetTabId ? { ...t, sidecarConfigDisposition: resolved } : t
+          )
+        );
       }
       setLoadingTabs((prev) => ({ ...prev, [targetTabId]: false }));
     } catch (err) {
@@ -1381,6 +1505,29 @@ export default function App() {
       const errorTabId = targetTabId !== activeTabId ? targetTabId : activeTabId;
       setTabErrors((prev) => ({ ...prev, [errorTabId]: errorMsg }));
 
+      // A5 (instant-nav): with the early flip the tab may already be on the chat
+      // view, where `tabErrors` isn't surfaced (it only feeds the Launcher's
+      // unused startError) and the startup overlay would otherwise just time out
+      // to a blank chat. A toast makes the boot failure visible regardless of
+      // which view the user is on. (Full in-chat "启动失败 + 重试" via
+      // useSessionReady('failed'): Phase A follow-up.)
+      toastRef.current.error(`启动失败：${errorMsg}`);
+
+      // Cross-AI review (Critical): an instant flip set the tab to chat + 'pending'
+      // BEFORE this ensure threw. 'pending' has no resolver left now (the post-ensure
+      // step is what threw), so the mounted chat would be WEDGED — neither push nor
+      // adopt ever runs, even if the sidecar later recovers (strictly worse than the
+      // old self-healing 'push', and it breaks the "never leave a chat pending"
+      // invariant). Reset to a terminal 'push' so a later reconnect pushes config.
+      // (The browser-dev branch below additionally flips the view.)
+      setTabs((prev) =>
+        prev.map((t) =>
+          t.id === errorTabId && t.sidecarConfigDisposition === 'pending'
+            ? { ...t, sidecarConfigDisposition: 'push' }
+            : t
+        )
+      );
+
       // In browser dev mode, still allow navigation
       if (isBrowserDevMode()) {
         console.log('[App] Browser mode: continuing despite error');
@@ -1392,6 +1539,8 @@ export default function App() {
                 agentDir: project.path,
                 view: 'chat',
                 title: project.displayName || getFolderName(project.path),
+                // Terminal: ensure failed — never leave a mounted chat 'pending'.
+                sidecarConfigDisposition: 'push' as const,
               }
               : t
           )
@@ -1410,9 +1559,13 @@ export default function App() {
     ));
   }, []);
 
-  const clearJoinedExistingSidecar = useCallback((tabId: string) => {
+  // Called by Chat after it has adopted a joined sidecar's config. Move the tab to
+  // 'push' so the user's SUBSEQUENT in-tab edits push to the sidecar normally (the
+  // adoption is one-shot). Push effects don't replay on adopt→push because they key
+  // on the `configPending` boolean, which stays false across this transition.
+  const markSidecarConfigAdopted = useCallback((tabId: string) => {
     setTabs(prev => prev.map(t =>
-      t.id === tabId ? { ...t, joinedExistingSidecar: undefined } : t
+      t.id === tabId ? { ...t, sidecarConfigDisposition: 'push' } : t
     ));
   }, []);
 
@@ -1444,6 +1597,9 @@ export default function App() {
       sessionId: newSessionId,
       view: 'chat',
       title,
+      // Fork mints a brand-new session id → fresh sidecar (no concurrent creator
+      // can target it) → 'push'. The post-ensure step below confirms it.
+      sidecarConfigDisposition: 'push',
       ...(initialMessage ? { initialMessage: { text: initialMessage } } : {}),
     };
 
@@ -1462,6 +1618,132 @@ export default function App() {
       setLoadingTabs(prev => ({ ...prev, [newTab.id]: false }));
     }
   }, []);
+
+  /**
+   * Spawn a fresh Tab bound to an EXISTING session, ensure its sidecar, and
+   * register the Tab as an owner. Shared by "在新 tab 打开" (history dropdown)
+   * and the cross-runtime auto-new-tab path in handleSwitchSession (Scenario
+   * 1.5). Returns false (after a toast) when the tab cap is hit. Stable
+   * identity ([] deps — only touches stable setters/refs/imports) so callers
+   * that must stay reference-stable (handleSwitchSession) can depend on it.
+   *
+   * `preserveCronActivation`: when the target session is owned by a running
+   * cron task, the new Tab must be added via `updateSessionTab` (which keeps
+   * the activation record's `task_id` intact) rather than `activateSession`
+   * (which inserts a fresh `{task_id: null}` record and breaks cron ownership
+   * — the exact pitfall documented in planSessionOpen, mirrored from
+   * handleSwitchSession Scenario 2).
+   */
+  const spawnTabForExistingSession = useCallback(async (
+    sessionId: string,
+    sessionAgentDir: string,
+    title: string,
+    opts?: { preserveCronActivation?: boolean },
+  ): Promise<boolean> => {
+    if (tabsRef.current.length >= MAX_TABS) {
+      toastRef.current.error('标签页已达上限，请关闭一个后重试');
+      return false;
+    }
+    const newTab: Tab = {
+      ...createNewTab(),
+      agentDir: sessionAgentDir,
+      sessionId,
+      view: 'chat',
+      title,
+      // Existing session pre-mounted before ensure → 'pending'; the post-ensure
+      // step below resolves push|adopt from result.isNew (no stomp on a join).
+      sidecarConfigDisposition: 'pending',
+    };
+    setTabs(prev => [...prev, newTab]);
+    setLoadingTabs(prev => ({ ...prev, [newTab.id]: true }));
+    let ownerAcquired = false;
+    try {
+      const result = await ensureSessionSidecar(sessionId, sessionAgentDir, 'tab', newTab.id);
+      ownerAcquired = true;
+      // The sidecar spawn above is the widest await window; if the user closed
+      // this loading tab during it, don't activate a dead tab or point
+      // activeTabId at a non-existent one. Release the owner we just acquired
+      // (the close handler's release may have raced ahead and found none) and
+      // bail before any activation/state commit.
+      if (!tabsRef.current.some(t => t.id === newTab.id)) {
+        await releaseSessionSidecar(sessionId, 'tab', newTab.id).catch(() => {});
+        return false;
+      }
+      if (opts?.preserveCronActivation) {
+        // Cron-owned session: add this Tab as an additional owner without
+        // replacing the activation record, so the cron `task_id` survives.
+        await updateSessionTab(sessionId, newTab.id);
+      } else {
+        // Plain/background session: cancel any background completion AFTER the
+        // Tab is an owner (order matters — releasing BG as the last owner would
+        // stop the sidecar mid-stream; see handleLaunchProject), then activate.
+        await cancelBackgroundCompletion(sessionId);
+        await activateSession(sessionId, newTab.id, null, result.port, sessionAgentDir, false);
+      }
+      setTabs(prev => prev.map(t =>
+        t.id === newTab.id ? { ...t, sidecarConfigDisposition: result.isNew ? 'push' : 'adopt' } : t,
+      ));
+      setActiveTabId(newTab.id);
+      return true;
+    } catch (error) {
+      console.error('[App] Failed to open session in new tab:', error);
+      setTabs(prev => prev.filter(t => t.id !== newTab.id));
+      // Release the Tab owner we acquired so a failed activation can't leak a
+      // phantom owner that keeps the (possibly otherwise-ownerless) sidecar
+      // alive forever.
+      if (ownerAcquired) {
+        await releaseSessionSidecar(sessionId, 'tab', newTab.id).catch(() => {});
+      }
+      return false;
+    } finally {
+      setLoadingTabs(prev => ({ ...prev, [newTab.id]: false }));
+    }
+  }, []);
+
+  // Per-session in-flight guard for open-in-new-tab. Without it, a rapid
+  // double-click both observe a `tabsRef.current` that doesn't yet reflect the
+  // first `setTabs`, so planSessionOpen returns non-jump twice → two tabs for
+  // one session (violates Session:Tab 1:1, can exceed MAX_TABS).
+  const openingInNewTabRef = useRef<Set<string>>(new Set());
+
+  /**
+   * Open a history session in a NEW tab (vs. handleSwitchSession which reuses
+   * the current tab). If the session is already open in a tab, jump to it
+   * instead of spawning a duplicate — Session:Tab is 1:1, so two tabs owning
+   * one sidecar would fight over it (mirrors handleSwitchSession's fast path).
+   * The real activation is fetched (not hard-coded null) so a cron-owned
+   * session routes through the activation-preserving attach path.
+   */
+  const handleOpenSessionInNewTab = useCallback(async (tabId: string, sessionId: string, title: string) => {
+    if (openingInNewTabRef.current.has(sessionId)) return;
+    openingInNewTabRef.current.add(sessionId);
+    try {
+      const activation = await getSessionActivation(sessionId);
+      const plan = planSessionOpen({
+        tabs: tabsRef.current,
+        targetSessionId: sessionId,
+        multiAgentRuntime: false,
+        targetActivation: activation,
+        currentTabCronRunning: false,
+      });
+      if (plan.type === 'jump-to-tab') {
+        console.log(`[App] handleOpenSessionInNewTab: Session ${sessionId} already in tab ${plan.tabId}, jumping to it`);
+        setActiveTabId(plan.tabId);
+        return;
+      }
+      const sourceTab = tabsRef.current.find(t => t.id === tabId);
+      const sessionAgentDir = sourceTab?.agentDir;
+      if (!sessionAgentDir) {
+        console.error('[App] Cannot open session in new tab: source tab has no agentDir');
+        return;
+      }
+      await spawnTabForExistingSession(sessionId, sessionAgentDir, title || getFolderName(sessionAgentDir), {
+        preserveCronActivation: plan.type === 'attach-existing-sidecar',
+      });
+    } finally {
+      openingInNewTabRef.current.delete(sessionId);
+    }
+  }, [spawnTabForExistingSession]);
 
   /**
    * Handle session switch from within Chat (history dropdown)
@@ -1534,38 +1816,15 @@ export default function App() {
     // the agent runtime is only the template for future sessions.
     if (plan.type === 'open-new-tab' && plan.reason === 'runtime-mismatch') {
       console.log(`[App] handleSwitchSession Scenario 1.5: Cross-runtime session (session=${plan.targetRuntime}, current=${plan.currentRuntime}), opening in new tab`);
-      if (tabsRef.current.length >= MAX_TABS) {
-        toastRef.current.error('标签页已达上限，请关闭一个后重试');
-        return;
-      }
       if (!currentTab?.agentDir) {
         console.error('[App] Cannot switch: current tab has no agentDir');
         return;
       }
-      const newTab: Tab = {
-        ...createNewTab(),
-        agentDir: currentTab.agentDir,
+      await spawnTabForExistingSession(
         sessionId,
-        view: 'chat',
-        title: currentTab.title || getFolderName(currentTab.agentDir),
-      };
-      setTabs(prev => [...prev, newTab]);
-      setLoadingTabs(prev => ({ ...prev, [newTab.id]: true }));
-      try {
-        const result = await ensureSessionSidecar(sessionId, currentTab.agentDir, 'tab', newTab.id);
-        await activateSession(sessionId, newTab.id, null, result.port, currentTab.agentDir, false);
-        setTabs(prev => prev.map(t =>
-          t.id === newTab.id
-            ? { ...t, joinedExistingSidecar: !result.isNew }
-            : t,
-        ));
-        setActiveTabId(newTab.id);
-      } catch (error) {
-        console.error('[App] Failed to open cross-runtime session in new tab:', error);
-        setTabs(prev => prev.filter(t => t.id !== newTab.id));
-      } finally {
-        setLoadingTabs(prev => ({ ...prev, [newTab.id]: false }));
-      }
+        currentTab.agentDir,
+        currentTab.title || getFolderName(currentTab.agentDir),
+      );
       return;
     }
 
@@ -1611,7 +1870,7 @@ export default function App() {
               ? {
                 ...t,
                 sessionId,
-                joinedExistingSidecar: !result.isNew,
+                sidecarConfigDisposition: result.isNew ? 'push' : 'adopt',
                 view: 'chat',
                 agentDir: tabAgentDir,
                 title: currentTab.title || getFolderName(tabAgentDir),
@@ -1662,7 +1921,7 @@ export default function App() {
                 sessionId,
                 view: 'chat',
                 title: currentTabForScenario3.title || getFolderName(currentTabForScenario3.agentDir ?? ''),
-                joinedExistingSidecar: !result.isNew,
+                sidecarConfigDisposition: result.isNew ? 'push' : 'adopt',
               }
               : t
           )
@@ -1810,7 +2069,7 @@ export default function App() {
             ? {
               ...t,
               sessionId,
-              joinedExistingSidecar: joinedExisting,
+              sidecarConfigDisposition: joinedExisting ? 'adopt' : 'push',
               view: 'chat',
               agentDir: tabAgentDir,
               title: currentTabForScenario4.title || getFolderName(tabAgentDir),
@@ -1822,7 +2081,10 @@ export default function App() {
     } catch (error) {
       console.error('[App] Failed to switch session:', error);
     }
-  }, []);
+    // spawnTabForExistingSession has stable identity ([] deps), so listing it
+    // keeps exhaustive-deps happy without changing handleSwitchSession's own
+    // stability (callers rely on this being reference-stable).
+  }, [spawnTabForExistingSession]);
 
   const handleBackToLauncher = useCallback(async () => {
     const activeTabId = activeTabIdRef.current;
@@ -1874,7 +2136,7 @@ export default function App() {
     setTabs((prev) =>
       prev.map((t) =>
         t.id === activeTabId
-          ? { ...t, agentDir: null, sessionId: null, view: 'launcher', title: 'New Tab' }
+          ? { ...t, agentDir: null, sessionId: null, view: 'launcher', title: 'New Tab', sidecarConfigDisposition: 'push' }
           : t
       )
     );
@@ -1921,12 +2183,12 @@ export default function App() {
       await activateSession(pendingSessionId, tabId, null, result.port, currentTab.agentDir, false);
 
       // Update tab state → TabProvider will detect sessionId change and reconnect
-      // Explicitly clear joinedExistingSidecar to prevent stale flag from blocking config sync
+      // Fresh sidecar for the new session → 'push' (overwrites any stale disposition)
       // on the new session (e.g. user clicks "New Session" while still in IM Bot adoption window)
       setTabs((prev) =>
         prev.map((t) =>
           t.id === tabId
-            ? { ...t, sessionId: pendingSessionId, joinedExistingSidecar: undefined }
+            ? { ...t, sessionId: pendingSessionId, sidecarConfigDisposition: 'push' }
             : t
         )
       );
@@ -1969,11 +2231,19 @@ export default function App() {
   // planSessionOpen — the planner would see the tab already holds this
   // sessionId and return `jump-to-tab`, self-jumping and never ensuring a
   // sidecar (handleLaunchProject's early return at the jump branch). This is the
-  // minimal ensure→activate path for a tab that owns no prior session.
+  // minimal ensure→register path for a tab that owns no prior session.
   const attachSessionToTab = useCallback(
     async (tabId: string, sessionId: string, agentDir: string): Promise<{ joinedExisting: boolean }> => {
       const result = await ensureSessionSidecar(sessionId, agentDir, 'tab', tabId);
-      await activateSession(sessionId, tabId, null, result.port, agentDir, false);
+      const activation = result.isNew ? null : await getSessionActivation(sessionId);
+      if (activation?.task_id) {
+        // Cron-owned session: add this Tab without replacing the activation
+        // record, otherwise the cron task_id is lost and later owner cleanup can
+        // misclassify the session.
+        await updateSessionTab(sessionId, tabId);
+      } else {
+        await activateSession(sessionId, tabId, null, result.port, agentDir, false);
+      }
       // Tab now owns the sidecar — safe to release any background-completion
       // owner that may have kept it warm.
       await cancelBackgroundCompletion(sessionId);
@@ -2029,7 +2299,7 @@ export default function App() {
         // connects SSE and loadSession()s the history from JSONL.
         setTabs((prev) =>
           prev.map((t) =>
-            t.id === tabId ? { ...t, restoreState: undefined, joinedExistingSidecar: joinedExisting } : t,
+            t.id === tabId ? { ...t, restoreState: undefined, sidecarConfigDisposition: joinedExisting ? 'adopt' : 'push' } : t,
           ),
         );
       } catch (err) {
@@ -2158,6 +2428,7 @@ export default function App() {
       sessionId: null,
       view: 'settings',
       title: '设置',
+      sidecarConfigDisposition: 'push',
     };
     openNewTabDeferred(newTab);
 
@@ -2198,6 +2469,7 @@ export default function App() {
       sessionId: null,
       view: 'taskcenter',
       title: '任务中心',
+      sidecarConfigDisposition: 'push',
     };
     openNewTabDeferred(newTab);
   }, [openNewTabDeferred]);
@@ -2460,14 +2732,12 @@ export default function App() {
   // Listen for OPEN_SESSION_IN_NEW_TAB — task center's 任务执行 session list
   // dispatches this to open a historical execution in a fresh chat tab.
   //
-  // Forces a NEW tab unconditionally. An earlier version delegated to
-  // `handleLaunchProject` which falls back to the active tab in its common
-  // Scenario 4 branch — that could silently replace the user's current
-  // chat session if they clicked a row while inside another Chat tab.
-  // We pre-seed a new tab here (mirroring OPEN_AI_DISCUSSION's approach)
-  // so the user always lands in a fresh tab and their active session stays
-  // put. Failures surface as toasts, not silent console.warn — otherwise
-  // the click looks dead and the user has no signal.
+  // Opens the session in a new tab (or jumps to it if already open) via the same
+  // cron-aware plan→spawn path as the in-tab handleOpenSessionInNewTab. An earlier
+  // version pre-seeded a chat tab + handleLaunchProject, which (a) could replace the
+  // active session via Scenario 4, and (b) wiped a cron task's activation when the
+  // pre-seeded session id made the planner pick jump-to-tab→Scenario 4. The
+  // spawn path avoids both.
   useEffect(() => {
     const handler = async (raw: Event) => {
       const event = raw as CustomEvent<{
@@ -2485,32 +2755,33 @@ export default function App() {
         return;
       }
 
-      if (tabsRef.current.length >= MAX_TABS) {
-        toastRef.current?.error(`已达 Tab 上限 (${MAX_TABS})，请先关闭一个 Tab`);
+      // Dedup + cron-aware routing — mirror handleOpenSessionInNewTab (the in-tab
+      // path); do NOT pre-seed + handleLaunchProject. A pre-seeded session id makes
+      // planSessionOpen return jump-to-tab, which the launch flow then routes into
+      // Scenario 4's release + deactivate + activate(taskId:null) → that WIPES a cron
+      // task's activation ownership (cross-AI review, High). spawnTabForExistingSession
+      // owns the disposition (pending → push|adopt from result.isNew), preserves the
+      // cron activation via updateSessionTab when joining a cron-owned sidecar, removes
+      // the tab on failure (no stuck-'pending'), and enforces MAX_TABS internally.
+      const activation = await getSessionActivation(sessionId);
+      const plan = planSessionOpen({
+        tabs: tabsRef.current,
+        targetSessionId: sessionId,
+        multiAgentRuntime: false,
+        targetActivation: activation,
+        currentTabCronRunning: false,
+      });
+      if (plan.type === 'jump-to-tab') {
+        // Already open → switch to it (don't duplicate, don't block on MAX_TABS).
+        setActiveTabId(plan.tabId);
         return;
       }
-
-      // Pre-seed a chat tab with the target session id so the user lands
-      // directly in Chat view, not Launcher. `handleLaunchProject` below
-      // uses `activeTabIdRef.current` as its target; we've just updated
-      // that to the new tab so no existing tab gets hijacked.
-      const newTab = createNewTab();
-      const seeded = {
-        ...newTab,
-        view: 'chat' as const,
-        agentDir: workspace.path,
+      await spawnTabForExistingSession(
         sessionId,
-      };
-      setTabs((prev) => [...prev, seeded]);
-      setActiveTabId(newTab.id);
-      activeTabIdRef.current = newTab.id;
-
-      try {
-        await handleLaunchProject(workspace, sessionId);
-      } catch (err) {
-        console.error('[App] OPEN_SESSION_IN_NEW_TAB failed:', err);
-        toastRef.current?.error('打开 session 失败，请稍后重试');
-      }
+        workspace.path,
+        workspace.displayName || getFolderName(workspace.path),
+        { preserveCronActivation: plan.type === 'attach-existing-sidecar' },
+      );
     };
     window.addEventListener(CUSTOM_EVENTS.OPEN_SESSION_IN_NEW_TAB, handler);
     return () =>
@@ -2772,6 +3043,9 @@ export default function App() {
         updateInstalling={updateInstalling}
         updatePreparing={updatePreparing}
         onRestartAndUpdate={() => void handleRestartAndUpdate()}
+        restoreCount={restorePillCount}
+        onRestoreSession={handleRestoreLastSession}
+        onDismissRestore={handleDismissRestore}
       >
         <TabBar
           tabs={tabs}
@@ -2796,6 +3070,7 @@ export default function App() {
             onLaunchProject={handleLaunchProject}
             onBack={handleBackToLauncher}
             onSwitchSession={handleSwitchSession}
+            onOpenSessionInNewTab={handleOpenSessionInNewTab}
             onNewSession={handleNewSession}
             onUpdateGenerating={updateTabGenerating}
             onUpdateTitle={updateTabTitle}
@@ -2804,7 +3079,7 @@ export default function App() {
             onForkSession={handleForkSession}
             onUpdateSessionId={updateTabSessionId}
             onClearInitialMessage={clearInitialMessage}
-            onClearJoinedExistingSidecar={clearJoinedExistingSidecar}
+            onSidecarConfigAdopted={markSidecarConfigAdopted}
             settingsInitialSection={tab.view === 'settings' ? settingsInitialSection : undefined}
             settingsInitialMcpId={tab.view === 'settings' ? settingsInitialMcpId : undefined}
             settingsInitialSelect={tab.view === 'settings' ? settingsInitialSelect : undefined}

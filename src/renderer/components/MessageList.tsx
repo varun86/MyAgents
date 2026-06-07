@@ -601,7 +601,7 @@ const MessageList = memo(function MessageList({
         defaultItemHeight={480}
         increaseViewportBy={{ top: 800, bottom: 400 }}
         className="h-full"
-        style={{ overscrollBehavior: 'none' }}
+        style={{ overscrollBehavior: 'none', scrollbarGutter: 'stable' }}
         components={components}
         itemContent={renderItem}
       />
