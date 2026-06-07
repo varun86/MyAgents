@@ -16,6 +16,7 @@ import SessionMenuButton, { type BotChannelCandidate } from '@/components/Sessio
 import { FileActionProvider } from '@/context/FileActionContext';
 import SimpleChatInput, { type ImageAttachment, type SimpleChatInputHandle } from '@/components/SimpleChatInput';
 import AgentStatusPanel from '@/components/agent-status/AgentStatusPanel';
+import ContextUsageIndicator from '@/components/ContextUsageIndicator';
 import ChatBootOverlay from '@/components/ChatBootOverlay';
 import QueryNavigator from '@/components/chat/QueryNavigator';
 import ChatSearchPanel from '@/components/ChatSearchPanel';
@@ -2908,6 +2909,23 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     [isExternalRuntime, handleJumpToTool],
   );
 
+  // PRD 0.2.32 — 智能压缩入口（builtin only）。用与正常发送完全相同的已解析
+  // model/permission/providerEnv 发送 `/compact`（实测可触发内置压缩），避免误切 provider。
+  const handleCompactContext = useCallback(() => {
+    const providerEnv = buildProviderEnv(currentProviderRef.current);
+    void sendMessage('/compact', undefined, effectivePermissionMode, effectiveModel, isExternalRuntime ? undefined : providerEnv);
+  }, [sendMessage, effectivePermissionMode, effectiveModel, isExternalRuntime, buildProviderEnv]);
+
+  // PRD 0.2.32 — context 用量指示器 slot。自取数（内部 useTabState 订阅 contextUsage），
+  // 数据不经 SimpleChatInput props；useMemo 让 slot identity 在流式期间稳定，不打穿
+  // SimpleChatInput 的 React.memo（与 agentStatusSlot 同款）。
+  const contextIndicatorSlot = useMemo(
+    // key on sessionId → remount on session switch resets local open/timer state
+    // (review #W3). sessionId is stable during streaming, so the memo still holds.
+    () => <ContextUsageIndicator key={sessionId ?? 'none'} onCompact={handleCompactContext} />,
+    [handleCompactContext, sessionId],
+  );
+
   // P3 (second memo-breaker): this list was computed inline in the SimpleChatInput
   // JSX, so a fresh array was created on every Chat re-render → broke
   // SimpleChatInput's shallow React.memo on every streamed token. Memoize it so
@@ -3674,6 +3692,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
             selectedModel={isExternalRuntime ? runtimeModel : selectedModel}
             onModelChange={isExternalRuntime ? handleRuntimeModelChange : handleModelChange}
             sessionUnlocked={isSessionUnlocked}
+            contextIndicator={contextIndicatorSlot}
             permissionMode={effectivePermissionMode}
             onPermissionModeChange={handlePermissionModeChange}
             apiKeys={apiKeys}

@@ -171,6 +171,11 @@ interface SimpleChatInputProps {
   mode?: 'chat' | 'launcher';
   /** Optional ReactNode rendered at the start of the toolbar (e.g., workspace selector in launcher) */
   toolbarPrefix?: React.ReactNode;
+  /**
+   * PRD 0.2.32 — context 用量指示器，渲染在右侧 model 按钮左侧。由 Chat.tsx 注入一个
+   * 自取数的 <ContextUsageIndicator>（不经本组件 props 传数据，避免打穿 memo）。Launcher 不传。
+   */
+  contextIndicator?: React.ReactNode;
   // Agent Runtime (v0.1.59)
   runtime?: RuntimeType;
   runtimeDetections?: RuntimeDetections;
@@ -317,6 +322,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   onCronStop,
   mode = 'chat',
   toolbarPrefix,
+  contextIndicator,
   // Whether this input belongs to the currently active tab. Used to gate document-level
   // listeners (Shift+Tab permission-mode cycle below) so background tabs don't also fire.
   active = true,
@@ -2385,6 +2391,8 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                   <Unlock className="h-3 w-3" />
                 </span>
               )}
+              {/* PRD 0.2.32 — context 用量指示器（自取数 slot，model 按钮左侧） */}
+              {contextIndicator}
               {/* Model Dropdown with Provider Selector */}
               <button
                 ref={modelBtnRef}

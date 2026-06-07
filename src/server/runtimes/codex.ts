@@ -18,6 +18,7 @@ import type {
 import { CODEX_PERMISSION_MODES } from '../../shared/types/runtime';
 import type { AgentRuntime, RuntimeProcess, SessionStartOptions, UnifiedEvent, UnifiedEventCallback, ImagePayload, SubAgentScope } from './types';
 import { StaleRuntimeSessionError } from './types';
+import { mapCodexTokenUsage, type CodexThreadTokenUsage } from './codex-token-usage';
 import { augmentedProcessEnv, resolveCommand, stripAnsi } from './env-utils';
 import { ensureDirSync } from '../utils/fs-utils';
 import { killWithEscalation } from './utils/kill-with-escalation';
@@ -2729,17 +2730,20 @@ export class CodexRuntime implements AgentRuntime {
         };
 
       // ── Token usage ──
+      // PRD 0.2.32 — `inputTokens`/`semantics:'running_total'` 维持原样（external watchdog 依赖
+      // 累计值）；新增 `contextOccupiedTokens`（= last.inputTokens，最近一次调用）+ runtime 窗口
+      // 给 context 用量指示器。解析逻辑见纯函数 mapCodexTokenUsage（schema 随版本漂移，单独可测）。
       case 'thread/tokenUsage/updated': {
-        const usage = p.tokenUsage as { total: { inputTokens: number; outputTokens: number } } | undefined;
-        if (usage?.total) {
-          return {
-            kind: 'usage',
-            inputTokens: usage.total.inputTokens || 0,
-            outputTokens: usage.total.outputTokens || 0,
-            semantics: 'running_total',
-          };
-        }
-        return null;
+        const mapped = mapCodexTokenUsage(p.tokenUsage as CodexThreadTokenUsage | undefined);
+        if (!mapped) return null;
+        return {
+          kind: 'usage',
+          inputTokens: mapped.runningTotalInputTokens,
+          outputTokens: mapped.runningTotalOutputTokens,
+          semantics: 'running_total',
+          contextOccupiedTokens: mapped.contextOccupiedTokens,
+          runtimeContextWindow: mapped.runtimeContextWindow,
+        };
       }
 
       // ── Errors ──

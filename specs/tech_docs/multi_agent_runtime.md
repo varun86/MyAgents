@@ -555,11 +555,36 @@ config.multiAgentRuntime (磁盘/React state)
 2. **前端** (`Chat.tsx`)：检测 `isCrossRuntimeSession` → 发消息时弹 ConfirmDialog → 用户可选择新开会话或留在当前页浏览历史
 3. **Fork/Rewind**：外部 Runtime session 不支持（前端隐藏按钮 + 服务端 400 守卫）
 
+## Context 用量归一化（PRD 0.2.32）
+
+实时「当前 context 窗口用量」指示器（对话框 model 选择器左侧的环 + hover 卡片）。四个 runtime 取数姿势不同，但都收敛到一个归一化纯函数 + 一个 SSE 事件 + 一个前端组件。
+
+**核心不变量**
+- **占用 = 最近一次 API 调用的 input 系 token，不是整 turn 聚合**。带工具的一轮发多次 API、每次重发上下文，聚合会严重高估（圆环钉死在 ~100%）。
+- **两系 cache 语义相反**：Anthropic 系（builtin / Claude Code）`input` 不含 cache → `input + cacheRead + cacheCreation`；OpenAI 系（Codex）`inputTokens` 已含 cached → 直接用，不再加。
+- **分母 = `runtime 报的窗口 ?? lookupModelContextLength(model) ?? 200K`**，永远有值（= auto-compact 有效窗口，约「窗口 − 13K」触发压缩）。
+
+**每 runtime 占用来源**
+
+| Runtime | 占用 | 窗口 | 备注 |
+|---|---|---|---|
+| builtin | `agent-session.ts` 捕获最近一条**主轮**（非子 Agent）assistant message 的 `input+cache`（`broadcastBuiltinContextUsage`）| `lookupModelContextLength ?? 200K`（**不**用 SDK `ModelUsage.contextWindow`——对 bridge 第三方模型只回落 200K，与注入的 `CLAUDE_CODE_AUTO_COMPACT_WINDOW` 不一致）| `windowSource: registry|default` |
+| Codex | `tokenUsage.last.inputTokens`（`mapCodexTokenUsage`，纯函数可测）；`total` 仍喂 watchdog | `tokenUsage.modelContextWindow`（`windowSource: runtime`）| 通知 turn 中流式到达 → 亚轮实时刷新 |
+| Claude Code | 最近一条主轮 assistant message 的 `input+cache`（`lastMainAssistantUsage`，**不**用 `result.usage`——那是整 turn 累计）| registry ?? 200K | |
+| Gemini | `_meta.quota.token_count.input_tokens`（per-request）| registry ?? 200K | |
+
+**统一通道**：每个 external adapter 在 `kind:'usage'` UnifiedEvent 上显式带 `contextOccupiedTokens` + `runtimeContextWindow`（`types.ts`）。`external-session.ts` 的 `usage` 分支**只用显式 `contextOccupiedTokens`**（缺失则不发——宁可不显示也不显错，避免把 Codex running_total / CC 累计当占用），过 `computeContextUsage` 归一化后 `broadcast('chat:context-usage', ...)`。builtin 走 `agent-session.ts` 旁挂 `chat:message-complete` 广播。前端 `TabProvider.contextUsage`（tab-scoped，session 切换由 `currentSessionId` effect 清空）→ `<ContextUsageIndicator>`（自取数，不穿 SimpleChatInput props）。
+
+**智能压缩入口**：卡片内按钮，仅 builtin（`source==='builtin'`）显示；复用 `Chat.tsx` 正常发送链路发 `/compact`（`effectiveModel`/`effectivePermissionMode`/`providerEnv` 同参，turn 中 `disabled`）。external runtime 隐藏（无可靠程序化压缩入口）。纯函数 `computeContextUsage` 见 `src/shared/contextUsage.ts`，单测 `contextUsage.test.ts` + `codex-token-usage.unit.test.ts`。
+
 ## 文件索引
 
 | 文件 | 职责 |
 |------|------|
-| `src/server/runtimes/types.ts` | AgentRuntime 接口 + UnifiedEvent 类型 |
+| `src/server/runtimes/types.ts` | AgentRuntime 接口 + UnifiedEvent 类型（含 PRD 0.2.32 `contextOccupiedTokens`/`runtimeContextWindow`）|
+| `src/shared/contextUsage.ts` | `computeContextUsage` 归一化纯函数（PRD 0.2.32）|
+| `src/server/runtimes/codex-token-usage.ts` | `mapCodexTokenUsage` Codex token schema 解析纯函数（PRD 0.2.32）|
+| `src/renderer/components/ContextUsageIndicator.tsx` | Context 用量环 + hover 卡片 + 智能压缩入口（PRD 0.2.32）|
 | `src/server/runtimes/factory.ts` | Runtime 工厂 + 检测 |
 | `src/server/runtimes/claude-code.ts` | CC Runtime 实现(NDJSON 协议) |
 | `src/server/runtimes/codex.ts` | Codex Runtime 实现(JSON-RPC 2.0) |

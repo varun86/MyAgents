@@ -252,6 +252,9 @@ export class ClaudeCodeRuntime implements AgentRuntime {
   private blockIndexToToolUseId = new Map<number, string>();
   // Track content_block_index → block type for correct stop events
   private blockIndexToType = new Map<number, 'text' | 'thinking' | 'tool_use'>();
+  // PRD 0.2.32 — 最近一条主轮 assistant message 的 usage（context 占用源；result.usage 是
+  // 整 turn 累计不能用）。每条主轮 assistant message 覆盖，turn 末（result）消费后重置。
+  private lastMainAssistantUsage: { inputTokens: number; cacheReadTokens: number; cacheCreationTokens: number } | null = null;
 
   async detect(): Promise<RuntimeDetection> {
     try {
@@ -720,16 +723,34 @@ export class ClaudeCodeRuntime implements AgentRuntime {
       case 'stream_event':
         return this.parseStreamEvent(msg.event as Record<string, unknown>);
 
-      case 'assistant':
+      case 'assistant': {
+        // PRD 0.2.32 — context 占用：CC 的 `result.usage` 是整 turn 累计（多次工具往返求和），
+        // 不能当占用。占用必须取**最近一条主轮 assistant message** 的 input+cache（每条 = 一次
+        // API 调用，最后一条即当前窗口装了多少）。子 Agent 消息（parent_tool_use_id 存在）有
+        // 独立上下文，排除。在 result 处用此值设 contextOccupiedTokens。
+        const am = msg.message as Record<string, unknown> | undefined;
+        const au = am?.usage as Record<string, unknown> | undefined;
+        if (!msg.parent_tool_use_id && au) {
+          this.lastMainAssistantUsage = {
+            inputTokens: this.readNumber(au.input_tokens, au.inputTokens),
+            cacheReadTokens: this.readNumber(
+              au.cache_read_input_tokens,
+              au.cacheReadInputTokens,
+              (au.input_tokens_details as Record<string, unknown> | undefined)?.cached_tokens,
+            ),
+            cacheCreationTokens: this.readNumber(au.cache_creation_input_tokens, au.cacheCreationInputTokens),
+          };
+        }
         // Complete assistant message (for replay / resume)
         return {
           kind: 'message_replay',
           message: {
             id: (msg.uuid as string) || '',
             role: 'assistant',
-            content: (msg.message as Record<string, unknown>)?.content,
+            content: am?.content,
           },
         };
+      }
 
       case 'user':
         return {
@@ -876,8 +897,16 @@ export class ClaudeCodeRuntime implements AgentRuntime {
     const events: UnifiedEvent[] = [];
     const usage = this.extractUsage(msg);
     if (usage) {
-      events.push({ kind: 'usage', ...usage, semantics: 'delta' });
+      // PRD 0.2.32 — context 占用取「最近一条主轮 message」（Anthropic 系 input+cache），
+      // 不是 result.usage（整 turn 累计）。无捕获到则不带 → 指示器不显示（不显错）。
+      const occ = this.lastMainAssistantUsage;
+      const contextOccupiedTokens = occ
+        ? occ.inputTokens + occ.cacheReadTokens + occ.cacheCreationTokens
+        : undefined;
+      events.push({ kind: 'usage', ...usage, semantics: 'delta', contextOccupiedTokens });
     }
+    this.lastMainAssistantUsage = null; // reset for next turn
+
     if (typeof msg.model === 'string' && msg.model) {
       events.push({ kind: 'model_update', model: msg.model });
     }

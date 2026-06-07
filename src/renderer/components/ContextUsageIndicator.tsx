@@ -1,0 +1,184 @@
+/**
+ * ContextUsageIndicator — 对话框右下角的实时 context 用量指示器（PRD 0.2.32）。
+ *
+ * 形态（V1 极简）：model 选择器左侧一个环形进度，hover 弹出极简卡片完整展示用量。
+ * 内置 runtime 在卡片内提供「智能压缩」入口（等价 `/compact`）；三方 runtime 隐藏该按钮。
+ *
+ * 关键约束：
+ * - **自取数**：通过 `useTabState()` 直接订阅 `contextUsage` 切片，**不**经由
+ *   SimpleChatInput 的 props 传入——否则 Codex 亚轮流式更新会重渲整个输入框（含 textarea），
+ *   打穿 SimpleChatInput 的 React.memo。由 Chat.tsx 作为 `contextIndicator` slot 注入。
+ * - 压缩动作的 model/providerEnv 解析归 Chat.tsx（与正常发送同参），经 `onCompact` 注入，
+ *   避免本组件误切 provider。
+ */
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { Minimize2 } from 'lucide-react';
+
+import { useTabState } from '@/context/TabContext';
+import Popover from './ui/Popover';
+import Tip from './Tip';
+
+/** ≈ 有效窗口 − 13K 处触发自动压缩（SDK 对 `CLAUDE_CODE_AUTO_COMPACT_WINDOW` 的 headroom；仅 builtin 适用）。 */
+const COMPACT_HEADROOM_TOKENS = 13_000;
+/** hover 离开后延迟关闭，给「环 → 卡片」鼠标移动留缓冲（safe-bridge 替代）。 */
+const HOVER_CLOSE_DELAY_MS = 140;
+
+function formatTokens(n: number): string {
+  if (n >= 1_000_000) {
+    const m = n / 1_000_000;
+    return `${Number.isInteger(m) ? m : m.toFixed(2)}M`;
+  }
+  if (n >= 1_000) return `${(n / 1_000).toFixed(n >= 100_000 ? 0 : 1)}K`;
+  return String(Math.round(n));
+}
+
+/** SVG 环形进度（从顶部顺时针）。单色 accent，V1 极简。 */
+function Ring({ percent, size, stroke }: { percent: number; size: number; stroke: number }) {
+  const r = (size - stroke) / 2;
+  const c = 2 * Math.PI * r;
+  const offset = c * (1 - Math.min(100, Math.max(0, percent)) / 100);
+  const half = size / 2;
+  return (
+    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} style={{ transform: 'rotate(-90deg)', display: 'block' }}>
+      <circle cx={half} cy={half} r={r} fill="none" stroke="var(--line-strong)" strokeWidth={stroke} />
+      <circle
+        cx={half}
+        cy={half}
+        r={r}
+        fill="none"
+        stroke="var(--accent)"
+        strokeWidth={stroke}
+        strokeLinecap="round"
+        strokeDasharray={c}
+        strokeDashoffset={offset}
+        style={{ transition: 'stroke-dashoffset 0.45s cubic-bezier(0.22, 0.61, 0.36, 1)' }}
+      />
+    </svg>
+  );
+}
+
+export interface ContextUsageIndicatorProps {
+  /**
+   * 触发智能压缩（builtin only）。由 Chat.tsx 用已解析的 model/providerEnv 包好
+   * `sendMessage('/compact', …)` 注入。未提供时不渲染压缩按钮。
+   */
+  onCompact?: () => void;
+}
+
+export default function ContextUsageIndicator({ onCompact }: ContextUsageIndicatorProps) {
+  const { contextUsage, isLoading } = useTabState();
+  const anchorRef = useRef<HTMLSpanElement>(null);
+  const [open, setOpen] = useState(false);
+  const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const cancelClose = useCallback(() => {
+    if (closeTimer.current) {
+      clearTimeout(closeTimer.current);
+      closeTimer.current = null;
+    }
+  }, []);
+  const scheduleClose = useCallback(() => {
+    cancelClose();
+    closeTimer.current = setTimeout(() => setOpen(false), HOVER_CLOSE_DELAY_MS);
+  }, [cancelClose]);
+  const openNow = useCallback(() => {
+    cancelClose();
+    setOpen(true);
+  }, [cancelClose]);
+  useEffect(() => cancelClose, [cancelClose]); // clear pending timer on unmount
+
+  // No usage yet (fresh session, before the first turn) — render nothing rather
+  // than a meaningless 0% ring.
+  // (review #W3 — open/timer local state is reset across sessions by remounting:
+  // Chat.tsx keys this component on sessionId, so a session switch can't leave the
+  // popover open without a hover.)
+  if (!contextUsage) return null;
+
+  const { contextTokens, contextWindow, usedPercent, source, windowSource } = contextUsage;
+  const isBuiltin = source === 'builtin';
+  const compactAt = Math.max(0, contextWindow - COMPACT_HEADROOM_TOKENS);
+  const showCompact = isBuiltin && !!onCompact;
+
+  // 窗口来源描述 + （仅 builtin）自动压缩阈值。"窗口 − 13K 自动压缩" 是 builtin SDK 的行为；
+  // 外部 runtime 的压缩阈值各不相同（Codex 有自己的 auto-compact），不能套用同一文案（review #W4）。
+  const windowDesc =
+    windowSource === 'default'
+      ? `未配置上限，按默认 ${formatTokens(contextWindow)} 估算`
+      : windowSource === 'runtime'
+        ? `窗口 ${formatTokens(contextWindow)} · runtime 实时`
+        : `窗口 ${formatTokens(contextWindow)} 来自模型配置`;
+  const footnote = isBuiltin ? `${windowDesc} · 约 ${formatTokens(compactAt)} 时自动压缩` : windowDesc;
+
+  return (
+    <span
+      ref={anchorRef}
+      onMouseEnter={openNow}
+      onMouseLeave={scheduleClose}
+      className="flex h-[30px] cursor-default items-center justify-center rounded-lg px-1 transition-colors hover:bg-[var(--hover-bg)]"
+      aria-label={`上下文已使用 ${usedPercent.toFixed(0)}%`}
+    >
+      <Ring percent={usedPercent} size={18} stroke={2} />
+
+      <Popover
+        open={open}
+        onClose={() => setOpen(false)}
+        anchorRef={anchorRef}
+        placement="top"
+        offset={10}
+        unstyled
+        className="w-[250px]"
+      >
+        {/* unstyled：自带 chrome 但不加 overflow-hidden，让 Tip 气泡可溢出卡片上沿 */}
+        <div
+          onMouseEnter={cancelClose}
+          onMouseLeave={scheduleClose}
+          className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] px-4 pb-3 pt-3.5 shadow-xl"
+        >
+          {/* 头部：标题 + 智能压缩入口（builtin only） */}
+          <div className="mb-3 flex min-h-[24px] items-center justify-between">
+            <span className="text-[12px] font-semibold text-[var(--ink-muted)]">上下文用量</span>
+            {showCompact && (
+              <Tip label="智能压缩上下文，提供更大可用空间" position="top" align="end">
+                <button
+                  type="button"
+                  disabled={isLoading}
+                  onClick={() => {
+                    onCompact?.();
+                    setOpen(false);
+                  }}
+                  className="flex items-center gap-1 rounded-lg border border-[var(--accent-warm-muted)] bg-[var(--accent-warm-subtle)] px-2 py-1 text-[11px] font-semibold leading-none text-[var(--accent)] transition-colors hover:border-[var(--accent)] hover:bg-[var(--accent-warm-muted)] disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <Minimize2 className="h-3 w-3" />
+                  智能压缩
+                </button>
+              </Tip>
+            )}
+          </div>
+
+          {/* 主体：大号百分比 + 小环 */}
+          <div className="mb-2.5 flex items-center gap-3.5">
+            <div className="flex-1">
+              <div className="text-[28px] font-bold leading-none tracking-tight tabular-nums text-[var(--ink)]">
+                {usedPercent.toFixed(1)}%
+              </div>
+              <div className="mt-1.5 text-[12px] text-[var(--ink-muted)]">已用 context 窗口</div>
+            </div>
+            <Ring percent={usedPercent} size={44} stroke={3.5} />
+          </div>
+
+          {/* tokens 行 */}
+          <div className="mb-1 text-[12px] tabular-nums text-[var(--ink-muted)]">
+            <span className="font-semibold text-[var(--ink-secondary)]">{formatTokens(contextTokens)}</span>
+            {' / '}
+            {formatTokens(contextWindow)} tokens
+          </div>
+
+          {/* 底部弱灰说明（窗口来源 + 压缩点） */}
+          <div className="mt-2 border-t border-[var(--line)] pt-2 text-[10.5px] leading-relaxed text-[var(--ink-faint)]">
+            {footnote}
+          </div>
+        </div>
+      </Popover>
+    </span>
+  );
+}

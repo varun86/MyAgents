@@ -33,6 +33,7 @@ import type { Message, ContentBlock, ToolUseSimple, ToolInput, TaskStats, Subage
 import type { ToolUse } from '@/types/stream';
 import type { SystemInitInfo } from '../../shared/types/system';
 import type { RuntimeDiagnostics } from '../../shared/types/runtime';
+import type { ContextUsage } from '../../shared/types/context-usage';
 import type { TerminalReason } from '../../shared/terminalReason';
 import type { LogEntry } from '@/types/log';
 import { parsePartialJson } from '@/utils/parsePartialJson';
@@ -424,6 +425,9 @@ export default function TabProvider({
     const [runtimeDiagnostics, setRuntimeDiagnostics] = useState<RuntimeDiagnostics | null>(null);
     const [agentError, setAgentError] = useState<string | null>(null);
     const [systemStatus, setSystemStatus] = useState<string | null>(null);  // e.g., 'compacting'
+    // PRD 0.2.32 — 归一化 context 用量快照（tab-scoped）。Set on chat:context-usage,
+    // cleared on session switch / reset. 见 ContextUsageIndicator。
+    const [contextUsage, setContextUsage] = useState<ContextUsage | null>(null);
     const [lastTerminalReason, setLastTerminalReason] = useState<TerminalReason | null>(null);
     const [isConnected, setIsConnected] = useState(false);
     const [pendingPermission, setPendingPermission] = useState<PermissionRequest | null>(null);
@@ -443,6 +447,15 @@ export default function TabProvider({
         currentSessionIdRef.current = sessionId;
         setCurrentSessionId(sessionId);
     }, [sessionId]);
+
+    // PRD 0.2.32 — clear context 用量 on ANY session switch. Keyed on currentSessionId
+    // (updated by loadSession / resetSession / adoptMigratedSession / prop sync) so it's
+    // structurally guaranteed for every transition — no per-path manual clear to forget
+    // (review #C1: loadSession had no clear → stale ring + stale `source` leaked the builtin
+    // compact button onto external sessions). A stale snapshot must never survive a switch.
+    useEffect(() => {
+        setContextUsage(null);
+    }, [currentSessionId]);
 
     // Store callbacks in refs to avoid triggering effects on every render
     const onGeneratingChangeRef = useRef(onGeneratingChange);
@@ -1934,6 +1947,13 @@ export default function TabProvider({
                 // Refresh the session-list surfaces (history dropdown / task center),
                 // which re-read titles from disk where the backend already persisted.
                 window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.SESSION_TITLE_CHANGED));
+                break;
+            }
+
+            case 'chat:context-usage': {
+                // PRD 0.2.32 — 归一化 context 用量快照（builtin 每轮末 / Codex 亚轮流式）。
+                // 后端已归一化，前端只存最新值供 <ContextUsageIndicator> 消费。
+                setContextUsage((data as ContextUsage | null) ?? null);
                 break;
             }
 
@@ -3895,6 +3915,7 @@ export default function TabProvider({
         runtimeDiagnostics,
         agentError,
         systemStatus,
+        contextUsage,
         lastTerminalReason,
         pendingPermission,
         pendingAskUserQuestion,
@@ -3933,7 +3954,7 @@ export default function TabProvider({
         onCronTaskExitRequested: onCronTaskExitRequestedRef,
     }), [
         tabId, agentDir, currentSessionId, messages, historyMessages, streamingMessage, firstItemIndex, hasMoreBefore, isLoading, isSessionLoading, sessionState, sessionRuntime, sessionMeta,
-        logs, unifiedLogs, systemInitInfo, runtimeDiagnostics, agentError, systemStatus, lastTerminalReason, pendingPermission, pendingAskUserQuestion, pendingExitPlanMode, pendingEnterPlanMode, toolCompleteCount, queuedMessages, isConnected,
+        logs, unifiedLogs, systemInitInfo, runtimeDiagnostics, agentError, systemStatus, contextUsage, lastTerminalReason, pendingPermission, pendingAskUserQuestion, pendingExitPlanMode, pendingEnterPlanMode, toolCompleteCount, queuedMessages, isConnected,
         setMessages, appendLog, appendUnifiedLog, clearUnifiedLogs, sendMessage, stopResponse, loadSession, loadOlderMessages, resetSession, adoptMigratedSession,
         apiGetJson, postJson, apiPutJson, apiDeleteJson, respondPermission, respondAskUserQuestion, respondExitPlanMode, cancelQueuedMessage, forceExecuteQueuedMessage
     ]);

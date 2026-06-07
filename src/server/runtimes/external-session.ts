@@ -49,6 +49,8 @@ import {
   estimatedContextTokensFromMessages,
   observedContextTokens,
 } from './external-watchdog-policy';
+import { computeContextUsage } from '../../shared/contextUsage';
+import { lookupModelContextLength } from '../utils/model-capabilities';
 import { elapsedMs, emitPerfTrace, nowMs } from '../utils/perf-trace';
 import { queryRuntimeModelsSingleFlight } from './runtime-model-singleflight';
 
@@ -3482,7 +3484,7 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
       break;
     }
 
-    case 'usage':
+    case 'usage': {
       // Store latest token usage.
       // Codex emits running totals, while other runtimes may emit per-turn deltas.
       currentTurnUsage = {
@@ -3495,7 +3497,29 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
         semantics: event.semantics,
       };
       recordRuntimeActivity();
+
+      // PRD 0.2.32 — 并发 context 用量快照。Codex 的 tokenUsage 通知在 turn 中流式到达
+      // → 亚轮实时刷新；CC/Gemini 每轮一次。
+      //
+      // 占用**只用各 adapter 显式给出的 `contextOccupiedTokens`**（= 最近一次调用的 input 系
+      // token），不从 `event.inputTokens` 推算——因为 `inputTokens` 的语义随 runtime 不同：
+      // Codex 是 running_total（累计，watchdog 用），CC 的 result.usage 是整 turn 累计，只有
+      // Gemini 才是 per-request。任一用作占用都会高估、让圆环钉死在 ~100%。所以三个 adapter
+      // 各自设 `contextOccupiedTokens`（codex=last.inputTokens / gemini=per-request input /
+      // cc=最近一条主轮 assistant message 的 input+cache），缺失时**不发**（宁可不显示也不显错）。
+      const ctxOccupied = event.contextOccupiedTokens;
+      const ctxRuntime = activeRuntime?.type ?? getCurrentRuntimeType();
+      if (typeof ctxOccupied === 'number' && ctxOccupied > 0 && ctxRuntime !== 'builtin') {
+        broadcast('chat:context-usage', computeContextUsage({
+          occupiedTokens: ctxOccupied,
+          runtimeWindow: event.runtimeContextWindow ?? null,
+          source: ctxRuntime,
+          model: currentTurnUsage.model,
+          lookupWindow: lookupModelContextLength,
+        }));
+      }
       break;
+    }
 
     case 'log':
       if (event.level === 'error') {

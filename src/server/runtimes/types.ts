@@ -174,6 +174,15 @@ export type UnifiedEvent =
     model?: string;
     modelUsage?: Record<string, ModelUsageEntry>;
     semantics?: 'delta' | 'running_total';
+    /**
+     * PRD 0.2.32 — 当前 context 占用（最近一次调用 input 系 token），用于 context 用量指示器。
+     * **与 `inputTokens` 分开**：`inputTokens` 可能是 running_total（Codex watchdog 依赖它），
+     * 而占用必须是「最近一次」。runtime 若能直接给出占用就填这里（Codex = `tokenUsage.last.inputTokens`，
+     * 已含 cached、不再加）；不填时 external-session 回落到 `input + cache`（Anthropic 系 CC/Gemini）。
+     */
+    contextOccupiedTokens?: number;
+    /** PRD 0.2.32 — runtime 自报的 context 窗口（Codex `tokenUsage.modelContextWindow`）；不报传 null/省略 → 回落 registry/200K。 */
+    runtimeContextWindow?: number | null;
   }
   | { kind: 'model_update'; model: string }
   | { kind: 'log'; level: 'info' | 'warn' | 'error'; message: string }
