@@ -42,12 +42,14 @@ describe('withClientActionCommands', () => {
     expect(result.find((c) => c.name === 'loop')?.source).toBe('builtin');
   });
 
-  it('does not duplicate when a same-named entry already exists', () => {
+  it('reserves client-action names: the product command preempts a same-named user skill', () => {
     const withUserLoop = [...base, cmd('loop', 'skill')];
     const result = withClientActionCommands(withUserLoop, true);
+    // Exactly one /loop, and it is the builtin client-action (not the user skill)
+    // — so selecting it opens the panel instead of inserting text.
     expect(result.filter((c) => c.name === 'loop')).toHaveLength(1);
-    // The existing entry wins (mirrors the Rust scanner's first-occurrence dedup)
-    expect(result.find((c) => c.name === 'loop')?.source).toBe('skill');
+    expect(result.find((c) => c.name === 'loop')?.source).toBe('builtin');
+    expect(isClientActionCommand(result.find((c) => c.name === 'loop')!)).toBe(true);
   });
 
   it('every client-action command is itself a client action', () => {

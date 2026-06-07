@@ -26,18 +26,23 @@ export function isClientActionCommand(cmd: SlashCommand): boolean {
   return cmd.source === 'builtin' && CLIENT_ACTION_NAMES.has(cmd.name);
 }
 
+/** Reserved command names — a disk-backed skill/command may not shadow these. */
+const RESERVED_NAMES = new Set(CLIENT_ACTION_SLASH_COMMANDS.map((c) => c.name));
+
 /**
  * Merge client-action commands into a fetched slash-command list.
  *
  * - `enabled` is false (no `onSlashAction` handler) → returns the list
  *   untouched so the command never appears where its action can't run.
- * - A command already present by name (e.g. a same-named user skill) is left
- *   as-is rather than duplicated; the existing entry wins, mirroring the Rust
- *   scanner's "first occurrence by name" dedup.
+ * - Client-action names are **reserved**: the product command preempts any
+ *   same-named disk-backed skill/command. Without this, a user skill literally
+ *   named `loop` would shadow `/loop` (its `source` is 'skill', so the dispatch
+ *   would insert text instead of opening the panel) — a silent failure of a
+ *   first-class command, and incoherent with ranking builtins first. Reserving
+ *   guarantees `/loop` always resolves to its action.
  */
 export function withClientActionCommands(commands: SlashCommand[], enabled: boolean): SlashCommand[] {
   if (!enabled) return commands;
-  const present = new Set(commands.map((c) => c.name));
-  const extras = CLIENT_ACTION_SLASH_COMMANDS.filter((c) => !present.has(c.name));
-  return extras.length === 0 ? commands : [...commands, ...extras];
+  const kept = commands.filter((c) => !RESERVED_NAMES.has(c.name));
+  return [...kept, ...CLIENT_ACTION_SLASH_COMMANDS];
 }

@@ -29,6 +29,11 @@ use super::platform_blocks::is_skill_blocked_on_platform;
 use super::skill_sync::sync_workspace_skills;
 use super::skills_config::read_disabled_list;
 
+// These are *text-insertion* builtins: selecting one inserts `/name ` and the
+// text is sent to the AI/CLI. Do NOT add UI-action commands here (e.g. `loop`,
+// which opens a panel) — those are renderer-only and live in
+// `src/renderer/utils/slashActions.ts`. Listing a UI-action command here would
+// surface it in the launcher (no panel, no handler) as a dead text entry.
 const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("compact", "压缩对话历史，释放上下文空间"),
     ("context", "显示或管理当前上下文"),

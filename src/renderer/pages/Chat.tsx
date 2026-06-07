@@ -201,7 +201,7 @@ interface ChatProps {
  *  (Ralph Loop) mode with "allow AI to autonomously end the task" pre-checked.
  *  Mirrors what the user would otherwise pick by hand in the 定时 panel. */
 const LOOP_SLASH_PRESET: CronInitialConfig = {
-  prompt: '',
+  prompt: '', // unused: the modal reads the prompt from initialPrompt, not here
   intervalMinutes: 30, // ignored in loop mode; satisfies the type
   endConditions: { aiCanExit: true },
   runMode: 'single_session', // loop mode forces single_session
@@ -4199,9 +4199,11 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
         isOpen={showCronSettings}
         onClose={() => { setShowCronSettings(false); setCronOpenPreset(null); }}
         initialPrompt={cronPrompt}
-        // Editing a running task wins; otherwise a slash preset (e.g. /loop)
-        // applies for a fresh open. Plain 定时-button opens have neither.
-        initialConfig={cronState.config ?? cronOpenPreset}
+        // Editing a RUNNING task always wins (cronState.task). Otherwise a slash
+        // preset (e.g. /loop) applies — including over an armed-but-unsent
+        // config, so /loop reliably forces loop mode. Plain 定时-button opens
+        // (no preset) fall back to cronState.config either way.
+        initialConfig={cronState.task ? cronState.config : (cronOpenPreset ?? cronState.config)}
         workspacePath={agentDir}
         onConfirm={async (config: CronSettingsResult) => {
           // PRD 0.2.9 — Forward `providerId` (live-resolve at sidecar)
