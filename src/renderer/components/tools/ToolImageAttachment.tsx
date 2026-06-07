@@ -7,8 +7,8 @@
  *   - tap-to-zoom modal preview
  *   - caption (revisedPrompt etc., capped 4KB at the source)
  *
- * The URL is resolved via useAttachmentUrl, which knows how to pick the right
- * sidecar port for the current session.
+ * The URL is resolved via useAttachmentUrl, which validates the refPath belongs
+ * to the current session before mapping it to the desktop attachment protocol.
  */
 
 import { useState } from 'react';

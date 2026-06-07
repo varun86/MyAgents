@@ -17,9 +17,46 @@ import type { ToolAttachment } from '../../shared/types/tool-attachment';
 const TOOL_ATTACHMENT_API_PREFIX = '/api/attachment/tool/';
 const TOOL_ATTACHMENT_PROTOCOL_PREFIX = 'myagents://tool-attachment/';
 
-export function resolveTauriToolAttachmentUrl(refPath: string): string | null {
+function sanitizeAttachmentScopeSegment(segment: string): string {
+  // Mirrors server/runtimes/tool-attachments.ts::sanitizeSessionTurnSegment.
+  return segment.replace(/[^a-zA-Z0-9_-]+/g, '_');
+}
+
+function decodePathSegment(segment: string): string | null {
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    return null;
+  }
+}
+
+function parseToolAttachmentRefPath(refPath: string): { sessionId: string; relativePath: string } | null {
   if (!refPath.startsWith(TOOL_ATTACHMENT_API_PREFIX)) return null;
-  return `${TOOL_ATTACHMENT_PROTOCOL_PREFIX}${refPath.slice(TOOL_ATTACHMENT_API_PREFIX.length)}`;
+  const relativePath = refPath.slice(TOOL_ATTACHMENT_API_PREFIX.length);
+  const segments = relativePath.split('/');
+  if (segments.length !== 3) return null;
+  const [encodedSessionId, encodedTurnId, encodedFilename] = segments;
+  if (!encodedSessionId || !encodedTurnId || !encodedFilename) return null;
+
+  const sessionId = decodePathSegment(encodedSessionId);
+  if (!sessionId || sessionId !== sanitizeAttachmentScopeSegment(sessionId)) return null;
+
+  return { sessionId, relativePath };
+}
+
+function getToolAttachmentRefError(refPath: string, expectedSessionId: string | null): string | null {
+  const parsed = parseToolAttachmentRefPath(refPath);
+  if (!parsed) return 'invalid_ref';
+  if (!expectedSessionId) return 'missing_session';
+  if (parsed.sessionId !== sanitizeAttachmentScopeSegment(expectedSessionId)) return 'session_mismatch';
+  return null;
+}
+
+export function resolveTauriToolAttachmentUrl(refPath: string, expectedSessionId?: string | null): string | null {
+  const parsed = parseToolAttachmentRefPath(refPath);
+  if (!parsed) return null;
+  if (expectedSessionId !== undefined && getToolAttachmentRefError(refPath, expectedSessionId)) return null;
+  return `${TOOL_ATTACHMENT_PROTOCOL_PREFIX}${parsed.relativePath}`;
 }
 
 /**
@@ -32,12 +69,13 @@ export function resolveTauriToolAttachmentUrl(refPath: string): string | null {
  */
 export async function resolveToolAttachmentUrl(
   attachment: ToolAttachment,
-  _sessionId: string | null,
+  sessionId: string | null,
 ): Promise<string | null> {
   // Placeholder still pending — caller renders skeleton.
   if (attachment.pendingId && !attachment.refPath) return null;
   // Error sentinel.
   if (attachment.refPath.startsWith('error://')) return attachment.refPath;
+  if (getToolAttachmentRefError(attachment.refPath, sessionId)) return null;
 
   if (!isTauriEnvironment()) {
     // Browser dev: vite proxies /api/* to the sidecar by default; refPath is
@@ -45,7 +83,7 @@ export async function resolveToolAttachmentUrl(
     return attachment.refPath;
   }
 
-  const protocolUrl = resolveTauriToolAttachmentUrl(attachment.refPath);
+  const protocolUrl = resolveTauriToolAttachmentUrl(attachment.refPath, sessionId);
   if (protocolUrl) return protocolUrl;
 
   return null;
@@ -65,11 +103,13 @@ export type AttachmentUrlState =
   | { state: 'pending' }
   | { state: 'error'; reason: string };
 
-function computeSyncState(attachment: ToolAttachment): AttachmentUrlState | null {
+function computeSyncState(attachment: ToolAttachment, sessionId: string | null): AttachmentUrlState | null {
   if (attachment.pendingId && !attachment.refPath) return { state: 'pending' };
   if (attachment.refPath.startsWith('error://')) {
     return { state: 'error', reason: attachment.refPath.slice('error://'.length) };
   }
+  const refError = getToolAttachmentRefError(attachment.refPath, sessionId);
+  if (refError) return { state: 'error', reason: refError };
   return null;
 }
 
@@ -83,7 +123,7 @@ export function useAttachmentUrl(
   attachment: ToolAttachment,
   sessionId: string | null,
 ): AttachmentUrlState {
-  const syncState = computeSyncState(attachment);
+  const syncState = computeSyncState(attachment, sessionId);
 
   // Derived-state-from-props pattern (React docs): reset resolvedUrl during
   // render when the input attachment changes — avoids the
