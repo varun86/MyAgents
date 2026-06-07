@@ -51,6 +51,16 @@ enum MemoryUpdateSidecarTarget {
     Missing,
 }
 
+/// Outcome of one session's memory update. `Deferred` (sidecar bound but still
+/// booting) is an EXPECTED transient — not a failure — so the caller retries it
+/// next phase and logs at info, instead of writing an ERROR to the unified log
+/// every heartbeat (cross-review CC Warning).
+enum SessionUpdateOutcome {
+    Updated,
+    Deferred,
+    Failed(String),
+}
+
 /// Check conditions and spawn a batch memory update task if all gates pass.
 /// Called at the end of HeartbeatRunner::run_once().
 pub async fn check_and_spawn<R: Runtime>(
@@ -227,11 +237,19 @@ async fn run_batch<R: Runtime>(
             session_id, agent_id, workspace_path, sidecar_manager,
             app_handle, &http_client, current_model, current_provider_env, mcp_servers_json,
         ).await {
-            Ok(()) => {
+            SessionUpdateOutcome::Updated => {
                 updated += 1;
                 ulog_info!("[memory-update] Session {} updated successfully", session_id);
             }
-            Err(e) => {
+            SessionUpdateOutcome::Deferred => {
+                // Sidecar bound but still booting — expected transient, retry next phase.
+                ulog_info!(
+                    "[memory-update] Session {} sidecar still booting, deferring to retry phase",
+                    session_id
+                );
+                deferred.push(session_id.clone());
+            }
+            SessionUpdateOutcome::Failed(e) => {
                 ulog_error!("[memory-update] Session {} failed: {}", session_id, e);
             }
         }
@@ -261,11 +279,19 @@ async fn run_batch<R: Runtime>(
                 session_id, agent_id, workspace_path, sidecar_manager,
                 app_handle, &http_client, current_model, current_provider_env, mcp_servers_json,
             ).await {
-                Ok(()) => {
+                SessionUpdateOutcome::Updated => {
                     updated += 1;
                     ulog_info!("[memory-update] Session {} updated successfully (deferred)", session_id);
                 }
-                Err(e) => {
+                SessionUpdateOutcome::Deferred => {
+                    // Already waited the cooldown; no further retry phase. Still
+                    // booting is an expected transient, not a failure — info, not error.
+                    ulog_info!(
+                        "[memory-update] Session {} sidecar still not ready after cooldown, skipping",
+                        session_id
+                    );
+                }
+                SessionUpdateOutcome::Failed(e) => {
                     ulog_error!("[memory-update] Session {} failed (deferred): {}", session_id, e);
                 }
             }
@@ -286,7 +312,7 @@ async fn update_single_session<R: Runtime>(
     current_model: &Arc<RwLock<Option<String>>>,
     current_provider_env: &Arc<RwLock<Option<serde_json::Value>>>,
     mcp_servers_json: &Arc<RwLock<Option<String>>>,
-) -> Result<(), String> {
+) -> SessionUpdateOutcome {
     let memory_update_key = format!("memory_update:{}:{}", agent_id, session_id);
     let owner = SidecarOwner::Agent(memory_update_key.clone());
 
@@ -295,7 +321,10 @@ async fn update_single_session<R: Runtime>(
     // still booting or awaiting health-monitor recovery; memory update must
     // not drive ensure's replacement/removal paths for that owner.
     let target = {
-        let mut mgr = sidecar_manager.lock().map_err(|e| format!("lock: {}", e))?;
+        let mut mgr = match sidecar_manager.lock() {
+            Ok(g) => g,
+            Err(e) => return SessionUpdateOutcome::Failed(format!("lock: {}", e)),
+        };
         if let Some(port) = mgr.get_session_port(session_id) {
             MemoryUpdateSidecarTarget::Ready(port)
         } else if mgr.generation_for(session_id).is_some() {
@@ -308,29 +337,36 @@ async fn update_single_session<R: Runtime>(
     let (port, was_temp) = match target {
         MemoryUpdateSidecarTarget::Ready(port) => (port, false),
         MemoryUpdateSidecarTarget::BoundButNotReady => {
-            return Err("Session sidecar is not ready; deferring memory update".to_string());
+            return SessionUpdateOutcome::Deferred;
         }
         MemoryUpdateSidecarTarget::Missing => {
             // Need to start a temporary sidecar via spawn_blocking (ensure_session_sidecar is blocking)
-            let ah = app_handle.clone();
-            let sm = Arc::clone(sidecar_manager);
-            let sid = session_id.to_string();
-            let ws = workspace_path.to_string();
-            let own = owner.clone();
+            let started: Result<(u16, bool), String> = async {
+                let ah = app_handle.clone();
+                let sm = Arc::clone(sidecar_manager);
+                let sid = session_id.to_string();
+                let ws = workspace_path.to_string();
+                let own = owner.clone();
 
-            let result = tokio::task::spawn_blocking(move || {
-                let workspace = PathBuf::from(&ws);
-                sidecar::ensure_session_sidecar(&ah, &sm, &sid, &workspace, own)
-            })
-            .await
-            .map_err(|e| format!("spawn_blocking: {}", e))?
-            .map_err(|e| format!("ensure_sidecar: {}", e))?;
+                let result = tokio::task::spawn_blocking(move || {
+                    let workspace = PathBuf::from(&ws);
+                    sidecar::ensure_session_sidecar(&ah, &sm, &sid, &workspace, own)
+                })
+                .await
+                .map_err(|e| format!("spawn_blocking: {}", e))?
+                .map_err(|e| format!("ensure_sidecar: {}", e))?;
 
-            // Sync AI config only for a sidecar this memory-update turn created.
-            if result.is_new {
-                sync_ai_config_to_port(result.port, current_model, current_provider_env, mcp_servers_json).await;
+                // Sync AI config only for a sidecar this memory-update turn created.
+                if result.is_new {
+                    sync_ai_config_to_port(result.port, current_model, current_provider_env, mcp_servers_json).await;
+                }
+                Ok((result.port, true))
             }
-            (result.port, true)
+            .await;
+            match started {
+                Ok(v) => v,
+                Err(e) => return SessionUpdateOutcome::Failed(e),
+            }
         }
     };
 
@@ -368,7 +404,10 @@ async fn update_single_session<R: Runtime>(
         let _ = sidecar::release_session_sidecar(sidecar_manager, session_id, &owner);
     }
 
-    update_result
+    match update_result {
+        Ok(()) => SessionUpdateOutcome::Updated,
+        Err(e) => SessionUpdateOutcome::Failed(e),
+    }
 }
 
 /// Sync AI config to a newly started sidecar port

@@ -2652,6 +2652,15 @@ async function persistTurnResult(): Promise<void> {
   const turnInboxMeta = currentTurnInboxMeta;
   currentTurnInboxMeta = null;
   const turnAttachmentHints = currentTurnAttachmentHints.splice(0);
+  // PRD 0.2.32 — snapshot THIS turn's context usage at the SAME synchronous entry
+  // as turnInboxMeta above, NOT after the `await awaitInFlightSaves()` further down.
+  // turn_complete fires persistTurnResult fire-and-forget and flips turnCompleted;
+  // the busy gate stops blocking, so a back-to-back sendExternalMessage can run
+  // resetTurnAccumulators() (which nulls currentTurnContextUsage) inside this turn's
+  // await window. Capturing here — before any await — makes it race-free, mirroring
+  // the inbox-meta discipline. Null = no usage event this turn → persist must OMIT
+  // the field (never write undefined, which would erase the prior persisted value).
+  const turnContextUsage = currentTurnContextUsage;
   const persistTraceStarted = nowMs();
   let persistFailed = false;
 
@@ -2676,10 +2685,8 @@ async function persistTurnResult(): Promise<void> {
     const usageData = buildPersistedTurnUsage();
     const turnToolCount = currentContentBlocks.filter(b => b.type === 'tool_use').length;
     const runtimeType = getCurrentRuntimeType();
-    // PRD 0.2.32 — snapshot THIS turn's context usage BEFORE resetTurnAccumulators() (below)
-    // nulls it. Null = this turn produced no usage event → persist must OMIT the field
-    // (not write undefined, which would erase the prior persisted value).
-    const turnContextUsage = currentTurnContextUsage;
+    // turnContextUsage was snapshotted at the synchronous function entry (above) to
+    // survive a concurrent turn's resetTurnAccumulators() during the await window.
 
     // PRD 0.2.18 — capture reply text into local var BEFORE resetTurnAccumulators
     // clears the source. The finally block reads this for inbox reply pushback.

@@ -658,7 +658,10 @@ impl RuntimeDriftResult {
 
 enum ExistingSidecarReuse {
     Healthy { port: u16, generation: u64, runtime: String },
-    Starting { port: u16, generation: u64, runtime: String },
+    /// `owner_added` = whether THIS ensure call newly inserted its owner when it
+    /// joined the still-starting Sidecar. Only true means a readiness-timeout
+    /// detach may safely remove that owner (see `add_owner`).
+    Starting { port: u16, generation: u64, runtime: String, owner_added: bool },
 }
 
 fn normalize_runtime_name(runtime: Option<&str>) -> &str {
@@ -932,9 +935,17 @@ impl SessionSidecar {
         !self.owners.is_empty()
     }
 
-    /// Add an owner to this Sidecar
-    pub fn add_owner(&mut self, owner: SidecarOwner) {
-        self.owners.insert(owner);
+    /// Add an owner to this Sidecar.
+    /// Returns true if the owner was newly inserted, false if it already owned
+    /// this Sidecar (symmetric with `remove_owner`). The Starting-join path uses
+    /// this to decide whether a later readiness-timeout detach is safe: only the
+    /// call that actually added a *new* owner may remove it on timeout. A
+    /// same-owner concurrent ensure (e.g. two `ensure_session_sidecar(.., Tab(t))`
+    /// for one tab) gets `false` here, so it must NOT remove the shared owner —
+    /// doing so would empty the owner set and kill a Sidecar another caller is
+    /// still starting.
+    pub fn add_owner(&mut self, owner: SidecarOwner) -> bool {
+        self.owners.insert(owner)
     }
 
     /// Remove an owner from this Sidecar
@@ -3382,6 +3393,15 @@ pub fn ensure_session_sidecar<R: Runtime>(
     )
 }
 
+/// Upper bound on ensure re-entry. The ensure path re-runs itself on
+/// generation-change and concurrent-create (it must re-wait for `/health/ready`
+/// rather than return a replacement port directly). This caps that re-entry so
+/// a thrashing health monitor that keeps bumping the generation can't recurse
+/// without a depth bound. Each attempt costs ≥2s (HTTP/readiness window), so 8
+/// is generous — real churn settles in 1–2 (cross-review: all three reviewers
+/// flagged the prior unbounded self-recursion).
+const MAX_ENSURE_ATTEMPTS: u32 = 8;
+
 pub fn ensure_session_sidecar_with_runtime_override<R: Runtime>(
     app_handle: &AppHandle<R>,
     manager: &ManagedSidecarManager,
@@ -3390,7 +3410,33 @@ pub fn ensure_session_sidecar_with_runtime_override<R: Runtime>(
     owner: SidecarOwner,
     runtime_override: Option<String>,
 ) -> Result<EnsureSidecarResult, String> {
-    ulog_info!("[sidecar] ensure_session_sidecar called for session: {}, owner: {:?}", session_id, owner);
+    ensure_session_sidecar_attempt(
+        app_handle,
+        manager,
+        session_id,
+        workspace_path,
+        owner,
+        runtime_override,
+        0,
+    )
+}
+
+fn ensure_session_sidecar_attempt<R: Runtime>(
+    app_handle: &AppHandle<R>,
+    manager: &ManagedSidecarManager,
+    session_id: &str,
+    workspace_path: &std::path::Path,
+    owner: SidecarOwner,
+    runtime_override: Option<String>,
+    attempt: u32,
+) -> Result<EnsureSidecarResult, String> {
+    if attempt >= MAX_ENSURE_ATTEMPTS {
+        return Err(format!(
+            "Session {} ensure exceeded {} attempts (sidecar generation churn not settling)",
+            session_id, MAX_ENSURE_ATTEMPTS
+        ));
+    }
+    ulog_info!("[sidecar] ensure_session_sidecar called for session: {}, owner: {:?} (attempt {})", session_id, owner, attempt);
     let ensure_started = trace_start();
     let owner_for_trace = format!("{:?}", owner);
     let requested_runtime_for_trace = normalize_runtime_name(runtime_override.as_deref()).to_string();
@@ -3474,11 +3520,12 @@ pub fn ensure_session_sidecar_with_runtime_override<R: Runtime>(
                     session_id, sidecar.port, owner
                 );
                 validate_sidecar_runtime_invariant(session_id, sidecar.runtime.as_deref(), "reuse-starting");
-                sidecar.add_owner(owner.clone());
+                let owner_added = sidecar.add_owner(owner.clone());
                 Some(ExistingSidecarReuse::Starting {
                     port: sidecar.port,
                     generation,
                     runtime: normalize_runtime_name(sidecar.runtime.as_deref()).to_string(),
+                    owner_added,
                 })
             }
         } else {
@@ -3491,12 +3538,12 @@ pub fn ensure_session_sidecar_with_runtime_override<R: Runtime>(
     // can replace the sidecar during this window. We use a generation counter to detect this
     // and avoid accidentally killing the healthy replacement.
     if let Some(existing) = existing_sidecar_info {
-        let (port, pre_gen, runtime_for_trace, wait_for_starting) = match existing {
+        let (port, pre_gen, runtime_for_trace, wait_for_starting, joined_owner_added) = match existing {
             ExistingSidecarReuse::Healthy { port, generation, runtime } => {
-                (port, generation, runtime, false)
+                (port, generation, runtime, false, false)
             }
-            ExistingSidecarReuse::Starting { port, generation, runtime } => {
-                (port, generation, runtime, true)
+            ExistingSidecarReuse::Starting { port, generation, runtime, owner_added } => {
+                (port, generation, runtime, true, owner_added)
             }
         };
         drop(manager_guard);
@@ -3546,13 +3593,14 @@ pub fn ensure_session_sidecar_with_runtime_override<R: Runtime>(
                     );
                     validate_sidecar_runtime_invariant(session_id, sidecar.runtime.as_deref(), "reuse-replacement");
                     drop(manager_guard);
-                    return ensure_session_sidecar_with_runtime_override(
+                    return ensure_session_sidecar_attempt(
                         app_handle,
                         manager,
                         session_id,
                         workspace_path,
                         owner,
                         runtime_override,
+                        attempt + 1,
                     );
                 }
             }
@@ -3621,8 +3669,18 @@ pub fn ensure_session_sidecar_with_runtime_override<R: Runtime>(
                     "[sidecar] Session {} starting Sidecar on port {} did not become ready for joining owner {:?}; preserving original startup",
                     session_id, port, owner
                 );
-                let should_stop = if let Some(sidecar) = manager_guard.sidecars.get_mut(session_id) {
-                    sidecar.port == port && sidecar.remove_owner(&owner)
+                // Only detach the owner if THIS call actually added it. When the
+                // owner was already present (a same-owner concurrent ensure joined
+                // the same Starting sidecar), `add_owner` returned false; removing
+                // it here would empty the shared owner set and tear down a sidecar
+                // the other caller is still legitimately starting (cross-review
+                // Codex Critical #2). Leave teardown to whoever truly owns it.
+                let should_stop = if joined_owner_added {
+                    if let Some(sidecar) = manager_guard.sidecars.get_mut(session_id) {
+                        sidecar.port == port && sidecar.remove_owner(&owner)
+                    } else {
+                        false
+                    }
                 } else {
                     false
                 };
@@ -3651,6 +3709,7 @@ pub fn ensure_session_sidecar_with_runtime_override<R: Runtime>(
             owner,
             manager_guard,
             runtime_override.as_deref(),
+            attempt,
         );
         if let Ok(ensure_result) = &result {
             emit_perf_trace(
@@ -3675,6 +3734,7 @@ pub fn ensure_session_sidecar_with_runtime_override<R: Runtime>(
         owner,
         manager_guard,
         runtime_override.as_deref(),
+        attempt,
     );
     if let Ok(ensure_result) = &result {
         emit_perf_trace(
@@ -3700,6 +3760,7 @@ fn create_new_session_sidecar<R: Runtime>(
     owner: SidecarOwner,
     mut manager_guard: std::sync::MutexGuard<'_, SidecarManager>,
     runtime_override: Option<&str>,
+    attempt: u32,
 ) -> Result<EnsureSidecarResult, String> {
     let boot_started = trace_start();
 
@@ -3712,13 +3773,14 @@ fn create_new_session_sidecar<R: Runtime>(
                 session_id, existing.state, existing.port
             );
             drop(manager_guard);
-            return ensure_session_sidecar_with_runtime_override(
+            return ensure_session_sidecar_attempt(
                 app_handle,
                 manager,
                 session_id,
                 workspace_path,
                 owner,
                 runtime_override.map(str::to_string),
+                attempt + 1,
             );
         }
         // Exists but process dead — remove before creating fresh

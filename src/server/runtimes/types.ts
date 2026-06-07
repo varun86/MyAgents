@@ -177,8 +177,9 @@ export type UnifiedEvent =
     /**
      * PRD 0.2.32 — 当前 context 占用（最近一次调用 input 系 token），用于 context 用量指示器。
      * **与 `inputTokens` 分开**：`inputTokens` 可能是 running_total（Codex watchdog 依赖它），
-     * 而占用必须是「最近一次」。runtime 若能直接给出占用就填这里（Codex = `tokenUsage.last.inputTokens`，
-     * 已含 cached、不再加）；不填时 external-session 回落到 `input + cache`（Anthropic 系 CC/Gemini）。
+     * 而占用必须是「最近一次」。**计算占用是 adapter 的职责**：Codex = `tokenUsage.last.inputTokens`
+     * （OpenAI 系，已含 cached、不再加）；Anthropic 系（CC/Gemini）= 最近一次的 `input + cacheRead + cacheCreation`。
+     * external-session 只消费 adapter 显式填的这个字段，**自己不做回退**——缺失则不发 context-usage 事件。
      */
     contextOccupiedTokens?: number;
     /** PRD 0.2.32 — runtime 自报的 context 窗口（Codex `tokenUsage.modelContextWindow`）；不报传 null/省略 → 回落 registry/200K。 */
