@@ -622,6 +622,20 @@ const ANTHROPIC_ALIASES = {
   haiku: 'claude-haiku-4-5',
 } as const;
 
+/** 小米 MiMo 开放平台模型目录（按量付费与 Token Plan 订阅共用，仅端点 / 计费不同）。
+ *  规格来源：platform.xiaomimimo.com 模型卡 + Kilo Code 模型页一致（1,048,576 上下文 / 131,072 输出，2026-06）。
+ *  contextLength ≥ 1M 阈值 → applyContextWindowSuffix 自动加 [1m] 走 SDK 1M 上下文路径
+ *  （MiMo 的 Claude Code 接入文档让手动用户手填 mimo-v2.5-pro[1m]，本产品自动完成；
+ *   SDK normalizeModelStringForAPI 在 wire 上再把 [1m] 剥掉，上游收到的是 mimo-v2.5-pro）。 */
+const MIMO_MODELS: ModelEntity[] = [
+  // mimo-v2.5-pro：旗舰推理 / Agent 模型，官方模型卡 input modality = 纯文本。
+  { model: 'mimo-v2.5-pro', modelName: 'MiMo V2.5 Pro', modelSeries: 'xiaomi', contextLength: 1_048_576, maxOutputTokens: 131_072, inputModalities: ['text'] },
+  // mimo-v2.5：为 Agent 场景而生的原生全模态模型，可同时看 / 听 / 读（图像 / 音频 / 视频）。
+  { model: 'mimo-v2.5', modelName: 'MiMo V2.5', modelSeries: 'xiaomi', contextLength: 1_048_576, maxOutputTokens: 131_072, inputModalities: ['text', 'image', 'video', 'audio'] },
+];
+
+const MIMO_ALIASES = { sonnet: 'mimo-v2.5-pro', opus: 'mimo-v2.5-pro', haiku: 'mimo-v2.5' } as const;
+
 export const PRESET_PROVIDERS: Provider[] = [
   {
     id: 'anthropic-sub',
@@ -802,6 +816,49 @@ export const PRESET_PROVIDERS: Provider[] = [
       { model: 'MiniMax-M2.1', modelName: 'MiniMax M2.1', modelSeries: 'minimax', contextLength: 196_608, maxOutputTokens: 8_192, inputModalities: ['text'] },
       { model: 'MiniMax-M2.1-lightning', modelName: 'MiniMax M2.1 Lightning', modelSeries: 'minimax', contextLength: 196_608, maxOutputTokens: 8_192, inputModalities: ['text'] },
     ],
+  },
+  {
+    // 小米 MiMo —— 按量付费（pay-as-you-go）。sk- 形式的 ANTHROPIC_AUTH_TOKEN，按 token 计费走账户余额。
+    // 与下方 Token Plan 订阅版拆成两个供应商：端点 / key 前缀 / 计费口径都不同，用户需明确区分。
+    id: 'xiaomi-mimo',
+    name: '小米 MiMo API',
+    vendor: 'Xiaomi',
+    cloudProvider: '模型官方',
+    type: 'api',
+    primaryModel: 'mimo-v2.5-pro',
+    isBuiltin: true,
+    authType: 'auth_token',
+    websiteUrl: 'https://platform.xiaomimimo.com/console/api-keys',
+    // Anthropic 兼容路径不暴露 /v1/models，模型发现走 OpenAI 兼容路径（同 deepseek/moonshot）
+    modelListUrl: 'https://api.xiaomimimo.com/v1/models',
+    config: {
+      baseUrl: 'https://api.xiaomimimo.com/anthropic',
+      timeout: 600000,
+      disableNonessential: true,
+    },
+    modelAliases: { ...MIMO_ALIASES },
+    models: MIMO_MODELS,
+  },
+  {
+    // 小米 MiMo —— Token Plan 订阅套餐。tp- 形式的专属 key，消耗套餐额度而非账户余额。
+    // 默认中国区端点；海外用户把 Base URL 改成 token-plan-sgp（新加坡）/ token-plan-ams（欧洲）。
+    id: 'xiaomi-mimo-token-plan',
+    name: '小米 MiMo Token Plan (CN)',
+    vendor: 'Xiaomi',
+    cloudProvider: '模型官方',
+    type: 'api',
+    primaryModel: 'mimo-v2.5-pro',
+    isBuiltin: true,
+    authType: 'auth_token',
+    websiteUrl: 'https://platform.xiaomimimo.com/console',
+    modelListUrl: 'https://token-plan-cn.xiaomimimo.com/v1/models',
+    config: {
+      baseUrl: 'https://token-plan-cn.xiaomimimo.com/anthropic',
+      timeout: 600000,
+      disableNonessential: true,
+    },
+    modelAliases: { ...MIMO_ALIASES },
+    models: MIMO_MODELS,
   },
   {
     id: 'google-gemini',
