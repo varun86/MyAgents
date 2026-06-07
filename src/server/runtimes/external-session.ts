@@ -50,6 +50,7 @@ import {
   observedContextTokens,
 } from './external-watchdog-policy';
 import { computeContextUsage } from '../../shared/contextUsage';
+import type { ContextUsage } from '../../shared/types/context-usage';
 import { lookupModelContextLength } from '../utils/model-capabilities';
 import { elapsedMs, emitPerfTrace, nowMs } from '../utils/perf-trace';
 import { queryRuntimeModelsSingleFlight } from './runtime-model-singleflight';
@@ -89,6 +90,10 @@ let lastModel = '';             // Latest model from config sync (passed on resu
 let lastRuntimeReportedModel = ''; // Actual model reported by runtime (session_init/model_update)
 let lastPermissionMode = '';    // Latest permission mode from config sync
 let lastPersistedRuntimeUsageTotals: MessageUsage | null = null;
+// PRD 0.2.32 — 本轮 context 用量快照（turn-scoped，sibling of currentTurnUsage）。Codex 亚轮多次
+// → 保留最新一个；turn 末 persistTurnResult 快照后写盘一次。**每轮在 resetTurnAccumulators 清空**
+// （review Critical 2：若只在 session 切换清，会把上一轮快照在「本轮无 usage 事件」时误持久成本轮）。
+let currentTurnContextUsage: ContextUsage | null = null;
 
 // Message accumulation for SessionStore persistence
 // allSessionMessages grows across turns — saveSessionMessages expects the FULL cumulative array
@@ -285,6 +290,7 @@ function resetModuleState(): void {
   lastRuntimeReportedModel = '';
   lastPermissionMode = '';
   lastPersistedRuntimeUsageTotals = null;
+  currentTurnContextUsage = null;
   allSessionMessages = [];
   currentAssistantText = '';
   currentTurnStartTime = 0;
@@ -890,6 +896,7 @@ function resetTurnAccumulators(): void {
   subagentAttachmentParents.clear();
   subagentTraceBuffers.clear();
   currentTurnUsage = null;
+  currentTurnContextUsage = null;  // PRD 0.2.32 — turn-scoped（review Critical 2：防上轮快照在无-usage 轮被误持久成本轮）
   currentTurnEstimatedInputTokens = 0;
 }
 
@@ -2669,6 +2676,10 @@ async function persistTurnResult(): Promise<void> {
     const usageData = buildPersistedTurnUsage();
     const turnToolCount = currentContentBlocks.filter(b => b.type === 'tool_use').length;
     const runtimeType = getCurrentRuntimeType();
+    // PRD 0.2.32 — snapshot THIS turn's context usage BEFORE resetTurnAccumulators() (below)
+    // nulls it. Null = this turn produced no usage event → persist must OMIT the field
+    // (not write undefined, which would erase the prior persisted value).
+    const turnContextUsage = currentTurnContextUsage;
 
     // PRD 0.2.18 — capture reply text into local var BEFORE resetTurnAccumulators
     // clears the source. The finally block reads this for inbox reply pushback.
@@ -2720,6 +2731,12 @@ async function persistTurnResult(): Promise<void> {
           ...(foundRealUserMessage ? { lastActiveAt: new Date().toISOString() } : {}),
           lastMessagePreview,
           runtimeUsageTotals: lastPersistedRuntimeUsageTotals ?? undefined,
+          // PRD 0.2.32 — 持久化**本轮**算出的 context 快照（turn-scoped snapshot 取于上方）。
+          // **只在本轮真有快照时才写**：无 usage 事件的轮（早退/错误/中止/CC 斜杠命令/adapter 不报）
+          // turnContextUsage 为 null → 整个 key 省略，保留上轮持久值；绝不写 `undefined`（会被
+          // spread+JSON.stringify 丢键 → 抹掉上轮值，review Critical 1）。turn-scoped 又确保不会把
+          // 上一轮快照在本轮误持久（review Critical 2）。
+          ...(turnContextUsage ? { lastContextUsage: turnContextUsage } : {}),
         });
       } catch (err) {
         persistFailed = true;
@@ -3510,13 +3527,17 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
       const ctxOccupied = event.contextOccupiedTokens;
       const ctxRuntime = activeRuntime?.type ?? getCurrentRuntimeType();
       if (typeof ctxOccupied === 'number' && ctxOccupied > 0 && ctxRuntime !== 'builtin') {
-        broadcast('chat:context-usage', computeContextUsage({
+        const ctxUsage = computeContextUsage({
           occupiedTokens: ctxOccupied,
           runtimeWindow: event.runtimeContextWindow ?? null,
           source: ctxRuntime,
           model: currentTurnUsage.model,
           lookupWindow: lookupModelContextLength,
-        }));
+        });
+        broadcast('chat:context-usage', ctxUsage);
+        // PRD 0.2.32 — 留住本轮最新快照；Codex 亚轮会多次进这里，不每次写盘，turn 末
+        // persistTurnResult 快照后写一次（单一数据源，供重开 seed）。
+        currentTurnContextUsage = ctxUsage;
       }
       break;
     }

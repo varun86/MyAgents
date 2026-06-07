@@ -1701,6 +1701,11 @@ function broadcastBuiltinContextUsage(): void {
     lookupWindow: lookupModelContextLength,
   });
   broadcast('chat:context-usage', usage);
+  // PRD 0.2.32 — 持久化**同一个**快照到 session 记录（单一数据源）。每轮末一次写盘，
+  // 重开会话时前端从 session metadata seed → 环立即显示且与会话期间一致。fire-and-forget。
+  void updateSessionMetadata(sessionId, { lastContextUsage: usage }).catch((err) =>
+    console.warn('[agent] persist lastContextUsage failed:', err),
+  );
 }
 
 type BuiltinTurnTraceSnapshot = {

@@ -3,6 +3,7 @@
  */
 
 import { apiFetch, apiGetJson, apiPostJson } from './apiFetch';
+import type { ContextUsage } from '../../shared/types/context-usage';
 
 export interface SessionStats {
     messageCount: number;
@@ -63,6 +64,12 @@ export interface SessionMetadata {
     /** Credentials — server redacts to '[redacted]' in PATCH response (zero-trust) */
     providerEnvJson?: string;
     configSnapshotAt?: string;
+
+    /**
+     * PRD 0.2.32 — 上一轮结束时的 context 用量快照（与实时环同一个计算结果，单一数据源）。
+     * 后端每轮末写入；重开会话时前端 seed 给指示器，使环立即显示真实占用、且与会话期间一致。
+     */
+    lastContextUsage?: ContextUsage;
 }
 
 export interface SessionMessage {

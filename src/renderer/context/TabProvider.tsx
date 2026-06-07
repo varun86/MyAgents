@@ -446,16 +446,15 @@ export default function TabProvider({
     useEffect(() => {
         currentSessionIdRef.current = sessionId;
         setCurrentSessionId(sessionId);
-    }, [sessionId]);
-
-    // PRD 0.2.32 — clear context 用量 on ANY session switch. Keyed on currentSessionId
-    // (updated by loadSession / resetSession / adoptMigratedSession / prop sync) so it's
-    // structurally guaranteed for every transition — no per-path manual clear to forget
-    // (review #C1: loadSession had no clear → stale ring + stale `source` leaked the builtin
-    // compact button onto external sessions). A stale snapshot must never survive a switch.
-    useEffect(() => {
+        // PRD 0.2.32 — clear the context 用量 ring synchronously the moment the session
+        // PROP changes. Keyed on the prop (not currentSessionId) so loadSession's post-await
+        // seed (which doesn't change the prop) is NOT clobbered. This fires BEFORE loadSession
+        // (which may be deferred until SSE re-attach), so a cold builtin→external switch never
+        // paints the previous session's ring / builtin compact button on the new session
+        // (review: stale-source transient). loadSession then re-seeds from the persisted
+        // lastContextUsage; new-session paths (reset/adopt) also clear explicitly for immediacy.
         setContextUsage(null);
-    }, [currentSessionId]);
+    }, [sessionId]);
 
     // Store callbacks in refs to avoid triggering effects on every render
     const onGeneratingChangeRef = useRef(onGeneratingChange);
@@ -583,6 +582,7 @@ export default function TabProvider({
         setHistoryMessages([]);
         resetPaginationState();
         setStreamingMessage(null);
+        setContextUsage(null);  // PRD 0.2.32 — 新会话无持久占用；仅清展示态（不碰后端持久数据）
         seenIdsRef.current.clear();
         isNewSessionRef.current = true;
         resetBirthPendingRef.current = true;
@@ -686,6 +686,7 @@ export default function TabProvider({
         setHistoryMessages([]);
         resetPaginationState();
         setStreamingMessage(null);
+        setContextUsage(null);  // PRD 0.2.32 — 新会话无持久占用；仅清展示态（不碰后端持久数据）
         seenIdsRef.current.clear();
         clearSessionActive();
         toolNameMapRef.current.clear();
@@ -1952,6 +1953,12 @@ export default function TabProvider({
 
             case 'chat:context-usage': {
                 // PRD 0.2.32 — 归一化 context 用量快照（builtin 每轮末 / Codex 亚轮流式）。
+                // review #W3 — drop events whose connection isn't bound to the current session.
+                // During an A→B switch the old (A) connection can still deliver a context-usage
+                // event before the SSE re-attaches to B; without this guard it would clobber B's
+                // freshly-seeded ring (and re-leak A's source). connectedSse===current only in
+                // steady state, so no legit live event is rejected (B's events imply attach to B).
+                if (connectedSseSessionIdRef.current !== currentSessionIdRef.current) break;
                 // 后端已归一化，前端只存最新值供 <ContextUsageIndicator> 消费。
                 setContextUsage((data as ContextUsage | null) ?? null);
                 break;
@@ -3364,6 +3371,15 @@ export default function TabProvider({
             const { messages: _meta_messages, ...metaOnly } = response.session as SessionMetadata & { messages?: unknown };
             void _meta_messages;
             setSessionMeta(metaOnly as SessionMetadata);
+            // PRD 0.2.32 — seed context 用量指示器 from the persisted last-turn snapshot.
+            // "进入会话时 display = 该 session 的 lastContextUsage ?? null" —— 同时承担「重开→显示真实
+            // 占用」和「无持久值→清空」（前端清空只动展示态，不影响后端持久数据）。实时 SSE 后续覆盖。
+            // review #W4 — only seed when the snapshot's `source` matches this session's runtime;
+            // a stale builtin snapshot must not paint the builtin-only /compact button onto a
+            // now-external session. Mismatch → null; the next live turn seeds the correct one.
+            const persistedUsage = response.session.lastContextUsage ?? null;
+            const seedRuntime = response.session.runtime || 'builtin';
+            setContextUsage(persistedUsage && persistedUsage.source === seedRuntime ? persistedUsage : null);
             // Only reset loading state if not explicitly skipped
             // (caller may be managing loading state for an in-progress operation like cron task)
             if (!options?.skipLoadingReset) {
