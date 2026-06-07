@@ -173,6 +173,48 @@ describe('FilePreviewModal live reload', () => {
     expect(mocks.saveFile).not.toHaveBeenCalled();
   });
 
+  it('keeps the dirty editor open when closing with an external-update conflict pending', async () => {
+    mocks.readPreview.mockResolvedValueOnce({
+      name: 'notes.md',
+      content: 'external content',
+      size: 16,
+    });
+    const onClose = vi.fn();
+
+    const { rerender } = render(
+      <FilePreviewModal
+        {...baseProps}
+        onClose={onClose}
+        initialEditMode
+        externalRefreshSignal={0}
+      />,
+    );
+
+    const editor = await screen.findByTestId('monaco-editor') as HTMLTextAreaElement;
+    fireEvent.change(editor, { target: { value: 'local dirty content' } });
+
+    rerender(
+      <FilePreviewModal
+        {...baseProps}
+        onClose={onClose}
+        initialEditMode
+        externalRefreshSignal={1}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText(/^外部更新 \d{2}:\d{2}$/)).toBeTruthy();
+    });
+
+    const buttons = screen.getAllByRole('button');
+    fireEvent.click(buttons[buttons.length - 1]);
+
+    expect(mocks.toastWarning).toHaveBeenCalledWith('文件已在外部更新，未自动覆盖');
+    expect(onClose).not.toHaveBeenCalled();
+    expect(mocks.saveFile).not.toHaveBeenCalled();
+    expect(editor.value).toBe('local dirty content');
+  });
+
   it('passes the saved baseline to autosave and converts stale-save failures into external-update pending', async () => {
     mocks.saveFile.mockRejectedValueOnce(new Error('File changed externally'));
     mocks.readPreview.mockResolvedValueOnce({

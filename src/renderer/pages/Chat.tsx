@@ -681,6 +681,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
 
   const messagesRef = useRef(messages);
   messagesRef.current = messages;
+  const sessionIdRef = useRef(sessionId);
+  sessionIdRef.current = sessionId;
 
   // Refs for one-time project settings sync (see effect after provider change effect)
   const hadInitialMessage = useRef(!!initialMessage);
@@ -691,6 +693,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   // choice; autoSend clears it after its MCP block, handing later config-change
   // re-pushes back to the mount effect. (codex review: dual MCP-push race.)
   const launcherOwnsInitialMcpRef = useRef(hadInitialMessage.current);
+  const [launcherMcpFallbackRevision, setLauncherMcpFallbackRevision] = useState(0);
   const projectSyncedRef = useRef(false);
 
   // Ref for input focus
@@ -1211,6 +1214,10 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
         onInitialMessageConsumedRef.current?.();
       } catch (err) {
         console.error('[Chat] Auto-send failed:', err);
+        if (launcherOwnsInitialMcpRef.current) {
+          launcherOwnsInitialMcpRef.current = false;
+          setLauncherMcpFallbackRevision((revision) => revision + 1);
+        }
         setShowStartupOverlay(false);
         // PRD 0.2.7 §4.5 failure recovery: restore the launcher draft (text /
         // images / cron config) into the chat input so the user can retry
@@ -1630,6 +1637,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     config?.mcpServerEnv,
     config?.mcpServerArgs,
     config?.mcpServers,
+    launcherMcpFallbackRevision,
   ]);
 
   // Load enabled agents and sync to backend
@@ -2104,6 +2112,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     // have advanced (user switched again), and we must not record adoption
     // ownership for a session whose live config we never actually read.
     const adoptingSessionId = sessionId;
+    const isCurrentAdoption = () =>
+      adoptingSessionId === sessionIdRef.current && configDispositionRef.current === 'adopt';
 
     const adoptConfig = async () => {
       try {
@@ -2115,6 +2125,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
           permissionMode?: string | null;
         }>('/api/session/config');
         if (config.success) {
+          if (!isCurrentAdoption()) return;
           // Server now always returns `runtime`; the `?? currentRuntime` is a
           // backward-compat hedge for older sidecars that pre-date the field.
           // Keep the fallback so a stale-binary sidecar doesn't crash adoption.
@@ -2152,7 +2163,9 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
         console.error('[Chat] Failed to read sidecar config:', err);
       } finally {
         // Clear the flag whether adoption succeeded or failed
-        onSidecarConfigAdoptedRef.current?.();
+        if (isCurrentAdoption()) {
+          onSidecarConfigAdoptedRef.current?.();
+        }
       }
     };
 

@@ -2231,11 +2231,19 @@ export default function App() {
   // planSessionOpen — the planner would see the tab already holds this
   // sessionId and return `jump-to-tab`, self-jumping and never ensuring a
   // sidecar (handleLaunchProject's early return at the jump branch). This is the
-  // minimal ensure→activate path for a tab that owns no prior session.
+  // minimal ensure→register path for a tab that owns no prior session.
   const attachSessionToTab = useCallback(
     async (tabId: string, sessionId: string, agentDir: string): Promise<{ joinedExisting: boolean }> => {
       const result = await ensureSessionSidecar(sessionId, agentDir, 'tab', tabId);
-      await activateSession(sessionId, tabId, null, result.port, agentDir, false);
+      const activation = result.isNew ? null : await getSessionActivation(sessionId);
+      if (activation?.task_id) {
+        // Cron-owned session: add this Tab without replacing the activation
+        // record, otherwise the cron task_id is lost and later owner cleanup can
+        // misclassify the session.
+        await updateSessionTab(sessionId, tabId);
+      } else {
+        await activateSession(sessionId, tabId, null, result.port, agentDir, false);
+      }
       // Tab now owns the sidecar — safe to release any background-completion
       // owner that may have kept it warm.
       await cancelBackgroundCompletion(sessionId);

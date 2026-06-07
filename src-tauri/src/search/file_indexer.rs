@@ -65,6 +65,10 @@ const BINARY_EXTENSIONS: &[&str] = &[
 
 /// Maximum file size to index (1 MB).
 const MAX_FILE_SIZE: u64 = 1_048_576;
+#[cfg(not(test))]
+const DIRECT_SCAN_MAX_FILES: usize = 2_000;
+#[cfg(test)]
+const DIRECT_SCAN_MAX_FILES: usize = 3;
 const FILE_INDEX_MANIFEST: &str = ".file_index_manifest.json";
 const SCHEMA_VERSION_FILE: &str = ".schema_version";
 
@@ -711,7 +715,8 @@ fn direct_search_workspace_files(
     let query_lower = query.to_lowercase();
     let mut hits = Vec::new();
     let mut total_matches = 0;
-    direct_walk_search(
+    let mut scanned_files = 0;
+    let stopped_early = direct_walk_search(
         root,
         root,
         &query_lower,
@@ -719,14 +724,22 @@ fn direct_search_workspace_files(
         max_matches_per_file,
         &mut hits,
         &mut total_matches,
+        &mut scanned_files,
+        DIRECT_SCAN_MAX_FILES,
     );
 
     let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
     ulog_info!(
-        "[search] Direct workspace scan for {:?} in {} -> {} files ({:.1}ms)",
+        "[search] Direct workspace scan for {:?} in {} -> {} hits, {} files scanned{} ({:.1}ms)",
         query,
         root.display(),
         hits.len(),
+        scanned_files,
+        if stopped_early {
+            " (stopped early)"
+        } else {
+            ""
+        },
         elapsed_ms
     );
 
@@ -746,21 +759,23 @@ fn direct_walk_search(
     max_matches_per_file: usize,
     hits: &mut Vec<FileSearchHit>,
     total_matches: &mut usize,
-) {
-    if hits.len() >= limit {
-        return;
+    scanned_files: &mut usize,
+    max_files: usize,
+) -> bool {
+    if hits.len() >= limit || *scanned_files >= max_files {
+        return true;
     }
 
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
-        Err(_) => return,
+        Err(_) => return false,
     };
     let mut entries: Vec<_> = entries.flatten().collect();
     entries.sort_by_key(|entry| entry.file_name());
 
     for entry in entries {
-        if hits.len() >= limit {
-            return;
+        if hits.len() >= limit || *scanned_files >= max_files {
+            return true;
         }
 
         let path = entry.path();
@@ -775,7 +790,7 @@ fn direct_walk_search(
 
         if metadata.is_dir() {
             if !should_skip_dir(&name) {
-                direct_walk_search(
+                if direct_walk_search(
                     root,
                     &path,
                     query_lower,
@@ -783,7 +798,11 @@ fn direct_walk_search(
                     max_matches_per_file,
                     hits,
                     total_matches,
-                );
+                    scanned_files,
+                    max_files,
+                ) {
+                    return true;
+                }
             }
             continue;
         }
@@ -801,6 +820,7 @@ fn direct_walk_search(
             continue;
         }
 
+        *scanned_files += 1;
         let name_matches = name.to_lowercase().contains(query_lower);
         let state = file_state_from_metadata(&metadata);
         let content = read_indexable_file(&path, &state);
@@ -827,6 +847,7 @@ fn direct_walk_search(
             matches,
         });
     }
+    false
 }
 
 /// Find matching lines in file content.
@@ -1070,6 +1091,33 @@ mod tests {
 
         assert_eq!(result.hits.len(), 1);
         assert_eq!(result.hits[0].path, "notes.txt");
+    }
+
+    #[test]
+    fn direct_scan_stops_after_file_budget_for_miss_queries() {
+        let temp = tempfile::tempdir().unwrap();
+        let base_dir = temp.path().join("index");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        for idx in 0..DIRECT_SCAN_MAX_FILES {
+            fs::write(workspace.join(format!("{idx:02}.txt")), "ordinary content").unwrap();
+        }
+        fs::write(
+            workspace.join(format!("{:02}.txt", DIRECT_SCAN_MAX_FILES)),
+            "latebudgettoken",
+        )
+        .unwrap();
+
+        let workspace = workspace_path(&workspace);
+        let manager = FileIndexManager::new(base_dir);
+        let result = manager
+            .search("latebudgettoken", &workspace, 10, 5)
+            .unwrap();
+
+        assert!(
+            result.hits.is_empty(),
+            "cold direct scan should not read beyond its foreground file budget"
+        );
     }
 
     #[test]

@@ -22,6 +22,7 @@ use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::workspace_files::path_safety::validate_workspace_root;
 use crate::{ulog_error, ulog_info};
 
 pub use searcher::{
@@ -446,6 +447,8 @@ pub async fn cmd_search_workspace_files(
             query_time_ms: 0.0,
         });
     }
+    let workspace_root = validate_workspace_root(&workspace)?;
+    let workspace = workspace_root.to_string_lossy().into_owned();
     state
         .search_files(
             query,
@@ -480,6 +483,9 @@ pub async fn cmd_refresh_workspace_index(
     state: tauri::State<'_, Arc<SearchEngine>>,
     workspace: String,
 ) -> Result<(usize, usize), String> {
+    let workspace = validate_workspace_root(&workspace)?
+        .to_string_lossy()
+        .into_owned();
     state.refresh_workspace_file_index(&workspace).await
 }
 

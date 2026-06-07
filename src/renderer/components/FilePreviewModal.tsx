@@ -763,7 +763,6 @@ export default function FilePreviewModal({
             editContentRef.current !== savedContentRef.current
         ) {
             toastRef.current.warning('文件已在外部更新，未自动覆盖');
-            onClose();
             return;
         }
         // If there are STILL unsaved direct-edit changes after in-flight completed, save now
