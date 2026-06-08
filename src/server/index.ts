@@ -1047,6 +1047,17 @@ function seedBundledSkills(): void {
       if (config.seeded.includes(folder) && dstExists) continue;
 
       const src = join(bundledDir, folder);
+      // Packaging guard (issue #321, mirrors Rust cmd_sync_system_skills):
+      // only treat a bundled folder as a seedable skill if it carries a
+      // SKILL.md. An empty / SKILL.md-less source dir is a packaging defect —
+      // seeding it would copy an empty directory that every SKILL.md-gated
+      // scanner (Settings panel, slash picker, SDK runtime) ignores, and
+      // marking it `seeded` would freeze that broken state so a corrected
+      // bundle never re-seeds. Skip without marking seeded → retries next launch.
+      if (!existsSync(join(src, 'SKILL.md'))) {
+        console.warn(`[seed] Bundled skill incomplete (no SKILL.md), skipping: ${folder}`);
+        continue;
+      }
       // Skip if destination already exists (don't overwrite user's custom content)
       if (dstExists) {
         config.seeded.push(folder);

@@ -1597,7 +1597,7 @@ Commands:
 Use to render inline charts / SVG / dashboards in desktop Chat replies.
 IM bot sessions don't render widgets.`,
 
-  skill: `myagents skill — Manage Claude Skills (installed under ~/.claude/skills)
+  skill: `myagents skill — Manage MyAgents skills (user skills live under ~/.myagents/skills/)
 
 Commands:
   list                       List installed skills + enabled state
@@ -1608,7 +1608,10 @@ Commands:
   remove <name>              Uninstall a skill   [--scope user|project]
   enable <name>              Enable an installed skill
   disable <name>             Disable without uninstalling
-  sync                       Re-seed system skills from bundled defaults`,
+  sync                       Import skills from Claude Code (~/.claude/skills) into
+                             MyAgents. Optional interop only — errors "directory not
+                             found" when Claude Code is not installed; your own skills
+                             always live under ~/.myagents/skills/ regardless.`,
 
   diagnose: `myagents diagnose — Diagnostic helpers
 
