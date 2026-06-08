@@ -434,6 +434,20 @@ export interface ProxySettings {
 /**
  * App-level configuration
  */
+export const DEFAULT_CLAUDE_TRANSCRIPT_CLEANUP_PERIOD_DAYS = 365;
+
+export function normalizeClaudeTranscriptCleanupPeriodDays(value: unknown): number {
+  const numericValue = typeof value === 'number'
+    ? value
+    : typeof value === 'string' && value.trim() !== ''
+      ? Number(value)
+      : Number.NaN;
+  if (!Number.isFinite(numericValue)) {
+    return DEFAULT_CLAUDE_TRANSCRIPT_CLEANUP_PERIOD_DAYS;
+  }
+  return Math.max(1, Math.floor(numericValue));
+}
+
 export interface AppConfig {
   // Default settings for new projects
   defaultProviderId?: string;
@@ -463,6 +477,9 @@ export interface AppConfig {
    *  而非旧的 forkFrom 懒分叉状态机。缺省视同 true（默认开）；关掉则回退旧路径。
    *  详见 specs/prd/prd_0.2.27_fork_standalone_migration.md。 */
   eagerFork?: boolean;
+  /** 开发者：传给 Claude Agent SDK `settings.cleanupPeriodDays` 的本地 transcript 保留天数。
+   *  缺省视同 365，最小 1。 */
+  claudeTranscriptCleanupPeriodDays?: number;
   // General settings
   autoStart: boolean; // 开机启动
   /** PRD 0.2.16 全局唤起快捷键。缺省视同 enabled=true + 默认键。
@@ -622,6 +639,20 @@ const ANTHROPIC_ALIASES = {
   haiku: 'claude-haiku-4-5',
 } as const;
 
+/** 小米 MiMo 开放平台模型目录（按量付费与 Token Plan 订阅共用，仅端点 / 计费不同）。
+ *  规格来源：platform.xiaomimimo.com 模型卡 + Kilo Code 模型页一致（1,048,576 上下文 / 131,072 输出，2026-06）。
+ *  contextLength ≥ 1M 阈值 → applyContextWindowSuffix 自动加 [1m] 走 SDK 1M 上下文路径
+ *  （MiMo 的 Claude Code 接入文档让手动用户手填 mimo-v2.5-pro[1m]，本产品自动完成；
+ *   SDK normalizeModelStringForAPI 在 wire 上再把 [1m] 剥掉，上游收到的是 mimo-v2.5-pro）。 */
+const MIMO_MODELS: ModelEntity[] = [
+  // mimo-v2.5-pro：旗舰推理 / Agent 模型，官方模型卡 input modality = 纯文本。
+  { model: 'mimo-v2.5-pro', modelName: 'MiMo V2.5 Pro', modelSeries: 'xiaomi', contextLength: 1_048_576, maxOutputTokens: 131_072, inputModalities: ['text'] },
+  // mimo-v2.5：为 Agent 场景而生的原生全模态模型，可同时看 / 听 / 读（图像 / 音频 / 视频）。
+  { model: 'mimo-v2.5', modelName: 'MiMo V2.5', modelSeries: 'xiaomi', contextLength: 1_048_576, maxOutputTokens: 131_072, inputModalities: ['text', 'image', 'video', 'audio'] },
+];
+
+const MIMO_ALIASES = { sonnet: 'mimo-v2.5-pro', opus: 'mimo-v2.5-pro', haiku: 'mimo-v2.5' } as const;
+
 export const PRESET_PROVIDERS: Provider[] = [
   {
     id: 'anthropic-sub',
@@ -668,11 +699,10 @@ export const PRESET_PROVIDERS: Provider[] = [
     },
     modelAliases: { sonnet: 'deepseek-v4-pro', opus: 'deepseek-v4-pro', haiku: 'deepseek-v4-flash' },
     models: [
-      // DeepSeek 全系 chat/reasoner 端点为纯文本；视觉能力在独立的 DeepSeek-VL2 / Janus 模型族
+      // DeepSeek V4 系纯文本；视觉能力在独立的 DeepSeek-VL2 / Janus 模型族。
+      // deepseek-chat / deepseek-reasoner 已退化为 v4-flash 的别名且 2026-07-24 硬下线，故移除。
       { model: 'deepseek-v4-pro', modelName: 'DeepSeek V4 Pro', modelSeries: 'deepseek', contextLength: 1_000_000, maxOutputTokens: 384_000, inputModalities: ['text'] },
       { model: 'deepseek-v4-flash', modelName: 'DeepSeek V4 Flash', modelSeries: 'deepseek', contextLength: 1_000_000, maxOutputTokens: 384_000, inputModalities: ['text'] },
-      { model: 'deepseek-chat', modelName: 'DeepSeek Chat', modelSeries: 'deepseek', contextLength: 131_072, maxOutputTokens: 8_192, inputModalities: ['text'] },
-      { model: 'deepseek-reasoner', modelName: 'DeepSeek Reasoner', modelSeries: 'deepseek', contextLength: 131_072, maxOutputTokens: 65_536, inputModalities: ['text'] },
     ],
   },
   {
@@ -694,8 +724,9 @@ export const PRESET_PROVIDERS: Provider[] = [
       // K2.5 引入视觉,K2.6 增加视频;K2-0711(原始 0711 release)在视觉之前,纯文本
       { model: 'kimi-k2.6', modelName: 'Kimi K2.6', modelSeries: 'moonshot', contextLength: 262_144, maxOutputTokens: 262_144, inputModalities: ['text', 'image', 'video'] },
       { model: 'kimi-k2.5', modelName: 'Kimi K2.5', modelSeries: 'moonshot', contextLength: 262_144, maxOutputTokens: 262_144, inputModalities: ['text', 'image'] },
-      { model: 'kimi-k2-thinking-turbo', modelName: 'Kimi K2 Thinking', modelSeries: 'moonshot', contextLength: 262_144, maxOutputTokens: 262_144, inputModalities: ['text', 'image'] },
-      { model: 'kimi-k2-0711', modelName: 'Kimi K2', modelSeries: 'moonshot', contextLength: 131_072, maxOutputTokens: 16_384, inputModalities: ['text'] },
+      { model: 'kimi-k2-thinking-turbo', modelName: 'Kimi K2 Thinking Turbo', modelSeries: 'moonshot', contextLength: 262_144, maxOutputTokens: 262_144, inputModalities: ['text', 'image'] },
+      // 官方 API id 必须带 -preview 后缀（kimi-k2-0711 会 model-not-found）
+      { model: 'kimi-k2-0711-preview', modelName: 'Kimi K2', modelSeries: 'moonshot', contextLength: 131_072, maxOutputTokens: 16_384, inputModalities: ['text'] },
     ],
   },
   {
@@ -790,18 +821,63 @@ export const PRESET_PROVIDERS: Provider[] = [
     config: {
       baseUrl: 'https://api.minimaxi.com/anthropic',
     },
-    modelAliases: { sonnet: 'MiniMax-M2.7', opus: 'MiniMax-M2.7', haiku: 'MiniMax-M2.7' },
+    modelAliases: { sonnet: 'MiniMax-M2.7', opus: 'MiniMax-M2.7', haiku: 'MiniMax-M2.7-highspeed' },
     models: [
-      // MiniMax M2.x 系列全系 ~200K 上下文（196,608 tokens，官方 platform.minimax.io + OpenRouter 一致）
-      // 注：LiteLLM 对 M2.x 记录的 1M 为错误数据，MiniMax 官方多处声明 200K
-      // M2.x 全系纯文本(MiniMax 视觉能力在独立 abab/audio 模型线)
-      { model: 'MiniMax-M2.7', modelName: 'MiniMax M2.7', modelSeries: 'minimax', contextLength: 196_608, maxOutputTokens: 131_072, inputModalities: ['text'] },
-      { model: 'MiniMax-M2.7-highspeed', modelName: 'MiniMax M2.7 Highspeed', modelSeries: 'minimax', contextLength: 196_608, maxOutputTokens: 131_072, inputModalities: ['text'] },
-      { model: 'MiniMax-M2.5', modelName: 'MiniMax M2.5', modelSeries: 'minimax', contextLength: 196_608, maxOutputTokens: 8_192, inputModalities: ['text'] },
-      { model: 'MiniMax-M2.5-lightning', modelName: 'MiniMax M2.5 Lightning', modelSeries: 'minimax', contextLength: 196_608, maxOutputTokens: 8_192, inputModalities: ['text'] },
-      { model: 'MiniMax-M2.1', modelName: 'MiniMax M2.1', modelSeries: 'minimax', contextLength: 196_608, maxOutputTokens: 8_192, inputModalities: ['text'] },
-      { model: 'MiniMax-M2.1-lightning', modelName: 'MiniMax M2.1 Lightning', modelSeries: 'minimax', contextLength: 196_608, maxOutputTokens: 8_192, inputModalities: ['text'] },
+      // MiniMax-M3（2026-06-01 发布）为新旗舰，原生多模态，官方上下文 1M（≥阈值 → 自动 [1m]）。
+      // M2.x 全系上下文 = 204,800（200K，官方 api-overview；旧 196,608 与 LiteLLM 的 1M 均为错误值）。
+      // 变体 API id 用 -highspeed（"Lightning" 仅营销名，API 不接受）。
+      // max output 官方未逐一公布：M3 暂按 M2 系列 128K（待核），M2.5/M2.1 沿用历史值。
+      { model: 'MiniMax-M3', modelName: 'MiniMax M3', modelSeries: 'minimax', contextLength: 1_000_000, maxOutputTokens: 131_072, inputModalities: ['text', 'image'] },
+      { model: 'MiniMax-M2.7', modelName: 'MiniMax M2.7', modelSeries: 'minimax', contextLength: 204_800, maxOutputTokens: 131_072, inputModalities: ['text'] },
+      { model: 'MiniMax-M2.7-highspeed', modelName: 'MiniMax M2.7 Highspeed', modelSeries: 'minimax', contextLength: 204_800, maxOutputTokens: 131_072, inputModalities: ['text'] },
+      { model: 'MiniMax-M2.5', modelName: 'MiniMax M2.5', modelSeries: 'minimax', contextLength: 204_800, maxOutputTokens: 8_192, inputModalities: ['text'] },
+      { model: 'MiniMax-M2.5-highspeed', modelName: 'MiniMax M2.5 Highspeed', modelSeries: 'minimax', contextLength: 204_800, maxOutputTokens: 8_192, inputModalities: ['text'] },
+      { model: 'MiniMax-M2.1', modelName: 'MiniMax M2.1', modelSeries: 'minimax', contextLength: 204_800, maxOutputTokens: 8_192, inputModalities: ['text'] },
+      { model: 'MiniMax-M2.1-highspeed', modelName: 'MiniMax M2.1 Highspeed', modelSeries: 'minimax', contextLength: 204_800, maxOutputTokens: 8_192, inputModalities: ['text'] },
     ],
+  },
+  {
+    // 小米 MiMo —— 按量付费（pay-as-you-go）。sk- 形式的 ANTHROPIC_AUTH_TOKEN，按 token 计费走账户余额。
+    // 与下方 Token Plan 订阅版拆成两个供应商：端点 / key 前缀 / 计费口径都不同，用户需明确区分。
+    id: 'xiaomi-mimo',
+    name: '小米 MiMo API',
+    vendor: 'Xiaomi',
+    cloudProvider: '模型官方',
+    type: 'api',
+    primaryModel: 'mimo-v2.5-pro',
+    isBuiltin: true,
+    authType: 'auth_token',
+    websiteUrl: 'https://platform.xiaomimimo.com/console/api-keys',
+    // Anthropic 兼容路径不暴露 /v1/models，模型发现走 OpenAI 兼容路径（同 deepseek/moonshot）
+    modelListUrl: 'https://api.xiaomimimo.com/v1/models',
+    config: {
+      baseUrl: 'https://api.xiaomimimo.com/anthropic',
+      timeout: 600000,
+      disableNonessential: true,
+    },
+    modelAliases: { ...MIMO_ALIASES },
+    models: MIMO_MODELS,
+  },
+  {
+    // 小米 MiMo —— Token Plan 订阅套餐。tp- 形式的专属 key，消耗套餐额度而非账户余额。
+    // 默认中国区端点；海外用户把 Base URL 改成 token-plan-sgp（新加坡）/ token-plan-ams（欧洲）。
+    id: 'xiaomi-mimo-token-plan',
+    name: '小米 MiMo Token Plan (CN)',
+    vendor: 'Xiaomi',
+    cloudProvider: '模型官方',
+    type: 'api',
+    primaryModel: 'mimo-v2.5-pro',
+    isBuiltin: true,
+    authType: 'auth_token',
+    websiteUrl: 'https://platform.xiaomimimo.com/console',
+    modelListUrl: 'https://token-plan-cn.xiaomimimo.com/v1/models',
+    config: {
+      baseUrl: 'https://token-plan-cn.xiaomimimo.com/anthropic',
+      timeout: 600000,
+      disableNonessential: true,
+    },
+    modelAliases: { ...MIMO_ALIASES },
+    models: MIMO_MODELS,
   },
   {
     id: 'google-gemini',
@@ -818,14 +894,15 @@ export const PRESET_PROVIDERS: Provider[] = [
     config: {
       baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
     },
-    modelAliases: { sonnet: 'gemini-3.1-pro-preview', opus: 'gemini-3.1-pro-preview', haiku: 'gemini-3-flash-preview' },
+    modelAliases: { sonnet: 'gemini-3.1-pro-preview', opus: 'gemini-3.1-pro-preview', haiku: 'gemini-3.5-flash' },
     models: [
       // Gemini 全系原生多模态：text + image + video + audio
       { model: 'gemini-2.5-pro', modelName: 'Gemini 2.5 Pro', modelSeries: 'google', contextLength: 1_048_576, maxOutputTokens: 65_535, inputModalities: ['text', 'image', 'video', 'audio'] },
       { model: 'gemini-2.5-flash', modelName: 'Gemini 2.5 Flash', modelSeries: 'google', contextLength: 1_048_576, maxOutputTokens: 65_535, inputModalities: ['text', 'image', 'video', 'audio'] },
       { model: 'gemini-2.5-flash-lite', modelName: 'Gemini 2.5 Flash-Lite', modelSeries: 'google', contextLength: 1_048_576, maxOutputTokens: 65_535, inputModalities: ['text', 'image', 'video', 'audio'] },
       { model: 'gemini-3.1-pro-preview', modelName: 'Gemini 3.1 Pro Preview', modelSeries: 'google', contextLength: 1_048_576, maxOutputTokens: 65_536, inputModalities: ['text', 'image', 'video', 'audio'] },
-      { model: 'gemini-3-flash-preview', modelName: 'Gemini 3 Flash Preview', modelSeries: 'google', contextLength: 1_048_576, maxOutputTokens: 65_535, inputModalities: ['text', 'image', 'video', 'audio'] },
+      // gemini-3.5-flash（2026-05 GA）为当前旗舰 Flash，取代 gemini-3-flash-preview
+      { model: 'gemini-3.5-flash', modelName: 'Gemini 3.5 Flash', modelSeries: 'google', contextLength: 1_048_576, maxOutputTokens: 65_536, inputModalities: ['text', 'image', 'video', 'audio'] },
     ],
   },
   {
@@ -866,12 +943,13 @@ export const PRESET_PROVIDERS: Provider[] = [
       baseUrl: 'https://ark.cn-beijing.volces.com/api/compatible',
       disableNonessential: true,
     },
-    modelAliases: { sonnet: 'doubao-seed-2-0-pro-260215', opus: 'doubao-seed-2-0-pro-260215', haiku: 'doubao-seed-2-0-lite-260215' },
+    modelAliases: { sonnet: 'doubao-seed-2-0-pro-260215', opus: 'doubao-seed-2-0-pro-260215', haiku: 'doubao-seed-2-0-lite-260428' },
     models: [
       // Doubao Seed 2.0 全系多模态：text + image + video（ByteDance Seed 2.0 公告）
       { model: 'doubao-seed-2-0-pro-260215', modelName: 'Doubao Seed 2.0 Pro', modelSeries: 'volcengine', contextLength: 256_000, maxOutputTokens: 128_000, inputModalities: ['text', 'image', 'video'] },
       { model: 'doubao-seed-2-0-code-preview-260215', modelName: 'Doubao Seed 2.0 Code Preview', modelSeries: 'volcengine', contextLength: 256_000, maxOutputTokens: 128_000, inputModalities: ['text', 'image', 'video'] },
-      { model: 'doubao-seed-2-0-lite-260215', modelName: 'Doubao Seed 2.0 Lite', modelSeries: 'volcengine', contextLength: 256_000, maxOutputTokens: 128_000, inputModalities: ['text', 'image', 'video'] },
+      // Lite 升级到 0428（omni-modal 升级版，取代 -260215）
+      { model: 'doubao-seed-2-0-lite-260428', modelName: 'Doubao Seed 2.0 Lite', modelSeries: 'volcengine', contextLength: 256_000, maxOutputTokens: 128_000, inputModalities: ['text', 'image', 'video'] },
     ],
   },
   {
@@ -904,10 +982,14 @@ export const PRESET_PROVIDERS: Provider[] = [
     models: [
       // SiliconFlow 转发上游，上下文 + 模态都跟随上游原生
       // (Step-3.5-Flash 纯文本，Step3 才是多模态，stepfun.ai/research/step3)
+      // 注：`Pro/` 是 SiliconFlow 计费分层前缀，仅部分模型有；上线前最好带 key GET /v1/models 核对 V4/M3 实际 id。
       { model: 'Pro/moonshotai/Kimi-K2.6', modelName: 'Kimi K2.6', modelSeries: 'siliconflow', contextLength: 262_144, maxOutputTokens: 262_144, inputModalities: ['text', 'image', 'video'] },
       { model: 'Pro/moonshotai/Kimi-K2.5', modelName: 'Kimi K2.5', modelSeries: 'siliconflow', contextLength: 262_144, maxOutputTokens: 262_144, inputModalities: ['text', 'image'] },
       { model: 'Pro/zai-org/GLM-5.1', modelName: 'GLM 5.1', modelSeries: 'siliconflow', contextLength: 204_800, maxOutputTokens: 131_072, inputModalities: ['text'] },
+      { model: 'Pro/deepseek-ai/DeepSeek-V4-Pro', modelName: 'DeepSeek V4 Pro', modelSeries: 'siliconflow', contextLength: 1_000_000, maxOutputTokens: 384_000, inputModalities: ['text'] },
+      { model: 'Pro/deepseek-ai/DeepSeek-V4-Flash', modelName: 'DeepSeek V4 Flash', modelSeries: 'siliconflow', contextLength: 1_000_000, maxOutputTokens: 384_000, inputModalities: ['text'] },
       { model: 'Pro/deepseek-ai/DeepSeek-V3.2', modelName: 'DeepSeek V3.2', modelSeries: 'siliconflow', contextLength: 163_840, maxOutputTokens: 163_840, inputModalities: ['text'] },
+      { model: 'Pro/MiniMaxAI/MiniMax-M3', modelName: 'MiniMax M3', modelSeries: 'siliconflow', contextLength: 1_000_000, maxOutputTokens: 131_072, inputModalities: ['text', 'image'] },
       { model: 'Pro/MiniMaxAI/MiniMax-M2.5', modelName: 'MiniMax M2.5', modelSeries: 'siliconflow', contextLength: 196_608, maxOutputTokens: 8_192, inputModalities: ['text'] },
       { model: 'stepfun-ai/Step-3.5-Flash', modelName: 'Step 3.5 Flash', modelSeries: 'siliconflow', contextLength: 262_144, maxOutputTokens: 65_536, inputModalities: ['text'] },
     ],
@@ -926,17 +1008,20 @@ export const PRESET_PROVIDERS: Provider[] = [
       baseUrl: 'https://zenmux.ai/api/anthropic',
       disableNonessential: true,
     },
-    modelAliases: { sonnet: 'anthropic/claude-sonnet-4.6', opus: 'anthropic/claude-opus-4.6', haiku: 'volcengine/doubao-seed-2.0-lite' },
+    modelAliases: { sonnet: 'anthropic/claude-sonnet-4.6', opus: 'anthropic/claude-opus-4.8', haiku: 'bytedance/doubao-seed-2.0-lite' },
     models: [
-      // ZenMux 聚合路由，上下文 + 模态都跟随上游原生
+      // ZenMux 聚合路由，上下文 + 模态跟随上游原生；id 已对齐 zenmux.ai/api/v1/models 实测
+      // （Doubao 在 ZenMux 的 vendor 前缀是 bytedance，不是 volcengine）。
       { model: 'google/gemini-3.1-pro-preview', modelName: 'Gemini 3.1 Pro', modelSeries: 'google', contextLength: 1_048_576, maxOutputTokens: 65_536, inputModalities: ['text', 'image', 'video', 'audio'] },
       { model: 'anthropic/claude-sonnet-4.6', modelName: 'Claude Sonnet 4.6', modelSeries: 'claude', contextLength: 1_000_000, maxOutputTokens: 64_000, inputModalities: ['text', 'image'] },
-      { model: 'anthropic/claude-opus-4.6', modelName: 'Claude Opus 4.6', modelSeries: 'claude', contextLength: 1_000_000, maxOutputTokens: 128_000, inputModalities: ['text', 'image'] },
-      { model: 'volcengine/doubao-seed-2.0-pro', modelName: 'Doubao Seed 2.0 Pro', modelSeries: 'volcengine', contextLength: 256_000, maxOutputTokens: 128_000, inputModalities: ['text', 'image', 'video'] },
-      { model: 'volcengine/doubao-seed-2.0-lite', modelName: 'Doubao Seed 2.0 Lite', modelSeries: 'volcengine', contextLength: 256_000, maxOutputTokens: 128_000, inputModalities: ['text', 'image', 'video'] },
-      { model: 'minimax/minimax-m2.5', modelName: 'MiniMax M2.5', modelSeries: 'minimax', contextLength: 196_608, maxOutputTokens: 8_192, inputModalities: ['text'] },
-      { model: 'moonshotai/kimi-k2.5', modelName: 'Kimi K2.5', modelSeries: 'moonshot', contextLength: 262_144, maxOutputTokens: 262_144, inputModalities: ['text', 'image'] },
-      { model: 'z-ai/glm-5', modelName: 'GLM 5', modelSeries: 'zhipu', contextLength: 200_000, maxOutputTokens: 128_000, inputModalities: ['text'] },
+      { model: 'anthropic/claude-opus-4.8', modelName: 'Claude Opus 4.8', modelSeries: 'claude', contextLength: 1_000_000, maxOutputTokens: 128_000, inputModalities: ['text', 'image'] },
+      { model: 'openai/gpt-5.4', modelName: 'GPT-5.4', modelSeries: 'openai', contextLength: 1_050_000, maxOutputTokens: 128_000, inputModalities: ['text', 'image'] },
+      { model: 'deepseek/deepseek-v4-pro', modelName: 'DeepSeek V4 Pro', modelSeries: 'deepseek', contextLength: 1_000_000, maxOutputTokens: 384_000, inputModalities: ['text'] },
+      { model: 'bytedance/doubao-seed-2.0-pro', modelName: 'Doubao Seed 2.0 Pro', modelSeries: 'volcengine', contextLength: 256_000, maxOutputTokens: 128_000, inputModalities: ['text', 'image', 'video'] },
+      { model: 'bytedance/doubao-seed-2.0-lite', modelName: 'Doubao Seed 2.0 Lite', modelSeries: 'volcengine', contextLength: 256_000, maxOutputTokens: 128_000, inputModalities: ['text', 'image', 'video'] },
+      { model: 'minimax/minimax-m3', modelName: 'MiniMax M3', modelSeries: 'minimax', contextLength: 512_000, maxOutputTokens: 131_072, inputModalities: ['text', 'image'] },
+      { model: 'moonshotai/kimi-k2.6', modelName: 'Kimi K2.6', modelSeries: 'moonshot', contextLength: 262_144, maxOutputTokens: 262_144, inputModalities: ['text', 'image', 'video'] },
+      { model: 'z-ai/glm-5.1', modelName: 'GLM 5.1', modelSeries: 'zhipu', contextLength: 204_800, maxOutputTokens: 131_072, inputModalities: ['text'] },
     ],
   },
   {
@@ -945,16 +1030,19 @@ export const PRESET_PROVIDERS: Provider[] = [
     vendor: '阿里云',
     cloudProvider: '云服务商',
     type: 'api',
-    primaryModel: 'qwen3.5-plus',
+    primaryModel: 'qwen3.7-plus',
     isBuiltin: true,
     authType: 'auth_token',
     websiteUrl: 'https://bailian.console.aliyun.com/',
     config: {
       baseUrl: 'https://coding.dashscope.aliyuncs.com/apps/anthropic',
     },
-    modelAliases: { sonnet: 'qwen3.5-plus', opus: 'qwen3.5-plus', haiku: 'qwen3.5-plus' },
+    modelAliases: { sonnet: 'qwen3.7-plus', opus: 'qwen3.7-plus', haiku: 'qwen3.7-plus' },
     models: [
-      // Qwen3.5-plus 是 native multimodal（qwen.ai/blog?id=qwen3.5），其余转发上游原生模态
+      // qwen3.7-plus 为当前官方推荐旗舰（1M 上下文，原生多模态）；3.5-plus 落后两代但仍在白名单保留。
+      // qwen3-coder-plus 为编码专用（1M）。其余为 Coding Plan 转发的三方模型，跟随上游原生模态。
+      { model: 'qwen3.7-plus', modelName: 'Qwen 3.7 Plus', modelSeries: 'aliyun', contextLength: 1_048_576, maxOutputTokens: 65_536, inputModalities: ['text', 'image', 'video'] },
+      { model: 'qwen3-coder-plus', modelName: 'Qwen3 Coder Plus', modelSeries: 'aliyun', contextLength: 1_048_576, maxOutputTokens: 65_536, inputModalities: ['text'] },
       { model: 'qwen3.5-plus', modelName: 'Qwen 3.5 Plus', modelSeries: 'aliyun', contextLength: 991_808, maxOutputTokens: 65_536, inputModalities: ['text', 'image', 'video'] },
       { model: 'kimi-k2.5', modelName: 'Kimi K2.5', modelSeries: 'aliyun', contextLength: 262_144, maxOutputTokens: 262_144, inputModalities: ['text', 'image'] },
       { model: 'glm-5', modelName: 'GLM 5', modelSeries: 'aliyun', contextLength: 200_000, maxOutputTokens: 128_000, inputModalities: ['text'] },
@@ -981,12 +1069,15 @@ export const PRESET_PROVIDERS: Provider[] = [
       { model: 'google/gemini-3-flash-preview', modelName: 'Gemini 3 Flash', modelSeries: 'google', contextLength: 1_048_576, maxOutputTokens: 65_535, inputModalities: ['text', 'image', 'video', 'audio'] },
       { model: 'google/gemini-3.1-pro-preview', modelName: 'Gemini 3.1 Pro', modelSeries: 'google', contextLength: 1_048_576, maxOutputTokens: 65_536, inputModalities: ['text', 'image', 'video', 'audio'] },
       { model: 'anthropic/claude-sonnet-4.6', modelName: 'Claude Sonnet 4.6', modelSeries: 'claude', contextLength: 1_000_000, maxOutputTokens: 64_000, inputModalities: ['text', 'image'] },
-      { model: 'anthropic/claude-opus-4.6', modelName: 'Claude Opus 4.6', modelSeries: 'claude', contextLength: 1_000_000, maxOutputTokens: 128_000, inputModalities: ['text', 'image'] },
+      // claude-opus-4.6 已落后两代 → 升级到当前旗舰 4.8
+      { model: 'anthropic/claude-opus-4.8', modelName: 'Claude Opus 4.8', modelSeries: 'claude', contextLength: 1_000_000, maxOutputTokens: 128_000, inputModalities: ['text', 'image'] },
       { model: 'anthropic/claude-haiku-4.5', modelName: 'Claude Haiku 4.5', modelSeries: 'claude', contextLength: 200_000, maxOutputTokens: 64_000, inputModalities: ['text', 'image'] },
       { model: 'openai/gpt-5.4', modelName: 'GPT-5.4', modelSeries: 'openai', contextLength: 1_050_000, maxOutputTokens: 128_000, inputModalities: ['text', 'image'] },
       { model: 'openai/gpt-5.4-pro', modelName: 'GPT-5.4 Pro', modelSeries: 'openai', contextLength: 1_050_000, maxOutputTokens: 128_000, inputModalities: ['text', 'image'] },
       { model: 'openai/gpt-5.3-codex', modelName: 'GPT-5.3 Codex', modelSeries: 'openai', contextLength: 272_000, maxOutputTokens: 128_000, inputModalities: ['text', 'image'] },
       { model: 'openai/gpt-5.3-chat', modelName: 'GPT-5.3 Chat', modelSeries: 'openai', contextLength: 128_000, maxOutputTokens: 16_384, inputModalities: ['text', 'image'] },
+      { model: 'deepseek/deepseek-v4-pro', modelName: 'DeepSeek V4 Pro', modelSeries: 'deepseek', contextLength: 1_000_000, maxOutputTokens: 384_000, inputModalities: ['text'] },
+      { model: 'moonshotai/kimi-k2.6', modelName: 'Kimi K2.6', modelSeries: 'moonshot', contextLength: 262_144, maxOutputTokens: 262_144, inputModalities: ['text', 'image', 'video'] },
     ],
   },
 ];
@@ -1201,6 +1292,7 @@ export const DEFAULT_CONFIG: AppConfig = {
   minimizeToTray: true,   // 默认开启最小化到托盘
   showDevTools: false,
   liteLLMModelDataRefresh: true, // 默认开启 LiteLLM 模型数据兜底刷新（开发者可关）
+  claudeTranscriptCleanupPeriodDays: DEFAULT_CLAUDE_TRANSCRIPT_CLEANUP_PERIOD_DAYS,
   autoStart: false,       // 默认不开启开机启动
   osNotifications: true,  // 默认开启系统通知
   notificationSound: true, // 默认开启通知声音

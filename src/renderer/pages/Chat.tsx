@@ -16,6 +16,7 @@ import SessionMenuButton, { type BotChannelCandidate } from '@/components/Sessio
 import { FileActionProvider } from '@/context/FileActionContext';
 import SimpleChatInput, { type ImageAttachment, type SimpleChatInputHandle } from '@/components/SimpleChatInput';
 import AgentStatusPanel from '@/components/agent-status/AgentStatusPanel';
+import ContextUsageIndicator from '@/components/ContextUsageIndicator';
 import ChatBootOverlay from '@/components/ChatBootOverlay';
 import QueryNavigator from '@/components/chat/QueryNavigator';
 import ChatSearchPanel from '@/components/ChatSearchPanel';
@@ -42,7 +43,7 @@ import type { CronTask } from '@/types/cronTask';
 import { formatScheduleDescription } from '@/types/cronTask';
 import CronTaskCard from '@/components/scheduled-tasks/CronTaskCard';
 import CronTaskDetailPanel from '@/components/CronTaskDetailPanel';
-import type { CronSettingsResult } from '@/components/cron/CronTaskSettingsModal';
+import type { CronSettingsResult, CronInitialConfig } from '@/components/cron/CronTaskSettingsModal';
 import { isTauriEnvironment } from '@/utils/browserMock';
 import { isDebugMode } from '@/utils/debug';
 import { isImSource, getChannelTypeLabel } from '@/utils/taskCenterUtils';
@@ -57,6 +58,7 @@ import { patchAgentConfig, getAgentById } from '@/config/services/agentConfigSer
 import { BrowserPanelContext } from '@/context/BrowserPanelContext';
 import { BROWSER_BLANK_URL } from '@/components/browserConstants';
 import { CUSTOM_EVENTS, isPendingSessionId } from '../../shared/constants';
+import { workspacePathsEqual } from '../../shared/workspacePath';
 import type { CapabilityInitialSelect } from '../../shared/skillsTypes';
 import { CC_MODELS, CC_PERMISSION_MODES, CODEX_PERMISSION_MODES, GEMINI_PERMISSION_MODES, getDefaultRuntimePermissionMode, getRuntimePermissionModes, buildRuntimeChangePatch } from '../../shared/types/runtime';
 import type { RuntimeType, RuntimeDetections, RuntimeConfig } from '../../shared/types/runtime';
@@ -196,6 +198,19 @@ interface ChatProps {
   onForkSession?: (newSessionId: string, agentDir: string, title: string, initialMessage?: string) => void;
 }
 
+/** Preset for the `/loop` slash command: opens the cron modal in infinite-loop
+ *  (Ralph Loop) mode with "allow AI to autonomously end the task" pre-checked.
+ *  Mirrors what the user would otherwise pick by hand in the 定时 panel. */
+const LOOP_SLASH_PRESET: CronInitialConfig = {
+  prompt: '', // unused: the modal reads the prompt from initialPrompt, not here
+  intervalMinutes: 30, // ignored in loop mode; satisfies the type
+  endConditions: { aiCanExit: true },
+  runMode: 'single_session', // loop mode forces single_session
+  notifyEnabled: true,
+  schedule: { kind: 'loop' },
+  executionTarget: 'current_session',
+};
+
 export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSessionInNewTab, initialMessage, onInitialMessageConsumed, sidecarConfigDisposition, onSidecarConfigAdopted, sessionTitle, onRenameSession, onForkSession }: ChatProps) {
   // Get state from TabContext (required - Chat must be inside TabProvider)
   const {
@@ -260,7 +275,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
 
   // Get config to find current project provider
   const { config, projects, providers, patchProject, apiKeys, providerVerifyStatus, refreshProviderData, refreshConfig } = useConfig();
-  const currentProject = projects.find((p) => p.path === agentDir);
+  const currentProject = projects.find((p) => workspacePathsEqual(p.path, agentDir));
   // AgentConfig is source of truth for AI settings, Project is fallback for non-agent workspaces
   const currentAgent = currentProject?.agentId ? getAgentById(config, currentProject.agentId) : undefined;
   // Local provider state: snapshot from AgentConfig (priority) or Project at creation.
@@ -651,6 +666,10 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   // Cron task state
   const [showCronSettings, setShowCronSettings] = useState(false);
   const [cronPrompt, setCronPrompt] = useState('');
+  // Preset applied when opening the cron modal via a slash command (e.g.
+  // `/loop`). Wins over `cronState.config` only for a fresh open (no running
+  // task); cleared on open-via-定时-button / close / confirm so it never leaks.
+  const [cronOpenPreset, setCronOpenPreset] = useState<CronInitialConfig | null>(null);
   const [cronCardTask, setCronCardTask] = useState<CronTask | null>(null);
   const [cronDetailTask, setCronDetailTask] = useState<CronTask | null>(null);
 
@@ -2779,7 +2798,19 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   // comment).
   const handleOpenCronSettings = useCallback(() => {
     setCronPrompt(chatInputRef.current?.getCurrentValue() ?? '');
+    setCronOpenPreset(null); // 定时 button = no slash preset
     setShowCronSettings(true);
+  }, []);
+
+  // Dispatch a client-action slash command from the chat input. `/loop` opens
+  // the cron modal preset to infinite-loop mode; the task content is entered in
+  // the input after confirming (which arms cron mode — see handleSendMessage).
+  const handleSlashAction = useCallback((name: string) => {
+    if (name === 'loop') {
+      setCronPrompt(''); // task is entered after confirm, not snapshotted here
+      setCronOpenPreset(LOOP_SLASH_PRESET);
+      setShowCronSettings(true);
+    }
   }, []);
 
   const handleCronStop = useCallback(async () => {
@@ -2906,6 +2937,23 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
         />
       ),
     [isExternalRuntime, handleJumpToTool],
+  );
+
+  // PRD 0.2.32 — 智能压缩入口（builtin only）。用与正常发送完全相同的已解析
+  // model/permission/providerEnv 发送 `/compact`（实测可触发内置压缩），避免误切 provider。
+  const handleCompactContext = useCallback(() => {
+    const providerEnv = buildProviderEnv(currentProviderRef.current);
+    void sendMessage('/compact', undefined, effectivePermissionMode, effectiveModel, isExternalRuntime ? undefined : providerEnv);
+  }, [sendMessage, effectivePermissionMode, effectiveModel, isExternalRuntime, buildProviderEnv]);
+
+  // PRD 0.2.32 — context 用量指示器 slot。自取数（内部 useTabState 订阅 contextUsage），
+  // 数据不经 SimpleChatInput props；useMemo 让 slot identity 在流式期间稳定，不打穿
+  // SimpleChatInput 的 React.memo（与 agentStatusSlot 同款）。
+  const contextIndicatorSlot = useMemo(
+    // key on sessionId → remount on session switch resets local open/timer state
+    // (review #W3). sessionId is stable during streaming, so the memo still holds.
+    () => <ContextUsageIndicator key={sessionId ?? 'none'} onCompact={handleCompactContext} />,
+    [handleCompactContext, sessionId],
   );
 
   // P3 (second memo-breaker): this list was computed inline in the SimpleChatInput
@@ -3674,6 +3722,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
             selectedModel={isExternalRuntime ? runtimeModel : selectedModel}
             onModelChange={isExternalRuntime ? handleRuntimeModelChange : handleModelChange}
             sessionUnlocked={isSessionUnlocked}
+            contextIndicator={contextIndicatorSlot}
             permissionMode={effectivePermissionMode}
             onPermissionModeChange={handlePermissionModeChange}
             apiKeys={apiKeys}
@@ -3700,6 +3749,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
             onCronSettings={handleOpenCronSettings}
             onCronCancel={disableCronMode}
             onCronStop={handleCronStop}
+            onSlashAction={handleSlashAction}
             runtime={currentRuntime}
             runtimeDetections={multiAgentRuntimeEnabled ? runtimeDetections : undefined}
             onRuntimeChange={multiAgentRuntimeEnabled ? handleRuntimeChange : undefined}
@@ -4148,9 +4198,13 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       {/* Cron Task Settings Modal */}
       <CronTaskSettingsModal
         isOpen={showCronSettings}
-        onClose={() => setShowCronSettings(false)}
+        onClose={() => { setShowCronSettings(false); setCronOpenPreset(null); }}
         initialPrompt={cronPrompt}
-        initialConfig={cronState.config}
+        // Editing a RUNNING task always wins (cronState.task). Otherwise a slash
+        // preset (e.g. /loop) applies — including over an armed-but-unsent
+        // config, so /loop reliably forces loop mode. Plain 定时-button opens
+        // (no preset) fall back to cronState.config either way.
+        initialConfig={cronState.task ? cronState.config : (cronOpenPreset ?? cronState.config)}
         workspacePath={agentDir}
         onConfirm={async (config: CronSettingsResult) => {
           // PRD 0.2.9 — Forward `providerId` (live-resolve at sidecar)
@@ -4184,6 +4238,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
             notify_enabled: config.notifyEnabled,
           });
           setShowCronSettings(false);
+          setCronOpenPreset(null);
         }}
       />
 

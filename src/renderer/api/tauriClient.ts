@@ -607,15 +607,16 @@ const tabServerUrlPending = new Map<string, Promise<string>>();
 /**
  * Wait-for-Sidecar-ready backoff schedule (milliseconds between attempts).
  *
- * Chosen so the total budget (~9s) comfortably covers the longest observed
- * cold start + MCP pre-warm kickoff (~2s), but stays short enough that
- * genuinely missing Sidecars still surface within 10s — not hang the UI.
+ * Chosen so the total budget (~33s) covers Rust `ensure_session_sidecar`'s
+ * `/health/ready` timeout (30s). `getSessionPort(sessionId)` intentionally
+ * hides `Starting` ports, so early Tab-scoped callers must be able to wait for
+ * the same readiness window instead of failing before Rust's ensure completes.
  *
  * Shape front-loads short delays so the common case (boot finishes in
  * 200–800ms) resolves within 1–2 attempts; later attempts stretch out so
  * we don't hammer the IPC layer if the Sidecar is taking longer to come up.
  */
-const TAB_SERVER_URL_RETRY_DELAYS_MS: readonly number[] = [50, 100, 200, 400, 800, 1500, 2000, 2000, 2000];
+const TAB_SERVER_URL_RETRY_DELAYS_MS: readonly number[] = [50, 100, 200, 400, 800, 1500, 2000, 3000, 5000, 5000, 5000, 5000, 5000];
 
 /**
  * Start a Sidecar for a specific Tab
@@ -723,7 +724,7 @@ export async function stopSseProxy(tabId: string): Promise<void> {
  *   • Cache hit → returns immediately (hot path, no IPC).
  *   • Cache miss, Sidecar up → one IPC round-trip, then cached.
  *   • Cache miss, Sidecar still booting → polls with backoff until the
- *     Rust `cmd_get_tab_server_url` resolves or the ~9s budget is
+ *     Rust `cmd_get_tab_server_url` resolves or the ~33s budget is
  *     exhausted. Concurrent callers for the same tab share one poll
  *     via `tabServerUrlPending` (no IPC amplification).
  *   • Budget exhausted → throws `"No running sidecar for tab <id>: <cause>"`
@@ -1211,10 +1212,15 @@ export async function releaseSessionSidecar(
 }
 
 /**
- * Get the port for a Session's Sidecar
+ * Get the ready port for a Session's Sidecar.
+ *
+ * This is for callers that will immediately issue HTTP/SSE requests to the
+ * returned port. Rust intentionally returns null while a sidecar is still
+ * Starting so renderer code falls back to the tab URL waiter instead of racing
+ * Node's bind/readiness window.
  *
  * @param sessionId - Session identifier
- * @returns Port number if Session has a Sidecar, null otherwise
+ * @returns Port number if Session has a ready Sidecar, null otherwise
  */
 export async function getSessionPort(sessionId: string): Promise<number | null> {
     if (!isTauri()) {
@@ -1226,6 +1232,46 @@ export async function getSessionPort(sessionId: string): Promise<number | null> 
         return port;
     } catch (error) {
         console.warn(`[tauriClient] Failed to get session port for ${sessionId}:`, error);
+        return null;
+    }
+}
+
+/**
+ * Check whether Rust currently has a live Session Sidecar entry.
+ *
+ * This is a presence/lifecycle check, not a transport URL primitive: Starting
+ * sidecars count as present, but callers must still use getSessionPort or
+ * ensureSessionSidecar before issuing HTTP requests.
+ */
+export async function hasSessionSidecar(sessionId: string): Promise<boolean> {
+    if (!isTauri()) {
+        return true;
+    }
+
+    try {
+        return await invoke<boolean>('cmd_has_session_sidecar', { sessionId });
+    } catch (error) {
+        console.warn(`[tauriClient] Failed to check session sidecar for ${sessionId}:`, error);
+        return false;
+    }
+}
+
+/**
+ * Get Rust's current sidecar generation for a session.
+ *
+ * Generation identifies a concrete sidecar instance. It remains the safest
+ * stale-event discriminator because a same-session relaunch gets a fresh
+ * generation even if that replacement is currently dead and awaiting recovery.
+ */
+export async function getSessionGeneration(sessionId: string): Promise<number | null> {
+    if (!isTauri()) {
+        return 1;
+    }
+
+    try {
+        return await invoke<number | null>('cmd_get_session_generation', { sessionId });
+    } catch (error) {
+        console.warn(`[tauriClient] Failed to get session generation for ${sessionId}:`, error);
         return null;
     }
 }

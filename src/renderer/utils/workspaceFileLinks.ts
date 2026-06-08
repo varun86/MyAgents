@@ -123,8 +123,11 @@ function hasUnsupportedScheme(raw: string): boolean {
  * paths outright). Callers normalize here so absolute and relative paths flow
  * through the same backend path, matching how inline AI-text paths behave.
  */
-export function toWorkspaceRelativePath(rawPath: string, workspacePath: string): string | null {
-  const path = rawPath.trim();
+export function toWorkspaceRelativePath(rawPath: string | null | undefined, workspacePath: string): string | null {
+  // Total by construction: a path util must never throw on a missing path —
+  // an uncaught throw here reaches the root error boundary and kills the whole
+  // app. Callers (file-tool chips) can pass an undefined `file_path`.
+  const path = rawPath?.trim();
   if (!path) return null;
 
   if (isAbsolutePath(path)) {
@@ -133,6 +136,25 @@ export function toWorkspaceRelativePath(rawPath: string, workspacePath: string):
 
   if (!looksLikeRelativeFileReference(path)) return null;
   return normalizeRelativePath(path);
+}
+
+/**
+ * Resolve the path to use for backend existence checks + context-menu actions
+ * from a raw path that may be absolute or workspace-relative.
+ *
+ * In-workspace absolute paths are normalized to workspace-relative form (the
+ * Rust `resolve_inside_workspace` resolver rejects absolute paths outright);
+ * everything else — relative paths, or absolute paths outside the workspace —
+ * passes through unchanged so the backend reports them as not-found.
+ *
+ * Shared by the two surfaces that turn paths into clickable chips so they
+ * resolve identically: the inline-code path detector (`markdown/InlineCode`)
+ * and the file-tool chip (`tools/FilePath`). Before this was shared, only the
+ * tool chip normalized — inline absolute paths in AI text silently stayed plain
+ * because the absolute form was sent straight to the rejecting resolver.
+ */
+export function resolveActionPath(rawPath: string, workspacePath: string | null | undefined): string {
+  return (workspacePath ? toWorkspaceRelativePath(rawPath, workspacePath) : null) ?? rawPath;
 }
 
 function absoluteToWorkspaceRelative(rawPath: string, rawWorkspace: string): string | null {

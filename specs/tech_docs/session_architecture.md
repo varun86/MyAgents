@@ -403,6 +403,14 @@ setSystemStatus(null);
 | 8 | `resetSession` | 用户点击「新对话」 |
 | 9 | `loadSession` | 用户加载历史会话 |
 
+### 会话历史恢复：REST 单一权威（#0608，load-bearing 不变量）
+
+上面的「新会话」靠 `isNewSessionRef` skip 旧事件；**恢复一个已存在会话的历史**是另一条路径，权威源不同。恢复历史的**唯一权威 = REST `GET /sessions/:id`**（磁盘、分页、有序；active session 已 merge 内存未持久化消息）。SSE `chat:message-replay` 让位——它是**重载**事件：SSE-connect 冷历史 backfill **＋** 新发 user/command 气泡的 live echo。
+
+- `loadSession` 用**同步**标志 `restoredSessionIdRef`（**不是**异步滞后的 `historyMessagesRef.length`）决定是否 skip replay。在 `setHistoryMessages` 前就放开 loading 标志，会让迟到的 `chat:init` 命中 `!isLoading && length===0` → 清掉刚恢复的 REST 页 + `seenIds` → 内存 replay（可能传输截断）回填**旧**集（#0608 实测：后端发 id 111-190，前端却停在 109）。
+- 冷历史 backfill 打 `replayKind:'cold-history'`，**只 skip 它**；live echo 不打标记、永远渲染（统一 skip 会吞掉刚发的 user 气泡）。决策纯核心 `sessionRestoreGuards.ts`（可单测）。
+- 诊断"恢复只显示一部分"：读磁盘 `~/.myagents/refs/<id>` 的 spilled body（后端实发的 JSON，可直接 `node` 解析）对比前端显示，先把"后端发了什么 vs 前端显示什么"一刀切开。
+
 ### Sidecar 配置归置：`sidecarConfigDisposition`（push / adopt / pending，0.2.31）
 
 Tab 翻成 chat 时，Chat 要决定**如何与该 session 的 sidecar 对齐配置**（MCP / agents / model / permission / 插件 / 外部 runtime prewarm）。这是 `Tab.sidecarConfigDisposition` 三态（`src/renderer/types/tab.ts`，**必填**——编译器强制每个 Tab 构造点选择）：

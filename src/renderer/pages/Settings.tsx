@@ -40,6 +40,8 @@ import {
     PROXY_DEFAULTS,
     isValidProxyHost,
     getPresetMcpServer,
+    DEFAULT_CLAUDE_TRANSCRIPT_CLEANUP_PERIOD_DAYS,
+    normalizeClaudeTranscriptCleanupPeriodDays,
 } from '@/config/types';
 import {
     getAllMcpServers,
@@ -76,6 +78,7 @@ import ShortcutRecorder from '@/components/ShortcutRecorder';
 import { VISIBLE_APP_SHORTCUTS } from '@/utils/appShortcuts';
 import { shouldDebounceAutoVerify } from '@/utils/apiKeyAutoVerify';
 import { DEFAULT_SUMMON_ACCELERATOR } from '../../shared/config-types';
+import { workspacePathsEqual } from '../../shared/workspacePath';
 import ProviderEnableOrderDialog from '@/components/ProviderEnableOrderDialog';
 
 /** Parse a string as a positive integer, returning undefined for invalid/non-positive values */
@@ -245,6 +248,25 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
 
     // Autostart hook for managing launch on startup
     const { isEnabled: autostartEnabled, isLoading: autostartLoading, setAutostart } = useAutostart();
+    const claudeTranscriptCleanupPeriodDays = useMemo(
+        () => normalizeClaudeTranscriptCleanupPeriodDays(config.claudeTranscriptCleanupPeriodDays),
+        [config.claudeTranscriptCleanupPeriodDays],
+    );
+    const [claudeTranscriptCleanupDaysDraft, setClaudeTranscriptCleanupDaysDraft] = useState(
+        String(DEFAULT_CLAUDE_TRANSCRIPT_CLEANUP_PERIOD_DAYS),
+    );
+    useEffect(() => {
+        setClaudeTranscriptCleanupDaysDraft(String(claudeTranscriptCleanupPeriodDays));
+    }, [claudeTranscriptCleanupPeriodDays]);
+    const commitClaudeTranscriptCleanupDays = useCallback(() => {
+        const raw = claudeTranscriptCleanupDaysDraft.trim();
+        const parsed = raw === '' ? DEFAULT_CLAUDE_TRANSCRIPT_CLEANUP_PERIOD_DAYS : Number(raw);
+        const next = normalizeClaudeTranscriptCleanupPeriodDays(parsed);
+        setClaudeTranscriptCleanupDaysDraft(String(next));
+        if (next !== claudeTranscriptCleanupPeriodDays) {
+            void updateConfig({ claudeTranscriptCleanupPeriodDays: next });
+        }
+    }, [claudeTranscriptCleanupDaysDraft, claudeTranscriptCleanupPeriodDays, updateConfig]);
 
     // Determine initial section: use initialSection if valid, otherwise default to 'providers'
     const getInitialSection = (): SettingsSection => {
@@ -3217,7 +3239,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                                     const { open } = await import('@tauri-apps/plugin-dialog');
                                                     const selected = await open({ directory: true, multiple: false, title: '选择默认工作区' });
                                                     if (selected && typeof selected === 'string') {
-                                                        if (!projects.find(p => p.path === selected)) {
+                                                        if (!projects.find(p => workspacePathsEqual(p.path, selected))) {
                                                             await addProject(selected);
                                                         }
                                                         await updateConfig({ defaultWorkspacePath: selected });
@@ -3804,6 +3826,32 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                                             }`}
                                                     />
                                                 </button>
+                                            </div>
+                                        </div>
+
+                                        {/* Claude transcript retention */}
+                                        <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
+                                            <div className="flex items-start justify-between gap-4">
+                                                <div className="min-w-0">
+                                                    <h3 className="text-sm font-medium text-[var(--ink)]">Claude 会话保留天数</h3>
+                                                    <p className="mt-1 text-xs text-[var(--ink-muted)]">
+                                                        写入 Claude Agent SDK 的 cleanupPeriodDays，用于控制本地 transcript 自动清理周期。
+                                                    </p>
+                                                </div>
+                                                <div className="flex shrink-0 items-center gap-2">
+                                                    <input
+                                                        type="text"
+                                                        inputMode="numeric"
+                                                        value={claudeTranscriptCleanupDaysDraft}
+                                                        onChange={(e) => setClaudeTranscriptCleanupDaysDraft(e.target.value.replace(/[^0-9]/g, ''))}
+                                                        onBlur={commitClaudeTranscriptCleanupDays}
+                                                        onKeyDown={(e) => { if (e.key === 'Enter') e.currentTarget.blur(); }}
+                                                        aria-label="Claude 会话保留天数"
+                                                        className="w-24 rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-1.5 text-right text-xs text-[var(--ink)] placeholder:text-[var(--ink-faint)] focus:border-[var(--focus-border)] focus:outline-none"
+                                                        placeholder={String(DEFAULT_CLAUDE_TRANSCRIPT_CLEANUP_PERIOD_DAYS)}
+                                                    />
+                                                    <span className="text-xs text-[var(--ink-muted)]">天</span>
+                                                </div>
                                             </div>
                                         </div>
 

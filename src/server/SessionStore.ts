@@ -646,6 +646,7 @@ export async function updateSessionMetadata(
         | 'runtime'
         | 'runtimeSessionId'
         | 'runtimeUsageTotals'
+        | 'lastContextUsage'
         | 'model'
         | 'permissionMode'
         | 'mcpEnabledServers'

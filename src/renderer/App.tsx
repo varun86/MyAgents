@@ -14,7 +14,7 @@ import {
   hashAgentNameSync,
 } from '@/analytics';
 import type { Surface } from '@/analytics';
-import { stopTabSidecar, startGlobalSidecar, initGlobalSidecarReadyPromise, markGlobalSidecarReady, getGlobalServerUrl, getSessionActivation, updateSessionTab, ensureSessionSidecar, releaseSessionSidecar, activateSession, deactivateSession, upgradeSessionId, getSessionPort, stopSseProxy, startBackgroundCompletion, cancelBackgroundCompletion, updateGlobalServerUrl, canRestoreSession } from '@/api/tauriClient';
+import { stopTabSidecar, startGlobalSidecar, initGlobalSidecarReadyPromise, markGlobalSidecarReady, getGlobalServerUrl, getSessionActivation, updateSessionTab, ensureSessionSidecar, releaseSessionSidecar, activateSession, deactivateSession, upgradeSessionId, getSessionPort, hasSessionSidecar, getSessionGeneration, stopSseProxy, startBackgroundCompletion, cancelBackgroundCompletion, updateGlobalServerUrl, canRestoreSession } from '@/api/tauriClient';
 import ConfirmDialog from '@/components/ConfirmDialog';
 import BugReportOverlay from '@/components/BugReportOverlay';
 import CustomTitleBar from '@/components/CustomTitleBar';
@@ -73,6 +73,7 @@ import { normalizeRuntime, resolveEffectiveRuntime, planSessionOpen } from '@/ut
 import { applyTerminalSessionToTabs } from '@/utils/sessionTermination';
 import { listenWithCleanup } from '@/utils/tauriListen';
 import { CUSTOM_EVENTS, createPendingSessionId, isPendingSessionId } from '../shared/constants';
+import { workspacePathsEqual } from '../shared/workspacePath';
 import type { CapabilityInitialSelect } from '../shared/skillsTypes';
 import { ensureSelfAwarenessWorkspace, resolveBuiltinSelection, pairBuiltinSelection, isProviderAvailable } from '@/config/configService';
 import { getAgentByWorkspacePath, getAgentById } from '@/config/services/agentConfigService';
@@ -810,15 +811,23 @@ export default function App() {
         async (event) => {
           if (!mountedRef.current) return;
           const { sessionId, generation } = event.payload;
-          // Presence check — Rust returns a port iff a sidecar entry
-          // exists in the manager (a relaunch since the event was emitted
-          // would re-create one with a fresh generation). Non-null ⇒
-          // event is stale; current binding is valid. (`getSessionPort`
-          // is presence, not process-health — adequate here.)
-          const livePort = await getSessionPort(sessionId);
-          if (livePort !== null) {
+          // Generation check first: a same-session relaunch after this terminal
+          // event gets a fresh generation. If that replacement is currently dead
+          // but still ownerful and awaiting health-monitor recovery, a liveness
+          // check alone would return false and incorrectly clear the new binding.
+          const currentGeneration = await getSessionGeneration(sessionId);
+          if (currentGeneration !== null && currentGeneration !== generation) {
             console.log(
-              `[App] Ignoring stale terminal event for ${sessionId} (gen=${generation}) — live sidecar present on port ${livePort}`
+              `[App] Ignoring stale terminal event for ${sessionId} (event gen=${generation}, current gen=${currentGeneration})`
+            );
+            return;
+          }
+          // Presence check for the same-generation edge case. Readiness is
+          // intentionally irrelevant here; any live entry means don't clear.
+          const liveSidecarPresent = await hasSessionSidecar(sessionId);
+          if (liveSidecarPresent) {
+            console.log(
+              `[App] Ignoring stale terminal event for ${sessionId} (gen=${generation}) — live sidecar entry present`
             );
             return;
           }
@@ -841,8 +850,10 @@ export default function App() {
       //
       // Two layers of guarding (Codex review CRIT-2):
       //  (1) The snapshot can be stale by the time we receive — for each
-      //      suspect, re-query Rust live state and only treat it as gone
-      //      if Rust currently has no sidecar for that id.
+      //      suspect, re-query Rust's current sidecar generation and only treat
+      //      it as gone if Rust has no sidecar entry for that id. A newer
+      //      generation must survive even if its process is temporarily dead
+      //      and waiting for health-monitor recovery.
       //  (2) Candidates are taken from a tabsRef snapshot; new tabs may
       //      appear during our async work. To avoid clearing those, we
       //      apply cleanup tab-by-tab via `applyTerminalSessionToTabs`
@@ -860,8 +871,8 @@ export default function App() {
           const goneIds: string[] = [];
           await Promise.all(
             candidates.map(async (sid) => {
-              const port = await getSessionPort(sid);
-              if (port === null) goneIds.push(sid);
+              const currentGeneration = await getSessionGeneration(sid);
+              if (currentGeneration === null) goneIds.push(sid);
             })
           );
           if (!mountedRef.current || goneIds.length === 0) return;
@@ -1225,17 +1236,14 @@ export default function App() {
           // stale Tab.sessionId), but if the user clicks task center inside
           // that tiny window, the planner can still match the not-yet-cleaned
           // tab and we'd "jump" to a tab whose sidecar is dead. A direct
-          // `getSessionPort` query asks Rust whether ANY sidecar entry
-          // currently exists for this session id (this is presence, not
-          // process-health — sufficient for "is something around to talk to"
-          // because the auto-restart path keeps the entry resident through
-          // brief restart windows). Null means the manager has nothing,
-          // which is the exact stale-binding case. Fall through to
+          // `hasSessionSidecar` asks Rust whether ANY live sidecar entry
+          // currently exists for this session id. False means the manager has
+          // nothing, which is the exact stale-binding case. Fall through to
           // Scenario 4 (`ensureSessionSidecar` re-spawns the session, adds
           // this Tab as owner) so the user always gets a working session,
           // never an empty UI. (Codex review AI-2 wording fix.)
-          const livePort = await getSessionPort(sessionId);
-          if (livePort === null) {
+          const liveSidecarPresent = await hasSessionSidecar(sessionId);
+          if (!liveSidecarPresent) {
             console.warn(
               `[App] Scenario 1 stale: tab ${plan.tabId} bound to session ${sessionId} but no live sidecar — falling through to relaunch`
             );
@@ -1386,7 +1394,7 @@ export default function App() {
       // for new sessions → TabProvider's SSE connect fires and Chat mounts now.
       //
       // `getSessionPort` is a PAINT-TIMING hint ONLY, never a config-correctness
-      // input: null ⇒ flip instant (no live sidecar to wait on); non-null ⇒ flip
+      // input: null ⇒ flip instant (no ready sidecar to wait on); non-null ⇒ flip
       // after the (fast) ensure. The actual push-vs-adopt disposition is ALWAYS
       // decided by the single post-ensure resolver below using the authoritative
       // `result.isNew` (under the Rust manager lock). So even if getSessionPort is
@@ -1414,8 +1422,9 @@ export default function App() {
                 // Disposition: a NEW session (pending-<tabId> id) is provably fresh
                 // — no Rust-side creator can target a pending id — so 'push'. A
                 // HISTORY session flips 'pending': push-vs-adopt is unknown until
-                // ensure resolves (getSessionPort is racy — a cron/IM/restart creator
-                // can spawn between the check and ensure), and the single post-ensure
+                // ensure resolves (ready-port lookup is only a paint hint — a
+                // cron/IM/restart creator can spawn between the check and ensure),
+                // and the single post-ensure
                 // resolver below decides it from the authoritative result.isNew.
                 // Hard-coding a guess here is exactly the #300/#301 stomp we removed.
                 // initialMessage only on the new-session ('push') branch. A 'pending'
@@ -1993,11 +2002,11 @@ export default function App() {
         } else {
           // AI is idle → check if target session already has a sidecar (e.g., from BG completion)
           // If yes, we can't use upgradeSessionId — it would overwrite the existing sidecar
-          const targetPort = await getSessionPort(sessionId);
+          const targetHasSidecar = await hasSessionSidecar(sessionId);
 
-          if (targetPort !== null) {
+          if (targetHasSidecar) {
             // Target session has existing sidecar → release current, reconnect to existing
-            console.log(`[App] Target session ${sessionId} has existing sidecar on port ${targetPort}, reconnecting`);
+            console.log(`[App] Target session ${sessionId} has existing sidecar, reconnecting`);
             await stopSseProxy(tabId);
             await releaseSessionSidecar(oldSessionId, 'tab', tabId);
             await deactivateSession(oldSessionId);
@@ -2748,7 +2757,7 @@ export default function App() {
       if (!sessionId || !workspacePath) return;
 
       const workspace = configProjectsRef.current.find(
-        (p) => p.path === workspacePath,
+        (p) => workspacePathsEqual(p.path, workspacePath),
       );
       if (!workspace) {
         toastRef.current?.error('找不到对应的工作区，可能已被删除');

@@ -28,11 +28,13 @@ import type { AskUserQuestionRequest, AskUserQuestion } from '../../shared/types
 import type { ExitPlanModeRequest, EnterPlanModeRequest, ExitPlanModeAllowedPrompt } from '../../shared/types/planMode';
 import { CUSTOM_EVENTS, isPendingSessionId } from '../../shared/constants';
 import { TabContext, TabApiContext, TabActiveContext, type SessionState, type TabContextValue, type TabApiContextValue } from './TabContext';
+import { shouldSkipHistoryReplay, shouldClearHistoryOnInit } from './sessionRestoreGuards';
 import { isSubagentContainerTool } from '@/components/tools/toolBadgeConfig';
 import type { Message, ContentBlock, ToolUseSimple, ToolInput, TaskStats, SubagentToolCall } from '@/types/chat';
 import type { ToolUse } from '@/types/stream';
 import type { SystemInitInfo } from '../../shared/types/system';
 import type { RuntimeDiagnostics } from '../../shared/types/runtime';
+import type { ContextUsage } from '../../shared/types/context-usage';
 import type { TerminalReason } from '../../shared/terminalReason';
 import type { LogEntry } from '@/types/log';
 import { parsePartialJson } from '@/utils/parsePartialJson';
@@ -136,7 +138,7 @@ interface TabProviderProps {
     /** Callback when unread state changes (message completed on non-active tab) */
     onUnreadChange?: (hasUnread: boolean) => void;
     // Note: sidecarPort prop removed - now using Session-centric Sidecar (Owner model)
-    // Port is dynamically retrieved via getSessionPort(sessionId)
+    // Ready port is dynamically retrieved via getSessionPort(sessionId)
 }
 
 /**
@@ -182,7 +184,7 @@ function mergeAttachmentsByPendingId(
 }
 
 async function getBaseUrl(tabId: string, sessionId?: string | null): Promise<string> {
-    // Session-centric: try to get port from sessionId first
+    // Session-centric: try to get a ready port from sessionId first.
     if (sessionId) {
         const port = await getSessionPort(sessionId);
         if (port !== null) {
@@ -333,7 +335,11 @@ export default function TabProvider({
     // Mirror of historyMessages for async listeners (cron incremental sync) that
     // need to read "what's on screen right now" without retriggering effects.
     // Eventual-consistency is fine — Tauri event handlers run in microtasks,
-    // after the latest render commit.
+    // after the latest render commit. NOTE: because this mirror lags by a commit,
+    // it must NOT be the sole basis for a synchronous "is history already loaded?"
+    // decision — the chat:init clear guard additionally consults the synchronous
+    // `restoredSessionIdRef` so a late chat:init can't wipe a just-restored page
+    // before this ref catches up (#0608).
     const historyMessagesRef = useRef<Message[]>(historyMessages);
     useEffect(() => { historyMessagesRef.current = historyMessages; }, [historyMessages]);
     const [streamingMessage, rawSetStreamingMessage] = useState<Message | null>(null);
@@ -424,6 +430,9 @@ export default function TabProvider({
     const [runtimeDiagnostics, setRuntimeDiagnostics] = useState<RuntimeDiagnostics | null>(null);
     const [agentError, setAgentError] = useState<string | null>(null);
     const [systemStatus, setSystemStatus] = useState<string | null>(null);  // e.g., 'compacting'
+    // PRD 0.2.32 — 归一化 context 用量快照（tab-scoped）。Set on chat:context-usage,
+    // cleared on session switch / reset. 见 ContextUsageIndicator。
+    const [contextUsage, setContextUsage] = useState<ContextUsage | null>(null);
     const [lastTerminalReason, setLastTerminalReason] = useState<TerminalReason | null>(null);
     const [isConnected, setIsConnected] = useState(false);
     const [pendingPermission, setPendingPermission] = useState<PermissionRequest | null>(null);
@@ -442,6 +451,14 @@ export default function TabProvider({
     useEffect(() => {
         currentSessionIdRef.current = sessionId;
         setCurrentSessionId(sessionId);
+        // PRD 0.2.32 — clear the context 用量 ring synchronously the moment the session
+        // PROP changes. Keyed on the prop (not currentSessionId) so loadSession's post-await
+        // seed (which doesn't change the prop) is NOT clobbered. This fires BEFORE loadSession
+        // (which may be deferred until SSE re-attach), so a cold builtin→external switch never
+        // paints the previous session's ring / builtin compact button on the new session
+        // (review: stale-source transient). loadSession then re-seeds from the persisted
+        // lastContextUsage; new-session paths (reset/adopt) also clear explicitly for immediacy.
+        setContextUsage(null);
     }, [sessionId]);
 
     // Store callbacks in refs to avoid triggering effects on every render
@@ -512,6 +529,18 @@ export default function TabProvider({
     // Without this, SSE replays race with loadSession and create intermediate
     // render states (3→46→249) causing visible scroll jumps on session entry.
     const isLoadingSessionRef = useRef(false);
+    // Session whose history was authoritatively restored from disk by loadSession
+    // (REST `/sessions/:id`, paginated + ordered). For such a session the SSE
+    // `chat:message-replay` stream (sidecar IN-MEMORY history) is redundant and
+    // must NOT re-deliver history: replaying the in-memory set after a partial
+    // REST page would append OLDER messages past the newest ones (out of order)
+    // or, if it raced the clear guard, refill a truncated set — the #0608
+    // "restore drops recent messages" bug. Older history is loaded in order via
+    // the `?before=` pagination path; the in-flight turn is carried by REST's
+    // liveStreamingMessage + live chunk events, not by replay. Set synchronously
+    // on a successful load, nulled on reset / new-session so a genuinely
+    // SSE-only (never-REST-loaded) session still replays normally.
+    const restoredSessionIdRef = useRef<string | null>(null);
     // Ref for cron task exit handler (set by useCronTask hook via context)
     const onCronTaskExitRequestedRef = useRef<((taskId: string, reason: string) => void) | null>(null);
     // Synchronous map: toolUseId → toolName. Updated outside React state updaters
@@ -570,7 +599,9 @@ export default function TabProvider({
         setHistoryMessages([]);
         resetPaginationState();
         setStreamingMessage(null);
+        setContextUsage(null);  // PRD 0.2.32 — 新会话无持久占用；仅清展示态（不碰后端持久数据）
         seenIdsRef.current.clear();
+        restoredSessionIdRef.current = null;  // new session: no REST-restored history → replay normally
         isNewSessionRef.current = true;
         resetBirthPendingRef.current = true;
         resetBirthSessionIdRef.current = null;
@@ -606,7 +637,7 @@ export default function TabProvider({
         setRuntimeDiagnostics(null);
         clearInteractiveState();
         // NOTE: Do NOT clear currentSessionId here. The old session ID is the only way
-        // to find the still-running sidecar via getSessionPort(). Setting it to null
+        // to find the ready sidecar port via getSessionPort(). Setting it to null
         // causes all subsequent API calls to fail ("No running sidecar for tab") because
         // getBaseUrl skips session-centric lookup when sessionId is null, and the tab-based
         // fallback also fails. The history dropdown naturally shows no selection when the
@@ -673,7 +704,9 @@ export default function TabProvider({
         setHistoryMessages([]);
         resetPaginationState();
         setStreamingMessage(null);
+        setContextUsage(null);  // PRD 0.2.32 — 新会话无持久占用；仅清展示态（不碰后端持久数据）
         seenIdsRef.current.clear();
+        restoredSessionIdRef.current = null;  // new session: no REST-restored history → replay normally
         clearSessionActive();
         toolNameMapRef.current.clear();
         pendingToolResultDeltasRef.current.clear();
@@ -1211,7 +1244,12 @@ export default function TabProvider({
                 // on screen stays on screen; the only scenario that still clears
                 // is "first-ever chat:init before any history loaded", which is
                 // exactly the case where the clear is correct (no-op on empty).
-                if (!isLoadingSessionRef.current && historyMessagesRef.current.length === 0) {
+                if (shouldClearHistoryOnInit({
+                    isLoadingSession: isLoadingSessionRef.current,
+                    historyLength: historyMessagesRef.current.length,
+                    restoredSessionId: restoredSessionIdRef.current,
+                    currentSessionId: currentSessionIdRef.current,
+                })) {
                     seenIdsRef.current.clear();
                     setHistoryMessages([]);
                     resetPaginationState();
@@ -1245,15 +1283,29 @@ export default function TabProvider({
             }
 
             case 'chat:message-replay': {
-                // Skip replay if user started a new session or loadSession is in-flight.
-                // During loadSession, SSE replays race with REST and create intermediate
-                // render batches (3→46→249) causing visible scroll jumps.
-                if (isNewSessionRef.current || isLoadingSessionRef.current) {
-                    break;
-                }
-                const payload = data as { message: { id: string; role: 'user' | 'assistant'; content: string | ContentBlock[]; timestamp: string; sdkUuid?: string; metadata?: Message['metadata'] } } | null;
+                const payload = data as { message: { id: string; role: 'user' | 'assistant'; content: string | ContentBlock[]; timestamp: string; sdkUuid?: string; metadata?: Message['metadata'] }; replayKind?: 'cold-history' } | null;
                 if (!payload?.message) break;
                 const msg = payload.message;
+                // `chat:message-replay` is OVERLOADED: the SSE-connect backfill carries
+                // replayKind:'cold-history' (the whole in-memory transcript), while a
+                // freshly-sent user / command bubble arrives on the SAME event with no
+                // replayKind (a LIVE echo — the chat bubble's authoritative render path,
+                // see agent-session.ts). Skip when a new session is being born or
+                // loadSession is in flight (both guard the cold-history race); ADDITIONALLY
+                // skip COLD-HISTORY for a REST-restored session (REST owns the ordered,
+                // paginated history — older pages come via ?before=). A LIVE echo must
+                // ALWAYS render, else a new user message vanishes after a restore (#0608
+                // Codex review).
+                const isColdHistoryReplay = payload.replayKind === 'cold-history';
+                if (shouldSkipHistoryReplay({
+                    isNewSession: isNewSessionRef.current,
+                    isLoadingSession: isLoadingSessionRef.current,
+                    isColdHistoryReplay,
+                    restoredSessionId: restoredSessionIdRef.current,
+                    currentSessionId: currentSessionIdRef.current,
+                })) {
+                    break;
+                }
                 if (seenIdsRef.current.has(msg.id)) break;
                 seenIdsRef.current.add(msg.id);
 
@@ -1934,6 +1986,19 @@ export default function TabProvider({
                 // Refresh the session-list surfaces (history dropdown / task center),
                 // which re-read titles from disk where the backend already persisted.
                 window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.SESSION_TITLE_CHANGED));
+                break;
+            }
+
+            case 'chat:context-usage': {
+                // PRD 0.2.32 — 归一化 context 用量快照（builtin 每轮末 / Codex 亚轮流式）。
+                // review #W3 — drop events whose connection isn't bound to the current session.
+                // During an A→B switch the old (A) connection can still deliver a context-usage
+                // event before the SSE re-attaches to B; without this guard it would clobber B's
+                // freshly-seeded ring (and re-leak A's source). connectedSse===current only in
+                // steady state, so no legit live event is rejected (B's events imply attach to B).
+                if (connectedSseSessionIdRef.current !== currentSessionIdRef.current) break;
+                // 后端已归一化，前端只存最新值供 <ContextUsageIndicator> 消费。
+                setContextUsage((data as ContextUsage | null) ?? null);
                 break;
             }
 
@@ -2696,7 +2761,7 @@ export default function TabProvider({
             // may have bound a new port, and direct `getTabServerUrl(tabId)`
             // consumers (Markdown, FileAction, DirectoryPanel) would otherwise
             // hit the stale cached URL forever. SSE / session-keyed HTTP auto
-            // pick the new port via `getSessionPort`, but tab-keyed callers
+            // pick the new ready port via `getSessionPort`, but tab-keyed callers
             // need an explicit bust. This keeps the pit-of-success guarantee
             // symmetric across startup AND mid-session recovery.
             resetTabServerUrlCache(tabId);
@@ -3305,7 +3370,11 @@ export default function TabProvider({
             resetBirthPendingRef.current = false;
             resetBirthSessionIdRef.current = null;
             clearSessionActive();  // Stop any streaming/active state
-            isLoadingSessionRef.current = false;
+            // isLoadingSessionRef stays TRUE here — it is cleared only AFTER
+            // setHistoryMessages + restoredSessionIdRef below. Clearing it at this
+            // (old) position, before the history is set, opened a window where a
+            // late chat:init / message-replay saw "no load in flight" and wiped /
+            // appended over the REST page (#0608).
             setIsSessionLoading(false);
             // Reset pagination for the new session. Virtuoso sees this as a
             // full data replacement; firstItemIndex snaps back to the start
@@ -3317,6 +3386,12 @@ export default function TabProvider({
             // Preload seen IDs so SSE replays / cron sync don't re-append them.
             for (const m of loadedMessages) seenIdsRef.current.add(m.id);
             setHistoryMessages(loadedMessages);
+            // History is now authoritatively restored from disk for this session.
+            // Mark it (and drop the load guard) in this order so SSE chat:init /
+            // message-replay firing the instant the guard drops still treat REST as
+            // the owner of history and never re-deliver the in-memory set (#0608).
+            restoredSessionIdRef.current = targetSessionId;
+            isLoadingSessionRef.current = false;
             // Reveal state is per-tab; a session swap must not let a stale reveal loop or
             // un-revealed pending text bleed across. Clear buffer + stop loop (any enqueued
             // commit is id-guarded against the new/null message).
@@ -3344,6 +3419,15 @@ export default function TabProvider({
             const { messages: _meta_messages, ...metaOnly } = response.session as SessionMetadata & { messages?: unknown };
             void _meta_messages;
             setSessionMeta(metaOnly as SessionMetadata);
+            // PRD 0.2.32 — seed context 用量指示器 from the persisted last-turn snapshot.
+            // "进入会话时 display = 该 session 的 lastContextUsage ?? null" —— 同时承担「重开→显示真实
+            // 占用」和「无持久值→清空」（前端清空只动展示态，不影响后端持久数据）。实时 SSE 后续覆盖。
+            // review #W4 — only seed when the snapshot's `source` matches this session's runtime;
+            // a stale builtin snapshot must not paint the builtin-only /compact button onto a
+            // now-external session. Mismatch → null; the next live turn seeds the correct one.
+            const persistedUsage = response.session.lastContextUsage ?? null;
+            const seedRuntime = response.session.runtime || 'builtin';
+            setContextUsage(persistedUsage && persistedUsage.source === seedRuntime ? persistedUsage : null);
             // Only reset loading state if not explicitly skipped
             // (caller may be managing loading state for an in-progress operation like cron task)
             if (!options?.skipLoadingReset) {
@@ -3895,6 +3979,7 @@ export default function TabProvider({
         runtimeDiagnostics,
         agentError,
         systemStatus,
+        contextUsage,
         lastTerminalReason,
         pendingPermission,
         pendingAskUserQuestion,
@@ -3933,7 +4018,7 @@ export default function TabProvider({
         onCronTaskExitRequested: onCronTaskExitRequestedRef,
     }), [
         tabId, agentDir, currentSessionId, messages, historyMessages, streamingMessage, firstItemIndex, hasMoreBefore, isLoading, isSessionLoading, sessionState, sessionRuntime, sessionMeta,
-        logs, unifiedLogs, systemInitInfo, runtimeDiagnostics, agentError, systemStatus, lastTerminalReason, pendingPermission, pendingAskUserQuestion, pendingExitPlanMode, pendingEnterPlanMode, toolCompleteCount, queuedMessages, isConnected,
+        logs, unifiedLogs, systemInitInfo, runtimeDiagnostics, agentError, systemStatus, contextUsage, lastTerminalReason, pendingPermission, pendingAskUserQuestion, pendingExitPlanMode, pendingEnterPlanMode, toolCompleteCount, queuedMessages, isConnected,
         setMessages, appendLog, appendUnifiedLog, clearUnifiedLogs, sendMessage, stopResponse, loadSession, loadOlderMessages, resetSession, adoptMigratedSession,
         apiGetJson, postJson, apiPutJson, apiDeleteJson, respondPermission, respondAskUserQuestion, respondExitPlanMode, cancelQueuedMessage, forceExecuteQueuedMessage
     ]);

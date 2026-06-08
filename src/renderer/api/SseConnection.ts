@@ -65,6 +65,7 @@ const JSON_EVENTS = new Set([
     'chat:api-retry', // SDK API retry status (v0.2.77+) — rate limit / transient error retrying
     'chat:permission-mode-changed', // Backend permission mode changed (plan/auto/etc.) — sync frontend UI
     'chat:session-title-changed', // #296 — backend Title Service applied an AI title; carries {sessionId,title,titleSource}
+    'chat:context-usage', // PRD 0.2.32 — 归一化的当前 context 窗口用量快照（ContextUsage）；builtin 每轮末 / Codex 亚轮流式
     // (Phase E PRD 0.2.7: `workspace:files-changed` SSE event removed —
     // renderer subscribes to Rust workspace_files watcher via Tauri event
     // `workspace:files-changed:<eventKey>` instead.)
@@ -559,10 +560,10 @@ export class SseConnection {
 
     /**
      * Get the server URL for this connection
-     * Session-centric: first try to get port from sessionId, then fallback to tabId lookup
+     * Session-centric: first try a ready session port, then fallback to the tab URL waiter.
      */
     private async getServerUrl(): Promise<string> {
-        // Session-centric: try to get port from sessionId first
+        // Session-centric: try to get a ready port from sessionId first.
         const sessionId = this.sessionIdRef?.current;
         if (sessionId) {
             const port = await getSessionPort(sessionId);

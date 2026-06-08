@@ -373,11 +373,11 @@ pub async fn cmd_handover_session_to_channel<R: Runtime>(
     // peer_sessions would bind IM to a stale port if a replacement happened
     // (review-by-codex F1 finding).
     {
-        let mgr = manager.lock().map_err(|e| {
+        let mut mgr = manager.lock().map_err(|e| {
             ulog_warn!("[handover] step3 manager lock poisoned: {}", e);
             e.to_string()
         })?;
-        if mgr.get_session_port(&sessionId).is_none() {
+        if !mgr.has_session_sidecar(&sessionId) {
             ulog_warn!(
                 "[handover] step3 session {} has no Sidecar in manager",
                 short_id(&sessionId)

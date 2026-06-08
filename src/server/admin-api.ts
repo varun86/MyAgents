@@ -30,6 +30,7 @@ import {
   type ChannelConfigSlim,
 } from './utils/admin-config';
 import { cancellableFetch } from './utils/cancellation';
+import { buildCronScope } from './utils/cron-scope';
 import { readLoopbackJson } from './utils/loopback-response';
 
 // Localhost loopback timeout for management / sidecar self-calls.
@@ -233,6 +234,15 @@ interface AdminResponse<T = unknown> {
    * actionable recovery path for a failed request.
    */
   hint?: string;
+  /**
+   * Scope descriptor for workspace-scoped list/status reads (cron). The list
+   * silently filters to the caller's workspace (a security boundary), so a
+   * `{data: []}` / `Total: 0` result is easy for an Agent consumer to misread
+   * as "nothing exists anywhere". Echo the scope so it can tell "empty within
+   * this workspace" apart from "empty everywhere". Pair with `hint` (the
+   * human/LLM-readable note). See `buildCronScope`.
+   */
+  scope?: { workspacePath: string; source: 'explicit' | 'default'; visibility: string };
   /**
    * Structured recovery path for recoverable errors. The CLI renders this
    * under the error line as `→ Run: <command>` so the caller (AI or human)
@@ -1587,7 +1597,7 @@ Commands:
 Use to render inline charts / SVG / dashboards in desktop Chat replies.
 IM bot sessions don't render widgets.`,
 
-  skill: `myagents skill — Manage Claude Skills (installed under ~/.claude/skills)
+  skill: `myagents skill — Manage MyAgents skills (user skills live under ~/.myagents/skills/)
 
 Commands:
   list                       List installed skills + enabled state
@@ -1598,7 +1608,10 @@ Commands:
   remove <name>              Uninstall a skill   [--scope user|project]
   enable <name>              Enable an installed skill
   disable <name>             Disable without uninstalling
-  sync                       Re-seed system skills from bundled defaults`,
+  sync                       Import skills from Claude Code (~/.claude/skills) into
+                             MyAgents. Optional interop only — errors "directory not
+                             found" when Claude Code is not installed; your own skills
+                             always live under ~/.myagents/skills/ regardless.`,
 
   diagnose: `myagents diagnose — Diagnostic helpers
 
@@ -1842,11 +1855,13 @@ export async function handleCronList(payload: { workspacePath?: string }): Promi
   // Default to current sidecar's workspace if caller didn't specify. Without
   // this, `myagents cron list` from an IM bot returns tasks across every
   // workspace on the system — see ownership-guard rationale above.
+  const explicit = Boolean(payload.workspacePath);
   const workspacePath = payload.workspacePath ?? defaultCronWorkspace();
   const qs = `?workspacePath=${encodeURIComponent(workspacePath)}`;
   const resp = await managementApi(`/api/cron/list${qs}`);
   if (resp.ok) {
-    return { success: true, data: (resp as Record<string, unknown>).tasks ?? [] };
+    const { scope, hint } = buildCronScope(workspacePath, explicit);
+    return { success: true, data: (resp as Record<string, unknown>).tasks ?? [], scope, hint };
   }
   return mgmtError(resp, 'Failed to list cron tasks');
 }
@@ -2035,10 +2050,19 @@ export async function handleCronRuns(payload: { taskId: string; limit?: number }
 }
 
 export async function handleCronStatus(payload: { workspacePath?: string }): Promise<AdminResponse> {
+  const explicit = Boolean(payload.workspacePath);
   const workspacePath = payload.workspacePath ?? defaultCronWorkspace();
   const qs = `?workspacePath=${encodeURIComponent(workspacePath)}`;
   const resp = await managementApi(`/api/cron/status${qs}`);
-  return wrapMgmtResponse(resp);
+  const wrapped = wrapMgmtResponse(resp);
+  // Same workspace-scoping as `cron list` → same "0 ≠ none anywhere" misread
+  // guard. The issue's `cron status → Total tasks: 0` came from this path.
+  if (wrapped.success) {
+    const { scope, hint } = buildCronScope(workspacePath, explicit);
+    wrapped.scope = scope;
+    wrapped.hint = hint;
+  }
+  return wrapped;
 }
 
 // ---------------------------------------------------------------------------

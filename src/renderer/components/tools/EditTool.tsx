@@ -23,7 +23,11 @@ export default function EditTool({ tool }: EditToolProps) {
     }
   }
   const filePath = input?.file_path || fallbackInput?.file_path;
-  const changePaths = input?.changes || fallbackInput?.changes || [];
+  // Restored/partial tool input can violate the assumed shape — `changes` may be
+  // a non-array (or absent). Coerce to an array so the `.map()` below can't
+  // throw "reading 'map'" and take down the whole app via the root error boundary.
+  const rawChanges = input?.changes ?? fallbackInput?.changes;
+  const changePaths = Array.isArray(rawChanges) ? rawChanges : [];
 
   if (!input && !fallbackInput) {
     return (

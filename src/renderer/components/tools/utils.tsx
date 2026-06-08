@@ -3,7 +3,7 @@ import type { ReactNode } from 'react';
 
 import { useFileAction } from '@/context/FileActionContext';
 import type { ToolUseSimple } from '@/types/chat';
-import { toWorkspaceRelativePath } from '@/utils/workspaceFileLinks';
+import { resolveActionPath } from '@/utils/workspaceFileLinks';
 
 import {
   getThinkingBadgeConfig,
@@ -103,8 +103,17 @@ const FILE_PATH_BOX_CLASS = 'rounded border border-[var(--line-subtle)] bg-[var(
  * which shares the same FileActionContext). Outside Chat, or while the path is
  * still unresolved / does not exist, it renders as a plain monospace chip.
  */
-export function FilePath({ path }: { path: string }) {
+export function FilePath({ path }: { path?: string | null }) {
   const fileAction = useFileAction(); // null outside Chat
+  // A file tool can arrive with NO path: a partial/streaming tool input where
+  // `file_path` hasn't parsed yet, or a restored/old persisted tool block whose
+  // input lacks it (parsedInput comes from parsePartialJson and is optional).
+  // Render nothing rather than crash the WHOLE app downstream in
+  // toWorkspaceRelativePath's `path.trim()` — that uncaught render error hits the
+  // root AppErrorBoundary and replaces the entire UI ("界面渲染出错"). Mirror
+  // toWorkspaceRelativePath's emptiness test so a whitespace-only path (also
+  // non-actionable) renders nothing rather than a blank chip.
+  if (!path?.trim()) return null;
   // File tools (Write/Edit/Read/NotebookEdit) emit ABSOLUTE `file_path` values,
   // but the workspace existence-check + read commands only accept
   // workspace-relative paths (Rust `resolve_inside_workspace` rejects absolute
@@ -113,9 +122,7 @@ export function FilePath({ path }: { path: string }) {
   // paths already use, so the existence check resolves and the menu actions
   // (预览/引用/打开/打开所在文件夹) work. Falls back to the raw path — which stays
   // a plain chip — when it's outside the workspace or no workspace is known.
-  const actionPath = (fileAction?.workspacePath
-    ? toWorkspaceRelativePath(path, fileAction.workspacePath)
-    : null) ?? path;
+  const actionPath = resolveActionPath(path, fileAction?.workspacePath);
   // Triggers a batched existence check; returns cached result or null (pending).
   const pathInfo = fileAction?.checkPath(actionPath) ?? null;
 
@@ -124,7 +131,7 @@ export function FilePath({ path }: { path: string }) {
   }
 
   const openMenu = (x: number, y: number) =>
-    fileAction.openFileMenu(x, y, actionPath, pathInfo.type);
+    fileAction.openFileMenu(x, y, actionPath, pathInfo.type, path);
 
   return (
     <code

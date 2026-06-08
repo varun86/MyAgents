@@ -50,6 +50,8 @@ import { resolveAuthHeaders, onTokenChange, startTokenRefreshScheduler } from '.
 import type { ToolInput } from '../renderer/types/chat';
 import { parsePartialJson } from '../shared/parsePartialJson';
 import { deriveSessionTitle } from '../shared/sessionTitle';
+import { computeContextUsage } from '../shared/contextUsage';
+import { observedContextTokens } from './runtimes/external-watchdog-policy';
 import type { SystemInitInfo } from '../shared/types/system';
 import { saveSessionMetadata, updateSessionTitleFromMessage, saveSessionMessages, saveAttachment, updateSessionMetadata, getSessionMetadata, getSessionData } from './SessionStore';
 import { firePostTurnTitleHook } from './turn-hooks';
@@ -83,6 +85,7 @@ import type { ToolAttachment } from '../shared/types/tool-attachment';
 import { imEventBus, type ImEventType } from './utils/im-event-bus';
 import { imRequestRegistry } from './utils/im-request-registry';
 import { mirrorIfChannelBound, type MirrorImage } from './utils/im-mirror';
+import { normalizeClaudeTranscriptCleanupPeriodDays } from '../shared/config-types';
 
 // Module-level debug mode check (avoids repeated environment variable access)
 const isDebugMode = process.env.DEBUG === '1' || process.env.NODE_ENV === 'development';
@@ -1542,6 +1545,10 @@ let currentTurnUsage = {
   model: undefined as string | undefined,
   modelUsage: undefined as Record<string, ModelUsageEntry> | undefined,
 };
+// PRD 0.2.32 — 当前 context 占用必须取「最近一次调用」而非 turn 聚合（带工具的一轮发多次
+// API、每次重发上下文，求和会严重高估）。捕获最近一条主轮 assistant message 的 usage，
+// 在 turn 末算占用并 broadcast chat:context-usage。currentTurnUsage 是聚合值，不能复用。
+let latestMainAssistantUsage: MessageUsage | null = null;
 // Timestamp when current assistant response started
 let currentTurnStartTime: number | null = null;
 // Tool count for current turn
@@ -1651,6 +1658,7 @@ function resetTurnUsage(): void {
     model: undefined,
     modelUsage: undefined,
   };
+  latestMainAssistantUsage = null;
   currentTurnStartTime = null;
   currentTurnToolCount = 0;
   currentTurnHasOutput = false;
@@ -1660,6 +1668,45 @@ function resetTurnUsage(): void {
   currentTurnTextBlocks.length = 0;
   // Note: currentTurnInboxMeta is NOT reset here — it's bound on dequeue
   // (generator yield) and cleared at result handler / abort path.
+}
+
+/**
+ * PRD 0.2.32 — broadcast 归一化的 context 用量快照（builtin runtime）。
+ *
+ * 占用 = 最近一条**主轮** assistant message 的 `input + cacheRead + cacheCreation`
+ * （Anthropic 系，input 不含 cache）。**不**用 currentTurnUsage（那是整 turn 多次调用的
+ * 聚合，会把重发的上下文求和、严重高估）。窗口优先用 SDK 运行时填充的
+ * `ModelUsage.contextWindow`，缺省回落 `lookupModelContextLength ?? 200K`（= auto-compact 有效窗口）。
+ */
+function broadcastBuiltinContextUsage(): void {
+  // Fall back to the aggregate only when no per-message usage was captured
+  // (single-call turns make aggregate == latest, so this stays correct for the
+  // common no-tool case; multi-call providers all emit per-message usage).
+  const usageForOccupancy: MessageUsage = latestMainAssistantUsage ?? {
+    inputTokens: currentTurnUsage.inputTokens,
+    outputTokens: currentTurnUsage.outputTokens,
+    cacheReadTokens: currentTurnUsage.cacheReadTokens,
+    cacheCreationTokens: currentTurnUsage.cacheCreationTokens,
+  };
+  const occupied = observedContextTokens(usageForOccupancy);
+  if (occupied <= 0) return; // no usable data yet — don't flash a meaningless 0%
+  // 窗口刻意用 `lookupModelContextLength ?? 200K`（computeContextUsage 内部回落），**不**用 SDK
+  // `ModelUsage.contextWindow`：后者是 SDK `getContextWindowForModel()` 的值，对经 bridge 的第三方
+  // builtin 模型（DeepSeek-128K 等）只会回落 200K 默认，与我们注入的 `CLAUDE_CODE_AUTO_COMPACT_WINDOW`
+  // （= lookupModelContextLength）不一致。圆环要对应 auto-compact，所以分母必须用同一来源（registry ?? 200K）。
+  const usage = computeContextUsage({
+    occupiedTokens: occupied,
+    runtimeWindow: null,
+    source: 'builtin',
+    model: currentTurnUsage.model,
+    lookupWindow: lookupModelContextLength,
+  });
+  broadcast('chat:context-usage', usage);
+  // PRD 0.2.32 — 持久化**同一个**快照到 session 记录（单一数据源）。每轮末一次写盘，
+  // 重开会话时前端从 session metadata seed → 环立即显示且与会话期间一致。fire-and-forget。
+  void updateSessionMetadata(sessionId, { lastContextUsage: usage }).catch((err) =>
+    console.warn('[agent] persist lastContextUsage failed:', err),
+  );
 }
 
 type BuiltinTurnTraceSnapshot = {
@@ -8555,7 +8602,10 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     const effectiveResumeAt = resolveEffectiveResumeAt({ forkMode, rewindResumeAt, forkResumeAt, reloadAnchor });
 
     const mcpStatus = currentMcpServers === null ? 'auto' : currentMcpServers.length === 0 ? 'disabled' : `enabled(${currentMcpServers.length})`;
-    console.log(`[agent] starting query with model: ${currentModel ?? 'default'}, permissionMode: ${currentPermissionMode} -> SDK: ${sdkPermissionMode}, MCP: ${mcpStatus}, ${resumeFrom ? `resume: ${resumeFrom}` : `sessionId: ${effectiveSdkSessionId}`}${effectiveResumeAt ? `, resumeSessionAt: ${effectiveResumeAt}` : ''}${forkMode ? `, FORK mode (forkPoint: ${forkResumeAt}${rewindResumeAt && rewindResumeAt !== forkResumeAt ? `, rewind→${rewindResumeAt}` : ''})` : ''}`);
+    const claudeTranscriptCleanupPeriodDays = normalizeClaudeTranscriptCleanupPeriodDays(
+      loadAdminConfig().claudeTranscriptCleanupPeriodDays,
+    );
+    console.log(`[agent] starting query with model: ${currentModel ?? 'default'}, permissionMode: ${currentPermissionMode} -> SDK: ${sdkPermissionMode}, MCP: ${mcpStatus}, cleanupPeriodDays: ${claudeTranscriptCleanupPeriodDays}, ${resumeFrom ? `resume: ${resumeFrom}` : `sessionId: ${effectiveSdkSessionId}`}${effectiveResumeAt ? `, resumeSessionAt: ${effectiveResumeAt}` : ''}${forkMode ? `, FORK mode (forkPoint: ${forkResumeAt}${rewindResumeAt && rewindResumeAt !== forkResumeAt ? `, rewind→${rewindResumeAt}` : ''})` : ''}`);
 
     const promptGen = messageGenerator();
 
@@ -8624,6 +8674,9 @@ async function startStreamingSession(preWarm = false): Promise<void> {
       // User-level skills are synced as symlinks into <cwd>/.claude/skills/ by syncProjectUserConfig()
       // CLAUDE_CONFIG_DIR is NOT set — preserves Anthropic subscription Keychain lookup
       settingSources: buildSettingSources(),
+      settings: {
+        cleanupPeriodDays: claudeTranscriptCleanupPeriodDays,
+      },
       // Permission mode mapping (uses mapToSdkPermissionMode):
       // - auto → acceptEdits (auto-accept edits, check others via canUseTool)
       // - plan → plan
@@ -10299,12 +10352,26 @@ async function startStreamingSession(preWarm = false): Promise<void> {
             output_tokens?: number;
             prompt_tokens?: number;
             completion_tokens?: number;
+            cache_read_input_tokens?: number;
+            cache_creation_input_tokens?: number;
           };
         }).usage;
         const subagentUsage = rawUsage ? {
           input_tokens: rawUsage.input_tokens ?? rawUsage.prompt_tokens,
           output_tokens: rawUsage.output_tokens ?? rawUsage.completion_tokens,
         } : undefined;
+
+        // PRD 0.2.32 — context 占用：记录最近一条**主轮**（非子 Agent）assistant message 的 usage。
+        // 每次重发整段上下文，所以「最近一条的 input+cache」即「此刻窗口装了多少」。子 Agent
+        // 消息（parent_tool_use_id 存在）有独立上下文，不能算进主会话占用。
+        if (!sdkMessage.parent_tool_use_id && rawUsage) {
+          latestMainAssistantUsage = {
+            inputTokens: rawUsage.input_tokens ?? rawUsage.prompt_tokens ?? 0,
+            outputTokens: rawUsage.output_tokens ?? rawUsage.completion_tokens ?? 0,
+            cacheReadTokens: rawUsage.cache_read_input_tokens ?? 0,
+            cacheCreationTokens: rawUsage.cache_creation_input_tokens ?? 0,
+          };
+        }
 
         if (sdkMessage.parent_tool_use_id && assistantMessage.content) {
           for (const block of assistantMessage.content) {
@@ -10745,6 +10812,11 @@ async function startStreamingSession(preWarm = false): Promise<void> {
             assistant_sdk_uuid: lastAssistant?.sdkUuid,
             assistant_message_id: lastAssistant?.id,
           });
+
+          // PRD 0.2.32 — 并发 context 用量快照。占用取「最近一条主轮 message」（非聚合
+          // currentTurnUsage），窗口用 lookupModelContextLength ?? 200K（对齐 auto-compact，
+          // **不**用 SDK contextWindow，理由见 broadcastBuiltinContextUsage）。
+          broadcastBuiltinContextUsage();
 
           // Server-side unified analytics: covers all sources (desktop/cron/im).
           // PRD 0.2.19 — `session_id` lets analytics join this back to the renderer's

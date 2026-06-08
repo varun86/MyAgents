@@ -14,7 +14,7 @@
  * error) when the sidecar is in trouble.
  *
  * Callers:
- *  - Pass the sidecar port (from `ensureSessionSidecar` result, or
+ *  - Pass the ready sidecar port (from `ensureSessionSidecar` result, or
  *    `getSessionPort`). When `null`, the hook reports `loading` without
  *    polling — there's no endpoint to hit.
  *  - Set `enabled=false` to fully pause polling (e.g. once Chat is ready).
