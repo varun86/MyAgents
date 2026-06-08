@@ -103,8 +103,17 @@ const FILE_PATH_BOX_CLASS = 'rounded border border-[var(--line-subtle)] bg-[var(
  * which shares the same FileActionContext). Outside Chat, or while the path is
  * still unresolved / does not exist, it renders as a plain monospace chip.
  */
-export function FilePath({ path }: { path: string }) {
+export function FilePath({ path }: { path?: string | null }) {
   const fileAction = useFileAction(); // null outside Chat
+  // A file tool can arrive with NO path: a partial/streaming tool input where
+  // `file_path` hasn't parsed yet, or a restored/old persisted tool block whose
+  // input lacks it (parsedInput comes from parsePartialJson and is optional).
+  // Render nothing rather than crash the WHOLE app downstream in
+  // toWorkspaceRelativePath's `path.trim()` — that uncaught render error hits the
+  // root AppErrorBoundary and replaces the entire UI ("界面渲染出错"). Mirror
+  // toWorkspaceRelativePath's emptiness test so a whitespace-only path (also
+  // non-actionable) renders nothing rather than a blank chip.
+  if (!path?.trim()) return null;
   // File tools (Write/Edit/Read/NotebookEdit) emit ABSOLUTE `file_path` values,
   // but the workspace existence-check + read commands only accept
   // workspace-relative paths (Rust `resolve_inside_workspace` rejects absolute

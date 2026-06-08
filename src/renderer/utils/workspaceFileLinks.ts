@@ -123,8 +123,11 @@ function hasUnsupportedScheme(raw: string): boolean {
  * paths outright). Callers normalize here so absolute and relative paths flow
  * through the same backend path, matching how inline AI-text paths behave.
  */
-export function toWorkspaceRelativePath(rawPath: string, workspacePath: string): string | null {
-  const path = rawPath.trim();
+export function toWorkspaceRelativePath(rawPath: string | null | undefined, workspacePath: string): string | null {
+  // Total by construction: a path util must never throw on a missing path —
+  // an uncaught throw here reaches the root error boundary and kills the whole
+  // app. Callers (file-tool chips) can pass an undefined `file_path`.
+  const path = rawPath?.trim();
   if (!path) return null;
 
   if (isAbsolutePath(path)) {

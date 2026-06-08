@@ -1,8 +1,20 @@
 import { describe, expect, it } from 'vitest';
 
-import { resolveActionPath, resolveWorkspaceFileLinkTarget, resolveAgainstWorkspace } from './workspaceFileLinks';
+import { resolveActionPath, resolveWorkspaceFileLinkTarget, resolveAgainstWorkspace, toWorkspaceRelativePath } from './workspaceFileLinks';
 
 const WORKSPACE = '/Users/zhihu/Documents/project/MyAgents';
+
+describe('toWorkspaceRelativePath — total on missing input (restore-old-session crash)', () => {
+  // A file-tool chip can pass an undefined `file_path` (partial/streaming or a
+  // restored old block). This util must return null, never throw — an uncaught
+  // throw here reaches the root error boundary and kills the whole app.
+  it('returns null for nullish / empty / whitespace paths', () => {
+    expect(toWorkspaceRelativePath(undefined, WORKSPACE)).toBeNull();
+    expect(toWorkspaceRelativePath(null, WORKSPACE)).toBeNull();
+    expect(toWorkspaceRelativePath('', WORKSPACE)).toBeNull();
+    expect(toWorkspaceRelativePath('   ', WORKSPACE)).toBeNull();
+  });
+});
 
 describe('resolveWorkspaceFileLinkTarget', () => {
   it('turns workspace absolute links into workspace-relative paths', () => {

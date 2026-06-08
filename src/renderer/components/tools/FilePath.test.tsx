@@ -56,6 +56,29 @@ describe('FilePath tool chip — clickable file paths', () => {
     mocks.openInFinder.mockResolvedValue(undefined);
   });
 
+  // A file tool can arrive with NO path — a partial/streaming tool input
+  // where file_path hasn't parsed yet, or a RESTORED old-session tool block whose
+  // input lacks it (parsedInput comes from parsePartialJson, file_path optional).
+  // Before the fix, FilePath fed undefined into toWorkspaceRelativePath's
+  // `path.trim()` → uncaught render error → the root AppErrorBoundary replaced the
+  // ENTIRE app with "界面渲染出错: Cannot read properties of undefined (reading 'trim')".
+  it('renders nothing instead of crashing the whole app when the path is missing', () => {
+    mocks.checkPaths.mockResolvedValue({ results: {} });
+    for (const missing of [undefined, null, '', '   '] as const) {
+      let container: HTMLElement | undefined;
+      expect(() => {
+        container = render(
+          <FileActionProvider workspacePath={WORKSPACE} onInsertReference={mocks.onInsertReference}>
+            <FilePath path={missing} />
+          </FileActionProvider>,
+        ).container;
+      }).not.toThrow();
+      // Not just "didn't throw" — the chip renders nothing at all.
+      expect(container?.querySelector('code')).toBeNull();
+      expect(container?.textContent).toBe('');
+    }
+  });
+
   it('renders a real file as an interactive chip and opens the action menu on click', async () => {
     mocks.checkPaths.mockResolvedValue({ results: { [REL_FILE]: { exists: true, type: 'file' } } });
     renderFilePath(FILE_PATH);
