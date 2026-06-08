@@ -77,6 +77,7 @@ export interface AdminAppConfig {
   // Agent
   agents?: AgentConfigSlim[];
   defaultPermissionMode?: string;
+  claudeTranscriptCleanupPeriodDays?: number;
   // Allow passthrough of all other fields
   [key: string]: unknown;
 }

@@ -7,6 +7,7 @@ import {
     type Project,
     type Provider,
     DEFAULT_BUNDLED_WORKSPACE_TEMPLATE_ID,
+    normalizeClaudeTranscriptCleanupPeriodDays,
 } from '../types';
 import {
     isBrowserDevMode,
@@ -104,6 +105,13 @@ export function migrateImBotConfig(config: AppConfig): AppConfig {
     return config;
 }
 
+function normalizeDeveloperSettings(config: AppConfig): AppConfig {
+    config.claudeTranscriptCleanupPeriodDays = normalizeClaudeTranscriptCleanupPeriodDays(
+        config.claudeTranscriptCleanupPeriodDays,
+    );
+    return config;
+}
+
 // ============= Load / Save =============
 
 export async function loadAppConfig(): Promise<AppConfig> {
@@ -115,7 +123,7 @@ export async function loadAppConfig(): Promise<AppConfig> {
     if (isBrowserDevMode()) {
         console.log('[configService] Browser mode: loading from localStorage');
         const loaded = mockLoadConfig();
-        return { ...dynamicDefault, ...loaded };
+        return normalizeDeveloperSettings({ ...dynamicDefault, ...loaded });
     }
 
     try {
@@ -144,13 +152,13 @@ export async function loadAppConfig(): Promise<AppConfig> {
             // real config write (its `before` snapshot is taken post-normalize),
             // and the independent Rust reader normalizes the same way at boot.
             normalizeStringifiedJsonFields(migrated);
-            const merged = { ...dynamicDefault, ...migrated };
+            const merged = normalizeDeveloperSettings({ ...dynamicDefault, ...migrated });
             return migrateImBotConfig(merged);
         }
-        return dynamicDefault;
+        return normalizeDeveloperSettings(dynamicDefault);
     } catch (error) {
         console.error('[configService] Failed to load app config:', error);
-        return dynamicDefault;
+        return normalizeDeveloperSettings(dynamicDefault);
     }
 }
 

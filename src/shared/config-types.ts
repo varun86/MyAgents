@@ -434,6 +434,20 @@ export interface ProxySettings {
 /**
  * App-level configuration
  */
+export const DEFAULT_CLAUDE_TRANSCRIPT_CLEANUP_PERIOD_DAYS = 365;
+
+export function normalizeClaudeTranscriptCleanupPeriodDays(value: unknown): number {
+  const numericValue = typeof value === 'number'
+    ? value
+    : typeof value === 'string' && value.trim() !== ''
+      ? Number(value)
+      : Number.NaN;
+  if (!Number.isFinite(numericValue)) {
+    return DEFAULT_CLAUDE_TRANSCRIPT_CLEANUP_PERIOD_DAYS;
+  }
+  return Math.max(1, Math.floor(numericValue));
+}
+
 export interface AppConfig {
   // Default settings for new projects
   defaultProviderId?: string;
@@ -463,6 +477,9 @@ export interface AppConfig {
    *  而非旧的 forkFrom 懒分叉状态机。缺省视同 true（默认开）；关掉则回退旧路径。
    *  详见 specs/prd/prd_0.2.27_fork_standalone_migration.md。 */
   eagerFork?: boolean;
+  /** 开发者：传给 Claude Agent SDK `settings.cleanupPeriodDays` 的本地 transcript 保留天数。
+   *  缺省视同 365，最小 1。 */
+  claudeTranscriptCleanupPeriodDays?: number;
   // General settings
   autoStart: boolean; // 开机启动
   /** PRD 0.2.16 全局唤起快捷键。缺省视同 enabled=true + 默认键。
@@ -1275,6 +1292,7 @@ export const DEFAULT_CONFIG: AppConfig = {
   minimizeToTray: true,   // 默认开启最小化到托盘
   showDevTools: false,
   liteLLMModelDataRefresh: true, // 默认开启 LiteLLM 模型数据兜底刷新（开发者可关）
+  claudeTranscriptCleanupPeriodDays: DEFAULT_CLAUDE_TRANSCRIPT_CLEANUP_PERIOD_DAYS,
   autoStart: false,       // 默认不开启开机启动
   osNotifications: true,  // 默认开启系统通知
   notificationSound: true, // 默认开启通知声音
