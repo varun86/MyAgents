@@ -573,7 +573,9 @@ config.multiAgentRuntime (磁盘/React state)
 | Claude Code | 最近一条主轮 assistant message 的 `input+cache`（`lastMainAssistantUsage`，**不**用 `result.usage`——那是整 turn 累计）| registry ?? 200K | |
 | Gemini | `_meta.quota.token_count.input_tokens`（per-request）| registry ?? 200K | |
 
-**统一通道**：每个 external adapter 在 `kind:'usage'` UnifiedEvent 上显式带 `contextOccupiedTokens` + `runtimeContextWindow`（`types.ts`）。`external-session.ts` 的 `usage` 分支**只用显式 `contextOccupiedTokens`**（缺失则不发——宁可不显示也不显错，避免把 Codex running_total / CC 累计当占用），过 `computeContextUsage` 归一化后 `broadcast('chat:context-usage', ...)`。builtin 走 `agent-session.ts` 旁挂 `chat:message-complete` 广播。前端 `TabProvider.contextUsage`（tab-scoped，session 切换由 `currentSessionId` effect 清空）→ `<ContextUsageIndicator>`（自取数，不穿 SimpleChatInput props）。
+**统一通道**：每个 external adapter 在 `kind:'usage'` UnifiedEvent 上显式带 `contextOccupiedTokens` + `runtimeContextWindow`（`types.ts`）。`external-session.ts` 的 `usage` 分支**只用显式 `contextOccupiedTokens`**（缺失则不发——宁可不显示也不显错，避免把 Codex running_total / CC 累计当占用），过 `computeContextUsage` 归一化后 `broadcast('chat:context-usage', ...)`。builtin 走 `agent-session.ts` 旁挂 `chat:message-complete` 广播。前端 `TabProvider.contextUsage`（tab-scoped，session 切换由 `currentSessionId` effect 重置，见下）→ `<ContextUsageIndicator>`（自取数，不穿 SimpleChatInput props）。
+
+**持久化 + 重开恢复**：turn 末算的同一快照既 broadcast、也写进 `SessionMetadata.lastContextUsage`（builtin 在 `updateSessionMetadata`；external 在 `persistTurnResult` 末——turn-scoped 快照须在**同步函数入口**捕获，否则背靠背 `sendExternalMessage` 会在 await 窗口被 `resetTurnAccumulators` 清空而丢盘）。重开会话 `loadSession` 从后端 seed，前端规则即「进入会话 `display = lastContextUsage ?? null`」（reset/adopt 才 clear，不再无脑清 null）；seed **仅当 `lastContextUsage.source === session.runtime`** 生效，防 stale builtin 快照把压缩按钮显示到 external 会话。
 
 **智能压缩入口**：卡片内按钮，仅 builtin（`source==='builtin'`）显示；复用 `Chat.tsx` 正常发送链路发 `/compact`（`effectiveModel`/`effectivePermissionMode`/`providerEnv` 同参，turn 中 `disabled`）。external runtime 隐藏（无可靠程序化压缩入口）。纯函数 `computeContextUsage` 见 `src/shared/contextUsage.ts`，单测 `contextUsage.test.ts` + `codex-token-usage.unit.test.ts`。
 
