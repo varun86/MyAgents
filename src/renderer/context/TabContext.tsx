@@ -25,6 +25,7 @@ import type { AskUserQuestionRequest } from '../../shared/types/askUserQuestion'
 import type { ExitPlanModeRequest, EnterPlanModeRequest } from '../../shared/types/planMode';
 import type { TerminalReason } from '../../shared/terminalReason';
 import type { SessionMetadata } from '@/api/sessionClient';
+import type { ContextUsage } from '../../shared/types/context-usage';
 
 // (issue #174) 'starting' = SDK subprocess launched, awaiting system_init.
 // Distinct from 'running' (= AI actively processing a turn) so the UI can
@@ -74,6 +75,13 @@ export interface TabState {
     runtimeDiagnostics: RuntimeDiagnostics | null;
     agentError: string | null;
     systemStatus: string | null;  // SDK system status (e.g., 'compacting')
+    /**
+     * PRD 0.2.32 — 归一化的「当前 context 窗口用量」快照。Set on `chat:context-usage`
+     * (builtin 每轮末 / Codex 亚轮流式)，cleared on session switch / reset. Null until
+     * the first usage snapshot arrives. Consumed by `<ContextUsageIndicator>` (tab-scoped,
+     * 自取数，不穿 SimpleChatInput props 以免 textarea 重渲)。
+     */
+    contextUsage: ContextUsage | null;
     /**
      * SDK 0.2.91+ terminal_reason of the last turn. Set on chat:message-complete,
      * cleared on next send / session load / reset. `completed` and missing reasons
@@ -217,6 +225,7 @@ const defaultContextValue: TabContextValue = {
     runtimeDiagnostics: null,
     agentError: null,
     systemStatus: null,
+    contextUsage: null,
     lastTerminalReason: null,
     pendingPermission: null,
     pendingAskUserQuestion: null,

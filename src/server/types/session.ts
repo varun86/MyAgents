@@ -1,5 +1,6 @@
 import { randomUUID } from 'crypto';
 import type { RuntimeType } from '../../shared/types/runtime';
+import type { ContextUsage } from '../../shared/types/context-usage';
 import { deriveSessionTitle } from '../../shared/sessionTitle';
 
 /**
@@ -62,6 +63,12 @@ export interface SessionMetadata {
     runtimeSessionId?: string;
     /** Runtime-level cumulative usage totals for restore-safe delta calculation. */
     runtimeUsageTotals?: MessageUsage;
+    /**
+     * PRD 0.2.32 — 上一轮结束时的 context 用量快照（与实时 chat:context-usage 广播同一个
+     * 计算结果 = 单一数据源）。每轮末写入；重开会话时随 session metadata 返回，前端 seed 给
+     * 指示器 → 环立即显示真实占用、且与会话期间显示的值一致。前端清空只动展示态，不删此持久值。
+     */
+    lastContextUsage?: ContextUsage;
 
     // ─── Session config snapshot (v0.1.69 layered-snapshot model) ───
     // Desktop/Cron owned sessions capture these at creation; IM sessions leave all

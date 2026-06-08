@@ -606,6 +606,9 @@ trusted root `~/.myagents/generated/tool-attachments/<sid>/<tid>/<file>`（base6
 | Legacy CronTask CAS upgrade | Rust | 幂等迁移（防并发重复创建） |
 | `saveToolAttachment` + `path-safety.ts` | Node | 任意工具图片产物统一落盘 + symlink-safe 路径校验 + SSRF 防护 |
 | `awaitInFlightSaves` + `rebuildAttachmentRegistry` | Node | 异步 attachment 落盘的 turn-boundary 守卫 + session resume 重 register |
+| `workspacePath` / `workspacePathsEqual` | shared (renderer) | 工作区路径跨存储标识比较（Rust `normalize_path` 的 TS 端口，防 Win 斜杠/盘符误判） |
+| Client-action 斜杠命令 (`slashActions`) | renderer | UI 动作命令名字保留 + 勿进文本插入 builtin 清单（防死条目 / shadow） |
+| System-skill 同步完整性门控 | Rust + Node | 验源含 SKILL.md 再清目标 + 全落地才写版本戳（防空目录冻结） |
 
 ---
 

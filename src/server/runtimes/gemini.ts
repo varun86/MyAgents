@@ -1818,5 +1818,8 @@ function extractUsage(response: PromptResponse): UnifiedEvent | null {
     model: Object.keys(modelUsage)[0],
     modelUsage: Object.keys(modelUsage).length > 0 ? modelUsage : undefined,
     semantics: 'delta',
+    // PRD 0.2.32 — context 占用：Gemini 的 `_meta.quota.token_count.input_tokens` 是 per-request
+    // 的提示词 token（含重发的整段上下文）= 当前占用。直接作为显式占用喂指示器。
+    contextOccupiedTokens: total.input_tokens && total.input_tokens > 0 ? total.input_tokens : undefined,
   };
 }

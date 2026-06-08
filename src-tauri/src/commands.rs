@@ -907,7 +907,7 @@ pub fn cmd_copy_folder_to_templates(
 
 // ============= Admin Agent Sync =============
 
-const ADMIN_AGENT_VERSION: &str = "18";
+const ADMIN_AGENT_VERSION: &str = "19";
 
 /// Helper-bundled paths (relative to `~/.myagents/`) that previous versions
 /// shipped but that have since been retired.
@@ -1000,7 +1000,7 @@ pub fn cmd_sync_admin_agent<R: Runtime>(
 
 // ============= CLI Sync =============
 
-const CLI_VERSION: &str = "18";
+const CLI_VERSION: &str = "19";
 
 /// Sync the CLI script from bundled resources to ~/.myagents/bin/.
 /// Version-gated: only runs when CLI_VERSION changes.
@@ -1161,7 +1161,7 @@ pub fn cmd_sync_cli<R: Runtime>(
 // matching exclusion list in src/server/index.ts::seedBundledSkills
 // MUST be kept in sync (comment there points back here).
 
-const SYSTEM_SKILLS_VERSION: &str = "16";
+const SYSTEM_SKILLS_VERSION: &str = "17";
 
 /// Skills that ship with the app and MUST stay at the bundled version —
 /// the app's flows depend on them, users are not meant to customise.
@@ -1218,11 +1218,21 @@ pub fn cmd_sync_system_skills<R: Runtime>(
     let skills_dir = myagents_dir.join("skills");
 
     // Version gate — skip the whole sweep if we've already landed
-    // SYSTEM_SKILLS_VERSION on this install.
+    // SYSTEM_SKILLS_VERSION AND every system skill is actually present on disk.
+    //
+    // The version stamp alone is NOT proof the install is healthy (issue #321):
+    // the old destructive sync could write the version after leaving empty
+    // `~/.myagents/skills/<name>/` dirs, freezing that broken state forever.
+    // Validating the on-disk result here makes the gate self-healing — a frozen
+    // or incomplete install re-runs the (now non-destructive) sync regardless of
+    // whether the version happened to be bumped. Healthy installs still
+    // early-return after the cheap per-skill SKILL.md stat.
     let ver_file = myagents_dir.join(".system-skills-version");
     if ver_file.exists() {
         let ver = fs::read_to_string(&ver_file).unwrap_or_default();
-        if ver.trim() == SYSTEM_SKILLS_VERSION {
+        if ver.trim() == SYSTEM_SKILLS_VERSION
+            && all_installed_system_skills_complete(&skills_dir)
+        {
             return Ok(false);
         }
     }
@@ -1242,6 +1252,7 @@ pub fn cmd_sync_system_skills<R: Runtime>(
 
     let mut synced = Vec::new();
     let mut missing = Vec::new();
+    let mut incomplete = Vec::new();
     let mut platform_skipped = Vec::new();
     for skill_name in SYSTEM_SKILLS {
         // Platform block: keep parity with Node-side `isSkillBlockedOnPlatform`
@@ -1256,67 +1267,137 @@ pub fn cmd_sync_system_skills<R: Runtime>(
         }
         let src = bundled_skills_dir.join(skill_name);
         let dst = skills_dir.join(skill_name);
-        if !src.exists() {
-            // Packaging miss — skill listed in SYSTEM_SKILLS but not
-            // present in the bundle. Log and continue so one missing
-            // skill doesn't block the rest.
-            ulog_warn!("[system-skills] bundled skill missing: {}", skill_name);
-            missing.push(skill_name.to_string());
-            continue;
-        }
-        // Remove any existing target so stale files don't linger.
-        // SYSTEM_SKILLS_VERSION bumps specifically mean "the whole skill
-        // snapshot is new, replace it wholesale".
-        //
-        // Path::exists() follows symlinks → returns false for broken links,
-        // so a dangling `~/.myagents/skills/<name>` left by the user (e.g.
-        // pointing at a moved repo) would slip past this guard and then
-        // trip `fs::create_dir_all` in `merge_dir_recursive` with EEXIST,
-        // failing the whole startup sync. symlink_metadata() does NOT
-        // follow, so it's the right probe for "is there anything at this
-        // path, even a dangling link?".
-        match fs::symlink_metadata(&dst) {
-            Ok(meta) => {
-                let removed = if meta.file_type().is_symlink() || meta.is_file() {
-                    fs::remove_file(&dst)
-                } else {
-                    fs::remove_dir_all(&dst)
-                };
-                if let Err(e) = removed {
-                    ulog_warn!(
-                        "[system-skills] failed to clear {}: {} — falling back to merge",
-                        skill_name,
-                        e
-                    );
-                }
+        match sync_one_system_skill(&src, &dst).map_err(|e| format!("sync {}: {}", skill_name, e))? {
+            SystemSkillSync::Synced => synced.push(*skill_name),
+            SystemSkillSync::SkippedMissingSource => {
+                // Packaging miss — skill listed in SYSTEM_SKILLS but absent
+                // from the bundle. Log and continue so one missing skill
+                // doesn't block the rest.
+                ulog_warn!("[system-skills] bundled skill missing: {}", skill_name);
+                missing.push(skill_name.to_string());
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                // Nothing there, fresh seed below.
-            }
-            Err(e) => {
+            SystemSkillSync::SkippedIncompleteSource => {
+                // Packaging miss — the bundled source dir exists but has no
+                // SKILL.md (issue #321: the Windows resource tree shipped some
+                // system skills empty). `sync_one_system_skill` left any
+                // existing good copy untouched. Don't advance the version gate
+                // below so a corrected bundle re-syncs on the next launch.
                 ulog_warn!(
-                    "[system-skills] symlink_metadata({}) failed: {} — falling back to merge",
-                    skill_name,
+                    "[system-skills] bundled skill incomplete (no SKILL.md), preserved existing copy: {}",
+                    skill_name
+                );
+                incomplete.push(skill_name.to_string());
+            }
+        }
+    }
+
+    // Only advance the version gate when every system skill actually landed.
+    // A missing/incomplete bundled source is a packaging defect; freezing the
+    // version on a partial sweep would make the broken state permanent (the
+    // old behavior that produced empty `~/.myagents/skills/<name>` dirs on
+    // Windows — issue #321). Leaving the version unwritten retries next launch
+    // and keeps the warnings above visible. Platform-skipped skills are
+    // intentional, not defects, so they don't block the advance.
+    let complete = missing.is_empty() && incomplete.is_empty();
+    if complete {
+        fs::write(&ver_file, SYSTEM_SKILLS_VERSION)
+            .map_err(|e| format!("version write failed: {}", e))?;
+    }
+
+    ulog_info!(
+        "[system-skills] Synced v{} (complete={}) — ok: {:?}, missing: {:?}, incomplete: {:?}, platform-skipped: {:?}",
+        SYSTEM_SKILLS_VERSION,
+        complete,
+        synced,
+        missing,
+        incomplete,
+        platform_skipped
+    );
+    Ok(complete)
+}
+
+/// Outcome of syncing one system skill from the app bundle into
+/// `~/.myagents/skills/`.
+enum SystemSkillSync {
+    /// Source was valid and copied over `dst`.
+    Synced,
+    /// Source directory does not exist in the bundle at all.
+    SkippedMissingSource,
+    /// Source directory exists but is not a valid skill (no SKILL.md). The
+    /// existing `dst`, if any, was left untouched.
+    SkippedIncompleteSource,
+}
+
+/// A skill directory is "complete" iff it carries a top-level `SKILL.md` — the
+/// one file every SKILL.md-gated scanner (Settings panel, slash picker, SDK
+/// runtime) requires to recognize a skill. An empty / SKILL.md-less directory
+/// is a packaging defect, not a skill. Applies equally to a bundled source dir
+/// and an installed `~/.myagents/skills/<name>` dir.
+fn skill_dir_is_complete(dir: &Path) -> bool {
+    dir.join("SKILL.md").is_file()
+}
+
+/// True iff every system skill that SHOULD be installed on this platform has a
+/// valid SKILL.md on disk under `skills_dir`. Platform-blocked skills are
+/// intentionally absent and don't count against completeness. Used to bypass
+/// the version fast-path so a frozen/incomplete install (issue #321) self-heals
+/// instead of trusting the version stamp.
+fn all_installed_system_skills_complete(skills_dir: &Path) -> bool {
+    SYSTEM_SKILLS.iter().all(|name| {
+        is_skill_blocked_on_platform(name) || skill_dir_is_complete(&skills_dir.join(name))
+    })
+}
+
+/// Sync one system skill `src` → `dst`. Refuses to clear an existing good
+/// `dst` unless the source is a complete skill, so a packaging miss can never
+/// replace a working installed copy with an empty directory (issue #321: the
+/// old path did `remove_dir_all(dst)` BEFORE merging, so an empty bundled
+/// source destroyed the user's copy and then wrote the version file, making
+/// the empty state permanent and invisible to every panel/scan).
+fn sync_one_system_skill(src: &Path, dst: &Path) -> Result<SystemSkillSync, String> {
+    if !src.exists() {
+        return Ok(SystemSkillSync::SkippedMissingSource);
+    }
+    if !skill_dir_is_complete(src) {
+        return Ok(SystemSkillSync::SkippedIncompleteSource);
+    }
+    // Source is a valid skill — safe to replace the existing target wholesale.
+    // SYSTEM_SKILLS_VERSION bumps mean "the whole skill snapshot is new".
+    //
+    // Path::exists() follows symlinks → returns false for broken links, so a
+    // dangling `~/.myagents/skills/<name>` left by the user (e.g. pointing at
+    // a moved repo) would slip past and then trip `fs::create_dir_all` in
+    // `merge_dir_recursive` with EEXIST, failing the whole startup sync.
+    // symlink_metadata() does NOT follow, so it's the right probe for "is
+    // there anything at this path, even a dangling link?".
+    match fs::symlink_metadata(dst) {
+        Ok(meta) => {
+            let removed = if meta.file_type().is_symlink() || meta.is_file() {
+                fs::remove_file(dst)
+            } else {
+                fs::remove_dir_all(dst)
+            };
+            if let Err(e) = removed {
+                ulog_warn!(
+                    "[system-skills] failed to clear {}: {} — falling back to merge",
+                    dst.display(),
                     e
                 );
             }
         }
-        merge_dir_recursive(&src, &dst)
-            .map_err(|e| format!("sync {}: {}", skill_name, e))?;
-        synced.push(*skill_name);
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // Nothing there, fresh seed below.
+        }
+        Err(e) => {
+            ulog_warn!(
+                "[system-skills] symlink_metadata({}) failed: {} — falling back to merge",
+                dst.display(),
+                e
+            );
+        }
     }
-
-    fs::write(&ver_file, SYSTEM_SKILLS_VERSION)
-        .map_err(|e| format!("version write failed: {}", e))?;
-
-    ulog_info!(
-        "[system-skills] Synced v{} — ok: {:?}, missing: {:?}, platform-skipped: {:?}",
-        SYSTEM_SKILLS_VERSION,
-        synced,
-        missing,
-        platform_skipped
-    );
-    Ok(true)
+    merge_dir_recursive(src, dst).map_err(|e| e.to_string())?;
+    Ok(SystemSkillSync::Synced)
 }
 
 /// Merge src/ into dst/ recursively. Creates missing dirs, overwrites files, never deletes.
@@ -1336,6 +1417,113 @@ fn merge_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod system_skills_tests {
+    use super::{
+        all_installed_system_skills_complete, is_skill_blocked_on_platform, skill_dir_is_complete,
+        sync_one_system_skill, SystemSkillSync, SYSTEM_SKILLS,
+    };
+    use std::fs;
+
+    // Issue #321: a Windows install shipped some system-skill source dirs
+    // empty (no SKILL.md). The old sync removed the user's good copy, merged
+    // the empty source, then wrote the version file — freezing an empty,
+    // panel-invisible directory permanently. These tests pin the invariant
+    // that an incomplete source can never destroy a working copy, and that the
+    // version gate validates on-disk state rather than trusting the stamp.
+
+    #[test]
+    fn complete_requires_skill_md() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("foo");
+        fs::create_dir_all(&dir).unwrap();
+        assert!(!skill_dir_is_complete(&dir), "empty dir is not a skill");
+        fs::write(dir.join("SKILL.md"), "x").unwrap();
+        assert!(skill_dir_is_complete(&dir), "dir with SKILL.md is a skill");
+    }
+
+    #[test]
+    fn version_gate_validation_detects_frozen_install() {
+        // Lay down every platform-available system skill WITH a SKILL.md →
+        // gate may early-return. Then blank one out → gate must bypass so the
+        // (non-destructive) re-sync runs and self-heals.
+        let tmp = tempfile::tempdir().unwrap();
+        let skills_dir = tmp.path().join("skills");
+        for name in SYSTEM_SKILLS {
+            if is_skill_blocked_on_platform(name) {
+                continue;
+            }
+            let d = skills_dir.join(name);
+            fs::create_dir_all(&d).unwrap();
+            fs::write(d.join("SKILL.md"), "x").unwrap();
+        }
+        assert!(
+            all_installed_system_skills_complete(&skills_dir),
+            "all SKILL.md present → install is complete"
+        );
+
+        // Freeze one into the empty-dir state seen in #321.
+        let victim = SYSTEM_SKILLS
+            .iter()
+            .find(|n| !is_skill_blocked_on_platform(n))
+            .expect("at least one platform-available system skill");
+        fs::remove_file(skills_dir.join(victim).join("SKILL.md")).unwrap();
+        assert!(
+            !all_installed_system_skills_complete(&skills_dir),
+            "a SKILL.md-less system skill must fail the gate so sync re-runs"
+        );
+    }
+
+    #[test]
+    fn missing_source_reports_missing_and_leaves_dst() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src/skill"); // never created
+        let dst = tmp.path().join("dst/skill");
+        fs::create_dir_all(&dst).unwrap();
+        fs::write(dst.join("SKILL.md"), "good").unwrap();
+        let outcome = sync_one_system_skill(&src, &dst).unwrap();
+        assert!(matches!(outcome, SystemSkillSync::SkippedMissingSource));
+        assert_eq!(fs::read_to_string(dst.join("SKILL.md")).unwrap(), "good");
+    }
+
+    #[test]
+    fn incomplete_source_preserves_existing_good_copy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src/skill");
+        fs::create_dir_all(&src).unwrap(); // source exists but has NO SKILL.md
+        fs::write(src.join("README.md"), "noise").unwrap();
+        let dst = tmp.path().join("dst/skill");
+        fs::create_dir_all(&dst).unwrap();
+        fs::write(dst.join("SKILL.md"), "good").unwrap();
+
+        let outcome = sync_one_system_skill(&src, &dst).unwrap();
+        assert!(matches!(outcome, SystemSkillSync::SkippedIncompleteSource));
+        assert!(
+            dst.join("SKILL.md").exists(),
+            "an incomplete bundled source must NOT destroy the installed copy"
+        );
+        assert_eq!(fs::read_to_string(dst.join("SKILL.md")).unwrap(), "good");
+    }
+
+    #[test]
+    fn valid_source_replaces_dst_wholesale() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src/skill");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("SKILL.md"), "new").unwrap();
+        let dst = tmp.path().join("dst/skill");
+        fs::create_dir_all(&dst).unwrap();
+        fs::write(dst.join("SKILL.md"), "old").unwrap();
+        // A stale file under dst must be gone after a wholesale replace.
+        fs::write(dst.join("stale.txt"), "stale").unwrap();
+
+        let outcome = sync_one_system_skill(&src, &dst).unwrap();
+        assert!(matches!(outcome, SystemSkillSync::Synced));
+        assert_eq!(fs::read_to_string(dst.join("SKILL.md")).unwrap(), "new");
+        assert!(!dst.join("stale.txt").exists(), "wholesale replace drops stale files");
+    }
 }
 
 // Path-safety blacklist (single source for validate_file_path + the cross-check
