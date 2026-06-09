@@ -27,9 +27,20 @@ export function decideSessionCompleteErrorAction(opts: {
   hasAssistantText: boolean;
   /** stopExternalSession() initiated this teardown (read-and-cleared by the shell). */
   userRequestedStop: boolean;
+  /**
+   * persistTurnResult() for the completed turn is still in flight (cross-review
+   * 0.2.32). While it runs, the accumulators still hold the COMPLETED turn's
+   * text, so hasAssistantText=true does not mean "interrupted mid-turn" — it
+   * means "successful turn being flushed". Without this, a process death in
+   * that window surfaced an error banner for a turn that already succeeded,
+   * and the shell's accumulator reset raced the in-flight persist.
+   */
+  finalizationInFlight?: boolean;
 }): SessionCompleteErrorAction {
   // Idle-exit wins: a between-turns death is invisible regardless of why it happened.
-  if (opts.turnCompleted && !opts.hasAssistantText) return 'ignore-idle';
+  // "Between turns" = the turn completed AND its leftover text (if any) is just
+  // the in-flight finalization flushing, not an interrupted response.
+  if (opts.turnCompleted && (!opts.hasAssistantText || opts.finalizationInFlight)) return 'ignore-idle';
   // #307: an abort we initiated is expected, not a failure.
   if (opts.userRequestedStop) return 'suppress-user-stop';
   return 'surface';
