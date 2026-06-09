@@ -2324,7 +2324,11 @@ export function setSessionPermissionMode(mode: PermissionMode): void {
   // must NOT silently downgrade a desktop session's plan-mode hard gate. Pure IM
   // sessions (not snapshotted) fall through and live-follow the channel mode.
   if (isCurrentSessionSnapshotted()) {
-    console.log(`[agent] IM config sync permissionMode '${mode}' ignored — session ${sessionId} is snapshotted (snapshot wins)`);
+    // warn, not log: this guard is UNCONDITIONAL (no imConfigSync flag) because a
+    // caller audit proved only the Rust IM router hits this endpoint. If a future
+    // desktop/renderer caller ever lands here, its change is swallowed — make
+    // that loudly visible instead of silently dropping a user action.
+    console.warn(`[agent] config sync permissionMode '${mode}' ignored — session ${sessionId} is snapshotted (snapshot wins; endpoint is Rust-IM-router-only by contract)`);
     return;
   }
 
@@ -2563,7 +2567,10 @@ export function setSessionProviderEnv(providerEnv: ProviderEnv | undefined): voi
   // DeepSeek → real "Model Not Found" 500 (#327 comment). Pure IM / cron
   // sessions (not snapshotted) fall through to the normal live-follow path.
   if (isCurrentSessionSnapshotted()) {
-    console.log(`[agent] IM config sync provider '${newLabel}' ignored — session ${sessionId} is snapshotted (snapshot wins)`);
+    // warn, not log: same rationale as the permissionMode guard — unconditional
+    // by caller audit (Rust-IM-router-only); a future non-IM caller's change
+    // would be swallowed here and must be loud.
+    console.warn(`[agent] config sync provider '${newLabel}' ignored — session ${sessionId} is snapshotted (snapshot wins; endpoint is Rust-IM-router-only by contract)`);
     return;
   }
 
@@ -5370,7 +5377,12 @@ function handleMessageComplete(): void {
   // (queue:started fallback) or the next turn's messages can't steal/drop the usage.
   // (Does not retroactively fix turns whose assistant line was already appended
   // usage-less by a mid-turn persist — queue replay / local-command echo — because
-  // the JSONL writer is append-only; that narrower path is tracked separately.)
+  // the JSONL writer is append-only. KNOWN RESIDUAL, see the #331 commit message
+  // (83f2ef7d) "Known residual" section for scope/evidence: not observed in any
+  // of 782 local sessions. Candidate root fix: make the mid-turn persist cursor
+  // stop BEFORE the current turn's unfinished assistant message so its line is
+  // never appended without usage — touches the persistence core, needs its own
+  // reviewed change.)
   const usageStampIndex = findTurnUsageStampIndex(messages, lastPersistedIndex);
   if (usageStampIndex >= 0) {
     const completedAssistant = messages[usageStampIndex];
