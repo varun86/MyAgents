@@ -298,7 +298,8 @@ export default function ModelManagementPanel({
             ) : (
               <div>
                 {provider.models.map(model => (
-                  <React.Fragment key={model.model}>
+                  // relative wrapper anchors the settings popover to its row
+                  <div key={model.model} className="relative">
                     <ActiveModelRow
                       model={model}
                       isPrimary={model.model === primaryModel}
@@ -315,7 +316,7 @@ export default function ModelManagementPanel({
                         onSave={handleSaveModelSettings}
                       />
                     )}
-                  </React.Fragment>
+                  </div>
                 ))}
               </div>
             )}
@@ -503,6 +504,7 @@ const ActiveModelRow = React.memo(function ActiveModelRow({
           type="button"
           onClick={handleToggleEdit}
           title="模型参数设置"
+          data-model-gear
           className={`flex-shrink-0 rounded p-1 transition-all hover:text-[var(--accent)] ${
             isEditing
               ? 'text-[var(--accent)] opacity-100'
@@ -540,11 +542,19 @@ const ActiveModelRow = React.memo(function ActiveModelRow({
   );
 });
 
-// ===== ModelSettingsEditor (#325 — inline per-model parameter form) =====
+// ===== ModelSettingsEditor (#325 — anchored per-model parameter popover) =====
 //
-// Expands below the row when the ⚙ button is active. Edits the three fields
+// A small card anchored under the row's ⚙ button (rendered inside the row's
+// `relative` wrapper) so the model list never shifts. Edits the three fields
 // that actually have consumers (see utils/modelSettingsForm.ts header for the
 // audit; model-level maxOutputTokens is deliberately absent — it has none).
+//
+// Dismissal: outside-click + Escape (ContextMenu pattern) and Cmd+W via
+// useCloseLayer at 210 — above the panel's own 200, so Cmd+W closes the
+// popover before the panel. Mousedown on any row's ⚙ is exempt from
+// outside-close: closing here would race the gear's own click-toggle and
+// reopen immediately. The toggle alone decides (same row → close; another
+// row → editingModelId switches and this instance unmounts).
 
 const ModelSettingsEditor = function ModelSettingsEditor({
   model,
@@ -564,6 +574,28 @@ const ModelSettingsEditor = function ModelSettingsEditor({
   );
   const [modalitiesTouched, setModalitiesTouched] = useState(false);
   const [saving, setSaving] = useState(false);
+  const popoverRef = useRef<HTMLDivElement>(null);
+
+  const onCancelRef = useRef(onCancel);
+  onCancelRef.current = onCancel;
+  useEffect(() => {
+    const handleMouseDown = (event: MouseEvent) => {
+      const target = event.target as Node;
+      if (popoverRef.current?.contains(target)) return;
+      if (target instanceof Element && target.closest('[data-model-gear]')) return;
+      onCancelRef.current();
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onCancelRef.current();
+    };
+    document.addEventListener('mousedown', handleMouseDown);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', handleMouseDown);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, []);
+  useCloseLayer(() => { onCancelRef.current(); return true; }, 210);
 
   const parsedContext = parseContextWindowInput(contextDraft);
   const contextInvalid = parsedContext === 'invalid';
@@ -595,80 +627,94 @@ const ModelSettingsEditor = function ModelSettingsEditor({
     }
   };
 
+  // Live hint: parsed-value echo when valid, error when invalid, default otherwise.
+  const hint = contextInvalid
+    ? '格式无效 — 输入 token 数，可带 k / m 后缀（上限 20m）'
+    : modalitiesInvalid
+      ? '至少选择一种模态'
+      : typeof parsedContext === 'number'
+        ? `≈ ${formatTokenCount(parsedContext)} tokens · 下一轮对话生效`
+        : '未设窗口按 200K 估算 · 下一轮对话生效';
+
+  const inputBase =
+    'w-full rounded-lg border bg-[var(--paper)] px-2.5 py-1.5 text-xs text-[var(--ink)] outline-none transition-all placeholder:text-[var(--ink-faint)] focus:bg-[var(--paper-elevated)]';
+  const inputOk =
+    'border-[var(--line)] focus:border-[var(--accent)] focus:shadow-[0_0_0_3px_var(--accent-warm-subtle)]';
+  const inputErr = 'border-[var(--error)] focus:shadow-[0_0_0_3px_rgba(220,38,38,0.07)]';
+
   return (
-    <div className="mb-1 ml-2 mr-2 rounded-lg border border-[var(--line-subtle)] bg-[var(--paper-inset)] px-3 py-2.5">
-      <div className="space-y-2.5">
-        {/* 显示名称 */}
-        <label className="flex items-center gap-3">
-          <span className="w-16 flex-shrink-0 text-[11px] text-[var(--ink-muted)]">显示名称</span>
-          <input
-            type="text"
-            value={nameDraft}
-            onChange={(e) => setNameDraft(e.target.value)}
-            placeholder={model.model}
-            className="flex-1 rounded-md border border-[var(--line)] bg-[var(--paper-elevated)] px-2 py-1 text-[12px] text-[var(--ink)] placeholder:text-[var(--ink-subtle)] focus:border-[var(--ink-muted)] focus:outline-none"
-          />
-        </label>
+    <div
+      ref={popoverRef}
+      className="absolute right-0 top-[calc(100%+8px)] z-20 w-[360px] max-w-full origin-top-right animate-[popoverIn_0.22s_cubic-bezier(0.3,1.2,0.4,1)] rounded-[14px] border border-[var(--line-subtle)] bg-[var(--paper-elevated)] p-4 shadow-[var(--shadow-lg)]"
+    >
+      {/* 箭头 — 指向行尾的 ⚙ 区域 */}
+      <div className="absolute -top-[5px] right-14 h-2.5 w-2.5 rotate-45 border-l border-t border-[var(--line-subtle)] bg-[var(--paper-elevated)]" />
 
-        {/* 上下文窗口 */}
-        <div className="flex items-start gap-3">
-          <span className="w-16 flex-shrink-0 pt-1 text-[11px] text-[var(--ink-muted)]">上下文窗口</span>
-          <div className="flex-1">
-            <input
-              type="text"
-              value={contextDraft}
-              onChange={(e) => setContextDraft(e.target.value)}
-              placeholder="如 128000，支持 128k / 1m"
-              className={`w-full rounded-md border bg-[var(--paper-elevated)] px-2 py-1 font-mono text-[12px] text-[var(--ink)] placeholder:font-sans placeholder:text-[var(--ink-subtle)] focus:outline-none ${
-                contextInvalid
-                  ? 'border-[var(--error)]'
-                  : 'border-[var(--line)] focus:border-[var(--ink-muted)]'
-              }`}
-            />
-            <p className="mt-1 text-[10px] leading-relaxed text-[var(--ink-subtle)]">
-              {contextInvalid
-                ? '格式无效 — 请输入 token 数，可带 k / m 后缀'
-                : '未设置时按默认 200K 估算；保存后下一轮对话生效，自动压缩阈值在会话重启后生效'}
-            </p>
-          </div>
-        </div>
+      {/* 标题带模型 ID，防止改错对象 */}
+      <div className="mb-3 flex items-baseline gap-2">
+        <span className="flex-shrink-0 text-xs font-semibold text-[var(--ink)]">模型参数</span>
+        <code className="truncate font-mono text-[10px] text-[var(--ink-subtle)]">{model.model}</code>
+      </div>
 
-        {/* 输入模态 */}
-        <div className="flex items-start gap-3">
-          <span className="w-16 flex-shrink-0 pt-1 text-[11px] text-[var(--ink-muted)]">输入模态</span>
-          <div className="flex-1">
-            <div className="flex gap-1.5">
-              {EDITABLE_MODALITIES.map(kind => {
-                const selected = modalities.includes(kind);
-                return (
-                  <button
-                    key={kind}
-                    type="button"
-                    onClick={() => toggleModality(kind)}
-                    className={`rounded-full border px-2.5 py-0.5 text-[11px] transition-colors ${
-                      selected
-                        ? 'border-[var(--accent-warm-muted)] bg-[var(--accent-warm-subtle)] text-[var(--accent)]'
-                        : 'border-[var(--line)] text-[var(--ink-muted)] hover:border-[var(--ink-subtle)]'
-                    }`}
-                  >
-                    {MODALITY_LABELS[kind]}
-                  </button>
-                );
-              })}
-            </div>
-            <p className="mt-1 text-[10px] leading-relaxed text-[var(--ink-subtle)]">
-              {modalitiesInvalid ? '至少选择一种模态' : '未设置时默认允许所有模态'}
-            </p>
-          </div>
+      {/* 显示名称 */}
+      <div className="mb-2.5">
+        <label className="mb-1 block text-[10px] font-medium tracking-wide text-[var(--ink-muted)]">显示名称</label>
+        <input
+          type="text"
+          value={nameDraft}
+          onChange={(e) => setNameDraft(e.target.value)}
+          placeholder={model.model}
+          className={`${inputBase} ${inputOk}`}
+        />
+      </div>
+
+      {/* 上下文窗口 */}
+      <div className="mb-2.5">
+        <label className="mb-1 block text-[10px] font-medium tracking-wide text-[var(--ink-muted)]">上下文窗口</label>
+        <input
+          type="text"
+          value={contextDraft}
+          onChange={(e) => setContextDraft(e.target.value)}
+          placeholder="如 128000 · 支持 128k / 1m"
+          className={`${inputBase} font-mono placeholder:font-sans ${contextInvalid ? inputErr : inputOk}`}
+        />
+      </div>
+
+      {/* 输入模态 */}
+      <div>
+        <label className="mb-1 block text-[10px] font-medium tracking-wide text-[var(--ink-muted)]">输入模态</label>
+        <div className="flex gap-1.5 pt-0.5">
+          {EDITABLE_MODALITIES.map(kind => {
+            const selected = modalities.includes(kind);
+            return (
+              <button
+                key={kind}
+                type="button"
+                onClick={() => toggleModality(kind)}
+                className={`rounded-full border px-2.5 py-1 text-[11px] transition-colors ${
+                  selected
+                    ? 'border-transparent bg-[var(--accent-warm-muted)] font-medium text-[var(--accent)]'
+                    : 'border-[var(--line)] text-[var(--ink-muted)] hover:border-[var(--ink-subtle)]'
+                }`}
+              >
+                {selected && <span className="mr-1 text-[9px]">✓</span>}
+                {MODALITY_LABELS[kind]}
+              </button>
+            );
+          })}
         </div>
       </div>
 
+      <p className={`mt-2 text-[10px] leading-relaxed ${contextInvalid || modalitiesInvalid ? 'text-[var(--error)]' : 'text-[var(--ink-subtle)]'}`}>
+        {hint}
+      </p>
+
       {/* Actions */}
-      <div className="mt-2.5 flex justify-end gap-2 border-t border-[var(--line-subtle)] pt-2">
+      <div className="mt-3 flex justify-end gap-2">
         <button
           type="button"
           onClick={onCancel}
-          className="rounded-md px-2.5 py-1 text-[11px] text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
+          className="rounded-lg px-3 py-1.5 text-xs text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
         >
           取消
         </button>
@@ -676,7 +722,7 @@ const ModelSettingsEditor = function ModelSettingsEditor({
           type="button"
           onClick={handleSave}
           disabled={!canSave}
-          className="rounded-md bg-[var(--accent-warm-subtle)] px-2.5 py-1 text-[11px] font-medium text-[var(--accent)] transition-colors hover:bg-[var(--accent-warm-muted)] disabled:opacity-40"
+          className="rounded-lg bg-[var(--button-primary-bg)] px-4 py-1.5 text-xs font-medium text-white transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:opacity-40"
         >
           {saving ? '保存中…' : '保存'}
         </button>
