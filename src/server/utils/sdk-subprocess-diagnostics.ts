@@ -1,5 +1,6 @@
 export type SdkSubprocessFailureKind =
   | 'windows-git-bash-missing'
+  | 'windows-subprocess-exit-1'
   | 'windows-native-bun-crash';
 
 export interface SdkSubprocessFailureDiagnostic {
@@ -37,6 +38,27 @@ function hasBunNativeCrashEvidence(raw: string): boolean {
   return /Bun has crashed|Illegal instruction|Failed to start HTTP Client thread|panic\([^)]*\):/i.test(raw);
 }
 
+/** Direct evidence that the failure is a missing bash (Git for Windows):
+ *  cmd.exe's "not recognized" (EN + zh-CN localization), spawn ENOENT on
+ *  bash, or a shebang that couldn't resolve /bin/bash. */
+function hasBashMissingEvidence(raw: string): boolean {
+  return (
+    /['"]?bash['"]?\s*(is not recognized|不是内部或外部命令)/i.test(raw)
+    || /spawn\s+bash\s+ENOENT|ENOENT[^\n]*\bbash\b|\bbash\b[^\n]*ENOENT/i.test(raw)
+    || /\/(usr\/)?bin\/bash:\s*No such file/i.test(raw)
+  );
+}
+
+/** The diagnostic REPLACES userFacingError at the consumer (agent-session),
+ *  so the original error must ride along or its only copy lives in the log
+ *  and a misclassified user has nothing to search for. */
+function originalErrorSuffix(errorMessage: string): string {
+  const trimmed = errorMessage.trim().replace(/\s+/g, ' ');
+  if (!trimmed) return '';
+  const summary = trimmed.length > 200 ? `${trimmed.slice(0, 200)}…` : trimmed;
+  return `（原始错误：${summary}）`;
+}
+
 export function diagnoseSdkSubprocessFailure(input: {
   errorMessage: string;
   stderr?: readonly string[];
@@ -48,28 +70,48 @@ export function diagnoseSdkSubprocessFailure(input: {
   const raw = [input.errorMessage, ...(input.stderr ?? [])].join('\n');
   const exitCode = parseProcessExitCode(raw);
 
-  if (exitCode === 1) {
+  // Native-crash evidence is checked FIRST (cross-review 0.2.32): a Bun
+  // crash that happens to exit 1 must not be classified as a Git problem.
+  const isNativeCrash =
+    (exitCode !== undefined && WINDOWS_NATIVE_CRASH_CODES.has(exitCode))
+    || hasBunNativeCrashEvidence(raw);
+  if (isNativeCrash) {
+    const codeSuffix = exitCode === undefined
+      ? ''
+      : `（exit code ${exitCode} / ${formatHexCode(exitCode)}）`;
     return {
-      kind: 'windows-git-bash-missing',
+      kind: 'windows-native-bun-crash',
       exitCode,
-      exitCodeHex: formatHexCode(exitCode),
-      userMessage: '子进程启动失败 (exit code 1)。最可能原因：未安装 Git for Windows。请安装 Git：https://git-scm.com/downloads/win',
-      imMessage: 'AI 引擎启动失败：Windows 机器可能未安装 Git for Windows。请在桌面端安装 Git 后重试。',
+      exitCodeHex: exitCode === undefined ? undefined : formatHexCode(exitCode),
+      userMessage: `Claude Agent SDK 启动失败${codeSuffix}，请检查运行环境。`,
+      imMessage: `Claude Agent SDK 启动失败${codeSuffix}，请检查运行环境。`,
     };
   }
 
-  const isNativeCrash = exitCode !== undefined && WINDOWS_NATIVE_CRASH_CODES.has(exitCode);
-  if (!isNativeCrash && !hasBunNativeCrashEvidence(raw)) return null;
+  if (exitCode === 1) {
+    const suffix = originalErrorSuffix(input.errorMessage);
+    if (hasBashMissingEvidence(raw)) {
+      // Confident: stderr names the missing bash.
+      return {
+        kind: 'windows-git-bash-missing',
+        exitCode,
+        exitCodeHex: formatHexCode(exitCode),
+        userMessage: `子进程启动失败 (exit code 1)：未找到 bash，通常表示未安装 Git for Windows。请安装 Git：https://git-scm.com/downloads/win ${suffix}`,
+        imMessage: 'AI 引擎启动失败：Windows 机器未找到 bash（通常是未安装 Git for Windows）。请在桌面端安装 Git 后重试。',
+      };
+    }
+    // Ambiguous (cross-review 0.2.32): exit 1 also covers CLI fatals, AV
+    // interference, broken config… Lead with the hint for the most common
+    // cause, but hedge and keep the original error so a user who HAS Git
+    // installed isn't steered into a dead end.
+    return {
+      kind: 'windows-subprocess-exit-1',
+      exitCode,
+      exitCodeHex: formatHexCode(exitCode),
+      userMessage: `子进程启动失败 (exit code 1)。常见原因：未安装 Git for Windows（https://git-scm.com/downloads/win）；也可能是杀毒软件拦截或运行环境异常。${suffix}`,
+      imMessage: `AI 引擎启动失败 (exit code 1)。常见原因：Windows 机器未安装 Git for Windows；也可能是杀毒软件拦截或运行环境异常。请在桌面端检查后重试。`,
+    };
+  }
 
-  const codeSuffix = exitCode === undefined
-    ? ''
-    : `（exit code ${exitCode} / ${formatHexCode(exitCode)}）`;
-
-  return {
-    kind: 'windows-native-bun-crash',
-    exitCode,
-    exitCodeHex: exitCode === undefined ? undefined : formatHexCode(exitCode),
-    userMessage: `Claude Agent SDK 启动失败${codeSuffix}，请检查运行环境。`,
-    imMessage: `Claude Agent SDK 启动失败${codeSuffix}，请检查运行环境。`,
-  };
+  return null;
 }
