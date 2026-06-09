@@ -11,6 +11,7 @@
  */
 
 import type { McpServerDefinition } from '../shared/config-types';
+import { workspacePathsEqual } from '../shared/workspacePath';
 import { SDK_RESERVED_MCP_NAMES } from './agent-session';
 import {
   loadConfig,
@@ -3727,8 +3728,10 @@ function resolveAgentRuntimeFromWorkspace(
   const config = loadConfig();
   const agents = config.agents ?? [];
   // Match by workspacePath first (most specific), then by workspaceId.
+  // #320 family: CLI/cron callers send POSIX-style paths while config agents
+  // may keep native Windows backslashes — compare on the canonical identity.
   const agent =
-    (wsPath && agents.find(a => a.workspacePath === wsPath))
+    (wsPath && agents.find(a => workspacePathsEqual(a.workspacePath, wsPath)))
     ?? (wsId && agents.find(a => a.id === wsId))
     ?? undefined;
   if (!agent) return undefined;

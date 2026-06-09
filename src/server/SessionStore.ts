@@ -21,6 +21,7 @@ import { join } from 'path';
 import type { SessionMetadata, SessionData, SessionMessage, SessionStats } from './types/session';
 import { createSessionMetadata, generateSessionTitle } from './types/session';
 import { stripBom } from '../shared/utils';
+import { workspacePathsEqual } from '../shared/workspacePath';
 import { ensureDirSync } from './utils/fs-utils';
 import { withFileLock } from './utils/file-lock';
 import { countNonEmptyJsonlLines } from './utils/jsonl-line-count';
@@ -304,7 +305,11 @@ export function getAllSessionMetadata(): SessionMetadata[] {
 export function getSessionsByAgentDir(agentDir: string): SessionMetadata[] {
     const all = getAllSessionMetadata();
     return all
-        .filter(s => s.agentDir === agentDir)
+        // #320 family: session agentDir and the caller's path come from
+        // different stores (sessions.json vs projects.json/config) — on
+        // Windows they disagree on separators/drive case, so raw === drops
+        // every session. Compare on the canonical identity.
+        .filter(s => workspacePathsEqual(s.agentDir, agentDir))
         .sort((a, b) => new Date(b.lastActiveAt).getTime() - new Date(a.lastActiveAt).getTime());
 }
 
