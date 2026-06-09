@@ -2311,9 +2311,23 @@ export function getSessionPermissionMode(): PermissionMode {
   return currentPermissionMode;
 }
 
-/** Set permission mode (called from frontend via /api/session/permission-mode) */
+/** Set permission mode (called by the Rust IM router via /api/session/permission-mode).
+ *  NOTE: desktop permission changes do NOT reach here — they ride the chat-send
+ *  payload (enqueueUserMessage's inline applySessionConfig). This endpoint is
+ *  Rust-IM-router-only. */
 export function setSessionPermissionMode(mode: PermissionMode): void {
   if (mode === currentPermissionMode) return;
+
+  // #327 — snapshot authority (see setSessionModel). Rust-IM-router-only caller;
+  // for a snapshotted owned session the channel's permission override must not
+  // change the live mode. This is security-relevant: an IM channel on fullAgency
+  // must NOT silently downgrade a desktop session's plan-mode hard gate. Pure IM
+  // sessions (not snapshotted) fall through and live-follow the channel mode.
+  if (isCurrentSessionSnapshotted()) {
+    console.log(`[agent] IM config sync permissionMode '${mode}' ignored — session ${sessionId} is snapshotted (snapshot wins)`);
+    return;
+  }
+
   const oldMode = currentPermissionMode;
   const oldPrePlan = prePlanPermissionMode;
   // Route through the shared transition so the UI toggle keeps the plan
@@ -2439,8 +2453,29 @@ function dispatchSetModelToSdk(model: string): Promise<void> {
   return promise;
 }
 
-export function setSessionModel(model: string): void {
+export function setSessionModel(model: string, opts?: { imConfigSync?: boolean }): void {
   if (model === currentModel) return;
+
+  // #327 — snapshot authority. An owned (snapshotted) desktop session's model is
+  // frozen at the snapshot, and the per-turn /api/im/enqueue resolver already
+  // applies "snapshot wins" (index.ts). But the Rust IM router ALSO pushes the
+  // channel's model override straight here, via sync_ai_config → /api/model/set,
+  // when it (re)warms a sidecar that is SHARED with the desktop session (the
+  // desktop↔IM handover binds the IM peer to the desktop session_id). For a
+  // snapshotted session that push must be ignored — applying it clobbers the
+  // process-global `currentModel`, which is read live by buildClaudeSessionEnv /
+  // broadcastBuiltinContextUsage. With an unregistered override (e.g.
+  // astron-code-latest) lookupModelContextLength returns undefined → the desktop
+  // tab's `chat:context-usage` window collapses to the SDK 200K default (100%),
+  // and it opens a window where the live provider/model desync into a real
+  // upstream mismatch → 500 (#327 comment). Desktop's own model push (Chat.tsx,
+  // no `imConfigSync`) stays authoritative — it updates the snapshot itself.
+  // Pure IM / cron / live-follow sessions have no snapshot, so this is a no-op
+  // for them (isCurrentSessionSnapshotted() === false) and the override applies.
+  if (opts?.imConfigSync && isCurrentSessionSnapshotted()) {
+    console.log(`[agent] IM config sync model '${model}' ignored — session ${sessionId} is snapshotted (snapshot wins)`);
+    return;
+  }
 
   const oldModel = currentModel;
   const aliasEnvChanged = modelAliasEnvChangesForModel(currentProviderEnv?.modelAliases, oldModel, model);
@@ -2516,6 +2551,22 @@ export function setSessionProviderEnv(providerEnv: ProviderEnv | undefined): voi
   // Full equality check — all ProviderEnv fields affect subprocess env (authType, apiProtocol, etc.)
   if (providerEnvEqual(currentProviderEnv, providerEnv)) return;
 
+  // #327 — snapshot authority (see setSessionModel). `/api/provider/set` is
+  // Rust-IM-router-only (no renderer caller); desktop provider changes are baked
+  // at sidecar spawn from the snapshot and re-applied per-turn inline by
+  // enqueueUserMessage — they never reach this setter. So for a snapshotted
+  // owned session, ANY call here is a channel/agent provider sync that must be
+  // ignored: the snapshot provider (self-resolved at boot) stays authoritative.
+  // This MUST no-op BEFORE mutating `currentProviderEnv` — the v0.1.69 guard
+  // below only skipped the abort/restart, so the desktop session's LIVE provider
+  // still became the channel's (e.g. Xunfei) while the resolved model stayed
+  // DeepSeek → real "Model Not Found" 500 (#327 comment). Pure IM / cron
+  // sessions (not snapshotted) fall through to the normal live-follow path.
+  if (isCurrentSessionSnapshotted()) {
+    console.log(`[agent] IM config sync provider '${newLabel}' ignored — session ${sessionId} is snapshotted (snapshot wins)`);
+    return;
+  }
+
   // Resume safety: entering a provider that validates signed session history requires a fresh
   // session when the previous provider did not. Anthropic validates thinking block signatures
   // that third-party providers don't, so resuming with third-party messages causes errors.
@@ -2539,13 +2590,9 @@ export function setSessionProviderEnv(providerEnv: ProviderEnv | undefined): voi
 
   // If a session is running, its subprocess has the OLD provider env.
   // Restart so the next session picks up the updated environment.
-  // v0.1.69 T14: Locked sessions own their provider — agent-level provider sync
-  // should not abort them. The snapshot in the Sidecar's startup env is
-  // authoritative; a later /api/provider/set from Rust reflecting an agent
-  // config change must be ignored at the restart-scheduling layer.
-  if (isCurrentSessionSnapshotted()) {
-    console.log(`[agent] provider changed (${oldLabel} → ${newLabel}) but session ${sessionId} is snapshotted — skip abort/restart`);
-  } else if (querySession) {
+  // (Snapshotted/owned sessions already returned above — only live-follow IM /
+  // cron sessions reach here, and they DO own provider changes via this path.)
+  if (querySession) {
     if (isProcessing && !isPreWarming) {
       // Active user turn in progress — defer restart to avoid killing mid-response.
       // The restart will fire after the current turn completes (pendingConfigRestart).

@@ -204,12 +204,15 @@ impl SessionRouter {
             EnsureSidecarPrep::NeedCreate(info) => info,
             EnsureSidecarPrep::Healthy(_) => unreachable!(),
         };
-        let port = Self::create_sidecar_blocking(info.clone(), app_handle, manager).await?;
+        // #327: forward the manager's authoritative is_new — a reused sidecar
+        // reports false here so the caller skips sync_ai_config (which would
+        // otherwise push channel config onto a shared/snapshotted session).
+        let (port, is_new) = Self::create_sidecar_blocking(info.clone(), app_handle, manager).await?;
 
         // Phase 3: Write result back
         self.commit_ensure_sidecar(session_key, &info, port);
 
-        Ok((port, true))
+        Ok((port, is_new))
     }
 
     // ---- Split ensure_sidecar into 3 phases for lock-free blocking ----
@@ -267,11 +270,21 @@ impl SessionRouter {
 
     /// Phase 2: Create the sidecar (blocking, up to 5 minutes). Does NOT hold the router lock.
     /// This is a static method — callers invoke it after releasing the lock.
+    ///
+    /// Returns `(port, is_new)`. `is_new` is the AUTHORITATIVE value from
+    /// `ensure_session_sidecar` (decided inside the manager lock): false when the
+    /// manager REUSED an already-healthy sidecar for this session_id (only adding
+    /// the Agent owner), true when it actually spawned one. #327: callers MUST
+    /// forward this verbatim and gate `sync_ai_config` on it — the old code
+    /// discarded it and reported is_new=true unconditionally, so a reused sidecar
+    /// (e.g. the desktop session's, shared via handover, whose router port cache
+    /// went stale after a health blip) got the channel's model/provider override
+    /// pushed onto its live state.
     pub async fn create_sidecar_blocking<R: Runtime>(
         info: EnsureSidecarInfo,
         app_handle: &AppHandle<R>,
         manager: &ManagedSidecarManager,
-    ) -> Result<u16, String> {
+    ) -> Result<(u16, bool), String> {
         let owner = SidecarOwner::Agent(info.session_key.clone());
         let app_clone = app_handle.clone();
         let manager_clone = Arc::clone(manager);
@@ -286,13 +299,14 @@ impl SessionRouter {
         .map_err(|e| format!("Failed to ensure Sidecar: {}", e))?;
 
         ulog_info!(
-            "[im-router] Sidecar ready for {} on port {} (workspace={})",
+            "[im-router] Sidecar ready for {} on port {} (workspace={}, is_new={})",
             info.session_key,
             result.port,
             info.workspace.display(),
+            result.is_new,
         );
 
-        Ok(result.port)
+        Ok((result.port, result.is_new))
     }
 
     /// Phase 3: Write the new sidecar port back into the peer session map.
@@ -839,10 +853,14 @@ impl SessionRouter {
         // 2. Model
         if let Some(model_id) = model {
             let url = format!("http://127.0.0.1:{}/api/model/set", port);
+            // `imConfigSync` (#327): mark this as channel/agent config sync so a
+            // snapshotted (desktop-owned) session ignores it — the snapshot model
+            // wins. Without it, a shared/handover sidecar's live model would be
+            // clobbered by the channel override (context window → 200K + 500).
             match self
                 .http_client
                 .post(&url)
-                .json(&json!({ "model": model_id }))
+                .json(&json!({ "model": model_id, "imConfigSync": true }))
                 .send()
                 .await
             {
@@ -922,9 +940,11 @@ impl SessionRouter {
         }
         if let Some(model_id) = model {
             let url = format!("http://127.0.0.1:{}/api/model/set", port);
+            // `imConfigSync` (#327): see sync_ai_config — snapshotted desktop
+            // sessions ignore channel model overrides (snapshot wins).
             match client
                 .post(&url)
-                .json(&json!({ "model": model_id }))
+                .json(&json!({ "model": model_id, "imConfigSync": true }))
                 .send()
                 .await
             {

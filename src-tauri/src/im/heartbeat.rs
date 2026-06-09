@@ -392,13 +392,16 @@ impl HeartbeatRunner {
                 match super::router::SessionRouter::create_sidecar_blocking(
                     info.clone(), app_handle, sidecar_manager,
                 ).await {
-                    Ok(port) => {
+                    // #327: use the authoritative is_new — a reused sidecar (the
+                    // manager kept an existing healthy one for this session_id)
+                    // reports false so the config sync below is skipped.
+                    Ok((port, is_new)) => {
                         // Phase 3: Write result back (brief lock)
                         {
                             let mut router_guard = router.lock().await;
                             router_guard.commit_ensure_sidecar(&session_key, &info, port);
                         }
-                        (port, true)
+                        (port, is_new)
                     }
                     Err(e) => {
                         ulog_warn!("[heartbeat] Failed to ensure sidecar for {}: {}", self.bot_label, e);
