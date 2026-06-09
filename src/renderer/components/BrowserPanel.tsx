@@ -15,7 +15,12 @@ import { invoke } from '@tauri-apps/api/core';
 import { listenWithCleanup } from '@/utils/tauriListen';
 import { ChevronLeft, ChevronRight, Code2, RotateCw, ExternalLink, Loader2, Globe, X } from 'lucide-react';
 import { openExternal } from '@/utils/openExternal';
-import { BROWSER_BLANK_URL, hasUsableBrowserBounds } from '@/components/browserConstants';
+import {
+  BROWSER_BLANK_URL,
+  browserBoundsEqual,
+  toUsableBrowserBounds,
+  type BrowserBounds,
+} from '@/components/browserConstants';
 import { useBrowserOverlayGuard } from '@/hooks/useBrowserOverlayGuard';
 import { useToast } from '@/components/Toast';
 import Tip from '@/components/Tip';
@@ -38,6 +43,11 @@ interface BrowserPanelProps {
    * drive workspace.
    */
   workspace?: string | null;
+  /**
+   * Changes when Chat performs layout moves that may affect the panel's x/y
+   * without changing its width/height (for example workspace side-panel ↔ overlay).
+   */
+  layoutSignature?: string | number;
   onBrowserCreated: () => void;
   onCreateFailed: () => void;
   onClose: () => void;
@@ -62,6 +72,7 @@ export default function BrowserPanel({
   browserAlive,
   sourceFile,
   workspace,
+  layoutSignature,
   onBrowserCreated,
   onCreateFailed,
   onClose,
@@ -110,6 +121,29 @@ export default function BrowserPanel({
 
   // Track the last URL we told the webview to load
   const lastRequestedUrlRef = useRef<string | null>(null);
+  const lastSyncedBoundsRef = useRef<BrowserBounds | null>(null);
+
+  const readUsableBounds = useCallback((): BrowserBounds | null => {
+    const el = containerRef.current;
+    if (!el) return null;
+    return toUsableBrowserBounds(el.getBoundingClientRect());
+  }, []);
+
+  const syncBrowserBounds = useCallback((force = false) => {
+    const bounds = readUsableBounds();
+    if (!bounds) return;
+    if (!force && lastSyncedBoundsRef.current && browserBoundsEqual(lastSyncedBoundsRef.current, bounds)) {
+      return;
+    }
+    lastSyncedBoundsRef.current = bounds;
+    invoke('cmd_browser_resize', {
+      tabId,
+      x: bounds.x,
+      y: bounds.y,
+      width: bounds.width,
+      height: bounds.height,
+    }).catch(() => {});
+  }, [readUsableBounds, tabId]);
 
   // ── Create or navigate webview when url prop changes ──
   useEffect(() => {
@@ -118,20 +152,20 @@ export default function BrowserPanel({
     // transition on Windows. Wait for the split panel to settle before create
     // or navigate so the first native geometry is the final panel geometry.
     if (isSplitTransitioning) return;
-    const el = containerRef.current;
-    if (!el) return;
-
     let cancelled = false;
-    let pendingObserver: ResizeObserver | null = null;
+    let rafId = 0;
+    let lastSample: BrowserBounds | null = null;
+    let stableFrames = 0;
 
-    const createWithRect = (rect: DOMRect) => {
+    const createWithBounds = (bounds: BrowserBounds) => {
       creatingRef.current = true;
       lastRequestedUrlRef.current = url;
+      lastSyncedBoundsRef.current = bounds;
 
       invoke('cmd_browser_create', {
         tabId, url,
-        x: rect.x, y: rect.y,
-        width: rect.width, height: rect.height,
+        x: bounds.x, y: bounds.y,
+        width: bounds.width, height: bounds.height,
       })
         .then(() => {
           // Cross-instance race: this resolution may belong to an unmounted
@@ -161,36 +195,41 @@ export default function BrowserPanel({
         .finally(() => { creatingRef.current = false; });
     };
 
-    if (!browserAlive && !creatingRef.current) {
-      const rect = el.getBoundingClientRect();
-      if (hasUsableBrowserBounds(rect.width, rect.height)) {
-        createWithRect(rect);
-      } else {
-        // The container isn't laid out yet — the split panel slides in behind
-        // the chat area's 300ms `transition-[width]`, so right now it's ~0px
-        // wide. Creating the webview against these bounds collapses it to
-        // width 0 and floats it over the chat area (issue #290). Wait for the
-        // container to gain real dimensions, then create. The post-create
-        // ResizeObserver effect tracks the remainder of the transition to the
-        // final size.
-        pendingObserver = new ResizeObserver(() => {
-          if (cancelled || creatingRef.current) return;
-          const r = el.getBoundingClientRect();
-          if (hasUsableBrowserBounds(r.width, r.height)) {
-            pendingObserver?.disconnect();
-            pendingObserver = null;
-            createWithRect(r);
-          }
-        });
-        pendingObserver.observe(el);
+    const waitForStableBounds = () => {
+      if (cancelled || creatingRef.current) return;
+      const bounds = readUsableBounds();
+      if (bounds) {
+        if (lastSample && browserBoundsEqual(lastSample, bounds)) {
+          stableFrames += 1;
+        } else {
+          lastSample = bounds;
+          stableFrames = 0;
+        }
+
+        if (stableFrames >= 1) {
+          createWithBounds(bounds);
+          return;
+        }
       }
+      rafId = requestAnimationFrame(waitForStableBounds);
+    };
+
+    if (!browserAlive && !creatingRef.current && isVisible) {
+      // The container may have a real size while its viewport origin is still
+      // moving (workspace side-panel → overlay + split width transition, #329).
+      // Wait until the full rect is usable and stable across two frames before
+      // seeding Rust's native child-webview geometry cache.
+      waitForStableBounds();
     } else if (browserAlive && url !== lastRequestedUrlRef.current) {
       lastRequestedUrlRef.current = url;
       invoke('cmd_browser_navigate', { tabId, url }).catch(() => {});
     }
 
-    return () => { cancelled = true; pendingObserver?.disconnect(); };
-  }, [url, browserAlive, isSplitTransitioning, tabId, onBrowserCreated, onCreateFailed]);
+    return () => {
+      cancelled = true;
+      if (rafId) cancelAnimationFrame(rafId);
+    };
+  }, [url, browserAlive, isVisible, isSplitTransitioning, tabId, onBrowserCreated, onCreateFailed, readUsableBounds]);
 
   // ── Listen for URL/loading events from Rust ──
   useEffect(() => {
@@ -225,27 +264,32 @@ export default function BrowserPanel({
     if (!el || !browserAlive) return;
     if (isSplitTransitioning) return;
 
-    const syncBounds = () => {
-      const rect = el.getBoundingClientRect();
-      // Skip degenerate reads (mid-transition or display:none) so a transient
-      // 0-size never gets cached in Rust and restored on the next SHOW (#290).
-      if (!hasUsableBrowserBounds(rect.width, rect.height)) return;
-      invoke('cmd_browser_resize', {
-        tabId, x: rect.x, y: rect.y,
-        width: rect.width, height: rect.height,
-      }).catch(() => {});
-    };
-
+    const syncBounds = () => syncBrowserBounds();
     const observer = new ResizeObserver(syncBounds);
     observer.observe(el);
     window.addEventListener('resize', syncBounds);
-    syncBounds();
+    syncBrowserBounds();
 
     return () => {
       observer.disconnect();
       window.removeEventListener('resize', syncBounds);
     };
-  }, [browserAlive, isSplitTransitioning, tabId]);
+  }, [browserAlive, isSplitTransitioning, syncBrowserBounds]);
+
+  useEffect(() => {
+    if (!browserAlive || !isVisible || isSplitTransitioning) return;
+    let rafId = 0;
+    let frames = 0;
+    const tick = () => {
+      syncBrowserBounds();
+      frames += 1;
+      if (frames < 8) rafId = requestAnimationFrame(tick);
+    };
+    rafId = requestAnimationFrame(tick);
+    return () => {
+      if (rafId) cancelAnimationFrame(rafId);
+    };
+  }, [browserAlive, isVisible, isSplitTransitioning, layoutSignature, syncBrowserBounds]);
 
   // Blank-state detection.
   //
@@ -270,21 +314,13 @@ export default function BrowserPanel({
     const shouldShow = isVisible && !nativeViewSuspended && !overlayDetected && !isBlankPage;
     if (shouldShow) {
       invoke('cmd_browser_show', { tabId }).catch(() => {});
-      const el = containerRef.current;
-      if (el) {
-        const rect = el.getBoundingClientRect();
-        // Same #290 guard: never push a 0-size down on show.
-        if (hasUsableBrowserBounds(rect.width, rect.height)) {
-          invoke('cmd_browser_resize', {
-            tabId, x: rect.x, y: rect.y,
-            width: rect.width, height: rect.height,
-          }).catch(() => {});
-        }
-      }
+      // Same #290 guard is inside readUsableBounds; force so SHOW refreshes
+      // Rust's cached geometry even if the last renderer sample was identical.
+      syncBrowserBounds(true);
     } else {
       invoke('cmd_browser_hide', { tabId }).catch(() => {});
     }
-  }, [isVisible, isDraggingSplit, isSplitTransitioning, overlayDetected, browserAlive, isBlankPage, tabId]);
+  }, [isVisible, isDraggingSplit, isSplitTransitioning, overlayDetected, browserAlive, isBlankPage, tabId, syncBrowserBounds]);
 
   // ── Cleanup on unmount ──
   useEffect(() => {

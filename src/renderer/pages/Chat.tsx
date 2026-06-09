@@ -4063,6 +4063,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
                     browserAlive={browserAlive}
                     sourceFile={browserSourceFile}
                     workspace={agentDir}
+                    layoutSignature={`${showWorkspace ? 1 : 0}:${shouldUseWorkspaceOverlay ? 1 : 0}`}
                     onBrowserCreated={handleBrowserCreated}
                     onCreateFailed={handleBrowserCreateFailed}
                     onClose={handleBrowserClose}
