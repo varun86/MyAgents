@@ -21,7 +21,7 @@ import { deriveReloadResumeAnchor, resolveEffectiveResumeAt } from './utils/rewi
 import { buildForkUuidRemap, remapStoredSdkUuids } from './utils/fork-remap';
 import { decideInFlightActionOnResult } from './utils/inflight-terminal';
 import { shouldBlockToolInPlanMode, planModeDenyMessage, isPlanModeInEffect, PLAN_MODE_READONLY_TOOLS, PLAN_MODE_HOST_INTERACTION_TOOLS, applyPermissionModeSelection, computePlanExitState, computeRestoredPlanState } from './utils/plan-mode-gate';
-import { isEmptySuccessfulSdkResult, isRecoveredAssistantMessageError } from './utils/sdk-turn-outcome';
+import { isEmptySuccessfulSdkResult, isRecoveredAssistantMessageError, findTurnUsageStampIndex } from './utils/sdk-turn-outcome';
 import { diagnoseSdkSubprocessFailure } from './utils/sdk-subprocess-diagnostics';
 import { InactivityWatchdog } from './utils/inactivity-watchdog';
 import { WATCHDOG_RESUME_REMINDER, planWatchdogAutoResume, shouldAdoptPendingContinueIntoScheduledAutoResume, shouldConsumePendingContinueAfterAbort, shouldDeferPendingContinueToScheduledAutoResume, shouldPrependWatchdogAutoResume } from './utils/watchdog-auto-resume';
@@ -487,6 +487,14 @@ export type MessageWire = {
     sourceId?: string;
     senderName?: string;
   };
+  // #331 — turn usage/toolCount/duration stamped onto the assistant message at
+  // handleMessageComplete so persistence serializes them FROM the object. Must
+  // not be inferred positionally ("last array element") at persist time: the
+  // turn-end persist is fire-and-forget, and messages[] can grow (queue surfacing,
+  // next turn) before it runs, which silently dropped usage → 0-token stats.
+  usage?: MessageUsage;
+  toolCount?: number;
+  durationMs?: number;
 };
 
 const requireModule = createRequire(import.meta.url);
@@ -3864,9 +3872,10 @@ export function getPendingInteractiveRequests(): Array<{
  * Cursor advances on success. Rewind / fork / session-reset paths reset the
  * cursor to 0 so a full remap runs the next time.
  *
- * @param lastAssistantUsage - Usage info for the last assistant message (on message complete)
- * @param lastAssistantToolCount - Tool count for the last assistant message
- * @param lastAssistantDurationMs - Duration for the last assistant response
+ * #331 — usage/toolCount/durationMs are read off each assistant message OBJECT
+ * (stamped at handleMessageComplete), NOT passed in / inferred positionally. This
+ * makes persistence indifferent to where the assistant sits in `messages[]` when
+ * the (fire-and-forget) persist actually runs.
  */
 const persistedSessionMessageCache: SessionMessage[] = [];
 
@@ -3880,18 +3889,10 @@ const persistedSessionMessageCache: SessionMessage[] = [];
 // or fresh-session swap doesn't replay onto the wrong key).
 const persistChainBySession = new Map<string, Promise<void>>();
 
-function schedulePersist(
-  lastAssistantUsage?: MessageUsage,
-  lastAssistantToolCount?: number,
-  lastAssistantDurationMs?: number
-): Promise<void> {
+function schedulePersist(): Promise<void> {
   const key = sessionId;
   const prev = persistChainBySession.get(key) ?? Promise.resolve();
-  const next = prev.then(() => doPersistMessagesToStorage(
-    lastAssistantUsage,
-    lastAssistantToolCount,
-    lastAssistantDurationMs,
-  )).catch(err => {
+  const next = prev.then(() => doPersistMessagesToStorage()).catch(err => {
     console.warn('[agent-session] persist failed:', err);
   });
   persistChainBySession.set(key, next);
@@ -3905,21 +3906,13 @@ function schedulePersist(
   return next;
 }
 
-async function persistMessagesToStorage(
-  lastAssistantUsage?: MessageUsage,
-  lastAssistantToolCount?: number,
-  lastAssistantDurationMs?: number
-): Promise<void> {
+async function persistMessagesToStorage(): Promise<void> {
   // Top-level entry — go through the per-session serializer so concurrent
   // callers don't interleave their cursor writes.
-  return schedulePersist(lastAssistantUsage, lastAssistantToolCount, lastAssistantDurationMs);
+  return schedulePersist();
 }
 
-async function doPersistMessagesToStorage(
-  lastAssistantUsage?: MessageUsage,
-  lastAssistantToolCount?: number,
-  lastAssistantDurationMs?: number
-): Promise<void> {
+async function doPersistMessagesToStorage(): Promise<void> {
   // Defensive: if the cursor is somehow > messages.length on entry (rewind
   // race, fork side-effect), log a warning and reset rather than silently
   // skipping the rest of the work.
@@ -3934,12 +3927,14 @@ async function doPersistMessagesToStorage(
   }
 
   const tail = messages.slice(lastPersistedIndex);
-  const tailMapped: SessionMessage[] = tail.map((msg, i) => {
-    const absoluteIndex = lastPersistedIndex + i;
-    const isLastAssistant = absoluteIndex === messages.length - 1 && msg.role === 'assistant';
+  const tailMapped: SessionMessage[] = tail.map((msg) => {
     const contentForDisk = typeof msg.content === 'string'
       ? msg.content
       : JSON.stringify(stripPlaywrightResults(msg.content));
+    // #331 — usage/toolCount/duration come off the assistant message object
+    // (stamped at handleMessageComplete), never from a positional "is this the
+    // last element" check. Position is unreliable by persist time.
+    const isAssistant = msg.role === 'assistant';
     return {
       id: msg.id,
       role: msg.role,
@@ -3953,17 +3948,14 @@ async function doPersistMessagesToStorage(
         path: att.relativePath ?? '',
       })),
       metadata: msg.metadata,
-      usage: isLastAssistant && lastAssistantUsage ? lastAssistantUsage : undefined,
-      toolCount: isLastAssistant && lastAssistantToolCount ? lastAssistantToolCount : undefined,
-      durationMs: isLastAssistant && lastAssistantDurationMs ? lastAssistantDurationMs : undefined,
+      usage: isAssistant ? msg.usage : undefined,
+      toolCount: isAssistant ? msg.toolCount : undefined,
+      durationMs: isAssistant ? msg.durationMs : undefined,
     };
   });
 
   // Stitch cached head + freshly-mapped tail. Cache holds previously-persisted
   // SessionMessage objects so we don't pay map cost on them every turn.
-  // Attach last-assistant usage info onto the cached entry too if the SDK
-  // delivered usage on the trailing assistant of a *prior* turn (rare, but
-  // defensive — saveSessionMessages reads only the tail anyway).
   const sessionMessages: SessionMessage[] = persistedSessionMessageCache
     .slice(0, lastPersistedIndex)
     .concat(tailMapped);
@@ -5323,7 +5315,32 @@ function handleMessageComplete(): void {
   // Calculate duration for this turn
   const durationMs = currentTurnStartTime ? Date.now() - currentTurnStartTime : undefined;
 
-  // Persist messages with usage info after AI response completes.
+  // #331 — stamp this turn's usage onto its assistant message OBJECT, here and now,
+  // while currentTurnUsage is still this turn's. Persistence then serializes usage
+  // from the message itself (see doPersistMessagesToStorage) instead of guessing
+  // "the last array element". `findTurnUsageStampIndex` targets the trailing
+  // assistant in the not-yet-persisted range, so a user message surfaced just above
+  // (queue:started fallback) or the next turn's messages can't steal/drop the usage.
+  // (Does not retroactively fix turns whose assistant line was already appended
+  // usage-less by a mid-turn persist — queue replay / local-command echo — because
+  // the JSONL writer is append-only; that narrower path is tracked separately.)
+  const usageStampIndex = findTurnUsageStampIndex(messages, lastPersistedIndex);
+  if (usageStampIndex >= 0) {
+    const completedAssistant = messages[usageStampIndex];
+    completedAssistant.usage = {
+      inputTokens: currentTurnUsage.inputTokens,
+      outputTokens: currentTurnUsage.outputTokens,
+      cacheReadTokens: currentTurnUsage.cacheReadTokens || undefined,
+      cacheCreationTokens: currentTurnUsage.cacheCreationTokens || undefined,
+      model: currentTurnUsage.model,
+      modelUsage: currentTurnUsage.modelUsage,
+    };
+    completedAssistant.toolCount = currentTurnToolCount;
+    completedAssistant.durationMs = durationMs;
+  }
+
+  // Persist messages after AI response completes (usage now lives on the message
+  // object above, so no usage args are threaded through the persist).
   // Fire-and-forget: persistMessagesToStorage is async (cooperative file lock),
   // but the enclosing handler is a sync stream-event callback. Errors are already
   // swallowed inside SessionStore writers; surfacing them here would be no-op.
@@ -5333,14 +5350,7 @@ function handleMessageComplete(): void {
   const persistTraceStarted = nowMs();
   const persistTraceToolCount = currentTurnToolCount;
   const persistTraceMessageCount = messages.length;
-  lastTurnEndPersist = persistMessagesToStorage({
-    inputTokens: currentTurnUsage.inputTokens,
-    outputTokens: currentTurnUsage.outputTokens,
-    cacheReadTokens: currentTurnUsage.cacheReadTokens || undefined,
-    cacheCreationTokens: currentTurnUsage.cacheCreationTokens || undefined,
-    model: currentTurnUsage.model,
-    modelUsage: currentTurnUsage.modelUsage,
-  }, currentTurnToolCount, durationMs)
+  lastTurnEndPersist = persistMessagesToStorage()
     .then(() => {
       emitBuiltinTurnTrace('persist_done', {
         durationMs: elapsedMs(persistTraceStarted),
@@ -5995,6 +6005,14 @@ function loadMessagesFromStorage(storedMessages: SessionMessage[]): void {
         relativePath: att.path,
       })),
       metadata: storedMsg.metadata,
+      // #331 — round-trip persisted usage back onto the in-memory message so a
+      // later FULL remap (rewind / fork / session-reset resets the cursor to 0 and
+      // re-maps from these MessageWire objects) re-serializes usage instead of
+      // dropping it. The persisted-tail cache below preserves it for the common
+      // incremental path; this covers the cursor-reset path.
+      usage: storedMsg.usage,
+      toolCount: storedMsg.toolCount,
+      durationMs: storedMsg.durationMs,
     });
   }
   // Pattern 3 §3.2.4 — these messages are already on disk; seed the persist
@@ -8156,6 +8174,12 @@ export async function forkSession(assistantMessageId: string): Promise<{
             relativePath: att.path,
           })),
           metadata: m.metadata,
+          // #331 — round-trip usage here too; otherwise the fork-copy map below
+          // reads `m.usage === undefined` and the forked session loses its
+          // inherited token stats when forking from storage (not in-memory).
+          usage: m.usage,
+          toolCount: m.toolCount,
+          durationMs: m.durationMs,
         }));
       }
     }
@@ -8215,6 +8239,11 @@ export async function forkSession(assistantMessageId: string): Promise<{
         path: ('relativePath' in att ? att.relativePath : (att as { path?: string }).path) ?? '',
       })),
       metadata: m.metadata,
+      // #331 — carry token usage into the fork so the forked session's stats
+      // reflect the inherited history (this explicit map omitted them).
+      usage: m.usage,
+      toolCount: m.toolCount,
+      durationMs: m.durationMs,
     }));
 
     // Pattern 3 §3.2.4 — fix #2 (forkSession parent cursor). Snapshot the parent's persist
