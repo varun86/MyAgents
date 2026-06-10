@@ -3946,7 +3946,20 @@ const persistChainBySession = new Map<string, Promise<void>>();
 function schedulePersist(): Promise<void> {
   const key = sessionId;
   const prev = persistChainBySession.get(key) ?? Promise.resolve();
-  const next = prev.then(() => doPersistMessagesToStorage()).catch(err => {
+  const next = prev.then(() => {
+    // Bind the queued work to the id captured at SCHEDULE time. The module-global
+    // `sessionId` can rotate while we wait on the chain (resetSession / switch /
+    // provider-change fresh start); doPersistMessagesToStorage reads the global at
+    // RUN time, so a stale invocation would write the OLD session's tail under the
+    // NEW session's file. Every rotation path explicitly flushes before rotating,
+    // so a skipped stale persist loses nothing — but log it: this firing means a
+    // rotation overlapped an in-flight persist chain.
+    if (key !== sessionId) {
+      console.warn(`[agent-session] skipping stale queued persist: scheduled for ${key}, current session is ${sessionId}`);
+      return;
+    }
+    return doPersistMessagesToStorage();
+  }).catch(err => {
     console.warn('[agent-session] persist failed:', err);
   });
   persistChainBySession.set(key, next);

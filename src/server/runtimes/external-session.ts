@@ -1642,16 +1642,20 @@ async function _doStartExternalSession(options: {
     currentTurnStartTime = Date.now();
     beginExternalTurnTrace('external_start_initial_message', options.sessionId);
 
+    // Register session in history index BEFORE the first message persist
+    // (mirrors agent-session.ts enqueueUserMessage and the Case-3 pre-warm path).
+    // SessionStore enforces the index⟺data invariant (issue #336): a JSONL is
+    // never CREATED for a session without a sessions.json entry — persisting
+    // first would get the write refused and drop the user's first message.
+    if (!options.resumeSessionId) {
+      await registerSessionMetadataIfNew(options.sessionId, options.workspacePath, options.initialMessage, 'initial message', options.scenario);
+    }
+
     // Persist user message immediately (crash safety — don't wait for turn_complete).
     // Append-only: allSessionMessages only grows here, so forbid the shrink-rewrite
     // (a shorter array would mean a partial load — never delete the on-disk tail).
     try { await saveSessionMessages(options.sessionId, allSessionMessages, { allowShrink: false }); }
     catch (err) { console.error('[external-session] Failed to persist user message:', err); }
-
-    // Register session in history index (mirrors agent-session.ts enqueueUserMessage logic)
-    if (!options.resumeSessionId) {
-      await registerSessionMetadataIfNew(options.sessionId, options.workspacePath, options.initialMessage, 'initial message', options.scenario);
-    }
   }
 
   // Pre-warm path (no initialMessage) keeps state as 'idle' so the UI doesn't
