@@ -8794,9 +8794,11 @@ async function startStreamingSession(preWarm = false): Promise<void> {
       // the SDK silently ignores the mode switch and keeps calling canUseTool.
       allowDangerouslySkipPermissions: true,
       // applyContextWindowSuffix appends [1m] when the registered contextLength
-      // is ≥1_000_000 — without it, SDK getContextWindowForModel() falls back
-      // to 200K for non-Anthropic models and /context, auto-compact, attachment
-      // trimming all use the wrong ceiling. SDK strips the suffix back out
+      // exceeds the SDK 200K default (#335) — without it, SDK
+      // getContextWindowForModel() falls back to 200K for non-Anthropic models
+      // and /context, auto-compact, attachment trimming all use the wrong
+      // ceiling; CLAUDE_CODE_AUTO_COMPACT_WINDOW then pulls the effective
+      // window back to the registry value. SDK strips the suffix back out
       // before the wire (normalizeModelStringForAPI in model.ts:616).
       model: applyContextWindowSuffix(currentModel),
       pathToClaudeCodeExecutable: resolveClaudeCodeCli(),

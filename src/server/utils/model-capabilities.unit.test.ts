@@ -38,6 +38,18 @@ describe('applyContextWindowSuffix — threshold via preset registry', () => {
     expect(applyContextWindowSuffix('claude-sonnet-4-6')).toBe('claude-sonnet-4-6');
     expect(applyContextWindowSuffix('claude-haiku-4-5')).toBe('claude-haiku-4-5');
   });
+
+  // #335 — mid-band models (200K < ctx < 1M) MUST be unlocked too. The [1m]
+  // suffix is the only lever that raises the SDK window above its 200K
+  // default; CLAUDE_CODE_AUTO_COMPACT_WINDOW (injected from the same registry
+  // value) then pulls the effective window back to the real limit. Without
+  // the wrap, a 512K model's usable window is min(200K, 512K) − 33K ≈ 167K —
+  // most of the model's capacity silently wasted.
+  it('tags mid-band preset models (>200K, <1M) so the env cap can take effect (#335)', () => {
+    // volcengine presets: doubao-seed-2.0-code = 262_144, kimi-k2.5 = 262_144
+    expect(applyContextWindowSuffix('doubao-seed-2.0-code')).toBe('doubao-seed-2.0-code[1m]');
+    expect(applyContextWindowSuffix('kimi-k2.5')).toBe('kimi-k2.5[1m]');
+  });
 });
 
 // LiteLLM fallback parser. Shapes mirror the real

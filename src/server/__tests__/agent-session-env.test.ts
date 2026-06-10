@@ -48,9 +48,13 @@ describe('session model alias resolution', () => {
       'MiniMax-M2.5',
     );
 
-    expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe('MiniMax-M2.5');
-    expect(env.ANTHROPIC_DEFAULT_OPUS_MODEL).toBe('MiniMax-M2.5');
-    expect(env.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe('MiniMax-M2.5');
+    // #335 — MiniMax-M2.5's preset contextLength is 204_800 (> the SDK 200K
+    // default), so the SDK-ingress `_MODEL` envs carry the `[1m]` unlock; the
+    // display-label `_MODEL_NAME` env stays raw (applyContextWindowSuffix
+    // contract: wrapped values flow ONLY into SDK ingress points).
+    expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe('MiniMax-M2.5[1m]');
+    expect(env.ANTHROPIC_DEFAULT_OPUS_MODEL).toBe('MiniMax-M2.5[1m]');
+    expect(env.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe('MiniMax-M2.5[1m]');
     expect(env.ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME).toBe('MiniMax-M2.5');
   });
 
