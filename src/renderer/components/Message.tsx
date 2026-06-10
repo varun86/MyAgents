@@ -417,7 +417,7 @@ const Message = memo(function Message({ message, isLoading = false, onRewind, on
             {/* Expand button with gradient fade — gradient overlaps bottom of content */}
             {!userExpanded && userOverflows && (
               <div className="relative z-10 -mx-4 -mb-4 -mt-14">
-                <div className="pointer-events-none h-14 bg-gradient-to-t from-[var(--paper-elevated)] to-transparent" />
+                <div className="pointer-events-none h-14 bg-gradient-to-t from-[var(--paper-elevated)] to-[var(--paper-elevated-a0)]" />
                 <button
                   type="button"
                   onClick={() => setUserExpanded(true)}

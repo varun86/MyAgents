@@ -249,7 +249,7 @@ export default memo(function RecentTasks({
 
                                         {/* Hover actions overlay */}
                                         <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:opacity-100">
-                                            <div className="h-full w-10 bg-gradient-to-r from-transparent to-[var(--paper-inset)]" />
+                                            <div className="h-full w-10 bg-gradient-to-r from-[var(--paper-inset-a0)] to-[var(--paper-inset)]" />
                                             <div className="flex h-full items-center gap-1 bg-[var(--paper-inset)] pr-3">
                                                 <button
                                                     onClick={e => handleShowStats(e, session)}

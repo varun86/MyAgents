@@ -1647,7 +1647,8 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
         <div
           className="pointer-events-none absolute inset-x-0 bottom-0 h-32"
           style={{
-            background: 'linear-gradient(to bottom, transparent, var(--paper-elevated) 60%)'
+            // #333: same-color 0-alpha endpoint, never the `transparent` keyword (see index.css --*-a0)
+            background: 'linear-gradient(to bottom, var(--paper-elevated-a0), var(--paper-elevated) 60%)'
           }}
         />
       )}

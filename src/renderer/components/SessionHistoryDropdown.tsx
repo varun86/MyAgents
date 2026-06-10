@@ -510,7 +510,7 @@ export default function SessionHistoryDropdown({
                                             ? 'pointer-events-auto opacity-100'
                                             : 'pointer-events-none opacity-0 group-hover:pointer-events-auto group-hover:opacity-100'
                                     }`}>
-                                        <div className="h-full w-10 bg-gradient-to-r from-transparent to-[var(--paper-inset)]" />
+                                        <div className="h-full w-10 bg-gradient-to-r from-[var(--paper-inset-a0)] to-[var(--paper-inset)]" />
                                         <div className="flex h-full items-center gap-1 bg-[var(--paper-inset)] pr-3">
                                             {onOpenInNewTab && (
                                                 <Tip label="在新 tab 打开" position="bottom">

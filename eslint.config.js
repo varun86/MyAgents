@@ -242,6 +242,24 @@ export default defineConfig(
           selector: "ImportExpression > Literal[value='@tauri-apps/api/event']",
           message: "Dynamic `import('@tauri-apps/api/event')` is forbidden — bypasses the static `listen` ban. Use `listenWithCleanup` from '@/utils/tauriListen' for subscriptions, or a static `import { emit } from '@tauri-apps/api/event'` for one-shot dispatch.",
         },
+        // #333: gradient stops must never fade to/from the `transparent`
+        // keyword. `transparent` is rgba(0,0,0,0) — when an engine interpolates
+        // a gradient without premultiplied alpha (macOS 27 beta WebKit does
+        // this on Tailwind v4's `in oklab` gradient path), the ramp from an
+        // opaque color to transparent BLACK passes through visible gray — the
+        // user sees a dark smear band exactly where the fade sits, on every
+        // theme, surviving restarts. Correct form: fade to the SAME color at
+        // alpha 0 via the `--*-a0` twin tokens in index.css (e.g.
+        // `to-[var(--paper-elevated-a0)]`) — a constant-color alpha ramp
+        // renders identically under every interpolation implementation.
+        {
+          selector: 'Literal[value=/\\b(?:to|from|via)-transparent\\b/]',
+          message: 'Gradient stop `(to|from|via)-transparent` is forbidden (#333): `transparent` = rgba(0,0,0,0) and buggy gradient interpolation (macOS 27 beta WebKit, oklab path) renders the ramp through BLACK as a gray smear band. Fade to the same color at alpha 0 instead — use the `--*-a0` twin tokens from index.css, e.g. `to-[var(--paper-elevated-a0)]`.',
+        },
+        {
+          selector: 'TemplateElement[value.raw=/\\b(?:to|from|via)-transparent\\b/]',
+          message: 'Gradient stop `(to|from|via)-transparent` is forbidden (#333): `transparent` = rgba(0,0,0,0) and buggy gradient interpolation (macOS 27 beta WebKit, oklab path) renders the ramp through BLACK as a gray smear band. Fade to the same color at alpha 0 instead — use the `--*-a0` twin tokens from index.css, e.g. `to-[var(--paper-elevated-a0)]`.',
+        },
         ...[
           '/api/files/import-base64',
           '/api/files/copy',
