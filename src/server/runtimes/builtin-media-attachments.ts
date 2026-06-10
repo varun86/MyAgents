@@ -30,6 +30,7 @@ import path from 'node:path';
 import { saveToolAttachment } from './tool-attachments';
 import { parseBuiltinMediaToolResult } from '../../shared/builtinMediaResult';
 import { MAX_TOOL_ATTACHMENT_BYTES, type ToolAttachment } from '../../shared/types/tool-attachment';
+import type { ExtractedToolResultAttachment } from '../utils/tool-result-attachments';
 
 /** generated dir segment names (`~/.myagents/<name>` or `<ws>/myagents_files/<name>`). */
 const GENERATED_DIR_NAMES = ['generated_audio', 'generated_images', 'generated'];
@@ -99,6 +100,50 @@ export async function buildBuiltinMediaAttachments(
     } catch (err) {
       console.warn(
         `[builtin-media] failed to build attachment for ${toolName}:`,
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+  }
+  return out;
+}
+
+/**
+ * #293 — save image sources EXTRACTED from tool_result content blocks (the
+ * generic MCP/SDK shapes: base64 ImageContent, data URLs, file refs, remote
+ * urls) as first-class `ToolAttachment[]`.
+ *
+ * Counterpart of `buildBuiltinMediaAttachments` (which parses file PATHS out
+ * of result TEXT for the two builtin generator tools); this one consumes the
+ * pre-extracted block sources from `extractToolResultRenderParts`. Both feed
+ * the same `saveToolAttachment` trust layer:
+ *   - base64   → trusted-root file write (validateTrustedAttachmentRoot)
+ *   - external → positive allow-list + canonicalized symlink check
+ *   - url      → https-only SSRF-guarded download
+ *
+ * Per-item failures are swallowed (log + skip) — one bad block must not sink
+ * the sibling images or the tool result itself.
+ */
+export async function saveExtractedToolResultAttachments(
+  extracted: ExtractedToolResultAttachment[],
+  toolName: string,
+  ctxBase: BuiltinAttachmentCtxBase,
+): Promise<ToolAttachment[]> {
+  if (extracted.length === 0) return [];
+  const out: ToolAttachment[] = [];
+  for (const item of extracted) {
+    try {
+      const attachment = await saveToolAttachment(item.source, {
+        sessionId: ctxBase.sessionId,
+        turnId: ctxBase.toolUseId,
+        toolUseId: ctxBase.toolUseId,
+        mimeType: item.mimeType,
+        kind: item.kind,
+        producedBy: toolName,
+      });
+      out.push(attachment);
+    } catch (err) {
+      console.warn(
+        `[builtin-media] failed to save extracted ${item.kind} from ${toolName}:`,
         err instanceof Error ? err.message : String(err),
       );
     }

@@ -15,11 +15,15 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { lookup } from 'node:dns/promises';
 import { mkdir, writeFile, stat } from 'node:fs/promises';
+import { isIP } from 'node:net';
 import { homedir } from 'node:os';
 import path from 'node:path';
 
-import { cancellableFetch } from '../utils/cancellation';
+import { Agent, fetch as undiciFetch, type RequestInit as UndiciRequestInit } from 'undici';
+
+import { withAbortSignal } from '../utils/cancellation';
 import {
   validateExternalReadPathNode,
   validateTrustedAttachmentRoot,
@@ -280,14 +284,13 @@ async function referenceExternalPath(sourcePath: string, ctx: SaveContext): Prom
  *
  * Exported for unit testing — pure (URL) → result, no I/O.
  */
-export function isUrlSchemeSafe(parsed: URL): { ok: true } | { ok: false; reason: string } {
-  if (parsed.protocol !== 'https:') {
-    return { ok: false, reason: `Unsupported URL scheme: ${parsed.protocol}` };
-  }
-  const host = parsed.hostname;
-  // Block obvious-by-lexical-form private/loopback/link-local IPv4/IPv6 addresses.
-  // (We don't DNS-resolve hostnames here; defense-in-depth at the network layer
-  //  is the user's responsibility for non-literal hosts.)
+/**
+ * Is a host string (literal IP or a DNS-resolved address) in a private /
+ * loopback / link-local range we must never let an attachment fetch reach?
+ * Shared by the lexical pre-check (`isUrlSchemeSafe`) and the DNS-resolution
+ * post-check (`assertPublicHostname`) so both judge addresses identically.
+ */
+function isBlockedHostLiteral(host: string): boolean {
   if (
     host === 'localhost' ||
     host === '127.0.0.1' || host.startsWith('127.') ||
@@ -299,7 +302,7 @@ export function isUrlSchemeSafe(parsed: URL): { ok: true } | { ok: false; reason
     /^172\.(1[6-9]|2\d|3[0-1])\./.test(host) ||
     /^\[?fc00:/i.test(host) || /^\[?fd[0-9a-f]{2}:/i.test(host) || /^\[?fe80:/i.test(host)
   ) {
-    return { ok: false, reason: `Blocked private/loopback host: ${host}` };
+    return true;
   }
   // IPv6 forms the lexical IPv4 checks above miss (cross-review W1). Node keeps
   // the brackets in `hostname` for IPv6 literals — strip + lower-case first.
@@ -309,9 +312,71 @@ export function isUrlSchemeSafe(parsed: URL): { ok: true } | { ok: false; reason
   //    reject the literal form outright — legitimate image hosts don't use it.
   const h6 = host.replace(/^\[|\]$/g, '').toLowerCase();
   if (h6 === '::' || h6 === '::0' || /^(?:0:){7}0$/.test(h6) || h6.startsWith('::ffff:')) {
-    return { ok: false, reason: `Blocked private/loopback host: ${host}` };
+    return true;
+  }
+  return false;
+}
+
+export function isUrlSchemeSafe(parsed: URL): { ok: true } | { ok: false; reason: string } {
+  if (parsed.protocol !== 'https:') {
+    return { ok: false, reason: `Unsupported URL scheme: ${parsed.protocol}` };
+  }
+  // Lexical pre-check — rejects literal private/loopback hosts before any DNS.
+  // Hostname SSRF (a public name resolving to a private IP) is caught by the
+  // DNS post-check in `assertPublicHostname` just before fetch.
+  if (isBlockedHostLiteral(parsed.hostname)) {
+    return { ok: false, reason: `Blocked private/loopback host: ${parsed.hostname}` };
   }
   return { ok: true };
+}
+
+/**
+ * SSRF DNS guard (#293 cross-review): the lexical check can't see that
+ * `https://attacker.example/x.png` resolves to `127.0.0.1` / `169.254.169.254`
+ * (cloud metadata) / RFC1918. Attachment URLs are model/tool-controlled, so a
+ * public name pointing inward is a real SSRF vector.
+ *
+ * Resolves the host, rejects if ANY returned address is private, AND returns an
+ * undici dispatcher PINNED to the validated addresses via `connect.lookup` — so
+ * the subsequent fetch connects to the exact IPs we vetted instead of
+ * re-resolving. This CLOSES the DNS-rebinding TOCTOU (a public answer to the
+ * guard lookup, a private answer at connect time): undici's connector can only
+ * return addresses from the pre-validated set. TLS SNI/cert verification still
+ * uses the original hostname, so HTTPS identity is unaffected. A literal-IP host
+ * needs neither check nor pin (undici connects to the literal directly;
+ * `isUrlSchemeSafe` already vetted it) → returns undefined.
+ *
+ * The dispatcher MUST be fetched with undici's OWN `fetch` (same package
+ * version) — the global fetch is Node's built-in undici and rejects a foreign
+ * Agent. Caller MUST `.close()` it after the body is consumed (per-request
+ * agent; leaving it open leaks sockets).
+ */
+async function buildSsrfGuardedDispatcher(parsed: URL): Promise<Agent | undefined> {
+  const host = parsed.hostname.replace(/^\[|\]$/g, '');
+  if (isIP(host) !== 0) return undefined; // literal IP — already vetted, no re-resolution risk
+  let addresses: { address: string; family: number }[];
+  try {
+    addresses = await lookup(host, { all: true });
+  } catch {
+    throw new AttachmentSaveError(ATTACHMENT_ERROR_CODES.FETCH_FAILED, `DNS resolution failed for ${host}`);
+  }
+  for (const { address } of addresses) {
+    if (isBlockedHostLiteral(address)) {
+      throw new AttachmentSaveError(
+        ATTACHMENT_ERROR_CODES.UNSUPPORTED_URL,
+        `Blocked: ${host} resolves to private/loopback address`,
+      );
+    }
+  }
+  // Pin connect-time resolution to the validated set — undici won't re-resolve.
+  const pinned = addresses.map((a) => ({ address: a.address, family: a.family }));
+  return new Agent({
+    connect: {
+      lookup: (_hostname: string, _options: unknown, cb: (err: Error | null, addrs: { address: string; family: number }[]) => void) => {
+        cb(null, pinned);
+      },
+    },
+  });
 }
 
 async function downloadAndSaveUrl(url: string, ctx: SaveContext, signal?: AbortSignal): Promise<ToolAttachment> {
@@ -335,34 +400,58 @@ async function downloadAndSaveUrl(url: string, ctx: SaveContext, signal?: AbortS
   if (!schemeCheck.ok) {
     throw new AttachmentSaveError(ATTACHMENT_ERROR_CODES.UNSUPPORTED_URL, schemeCheck.reason);
   }
+  // DNS guard: reject a public hostname resolving to a private IP, and pin the
+  // fetch to the validated addresses (closes the rebinding TOCTOU). undefined
+  // for a literal-IP host (no re-resolution to defend against).
+  const dispatcher = await buildSsrfGuardedDispatcher(parsed);
 
-  const resp = await cancellableFetch(url, { redirect: 'error' }, { parentSignal: signal, timeoutMs: 30_000 });
-  if (!resp.ok) {
-    throw new AttachmentSaveError(
-      ATTACHMENT_ERROR_CODES.FETCH_FAILED,
-      `URL fetch failed: ${resp.status}`,
+  let buf: Buffer;
+  let mime: string;
+  try {
+    // Use undici's OWN fetch (not the global) so it matches the `Agent` version
+    // — mixing the repo's undici@8 Agent with Node's built-in-undici global fetch
+    // throws "invalid onRequestStart method". `withAbortSignal` composes the
+    // parent signal + 30s timeout (same semantics cancellableFetch gave us).
+    const resp = await withAbortSignal(
+      signal,
+      (s) => undiciFetch(url, {
+        redirect: 'error',
+        signal: s,
+        ...(dispatcher ? { dispatcher } : {}),
+      } as UndiciRequestInit),
+      { timeoutMs: 30_000 },
     );
-  }
-
-  const contentLengthHeader = resp.headers.get('content-length');
-  if (contentLengthHeader) {
-    const len = Number.parseInt(contentLengthHeader, 10);
-    if (Number.isFinite(len) && len > MAX_TOOL_ATTACHMENT_BYTES) {
+    if (!resp.ok) {
       throw new AttachmentSaveError(
-        ATTACHMENT_ERROR_CODES.TOO_LARGE,
-        `URL response too large per Content-Length: ${len}`,
+        ATTACHMENT_ERROR_CODES.FETCH_FAILED,
+        `URL fetch failed: ${resp.status}`,
       );
     }
+
+    const contentLengthHeader = resp.headers.get('content-length');
+    if (contentLengthHeader) {
+      const len = Number.parseInt(contentLengthHeader, 10);
+      if (Number.isFinite(len) && len > MAX_TOOL_ATTACHMENT_BYTES) {
+        throw new AttachmentSaveError(
+          ATTACHMENT_ERROR_CODES.TOO_LARGE,
+          `URL response too large per Content-Length: ${len}`,
+        );
+      }
+    }
+    const ab = await resp.arrayBuffer();
+    if (ab.byteLength > MAX_TOOL_ATTACHMENT_BYTES) {
+      throw new AttachmentSaveError(
+        ATTACHMENT_ERROR_CODES.TOO_LARGE,
+        `URL response too large: ${ab.byteLength} bytes`,
+      );
+    }
+    buf = Buffer.from(ab);
+    mime = resp.headers.get('content-type')?.split(';')[0]?.trim() || ctx.mimeType;
+  } finally {
+    // Per-request agent — close after the body is consumed (or on error) so we
+    // don't leak the pinned socket pool.
+    if (dispatcher) void dispatcher.close().catch(() => { /* best-effort */ });
   }
-  const ab = await resp.arrayBuffer();
-  if (ab.byteLength > MAX_TOOL_ATTACHMENT_BYTES) {
-    throw new AttachmentSaveError(
-      ATTACHMENT_ERROR_CODES.TOO_LARGE,
-      `URL response too large: ${ab.byteLength} bytes`,
-    );
-  }
-  const buf = Buffer.from(ab);
-  const mime = resp.headers.get('content-type')?.split(';')[0]?.trim() || ctx.mimeType;
 
   const filename = buildFilename({ ...ctx, mimeType: mime });
   const savedPath = buildSavedPath(ctx.sessionId, ctx.turnId, filename);

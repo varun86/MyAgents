@@ -81,7 +81,13 @@ import { getCurrentRuntimeType, isExternalRuntime } from './runtimes/factory';
 import { resolveLastRealUserMessagePreview } from './utils/session-message-preview';
 import { elapsedMs, emitPerfTrace, nowMs } from './utils/perf-trace';
 import type { ImagePayload } from './runtimes/types';
-import { buildBuiltinMediaAttachments } from './runtimes/builtin-media-attachments';
+import { buildBuiltinMediaAttachments, saveExtractedToolResultAttachments } from './runtimes/builtin-media-attachments';
+import {
+  appendOmittedImageNote,
+  classifyToolAttachmentPresentation,
+  extractToolResultRenderParts,
+  type ExtractedToolResultAttachment,
+} from './utils/tool-result-attachments';
 import type { ToolAttachment } from '../shared/types/tool-attachment';
 import { imEventBus, type ImEventType } from './utils/im-event-bus';
 import { imRequestRegistry } from './utils/im-request-registry';
@@ -5765,21 +5771,32 @@ function appendToolResultContent(toolUseId: string, content: string, isError?: b
 }
 
 /**
- * PRD 0.2.30 — for builtin media tools (edge-tts audio / gemini-image image),
- * normalize the just-completed tool result into `ToolAttachment[]`, set them on
- * the persisted tool block, and return them so the caller can include them in
- * the `chat:tool-result-complete` broadcast. No-op (returns undefined) for any
- * non-media tool. Idempotent — if the block already carries attachments (e.g.
- * the result surfaced via a second delivery path), the existing set is reused
- * without re-saving to disk.
+ * PRD 0.2.30 + #293 — unified builtin tool-result media entry. Normalizes the
+ * just-completed tool result into `ToolAttachment[]`, sets them on the
+ * persisted tool block, and returns them so the caller can include them in
+ * the `chat:tool-result-complete` broadcast. Two source families, one entry:
+ *   1. file-path media in result TEXT (edge-tts audio / gemini-image image —
+ *      PRD 0.2.30, `buildBuiltinMediaAttachments`);
+ *   2. image blocks in result CONTENT (generic MCP `ImageContent` base64 /
+ *      data-URL / file ref / remote url — #293, pre-extracted by the caller
+ *      via `extractToolResultRenderParts`, saved by
+ *      `saveExtractedToolResultAttachments`).
+ * Every produced attachment is stamped with the tool's presentation class:
+ * 'process' (Playwright / computer-use screenshots → rendered inside the
+ * folded tool row) vs default artifact (in-flow card, field omitted).
  *
- * Synchronous save is fine here: the file already exists on disk and the
- * trusted-root copy is a cheap base64 round-trip; gating to two tool names
- * keeps every other tool result on the zero-cost path.
+ * No-op (returns undefined) when nothing media-like is present. Idempotent —
+ * if the block already carries attachments (e.g. the result surfaced via a
+ * second delivery path), the existing set is reused without re-saving.
+ *
+ * Synchronous save is fine here: base64 round-trips and small file copies are
+ * ms-level; non-media tools stay on the zero-cost path (both extractors
+ * return [] without touching disk).
  */
 async function attachBuiltinMediaIfAny(
   toolUseId: string,
   contentStr: string,
+  extracted?: ExtractedToolResultAttachment[],
 ): Promise<ToolAttachment[] | undefined> {
   const toolBlock = findToolBlockById(toolUseId);
   if (!toolBlock) return undefined;
@@ -5787,13 +5804,18 @@ async function attachBuiltinMediaIfAny(
     return toolBlock.tool.attachments;
   }
   try {
-    const attachments = await buildBuiltinMediaAttachments(toolBlock.tool.name, contentStr, {
-      sessionId,
-      toolUseId,
-    });
+    const ctx = { sessionId, toolUseId };
+    const attachments = [
+      ...await buildBuiltinMediaAttachments(toolBlock.tool.name, contentStr, ctx),
+      ...await saveExtractedToolResultAttachments(extracted ?? [], toolBlock.tool.name, ctx),
+    ];
     if (attachments.length === 0) return undefined;
-    toolBlock.tool.attachments = attachments;
-    return attachments;
+    const presentation = classifyToolAttachmentPresentation(toolBlock.tool.name);
+    const stamped = presentation === 'process'
+      ? attachments.map((a) => ({ ...a, presentation }))
+      : attachments; // artifact = omitted field (renderer default; old data stays valid)
+    toolBlock.tool.attachments = stamped;
+    return stamped;
   } catch (err) {
     console.warn('[agent] builtin media attachment failed:', err instanceof Error ? err.message : String(err));
     return undefined;
@@ -10173,12 +10195,11 @@ async function startStreamingSession(preWarm = false): Promise<void> {
               is_error?: boolean;
             };
 
-            let contentStr = '';
-            if (typeof toolResultBlock.content === 'string') {
-              contentStr = toolResultBlock.content;
-            } else if (toolResultBlock.content !== null && toolResultBlock.content !== undefined) {
-              contentStr = JSON.stringify(toolResultBlock.content, null, 2);
-            }
+            // #293 — never let image-block / data-URL base64 through to SSE / tool
+            // state on the start event either; attachments are produced once on the
+            // COMPLETE path (user-turn tool_result), this transient preview only
+            // needs the redacted text. renderParts.text passes plain strings through.
+            const contentStr = extractToolResultRenderParts(toolResultBlock.content).text;
 
             toolResultIndexToId.set(streamEvent.index, toolResultBlock.tool_use_id);
             if (contentStr) {
@@ -10400,16 +10421,21 @@ async function startStreamingSession(preWarm = false): Promise<void> {
                 content: string | unknown;
               };
 
+              // #293 — split image-bearing blocks out of the raw content BEFORE any
+              // stringification: extracted sources become disk-backed ToolAttachments
+              // below; the remaining text has every base64-ish payload redacted to
+              // `[N bytes omitted]`. Session JSONL / SSE only ever carry path refs —
+              // the SDK's own transcript (what the model sees) is untouched.
+              const renderParts = extractToolResultRenderParts(toolResultBlock.content);
+
               // For WebSearch/WebFetch, prefer structured tool_use_result data if available
               // This contains query, results array with titles/urls, etc.
-              let contentStr: string;
-              if (toolUseResultData && typeof toolUseResultData === 'object') {
-                contentStr = JSON.stringify(toolUseResultData);
-              } else if (typeof toolResultBlock.content === 'string') {
-                contentStr = toolResultBlock.content;
-              } else {
-                contentStr = JSON.stringify(toolResultBlock.content ?? '', null, 2);
-              }
+              // Otherwise use renderParts.text: passes plain strings / JSON through
+              // verbatim, joins non-image blocks, and (finding 2) yields '' for a bare
+              // data-URL string whose bytes were extracted — so base64 never persists.
+              const contentStr = (toolUseResultData && typeof toolUseResultData === 'object')
+                ? JSON.stringify(toolUseResultData)
+                : renderParts.text;
 
               const parentToolUseId =
                 childToolToParent.get(toolResultBlock.tool_use_id) ?? sdkMessage.parent_tool_use_id;
@@ -10420,13 +10446,21 @@ async function startStreamingSession(preWarm = false): Promise<void> {
                 broadcast('chat:subagent-tool-result-complete', {
                   parentToolUseId,
                   toolUseId: toolResultBlock.tool_use_id,
-                  content: contentStr
+                  // Subagent media is not yet attached (pipeline doc §10 residual) —
+                  // leave an honest text trace instead of silently dropping the image.
+                  content: appendOmittedImageNote(contentStr, renderParts.attachments.length)
                 });
               } else {
                 // Top-level tool result (e.g., WebSearch without parent)
                 const stripped = strippedToolResultIds.has(toolResultBlock.tool_use_id) || isPlaywrightTool(toolResultBlock.tool_use_id);
-                // PRD 0.2.30 — builtin media tools (edge-tts / gemini-image) → first-class attachments.
-                const attachments = await attachBuiltinMediaIfAny(toolResultBlock.tool_use_id, contentStr);
+                // PRD 0.2.30 + #293 — unified media entry: file-path media (edge-tts /
+                // gemini-image) AND extracted image blocks (Playwright screenshots,
+                // generic MCP ImageContent) → first-class disk-backed attachments.
+                const attachments = await attachBuiltinMediaIfAny(
+                  toolResultBlock.tool_use_id,
+                  contentStr,
+                  renderParts.attachments,
+                );
                 broadcast('chat:tool-result-complete', {
                   toolUseId: toolResultBlock.tool_use_id,
                   content: stripped ? PLAYWRIGHT_RESULT_SENTINEL : contentStr,
@@ -10536,32 +10570,15 @@ async function startStreamingSession(preWarm = false): Promise<void> {
                 is_error?: boolean;
               };
 
-              let contentStr: string;
-              if (typeof toolResultBlock.content === 'string') {
-                contentStr = toolResultBlock.content;
-              } else if (Array.isArray(toolResultBlock.content)) {
-                contentStr = toolResultBlock.content
-                  .map((c) => {
-                    if (typeof c === 'string') {
-                      return c;
-                    }
-                    if (typeof c === 'object' && c !== null) {
-                      if ('text' in c && typeof c.text === 'string') {
-                        return c.text;
-                      }
-                      if ('type' in c && c.type === 'text' && 'text' in c) {
-                        return String(c.text);
-                      }
-                      return JSON.stringify(c, null, 2);
-                    }
-                    return String(c);
-                  })
-                  .join('\n');
-              } else if (typeof toolResultBlock.content === 'object' && toolResultBlock.content) {
-                contentStr = JSON.stringify(toolResultBlock.content, null, 2);
-              } else {
-                contentStr = String(toolResultBlock.content);
-              }
+              // #293 — Site B mirrors Site A (cross-review finding 1): extract image
+              // blocks BEFORE stringification so this sibling delivery path can't
+              // re-introduce base64 into SSE / JSONL. Non-string content collapses to
+              // the redacted joined text (single text block → its inner text — same
+              // shape the old hand-rolled mapper produced for the common case).
+              const renderParts = extractToolResultRenderParts(toolResultBlock.content);
+              // renderParts.text passes plain strings through verbatim and yields ''
+              // for a bare data-URL string whose bytes were extracted (finding 2).
+              const contentStr = renderParts.text;
 
               const parentToolUseId =
                 childToolToParent.get(toolResultBlock.tool_use_id) ?? sdkMessage.parent_tool_use_id;
@@ -10572,16 +10589,19 @@ async function startStreamingSession(preWarm = false): Promise<void> {
                 broadcast('chat:subagent-tool-result-complete', {
                   parentToolUseId,
                   toolUseId: toolResultBlock.tool_use_id,
-                  content: contentStr,
+                  // Subagent media is not yet attached (pipeline doc §10 residual) —
+                  // leave an honest text trace instead of silently dropping the image.
+                  content: appendOmittedImageNote(contentStr, renderParts.attachments.length),
                   isError: toolResultBlock.is_error || false
                 });
               } else {
                 const stripped = strippedToolResultIds.has(toolResultBlock.tool_use_id) || isPlaywrightTool(toolResultBlock.tool_use_id);
-                // PRD 0.2.30 — builtin media tools (edge-tts / gemini-image) → first-class attachments.
-                // Idempotent with Site A; only one delivery path fires per tool result.
+                // PRD 0.2.30 + #293 — unified media entry (file-path media + extracted
+                // image blocks). Idempotent with Site A; only one delivery path fires
+                // per tool result.
                 const attachments = toolResultBlock.is_error
                   ? undefined
-                  : await attachBuiltinMediaIfAny(toolResultBlock.tool_use_id, contentStr);
+                  : await attachBuiltinMediaIfAny(toolResultBlock.tool_use_id, contentStr, renderParts.attachments);
                 broadcast('chat:tool-result-complete', {
                   toolUseId: toolResultBlock.tool_use_id,
                   content: stripped ? PLAYWRIGHT_RESULT_SENTINEL : contentStr,
