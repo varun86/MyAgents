@@ -11,7 +11,14 @@ interface WorkspaceTreeRowProps {
   rowHeight: number;
   isDropTarget: boolean;
   isInternalDropTarget: boolean;
+  /** Row lies INSIDE the current drop-target directory's subtree — the whole
+   *  destination region tints so the user sees where items will land. */
+  isInDropSubtree: boolean;
   isDragging: boolean;
+  /** Keyboard focus (distinct from selection — VS Code semantics). */
+  isFocused: boolean;
+  /** On the clipboard in CUT mode — dimmed until pasted elsewhere. */
+  isCut: boolean;
   onClick: (e: React.MouseEvent) => void;
   onContextMenu: (e: React.MouseEvent) => void;
 }
@@ -21,7 +28,10 @@ export const WorkspaceTreeRow = memo(function WorkspaceTreeRow({
   rowHeight,
   isDropTarget,
   isInternalDropTarget,
+  isInDropSubtree,
   isDragging,
+  isFocused,
+  isCut,
   onClick,
   onContextMenu,
 }: WorkspaceTreeRowProps) {
@@ -55,6 +65,20 @@ export const WorkspaceTreeRow = memo(function WorkspaceTreeRow({
   // as highlight flicker while dragging.
   const highlight = isDropTarget || isInternalDropTarget;
 
+  const stateClasses = highlight
+    ? "ring-1 ring-inset ring-[var(--accent)]/40 bg-[var(--accent)]/8"
+    : isDragging
+      ? "opacity-40"
+      : `${
+          isInDropSubtree
+            ? "bg-[var(--accent)]/4 "
+            : ""
+        }${
+          row.isSelected
+            ? "bg-[var(--paper-inset)] text-[var(--ink)]"
+            : "text-[var(--ink-muted)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
+        }${isCut ? " opacity-50" : ""}`;
+
   return (
     <div
       ref={mergedRef}
@@ -62,14 +86,8 @@ export const WorkspaceTreeRow = memo(function WorkspaceTreeRow({
       data-tree-path={row.path}
       {...attributes}
       {...listeners}
-      className={`flex cursor-pointer items-center gap-2 px-3 text-[13px] transition-colors select-none ${
-        highlight
-          ? "ring-1 ring-inset ring-[var(--accent)]/40 bg-[var(--accent)]/8"
-          : isDragging
-            ? "opacity-40"
-            : row.isSelected
-              ? "bg-[var(--paper-inset)] text-[var(--ink)]"
-              : "text-[var(--ink-muted)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
+      className={`flex cursor-pointer items-center gap-2 px-3 text-[13px] transition-colors select-none ${stateClasses}${
+        isFocused ? " outline outline-1 -outline-offset-1 outline-[var(--accent)]/45" : ""
       }`}
       style={{
         height: rowHeight,

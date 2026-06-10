@@ -98,6 +98,99 @@ pub async fn cmd_workspace_copy_paths(
     })
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InternalCopyResult {
+    pub success: bool,
+    pub copied_files: Vec<CopiedFile>,
+    pub errors: Vec<String>,
+}
+
+/// Copy WORKSPACE-RELATIVE paths to another directory inside the same
+/// workspace — the tree's copy/paste (Cmd+C → Cmd+V). Separate from
+/// `cmd_workspace_copy_paths` because both endpoints live inside the
+/// workspace: sources go through `resolve_inside_workspace`, NOT the
+/// external-read blacklist (whose semantics target foreign OS paths and
+/// could reject workspaces on unusual locations). Collisions always
+/// auto-rename — the canonical "paste next to the original" flow IS a
+/// collision.
+#[tauri::command]
+pub async fn cmd_workspace_copy_internal(
+    workspace: String,
+    source_paths: Vec<String>,
+    target_dir: String,
+) -> Result<InternalCopyResult, String> {
+    if source_paths.is_empty() {
+        return Err("sourcePaths is required".to_string());
+    }
+    let workspace_root = validate_workspace_root(&workspace)?;
+    let target_root = resolve_inside_workspace(&workspace_root, target_dir.trim())?;
+    if !target_root.is_dir() {
+        return Err("Target must be an existing directory".to_string());
+    }
+
+    let mut copied: Vec<CopiedFile> = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
+
+    for src in source_paths {
+        let trimmed = src.trim();
+        match copy_internal_one(trimmed, &workspace_root, &target_root) {
+            Ok(item) => copied.push(item),
+            Err(err) => errors.push(format!("{}: {}", trimmed, err)),
+        }
+    }
+
+    Ok(InternalCopyResult {
+        success: true,
+        copied_files: copied,
+        errors,
+    })
+}
+
+fn copy_internal_one(
+    src_rel: &str,
+    workspace_root: &Path,
+    target_root: &Path,
+) -> Result<CopiedFile, String> {
+    let resolved = resolve_inside_workspace(workspace_root, src_rel)?;
+    let metadata =
+        fs::symlink_metadata(&resolved).map_err(|e| format!("stat failed: {}", e))?;
+
+    // Copying a directory into itself / its own subtree would make
+    // `copy_dir_recursive` walk the growing destination — refuse up front.
+    // Component-aware Path::starts_with, same rationale as crud.rs::move.
+    if metadata.is_dir() && target_root.starts_with(&resolved) {
+        return Err("Cannot copy folder into itself".to_string());
+    }
+
+    let name = resolved
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .ok_or_else(|| "source has no filename".to_string())?;
+    let (final_name, renamed) = unique_target_name(target_root, &name, true)?;
+    let dest = target_root.join(&final_name);
+
+    if metadata.is_dir() {
+        copy_dir_recursive(&resolved, &dest)?;
+    } else if metadata.is_file() {
+        fs::copy(&resolved, &dest).map_err(|e| format!("copy failed: {}", e))?;
+    } else {
+        return Err("Unsupported file type".to_string());
+    }
+
+    let target_relative = dest
+        .strip_prefix(workspace_root)
+        .map_err(|_| "Resolved path escaped workspace".to_string())?
+        .to_string_lossy()
+        .replace('\\', "/");
+
+    Ok(CopiedFile {
+        source_path: src_rel.to_string(),
+        target_path: target_relative,
+        renamed,
+    })
+}
+
 fn copy_one_path(
     source: &str,
     target_root: &Path,
@@ -212,6 +305,86 @@ mod tests {
 
     fn make_tmp_dir(prefix: &str) -> PathBuf {
         make_test_workspace(&format!("transfer_{}", prefix))
+    }
+
+    #[tokio::test]
+    async fn internal_copy_file_and_dir() {
+        let ws = make_tmp_dir("internal_basic");
+        fs::create_dir_all(ws.join("dst")).unwrap();
+        fs::create_dir_all(ws.join("src/nested")).unwrap();
+        fs::write(ws.join("a.txt"), "a").unwrap();
+        fs::write(ws.join("src/nested/b.txt"), "b").unwrap();
+
+        let res = cmd_workspace_copy_internal(
+            ws.to_string_lossy().to_string(),
+            vec!["a.txt".to_string(), "src".to_string()],
+            "dst".to_string(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(res.copied_files.len(), 2);
+        assert!(res.errors.is_empty());
+        assert!(ws.join("dst/a.txt").is_file());
+        assert!(ws.join("dst/src/nested/b.txt").is_file());
+        // Source untouched (it's a copy).
+        assert!(ws.join("a.txt").is_file());
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    #[tokio::test]
+    async fn internal_copy_into_same_dir_auto_renames() {
+        let ws = make_tmp_dir("internal_same_dir");
+        fs::write(ws.join("a.txt"), "a").unwrap();
+
+        let res = cmd_workspace_copy_internal(
+            ws.to_string_lossy().to_string(),
+            vec!["a.txt".to_string()],
+            "".to_string(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(res.copied_files.len(), 1);
+        assert!(res.copied_files[0].renamed);
+        assert_eq!(res.copied_files[0].target_path, "a_1.txt");
+        assert!(ws.join("a_1.txt").is_file());
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    #[tokio::test]
+    async fn internal_copy_rejects_dir_into_itself() {
+        let ws = make_tmp_dir("internal_self");
+        fs::create_dir_all(ws.join("a/b")).unwrap();
+
+        let res = cmd_workspace_copy_internal(
+            ws.to_string_lossy().to_string(),
+            vec!["a".to_string()],
+            "a/b".to_string(),
+        )
+        .await
+        .unwrap();
+
+        assert!(res.copied_files.is_empty());
+        assert_eq!(res.errors.len(), 1);
+        assert!(res.errors[0].contains("itself"));
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    #[tokio::test]
+    async fn internal_copy_rejects_traversal_source() {
+        let ws = make_tmp_dir("internal_traversal");
+        fs::create_dir_all(ws.join("dst")).unwrap();
+        let res = cmd_workspace_copy_internal(
+            ws.to_string_lossy().to_string(),
+            vec!["../escape.txt".to_string()],
+            "dst".to_string(),
+        )
+        .await
+        .unwrap();
+        assert!(res.copied_files.is_empty());
+        assert_eq!(res.errors.len(), 1);
+        let _ = fs::remove_dir_all(&ws);
     }
 
     #[tokio::test]

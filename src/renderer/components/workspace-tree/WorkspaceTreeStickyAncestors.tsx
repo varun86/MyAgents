@@ -117,6 +117,13 @@ export const WorkspaceTreeStickyAncestors = memo(
     return (
       <div
         className="absolute left-0 right-0 top-0 z-10 border-b border-[var(--line-subtle)] bg-[var(--paper-elevated)] shadow-xs"
+        // VS Code-style push transition: the viewport writes the sub-row
+        // scroll fraction into `--tree-sticky-push` (pure DOM write, no
+        // re-render) and the bar slides up as the deepest folder's subtree
+        // ends; the tree container's overflow-hidden clips the exiting rows.
+        style={{
+          transform: "translateY(calc(-1 * var(--tree-sticky-push, 0px)))",
+        }}
         onWheel={onWheel}
       >
         {ancestors.map((ancestor) => (

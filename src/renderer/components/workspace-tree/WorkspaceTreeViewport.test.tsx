@@ -80,15 +80,24 @@ function fileRow(path: string): VisibleTreeRow {
   };
 }
 
+function fileItems(paths: string[]) {
+  return paths.map((p) => {
+    const row = fileRow(p);
+    return { kind: 'node' as const, key: row.path, row };
+  });
+}
+
 function renderViewport(overrides: Partial<ComponentProps<typeof WorkspaceTreeViewport>> = {}) {
   const onRevealHandled = vi.fn();
   render(
     <WorkspaceTreeViewport
-      rows={[fileRow('a.md'), fileRow('dir/b.md')]}
+      items={fileItems(['a.md', 'dir/b.md'])}
       rowHeight={26}
       dropTargetPath={null}
       internalDropTarget={null}
       activeDragPaths={[]}
+      cutPaths={[]}
+      focusedPath={null}
       revealRequest={{ id: 7, path: 'dir/b.md' }}
       onRevealHandled={onRevealHandled}
       getStickyAncestors={() => []}
@@ -97,6 +106,8 @@ function renderViewport(overrides: Partial<ComponentProps<typeof WorkspaceTreeVi
       onAncestorContextMenu={vi.fn()}
       onRowClick={vi.fn()}
       onRowContextMenu={vi.fn()}
+      onEditCommit={vi.fn()}
+      onEditCancel={vi.fn()}
       {...overrides}
     />,
   );

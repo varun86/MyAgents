@@ -20,11 +20,21 @@ export const ROOT_DROP_ID = "drop:";
  */
 export const STICKY_DROP_PREFIX = "sticky:";
 
-/** Extract the workspace-relative path from a `drop:<path>` / `sticky:<path>` id. */
+/**
+ * Droppable id prefix for the synthetic "empty folder" hint row — it stands
+ * in for the (empty) directory it lives in, so drops on it land in that dir
+ * rather than falling through to the viewport root zone.
+ */
+export const EMPTY_HINT_DROP_PREFIX = "empty:";
+
+/** Extract the workspace-relative path from a `drop:` / `sticky:` / `empty:` id. */
 export function parseDropId(overId: string | null): string | null {
   if (overId === null) return null;
   if (overId.startsWith(STICKY_DROP_PREFIX)) {
     return overId.slice(STICKY_DROP_PREFIX.length);
+  }
+  if (overId.startsWith(EMPTY_HINT_DROP_PREFIX)) {
+    return overId.slice(EMPTY_HINT_DROP_PREFIX.length);
   }
   if (!overId.startsWith("drop:")) return null;
   return overId.slice("drop:".length);

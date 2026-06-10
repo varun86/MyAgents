@@ -1,11 +1,15 @@
 //! Delete a file or directory inside the workspace.
 //!
-//! Used by SimpleChatInput's Cmd+Z undo for file references — it deletes the
-//! attachment that was just copied into `myagents_files/`. We use
-//! `symlink_metadata` (NOT `metadata`) so a broken symlink reports as a file
-//! and gets removed cleanly. v0.2.5 hit a sidecar crash where `metadata`
-//! followed a broken symlink and called into a sync `cpSync`-style path
-//! checking; lesson is enshrined in CLAUDE.md red-line table.
+//! Default (`permanent` unset/false) moves the item to the OS trash via the
+//! `trash` crate, so Finder's「放回原处」/ Explorer restore stays available —
+//! tree deletions are no longer unrecoverable. `permanent: true` keeps the
+//! old unlink semantics for callers cleaning up their own scratch files
+//! (and for tests, which must not pollute the developer's trash).
+//!
+//! We use `symlink_metadata` (NOT `metadata`) so a broken symlink reports as
+//! a file and gets removed cleanly. v0.2.5 hit a sidecar crash where
+//! `metadata` followed a broken symlink and called into a sync `cpSync`-style
+//! path checking; lesson is enshrined in CLAUDE.md red-line table.
 
 use std::fs;
 
@@ -24,6 +28,7 @@ pub struct DeleteResult {
 pub async fn cmd_workspace_delete(
     workspace: String,
     path: String,
+    permanent: Option<bool>,
 ) -> Result<DeleteResult, String> {
     let workspace_root = validate_workspace_root(&workspace)?;
     let target = resolve_inside_workspace(&workspace_root, &path)?;
@@ -44,15 +49,34 @@ pub async fn cmd_workspace_delete(
         Err(e) => return Err(format!("stat failed: {}", e)),
     };
 
-    let res = if metadata.is_symlink() || metadata.is_file() {
+    // Symlinks always unlink directly regardless of mode: removing a link
+    // destroys no data (the target is untouched), and trash backends stat
+    // the link target — a broken link would error the whole delete.
+    if metadata.is_symlink() {
         fs::remove_file(&target)
-    } else if metadata.is_dir() {
-        fs::remove_dir_all(&target)
-    } else {
-        return Err("Unsupported file type".to_string());
-    };
+            .map_err(|e| format!("Failed to delete {}: {}", path, e))?;
+        return Ok(DeleteResult {
+            success: true,
+            deleted: true,
+        });
+    }
 
-    res.map_err(|e| format!("Failed to delete {}: {}", path, e))?;
+    if !metadata.is_file() && !metadata.is_dir() {
+        return Err("Unsupported file type".to_string());
+    }
+
+    if permanent.unwrap_or(false) {
+        let res = if metadata.is_file() {
+            fs::remove_file(&target)
+        } else {
+            fs::remove_dir_all(&target)
+        };
+        res.map_err(|e| format!("Failed to delete {}: {}", path, e))?;
+    } else {
+        trash::delete(&target)
+            .map_err(|e| format!("Failed to move {} to trash: {}", path, e))?;
+    }
+
     Ok(DeleteResult {
         success: true,
         deleted: true,
@@ -73,7 +97,7 @@ mod tests {
     async fn deletes_file() {
         let ws = make_tmp_workspace();
         fs::write(ws.join("a.txt"), "x").unwrap();
-        let res = cmd_workspace_delete(ws.to_string_lossy().to_string(), "a.txt".to_string())
+        let res = cmd_workspace_delete(ws.to_string_lossy().to_string(), "a.txt".to_string(), Some(true))
             .await
             .unwrap();
         assert!(res.deleted);
@@ -87,7 +111,7 @@ mod tests {
         let sub = ws.join("dir");
         fs::create_dir_all(sub.join("nested")).unwrap();
         fs::write(sub.join("a.txt"), "x").unwrap();
-        let res = cmd_workspace_delete(ws.to_string_lossy().to_string(), "dir".to_string())
+        let res = cmd_workspace_delete(ws.to_string_lossy().to_string(), "dir".to_string(), Some(true))
             .await
             .unwrap();
         assert!(res.deleted);
@@ -101,6 +125,7 @@ mod tests {
         let res = cmd_workspace_delete(
             ws.to_string_lossy().to_string(),
             "missing.txt".to_string(),
+            Some(true),
         )
         .await
         .unwrap();
@@ -112,7 +137,7 @@ mod tests {
     async fn rejects_workspace_root_itself() {
         let ws = make_tmp_workspace();
         let res =
-            cmd_workspace_delete(ws.to_string_lossy().to_string(), "".to_string()).await;
+            cmd_workspace_delete(ws.to_string_lossy().to_string(), "".to_string(), Some(true)).await;
         assert!(res.is_err());
         let _ = fs::remove_dir_all(&ws);
     }
@@ -123,6 +148,7 @@ mod tests {
         let res = cmd_workspace_delete(
             ws.to_string_lossy().to_string(),
             "../escape".to_string(),
+            Some(true),
         )
         .await;
         assert!(res.is_err());
@@ -140,6 +166,7 @@ mod tests {
         let res = cmd_workspace_delete(
             ws.to_string_lossy().to_string(),
             "broken".to_string(),
+            Some(true),
         )
         .await
         .unwrap();
@@ -147,6 +174,28 @@ mod tests {
         assert!(!ws.join("broken").exists());
         // exists() returns false for broken symlinks, so we also verify it's gone via symlink_metadata
         assert!(fs::symlink_metadata(ws.join("broken")).is_err());
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    // Trash-mode (permanent=None) must not hand symlinks to the trash crate —
+    // its backends stat the link target, so a BROKEN link would error the
+    // whole delete. The symlink branch unlinks directly, which also keeps
+    // this test from polluting the developer's trash.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn trash_mode_unlinks_broken_symlink_directly() {
+        use std::os::unix::fs::symlink;
+        let ws = make_tmp_workspace();
+        symlink("/nonexistent/target", ws.join("broken2")).unwrap();
+        let res = cmd_workspace_delete(
+            ws.to_string_lossy().to_string(),
+            "broken2".to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(res.deleted);
+        assert!(fs::symlink_metadata(ws.join("broken2")).is_err());
         let _ = fs::remove_dir_all(&ws);
     }
 }

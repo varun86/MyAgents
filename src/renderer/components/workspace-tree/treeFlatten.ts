@@ -2,9 +2,12 @@ import type { DirectoryTreeNode } from "../../../shared/dir-types";
 
 import type {
   StickyAncestor,
+  TreeEditingState,
+  TreeListItem,
   VisibleTreeRow,
   WorkspaceTreeNodeMeta,
 } from "./treeTypes";
+import { parentDirOfPath, stickyParentPathOf } from "./treeTypes";
 
 export function buildWorkspaceNodeMetaByPath(
   nodes: DirectoryTreeNode[],
@@ -74,7 +77,7 @@ export function buildVisibleRangeSelection(
 }
 
 export function buildStickyAncestors(
-  visibleRows: VisibleTreeRow[],
+  items: readonly TreeListItem[],
   nodeMetaByPath: ReadonlyMap<string, WorkspaceTreeNodeMeta>,
   firstVisibleIndex: number,
   scrollTop: number,
@@ -84,20 +87,20 @@ export function buildStickyAncestors(
     return [];
   }
 
-  // Clamp to the last row instead of bailing: the overlay-model probe
-  // (`topUnits + count`) can overshoot the row list near the scroll bottom
+  // Clamp to the last item instead of bailing: the overlay-model probe
+  // (`topUnits + count`) can overshoot the list near the scroll bottom
   // when the viewport is only a few rows tall. Bailing to `[]` there makes
   // the fixed-point iteration oscillate between `[]` and an n-deep stack at
   // every row boundary (visible as per-row breadcrumb flicker); clamping
   // means "use the last row's ancestors" — which is also the correct VS Code
   // semantics for a bottom-pinned view.
-  const row = visibleRows[Math.min(firstVisibleIndex, visibleRows.length - 1)];
-  if (!row) {
+  const item = items[Math.min(firstVisibleIndex, items.length - 1)];
+  if (!item) {
     return [];
   }
 
   const ancestors: StickyAncestor[] = [];
-  let parentPath = row.parentPath;
+  let parentPath = stickyParentPathOf(item);
   while (parentPath && ancestors.length < maxDepth) {
     const meta = nodeMetaByPath.get(parentPath);
     if (!meta) {
@@ -113,6 +116,97 @@ export function buildStickyAncestors(
   }
   return ancestors;
 }
+
+/**
+ * Assemble what the virtual list renders: the visible tree rows plus
+ * synthetic rows —
+ *  - the inline editor row (rename replaces its node IN PLACE; create is
+ *    inserted as the first child of its parent dir, or at the very top for
+ *    the root), and
+ *  - an "empty folder" hint row under every open, fully-loaded, empty dir
+ *    (suppressed while the inline editor is creating inside that dir —
+ *    the editor takes its place).
+ */
+export function buildTreeListItems(
+  visibleRows: readonly VisibleTreeRow[],
+  editing: TreeEditingState | null,
+): TreeListItem[] {
+  const items: TreeListItem[] = [];
+  const creatingIn =
+    editing && editing.mode !== "rename" ? editing.parentDir : null;
+
+  if (creatingIn === "") {
+    items.push({ kind: "edit", key: "__edit__", depth: 0, editing: editing! });
+  }
+
+  for (const row of visibleRows) {
+    if (editing?.mode === "rename" && row.path === editing.path) {
+      items.push({
+        kind: "edit",
+        key: "__edit__",
+        depth: row.depth,
+        editing,
+      });
+      continue;
+    }
+    items.push({ kind: "node", key: row.path, row });
+
+    if (row.isDir && row.isOpen) {
+      if (creatingIn === row.path) {
+        items.push({
+          kind: "edit",
+          key: "__edit__",
+          depth: row.depth + 1,
+          editing: editing!,
+        });
+      } else if (
+        row.data.loaded !== false &&
+        (row.data.children?.length ?? 0) === 0 &&
+        !row.isLoading
+      ) {
+        items.push({
+          kind: "empty-hint",
+          key: `${row.path}/__empty__`,
+          depth: row.depth + 1,
+          parentDir: row.path,
+        });
+      }
+    }
+  }
+  return items;
+}
+
+/**
+ * VS Code-style sticky "push" transition, as a pure function of the RAW
+ * scroll position. When the next row unit resolves to a SHALLOWER breadcrumb
+ * (the deepest sticky folder's subtree is ending), the bar slides up by the
+ * sub-row scroll fraction × the depth delta, so exiting rows are pushed out
+ * smoothly instead of popping at the boundary. Returns the upward translate
+ * in px (0 when no transition is in progress).
+ *
+ * Designed to be called from the scroll handler and written to a CSS
+ * variable — it must NOT enter React state (that would re-render per pixel,
+ * defeating the row-quantized `topUnits` state).
+ */
+export function computeStickyPushPx(
+  rawScrollTop: number,
+  rowHeight: number,
+  countAtUnit: (unit: number) => number,
+): number {
+  if (rawScrollTop <= 0 || rowHeight <= 0) return 0;
+  const unit = Math.floor(rawScrollTop / rowHeight);
+  const frac = (rawScrollTop - unit * rowHeight) / rowHeight;
+  if (frac <= 0) return 0;
+  const current = countAtUnit(unit);
+  if (current <= 0) return 0;
+  const next = countAtUnit(unit + 1);
+  if (next >= current) return 0;
+  const push = frac * rowHeight * (current - next);
+  return Math.min(Math.round(push), current * rowHeight);
+}
+
+/** Re-export for callers that need the same parent-dir derivation. */
+export { parentDirOfPath };
 
 /**
  * Maximum number of stacked sticky-ancestor rows. The viewport reserves a

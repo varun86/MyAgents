@@ -97,6 +97,12 @@ interface CopyResult {
   copiedFiles: CopiedFile[];
 }
 
+interface InternalCopyResult {
+  success: boolean;
+  copiedFiles: CopiedFile[];
+  errors: string[];
+}
+
 interface ReadAsBase64Item {
   path: string;
   name: string;
@@ -201,6 +207,12 @@ export interface WorkspaceFileService {
     targetDir: string;
     autoRename?: boolean;
   }): Promise<CopyResult>;
+  /** [requires workspace] Copy WORKSPACE-RELATIVE paths to another dir inside
+   *  the same workspace (tree copy/paste). Collisions auto-rename. */
+  copyInternal(args: {
+    sourcePaths: string[];
+    targetDir: string;
+  }): Promise<InternalCopyResult>;
   /** [workspace-free] Read absolute image paths and return base64 (for Tauri image drops). */
   readPathsAsBase64(args: { paths: string[] }): Promise<ReadAsBase64Response>;
   /** [requires workspace] Append a pattern to `<workspace>/.gitignore` if not already present. */
@@ -334,6 +346,18 @@ export function useWorkspaceFileService(workspacePath: string | null): Workspace
         sourcePaths,
         targetDir,
         autoRename,
+      });
+    },
+    [requireWorkspace, invokeIfTauri],
+  );
+
+  const copyInternal: WorkspaceFileService['copyInternal'] = useCallback(
+    async ({ sourcePaths, targetDir }) => {
+      const ws = requireWorkspace();
+      return invokeIfTauri<InternalCopyResult>('cmd_workspace_copy_internal', {
+        workspace: ws,
+        sourcePaths,
+        targetDir,
       });
     },
     [requireWorkspace, invokeIfTauri],
@@ -634,6 +658,7 @@ export function useWorkspaceFileService(workspacePath: string | null): Workspace
     () => ({
       importBase64Files,
       copyPaths,
+      copyInternal,
       readPathsAsBase64,
       addGitignore,
       searchFiles,
@@ -667,6 +692,7 @@ export function useWorkspaceFileService(workspacePath: string | null): Workspace
     [
       importBase64Files,
       copyPaths,
+      copyInternal,
       readPathsAsBase64,
       addGitignore,
       searchFiles,

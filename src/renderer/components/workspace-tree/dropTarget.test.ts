@@ -4,6 +4,7 @@ import type { DirectoryTreeNode } from "../../../shared/dir-types";
 import type { WorkspaceTreeNodeMeta } from "./treeTypes";
 
 import {
+  EMPTY_HINT_DROP_PREFIX,
   parseDropId,
   resolveExternalDropDir,
   resolveInternalDropTarget,
@@ -50,6 +51,18 @@ describe("parseDropId", () => {
 
   it("extracts the path from sticky breadcrumb drop ids", () => {
     expect(parseDropId(`${STICKY_DROP_PREFIX}docs/notes`)).toBe("docs/notes");
+  });
+
+  it("extracts the dir from empty-hint drop ids (the hint stands in for its dir)", () => {
+    expect(parseDropId(`${EMPTY_HINT_DROP_PREFIX}docs/notes`)).toBe("docs/notes");
+  });
+});
+
+describe("resolveInternalDropTarget via empty-hint ids", () => {
+  it("targets the empty folder the hint row represents", () => {
+    expect(
+      resolveInternalDropTarget(`${EMPTY_HINT_DROP_PREFIX}docs/notes`, ["root.md"], META),
+    ).toBe("docs/notes");
   });
 });
 

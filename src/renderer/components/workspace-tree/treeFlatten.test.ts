@@ -3,10 +3,16 @@ import { describe, expect, it, vi } from "vitest";
 import type { StickyAncestor } from "./treeTypes";
 
 import type { DirectoryTreeNode } from "../../../shared/dir-types";
-import type { VisibleTreeRow, WorkspaceTreeNodeMeta } from "./treeTypes";
+import type {
+  TreeListItem,
+  VisibleTreeRow,
+  WorkspaceTreeNodeMeta,
+} from "./treeTypes";
 
 import {
   buildStickyAncestors,
+  buildTreeListItems,
+  computeStickyPushPx,
   MAX_STICKY_ANCESTOR_DEPTH,
   resolveStickyAncestors,
 } from "./treeFlatten";
@@ -129,44 +135,63 @@ describe("resolveStickyAncestors", () => {
   });
 });
 
+function makeDirRow(path: string, opts?: Partial<VisibleTreeRow>): VisibleTreeRow {
+  const data: DirectoryTreeNode = {
+    id: path,
+    name: path.split("/").pop() ?? path,
+    path,
+    type: "dir",
+    children: [],
+    ...((opts?.data ?? {}) as Partial<DirectoryTreeNode>),
+  };
+  return {
+    data,
+    depth: path.split("/").length - 1,
+    isDir: true,
+    isLoading: false,
+    isOpen: false,
+    isSelected: false,
+    parentPath: path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : null,
+    path,
+    ...opts,
+    ...(opts?.data ? { data: { ...data, ...opts.data } } : {}),
+  };
+}
+
+function makeFileRow(path: string): VisibleTreeRow {
+  const data: DirectoryTreeNode = {
+    id: path,
+    name: path.split("/").pop() ?? path,
+    path,
+    type: "file",
+  };
+  return {
+    data,
+    depth: path.split("/").length - 1,
+    isDir: false,
+    isLoading: false,
+    isOpen: false,
+    isSelected: false,
+    parentPath: path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : null,
+    path,
+  };
+}
+
+function asItems(rows: VisibleTreeRow[]): TreeListItem[] {
+  return rows.map((row) => ({ kind: "node", key: row.path, row }));
+}
+
 describe("buildStickyAncestors probe clamping", () => {
-  function makeRows(): {
-    rows: VisibleTreeRow[];
+  function makeFixture(): {
+    items: TreeListItem[];
     meta: Map<string, WorkspaceTreeNodeMeta>;
   } {
-    const dir: DirectoryTreeNode = { id: "a", name: "a", path: "a", type: "dir" };
-    const child = (p: string): DirectoryTreeNode => ({
-      id: p,
-      name: p.split("/").pop() ?? p,
-      path: p,
-      type: "file",
-    });
-    const rows: VisibleTreeRow[] = [
-      {
-        data: dir,
-        depth: 0,
-        isDir: true,
-        isLoading: false,
-        isOpen: true,
-        isSelected: false,
-        parentPath: null,
-        path: "a",
-      },
-      ...["a/x.md", "a/y.md"].map((p) => ({
-        data: child(p),
-        depth: 1,
-        isDir: false,
-        isLoading: false,
-        isOpen: false,
-        isSelected: false,
-        parentPath: "a",
-        path: p,
-      })),
-    ];
+    const dir = makeDirRow("a", { isOpen: true });
+    const rows = [dir, makeFileRow("a/x.md"), makeFileRow("a/y.md")];
     const meta = new Map<string, WorkspaceTreeNodeMeta>([
-      ["a", { data: dir, depth: 0, parentPath: null }],
+      ["a", { data: dir.data, depth: 0, parentPath: null }],
     ]);
-    return { rows, meta };
+    return { items: asItems(rows), meta };
   }
 
   // Regression: the overlay probe (`topUnits + count`) can overshoot the row
@@ -175,14 +200,106 @@ describe("buildStickyAncestors probe clamping", () => {
   // boundaries (per-row breadcrumb flicker at the bottom). Overshoot must
   // clamp to the LAST row's ancestors instead.
   it("clamps an overshooting index to the last row's ancestors", () => {
-    const { rows, meta } = makeRows();
-    const result = buildStickyAncestors(rows, meta, 10, ROW, MAX_STICKY_ANCESTOR_DEPTH);
+    const { items, meta } = makeFixture();
+    const result = buildStickyAncestors(items, meta, 10, ROW, MAX_STICKY_ANCESTOR_DEPTH);
     expect(result.map((a) => a.path)).toEqual(["a"]);
   });
 
-  it("still returns [] for an empty row list", () => {
+  it("still returns [] for an empty list", () => {
     expect(
       buildStickyAncestors([], new Map(), 5, ROW, MAX_STICKY_ANCESTOR_DEPTH),
     ).toEqual([]);
+  });
+});
+
+describe("buildTreeListItems", () => {
+  const siblingNames = new Set<string>();
+
+  it("passes rows through unchanged with no editing state", () => {
+    const child = makeFileRow("a/x.md");
+    const dir = makeDirRow("a", { isOpen: true });
+    dir.data.children = [child.data];
+    const items = buildTreeListItems([dir, child], null);
+    expect(items.map((i) => i.kind)).toEqual(["node", "node"]);
+  });
+
+  it("replaces the renamed node with the edit row IN PLACE", () => {
+    const rows = [makeFileRow("a.md"), makeFileRow("b.md")];
+    const items = buildTreeListItems(rows, {
+      mode: "rename",
+      path: "a.md",
+      initialName: "a.md",
+      isDir: false,
+      siblingNames,
+    });
+    expect(items[0].kind).toBe("edit");
+    expect(items[1]).toMatchObject({ kind: "node", key: "b.md" });
+  });
+
+  it("inserts a create-edit row at the top for the root, and after the parent dir otherwise", () => {
+    const dir = makeDirRow("docs", { isOpen: true });
+    const rows = [dir, makeFileRow("docs/x.md")];
+    const atRoot = buildTreeListItems(rows, {
+      mode: "create-file",
+      parentDir: "",
+      siblingNames,
+    });
+    expect(atRoot[0].kind).toBe("edit");
+
+    const inDir = buildTreeListItems(rows, {
+      mode: "create-folder",
+      parentDir: "docs",
+      siblingNames,
+    });
+    expect(inDir.map((i) => i.kind)).toEqual(["node", "edit", "node"]);
+    expect(inDir[1]).toMatchObject({ depth: 1 });
+  });
+
+  it("adds an empty-hint under open+loaded+empty dirs, suppressed while creating there", () => {
+    const empty = makeDirRow("empty", { isOpen: true });
+    const plain = buildTreeListItems([empty], null);
+    expect(plain.map((i) => i.kind)).toEqual(["node", "empty-hint"]);
+    expect(plain[1]).toMatchObject({ parentDir: "empty", depth: 1 });
+
+    const whileCreating = buildTreeListItems([empty], {
+      mode: "create-file",
+      parentDir: "empty",
+      siblingNames,
+    });
+    expect(whileCreating.map((i) => i.kind)).toEqual(["node", "edit"]);
+  });
+
+  it("does NOT add an empty-hint for unloaded or loading dirs", () => {
+    const unloaded = makeDirRow("lazy", {
+      isOpen: true,
+      data: { id: "lazy", name: "lazy", path: "lazy", type: "dir", loaded: false },
+    });
+    expect(buildTreeListItems([unloaded], null).map((i) => i.kind)).toEqual(["node"]);
+
+    const loading = makeDirRow("busy", { isOpen: true, isLoading: true });
+    expect(buildTreeListItems([loading], null).map((i) => i.kind)).toEqual(["node"]);
+  });
+});
+
+describe("computeStickyPushPx", () => {
+  it("is 0 with no sub-row offset or no sticky stack", () => {
+    expect(computeStickyPushPx(4 * ROW, ROW, () => 2)).toBe(0); // exact boundary
+    expect(computeStickyPushPx(4 * ROW + 13, ROW, () => 0)).toBe(0); // no stack
+  });
+
+  it("is 0 while the next unit keeps the same (or deeper) stack", () => {
+    expect(computeStickyPushPx(4 * ROW + 13, ROW, () => 2)).toBe(0);
+    expect(
+      computeStickyPushPx(4 * ROW + 13, ROW, (u) => (u === 4 ? 1 : 2)),
+    ).toBe(0);
+  });
+
+  it("pushes by the scroll fraction × depth delta when the stack is about to shrink", () => {
+    // Half a row into unit 4; depth drops 2 → 1 at unit 5 → push half a row.
+    const half = computeStickyPushPx(4 * ROW + ROW / 2, ROW, (u) => (u === 4 ? 2 : 1));
+    expect(half).toBe(ROW / 2);
+    // Depth drops 2 → 0 → push a full row at half fraction (delta 2).
+    const double = computeStickyPushPx(4 * ROW + ROW / 2, ROW, (u) => (u === 4 ? 2 : 0));
+    expect(double).toBe(ROW);
   });
 });

@@ -1,6 +1,7 @@
 import {
   AtSign,
   ChevronUp,
+  ClipboardPaste,
   Copy,
   Eye,
   FilePlus,
@@ -12,6 +13,7 @@ import {
   NotebookPen,
   Pencil,
   RefreshCw,
+  Scissors,
   SlidersHorizontal,
   Trash2,
   Upload,
@@ -103,11 +105,27 @@ function useDebounce<T>(value: T, delay: number): T {
   }, [value, delay]);
   return debouncedValue;
 }
-import RenameDialog from "./RenameDialog";
 import AgentCapabilitiesPanel from "./AgentCapabilitiesPanel";
 import WorkspaceIcon from "./launcher/WorkspaceIcon";
 import { useWorkspaceTreeModel } from "./workspace-tree/useWorkspaceTreeModel";
-import { WorkspaceTreeViewport } from "./workspace-tree/WorkspaceTreeViewport";
+import {
+  WorkspaceTreeViewport,
+  type WorkspaceTreeViewportHandle,
+} from "./workspace-tree/WorkspaceTreeViewport";
+import {
+  findTypeAheadTarget,
+  resolveTreeKeyAction,
+} from "./workspace-tree/treeKeyboard";
+import {
+  baseNameOf,
+  buildUndoPlan,
+  pushUndoEntry,
+  type UndoableOp,
+} from "./workspace-tree/undoJournal";
+import {
+  parentDirOfPath,
+  type TreeEditingState,
+} from "./workspace-tree/treeTypes";
 import {
   resolveExternalDropDir,
   resolveInternalDropTarget,
@@ -292,9 +310,14 @@ type SearchResultContextMenuState = {
 } | null;
 
 type DialogState = {
-  type: "rename" | "delete" | "new-file" | "new-folder" | "delete-multi";
-  node: DirectoryTreeNode | null; // null means root directory for new-file/new-folder
+  type: "delete" | "delete-multi";
+  node: DirectoryTreeNode | null;
   nodes?: DirectoryTreeNode[]; // for delete-multi
+} | null;
+
+type TreeClipboard = {
+  mode: "copy" | "cut";
+  paths: string[];
 } | null;
 
 function getFolderName(path: string): string {
@@ -394,6 +417,21 @@ const DirectoryPanel = memo(
     const [contextMenu, setContextMenu] = useState<ContextMenuState>(null);
     const [dialog, setDialog] = useState<DialogState>(null);
     const [importTargetDir, setImportTargetDir] = useState<string>("");
+
+    // Keyboard focus (distinct from selection — VS Code tree semantics).
+    const [focusedPath, setFocusedPath] = useState<string | null>(null);
+    // Inline create/rename editor state (synthetic row in the tree).
+    const [editing, setEditing] = useState<TreeEditingState | null>(null);
+    // Internal file clipboard (Cmd+C / Cmd+X / Cmd+V on tree nodes).
+    const [clipboard, setClipboard] = useState<TreeClipboard>(null);
+    // Undo journal for reversible mutations (move/rename/create/paste).
+    // Ref — pushing/popping must not re-render the tree.
+    const undoJournalRef = useRef<readonly UndoableOp[]>([]);
+    const typeAheadRef = useRef<{ buffer: string; timer: ReturnType<typeof setTimeout> | null }>({
+      buffer: "",
+      timer: null,
+    });
+    const viewportRef = useRef<WorkspaceTreeViewportHandle>(null);
 
     // External drag-drop state
     const [isExternalDrop, setIsExternalDrop] = useState(false);
@@ -946,6 +984,8 @@ const DirectoryPanel = memo(
       getOpenPaths,
       getRangeSelection,
       getStickyAncestors,
+      isOpen,
+      items,
       nodeMetaByPath,
       openPath,
       togglePath,
@@ -954,6 +994,7 @@ const DirectoryPanel = memo(
       loadingPaths: loadingDirs,
       rootChildren: treeData,
       selectedPaths,
+      editing,
       // Restore the previously-expanded folders when the panel remounts (read
       // once on mount; see WorkspaceTreePersistedState).
       initialOpenPaths: persistedTreeStateRef?.current.openPaths,
@@ -1099,6 +1140,16 @@ const DirectoryPanel = memo(
       ) {
         lastClickedPathRef.current = null;
       }
+      // Keyboard focus and an in-flight rename must not point at vanished
+      // nodes (deleted externally / refresh pruned them).
+      setFocusedPath((prev) =>
+        prev && !nodeMetaByPath.has(prev) && !pendingSelectionPathsRef.current.has(prev)
+          ? null
+          : prev,
+      );
+      setEditing((prev) =>
+        prev?.mode === "rename" && !nodeMetaByPath.has(prev.path) ? null : prev,
+      );
     }, [nodeMetaByPath]);
 
     const handlePreview = useCallback(async (node: DirectoryTreeNode) => {
@@ -1164,6 +1215,42 @@ const DirectoryPanel = memo(
         setPreviewError(null);
       }
     }, [onFilePreviewExternal]);
+
+    /** Route a FILE node to the right preview (image / rich doc / text) —
+     *  shared by row clicks and keyboard Enter. */
+    const previewNode = useCallback(
+      async (data: DirectoryTreeNode) => {
+        if (isImageFile(data.name)) {
+          // Image branch — same latest-wins pattern as handleImagePreview.
+          // We don't delegate to it because this branch also drives
+          // `isPreviewLoading` (for the inline modal's loading indicator),
+          // which `handleImagePreview` doesn't touch.
+          const myReq = ++previewReqIdRef.current;
+          setIsPreviewLoading(true);
+          try {
+            const result = await fileService.downloadFile({ path: data.path });
+            if (myReq !== previewReqIdRef.current) return;
+            const dataUrl = `data:${result.mimeType};base64,${result.data}`;
+            openPreview(dataUrl, data.name);
+          } catch (err) {
+            if (myReq !== previewReqIdRef.current) return;
+            console.error("[DirectoryPanel] Failed to load image:", err);
+            toast.error("图片加载失败");
+          } finally {
+            if (myReq === previewReqIdRef.current) {
+              setIsPreviewLoading(false);
+            }
+          }
+        } else if (isRichDocPreviewable(data.name)) {
+          handleRichDocPreview(data);
+        } else if (isPreviewable(data.name)) {
+          void handlePreview(data);
+        } else {
+          toast.info("暂不支持预览此文件类型，可右键菜单打开");
+        }
+      },
+      [fileService, handlePreview, handleRichDocPreview, openPreview, toast],
+    );
 
     const handleSearchItemClick = useCallback(
       async (path: string, focusTarget?: FilePreviewFocusTarget) => {
@@ -1523,7 +1610,22 @@ const DirectoryPanel = memo(
       [externalDropDirFromEventTarget, handleExternalFileDrop],
     );
 
-    // Move handler (used by both internal DnD and context menu).
+    /** Silent auto-rename policy (用户决策 2026-06-11): collisions never
+     *  block with a dialog — Rust renames (`a_1.txt` / `a (1).txt`) and we
+     *  TELL the user via toast so the rename is no longer invisible. */
+    const notifyAutoRenames = useCallback(
+      (pairs: Array<{ from: string; to: string }>) => {
+        if (pairs.length === 0) return;
+        if (pairs.length === 1) {
+          toast.info(`已自动重命名避免冲突：${pairs[0].from} → ${pairs[0].to}`);
+        } else {
+          toast.info(`${pairs.length} 项因重名已自动重命名`);
+        }
+      },
+      [toast],
+    );
+
+    // Move handler (used by internal DnD, cut-paste and context menu).
     // Cross-review caught: pre-fix this ignored `result.errors`, so partial
     // failures (3 of 5 files moved, 2 errored due to permission / collision
     // exhaustion) silently dropped on the floor — user saw 2 files vanish
@@ -1539,12 +1641,29 @@ const DirectoryPanel = memo(
               `已移动 ${moved} 项；${result.errors.length} 项失败：${result.errors[0]}`,
             );
           }
+          if (result.movedFiles && result.movedFiles.length > 0) {
+            undoJournalRef.current = pushUndoEntry(undoJournalRef.current, {
+              kind: "move",
+              moves: result.movedFiles.map((m) => ({
+                from: m.oldPath,
+                to: m.newPath,
+              })),
+            });
+            notifyAutoRenames(
+              result.movedFiles
+                .filter((m) => baseNameOf(m.oldPath) !== baseNameOf(m.newPath))
+                .map((m) => ({
+                  from: baseNameOf(m.oldPath),
+                  to: baseNameOf(m.newPath),
+                })),
+            );
+          }
           refresh();
         } catch (err) {
           setError(err instanceof Error ? err.message : "Move failed");
         }
       },
-      [fileService, refresh, toast],
+      [fileService, notifyAutoRenames, refresh, toast],
     );
 
     // --- Internal DnD via @dnd-kit (pointer-events based, reliable in Tauri WebView) ---
@@ -1807,18 +1926,12 @@ const DirectoryPanel = memo(
       },
     ];
 
-    const handleRename = async (oldPath: string, newName: string) => {
-      try {
-        await fileService.rename({ oldPath, newName });
-        refresh();
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "Rename failed");
-      }
-    };
-
     const handleDelete = async (path: string) => {
       try {
-        await fileService.deleteFile({ path });
+        const result = await fileService.deleteFile({ path });
+        if (result.deleted) {
+          toast.success("已移至废纸篓");
+        }
         refresh();
       } catch (err) {
         setError(err instanceof Error ? err.message : "Delete failed");
@@ -1843,22 +1956,13 @@ const DirectoryPanel = memo(
           },
         ]);
         lastClickedPathRef.current = relPath;
+        setFocusedPath(relPath);
         // silentIfMissing: creation already succeeded — a slow watcher refresh
         // must not surface a scary "文件不存在或已删除" toast.
         void handleRevealSearchResultInTree(relPath, { silentIfMissing: true });
       },
       [markPendingSelection, handleRevealSearchResultInTree],
     );
-
-    const handleNewFile = async (parentDir: string, name: string) => {
-      try {
-        const created = await fileService.newFile({ parentDir, name });
-        refresh();
-        selectAndRevealCreated(created.path, "file");
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "Create failed");
-      }
-    };
 
     /** 「新建笔记」: pick the next free `note-YYYYMMDDHHMM[-N].md` slot in
      *  `parentDir`, create it empty, then open the preview directly in
@@ -1916,6 +2020,11 @@ const DirectoryPanel = memo(
           return;
         }
 
+        undoJournalRef.current = pushUndoEntry(undoJournalRef.current, {
+          kind: "create",
+          paths: [createdPath],
+        });
+
         // Watcher refresh will surface the new file; we also kick a manual
         // refresh so the highlight + selection are immediate.
         refresh();
@@ -1944,15 +2053,437 @@ const DirectoryPanel = memo(
       }
     };
 
-    const handleNewFolder = async (parentDir: string, name: string) => {
+    /** Sibling names of `parentDir`'s current children — live collision
+     *  feedback for the inline editor. Rust stays authoritative. */
+    const siblingNamesOf = useCallback(
+      (parentDir: string, excludeName?: string): Set<string> => {
+        const children =
+          parentDir === ""
+            ? treeData
+            : (nodeMetaByPath.get(parentDir)?.data.children ?? []);
+        const names = new Set(children.map((c) => c.name));
+        if (excludeName) names.delete(excludeName);
+        return names;
+      },
+      [treeData, nodeMetaByPath],
+    );
+
+    /** F2 / context-menu rename → inline editor replacing the row in place. */
+    const startRename = useCallback(
+      (path: string) => {
+        const meta = nodeMetaByPath.get(path);
+        if (!meta) return;
+        setContextMenu(null);
+        setEditing({
+          mode: "rename",
+          path,
+          initialName: meta.data.name,
+          isDir: meta.data.type === "dir",
+          siblingNames: siblingNamesOf(meta.parentPath ?? "", meta.data.name),
+        });
+      },
+      [nodeMetaByPath, siblingNamesOf],
+    );
+
+    /** 新建文件/新建文件夹 → inline editor as the parent's first child. */
+    const startCreate = useCallback(
+      (parentDir: string, mode: "create-file" | "create-folder") => {
+        setContextMenu(null);
+        if (parentDir) {
+          const meta = nodeMetaByPath.get(parentDir);
+          if (!meta || meta.data.type !== "dir") return;
+          openPath(parentDir);
+          if (meta.data.loaded === false) void expandDir(parentDir);
+        }
+        setEditing({ mode, parentDir, siblingNames: siblingNamesOf(parentDir) });
+      },
+      [nodeMetaByPath, openPath, expandDir, siblingNamesOf],
+    );
+
+    const handleEditCancel = useCallback(() => {
+      setEditing(null);
+      treeContainerRef.current?.focus();
+    }, []);
+
+    const handleEditCommit = useCallback(
+      async (name: string) => {
+        const session = editing;
+        if (!session) return;
+        try {
+          if (session.mode === "rename") {
+            const result = await fileService.rename({
+              oldPath: session.path,
+              newName: name,
+            });
+            undoJournalRef.current = pushUndoEntry(undoJournalRef.current, {
+              kind: "rename",
+              from: session.path,
+              to: result.newPath,
+            });
+            setEditing(null);
+            markPendingSelection(result.newPath);
+            setSelectedNodes([
+              {
+                id: result.newPath,
+                name,
+                path: result.newPath,
+                type: session.isDir ? "dir" : "file",
+              },
+            ]);
+            lastClickedPathRef.current = result.newPath;
+            setFocusedPath(result.newPath);
+          } else {
+            const created =
+              session.mode === "create-file"
+                ? await fileService.newFile({
+                    parentDir: session.parentDir,
+                    name,
+                  })
+                : await fileService.newFolder({
+                    parentDir: session.parentDir,
+                    name,
+                  });
+            undoJournalRef.current = pushUndoEntry(undoJournalRef.current, {
+              kind: "create",
+              paths: [created.path],
+            });
+            setEditing(null);
+            selectAndRevealCreated(
+              created.path,
+              session.mode === "create-file" ? "file" : "dir",
+            );
+          }
+          refresh();
+          treeContainerRef.current?.focus();
+        } catch (err) {
+          // Rust rejected (collision raced in, fs error). Close the editor —
+          // its commit guard has already settled — and surface the reason.
+          setEditing(null);
+          toast.error(err instanceof Error ? err.message : "操作失败");
+        }
+      },
+      [
+        editing,
+        fileService,
+        markPendingSelection,
+        refresh,
+        selectAndRevealCreated,
+        toast,
+      ],
+    );
+
+    /** Cmd+C / Cmd+X — selection (or the focused row) onto the clipboard. */
+    const copySelection = useCallback(
+      (mode: "copy" | "cut") => {
+        const nodes =
+          selectedNodes.length > 0
+            ? selectedNodes
+            : focusedPath && nodeMetaByPath.has(focusedPath)
+              ? [nodeMetaByPath.get(focusedPath)!.data]
+              : [];
+        if (nodes.length === 0) return;
+        setClipboard({ mode, paths: nodes.map((n) => n.path) });
+      },
+      [selectedNodes, focusedPath, nodeMetaByPath],
+    );
+
+    /** Paste lands where a drop would: selected dir → itself, selected file →
+     *  its parent, no selection → workspace root. */
+    const pasteFromClipboard = useCallback(async () => {
+      const clip = clipboard;
+      if (!clip || clip.paths.length === 0) return;
+      const anchor =
+        selectedNodes[0] ??
+        (focusedPath ? nodeMetaByPath.get(focusedPath)?.data : undefined);
+      const targetDir = !anchor
+        ? ""
+        : anchor.type === "dir"
+          ? anchor.path
+          : parentDirOfPath(anchor.path);
       try {
-        const created = await fileService.newFolder({ parentDir, name });
+        if (clip.mode === "copy") {
+          const result = await fileService.copyInternal({
+            sourcePaths: clip.paths,
+            targetDir,
+          });
+          if (result.errors.length > 0) {
+            toast.warning(`部分粘贴失败：${result.errors[0]}`);
+          }
+          if (result.copiedFiles.length > 0) {
+            undoJournalRef.current = pushUndoEntry(undoJournalRef.current, {
+              kind: "copy",
+              createdPaths: result.copiedFiles.map((f) => f.targetPath),
+            });
+            notifyAutoRenames(
+              result.copiedFiles
+                .filter((f) => f.renamed)
+                .map((f) => ({
+                  from: baseNameOf(f.sourcePath),
+                  to: baseNameOf(f.targetPath),
+                })),
+            );
+            const first = result.copiedFiles[0];
+            const sourceType =
+              nodeMetaByPath.get(first.sourcePath)?.data.type ?? "file";
+            selectAndRevealCreated(first.targetPath, sourceType);
+          }
+        } else {
+          // Cut → move; Rust skips already-in-target no-ops.
+          const result = await fileService.movePaths({
+            sourcePaths: clip.paths,
+            targetDir,
+          });
+          if (result.errors && result.errors.length > 0) {
+            toast.warning(`部分移动失败：${result.errors[0]}`);
+          }
+          if (result.movedFiles.length > 0) {
+            undoJournalRef.current = pushUndoEntry(undoJournalRef.current, {
+              kind: "move",
+              moves: result.movedFiles.map((m) => ({
+                from: m.oldPath,
+                to: m.newPath,
+              })),
+            });
+            notifyAutoRenames(
+              result.movedFiles
+                .filter((m) => baseNameOf(m.oldPath) !== baseNameOf(m.newPath))
+                .map((m) => ({
+                  from: baseNameOf(m.oldPath),
+                  to: baseNameOf(m.newPath),
+                })),
+            );
+            const moved = result.movedFiles[0];
+            const sourceType =
+              nodeMetaByPath.get(moved.oldPath)?.data.type ?? "file";
+            selectAndRevealCreated(moved.newPath, sourceType);
+          }
+          setClipboard(null);
+        }
         refresh();
-        selectAndRevealCreated(created.path, "dir");
       } catch (err) {
-        setError(err instanceof Error ? err.message : "Create failed");
+        toast.error(err instanceof Error ? err.message : "粘贴失败");
       }
-    };
+    }, [
+      clipboard,
+      selectedNodes,
+      focusedPath,
+      nodeMetaByPath,
+      fileService,
+      notifyAutoRenames,
+      refresh,
+      selectAndRevealCreated,
+      toast,
+    ]);
+
+    /** Cmd+Z — undo the last reversible mutation (move/rename/create/paste).
+     *  Deletes are NOT here: they live in the OS trash (用户决策 2026-06-11,
+     *  Finder「放回原处」owns restoration). */
+    const executeUndo = useCallback(async () => {
+      const journal = undoJournalRef.current;
+      const entry = journal[journal.length - 1];
+      if (!entry) {
+        toast.info("没有可撤销的操作");
+        return;
+      }
+      undoJournalRef.current = journal.slice(0, -1);
+      try {
+        for (const step of buildUndoPlan(entry)) {
+          if (step.op === "delete") {
+            // Undo of create/paste — to the OS trash, never permanent.
+            await fileService.deleteFile({ path: step.path });
+          } else if (step.op === "rename") {
+            await fileService.rename({
+              oldPath: step.path,
+              newName: step.newName,
+            });
+          } else {
+            const res = await fileService.movePaths({
+              sourcePaths: [step.sourcePath],
+              targetDir: step.targetDir,
+            });
+            if (res.errors && res.errors.length > 0) {
+              toast.warning(`撤销部分失败：${res.errors[0]}`);
+            }
+            const landed = res.movedFiles[0];
+            if (landed && baseNameOf(landed.newPath) !== step.desiredName) {
+              // The forward move auto-renamed; best-effort restore of the
+              // original basename (a new occupant may block it — keep the
+              // landed name then).
+              await fileService
+                .rename({ oldPath: landed.newPath, newName: step.desiredName })
+                .catch(() => {});
+            }
+          }
+        }
+        toast.success("已撤销");
+      } catch (err) {
+        toast.error(
+          err instanceof Error ? `撤销失败：${err.message}` : "撤销失败",
+        );
+      }
+      refresh();
+    }, [fileService, refresh, toast]);
+
+    /** Move keyboard focus (arrow keys / Home / End / type-ahead). Plain
+     *  moves also move the single selection (VS Code); Shift extends the
+     *  range from the click/focus anchor. */
+    const focusRow = useCallback(
+      (path: string, extendSelection: boolean) => {
+        setFocusedPath(path);
+        const meta = nodeMetaByPath.get(path);
+        if (meta) {
+          if (extendSelection && lastClickedPathRef.current) {
+            const rangePaths = getRangeSelection(
+              lastClickedPathRef.current,
+              path,
+            );
+            const rangeNodes = rangePaths
+              .map((p) => nodeByPath.get(p))
+              .filter((node): node is DirectoryTreeNode => !!node);
+            setSelectedNodes(rangeNodes);
+          } else {
+            setSelectedNodes([meta.data]);
+            lastClickedPathRef.current = path;
+          }
+        }
+        viewportRef.current?.scrollPathIntoView(path);
+      },
+      [nodeMetaByPath, getRangeSelection, nodeByPath],
+    );
+
+    const handleTreeKeyDown = useCallback(
+      (e: React.KeyboardEvent) => {
+        // The inline editor's input owns its own keys (it also stops
+        // propagation — this is belt-and-suspenders for portaled focus).
+        const targetEl = e.target as HTMLElement;
+        if (targetEl.tagName === "INPUT" || targetEl.tagName === "TEXTAREA") {
+          return;
+        }
+        if (editing) return;
+        // Real text selected somewhere in the panel → let native copy win.
+        if (
+          (e.metaKey || e.ctrlKey) &&
+          e.key.toLowerCase() === "c" &&
+          window.getSelection()?.toString()
+        ) {
+          return;
+        }
+
+        const action = resolveTreeKeyAction(
+          {
+            key: e.key,
+            metaKey: e.metaKey,
+            ctrlKey: e.ctrlKey,
+            shiftKey: e.shiftKey,
+            altKey: e.altKey,
+          },
+          { rows: visibleRows, focusedPath, isOpen },
+        );
+        if (!action) return;
+        e.preventDefault();
+        e.stopPropagation();
+
+        switch (action.type) {
+          case "focus":
+            focusRow(action.path, action.extendSelection);
+            break;
+          case "collapse":
+            closePath(action.path);
+            break;
+          case "expand": {
+            openPath(action.path);
+            const meta = nodeMetaByPath.get(action.path);
+            if (meta?.data.loaded === false) void expandDir(action.path);
+            break;
+          }
+          case "activate": {
+            const meta = nodeMetaByPath.get(action.path);
+            if (!meta) break;
+            if (meta.data.type === "dir") {
+              if (!isOpen(action.path) && meta.data.loaded === false) {
+                void expandDir(action.path);
+              }
+              togglePath(action.path);
+            } else {
+              setSelectedNodes([meta.data]);
+              void previewNode(meta.data);
+            }
+            break;
+          }
+          case "rename":
+            startRename(action.path);
+            break;
+          case "delete": {
+            if (selectedNodes.length > 1) {
+              setDialog({ type: "delete-multi", node: null, nodes: selectedNodes });
+            } else {
+              const node =
+                selectedNodes[0] ??
+                (focusedPath ? nodeMetaByPath.get(focusedPath)?.data : undefined);
+              if (node) setDialog({ type: "delete", node });
+            }
+            break;
+          }
+          case "select-all":
+            setSelectedNodes(visibleRows.map((r) => r.data));
+            break;
+          case "copy":
+            copySelection("copy");
+            break;
+          case "cut":
+            copySelection("cut");
+            break;
+          case "paste":
+            void pasteFromClipboard();
+            break;
+          case "undo":
+            void executeUndo();
+            break;
+          case "type-ahead": {
+            const ta = typeAheadRef.current;
+            if (ta.timer) clearTimeout(ta.timer);
+            ta.buffer += action.char;
+            ta.timer = setTimeout(() => {
+              ta.buffer = "";
+              ta.timer = null;
+            }, 600);
+            const target = findTypeAheadTarget(
+              visibleRows,
+              focusedPath,
+              ta.buffer,
+            );
+            if (target) focusRow(target, false);
+            break;
+          }
+        }
+      },
+      [
+        editing,
+        visibleRows,
+        focusedPath,
+        isOpen,
+        focusRow,
+        closePath,
+        openPath,
+        nodeMetaByPath,
+        expandDir,
+        togglePath,
+        previewNode,
+        startRename,
+        selectedNodes,
+        copySelection,
+        pasteFromClipboard,
+        executeUndo,
+      ],
+    );
+
+    // Clear the pending type-ahead timer on unmount.
+    useEffect(
+      () => () => {
+        if (typeAheadRef.current.timer) clearTimeout(typeAheadRef.current.timer);
+      },
+      [],
+    );
 
     const handleContextMenu = useCallback((
       e: React.MouseEvent,
@@ -2023,6 +2554,7 @@ const DirectoryPanel = memo(
         if (meta) {
           setSelectedNodes([meta.data]);
           lastClickedPathRef.current = path;
+          setFocusedPath(path);
         }
         setTreeRevealRequest({ id: ++treeRevealRequestIdRef.current, path });
       },
@@ -2047,49 +2579,9 @@ const DirectoryPanel = memo(
     const handleRowClick = useCallback(
       (row: VisibleTreeRow, e: React.MouseEvent) => {
         const data = row.data;
-        const executeFilePreview = async () => {
-          setSelectedNodes([data]);
-          lastClickedPathRef.current = data.path;
-
-          if (isImageFile(data.name)) {
-            // Image branch — same latest-wins pattern as
-            // handleImagePreview. We don't delegate to it
-            // because this branch also drives
-            // `isPreviewLoading` (for the inline modal's
-            // loading indicator), which `handleImagePreview`
-            // doesn't touch.
-            const myReq = ++previewReqIdRef.current;
-            setIsPreviewLoading(true);
-            try {
-              // PRD 0.2.7 Phase D: same migration as
-              // handleImagePreview — Rust returns base64
-              // already, no FileReader round-trip needed.
-              const result = await fileService.downloadFile({
-                path: data.path,
-              });
-              if (myReq !== previewReqIdRef.current) return;
-              const dataUrl = `data:${result.mimeType};base64,${result.data}`;
-              openPreview(dataUrl, data.name);
-            } catch (err) {
-              if (myReq !== previewReqIdRef.current) return;
-              console.error("[DirectoryPanel] Failed to load image:", err);
-              toast.error("图片加载失败");
-            } finally {
-              if (myReq === previewReqIdRef.current) {
-                setIsPreviewLoading(false);
-              }
-            }
-          } else if (isRichDocPreviewable(data.name)) {
-            handleRichDocPreview(data);
-          } else if (isPreviewable(data.name)) {
-            void handlePreview(data);
-          } else {
-            toast.info("暂不支持预览此文件类型，可右键菜单打开");
-          }
-        };
-
         const isMeta = e.metaKey || e.ctrlKey;
         const isShift = e.shiftKey;
+        setFocusedPath(data.path);
 
         if (isMeta) {
           setSelectedNodes((prev) =>
@@ -2111,7 +2603,9 @@ const DirectoryPanel = memo(
           setSelectedNodes([data]);
           lastClickedPathRef.current = data.path;
         } else {
-          void executeFilePreview();
+          setSelectedNodes([data]);
+          lastClickedPathRef.current = data.path;
+          void previewNode(data);
         }
 
         // Toggle expansion only on a PLAIN click. Cmd/Shift clicks are
@@ -2124,17 +2618,7 @@ const DirectoryPanel = memo(
           togglePath(data.path);
         }
       },
-      [
-        expandDir,
-        fileService,
-        getRangeSelection,
-        handlePreview,
-        handleRichDocPreview,
-        nodeByPath,
-        openPreview,
-        toast,
-        togglePath,
-      ],
+      [expandDir, getRangeSelection, nodeByPath, previewNode, togglePath],
     );
 
     const handleTreeScrollTopChange = useCallback((scrollTop: number) => {
@@ -2181,6 +2665,7 @@ const DirectoryPanel = memo(
           await fileService.deleteFile({ path: node.path });
         }
         setSelectedNodes([]);
+        toast.success(`已将 ${filteredNodes.length} 项移至废纸篓`);
         refresh();
       } catch (err) {
         setError(err instanceof Error ? err.message : "Delete failed");
@@ -2195,6 +2680,16 @@ const DirectoryPanel = memo(
       if (isMultiSelect && selectedNodes.length > 1) {
         const uniqueParentDirs = getUniqueParentDirs(selectedNodes);
         return [
+          {
+            label: `复制 (${selectedNodes.length})`,
+            icon: <Copy className="h-4 w-4" />,
+            onClick: () => copySelection("copy"),
+          },
+          {
+            label: `剪切 (${selectedNodes.length})`,
+            icon: <Scissors className="h-4 w-4" />,
+            onClick: () => copySelection("cut"),
+          },
           {
             label: `打开所在文件夹 (${uniqueParentDirs.length})`,
             icon: <FolderOpen className="h-4 w-4" />,
@@ -2234,6 +2729,16 @@ const DirectoryPanel = memo(
             onClick: () => void handleNewNote(""),
           },
           {
+            label: "新建文件",
+            icon: <FilePlus className="h-4 w-4" />,
+            onClick: () => startCreate("", "create-file"),
+          },
+          {
+            label: "新建文件夹",
+            icon: <FolderPlus className="h-4 w-4" />,
+            onClick: () => startCreate("", "create-folder"),
+          },
+          {
             label: "导入文件",
             icon: <Upload className="h-4 w-4" />,
             onClick: () => {
@@ -2242,14 +2747,10 @@ const DirectoryPanel = memo(
             },
           },
           {
-            label: "新建文件",
-            icon: <FilePlus className="h-4 w-4" />,
-            onClick: () => setDialog({ type: "new-file", node: null }),
-          },
-          {
-            label: "新建文件夹",
-            icon: <FolderPlus className="h-4 w-4" />,
-            onClick: () => setDialog({ type: "new-folder", node: null }),
+            label: "粘贴",
+            icon: <ClipboardPaste className="h-4 w-4" />,
+            disabled: !clipboard,
+            onClick: () => void pasteFromClipboard(),
           },
           {
             label: "刷新",
@@ -2279,12 +2780,12 @@ const DirectoryPanel = memo(
           {
             label: "新建文件",
             icon: <FilePlus className="h-4 w-4" />,
-            onClick: () => setDialog({ type: "new-file", node }),
+            onClick: () => startCreate(node.path, "create-file"),
           },
           {
             label: "新建文件夹",
             icon: <FolderPlus className="h-4 w-4" />,
-            onClick: () => setDialog({ type: "new-folder", node }),
+            onClick: () => startCreate(node.path, "create-folder"),
           },
           {
             label: "导入文件",
@@ -2294,6 +2795,24 @@ const DirectoryPanel = memo(
               importInputRef.current?.click();
             },
           },
+          { separator: true },
+          {
+            label: "复制",
+            icon: <Copy className="h-4 w-4" />,
+            onClick: () => copySelection("copy"),
+          },
+          {
+            label: "剪切",
+            icon: <Scissors className="h-4 w-4" />,
+            onClick: () => copySelection("cut"),
+          },
+          {
+            label: "粘贴",
+            icon: <ClipboardPaste className="h-4 w-4" />,
+            disabled: !clipboard,
+            onClick: () => void pasteFromClipboard(),
+          },
+          { separator: true },
           {
             label: "打开所在文件夹",
             icon: <FolderOpen className="h-4 w-4" />,
@@ -2312,7 +2831,7 @@ const DirectoryPanel = memo(
           {
             label: "重命名",
             icon: <Pencil className="h-4 w-4" />,
-            onClick: () => setDialog({ type: "rename", node }),
+            onClick: () => startRename(node.path),
           },
           {
             label: "删除",
@@ -2361,6 +2880,17 @@ const DirectoryPanel = memo(
             icon: <FolderOpen className="h-4 w-4" />,
             onClick: () => handleOpenInFinder(node.path),
           },
+          { separator: true },
+          {
+            label: "复制",
+            icon: <Copy className="h-4 w-4" />,
+            onClick: () => copySelection("copy"),
+          },
+          {
+            label: "剪切",
+            icon: <Scissors className="h-4 w-4" />,
+            onClick: () => copySelection("cut"),
+          },
           {
             label: "复制文件路径",
             icon: <Copy className="h-4 w-4" />,
@@ -2369,7 +2899,7 @@ const DirectoryPanel = memo(
           {
             label: "重命名",
             icon: <Pencil className="h-4 w-4" />,
-            onClick: () => setDialog({ type: "rename", node }),
+            onClick: () => startRename(node.path),
           },
           {
             label: "删除",
@@ -2379,16 +2909,6 @@ const DirectoryPanel = memo(
           },
         ];
       }
-    };
-
-    // Get parent directory path for new file/folder creation
-    const getParentDirForCreate = (node: DirectoryTreeNode | null): string => {
-      if (!node) return ""; // root directory
-      if (node.type === "dir") return node.path;
-      // For files, get parent directory
-      const parts = node.path.split("/");
-      parts.pop();
-      return parts.join("/");
     };
 
     return (
@@ -2605,13 +3125,27 @@ const DirectoryPanel = memo(
               {/* Tree container */}
               <div
                 ref={treeContainerRef}
-                className={`relative min-h-0 flex-1 overflow-hidden overscroll-none ${
+                role="tree"
+                tabIndex={0}
+                className={`relative min-h-0 flex-1 overflow-hidden overscroll-none outline-none ${
                   isExternalDrop ||
                   isTauriDragActive ||
                   (activeDragItem !== null && internalDropTarget === "")
                     ? "ring-2 ring-inset ring-[var(--accent)]/30"
                     : ""
                 }`}
+                onKeyDown={handleTreeKeyDown}
+                // WebKit quirk: clicking a child of a tabindex=0 div does NOT
+                // focus the container (Safari never focuses non-inputs on
+                // click) — without this, keyboard navigation silently doesn't
+                // start after a mouse click. The inline editor's input keeps
+                // its own focus.
+                onMouseDown={(e) => {
+                  const t = e.target as HTMLElement;
+                  if (t.tagName !== "INPUT" && t.tagName !== "TEXTAREA") {
+                    treeContainerRef.current?.focus({ preventScroll: true });
+                  }
+                }}
                 onContextMenu={handleTreeContainerContextMenu}
                 onDragEnter={handleTreeDragEnter}
                 onDragOver={handleTreeDragOver}
@@ -2682,11 +3216,16 @@ const DirectoryPanel = memo(
                     onDragCancel={handleDndDragCancel}
                   >
                     <WorkspaceTreeViewport
-                      rows={visibleRows}
+                      ref={viewportRef}
+                      items={items}
                       rowHeight={ROW_HEIGHT}
                       dropTargetPath={isExternalDrop ? dropTargetPath : null}
                       internalDropTarget={internalDropTarget}
                       activeDragPaths={activeDragItem?.paths ?? []}
+                      cutPaths={
+                        clipboard?.mode === "cut" ? clipboard.paths : []
+                      }
+                      focusedPath={focusedPath}
                       initialScrollTop={treeScrollTopRef.current}
                       revealRequest={treeRevealRequest}
                       onRevealHandled={handleTreeRevealHandled}
@@ -2697,6 +3236,8 @@ const DirectoryPanel = memo(
                       onScrollTopChange={handleTreeScrollTopChange}
                       onRowClick={handleRowClick}
                       onRowContextMenu={handleRowContextMenu}
+                      onEditCommit={handleEditCommit}
+                      onEditCancel={handleEditCancel}
                     />
                     {/* Drag overlay — floating preview that follows cursor */}
                     <DragOverlay dropAnimation={null}>
@@ -2771,50 +3312,12 @@ const DirectoryPanel = memo(
           />
         )}
 
-        {/* Rename Dialog */}
-        {dialog?.type === "rename" && dialog.node && (
-          <RenameDialog
-            currentName={dialog.node.name}
-            itemType={dialog.node.type === "dir" ? "folder" : "file"}
-            onRename={(newName) => {
-              void handleRename(dialog.node!.path, newName);
-              setDialog(null);
-            }}
-            onCancel={() => setDialog(null)}
-          />
-        )}
-
-        {/* New File Dialog */}
-        {dialog?.type === "new-file" && (
-          <RenameDialog
-            currentName=""
-            itemType="file"
-            onRename={(name) => {
-              void handleNewFile(getParentDirForCreate(dialog.node), name);
-              setDialog(null);
-            }}
-            onCancel={() => setDialog(null)}
-          />
-        )}
-
-        {/* New Folder Dialog */}
-        {dialog?.type === "new-folder" && (
-          <RenameDialog
-            currentName=""
-            itemType="folder"
-            onRename={(name) => {
-              void handleNewFolder(getParentDirForCreate(dialog.node), name);
-              setDialog(null);
-            }}
-            onCancel={() => setDialog(null)}
-          />
-        )}
-
-        {/* Delete Confirm Dialog */}
+        {/* Delete Confirm Dialog — deletion goes to the OS trash (recoverable
+            via Finder/Explorer), the copy reflects that. */}
         {dialog?.type === "delete" && dialog.node && (
           <ConfirmDialog
             title={`删除${dialog.node.type === "dir" ? "文件夹" : "文件"}`}
-            message={`确定要删除 "${dialog.node.name}" 吗？此操作无法撤销。`}
+            message={`确定要删除 "${dialog.node.name}" 吗？将移至系统废纸篓。`}
             confirmLabel="删除"
             cancelLabel="取消"
             danger
@@ -2832,7 +3335,7 @@ const DirectoryPanel = memo(
           dialog.nodes.length > 0 && (
             <ConfirmDialog
               title={`删除 ${dialog.nodes.length} 个项目`}
-              message={`确定要删除选中的 ${dialog.nodes.length} 个文件/文件夹吗？此操作无法撤销。`}
+              message={`确定要删除选中的 ${dialog.nodes.length} 个文件/文件夹吗？将移至系统废纸篓。`}
               confirmLabel="全部删除"
               cancelLabel="取消"
               danger

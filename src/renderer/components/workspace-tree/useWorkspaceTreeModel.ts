@@ -4,17 +4,25 @@ import type { DirectoryTreeNode } from "../../../shared/dir-types";
 
 import {
   buildStickyAncestors,
+  buildTreeListItems,
   buildVisibleRangeSelection,
   buildVisibleTreeRows,
   buildWorkspaceNodeMetaByPath,
   MAX_STICKY_ANCESTOR_DEPTH,
 } from "./treeFlatten";
-import type { StickyAncestor, WorkspaceTreeNodeMeta } from "./treeTypes";
+import type {
+  StickyAncestor,
+  TreeEditingState,
+  TreeListItem,
+  WorkspaceTreeNodeMeta,
+} from "./treeTypes";
 
 interface UseWorkspaceTreeModelOptions {
   rootChildren: DirectoryTreeNode[];
   loadingPaths: ReadonlySet<string>;
   selectedPaths: readonly string[];
+  /** Inline editor state (rename / create) — injected as a synthetic row. */
+  editing?: TreeEditingState | null;
   /**
    * Seed for the open/expanded path set, read once on mount. Lets a parent
    * persist expand state across the panel's unmount/remount (e.g. dismissing
@@ -27,6 +35,8 @@ interface UseWorkspaceTreeModelOptions {
 export interface WorkspaceTreeModel {
   nodeMetaByPath: Map<string, WorkspaceTreeNodeMeta>;
   visibleRows: ReturnType<typeof buildVisibleTreeRows>;
+  /** What the virtual list renders: rows + synthetic edit / empty-hint rows. */
+  items: TreeListItem[];
   openPath: (path: string) => void;
   closePath: (path: string) => void;
   togglePath: (path: string) => void;
@@ -55,6 +65,7 @@ export function useWorkspaceTreeModel({
   rootChildren,
   loadingPaths,
   selectedPaths,
+  editing = null,
   initialOpenPaths,
 }: UseWorkspaceTreeModelOptions): WorkspaceTreeModel {
   // `new Set(undefined)` is an empty set, so the no-seed case is unchanged.
@@ -95,6 +106,11 @@ export function useWorkspaceTreeModel({
         selectedPathSet,
       ),
     [rootChildren, visibleOpenPaths, loadingPaths, selectedPathSet],
+  );
+
+  const items = useMemo(
+    () => buildTreeListItems(visibleRows, editing),
+    [visibleRows, editing],
   );
 
   const openPath = useCallback((path: string) => {
@@ -148,13 +164,13 @@ export function useWorkspaceTreeModel({
   const getStickyAncestors = useCallback(
     (firstVisibleIndex: number, scrollTop: number) =>
       buildStickyAncestors(
-        visibleRows,
+        items,
         nodeMetaByPath,
         firstVisibleIndex,
         scrollTop,
         MAX_STICKY_ANCESTOR_DEPTH,
       ),
-    [visibleRows, nodeMetaByPath],
+    [items, nodeMetaByPath],
   );
 
   return {
@@ -163,6 +179,7 @@ export function useWorkspaceTreeModel({
     getRangeSelection,
     getStickyAncestors,
     isOpen,
+    items,
     nodeMetaByPath,
     openPath,
     togglePath,
