@@ -2,8 +2,10 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Virtuoso } from "react-virtuoso";
 import type { Components, ContextProp } from "react-virtuoso";
 import type { VirtuosoHandle } from "react-virtuoso";
+import { useDroppable } from "@dnd-kit/core";
 
 import { runAfterNextPaint } from "@/utils/afterPaint";
+import { ROOT_DROP_ID } from "./dropTarget";
 import { WorkspaceTreeRow } from "./WorkspaceTreeRow";
 import { WorkspaceTreeStickyAncestors } from "./WorkspaceTreeStickyAncestors";
 import {
@@ -18,26 +20,19 @@ import type { StickyAncestor, VisibleTreeRow } from "./treeTypes";
 const REVEAL_READINESS_MAX_FRAMES = 20;
 
 interface ViewportContext {
-  stickyHeight: number;
   footerHeight: number;
 }
 
-const TreeHeaderSpacer = memo(function TreeHeaderSpacer({
-  context,
-}: ContextProp<ViewportContext>) {
-  if (context.stickyHeight <= 0) {
-    return null;
-  }
-  return <div aria-hidden="true" style={{ height: context.stickyHeight }} />;
-});
-
-// Complement of the sticky header. Header + footer always sum to a CONSTANT
-// `MAX_STICKY_ANCESTOR_DEPTH * rowHeight`, so the total scroll-content height
-// never changes as the breadcrumb grows/shrinks. That keeps `maxScroll` fixed,
-// which is what makes the bottom flicker-free (the bottom previously had no
-// scroll slack, so header-height changes perturbed the pinned scroll position).
-// The reserved bottom space also lets the last rows scroll clear of the sticky
-// bar, mirroring an editor's "scroll beyond last line".
+// CONSTANT bottom slack (`MAX_STICKY_ANCESTOR_DEPTH * rowHeight`). Two jobs:
+// (1) the scroll-content height never changes, so `maxScroll` never moves and
+// `scrollTop` stays a stable input for the sticky breadcrumb (no feedback
+// loop at the bottom); (2) the last rows can scroll clear of the overlay
+// breadcrumb bar, mirroring an editor's "scroll beyond last line".
+//
+// There is deliberately NO header spacer: the breadcrumb is an OVERLAY that
+// covers the top rows (VS Code sticky-scroll semantics). The previous
+// variable-height header spacer resized at every breadcrumb depth change and
+// made the whole list jump by ±rowHeight while scrolling.
 const TreeFooterSpacer = memo(function TreeFooterSpacer({
   context,
 }: ContextProp<ViewportContext>) {
@@ -48,7 +43,6 @@ const TreeFooterSpacer = memo(function TreeFooterSpacer({
 });
 
 const TREE_COMPONENTS: Components<VisibleTreeRow, ViewportContext> = {
-  Header: TreeHeaderSpacer,
   Footer: TreeFooterSpacer,
 };
 
@@ -66,6 +60,10 @@ interface WorkspaceTreeViewportProps {
     scrollTop: number,
   ) => StickyAncestor[];
   onCloseAncestorPath: (path: string) => void;
+  /** Click on a sticky breadcrumb row → jump to (select + scroll to) that folder. */
+  onJumpToAncestorPath: (path: string) => void;
+  /** Right-click on a sticky breadcrumb row → the folder's context menu. */
+  onAncestorContextMenu: (path: string, event: React.MouseEvent) => void;
   onRowClick: (row: VisibleTreeRow, event: React.MouseEvent) => void;
   onRowContextMenu: (row: VisibleTreeRow, event: React.MouseEvent) => void;
   onRowDragEnter: (event: React.DragEvent, row: VisibleTreeRow) => void;
@@ -84,13 +82,22 @@ export const WorkspaceTreeViewport = memo(function WorkspaceTreeViewport({
   onRevealHandled,
   getStickyAncestors,
   onCloseAncestorPath,
+  onJumpToAncestorPath,
+  onAncestorContextMenu,
   onRowClick,
   onRowContextMenu,
   onRowDragEnter,
   onRowDragLeave,
   onScrollTopChange,
 }: WorkspaceTreeViewportProps) {
-  const [scrollTop, setScrollTop] = useState(initialScrollTop);
+  // Scroll position quantized to whole rows. The sticky breadcrumb only
+  // depends on `floor(scrollTop / rowHeight)`, so storing the quantized value
+  // turns "re-render every scrolled pixel" into "re-render every crossed row
+  // boundary" — the raw value still reaches `onScrollTopChange` (a ref write
+  // in the parent) on every scroll event.
+  const [topUnits, setTopUnits] = useState(() =>
+    Math.max(0, Math.floor(initialScrollTop / rowHeight)),
+  );
   const [scrollerElement, setScrollerElement] = useState<HTMLElement | null>(
     null,
   );
@@ -132,7 +139,8 @@ export const WorkspaceTreeViewport = memo(function WorkspaceTreeViewport({
 
     const handleScroll = () => {
       const nextScrollTop = scrollerElement.scrollTop;
-      setScrollTop(nextScrollTop);
+      // Quantized setState: same value → React bails out, no re-render.
+      setTopUnits(Math.max(0, Math.floor(nextScrollTop / rowHeight)));
       onScrollTopChange?.(nextScrollTop);
     };
 
@@ -141,29 +149,27 @@ export const WorkspaceTreeViewport = memo(function WorkspaceTreeViewport({
     return () => {
       scrollerElement.removeEventListener("scroll", handleScroll);
     };
-  }, [onScrollTopChange, scrollerElement]);
+  }, [onScrollTopChange, rowHeight, scrollerElement]);
 
-  // Sticky breadcrumb derived purely from the (now stable) scroll position —
-  // never from Virtuoso's rendered range, which is both a feedback variable and
-  // offset from the visual top by the overscan. See `resolveStickyAncestors`.
+  // Sticky breadcrumb derived purely from the (quantized, stable) scroll
+  // position — never from Virtuoso's rendered range, which is both a feedback
+  // variable and offset from the visual top by the overscan. See
+  // `resolveStickyAncestors` for the overlay-model derivation.
+  const quantizedScrollTop = topUnits * rowHeight;
   const stickyAncestors = useMemo(
     () =>
       resolveStickyAncestors(
-        scrollTop,
+        quantizedScrollTop,
         rowHeight,
         MAX_STICKY_ANCESTOR_DEPTH,
-        (firstVisibleIndex) => getStickyAncestors(firstVisibleIndex, scrollTop),
+        (firstVisibleIndex) =>
+          getStickyAncestors(firstVisibleIndex, quantizedScrollTop),
       ),
-    [getStickyAncestors, rowHeight, scrollTop],
+    [getStickyAncestors, rowHeight, quantizedScrollTop],
   );
   const context = useMemo<ViewportContext>(
-    () => ({
-      stickyHeight: stickyAncestors.length * rowHeight,
-      footerHeight:
-        Math.max(0, MAX_STICKY_ANCESTOR_DEPTH - stickyAncestors.length) *
-        rowHeight,
-    }),
-    [rowHeight, stickyAncestors.length],
+    () => ({ footerHeight: MAX_STICKY_ANCESTOR_DEPTH * rowHeight }),
+    [rowHeight],
   );
 
   const handleScrollerRef = useCallback((element: HTMLElement | null | Window) => {
@@ -171,6 +177,11 @@ export const WorkspaceTreeViewport = memo(function WorkspaceTreeViewport({
     scrollerElRef.current = el;
     setScrollerElement(el);
   }, []);
+
+  // Viewport-wide droppable = the workspace root. Dropping on blank space
+  // below the last row lands at the root; rows themselves win over this zone
+  // via the panel's collision detection (rows are checked first).
+  const { setNodeRef: setRootDropRef } = useDroppable({ id: ROOT_DROP_ID });
 
   // Scroll a requested path into view. The tree is conditionally rendered
   // (search ↔ tree), so a reveal coincides with a FRESH MOUNT of this Virtuoso,
@@ -225,11 +236,13 @@ export const WorkspaceTreeViewport = memo(function WorkspaceTreeViewport({
   }, [onRevealHandled, revealRequest, rows]);
 
   return (
-    <>
+    <div ref={setRootDropRef} className="h-full">
       <WorkspaceTreeStickyAncestors
         ancestors={stickyAncestors}
         rowHeight={rowHeight}
         onClosePath={onCloseAncestorPath}
+        onJumpToPath={onJumpToAncestorPath}
+        onPathContextMenu={onAncestorContextMenu}
       />
       <Virtuoso
         ref={virtuosoRef}
@@ -255,6 +268,6 @@ export const WorkspaceTreeViewport = memo(function WorkspaceTreeViewport({
           />
         )}
       />
-    </>
+    </div>
   );
 });

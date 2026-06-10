@@ -39,8 +39,10 @@ import {
   DndContext,
   DragOverlay,
   PointerSensor,
+  pointerWithin,
   useSensor,
   useSensors,
+  type CollisionDetection,
   type DragStartEvent,
   type DragOverEvent,
   type DragEndEvent,
@@ -106,6 +108,10 @@ import AgentCapabilitiesPanel from "./AgentCapabilitiesPanel";
 import WorkspaceIcon from "./launcher/WorkspaceIcon";
 import { useWorkspaceTreeModel } from "./workspace-tree/useWorkspaceTreeModel";
 import { WorkspaceTreeViewport } from "./workspace-tree/WorkspaceTreeViewport";
+import {
+  ROOT_DROP_ID,
+  resolveInternalDropTarget,
+} from "./workspace-tree/dropTarget";
 import {
   applyChildrenMap,
   collectFreshUpdates,
@@ -395,6 +401,10 @@ const DirectoryPanel = memo(
       null,
     );
     const internalDropTargetRef = useRef<string | null>(null);
+    // Paths being dragged, mirrored into a ref so the (hot) drag-over handler
+    // and the pure drop-target resolver read them without re-binding on every
+    // drag start.
+    const activeDragPathsRef = useRef<readonly string[]>([]);
     const autoExpandTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
       null,
     );
@@ -1067,7 +1077,7 @@ const DirectoryPanel = memo(
       }
     }, [nodeMetaByPath]);
 
-    const handlePreview = async (node: DirectoryTreeNode) => {
+    const handlePreview = useCallback(async (node: DirectoryTreeNode) => {
       if (node.type !== "file") return;
 
       const myReq = ++previewReqIdRef.current;
@@ -1099,7 +1109,7 @@ const DirectoryPanel = memo(
         // the setter so the UI keeps reflecting the fresh in-flight request.
         if (myReq === previewReqIdRef.current) setIsPreviewLoading(false);
       }
-    };
+    }, [fileService, onFilePreviewExternal, toast]);
 
     /** Route a rich document (pdf/docx/xlsx/xls/pptx) to the read-only viewer.
      *  Unlike handlePreview, this does NOT call readPreview (binary → UTF-8
@@ -1107,7 +1117,7 @@ const DirectoryPanel = memo(
      *  reqId bump invalidates any in-flight text/image preview so its async
      *  result can't stomp this one (and won't reset isPreviewLoading, so we
      *  clear it ourselves). */
-    const handleRichDocPreview = (node: DirectoryTreeNode) => {
+    const handleRichDocPreview = useCallback((node: DirectoryTreeNode) => {
       if (node.type !== "file") return;
       const richDocKind = getRichDocKind(node.name);
       if (!richDocKind) return;
@@ -1129,7 +1139,7 @@ const DirectoryPanel = memo(
         setPreview(fileData);
         setPreviewError(null);
       }
-    };
+    }, [onFilePreviewExternal]);
 
     const handleSearchItemClick = useCallback(
       async (path: string, focusTarget?: FilePreviewFocusTarget) => {
@@ -1404,6 +1414,12 @@ const DirectoryPanel = memo(
         if (!isExternalFileDrag(e)) return;
 
         e.dataTransfer.dropEffect = "copy";
+        // Hovering blank space (below the last row) targets the workspace
+        // root. Pre-fix the last-highlighted folder silently stayed the
+        // target, so the drop landed somewhere the pointer wasn't.
+        if (!(e.target as HTMLElement).closest?.("[data-tree-row]")) {
+          setDropTargetPath((prev) => (prev === "" ? prev : ""));
+        }
       },
       [isExternalFileDrag],
     );
@@ -1446,16 +1462,16 @@ const DirectoryPanel = memo(
       [dropTargetPath, handleExternalFileDrop],
     );
 
-    // Row-level drag handlers for directory highlighting
+    // Row-level drag handlers for directory highlighting (external OS drags).
+    // VS Code semantics: a directory row targets itself; a FILE row targets
+    // the directory the file lives in (root = ""). Pre-fix file rows kept the
+    // previously-highlighted directory as the target, so dropping "on a file"
+    // imported into whatever folder the pointer passed earlier.
     const handleRowDragEnter = useCallback(
-      (e: React.DragEvent, nodePath: string, isDir: boolean) => {
+      (e: React.DragEvent, row: VisibleTreeRow) => {
         e.stopPropagation();
         if (!isExternalFileDrag(e)) return;
-
-        // Only highlight directories
-        if (isDir) {
-          setDropTargetPath(nodePath);
-        }
+        setDropTargetPath(row.isDir ? row.path : (row.parentPath ?? ""));
       },
       [isExternalFileDrag],
     );
@@ -1515,6 +1531,18 @@ const DirectoryPanel = memo(
       useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
     );
 
+    // Pointer-based collision with "rows beat the root zone". `pointerWithin`
+    // (vs the default rect-intersection) keys the target to where the POINTER
+    // is, not where the floating overlay's rectangle happens to overlap —
+    // rect-intersection made the highlight flip between adjacent folders
+    // while dragging (the "拖拽晃动" jitter). The viewport-wide root zone
+    // geometrically contains every row, so rows must win when both match.
+    const dndCollisionDetection: CollisionDetection = useCallback((args) => {
+      const within = pointerWithin(args);
+      const rowHits = within.filter((c) => c.id !== ROOT_DROP_ID);
+      return rowHits.length > 0 ? rowHits : within;
+    }, []);
+
     const handleDndDragStart = useCallback(
       (event: DragStartEvent) => {
         const data = event.active.data.current as DirectoryTreeNode | undefined;
@@ -1526,6 +1554,7 @@ const DirectoryPanel = memo(
             ? selectedNodes.map((n) => n.path)
             : [data.path];
         const icon = data.type === "dir" ? Folder : getFileIcon(data.name);
+        activeDragPathsRef.current = paths;
         setActiveDragItem({ paths, name: data.name, icon });
       },
       [selectedNodes],
@@ -1533,33 +1562,32 @@ const DirectoryPanel = memo(
 
     const handleDndDragOver = useCallback(
       (event: DragOverEvent) => {
-        const overId = event.over?.id as string | undefined;
-        if (!overId) {
-          // Over empty space — target root
-          if (internalDropTargetRef.current !== "") {
-            updateDropTarget("");
-            clearAutoExpandTimer();
+        // All target semantics live in the pure resolver: dir row → itself,
+        // FILE row → its parent dir, root zone → "", outside the tree → null
+        // (no drop). Pre-fix `over=null` was treated as "root", so releasing
+        // over a file row or outside the panel silently moved items to the
+        // workspace root.
+        const overId = event.over ? String(event.over.id) : null;
+        const target = resolveInternalDropTarget(
+          overId,
+          activeDragPathsRef.current,
+          nodeMetaByPath,
+        );
+        if (internalDropTargetRef.current === target) return;
+        updateDropTarget(target);
+        clearAutoExpandTimer();
+        if (!target) return; // null (no drop) or "" (root — nothing to expand)
+        const meta = nodeMetaByPath.get(target);
+        if (meta?.data.type !== "dir") return;
+        // Auto-expand closed folder after 600ms hover
+        autoExpandTimerRef.current = setTimeout(() => {
+          if (meta.data.loaded === false) {
+            void expandDir(target);
           }
-          return;
-        }
-        // Drop targets have id = "drop:{path}"
-        const targetPath = overId.startsWith("drop:") ? overId.slice(5) : null;
-        if (targetPath === null) return;
-
-        if (internalDropTargetRef.current !== targetPath) {
-          updateDropTarget(targetPath);
-          clearAutoExpandTimer();
-          // Auto-expand closed folder after 600ms hover
-          const nodeData = nodeByPath.get(targetPath);
-          autoExpandTimerRef.current = setTimeout(() => {
-            if (nodeData?.loaded === false) {
-              void expandDir(targetPath);
-            }
-            openPath(targetPath);
-          }, 600);
-        }
+          openPath(target);
+        }, 600);
       },
-      [updateDropTarget, clearAutoExpandTimer, nodeByPath, expandDir, openPath],
+      [updateDropTarget, clearAutoExpandTimer, nodeMetaByPath, expandDir, openPath],
     );
 
     const handleDndDragEnd = useCallback(
@@ -1568,12 +1596,13 @@ const DirectoryPanel = memo(
         const targetPath = internalDropTargetRef.current;
         // Clean up state first
         setActiveDragItem(null);
+        activeDragPathsRef.current = [];
         updateDropTarget(null);
         clearAutoExpandTimer();
 
         if (!dragItem || targetPath === null) return;
         const sourcePaths = dragItem.paths;
-        // Don't drop on itself or into descendant
+        // Belt-and-suspenders: the resolver already refuses these targets.
         if (sourcePaths.includes(targetPath)) return;
         if (
           targetPath &&
@@ -1587,6 +1616,7 @@ const DirectoryPanel = memo(
 
     const handleDndDragCancel = useCallback(() => {
       setActiveDragItem(null);
+      activeDragPathsRef.current = [];
       updateDropTarget(null);
       clearAutoExpandTimer();
     }, [updateDropTarget, clearAutoExpandTimer]);
@@ -1743,10 +1773,34 @@ const DirectoryPanel = memo(
       }
     };
 
+    /** Select + reveal a freshly-created file/folder. The synthetic node keeps
+     *  the selection highlighted before the watcher-driven refresh surfaces
+     *  the real node (`markPendingSelection` protects it from the
+     *  reconciliation effect); the reveal expands ancestors and scrolls it
+     *  into view — without it, creating inside a COLLAPSED folder gave no
+     *  visible feedback and read as "the file went to the root". */
+    const selectAndRevealCreated = useCallback(
+      (relPath: string, type: "file" | "dir") => {
+        markPendingSelection(relPath);
+        setSelectedNodes([
+          {
+            id: relPath,
+            name: relPath.split("/").pop() ?? relPath,
+            path: relPath,
+            type,
+          },
+        ]);
+        lastClickedPathRef.current = relPath;
+        void handleRevealSearchResultInTree(relPath);
+      },
+      [markPendingSelection, handleRevealSearchResultInTree],
+    );
+
     const handleNewFile = async (parentDir: string, name: string) => {
       try {
-        await fileService.newFile({ parentDir, name });
+        const created = await fileService.newFile({ parentDir, name });
         refresh();
+        selectAndRevealCreated(created.path, "file");
       } catch (err) {
         setError(err instanceof Error ? err.message : "Create failed");
       }
@@ -1812,19 +1866,10 @@ const DirectoryPanel = memo(
         // refresh so the highlight + selection are immediate.
         refresh();
 
-        // Synthesize a tree-node so selectedNodes highlights the new file
-        // even before the watcher-driven re-fetch resolves. The pending
-        // selection mark protects this node from the reconciliation
-        // useEffect, which would otherwise filter it out (it isn't yet
-        // in `nodeMetaByPath`).
-        const newNode: DirectoryTreeNode = {
-          id: createdPath,
-          name: filename,
-          path: createdPath,
-          type: "file",
-        };
-        markPendingSelection(createdPath);
-        setSelectedNodes([newNode]);
+        // Select + expand ancestors + scroll into view. Creating inside a
+        // COLLAPSED folder previously gave no visible feedback in the tree,
+        // which users read as "the note went to the root".
+        selectAndRevealCreated(createdPath, "file");
 
         // Open preview in edit mode. Split-view (Chat) routes via the
         // external callback; otherwise open the inline modal.
@@ -1847,14 +1892,15 @@ const DirectoryPanel = memo(
 
     const handleNewFolder = async (parentDir: string, name: string) => {
       try {
-        await fileService.newFolder({ parentDir, name });
+        const created = await fileService.newFolder({ parentDir, name });
         refresh();
+        selectAndRevealCreated(created.path, "dir");
       } catch (err) {
         setError(err instanceof Error ? err.message : "Create failed");
       }
     };
 
-    const handleContextMenu = (
+    const handleContextMenu = useCallback((
       e: React.MouseEvent,
       node: DirectoryTreeNode | null,
     ) => {
@@ -1894,7 +1940,7 @@ const DirectoryPanel = memo(
           isMultiSelect: false,
         });
       }
-    };
+    }, [selectedNodes]);
 
     const handleTreeContainerContextMenu = (e: React.MouseEvent) => {
       // Only trigger if clicking on empty area (not on a tree item)
@@ -1903,6 +1949,147 @@ const DirectoryPanel = memo(
         handleContextMenu(e, null);
       }
     };
+
+    const handleRowContextMenu = useCallback(
+      (row: VisibleTreeRow, e: React.MouseEvent) => {
+        handleContextMenu(e, row.data);
+      },
+      [handleContextMenu],
+    );
+
+    // Sticky breadcrumb interactions (VS Code sticky-scroll semantics).
+    // Right-click MUST open the FOLDER's menu: the breadcrumb shows a folder
+    // name, so users right-click it intending that folder — pre-fix the event
+    // fell through to the container's "empty area" handler and opened the
+    // ROOT menu, which is how 「新建笔记」 on a folder created the note at the
+    // workspace root.
+    const handleStickyJump = useCallback(
+      (path: string) => {
+        const meta = nodeMetaByPath.get(path);
+        if (meta) {
+          setSelectedNodes([meta.data]);
+          lastClickedPathRef.current = path;
+        }
+        setTreeRevealRequest({ id: ++treeRevealRequestIdRef.current, path });
+      },
+      [nodeMetaByPath],
+    );
+
+    const handleStickyContextMenu = useCallback(
+      (path: string, e: React.MouseEvent) => {
+        const meta = nodeMetaByPath.get(path);
+        if (meta) {
+          handleContextMenu(e, meta.data);
+        } else {
+          // Folder vanished mid-render (refresh race) — still swallow the
+          // event so the browser menu / root menu don't appear.
+          e.preventDefault();
+          e.stopPropagation();
+        }
+      },
+      [nodeMetaByPath, handleContextMenu],
+    );
+
+    const handleRowClick = useCallback(
+      (row: VisibleTreeRow, e: React.MouseEvent) => {
+        const data = row.data;
+        const executeFilePreview = async () => {
+          setSelectedNodes([data]);
+          lastClickedPathRef.current = data.path;
+
+          if (isImageFile(data.name)) {
+            // Image branch — same latest-wins pattern as
+            // handleImagePreview. We don't delegate to it
+            // because this branch also drives
+            // `isPreviewLoading` (for the inline modal's
+            // loading indicator), which `handleImagePreview`
+            // doesn't touch.
+            const myReq = ++previewReqIdRef.current;
+            setIsPreviewLoading(true);
+            try {
+              // PRD 0.2.7 Phase D: same migration as
+              // handleImagePreview — Rust returns base64
+              // already, no FileReader round-trip needed.
+              const result = await fileService.downloadFile({
+                path: data.path,
+              });
+              if (myReq !== previewReqIdRef.current) return;
+              const dataUrl = `data:${result.mimeType};base64,${result.data}`;
+              openPreview(dataUrl, data.name);
+            } catch (err) {
+              if (myReq !== previewReqIdRef.current) return;
+              console.error("[DirectoryPanel] Failed to load image:", err);
+              toast.error("图片加载失败");
+            } finally {
+              if (myReq === previewReqIdRef.current) {
+                setIsPreviewLoading(false);
+              }
+            }
+          } else if (isRichDocPreviewable(data.name)) {
+            handleRichDocPreview(data);
+          } else if (isPreviewable(data.name)) {
+            void handlePreview(data);
+          } else {
+            toast.info("暂不支持预览此文件类型，可右键菜单打开");
+          }
+        };
+
+        const isMeta = e.metaKey || e.ctrlKey;
+        const isShift = e.shiftKey;
+
+        if (isMeta) {
+          setSelectedNodes((prev) =>
+            prev.some((node) => node.path === data.path)
+              ? prev.filter((node) => node.path !== data.path)
+              : [...prev, data],
+          );
+          lastClickedPathRef.current = data.path;
+        } else if (isShift && lastClickedPathRef.current) {
+          const rangePaths = getRangeSelection(
+            lastClickedPathRef.current,
+            data.path,
+          );
+          const rangeNodes = rangePaths
+            .map((path) => nodeByPath.get(path))
+            .filter((node): node is DirectoryTreeNode => !!node);
+          setSelectedNodes(rangeNodes);
+        } else if (row.isDir) {
+          setSelectedNodes([data]);
+          lastClickedPathRef.current = data.path;
+        } else {
+          void executeFilePreview();
+        }
+
+        // Toggle expansion only on a PLAIN click. Cmd/Shift clicks are
+        // selection edits — toggling there made multi-selecting folders
+        // fold/unfold them as a side effect (VS Code keeps them put).
+        if (row.isDir && !isMeta && !isShift) {
+          if (!row.isOpen && data.loaded === false) {
+            void expandDir(data.path);
+          }
+          togglePath(data.path);
+        }
+      },
+      [
+        expandDir,
+        fileService,
+        getRangeSelection,
+        handlePreview,
+        handleRichDocPreview,
+        nodeByPath,
+        openPreview,
+        toast,
+        togglePath,
+      ],
+    );
+
+    const handleTreeScrollTopChange = useCallback((scrollTop: number) => {
+      treeScrollTopRef.current = scrollTop;
+    }, []);
+
+    const handleTreeRevealHandled = useCallback((id: number) => {
+      setTreeRevealRequest((prev) => (prev?.id === id ? null : prev));
+    }, []);
 
     // Get unique parent directories for multi-select "open in finder"
     const getUniqueParentDirs = (nodes: DirectoryTreeNode[]): string[] => {
@@ -2364,7 +2551,13 @@ const DirectoryPanel = memo(
               {/* Tree container */}
               <div
                 ref={treeContainerRef}
-                className={`relative min-h-0 flex-1 overflow-hidden overscroll-none ${isExternalDrop || isTauriDragActive ? "ring-2 ring-inset ring-[var(--accent)]/30" : ""}`}
+                className={`relative min-h-0 flex-1 overflow-hidden overscroll-none ${
+                  isExternalDrop ||
+                  isTauriDragActive ||
+                  (activeDragItem !== null && internalDropTarget === "")
+                    ? "ring-2 ring-inset ring-[var(--accent)]/30"
+                    : ""
+                }`}
                 onContextMenu={handleTreeContainerContextMenu}
                 onDragEnter={handleTreeDragEnter}
                 onDragOver={handleTreeDragOver}
@@ -2428,6 +2621,7 @@ const DirectoryPanel = memo(
                     {directoryInfo && (
                       <DndContext
                     sensors={dndSensors}
+                    collisionDetection={dndCollisionDetection}
                     onDragStart={handleDndDragStart}
                     onDragOver={handleDndDragOver}
                     onDragEnd={handleDndDragEnd}
@@ -2441,117 +2635,16 @@ const DirectoryPanel = memo(
                       activeDragPaths={activeDragItem?.paths ?? []}
                       initialScrollTop={treeScrollTopRef.current}
                       revealRequest={treeRevealRequest}
-                      onRevealHandled={(id) => {
-                        setTreeRevealRequest((prev) =>
-                          prev?.id === id ? null : prev,
-                        );
-                      }}
+                      onRevealHandled={handleTreeRevealHandled}
                       getStickyAncestors={getStickyAncestors}
                       onCloseAncestorPath={closePath}
-                      onScrollTopChange={(scrollTop) => {
-                        treeScrollTopRef.current = scrollTop;
-                      }}
-                      onRowClick={(
-                        row: VisibleTreeRow,
-                        e: React.MouseEvent,
-                      ) => {
-                        const data = row.data;
-                        const executeFilePreview = async () => {
-                          setSelectedNodes([data]);
-                          lastClickedPathRef.current = data.path;
-
-                          if (isImageFile(data.name)) {
-                            // Image branch — same latest-wins pattern as
-                            // handleImagePreview. We don't delegate to it
-                            // because this branch also drives
-                            // `isPreviewLoading` (for the inline modal's
-                            // loading indicator), which `handleImagePreview`
-                            // doesn't touch.
-                            const myReq = ++previewReqIdRef.current;
-                            setIsPreviewLoading(true);
-                            try {
-                              // PRD 0.2.7 Phase D: same migration as
-                              // handleImagePreview — Rust returns base64
-                              // already, no FileReader round-trip needed.
-                              const result = await fileService.downloadFile({
-                                path: data.path,
-                              });
-                              if (myReq !== previewReqIdRef.current) return;
-                              const dataUrl = `data:${result.mimeType};base64,${result.data}`;
-                              openPreview(dataUrl, data.name);
-                            } catch (err) {
-                              if (myReq !== previewReqIdRef.current) return;
-                              console.error(
-                                "[DirectoryPanel] Failed to load image:",
-                                err,
-                              );
-                              toast.error("图片加载失败");
-                            } finally {
-                              if (myReq === previewReqIdRef.current) {
-                                setIsPreviewLoading(false);
-                              }
-                            }
-                          } else if (isRichDocPreviewable(data.name)) {
-                            handleRichDocPreview(data);
-                          } else if (isPreviewable(data.name)) {
-                            void handlePreview(data);
-                          } else {
-                            toast.info(
-                              "暂不支持预览此文件类型，可右键菜单打开",
-                            );
-                          }
-                        };
-
-                        const isMeta = e.metaKey || e.ctrlKey;
-                        const isShift = e.shiftKey;
-
-                        if (isMeta) {
-                          setSelectedNodes((prev) =>
-                            prev.some((node) => node.path === data.path)
-                              ? prev.filter((node) => node.path !== data.path)
-                              : [...prev, data],
-                          );
-                          lastClickedPathRef.current = data.path;
-                        } else if (isShift && lastClickedPathRef.current) {
-                          const rangePaths = getRangeSelection(
-                            lastClickedPathRef.current,
-                            data.path,
-                          );
-                          const rangeNodes = rangePaths
-                            .map((path) => nodeByPath.get(path))
-                            .filter(
-                              (node): node is DirectoryTreeNode => !!node,
-                            );
-                          setSelectedNodes(rangeNodes);
-                        } else if (row.isDir) {
-                          setSelectedNodes([data]);
-                          lastClickedPathRef.current = data.path;
-                        } else {
-                          void executeFilePreview();
-                        }
-
-                        if (row.isDir) {
-                          if (!row.isOpen && data.loaded === false) {
-                            void expandDir(data.path);
-                          }
-                          togglePath(data.path);
-                        }
-                      }}
-                      onRowContextMenu={(
-                        row: VisibleTreeRow,
-                        e: React.MouseEvent,
-                      ) => {
-                        handleContextMenu(e, row.data);
-                      }}
-                      onRowDragEnter={(
-                        e: React.DragEvent,
-                        row: VisibleTreeRow,
-                      ) => {
-                        handleRowDragEnter(e, row.path, row.isDir);
-                      }}
-                      onRowDragLeave={(e: React.DragEvent) => {
-                        handleRowDragLeave(e);
-                      }}
+                      onJumpToAncestorPath={handleStickyJump}
+                      onAncestorContextMenu={handleStickyContextMenu}
+                      onScrollTopChange={handleTreeScrollTopChange}
+                      onRowClick={handleRowClick}
+                      onRowContextMenu={handleRowContextMenu}
+                      onRowDragEnter={handleRowDragEnter}
+                      onRowDragLeave={handleRowDragLeave}
                     />
                     {/* Drag overlay — floating preview that follows cursor */}
                     <DragOverlay dropAnimation={null}>

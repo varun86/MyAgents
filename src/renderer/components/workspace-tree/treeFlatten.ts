@@ -109,32 +109,36 @@ export function buildStickyAncestors(
 
 /**
  * Maximum number of stacked sticky-ancestor rows. The viewport reserves a
- * CONSTANT `MAX_STICKY_ANCESTOR_DEPTH * rowHeight` of scroll space at all times
- * (sticky header + complementary footer), which is what makes the breadcrumb
- * flicker-free at the scroll bottom — see `resolveStickyAncestors` and
- * `WorkspaceTreeViewport`. The model's `buildStickyAncestors` cap MUST use the
- * same value so header + footer always sum to this constant.
+ * CONSTANT `MAX_STICKY_ANCESTOR_DEPTH * rowHeight` footer at the scroll bottom
+ * so `maxScroll` never moves (the breadcrumb stays flicker-free at the bottom)
+ * AND the last rows can scroll clear of the overlay bar — see
+ * `resolveStickyAncestors` and `WorkspaceTreeViewport`. The model's
+ * `buildStickyAncestors` cap MUST use the same value.
  */
 export const MAX_STICKY_ANCESTOR_DEPTH = 3;
 
 /**
- * Resolve the sticky breadcrumb as a PURE FUNCTION of `scrollTop`.
+ * Resolve the sticky breadcrumb as a PURE FUNCTION of `scrollTop`,
+ * OVERLAY model (VS Code sticky-scroll semantics).
  *
- * Why not just feed Virtuoso's reported first-visible index back in: the sticky
- * header occupies space at the top of the scroll content, so the index of the
- * first visible data row is itself a function of the header's height — which is
- * a function of how many ancestors we show. Feeding the rendered index back into
- * the ancestor count closes a scroll<->layout loop that only settles where there
- * is free scroll slack; at the very bottom (scroll pinned to max) it oscillates
- * → the "flicker when scrolled to the bottom" bug.
+ * The breadcrumb bar floats OVER the scroll content and occupies no scroll
+ * space. This is load-bearing for two scroll-stability properties:
  *
- * The fix is twofold and lives together: (1) the viewport reserves a CONSTANT
- * total height (header + complementary footer = `maxDepth * rowHeight`) so
- * `maxScroll` never moves and `scrollTop` is a stable input; (2) this function
- * derives the breadcrumb from that stable `scrollTop` instead of the rendered
- * index. The header offsets data rows by `count * rowHeight`, so the first
- * visible data row is `floor(scrollTop / rowHeight) - count`. That's circular in
- * `count`, but `count` is bounded by `maxDepth`, so we resolve it by fixed-point
+ *  1. No content jump at depth boundaries. The previous header-spacer model
+ *     inserted a `count * rowHeight` spacer into the scroll content so the
+ *     bar never covered a row — but every time `count` changed mid-scroll the
+ *     spacer resized and the WHOLE list visually jumped by ±rowHeight (the
+ *     "sticky跳动" bug). With an overlay nothing in the scroll content ever
+ *     resizes, so rows never shift; the bar simply covers the top `count`
+ *     rows, exactly like VS Code.
+ *
+ *  2. No scroll↔layout feedback loop at the bottom. The scroll content height
+ *     is constant (rows + constant footer), so `maxScroll` never moves and
+ *     `scrollTop` is a stable input.
+ *
+ * Derivation: with the bar covering `count` rows, the row at the bar's bottom
+ * edge is `floor(scrollTop / rowHeight) + count`. That's circular in `count`,
+ * but `count` is bounded by `maxDepth`, so we resolve it by fixed-point
  * iteration in at most `maxDepth + 1` steps. Even at a depth boundary where no
  * exact fixed point exists, the final value is a deterministic function of
  * `scrollTop`, so the result is identical across renders → no oscillation.
@@ -155,7 +159,7 @@ export function resolveStickyAncestors(
   let count = 0;
   let ancestors: StickyAncestor[] = [];
   for (let step = 0; step <= maxDepth; step += 1) {
-    const firstVisibleIndex = Math.max(0, topUnits - count);
+    const firstVisibleIndex = topUnits + count;
     ancestors = ancestorsAt(firstVisibleIndex);
     if (ancestors.length === count) {
       return ancestors;

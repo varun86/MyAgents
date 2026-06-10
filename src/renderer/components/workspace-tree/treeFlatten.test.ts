@@ -30,6 +30,14 @@ function ancestorsAtFrom(
   };
 }
 
+// OVERLAY MODEL (regression for the "sticky jump" bug): the breadcrumb bar
+// floats OVER the scroll content and occupies no scroll space, so data rows
+// never shift when the breadcrumb depth changes. The row at the sticky bar's
+// bottom edge is therefore `floor(scrollTop / rowHeight) + count` — count
+// enters POSITIVELY (the bar covers `count` rows below the viewport top).
+// The pre-fix header-spacer model used `topUnits - count`, which required a
+// scroll-content spacer whose height change made the whole list jump by
+// ±rowHeight at every depth boundary while scrolling.
 describe("resolveStickyAncestors", () => {
   it("returns [] at the very top (scrollTop <= 0)", () => {
     const spy = vi.fn(() => [] as StickyAncestor[]);
@@ -45,27 +53,28 @@ describe("resolveStickyAncestors", () => {
     expect(spy).not.toHaveBeenCalled();
   });
 
-  it("returns [] when the top row is a top-level entry (no ancestors)", () => {
-    // scrollTop two rows down; row 2 has depth 0.
+  it("returns [] when the boundary row is a top-level entry (no ancestors)", () => {
+    // scrollTop two rows down; row 2 has depth 0 → empty stack is consistent.
     const ancestorsAt = ancestorsAtFrom({ 2: 0 });
     expect(
       resolveStickyAncestors(2 * ROW, ROW, MAX_STICKY_ANCESTOR_DEPTH, ancestorsAt),
     ).toEqual([]);
   });
 
-  it("returns [] just past the top while the header would clamp the index to 0", () => {
-    // scrollTop within the first row → topUnits = 0 → firstVisibleIndex clamps
-    // to 0 → guard yields [].
+  it("returns [] just past the top while the index is still 0", () => {
+    // scrollTop within the first row → topUnits = 0, count starts 0 →
+    // firstVisibleIndex 0 → guard yields [] → consistent.
     const ancestorsAt = ancestorsAtFrom({ 1: 2 });
     expect(
       resolveStickyAncestors(10, ROW, MAX_STICKY_ANCESTOR_DEPTH, ancestorsAt),
     ).toEqual([]);
   });
 
-  it("converges to the self-consistent ancestor stack", () => {
-    // topUnits = 4. The header pushes content down by count rows, so the first
-    // visible row is 4 - count. With a 2-deep stack the consistent row is 2.
-    const ancestorsAt = ancestorsAtFrom({ 4: 2, 2: 2 });
+  it("probes the row BELOW the bar (topUnits + count), never an already-scrolled-out row", () => {
+    // topUnits = 4. With a 2-deep stack the bar covers rows 4..5, so the
+    // consistent boundary row is 6 — NOT row 2 (the header-spacer model's
+    // `topUnits - count`).
+    const ancestorsAt = vi.fn(ancestorsAtFrom({ 4: 2, 6: 2 }));
     const result = resolveStickyAncestors(
       4 * ROW,
       ROW,
@@ -73,11 +82,14 @@ describe("resolveStickyAncestors", () => {
       ancestorsAt,
     );
     expect(result).toHaveLength(2);
+    const probedIndexes = ancestorsAt.mock.calls.map((c) => c[0]);
+    expect(probedIndexes).toContain(6);
+    expect(probedIndexes.every((i) => i >= 4)).toBe(true);
   });
 
-  it("resolves a multi-step fixed point (depth grows as the header offsets the index)", () => {
-    // topUnits = 5. count 0→idx5(=3)→count3→idx2(=3) consistent → 3 ancestors.
-    const ancestorsAt = ancestorsAtFrom({ 5: 3, 2: 3 });
+  it("resolves a multi-step fixed point (depth grows as the bar covers more rows)", () => {
+    // topUnits = 5. count 0→idx5(=1)→count1→idx6(=3)→count3→idx8(=3) → settle 3.
+    const ancestorsAt = ancestorsAtFrom({ 5: 1, 6: 3, 8: 3 });
     const result = resolveStickyAncestors(
       5 * ROW,
       ROW,
@@ -88,16 +100,16 @@ describe("resolveStickyAncestors", () => {
   });
 
   it("caps the stack at maxDepth", () => {
-    const ancestorsAt = ancestorsAtFrom({ 10: 9, 7: 9, 8: 9 }, 3);
+    const ancestorsAt = ancestorsAtFrom({ 10: 9, 13: 9 }, 3);
     const result = resolveStickyAncestors(10 * ROW, ROW, 3, ancestorsAt);
     expect(result.length).toBeLessThanOrEqual(3);
   });
 
   it("is deterministic at a depth boundary with no exact fixed point (no oscillation)", () => {
-    // f(idx) alternates between adjacent candidate rows, so there is no exact
+    // f alternates between adjacent candidate rows, so there is no exact
     // fixed point. The result must still be identical across calls — that
     // determinism is what kills the cross-render flicker.
-    const ancestorsAt = ancestorsAtFrom({ 3: 2, 1: 1, 2: 2 });
+    const ancestorsAt = ancestorsAtFrom({ 3: 1, 4: 0 });
     const a = resolveStickyAncestors(3 * ROW, ROW, MAX_STICKY_ANCESTOR_DEPTH, ancestorsAt);
     const b = resolveStickyAncestors(3 * ROW, ROW, MAX_STICKY_ANCESTOR_DEPTH, ancestorsAt);
     const c = resolveStickyAncestors(3 * ROW, ROW, MAX_STICKY_ANCESTOR_DEPTH, ancestorsAt);
@@ -106,7 +118,7 @@ describe("resolveStickyAncestors", () => {
   });
 
   it("never calls the walker more than maxDepth + 1 times (bounded work)", () => {
-    const base = ancestorsAtFrom({ 3: 2, 1: 1, 2: 2 });
+    const base = ancestorsAtFrom({ 3: 1, 4: 0 });
     const spy = vi.fn(base);
     resolveStickyAncestors(3 * ROW, ROW, MAX_STICKY_ANCESTOR_DEPTH, spy);
     expect(spy.mock.calls.length).toBeLessThanOrEqual(MAX_STICKY_ANCESTOR_DEPTH + 1);

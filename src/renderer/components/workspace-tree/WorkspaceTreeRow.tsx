@@ -37,8 +37,11 @@ export const WorkspaceTreeRow = memo(function WorkspaceTreeRow({
     id: `drag:${row.path}`,
     data: row.data,
   });
-  const { isOver, setNodeRef: setDropRef } = useDroppable({
-    disabled: !row.isDir,
+  // Every row is droppable — FILE rows resolve to their parent directory in
+  // the panel's drop-target resolver (VS Code semantics). Pre-fix file rows
+  // were disabled, so dragging over them yielded `over=null`, which the panel
+  // interpreted as "workspace root" → items silently moved to the root.
+  const { setNodeRef: setDropRef } = useDroppable({
     id: `drop:${row.path}`,
   });
 
@@ -50,8 +53,11 @@ export const WorkspaceTreeRow = memo(function WorkspaceTreeRow({
     [setDragRef, setDropRef],
   );
 
-  const highlight =
-    isDropTarget || isInternalDropTarget || (isOver && row.isDir);
+  // Single highlight source: the panel-resolved target (state). The raw
+  // dnd-kit `isOver` is deliberately NOT used — it disagrees with the resolved
+  // target for file rows (parent dir) and lags one frame behind, which read
+  // as highlight flicker while dragging.
+  const highlight = isDropTarget || isInternalDropTarget;
 
   return (
     <div

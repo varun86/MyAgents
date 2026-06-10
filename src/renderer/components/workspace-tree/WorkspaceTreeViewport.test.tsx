@@ -93,6 +93,8 @@ function renderViewport(overrides: Partial<ComponentProps<typeof WorkspaceTreeVi
       onRevealHandled={onRevealHandled}
       getStickyAncestors={() => []}
       onCloseAncestorPath={vi.fn()}
+      onJumpToAncestorPath={vi.fn()}
+      onAncestorContextMenu={vi.fn()}
       onRowClick={vi.fn()}
       onRowContextMenu={vi.fn()}
       onRowDragEnter={vi.fn()}
