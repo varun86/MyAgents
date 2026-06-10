@@ -119,13 +119,19 @@ pub fn resolve_inside_workspace(workspace_root: &Path, relative: &str) -> WfResu
 /// extension allow-list checks the *name*, not the target) and `copy_paths`
 /// reports them as unsupported — returning the canonical path would silently
 /// resolve the leaf and re-open that hole.
+///
+/// A path that does NOT exist passes on the lexical check alone: the
+/// symlink-escape defense is only meaningful for paths that resolve (a
+/// non-existent path can't be read; `transfer`/`files_b64` stat it right
+/// after and fail their own way), and `slash.rs` depends on validating a
+/// brand-new workspace root that hasn't been created yet — failing here
+/// would break the launcher's slash-command scan for new workspaces.
 pub fn validate_external_read_path(absolute_path: &str) -> WfResult<PathBuf> {
     let lexical = system_blacklist_check(absolute_path)?;
-    // Read-side: the path must exist for any read to succeed, so a
-    // canonicalize failure collapses into a uniform "File not found".
-    let canonical = fs::canonicalize(&lexical).map_err(|_| "File not found".to_string())?;
-    if let Some(s) = canonical.to_str() {
-        let _ = system_blacklist_check(s)?;
+    if let Ok(canonical) = fs::canonicalize(&lexical) {
+        if let Some(s) = canonical.to_str() {
+            let _ = system_blacklist_check(s)?;
+        }
     }
     Ok(lexical)
 }
@@ -481,6 +487,38 @@ mod tests {
     fn validate_item_name_rejects_control_chars() {
         assert!(validate_item_name("a\x00b").is_err());
         assert!(validate_item_name("\tfoo").is_err());
+    }
+
+    // validate_external_read_path: the canonical re-check only applies to
+    // paths that EXIST. A non-existent path passes lexically — slash.rs
+    // validates brand-new workspace roots before they're created (launcher
+    // slash-command scan), and read flows stat right after anyway. The
+    // 0.2.33 symlink hardening must not break that contract (caught by
+    // align-docs reading the slash.rs caller comment).
+    #[test]
+    fn external_read_path_allows_nonexistent_path_lexically() {
+        // NOT env::temp_dir(): on macOS that's /var/folders/… and the LEXICAL
+        // blacklist rejects /var outright — use a non-existent child of a
+        // real test workspace instead.
+        let ws = make_tmp_workspace();
+        let missing = ws.join("does_not_exist_yet");
+        assert!(!missing.exists());
+        assert!(validate_external_read_path(&missing.to_string_lossy()).is_ok());
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    // …but an EXISTING path whose symlink chain lands in a blacklisted dir
+    // is rejected on the canonical form (cross-review 0.2.33, Codex
+    // Critical — the per-command test lives in transfer.rs).
+    #[cfg(unix)]
+    #[test]
+    fn external_read_path_rejects_existing_symlink_into_blacklisted_dir() {
+        use std::os::unix::fs::symlink;
+        let staging = make_tmp_workspace();
+        symlink("/etc", staging.join("lure")).unwrap();
+        let evil = staging.join("lure").join("hosts");
+        assert!(validate_external_read_path(&evil.to_string_lossy()).is_err());
+        let _ = fs::remove_dir_all(&staging);
     }
 
     // Rust side of the Rust↔renderer name-rule crosscheck (cross-review
