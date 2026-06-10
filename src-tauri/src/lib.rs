@@ -466,6 +466,7 @@ pub fn run() {
             workspace_files::files_b64::cmd_workspace_read_files_b64,
             workspace_files::check_paths::cmd_workspace_check_paths,
             workspace_files::transfer::cmd_workspace_copy_paths,
+            workspace_files::transfer::cmd_workspace_copy_internal,
             workspace_files::gitignore::cmd_workspace_add_gitignore,
             workspace_files::search::cmd_workspace_search_files_fuzzy,
             workspace_files::delete::cmd_workspace_delete,

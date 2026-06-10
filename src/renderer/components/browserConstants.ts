@@ -30,6 +30,14 @@ export const BROWSER_BLANK_URL = 'data:text/html;charset=utf-8,%3Chtml%3E%3C%2Fh
 // bounds before the final panel exists. Match TerminalPanel's transition guard
 // and wait until the panel is at least meaningfully interactive.
 const MIN_BROWSER_BOUNDS_PX = 100;
+const BROWSER_BOUNDS_EPSILON_PX = 0.5;
+
+export interface BrowserBounds {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
 
 /**
  * True when a container's measured bounds are real enough to position the
@@ -42,5 +50,25 @@ export function hasUsableBrowserBounds(width: number, height: number): boolean {
     Number.isFinite(height) &&
     width >= MIN_BROWSER_BOUNDS_PX &&
     height >= MIN_BROWSER_BOUNDS_PX
+  );
+}
+
+export function toUsableBrowserBounds(rect: BrowserBounds): BrowserBounds | null {
+  if (!Number.isFinite(rect.x) || !Number.isFinite(rect.y)) return null;
+  if (!hasUsableBrowserBounds(rect.width, rect.height)) return null;
+  return {
+    x: rect.x,
+    y: rect.y,
+    width: rect.width,
+    height: rect.height,
+  };
+}
+
+export function browserBoundsEqual(a: BrowserBounds, b: BrowserBounds): boolean {
+  return (
+    Math.abs(a.x - b.x) <= BROWSER_BOUNDS_EPSILON_PX &&
+    Math.abs(a.y - b.y) <= BROWSER_BOUNDS_EPSILON_PX &&
+    Math.abs(a.width - b.width) <= BROWSER_BOUNDS_EPSILON_PX &&
+    Math.abs(a.height - b.height) <= BROWSER_BOUNDS_EPSILON_PX
   );
 }

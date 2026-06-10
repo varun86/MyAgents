@@ -21,6 +21,7 @@ import { getExternalRuntime, getCurrentRuntimeType, isExternalRuntime } from './
 import { resolveCodexWorkspaceInstructions } from './workspace-instructions';
 import { shouldQueueExternalSend, canDrainExternalQueue } from './external-queue-policy';
 import { decideSessionCompleteErrorAction } from './external-abort-policy';
+import { TurnFinalizationGate } from './external-turn-finalization';
 import type { RuntimeType } from '../../shared/types/runtime';
 import { deriveSessionTitle } from '../../shared/sessionTitle';
 import { isPendingSessionId } from '../../shared/constants';
@@ -47,8 +48,8 @@ import {
   EXTERNAL_WATCHDOG_DEFAULT_TIMEOUT_MS,
   externalRuntimeWatchdogTimeoutMs,
   estimatedContextTokensFromMessages,
-  observedContextTokens,
 } from './external-watchdog-policy';
+import { observedContextTokens } from '../utils/context-occupancy';
 import { computeContextUsage } from '../../shared/contextUsage';
 import type { ContextUsage } from '../../shared/types/context-usage';
 import { lookupModelContextLength } from '../utils/model-capabilities';
@@ -61,6 +62,14 @@ let activeProcess: RuntimeProcess | null = null;
 let activeRuntime: AgentRuntime | null = null;
 let isRunning = false;
 let turnCompleted = false;
+// Cross-review 0.2.32 (Codex Critical 1+2): `turnCompleted` only means "the
+// runtime emitted its terminal event". The assistant message lands in
+// allSessionMessages later, inside the fire-and-forget persistTurnResult().
+// Consumers that need "the turn is FINALIZED" (idle waiters reading the last
+// assistant text; the next turn about to reset the accumulators; the
+// session_complete error branch) must consult this gate as well. See
+// external-turn-finalization.ts for the full failure modes.
+const turnFinalization = new TurnFinalizationGate();
 // #307: set true while stopExternalSession() is tearing down the process (user
 // pressed Stop / config-change restart / session takeover). When the killed
 // subprocess then emits its terminal session_complete (subtype='error' from the
@@ -1407,17 +1416,26 @@ export function getActiveRuntimeType(): RuntimeType {
  */
 export async function waitForExternalSessionIdle(timeoutMs: number, pollMs = 500): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
+  // Cross-review 0.2.32 (Codex Critical 1): "idle" for our callers means "the
+  // last assistant message is readable" (cron execute-sync, IM heartbeat and
+  // memory-update all call getLastExternalAssistantText right after this
+  // returns). The flags below only say the runtime EMITTED its terminal event;
+  // the assistant push happens inside the fire-and-forget persistTurnResult.
+  // So every idle exit additionally waits for finalization to settle, within
+  // the caller's remaining deadline (a hung persist → not idle → the caller's
+  // existing timeout handling applies, same as a hung turn).
+  const finalized = () => turnFinalization.settled(Math.max(1, deadline - Date.now()));
   // Brief initial delay to let sendExternalMessage → startExternalSession set isRunning.
   // Without this, polling could see the pre-start state (!isRunning && !activeProcess) and
   // return true immediately before the CC process has even started.
   if (!isRunning && !activeProcess) {
     await new Promise(r => setTimeout(r, 200));
-    if (!isRunning && !activeProcess) return true; // genuinely idle
+    if (!isRunning && !activeProcess) return finalized(); // genuinely idle
   }
   while (Date.now() < deadline) {
-    if (!isRunning && !activeProcess) return true;  // CC: process exited
-    if (activeProcess?.exited) return true;          // CC: process exited (alt check)
-    if (turnCompleted) return true;                  // Codex: turn done, process alive
+    if (!isRunning && !activeProcess) return finalized();  // CC: process exited
+    if (activeProcess?.exited) return finalized();          // CC: process exited (alt check)
+    if (turnCompleted) return finalized();                  // Codex: turn done, process alive
     await new Promise(r => setTimeout(r, pollMs));
   }
   return false;
@@ -1624,16 +1642,20 @@ async function _doStartExternalSession(options: {
     currentTurnStartTime = Date.now();
     beginExternalTurnTrace('external_start_initial_message', options.sessionId);
 
+    // Register session in history index BEFORE the first message persist
+    // (mirrors agent-session.ts enqueueUserMessage and the Case-3 pre-warm path).
+    // SessionStore enforces the index⟺data invariant (issue #336): a JSONL is
+    // never CREATED for a session without a sessions.json entry — persisting
+    // first would get the write refused and drop the user's first message.
+    if (!options.resumeSessionId) {
+      await registerSessionMetadataIfNew(options.sessionId, options.workspacePath, options.initialMessage, 'initial message', options.scenario);
+    }
+
     // Persist user message immediately (crash safety — don't wait for turn_complete).
     // Append-only: allSessionMessages only grows here, so forbid the shrink-rewrite
     // (a shorter array would mean a partial load — never delete the on-disk tail).
     try { await saveSessionMessages(options.sessionId, allSessionMessages, { allowShrink: false }); }
     catch (err) { console.error('[external-session] Failed to persist user message:', err); }
-
-    // Register session in history index (mirrors agent-session.ts enqueueUserMessage logic)
-    if (!options.resumeSessionId) {
-      await registerSessionMetadataIfNew(options.sessionId, options.workspacePath, options.initialMessage, 'initial message', options.scenario);
-    }
   }
 
   // Pre-warm path (no initialMessage) keeps state as 'idle' so the UI doesn't
@@ -1836,6 +1858,26 @@ export async function sendExternalMessage(
       // surfaces the error code; no need to also push a reply (cross-review CC:
       // double-signal causes duplicate / contradictory caller feedback).
       return { queued: false, error: 'external_busy: 上一个回合超过 5 分钟未完成，消息未发送，请稍后重试。' };
+    }
+  }
+
+  // Cross-review 0.2.32 (Codex Critical 2): the busy gate above is SKIPPED the
+  // moment turnCompleted flips true — but the previous turn's fire-and-forget
+  // persistTurnResult may still be inside its await window. Proceeding now
+  // would push this turn's user message ahead of the previous assistant
+  // message (history order inversion) and run resetTurnAccumulators() under
+  // the persist's feet, wiping the content blocks it still has to read — the
+  // previous assistant reply would vanish from history/disk. Wait (bounded)
+  // for finalization; on a pathological hang, proceed degraded rather than
+  // blocking the user's send forever — persistTurnResult snapshots EVERY
+  // turn-scoped field (inbox meta, hints, context usage, content blocks,
+  // assistant text) before its first await and only resets accumulators it
+  // still owns, so the worst case is a stale-ordering write, not message
+  // loss (cross-review 0.2.33, Codex W1 closed the content-blocks gap).
+  if (turnFinalization.inFlight) {
+    const settled = await turnFinalization.settled(60_000);
+    if (!settled) {
+      console.warn('[external-session] previous turn finalization still in flight after 60s — proceeding with send (degraded ordering)');
     }
   }
 
@@ -2675,15 +2717,28 @@ async function persistTurnResult(): Promise<void> {
     const turnDurationMs = currentTurnStartTime ? Date.now() - currentTurnStartTime : undefined;
     flushAllPending();
 
+    // Cross-review 0.2.33 (Codex W1) — snapshot THIS turn's content blocks and
+    // assistant text at the same synchronous discipline as the entry snapshots
+    // above (here = after flushAllPending, still before the first await). A
+    // degraded send (turnFinalization.settled timeout in sendExternalMessage)
+    // runs resetTurnAccumulators() during the await below; these were the LAST
+    // un-snapshotted fields, so the worst case was silent loss of the previous
+    // assistant message, not just stale ordering. The array is captured by
+    // REFERENCE on purpose: reset reassigns (`currentContentBlocks = []`), so
+    // the snapshot survives it, while in-place attachment patches during
+    // awaitInFlightSaves() still land in the captured blocks.
+    const turnContentBlocks = currentContentBlocks;
+    const turnAssistantText = currentAssistantText;
+
     // PRD 0.2.15 Review A4 fix — drain in-flight attachment saves so the
-    // placeholder attachments embedded in currentContentBlocks get patched
+    // placeholder attachments embedded in the turn's content blocks get patched
     // BEFORE we snapshot to disk. Without this await, large/slow saves land
     // their `tool_attachment_update` after `currentContentBlocks = []` reset
     // and the disk JSON keeps the "生成中" placeholder forever.
     await awaitInFlightSaves();
 
     const usageData = buildPersistedTurnUsage();
-    const turnToolCount = currentContentBlocks.filter(b => b.type === 'tool_use').length;
+    const turnToolCount = turnContentBlocks.filter(b => b.type === 'tool_use').length;
     const runtimeType = getCurrentRuntimeType();
     // turnContextUsage was snapshotted at the synchronous function entry (above) to
     // survive a concurrent turn's resetTurnAccumulators() during the await window.
@@ -2691,18 +2746,25 @@ async function persistTurnResult(): Promise<void> {
     // PRD 0.2.18 — capture reply text into local var BEFORE resetTurnAccumulators
     // clears the source. The finally block reads this for inbox reply pushback.
     if (turnInboxMeta) {
-      if (currentContentBlocks.length > 0) {
-        capturedReplyText = currentContentBlocks
+      if (turnContentBlocks.length > 0) {
+        capturedReplyText = turnContentBlocks
           .filter((b) => b.type === 'text' && typeof b.text === 'string')
           .map((b) => b.text ?? '')
           .join('\n\n')
           .trim();
       }
-      if (!capturedReplyText) capturedReplyText = currentAssistantText.trim();
+      if (!capturedReplyText) capturedReplyText = turnAssistantText.trim();
     }
 
-    if (currentContentBlocks.length > 0) {
-      const content = JSON.stringify(currentContentBlocks);
+    // Reset only what we still own: if a degraded concurrent send already ran
+    // resetTurnAccumulators(), the module global points at the NEW turn's
+    // array — resetting again would wipe that turn's accumulating state.
+    const resetIfStillOurs = () => {
+      if (currentContentBlocks === turnContentBlocks) resetTurnAccumulators();
+    };
+
+    if (turnContentBlocks.length > 0) {
+      const content = JSON.stringify(turnContentBlocks);
       allSessionMessages.push({
         id: `assistant-${Date.now()}`,
         role: 'assistant',
@@ -2712,18 +2774,18 @@ async function persistTurnResult(): Promise<void> {
         usage: usageData,
         toolCount: turnToolCount || undefined,
       });
-      resetTurnAccumulators();
-    } else if (currentAssistantText.trim()) {
+      resetIfStillOurs();
+    } else if (turnAssistantText.trim()) {
       // Fallback: no structured blocks, just plain text (e.g. CC slash commands)
       allSessionMessages.push({
         id: `assistant-${Date.now()}`,
         role: 'assistant',
-        content: currentAssistantText,
+        content: turnAssistantText,
         timestamp: new Date().toISOString(),
         durationMs: turnDurationMs,
         usage: usageData,
       });
-      resetTurnAccumulators();
+      resetIfStillOurs();
     }
 
     // Save cumulative messages to disk (saveSessionMessages uses .slice(existingCount) to append).
@@ -3382,7 +3444,8 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
       });
       console.log(`[external-session] turn_complete: text=${currentAssistantText.length}chars, blocks=${currentContentBlocks.length}, elapsed=${currentTurnStartTime ? Date.now() - currentTurnStartTime : 0}ms`);
       // Fire-and-forget: handleUnifiedEvent is a sync stream callback; persistTurnResult is async.
-      void persistTurnResult().catch((err) => console.error('[external-session] persistTurnResult (turn_complete) failed:', err));
+      // Tracked by turnFinalization so idle-waiters / the next turn wait for the flush.
+      turnFinalization.track(persistTurnResult().catch((err) => console.error('[external-session] persistTurnResult (turn_complete) failed:', err)));
       break;
     }
 
@@ -3438,7 +3501,8 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
             },
           });
           // Fire-and-forget: handleUnifiedEvent is a sync stream callback; persistTurnResult is async.
-          void persistTurnResult().catch((err) => console.error('[external-session] persistTurnResult (session_complete) failed:', err));
+          // Tracked by turnFinalization so idle-waiters / the next turn wait for the flush.
+          turnFinalization.track(persistTurnResult().catch((err) => console.error('[external-session] persistTurnResult (session_complete) failed:', err)));
           persistInFlight = true;
         }
         // else: turn_complete already fired persistTurnResult — persistInFlight
@@ -3465,6 +3529,11 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
           turnCompleted,
           hasAssistantText: !!currentAssistantText.trim(),
           userRequestedStop: wasUserStop,
+          // Cross-review 0.2.32: while persistTurnResult is flushing the
+          // completed turn, the leftover accumulator text belongs to that
+          // SUCCESSFUL turn — a death in this window is between-turns, not a
+          // failure to surface.
+          finalizationInFlight: turnFinalization.inFlight,
         });
         if (errorAction === 'ignore-idle') {
           console.log(`[external-session] Ignoring idle-exit "${errorMessage}" — process was between turns; next message will auto-resume`);
@@ -3474,7 +3543,11 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
             detail: { source: 'user_stop', error: errorMessage },
           });
           console.log(`[external-session] Suppressing error banner for user-initiated stop (was: "${errorMessage}")`);
-          resetTurnAccumulators(); // Prevent stale content leaking into next turn
+          // Cross-review 0.2.32: when persistTurnResult is in flight it OWNS the
+          // accumulators (it still has to read the content blocks; its push
+          // branches reset them). Resetting here would race it and drop the
+          // assistant message. With no finalization in flight, reset as before.
+          if (!turnFinalization.inFlight) resetTurnAccumulators(); // Prevent stale content leaking into next turn
         } else {
           emitExternalTurnTrace('final', {
             status: 'error',
@@ -3483,7 +3556,8 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
           broadcast('chat:agent-error', { message: errorMessage });
           broadcast('chat:message-error', errorMessage);
           fireImCallback('error', errorMessage);
-          resetTurnAccumulators(); // Prevent stale content leaking into next turn
+          // Same finalization-ownership rule as the suppress branch above.
+          if (!turnFinalization.inFlight) resetTurnAccumulators(); // Prevent stale content leaking into next turn
         }
       }
       pendingPermissionSuggestions.clear();

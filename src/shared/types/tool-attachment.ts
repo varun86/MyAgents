@@ -62,6 +62,19 @@ export interface ToolAttachment {
    * 前端识别该字段，渲染 loading 骨架直到 patch 抵达。
    */
   pendingId?: string;
+
+  /**
+   * 展示语义（#293 / PRD 0.2.33）：
+   *  - `'artifact'`（默认，含 undefined / 历史数据）— 交付物（gemini-image 产图、
+   *    edge-tts 音频等用户点名要的产出），渲染为对话流内始终可见的独立卡片
+   *    （Message.tsx per-BlockGroup hoist，PRD 0.2.30 行为不变）。
+   *  - `'process'` — 过程产物（Playwright / computer-use 截图等 AI 的"眼睛"），
+   *    渲染进折叠工具条内部（ProcessRow 展开体），折叠条上以图片角标提示。
+   *    重度浏览任务一轮几十张截图不再刷屏对话流。
+   * 由 server 侧按工具名判定（classifyToolAttachmentPresentation），只在 'process'
+   * 时显式写入 — 省略即 artifact，老持久化数据无需迁移。
+   */
+  presentation?: 'artifact' | 'process';
 }
 
 /** 占位 attachment 的硬性最大字节数（25MB，对齐 workspace_files download 红线）。 */

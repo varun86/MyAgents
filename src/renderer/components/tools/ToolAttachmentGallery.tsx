@@ -1,12 +1,16 @@
 /**
  * ToolAttachmentGallery — uniform renderer for all rich-media tool attachments.
  *
- * PRD 0.2.15 §4.8. Mounted by Message.tsx in the message flow (after each
- * BlockGroup), NOT inside the collapsible tool body — so any tool (Codex
- * image_generation, MCP gemini-image, builtin edge-tts, future Gemini/CC) that
- * emits ToolAttachment[] renders a standalone, always-visible in-flow card with
- * zero per-tool code (PRD 0.2.30 moved it out of ToolUse/ProcessRow, where it
- * was buried inside the folded tool window).
+ * PRD 0.2.15 §4.8. Two mount points, split by `attachment.presentation` (#293):
+ *  - ARTIFACT media (default) — mounted by Message.tsx in the message flow
+ *    (after each BlockGroup): deliverables (Codex image_generation, MCP
+ *    gemini-image, builtin edge-tts, …) render as standalone, always-visible
+ *    in-flow cards with zero per-tool code (PRD 0.2.30 moved them out of the
+ *    folded tool window where they were buried).
+ *  - PROCESS media — mounted by ProcessRow.tsx INSIDE the expanded tool body:
+ *    Playwright / computer-use screenshots are the AI's working captures, not
+ *    deliverables, so they deliberately stay behind the fold (collapsed row
+ *    shows an image-count badge).
  *
  * Kind dispatch is intentionally small; new kinds slot into the switch.
  */

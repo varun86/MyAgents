@@ -15,6 +15,7 @@ import { join, resolve } from 'path';
 import { existsSync, readFileSync, renameSync, lstatSync, realpathSync } from 'fs';
 import { randomUUID } from 'crypto';
 import { stripBom } from '../../shared/utils';
+import { workspacePathsEqual } from '../../shared/workspacePath';
 
 import { withConfigLock, loadConfig, type AdminAppConfig } from '../utils/admin-config';
 import { getHomeDirOrNull } from '../utils/platform';
@@ -523,7 +524,9 @@ export async function setWorkspaceEnabledPlugins(
     // fine — TS just can't narrow through the `as` cast cleanly. Cast via
     // `unknown` to express "we know this field exists on AgentConfig".
     const agents = cfg.agents ?? [];
-    const idx = agents.findIndex(a => a.workspacePath === workspacePath);
+    // #320 family: caller workspacePath (renderer/CLI, POSIX-style) vs config
+    // agent workspacePath (may be native Windows backslashes) — canonical identity.
+    const idx = agents.findIndex(a => workspacePathsEqual(a.workspacePath, workspacePath));
     if (idx !== -1) {
       const next = { ...cfg };
       const newAgents = agents.slice();

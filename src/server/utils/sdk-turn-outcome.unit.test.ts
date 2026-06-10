@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   isEmptySuccessfulSdkResult,
   isRecoveredAssistantMessageError,
+  findTurnUsageStampIndex,
 } from './sdk-turn-outcome';
 
 describe('isEmptySuccessfulSdkResult', () => {
@@ -108,5 +109,61 @@ describe('isRecoveredAssistantMessageError', () => {
       terminalReason: 'completed',
       emptySuccessfulResult: true,
     })).toBe(false);
+  });
+});
+
+describe('findTurnUsageStampIndex (#331 — usage must land on the right assistant, not the last element)', () => {
+  const u = { role: 'user' as const };
+  const a = { role: 'assistant' as const };                       // not yet stamped
+  const aStamped = { role: 'assistant' as const, usage: { inputTokens: 100 } };
+
+  it('targets the trailing assistant of the turn', () => {
+    // Normal turn: [user, assistant], nothing persisted yet.
+    expect(findTurnUsageStampIndex([u, a], 0)).toBe(1);
+  });
+
+  it('still finds the assistant when a user message was surfaced AFTER it (queue:started fallback) — the bug case', () => {
+    // handleMessageComplete pushed a queued user message after the just-finished
+    // assistant; positional "last element" would attribute usage to the user msg
+    // (index 2) and drop it. We must stamp the assistant at index 1.
+    expect(findTurnUsageStampIndex([u, a, u], 0)).toBe(1);
+  });
+
+  it('only considers the not-yet-persisted range — never re-stamps a prior turn\'s persisted assistant', () => {
+    // Prior turn [user, assistant] already persisted (cursor=2); this turn pushed
+    // only a user message so far (no new assistant). Must NOT target the old
+    // assistant at index 1 with this (different) turn's usage.
+    expect(findTurnUsageStampIndex([u, a, u], 2)).toBe(-1);
+  });
+
+  it('does NOT re-stamp a STAMPED-but-not-yet-persisted assistant (Codex-caught race)', () => {
+    // Turn N's assistant is stamped but its fire-and-forget persist is still
+    // blocked (cursor=0, behind it). Turn N+1 completes producing no new
+    // assistant. The trailing assistant in range is turn N's — already stamped —
+    // so we must return -1 rather than overwrite its usage with turn N+1's.
+    expect(findTurnUsageStampIndex([u, aStamped, u], 0)).toBe(-1);
+    expect(findTurnUsageStampIndex([u, aStamped], 0)).toBe(-1);
+  });
+
+  it('still stamps a genuinely NEW assistant even when a prior stamped assistant precedes it', () => {
+    // Turn N stamped (index 1, persist still pending), turn N+1 produced its own
+    // assistant (index 3, unstamped). The new one is the trailing assistant → 3.
+    expect(findTurnUsageStampIndex([u, aStamped, u, a], 0)).toBe(3);
+  });
+
+  it('returns -1 when the turn produced no assistant message', () => {
+    expect(findTurnUsageStampIndex([u], 0)).toBe(-1);
+    expect(findTurnUsageStampIndex([], 0)).toBe(-1);
+  });
+
+  it('picks the LAST assistant in a multi-assistant turn (final response carries the turn aggregate)', () => {
+    // text → tool → text within one turn produces two assistant messages (both
+    // unstamped until turn end); the turn's usage belongs to the final one.
+    expect(findTurnUsageStampIndex([u, a, u, a], 1)).toBe(3);
+  });
+
+  it('clamps a negative / oversized fromIndex safely', () => {
+    expect(findTurnUsageStampIndex([u, a], -5)).toBe(1);
+    expect(findTurnUsageStampIndex([u, a], 99)).toBe(-1);
   });
 });

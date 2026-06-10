@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { hasUsableBrowserBounds } from './browserConstants';
+import { browserBoundsEqual, hasUsableBrowserBounds, toUsableBrowserBounds } from './browserConstants';
 
 // Regression guard for issue #290: HTML preview webview was created with
 // width 0 because the create effect read getBoundingClientRect() while the
@@ -45,5 +45,26 @@ describe('hasUsableBrowserBounds', () => {
 
   it('accepts the minimum interactive panel size', () => {
     expect(hasUsableBrowserBounds(100, 100)).toBe(true);
+  });
+});
+
+describe('browser bounds identity', () => {
+  it('rejects non-finite origins even when size is usable', () => {
+    expect(toUsableBrowserBounds({ x: NaN, y: 80, width: 688, height: 662 })).toBeNull();
+    expect(toUsableBrowserBounds({ x: 699, y: Infinity, width: 688, height: 662 })).toBeNull();
+  });
+
+  it('treats position-only movement as a bounds change', () => {
+    expect(browserBoundsEqual(
+      { x: 699, y: 80, width: 688, height: 662 },
+      { x: 1039, y: 80, width: 688, height: 662 },
+    )).toBe(false);
+  });
+
+  it('allows sub-pixel measurement noise', () => {
+    expect(browserBoundsEqual(
+      { x: 699.42, y: 79.99, width: 688.66, height: 662.02 },
+      { x: 699.7, y: 80.2, width: 688.3, height: 661.8 },
+    )).toBe(true);
   });
 });

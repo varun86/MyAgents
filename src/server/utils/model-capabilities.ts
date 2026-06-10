@@ -405,24 +405,44 @@ export function lookupModelCapability(modelId: string | undefined | null): Model
 }
 
 /**
- * Threshold above which we tag a model with `[1m]`. Picked at 1_000_000 to
- * cover the cluster of "≈1M context" models we ship as presets:
- * `claude-sonnet-4-6` / `claude-opus-4-6` / `deepseek-v4-pro` are exactly 1M;
- * Gemini 2.5/3.x are 1_048_576 (2^20); GPT-5.4 is 1_050_000. All of them want
- * the SDK's 1M code path. Models in the 200K–256K band (Kimi, GLM, MiniMax)
- * stay unwrapped — SDK's 200K default + `CLAUDE_CODE_AUTO_COMPACT_WINDOW`
- * downshift handle them correctly without lying about the window.
+ * Threshold above which we tag a model with `[1m]` — the SDK's
+ * MODEL_CONTEXT_WINDOW_DEFAULT (200K). Anything the registry declares LARGER
+ * than the SDK default needs the unlock, because the suffix is the ONLY lever
+ * that raises the SDK window for a non-Anthropic model, and
+ * `CLAUDE_CODE_AUTO_COMPACT_WINDOW` only `Math.min`'s downward (#335):
+ *
+ *   effective auto-compact window = min(suffix ? 1M : 200K, env cap) − ~33K
+ *
+ * For a mid-band model (e.g. volcengine minimax-m3 @ 512K) the old ≥1M policy
+ * left the SDK on the 200K path → usable window ≈ 167K, silently wasting 2/3
+ * of the model's real capacity; the user's configured contextLength only ever
+ * moved the env cap, which min(200K, 512K) ignored. With the unlock + env cap
+ * the effective window is min(1M, 512K) − 33K ≈ 491K — always ≤ the model's
+ * real limit, so compaction still fires before upstream overflows.
+ *
+ * Known cosmetic trade-off (documented in #335): the SDK's own `/context`
+ * HEADLINE window is the raw suffix value (1M) — the env cap only shapes the
+ * auto-compact threshold / free-space rows, which stay correct. MyAgents' own
+ * context ring (`chat:context-usage`) uses the registry window and shows the
+ * true value. Models at exactly 200K (claude-sonnet-4-6 wire-default,
+ * claude-haiku-4-5) stay unwrapped — for first-party Anthropic models the
+ * suffix also requests the `context-1m` beta header (Tier-4 / extra-usage
+ * billing), so our presets deliberately encode the SAFE window and the
+ * registry value itself is the wrap policy.
  */
-const CONTEXT_WINDOW_1M_THRESHOLD = 1_000_000;
+const CONTEXT_WINDOW_UNLOCK_THRESHOLD = 200_000;
 
 /**
- * Wrap a model id with `[1m]` suffix iff its registry contextLength is at
- * least 1_000_000. This is the trigger Claude Agent SDK uses to take the
- * 1M-context code path: `getContextWindowForModel` checks `has1mContext`
- * which is `/\[1m\]/i.test(model)`. Without the suffix, SDK falls back to
- * MODEL_CONTEXT_WINDOW_DEFAULT (200K) for every non-Anthropic model
- * regardless of any env var — `CLAUDE_CODE_AUTO_COMPACT_WINDOW` only
- * `Math.min`'s the window down, never up.
+ * Wrap a model id with `[1m]` suffix iff its registry contextLength exceeds
+ * the SDK's 200K default window. This is the trigger Claude Agent SDK uses to
+ * take the 1M-context code path: `getContextWindowForModel` checks
+ * `has1mContext` which is `/\[1m\]/i.test(model)`. Without the suffix, SDK
+ * falls back to MODEL_CONTEXT_WINDOW_DEFAULT (200K) for every non-Anthropic
+ * model regardless of any env var — `CLAUDE_CODE_AUTO_COMPACT_WINDOW` only
+ * `Math.min`'s the window down, never up. For models between 200K and 1M the
+ * suffix raises the SDK window to 1M and the env cap (injected from the same
+ * registry value in buildClaudeSessionEnv) pulls the effective auto-compact
+ * window back down to the model's real limit.
  *
  * The wrapped value MUST only flow into SDK ingress points:
  *   - `query({ model })` SDK option
@@ -447,15 +467,15 @@ const CONTEXT_WINDOW_1M_THRESHOLD = 1_000_000;
  *     own `has1mContext` semantics, so user-typed pre-wrapped values are
  *     respected even if registry has a lower ctx; also defends against
  *     pathological double-wrap on partially-tagged ids
- *   - registry has no entry, or contextLength < CONTEXT_WINDOW_1M_THRESHOLD;
- *     `>=` naturally rejects `undefined` / `NaN` / negative without an
- *     explicit `Number.isFinite` guard
+ *   - registry has no entry, or contextLength ≤ CONTEXT_WINDOW_UNLOCK_THRESHOLD;
+ *     the strict `>` comparison naturally rejects `undefined` / `NaN` /
+ *     negative without an explicit `Number.isFinite` guard
  */
 export function applyContextWindowSuffix(model: string | undefined | null): string | undefined {
   if (!model) return undefined;
   if (/\[1m\]/i.test(model)) return model;
   const ctx = lookupModelContextLength(model);
-  if (!(typeof ctx === 'number' && ctx >= CONTEXT_WINDOW_1M_THRESHOLD)) return model;
+  if (!(typeof ctx === 'number' && ctx > CONTEXT_WINDOW_UNLOCK_THRESHOLD)) return model;
   return `${model}[1m]`;
 }
 

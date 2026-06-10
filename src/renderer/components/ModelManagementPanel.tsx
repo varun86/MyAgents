@@ -4,12 +4,22 @@
  * Upper section: Active models — hover "设为首选", delete any model, add custom ID
  * Lower section: Discover more — single-click "添加" per row, no multi-select
  */
-import { X, Search, Loader2, RefreshCw, AlertCircle, Plus, Trash2 } from 'lucide-react';
+import { X, Search, Loader2, RefreshCw, AlertCircle, Plus, Trash2, Settings2 } from 'lucide-react';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 
 import { useCloseLayer } from '@/hooks/useCloseLayer';
-import { type Provider, type ModelEntity, type AppConfig } from '@/config/types';
+import {
+  EDITABLE_MODALITIES,
+  MODALITY_LABELS,
+  discoveredModelWritePlan,
+  initialModalitySelection,
+  isModalitySelectionValid,
+  parseContextWindowInput,
+  resolveModalitiesToSave,
+  type EditableModality,
+} from '@/utils/modelSettingsForm';
+import { PRESET_PROVIDERS, type Provider, type ModelEntity, type AppConfig } from '@/config/types';
 import {
   fetchProviderModels,
   toModelEntity,
@@ -49,6 +59,8 @@ export default function ModelManagementPanel({
   const [discoveryError, setDiscoveryError] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const [customInput, setCustomInput] = useState('');
+  // #325 — which model row has its inline settings editor expanded.
+  const [editingModelId, setEditingModelId] = useState<string | null>(null);
   const isMountedRef = useRef(true);
   const fetchIdRef = useRef(0);
 
@@ -155,6 +167,70 @@ export default function ModelManagementPanel({
     await onRefresh();
   }, [customInput, activeModelIds, provider, config.presetCustomModels, onSaveCustomModels, onUpdateCustomProvider, onRefresh]);
 
+  // #325 — which rows get the ⚙ settings button. On a custom provider every
+  // model lives in the provider file → all editable. On a builtin (preset)
+  // provider only USER-ADDED models are editable; bundled preset models are
+  // hand-curated by the app and stay read-only by design.
+  //
+  // Membership in `presetCustomModels` alone is NOT the right gate (codex
+  // review): re-adding a previously removed BUNDLED preset also writes an
+  // entry into presetCustomModels (see handleAddDiscoveredModel), so a bundled
+  // row could acquire the gear. Editing that duplicate would diverge the two
+  // registries — the renderer merge is preset-wins (mergePresetCustomModels
+  // only fills gaps) while the sidecar registry ingests presetCustomModels
+  // BEFORE bundled presets with first-wins, so the edit would silently apply
+  // on the sidecar but never show in the UI. Exclude bundled IDs explicitly.
+  // Hand-curated bundled model ids for this builtin provider — shared by the
+  // editability gate below and the re-add write plan in
+  // handleAddDiscoveredModel (both must agree on what "bundled" means).
+  const bundledModelIds = useMemo(
+    () => new Set(
+      provider.isBuiltin
+        ? PRESET_PROVIDERS.find(p => p.id === provider.id)?.models.map(m => m.model) ?? []
+        : [],
+    ),
+    [provider.isBuiltin, provider.id],
+  );
+
+  const editableModelIds = useMemo(() => {
+    if (!provider.isBuiltin) return activeModelIds;
+    return new Set(
+      (config.presetCustomModels?.[provider.id] ?? [])
+        .map(m => m.model)
+        .filter(id => !bundledModelIds.has(id)),
+    );
+  }, [provider.isBuiltin, provider.id, activeModelIds, config.presetCustomModels, bundledModelIds]);
+
+  const handleToggleEdit = useCallback((modelId: string) => {
+    setEditingModelId(prev => (prev === modelId ? null : modelId));
+  }, []);
+
+  const handleCancelEdit = useCallback(() => setEditingModelId(null), []);
+
+  // #325 — persist edited model-level params through the SAME write paths the
+  // add/delete actions use, so the sidecar capability registry picks the change
+  // up via its existing mtime invalidation (providers dir / config.json).
+  const handleSaveModelSettings = useCallback(async (modelId: string, patch: Partial<ModelEntity>) => {
+    const applyPatch = (m: ModelEntity): ModelEntity => {
+      if (m.model !== modelId) return m;
+      const next = { ...m, ...patch };
+      // `undefined` patch values mean "clear" — drop the keys so the stored
+      // JSON stays minimal and the registry falls back per its source chain.
+      for (const key of Object.keys(patch) as Array<keyof ModelEntity>) {
+        if (patch[key] === undefined) delete next[key];
+      }
+      return next;
+    };
+    if (provider.isBuiltin) {
+      const customModels = config.presetCustomModels?.[provider.id] ?? [];
+      await onSaveCustomModels(provider.id, customModels.map(applyPatch));
+    } else if (onUpdateCustomProvider) {
+      await onUpdateCustomProvider({ ...provider, models: provider.models.map(applyPatch) });
+    }
+    setEditingModelId(null);
+    await onRefresh();
+  }, [provider, config.presetCustomModels, onSaveCustomModels, onUpdateCustomProvider, onRefresh]);
+
   const handleAddDiscoveredModel = useCallback(async (model: DiscoveredModel) => {
     if (activeModelIds.has(model.id)) return;
     const entity = toModelEntity(model, provider);
@@ -172,13 +248,21 @@ export default function ModelManagementPanel({
           },
         };
       });
-      const existing = config.presetCustomModels?.[provider.id] ?? [];
-      await onSaveCustomModels(provider.id, [...existing, entity]);
+      // Re-adding a BUNDLED preset stops here: un-removing makes the preset
+      // resurface by itself. Appending a duplicate into presetCustomModels
+      // would diverge the registries (renderer merge is preset-wins, sidecar
+      // ingest is first-wins over presetCustomModels) — see
+      // discoveredModelWritePlan + its regression tests.
+      const plan = discoveredModelWritePlan(bundledModelIds, model.id);
+      if (plan.appendToCustomModels) {
+        const existing = config.presetCustomModels?.[provider.id] ?? [];
+        await onSaveCustomModels(provider.id, [...existing, entity]);
+      }
     } else if (onUpdateCustomProvider) {
       await onUpdateCustomProvider({ ...provider, models: [...provider.models, entity] });
     }
     await onRefresh();
-  }, [activeModelIds, provider, config.presetCustomModels, onSaveCustomModels, onUpdateCustomProvider, onRefresh]);
+  }, [activeModelIds, provider, config.presetCustomModels, bundledModelIds, onSaveCustomModels, onUpdateCustomProvider, onRefresh]);
 
   // ===== Filtered discovery (exclude already-added) =====
   const filteredDiscovered = useMemo(() => {
@@ -232,13 +316,25 @@ export default function ModelManagementPanel({
             ) : (
               <div>
                 {provider.models.map(model => (
-                  <ActiveModelRow
-                    key={model.model}
-                    model={model}
-                    isPrimary={model.model === primaryModel}
-                    onSetPrimary={handleSetPrimary}
-                    onDelete={handleDeleteModel}
-                  />
+                  // relative wrapper anchors the settings popover to its row
+                  <div key={model.model} className="relative">
+                    <ActiveModelRow
+                      model={model}
+                      isPrimary={model.model === primaryModel}
+                      editable={editableModelIds.has(model.model)}
+                      isEditing={editingModelId === model.model}
+                      onSetPrimary={handleSetPrimary}
+                      onDelete={handleDeleteModel}
+                      onToggleEdit={handleToggleEdit}
+                    />
+                    {editingModelId === model.model && (
+                      <ModelSettingsEditor
+                        model={model}
+                        onCancel={handleCancelEdit}
+                        onSave={handleSaveModelSettings}
+                      />
+                    )}
+                  </div>
                 ))}
               </div>
             )}
@@ -376,16 +472,23 @@ export default function ModelManagementPanel({
 const ActiveModelRow = React.memo(function ActiveModelRow({
   model,
   isPrimary,
+  editable,
+  isEditing,
   onSetPrimary,
   onDelete,
+  onToggleEdit,
 }: {
   model: ModelEntity;
   isPrimary: boolean;
+  editable: boolean;
+  isEditing: boolean;
   onSetPrimary: (id: string) => void;
   onDelete: (id: string) => void;
+  onToggleEdit: (id: string) => void;
 }) {
   const handleSetPrimary = useCallback(() => { if (!isPrimary) onSetPrimary(model.model); }, [isPrimary, onSetPrimary, model.model]);
   const handleDelete = useCallback(() => onDelete(model.model), [onDelete, model.model]);
+  const handleToggleEdit = useCallback(() => onToggleEdit(model.model), [onToggleEdit, model.model]);
 
   const displayName = model.modelName && model.modelName !== model.model ? model.modelName : null;
 
@@ -411,6 +514,24 @@ const ActiveModelRow = React.memo(function ActiveModelRow({
           {formatTokenCount(model.contextLength)}
         </span>
       ) : null}
+
+      {/* #325 — per-model settings (user-added / custom-provider models only;
+          bundled preset models are app-curated and read-only) */}
+      {editable && (
+        <button
+          type="button"
+          onClick={handleToggleEdit}
+          title="模型参数设置"
+          data-model-gear
+          className={`flex-shrink-0 rounded p-1 transition-all hover:text-[var(--accent)] ${
+            isEditing
+              ? 'text-[var(--accent)] opacity-100'
+              : 'text-[var(--ink-subtle)] opacity-0 group-hover:opacity-100'
+          }`}
+        >
+          <Settings2 className="h-3 w-3" />
+        </button>
+      )}
 
       {/* Primary badge or hover action */}
       {isPrimary ? (
@@ -438,6 +559,195 @@ const ActiveModelRow = React.memo(function ActiveModelRow({
     </div>
   );
 });
+
+// ===== ModelSettingsEditor (#325 — anchored per-model parameter popover) =====
+//
+// A small card anchored under the row's ⚙ button (rendered inside the row's
+// `relative` wrapper) so the model list never shifts. Edits the three fields
+// that actually have consumers (see utils/modelSettingsForm.ts header for the
+// audit; model-level maxOutputTokens is deliberately absent — it has none).
+//
+// Dismissal: outside-click + Escape (ContextMenu pattern) and Cmd+W via
+// useCloseLayer at 210 — above the panel's own 200, so Cmd+W closes the
+// popover before the panel. Mousedown on any row's ⚙ is exempt from
+// outside-close: closing here would race the gear's own click-toggle and
+// reopen immediately. The toggle alone decides (same row → close; another
+// row → editingModelId switches and this instance unmounts).
+
+const ModelSettingsEditor = function ModelSettingsEditor({
+  model,
+  onCancel,
+  onSave,
+}: {
+  model: ModelEntity;
+  onCancel: () => void;
+  onSave: (modelId: string, patch: Partial<ModelEntity>) => Promise<void>;
+}) {
+  const [nameDraft, setNameDraft] = useState(model.modelName ?? model.model);
+  const [contextDraft, setContextDraft] = useState(
+    model.contextLength ? String(model.contextLength) : '',
+  );
+  const [modalities, setModalities] = useState<EditableModality[]>(
+    () => initialModalitySelection(model.inputModalities),
+  );
+  const [modalitiesTouched, setModalitiesTouched] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const popoverRef = useRef<HTMLDivElement>(null);
+
+  const onCancelRef = useRef(onCancel);
+  onCancelRef.current = onCancel;
+  useEffect(() => {
+    const handleMouseDown = (event: MouseEvent) => {
+      const target = event.target as Node;
+      if (popoverRef.current?.contains(target)) return;
+      if (target instanceof Element && target.closest('[data-model-gear]')) return;
+      onCancelRef.current();
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onCancelRef.current();
+    };
+    document.addEventListener('mousedown', handleMouseDown);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', handleMouseDown);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, []);
+  useCloseLayer(() => { onCancelRef.current(); return true; }, 210);
+
+  const parsedContext = parseContextWindowInput(contextDraft);
+  const contextInvalid = parsedContext === 'invalid';
+  const modalitiesInvalid = !isModalitySelectionValid(modalities);
+  const canSave = !contextInvalid && !modalitiesInvalid && !saving;
+
+  const toggleModality = (kind: EditableModality) => {
+    setModalitiesTouched(true);
+    setModalities(prev => (
+      prev.includes(kind)
+        ? prev.filter(m => m !== kind)
+        : EDITABLE_MODALITIES.filter(m => prev.includes(m) || m === kind)
+    ));
+  };
+
+  const handleSave = async () => {
+    if (!canSave) return;
+    setSaving(true);
+    try {
+      // `canSave` guard above already excluded 'invalid' (TS narrows via the
+      // aliased condition), so parsedContext is number | null here.
+      await onSave(model.model, {
+        modelName: nameDraft.trim() || model.model,
+        contextLength: parsedContext ?? undefined,
+        inputModalities: resolveModalitiesToSave(modalitiesTouched, model.inputModalities, modalities),
+      });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  // Live hint: parsed-value echo when valid, error when invalid, default otherwise.
+  const hint = contextInvalid
+    ? '格式无效 — 输入 token 数，可带 k / m 后缀（上限 20m）'
+    : modalitiesInvalid
+      ? '至少选择一种模态'
+      : typeof parsedContext === 'number'
+        ? `≈ ${formatTokenCount(parsedContext)} tokens · 下一轮对话生效`
+        : '未设窗口按 200K 估算 · 下一轮对话生效';
+
+  const inputBase =
+    'w-full rounded-lg border bg-[var(--paper)] px-2.5 py-1.5 text-xs text-[var(--ink)] outline-none transition-all placeholder:text-[var(--ink-faint)] focus:bg-[var(--paper-elevated)]';
+  const inputOk =
+    'border-[var(--line)] focus:border-[var(--accent)] focus:shadow-[0_0_0_3px_var(--accent-warm-subtle)]';
+  const inputErr = 'border-[var(--error)] focus:shadow-[0_0_0_3px_var(--error-subtle)]';
+
+  return (
+    <div
+      ref={popoverRef}
+      className="absolute right-0 top-[calc(100%+8px)] z-20 w-[360px] max-w-full origin-top-right animate-[popoverIn_0.22s_cubic-bezier(0.3,1.2,0.4,1)] rounded-[14px] border border-[var(--line-subtle)] bg-[var(--paper-elevated)] p-4 shadow-[var(--shadow-lg)]"
+    >
+      {/* 箭头 — 指向行尾的 ⚙ 区域 */}
+      <div className="absolute -top-[5px] right-14 h-2.5 w-2.5 rotate-45 border-l border-t border-[var(--line-subtle)] bg-[var(--paper-elevated)]" />
+
+      {/* 标题带模型 ID，防止改错对象 */}
+      <div className="mb-3 flex items-baseline gap-2">
+        <span className="flex-shrink-0 text-xs font-semibold text-[var(--ink)]">模型参数</span>
+        <code className="truncate font-mono text-[10px] text-[var(--ink-subtle)]">{model.model}</code>
+      </div>
+
+      {/* 显示名称 */}
+      <div className="mb-2.5">
+        <label className="mb-1 block text-[10px] font-medium tracking-wide text-[var(--ink-muted)]">显示名称</label>
+        <input
+          type="text"
+          value={nameDraft}
+          onChange={(e) => setNameDraft(e.target.value)}
+          placeholder={model.model}
+          className={`${inputBase} ${inputOk}`}
+        />
+      </div>
+
+      {/* 上下文窗口 */}
+      <div className="mb-2.5">
+        <label className="mb-1 block text-[10px] font-medium tracking-wide text-[var(--ink-muted)]">上下文窗口</label>
+        <input
+          type="text"
+          value={contextDraft}
+          onChange={(e) => setContextDraft(e.target.value)}
+          placeholder="如 128000 · 支持 128k / 1m"
+          className={`${inputBase} font-mono placeholder:font-sans ${contextInvalid ? inputErr : inputOk}`}
+        />
+      </div>
+
+      {/* 输入模态 */}
+      <div>
+        <label className="mb-1 block text-[10px] font-medium tracking-wide text-[var(--ink-muted)]">输入模态</label>
+        <div className="flex gap-1.5 pt-0.5">
+          {EDITABLE_MODALITIES.map(kind => {
+            const selected = modalities.includes(kind);
+            return (
+              <button
+                key={kind}
+                type="button"
+                onClick={() => toggleModality(kind)}
+                className={`rounded-full border px-2.5 py-1 text-[11px] transition-colors ${
+                  selected
+                    ? 'border-transparent bg-[var(--accent-warm-muted)] font-medium text-[var(--accent)]'
+                    : 'border-[var(--line)] text-[var(--ink-muted)] hover:border-[var(--ink-subtle)]'
+                }`}
+              >
+                {selected && <span className="mr-1 text-[9px]">✓</span>}
+                {MODALITY_LABELS[kind]}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      <p className={`mt-2 text-[10px] leading-relaxed ${contextInvalid || modalitiesInvalid ? 'text-[var(--error)]' : 'text-[var(--ink-subtle)]'}`}>
+        {hint}
+      </p>
+
+      {/* Actions */}
+      <div className="mt-3 flex justify-end gap-2">
+        <button
+          type="button"
+          onClick={onCancel}
+          className="rounded-lg px-3 py-1.5 text-xs text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
+        >
+          取消
+        </button>
+        <button
+          type="button"
+          onClick={handleSave}
+          disabled={!canSave}
+          className="rounded-lg bg-[var(--button-primary-bg)] px-4 py-1.5 text-xs font-medium text-white transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:opacity-40"
+        >
+          {saving ? '保存中…' : '保存'}
+        </button>
+      </div>
+    </div>
+  );
+};
 
 // ===== DiscoveredModelRow (lower section — light row with hover "添加") =====
 

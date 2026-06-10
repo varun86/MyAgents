@@ -1,13 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
-import type { MessageUsage } from '../types/session';
 import {
   CODEX_LONG_CONTEXT_MAX_TIMEOUT_MS,
   CODEX_LONG_CONTEXT_MIN_TIMEOUT_MS,
   EXTERNAL_WATCHDOG_DEFAULT_TIMEOUT_MS,
   estimatedContextTokensFromMessages,
   externalRuntimeWatchdogTimeoutMs,
-  observedContextTokens,
 } from './external-watchdog-policy';
 
 describe('externalRuntimeWatchdogTimeoutMs', () => {
@@ -39,26 +37,9 @@ describe('externalRuntimeWatchdogTimeoutMs', () => {
   });
 });
 
-describe('observedContextTokens', () => {
-  it('includes cache tokens and modelUsage entries', () => {
-    const usage: MessageUsage = {
-      inputTokens: 100,
-      outputTokens: 0,
-      cacheReadTokens: 200,
-      cacheCreationTokens: 300,
-      modelUsage: {
-        'gpt-5.5': {
-          inputTokens: 1_000,
-          outputTokens: 0,
-          cacheReadTokens: 2_000,
-          cacheCreationTokens: 3_000,
-        },
-      },
-    };
-
-    expect(observedContextTokens(usage)).toBe(6_000);
-  });
-});
+// observedContextTokens / resolveContextOccupancyTokens moved to
+// src/server/utils/context-occupancy.{ts,unit.test.ts} — they are consumed by
+// BOTH runtime families, not just the external watchdog (cross-review 0.2.32).
 
 describe('estimatedContextTokensFromMessages', () => {
   it('estimates pre-usage context size from persisted message content and the new turn text', () => {

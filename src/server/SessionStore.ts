@@ -21,6 +21,7 @@ import { join } from 'path';
 import type { SessionMetadata, SessionData, SessionMessage, SessionStats } from './types/session';
 import { createSessionMetadata, generateSessionTitle } from './types/session';
 import { stripBom } from '../shared/utils';
+import { workspacePathsEqual } from '../shared/workspacePath';
 import { ensureDirSync } from './utils/fs-utils';
 import { withFileLock } from './utils/file-lock';
 import { countNonEmptyJsonlLines } from './utils/jsonl-line-count';
@@ -304,7 +305,11 @@ export function getAllSessionMetadata(): SessionMetadata[] {
 export function getSessionsByAgentDir(agentDir: string): SessionMetadata[] {
     const all = getAllSessionMetadata();
     return all
-        .filter(s => s.agentDir === agentDir)
+        // #320 family: session agentDir and the caller's path come from
+        // different stores (sessions.json vs projects.json/config) — on
+        // Windows they disagree on separators/drive case, so raw === drops
+        // every session. Compare on the canonical identity.
+        .filter(s => workspacePathsEqual(s.agentDir, agentDir))
         .sort((a, b) => new Date(b.lastActiveAt).getTime() - new Date(a.lastActiveAt).getTime());
 }
 
@@ -360,8 +365,13 @@ export async function saveSessionMetadata(session: SessionMetadata): Promise<voi
 export async function deleteSession(sessionId: string): Promise<boolean> {
     ensureStorageDir();
 
-    return withSessionsLock(async () => {
-        // Remove from metadata
+    // Lock order matches saveSessionMessages: per-session file lock OUTER,
+    // sessions lock INNER. Taking the file lock here serializes the delete
+    // against an in-flight append from another writer of the same session
+    // (cross-tab cron, background completion) — previously the unlink could
+    // interleave with an append and leave either a half-deleted file or a
+    // just-recreated one.
+    return withSessionFileLock(sessionId, async () => withSessionsLock(async () => {
         const all = getAllSessionMetadata();
         const filtered = all.filter(s => s.id !== sessionId);
 
@@ -370,9 +380,11 @@ export async function deleteSession(sessionId: string): Promise<boolean> {
         }
 
         try {
-            atomicWriteSessionsFile(JSON.stringify(filtered, null, 2));
-
-            // Remove session data file (both formats)
+            // Remove the data files FIRST, then the index entry. If we crash
+            // between the two steps, the failure mode is "entry present, file
+            // gone" — a visible empty session the user can still see and delete
+            // again. The previous order (entry first) left "entry gone, file
+            // present": an invisible orphan that no UI can reach (issue #336).
             const jsonlFile = getSessionFilePath(sessionId);
             const legacyFile = getLegacySessionFilePath(sessionId);
 
@@ -386,12 +398,14 @@ export async function deleteSession(sessionId: string): Promise<boolean> {
             // Clear line count cache
             clearLineCountCache(sessionId);
 
+            atomicWriteSessionsFile(JSON.stringify(filtered, null, 2));
+
             return true;
         } catch (error) {
             console.error('[SessionStore] Failed to delete session:', error);
             return false;
         }
-    });
+    }));
 }
 
 /**
@@ -465,6 +479,12 @@ export async function appendSessionMessage(sessionId: string, message: SessionMe
 
     try {
         await withSessionFileLock(sessionId, async () => {
+            // Index⟺data invariant (issue #336) — same would-create refusal as
+            // saveSessionMessages: never mint a JSONL for an unindexed session.
+            if (!existsSync(filePath) && !getSessionMetadata(sessionId)) {
+                console.warn(`[SessionStore] REFUSING to create JSONL for unindexed session ${sessionId} (appendSessionMessage): no sessions.json entry.`);
+                return;
+            }
             const line = JSON.stringify(message) + '\n';
             const start = nowMs();
             appendFileSync(filePath, line, 'utf-8');
@@ -517,6 +537,27 @@ export async function saveSessionMessages(
         // same session (cross-tab cron, background completion). Lock hold time is
         // ~1ms per call (single append + sessions.json stats update).
         await withSessionFileLock(sessionId, async () => {
+            // Index⟺data invariant (issue #336): never CREATE a JSONL for a session
+            // that has no sessions.json entry. The one real-world producer of that
+            // state is deleteSession() racing a live sidecar: the delete removes the
+            // entry + unlinks the file, then the owner sidecar's next persist (e.g.
+            // resetSession's "persist before clearing") sees existsSync=false →
+            // existingCount=0 → re-appends its ENTIRE in-memory array, resurrecting
+            // the full file as an invisible orphan (entry gone, data present — the
+            // user's session has vanished from every list while 10MB sit on disk).
+            // Refusing the would-create write makes deletion final and stops any
+            // current or future caller from minting orphans. Appends to an EXISTING
+            // unindexed file are still allowed below (legacy orphans keep their data).
+            const fileAlreadyExists = existsSync(filePath) || existsSync(legacyPath);
+            if (!fileAlreadyExists && !getSessionMetadata(sessionId)) {
+                // Include the call stack: this refusal converts a future
+                // "caller forgot to register metadata first" ordering bug from
+                // an orphan file into a silently dropped first message — the
+                // stack is the only way to identify that caller from the log.
+                console.warn(`[SessionStore] REFUSING to create JSONL for unindexed session ${sessionId} (${messages.length} in-memory messages): no sessions.json entry (deleted or never registered). Callers must persist metadata BEFORE messages.\n${new Error().stack}`);
+                return;
+            }
+
             // Get existing message count (use cached line count for performance)
             let existingCount = 0;
 
@@ -593,7 +634,14 @@ export async function saveSessionMessages(
                 await withSessionsLock(async () => {
                     // Read metadata inside the lock to prevent TOCTOU race
                     const session = getSessionMetadata(sessionId);
-                    if (!session) return;
+                    if (!session) {
+                        // Appended to an EXISTING file whose index entry is gone
+                        // (legacy orphan / deleted mid-append). Data is preserved but
+                        // invisible to every session list — say so instead of silently
+                        // diverging (issue #336 family).
+                        console.warn(`[SessionStore] appended ${newMessages.length} message(s) to unindexed session ${sessionId} — sessions.json has no entry; stats not updated`);
+                        return;
+                    }
 
                     const existingStats = session.stats ?? {
                         messageCount: 0,

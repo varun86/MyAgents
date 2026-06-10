@@ -417,7 +417,7 @@ const Message = memo(function Message({ message, isLoading = false, onRewind, on
             {/* Expand button with gradient fade — gradient overlaps bottom of content */}
             {!userExpanded && userOverflows && (
               <div className="relative z-10 -mx-4 -mb-4 -mt-14">
-                <div className="pointer-events-none h-14 bg-gradient-to-t from-[var(--paper-elevated)] to-transparent" />
+                <div className="pointer-events-none h-14 bg-gradient-to-t from-[var(--paper-elevated)] to-[var(--paper-elevated-a0)]" />
                 <button
                   type="button"
                   onClick={() => setUserExpanded(true)}
@@ -597,9 +597,15 @@ const Message = memo(function Message({ message, isLoading = false, onRewind, on
               // (PRD 0.2.30 bug). Sub-agent (Task) attachments live on
               // subagentCalls and are rendered inside TaskTool — not here — so
               // pulling top-level `tool.attachments` never double-renders them.
+              //
+              // #293 — only ARTIFACT media (deliverables: generated images/audio)
+              // is hoisted into the flow. PROCESS media (Playwright / computer-use
+              // screenshots — the AI's "eyes") stays inside the folded tool row
+              // (rendered by ProcessRow), so a 30-screenshot browse run doesn't
+              // flood the conversation. Missing field = artifact (old data).
               const groupAttachments = item.flatMap((b) =>
                 (b.type === 'tool_use' || b.type === 'server_tool_use')
-                  ? (b.tool?.attachments ?? [])
+                  ? (b.tool?.attachments ?? []).filter((a) => a.presentation !== 'process')
                   : []
               );
               return (

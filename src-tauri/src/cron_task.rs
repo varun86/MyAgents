@@ -34,7 +34,13 @@ use crate::sidecar::{
 /// with backslashes, so compare on a stable lexical identity instead of the raw
 /// string. This intentionally does not canonicalize: workspaces may not exist
 /// when listing historical tasks.
-fn normalize_path(path: &str) -> String {
+///
+/// pub(crate): this is the canonical Rust workspace-path identity (the TS port
+/// lives in src/shared/workspacePath.ts — keep both in sync). Other modules
+/// (im::handover, im::memory_update) MUST reuse it instead of hand-rolling
+/// `.replace('\\', "/")`, which misses drive-letter case folding and
+/// trailing-slash trimming (#320 family).
+pub(crate) fn normalize_path(path: &str) -> String {
     let windows_style = (path.len() >= 2 && path.as_bytes()[1] == b':')
         || path.starts_with("\\\\")
         || path.starts_with("//");

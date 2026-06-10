@@ -21,6 +21,7 @@ import {
 import { resolve } from 'path';
 import { getHomeDirOrNull } from './platform';
 import { stripBom } from '../../shared/utils';
+import { workspacePathsEqual } from '../../shared/workspacePath';
 import type { McpServerDefinition } from '../../shared/config-types';
 import { applyProviderEnablementAndOrder, isProviderEnabled, PRESET_MCP_SERVERS, PRESET_PROVIDERS } from '../../shared/config-types';
 import type { SessionMetadata } from '../types/session';
@@ -504,10 +505,14 @@ export function resolveProviderEnv(
  */
 export function findAgentByWorkspacePath(agentDir: string): AgentConfigSlim | undefined {
   const config = loadConfig();
-  const normalized = agentDir.replace(/\\/g, '/');
   const agents = (config.agents ?? []) as AgentConfigSlim[];
+  // #320 family: slash-only folding missed drive-letter case + trailing-slash
+  // differences (C:\Users vs c:/users/), so the v0.1.69 session-snapshot lookup
+  // could silently miss the Agent on Windows — the session then fell back to
+  // live-follow and stayed exposed to the #327 config-stomp this snapshot
+  // exists to prevent. Use the canonical workspace-path identity.
   return agents.find(a =>
-    typeof a.workspacePath === 'string' && a.workspacePath.replace(/\\/g, '/') === normalized
+    typeof a.workspacePath === 'string' && workspacePathsEqual(a.workspacePath, agentDir)
   );
 }
 

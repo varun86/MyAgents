@@ -57,10 +57,10 @@ export default function EditTool({ tool }: EditToolProps) {
       </div>
 
       {/* Diff (C1): stacked old/new — flat sibling of header, height-clamped.
-          gradientFrom must match the surrounding panel bg (paper-elevated/50 from
+          fade must match the surrounding panel bg (paper-elevated/50 from
           ProcessRow body) so the fade is invisible against the actual background. */}
       {hasDiff ? (
-        <ExpandableContainer gradientFrom="from-[var(--paper-elevated)]">
+        <ExpandableContainer fade="paper-elevated">
           <div className="space-y-1.5">
             <pre className="overflow-x-auto rounded bg-[var(--error-bg)] px-2 py-1 font-mono text-sm break-words whitespace-pre-wrap text-[var(--error)] select-text">
               {input?.old_string || ''}

@@ -1,5 +1,6 @@
 import type { RuntimeType } from '../../shared/types/runtime';
 import type { MessageUsage } from '../types/session';
+import { observedContextTokens } from '../utils/context-occupancy';
 
 export const EXTERNAL_WATCHDOG_DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
 export const CODEX_LONG_CONTEXT_THRESHOLD_TOKENS = 1_000_000;
@@ -10,30 +11,6 @@ export const CODEX_WATCHDOG_ESTIMATED_BYTES_PER_TOKEN = 4;
 
 export interface WatchdogContextMessage {
   content: string;
-}
-
-function finiteNonNegative(value: unknown): number {
-  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 0;
-}
-
-export function observedContextTokens(usage: MessageUsage | null | undefined): number {
-  if (!usage) return 0;
-  let observed = finiteNonNegative(usage.inputTokens)
-    + finiteNonNegative(usage.cacheReadTokens)
-    + finiteNonNegative(usage.cacheCreationTokens);
-
-  if (usage.modelUsage) {
-    for (const entry of Object.values(usage.modelUsage)) {
-      observed = Math.max(
-        observed,
-        finiteNonNegative(entry.inputTokens)
-          + finiteNonNegative(entry.cacheReadTokens)
-          + finiteNonNegative(entry.cacheCreationTokens),
-      );
-    }
-  }
-
-  return observed;
 }
 
 export function estimatedContextTokensFromMessages(

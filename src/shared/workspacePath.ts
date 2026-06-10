@@ -1,5 +1,6 @@
-// Canonical workspace-path identity — the single renderer-side comparator for
-// "do these two paths denote the same workspace?".
+// Canonical workspace-path identity — the single TS-side comparator for
+// "do these two paths denote the same workspace?" (renderer AND sidecar;
+// the Rust side is `src-tauri/src/cron_task.rs::normalize_path`).
 //
 // Why this exists (#320): the persisted stores legitimately disagree on
 // separator style. `projects.json` keeps the raw path from the Windows native

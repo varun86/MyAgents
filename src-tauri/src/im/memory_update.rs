@@ -497,7 +497,10 @@ fn collect_qualifying_sessions(workspace_path: &str, config: &MemoryAutoUpdateCo
         Err(_) => return vec![],
     };
 
-    let normalized_workspace = workspace_path.replace('\\', "/");
+    // #320 family: canonical workspace-path identity (drive-letter case fold +
+    // trailing-slash trim), not a separator-only fold — config workspace path
+    // and session agent_dir come from different stores with different forms.
+    let normalized_workspace = crate::cron_task::normalize_path(workspace_path);
     let cutoff = Utc::now() - chrono::Duration::hours(config.interval_hours as i64);
 
     let mut qualifying = Vec::new();
@@ -505,7 +508,7 @@ fn collect_qualifying_sessions(workspace_path: &str, config: &MemoryAutoUpdateCo
     for session in &all_sessions {
         // Filter: belongs to this workspace
         let agent_dir = match &session.agent_dir {
-            Some(d) => d.replace('\\', "/"),
+            Some(d) => crate::cron_task::normalize_path(d),
             None => continue,
         };
         if agent_dir != normalized_workspace {

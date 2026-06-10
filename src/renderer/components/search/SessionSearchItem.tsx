@@ -87,7 +87,7 @@ export default memo(function SessionSearchItem({
 
                 {/* Hover state: Actions (Absolute positioned over the workspace info) */}
                 <div className="pointer-events-none absolute right-0 top-[-2px] flex items-center opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:opacity-100">
-                    <div className="h-full w-10 bg-gradient-to-r from-transparent to-[var(--paper-inset)]" />
+                    <div className="h-full w-10 bg-gradient-to-r from-[var(--paper-inset-a0)] to-[var(--paper-inset)]" />
                     <div className="flex items-center gap-1 bg-[var(--paper-inset)] pl-1">
                         <button
                             onClick={onShowStats}

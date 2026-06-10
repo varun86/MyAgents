@@ -1486,7 +1486,13 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
 
           for (const a of batchActions) {
             try {
-              await fileService.deleteFile({ path: a.copiedFilePath });
+              // permanent: scratch cleanup of a file WE just copied in — the
+              // user never saw it as workspace content; routing it through
+              // the OS trash (the new default) would just pollute the trash.
+              await fileService.deleteFile({
+                path: a.copiedFilePath,
+                permanent: true,
+              });
               successCount++;
             } catch {
               failCount++;
@@ -1647,7 +1653,8 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
         <div
           className="pointer-events-none absolute inset-x-0 bottom-0 h-32"
           style={{
-            background: 'linear-gradient(to bottom, transparent, var(--paper-elevated) 60%)'
+            // #333: same-color 0-alpha endpoint, never the `transparent` keyword (see index.css --*-a0)
+            background: 'linear-gradient(to bottom, var(--paper-elevated-a0), var(--paper-elevated) 60%)'
           }}
         />
       )}
