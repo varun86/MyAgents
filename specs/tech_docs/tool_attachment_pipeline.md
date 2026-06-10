@@ -320,6 +320,12 @@ attachment。任何触发这种路径的入口视为 bug。
     共用 `attachBuiltinMediaIfAny` 统一入口）；剩余文本里所有 base64-ish payload 脱敏为
     `[N bytes omitted]` — **session JSONL / SSE 从此只携带 path 引用，绝不进图片字节**（此前非
     Playwright 产图工具的 base64 会整段灌进 JSONL）。AI 侧 SDK transcript 不受影响（模型仍看得到图）。
+    **存储位置**：base64 图片写进统一的工作区目录 `<workspace>/myagents_files/<工具名>/`（不同工具各自
+    一个文件夹，沿用 edge-tts / gemini-image 的 `myagents_files/` 约定，首写自动 gitignore），作为
+    `sourcePath`（工具卡「在 Finder 显示 / 打开」指向它）；同时保留一份 trusted-root 副本
+    （`~/.myagents/generated/tool-attachments/<sid>/<tid>/`）作 `savedPath` 供重启后稳定渲染——
+    即「工作区原件 + trusted 服务副本」双写，与 gemini-image 同构。无工作区（IM/cron）回退
+    `~/.myagents/generated/<工具名>/`。`externalPath` / `url` 源保留各自 allow-list / SSRF 守卫的原位置。
     新增 `ToolAttachment.presentation: 'artifact' | 'process'`（仅 'process' 显式写入，缺省=artifact，
     老数据无需迁移）：artifact=交付物，Message.tsx 对话流内可见卡片（0.2.30 行为不变）；
     process=过程产物（`classifyToolAttachmentPresentation`：`mcp__playwright__*` / `mcp__computer-use__*` /

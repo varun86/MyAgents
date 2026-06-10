@@ -88,7 +88,7 @@ function buildFilename(ctx: SaveContext): string {
   return `${safeTool || 'tool'}-${stamp}-${uniq}.${ext}`;
 }
 
-function mimeToExt(mimeType: string): string {
+export function mimeToExt(mimeType: string): string {
   const subtype = mimeType.split('/')[1]?.split('+')[0] || 'bin';
   if (subtype === 'jpeg') return 'jpg';
   if (subtype === 'svg') return 'svg';

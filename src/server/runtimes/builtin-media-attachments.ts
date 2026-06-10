@@ -3,10 +3,14 @@
  * (edge-tts audio / gemini-image image) into first-class `ToolAttachment[]`,
  * on the same pipeline as the Codex external runtime.
  *
- * PRD 0.2.30 (§3.1) + 0.2.31 cleanup. Parsing of the tool result text now lives
- * in the shared, single-source parser `@/shared/builtinMediaResult` (consumed by
- * both this server module and the renderer cards). This module owns only the
- * IO half: reading the generated file and saving a trusted-root copy.
+ * PRD 0.2.30 (§3.1) + 0.2.31 cleanup + #293. Parsing of the tool result text
+ * lives in the shared parser `@/shared/builtinMediaResult` (consumed by both
+ * this server module and the renderer cards). This module owns the IO half:
+ *  - `buildBuiltinMediaAttachments` — read a file-path media result (edge-tts /
+ *    gemini-image) and save a trusted-root serving copy;
+ *  - `saveExtractedToolResultAttachments` (#293) — write extracted image bytes
+ *    into the per-tool workspace dir `<workspace>/myagents_files/<tool-name>/`
+ *    (the user-visible `sourcePath`) + a trusted-root serving copy.
  *
  * Why base64-copy into the trusted root (not a zero-copy externalPath ref):
  *  - the attachment endpoint resolves trusted-root files by path concat, so
@@ -24,12 +28,16 @@
  * the read (so a pathological file never gets fully loaded + base64-expanded).
  */
 
-import { lstat, readFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { lstat, readFile, writeFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import path from 'node:path';
 
-import { saveToolAttachment } from './tool-attachments';
+import { mimeToExt, saveToolAttachment } from './tool-attachments';
 import { parseBuiltinMediaToolResult } from '../../shared/builtinMediaResult';
 import { MAX_TOOL_ATTACHMENT_BYTES, type ToolAttachment } from '../../shared/types/tool-attachment';
+import { ensureDirSync } from '../utils/fs-utils';
+import { ensureGitignorePattern } from '../utils/gitignore';
 import type { ExtractedToolResultAttachment } from '../utils/tool-result-attachments';
 
 /** generated dir segment names (`~/.myagents/<name>` or `<ws>/myagents_files/<name>`). */
@@ -39,6 +47,39 @@ export interface BuiltinAttachmentCtxBase {
   sessionId: string;
   /** path-namespace turn segment; only needs to be unique — we use toolUseId. */
   toolUseId: string;
+  /**
+   * Active workspace dir (agentDir). When set, extracted images land in the
+   * unified workspace location `<workspace>/myagents_files/<tool-name>/` —
+   * the same `myagents_files/` convention edge-tts / gemini-image use, but
+   * foldered per tool (user's request #293-followup) so a Playwright run's
+   * screenshots sit under their own folder. Absent (IM/cron with no
+   * workspace) → falls back to `~/.myagents/generated/<tool-name>/`.
+   */
+  workspace?: string;
+}
+
+/**
+ * Folder name for a tool's generated files, under `myagents_files/`. Uses the
+ * raw tool name (`mcp__playwright__browser_take_screenshot`) sanitized to
+ * filesystem-safe chars so different tools self-organize into sibling folders.
+ */
+function toolDirName(toolName: string): string {
+  const safe = toolName.replace(/[^a-zA-Z0-9._-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 80);
+  return safe || 'tool';
+}
+
+/**
+ * Resolve the per-tool generated dir and ensure it exists (+ gitignore the
+ * workspace `myagents_files/` umbrella on first write, matching edge-tts /
+ * gemini-image).
+ */
+function ensureToolGeneratedDir(toolName: string, workspace?: string): string {
+  const dir = workspace
+    ? path.join(workspace, 'myagents_files', toolDirName(toolName))
+    : path.join(homedir(), '.myagents', 'generated', toolDirName(toolName));
+  ensureDirSync(dir);
+  if (workspace) ensureGitignorePattern(workspace, 'myagents_files/');
+  return dir;
 }
 
 /** Defensive: the path must sit under a known generated dir segment. */
@@ -114,11 +155,17 @@ export async function buildBuiltinMediaAttachments(
  *
  * Counterpart of `buildBuiltinMediaAttachments` (which parses file PATHS out
  * of result TEXT for the two builtin generator tools); this one consumes the
- * pre-extracted block sources from `extractToolResultRenderParts`. Both feed
- * the same `saveToolAttachment` trust layer:
- *   - base64   → trusted-root file write (validateTrustedAttachmentRoot)
- *   - external → positive allow-list + canonicalized symlink check
- *   - url      → https-only SSRF-guarded download
+ * pre-extracted block sources from `extractToolResultRenderParts`.
+ *
+ * Storage (#293-followup): a `base64` source — the dominant case for
+ * screenshots / inline images — is written to the unified WORKSPACE location
+ * `<workspace>/myagents_files/<tool-name>/` (its `sourcePath`, what the tool
+ * card's "reveal / open" targets), then a trusted-root copy is taken for
+ * restart-safe serving (its `savedPath`). This is exactly edge-tts /
+ * gemini-image's "workspace original + trusted serving copy" shape, just
+ * foldered per tool. `externalPath` (a file the tool already wrote) and `url`
+ * (remote) keep their own locations via `saveToolAttachment`'s allow-listed /
+ * SSRF-guarded paths.
  *
  * Per-item failures are swallowed (log + skip) — one bad block must not sink
  * the sibling images or the tool result itself.
@@ -132,15 +179,35 @@ export async function saveExtractedToolResultAttachments(
   const out: ToolAttachment[] = [];
   for (const item of extracted) {
     try {
-      const attachment = await saveToolAttachment(item.source, {
+      const saveCtx = {
         sessionId: ctxBase.sessionId,
         turnId: ctxBase.toolUseId,
         toolUseId: ctxBase.toolUseId,
         mimeType: item.mimeType,
         kind: item.kind,
         producedBy: toolName,
-      });
-      out.push(attachment);
+      };
+
+      if (item.source.kind === 'base64') {
+        // Write the bytes into the per-tool workspace dir first (the unified,
+        // user-visible location), size-gated up front so a pathological image
+        // never gets fully buffered. Then take the trusted-root serving copy.
+        const bytes = Buffer.from(item.source.data, 'base64');
+        if (bytes.byteLength > MAX_TOOL_ATTACHMENT_BYTES) {
+          console.warn(`[builtin-media] extracted image exceeds ${MAX_TOOL_ATTACHMENT_BYTES} bytes (${bytes.byteLength}), skip: ${toolName}`);
+          continue;
+        }
+        const dir = ensureToolGeneratedDir(toolName, ctxBase.workspace);
+        const filename = `${Date.now().toString(36)}-${randomUUID().slice(0, 8)}.${mimeToExt(item.mimeType)}`;
+        const workspaceFile = path.join(dir, filename);
+        await writeFile(workspaceFile, bytes, { flag: 'wx' });
+        const attachment = await saveToolAttachment(item.source, saveCtx);
+        out.push({ ...attachment, sourcePath: workspaceFile });
+        continue;
+      }
+
+      // externalPath / url — saveToolAttachment owns the trust + location.
+      out.push(await saveToolAttachment(item.source, saveCtx));
     } catch (err) {
       console.warn(
         `[builtin-media] failed to save extracted ${item.kind} from ${toolName}:`,

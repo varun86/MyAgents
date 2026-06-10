@@ -5804,7 +5804,9 @@ async function attachBuiltinMediaIfAny(
     return toolBlock.tool.attachments;
   }
   try {
-    const ctx = { sessionId, toolUseId };
+    // workspace = agentDir → extracted images land in the unified
+    // `<workspace>/myagents_files/<tool-name>/` location (#293-followup).
+    const ctx = { sessionId, toolUseId, workspace: agentDir };
     const attachments = [
       ...await buildBuiltinMediaAttachments(toolBlock.tool.name, contentStr, ctx),
       ...await saveExtractedToolResultAttachments(extracted ?? [], toolBlock.tool.name, ctx),
