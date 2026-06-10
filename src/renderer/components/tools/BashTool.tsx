@@ -122,7 +122,7 @@ export default function BashTool({ tool }: BashToolProps) {
             content={output}
             wrapperClassName="rounded-xl border border-[var(--line)] bg-[var(--code-bg)] shadow-sm"
             className="px-4 py-3 text-sm text-[var(--code-text)]"
-            gradientFrom="from-[var(--code-bg)]"
+            fade="code-bg"
           />
         </div>
       )}

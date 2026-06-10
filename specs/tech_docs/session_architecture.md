@@ -433,6 +433,27 @@ Tab 翻成 chat 时，Chat 要决定**如何与该 session 的 sidecar 对齐配
 
 即时进入还包含 `ChatBootOverlay` 的"AI 启动中"毛玻璃蒙层（翻页瞬时出现、就绪时淡出衔接），它同时是 App 的 lazy-Chat Suspense fallback。`getSessionPort` 之所以只能是提示：见上方「唯一裁决者」。
 
+### Session 配置写入方向矩阵：setter 边界的 snapshot guard（#327，0.2.32+）
+
+`sidecarConfigDisposition`（上节）管的是**桌面 Chat 这个 writer**"要不要推"；本节管的是 **Rust IM router 这个 writer** 推过来时 sidecar **"要不要接"**。两个 choke point 互补，不可互替。
+
+背景（#327）：desktop Chat 会话与 IM channel 可共享同一 sidecar（handover 把 IM peer 绑到 desktop session_id），channel 可携带不同的 model/provider/permission 覆盖。Rust IM router (re)warm 该 sidecar 时 `sync_ai_config` 把覆盖 POST 进 sidecar 的 process-global setter → 桌面会话的快照配置被冲掉（context 环 1M→200K；live provider 串成 channel 的而 model 还是桌面的 → 上游 500 "Model Not Found"）。
+
+修法 = **setter 边界收权**（`src/server/agent-session.ts`），快照会话无视 IM 配置同步：
+
+| 端点 / setter | 调用方 | 守卫形态 | 快照会话行为 |
+|---|---|---|---|
+| `/api/model/set` → `setSessionModel` | 桌面 picker **和** Rust IM router 共用 | **显式 source flag**：Rust 带 `imConfigSync:true` | 仅 `imConfigSync` 调用被忽略；桌面 picker 保持权威（它自己更新快照） |
+| `/api/provider/set` → `setSessionProviderEnv` | **仅 Rust IM router**（caller audit；桌面 provider 走 chat-send payload / boot env，从不到这） | 无条件守卫 | 任何调用都被忽略（snapshot wins），`console.warn` 记录 |
+| `/api/session/permission-mode` → `setSessionPermissionMode` | **仅 Rust IM router**（同上） | 无条件守卫 | 同上。安全相关：fullAgency 的 IM channel 不得静默降级桌面 plan-mode 硬闸 |
+
+配套 Rust 根因：`SessionRouter::ensure_sidecar` 曾在 create 路径无条件返回 `is_new=true`——复用既有健康 sidecar（只加 owner）也被当"新建"推配置。现透传 manager 锁内权威的 `EnsureSidecarResult.is_new`，复用即跳过 `sync_ai_config`（复用的 sidecar 已有配置；per-message enqueue 每轮重解析 channel 配置，不受影响）。
+
+**红线**：
+- provider/permission 两端点"仅 Rust-IM-router 可调"是**注释级契约**——渲染器/桌面侧**禁止**新增对这两个端点的调用；在快照会话上它们会被静默吞掉（守卫处 `console.warn` 可见）。桌面要改 provider/permission：provider 走 chat-send payload（enqueue 每轮 inline 解析），permission 走既有 `/api/permission-mode` 桌面路径。
+- 纯 IM / cron 会话（无快照）不受守卫影响，保持 live-follow——新增守卫时不得破坏这条（回归测试 `session-config-snapshot-guard.test.ts` 锁定三 setter × 三场景）。
+- 合法的 per-turn channel 配置应用走 `enqueueUserMessage` inline 解析（"snapshot wins" 已内建），**不经过**这些 setter。
+
 ---
 
 ## 相关文件

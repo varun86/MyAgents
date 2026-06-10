@@ -317,7 +317,12 @@ pub async fn cmd_handover_session_to_channel<R: Runtime>(
     ulog_info!("[handover] step1 channel resolved");
 
     let req_workspace = PathBuf::from(&workspacePath);
-    if normalize_str(&agent_workspace) != normalize_path(&req_workspace) {
+    // #320 family: use the canonical workspace-path identity (drive-letter case
+    // fold + trailing-slash trim), not a separator-only fold — a Windows agent
+    // workspace `C:\Users\...` vs request `c:/users/.../` must still match.
+    if crate::cron_task::normalize_path(&agent_workspace)
+        != crate::cron_task::normalize_path(&req_workspace.to_string_lossy())
+    {
         ulog_warn!(
             "[handover] workspace mismatch: agent={} request={}",
             agent_workspace,
@@ -666,14 +671,6 @@ pub async fn cmd_handover_session_to_channel<R: Runtime>(
         session_key: target_session_key,
         notified,
     })
-}
-
-fn normalize_path(p: &std::path::Path) -> String {
-    p.to_string_lossy().replace('\\', "/")
-}
-
-fn normalize_str(s: &str) -> String {
-    s.replace('\\', "/")
 }
 
 // AnyAdapter::send_message is on `ImAdapter` — pull the trait into scope so

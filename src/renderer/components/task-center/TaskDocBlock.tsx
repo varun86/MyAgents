@@ -200,7 +200,7 @@ export function TaskDocBlock({
             {showFade && (
               <div
                 aria-hidden
-                className="pointer-events-none absolute inset-x-0 bottom-0 h-16 bg-gradient-to-t from-[var(--paper)] to-transparent"
+                className="pointer-events-none absolute inset-x-0 bottom-0 h-16 bg-gradient-to-t from-[var(--paper)] to-[var(--paper-a0)]"
               />
             )}
           </div>

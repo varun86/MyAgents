@@ -641,7 +641,7 @@ const ANTHROPIC_ALIASES = {
 
 /** 小米 MiMo 开放平台模型目录（按量付费与 Token Plan 订阅共用，仅端点 / 计费不同）。
  *  规格来源：platform.xiaomimimo.com 模型卡 + Kilo Code 模型页一致（1,048,576 上下文 / 131,072 输出，2026-06）。
- *  contextLength ≥ 1M 阈值 → applyContextWindowSuffix 自动加 [1m] 走 SDK 1M 上下文路径
+ *  contextLength > 200K（SDK 默认窗口）→ applyContextWindowSuffix 自动加 [1m] 走 SDK 1M 上下文路径（#335 起含 200K–1M 中间档）
  *  （MiMo 的 Claude Code 接入文档让手动用户手填 mimo-v2.5-pro[1m]，本产品自动完成；
  *   SDK normalizeModelStringForAPI 在 wire 上再把 [1m] 剥掉，上游收到的是 mimo-v2.5-pro）。 */
 const MIMO_MODELS: ModelEntity[] = [

@@ -68,4 +68,44 @@ describe('decideSessionCompleteErrorAction — external session_complete error r
       }),
     ).toBe('suppress-user-stop');
   });
+
+  it('cross-review 0.2.32: a death while the completed turn is still FINALIZING is idle, not a surfaced error', () => {
+    // Repro (Codex state-machine finding): turn_complete fired persistTurnResult
+    // fire-and-forget; before it resets the accumulators the process error-exits.
+    // currentAssistantText is still non-empty — but that text belongs to the
+    // ALREADY-SUCCESSFUL turn being flushed, not to an interrupted one. The old
+    // policy read hasAssistantText=true → 'surface': error banner + accumulator
+    // reset racing the in-flight persist (dropping the assistant message).
+    expect(
+      decideSessionCompleteErrorAction({
+        turnCompleted: true,
+        hasAssistantText: true,
+        userRequestedStop: false,
+        finalizationInFlight: true,
+      }),
+    ).toBe('ignore-idle');
+
+    // Same death AFTER finalization settled: text would have been reset by
+    // persistTurnResult, so hasAssistantText=false → already ignore-idle.
+    expect(
+      decideSessionCompleteErrorAction({
+        turnCompleted: true,
+        hasAssistantText: false,
+        userRequestedStop: false,
+        finalizationInFlight: false,
+      }),
+    ).toBe('ignore-idle');
+
+    // finalizationInFlight must NOT mask a genuine mid-turn failure: if the
+    // turn never completed, a pending finalization from some earlier turn
+    // cannot downgrade this turn's error.
+    expect(
+      decideSessionCompleteErrorAction({
+        turnCompleted: false,
+        hasAssistantText: true,
+        userRequestedStop: false,
+        finalizationInFlight: true,
+      }),
+    ).toBe('surface');
+  });
 });

@@ -218,8 +218,8 @@ async function generateTitleInner(
         // to invoke, so bypassPermissions becomes moot. The model can still
         // produce the title text (tools are orthogonal to generation).
         tools: [],
-        // Wrap with [1m] when contextLength ≥1M so SDK uses the 1M path even for
-        // a one-shot title-gen subprocess. SDK strips the suffix before the wire.
+        // Wrap with [1m] when contextLength >200K (#335) so SDK uses the 1M path even
+        // for a one-shot title-gen subprocess. SDK strips the suffix before the wire.
         ...(model ? { model: applyContextWindowSuffix(model) } : {}),
       },
     });

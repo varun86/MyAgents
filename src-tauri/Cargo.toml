@@ -1,6 +1,6 @@
 [package]
 name = "myagents"
-version = "0.2.32"
+version = "0.2.33"
 description = "MyAgents - Desktop Claude Code for everyone"
 authors = ["MyAgents Team <myagents.io@gmail.com>"]
 license = "Apache-2.0"
@@ -65,6 +65,7 @@ tantivy = "0.22"
 tantivy-jieba = "0.11"
 notify-debouncer-full = "0.6"
 sysinfo = { version = "0.33", default-features = false, features = ["system"] }
+trash = "5.2.3"
 
 # Pattern 5: stale-lock recovery needs `kill(pid, 0)` for liveness probing on Unix.
 # The `signal` feature pulls in just `nix::sys::signal::kill` + `nix::unistd::Pid`,

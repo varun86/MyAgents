@@ -216,7 +216,7 @@ async function verifyViaSdk(
         includePartialMessages: true,
         persistSession: false,
         mcpServers: {},
-        // Wrap with [1m] when contextLength ≥1M; SDK strips the suffix before the wire.
+        // Wrap with [1m] when contextLength >200K (#335); SDK strips the suffix before the wire.
         ...(opts.model ? { model: applyContextWindowSuffix(opts.model) } : {}),
       },
     });

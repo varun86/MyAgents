@@ -188,7 +188,18 @@ URL 下载额外防 SSRF：
 - 拒绝 `169.254/16` 链路本地（AWS/GCP/Azure metadata service）
 - 拒绝 IPv6 ULA / link-local（`fc00:` / `fd*:` / `fe80:`）
 - `redirect: 'error'` — 拒绝跨 scheme/host 跳转
-- `cancellableFetch` 30s timeout
+- DNS 解析后校验 + undici dispatcher 钉死已验证 IP（关闭 DNS-rebinding TOCTOU）
+- `withAbortSignal`（parentSignal + 30s timeout）
+- 流式读取 + 累计上限：Content-Length 可选（chunked 编码），`arrayBuffer()` 会让
+  恶意端点在尺寸检查前无界分配——按 chunk 累计超过 25MB 即 `reader.cancel()`
+
+**cancellableFetch 豁免（刻意为之，勿"修"回去）**：`downloadAndSaveUrl` 用的是
+undici 自有 `fetch` + `withAbortSignal`，**不是**红线表里的 `cancellableFetch`。
+原因：DNS 钉死需要传 per-request `dispatcher`（undici `Agent`），`cancellableFetch`
+的签名带不进去；且 repo 的 undici@8 `Agent` 混用 Node 内建 fetch 会抛
+`invalid onRequestStart method`。超时/取消语义经 `withAbortSignal` 组合后与
+`cancellableFetch` 等价。后续 lint 收紧或 review 如果把它替换回
+`cancellableFetch`，会静默丢掉 SSRF 钉死——这正是这段记录存在的原因。
 
 错误暴露面：`makeErrorAttachment(ctx, err, pendingId)` 把 throw 映射到固定 enum
 （`too_large` / `rejected_path` / `not_found` / `fetch_failed` / `unsupported_url` /
@@ -312,8 +323,31 @@ attachment。任何触发这种路径的入口视为 bug。
   `ToolAttachmentGallery` 补 `audio` case；`EdgeTtsTool`/`GeminiImageTool` 改 attachment-aware
   （有 attachments → 卡内只留 meta+路径，媒体交 gallery 在对话流就地露出；无 attachments → 旧内嵌渲染
   legacy fallback）；`TOOLS_THAT_OWN_GALLERY_PREFIXES` 已清空。
-  - **仍未做**：SDK 通用 `content[]` image ContentBlock 的 array-aware 归一化（任意 builtin 工具产图的
-    通用形态）；子 Agent 调用媒体工具的接入；PDF/file 渲染器（仍占位卡）。
+  - **P5 完成（#293 / 0.2.33）— SDK 通用 `content[]` image ContentBlock 归一化**：任意 builtin 工具
+    （Playwright / computer-use 截图、产图类 MCP）的 `tool_result.content[]` 图片块（MCP `ImageContent`
+    base64 / Anthropic source 块 / data-URL / file ref / 远程 url）由纯函数
+    `utils/tool-result-attachments.ts::extractToolResultRenderParts` 提取为 attachment source，
+    `runtimes/builtin-media-attachments.ts::saveExtractedToolResultAttachments` 落盘（与文件路径型媒体
+    共用 `attachBuiltinMediaIfAny` 统一入口）；剩余文本里所有 base64-ish payload 脱敏为
+    `[N bytes omitted]` — **session JSONL / SSE 从此只携带 path 引用，绝不进图片字节**（此前非
+    Playwright 产图工具的 base64 会整段灌进 JSONL）。AI 侧 SDK transcript 不受影响（模型仍看得到图）。
+    **存储位置**：base64 图片写进统一的工作区目录 `<workspace>/myagents_files/<工具名>/`（不同工具各自
+    一个文件夹，沿用 edge-tts / gemini-image 的 `myagents_files/` 约定，首写自动 gitignore），作为
+    `sourcePath`（工具卡「在 Finder 显示 / 打开」指向它）；同时保留一份 trusted-root 副本
+    （`~/.myagents/generated/tool-attachments/<sid>/<tid>/`）作 `savedPath` 供重启后稳定渲染——
+    即「工作区原件 + trusted 服务副本」双写，与 gemini-image 同构。无工作区（IM/cron）回退
+    `~/.myagents/generated/<工具名>/`。`externalPath` / `url` 源保留各自 allow-list / SSRF 守卫的原位置。
+    新增 `ToolAttachment.presentation: 'artifact' | 'process'`（仅 'process' 显式写入，缺省=artifact，
+    老数据无需迁移）：artifact=交付物，Message.tsx 对话流内可见卡片（0.2.30 行为不变）；
+    process=过程产物（`classifyToolAttachmentPresentation`：`mcp__playwright__*` / `mcp__computer-use__*` /
+    `mcp__cuse__*` 前缀或工具名含 screenshot），渲染进 ProcessRow 展开体、折叠条显示图片角标——
+    重度浏览任务几十张截图不再刷屏对话流。Playwright 结果**文本**照旧剥成哨兵。
+  - **仍未做**：子 Agent 调用媒体工具的接入——subagent tool_result 的图片块会被**提取后丢弃**
+    （不灌 base64 进 subagentCalls，文本里留 `[N image attachment(s) omitted]` 痕迹，
+    `appendOmittedImageNote`），但尚未落盘成 attachment / 渲染进 TaskTool；PDF/file 渲染器（仍占位卡）。
+    另注：脱敏覆盖的是**结构化字段**里的 base64（data/base64/b64_json/data-URL/长 base64 串），
+    `text` 块的内文与纯字符串结果原样透传——MCP 服务器把 base64 塞进 text 正文属于罕见病态形态，
+    未在防护面内。
 - **Gemini / CC Runtime tool image**：协议层就位，对应 Runtime parseNotification 改造接入
 - **IM Bot 媒体下发**：tool_result 转发链路消费 attachments，把图片送达 Telegram / 飞书 / 微信
 - **GC / size limits**：session 软删除时清理 `~/.myagents/generated/tool-attachments/<sid>/`；

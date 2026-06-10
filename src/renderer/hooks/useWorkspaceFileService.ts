@@ -95,6 +95,16 @@ interface ImportResult {
 interface CopyResult {
   success: boolean;
   copiedFiles: CopiedFile[];
+  /** Per-file failures (blacklist reject, fs error) — the batch keeps going,
+   *  but callers must surface these: an all-rejected drop otherwise looks
+   *  like a silent no-op refresh (cross-review 0.2.33, Codex W3). */
+  errors: string[];
+}
+
+interface InternalCopyResult {
+  success: boolean;
+  copiedFiles: CopiedFile[];
+  errors: string[];
 }
 
 interface ReadAsBase64Item {
@@ -201,14 +211,23 @@ export interface WorkspaceFileService {
     targetDir: string;
     autoRename?: boolean;
   }): Promise<CopyResult>;
+  /** [requires workspace] Copy WORKSPACE-RELATIVE paths to another dir inside
+   *  the same workspace (tree copy/paste). Collisions auto-rename. */
+  copyInternal(args: {
+    sourcePaths: string[];
+    targetDir: string;
+  }): Promise<InternalCopyResult>;
   /** [workspace-free] Read absolute image paths and return base64 (for Tauri image drops). */
   readPathsAsBase64(args: { paths: string[] }): Promise<ReadAsBase64Response>;
   /** [requires workspace] Append a pattern to `<workspace>/.gitignore` if not already present. */
   addGitignore(args: { pattern: string }): Promise<GitignoreResult>;
   /** [requires workspace] Fuzzy file-name search for the @ mention picker. */
   searchFiles(args: { query: string }): Promise<FileSearchResult[]>;
-  /** [requires workspace] Delete a workspace-relative path (file / dir / broken symlink). */
-  deleteFile(args: { path: string }): Promise<DeleteResult>;
+  /** [requires workspace] Delete a workspace-relative path (file / dir /
+   *  broken symlink). Default goes to the OS trash; `permanent: true` keeps
+   *  unlink semantics for scratch-file cleanup (don't pollute the trash with
+   *  files the user never saw). */
+  deleteFile(args: { path: string; permanent?: boolean }): Promise<DeleteResult>;
   /** [requires workspace] List slash-command picker entries — global + project skills + builtins. */
   listSlashCommands(): Promise<SlashCommandsResponse>;
   // ─── Phase D: DirectoryPanel ops ───
@@ -339,6 +358,18 @@ export function useWorkspaceFileService(workspacePath: string | null): Workspace
     [requireWorkspace, invokeIfTauri],
   );
 
+  const copyInternal: WorkspaceFileService['copyInternal'] = useCallback(
+    async ({ sourcePaths, targetDir }) => {
+      const ws = requireWorkspace();
+      return invokeIfTauri<InternalCopyResult>('cmd_workspace_copy_internal', {
+        workspace: ws,
+        sourcePaths,
+        targetDir,
+      });
+    },
+    [requireWorkspace, invokeIfTauri],
+  );
+
   const readPathsAsBase64: WorkspaceFileService['readPathsAsBase64'] = useCallback(
     async ({ paths }) => {
       // Doesn't need a workspace — paths are absolute.
@@ -370,11 +401,12 @@ export function useWorkspaceFileService(workspacePath: string | null): Workspace
   );
 
   const deleteFile: WorkspaceFileService['deleteFile'] = useCallback(
-    async ({ path }) => {
+    async ({ path, permanent }) => {
       const ws = requireWorkspace();
       return invokeIfTauri<DeleteResult>('cmd_workspace_delete', {
         workspace: ws,
         path,
+        permanent,
       });
     },
     [requireWorkspace, invokeIfTauri],
@@ -634,6 +666,7 @@ export function useWorkspaceFileService(workspacePath: string | null): Workspace
     () => ({
       importBase64Files,
       copyPaths,
+      copyInternal,
       readPathsAsBase64,
       addGitignore,
       searchFiles,
@@ -667,6 +700,7 @@ export function useWorkspaceFileService(workspacePath: string | null): Workspace
     [
       importBase64Files,
       copyPaths,
+      copyInternal,
       readPathsAsBase64,
       addGitignore,
       searchFiles,

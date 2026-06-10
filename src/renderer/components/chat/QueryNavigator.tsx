@@ -218,7 +218,7 @@ export default function QueryNavigator({
           className={`pointer-events-none absolute inset-x-0 top-0 z-10 h-5 transition-opacity duration-200 ${
             isExpanded ? 'opacity-100' : 'opacity-0'
           }`}
-          style={{ background: 'linear-gradient(to bottom, var(--paper-elevated), transparent)' }}
+          style={{ background: 'linear-gradient(to bottom, var(--paper-elevated), var(--paper-elevated-a0))' }}
         />
 
         {/* Scrollable list — each row: [text (conditional)] + [dash (always)] */}
@@ -270,7 +270,7 @@ export default function QueryNavigator({
           className={`pointer-events-none absolute inset-x-0 bottom-0 z-10 h-5 transition-opacity duration-200 ${
             isExpanded ? 'opacity-100' : 'opacity-0'
           }`}
-          style={{ background: 'linear-gradient(to top, var(--paper-elevated), transparent)' }}
+          style={{ background: 'linear-gradient(to top, var(--paper-elevated), var(--paper-elevated-a0))' }}
         />
       </div>
     </div>

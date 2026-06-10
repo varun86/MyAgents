@@ -1,5 +1,5 @@
 
-import { AlertCircle, Brain, ChevronDown, Loader2, XCircle, StopCircle, Copy, Check, Download } from 'lucide-react';
+import { AlertCircle, Brain, ChevronDown, Image as ImageIcon, Loader2, XCircle, StopCircle, Copy, Check, Download } from 'lucide-react';
 import { memo, useEffect, useMemo, useRef, useState } from 'react';
 
 import { track } from '@/analytics';
@@ -16,6 +16,7 @@ import {
     isSubagentContainerTool
 } from '@/components/tools/toolBadgeConfig';
 import ToolUse from '@/components/ToolUse';
+import ToolAttachmentGallery from '@/components/tools/ToolAttachmentGallery';
 import type { ContentBlock } from '@/types/chat';
 
 interface ProcessRowProps {
@@ -154,9 +155,18 @@ const ProcessRow = memo(function ProcessRow({
     }, [isTaskTool, block.tool, isTaskRunning, taskElapsed, taskParsedResult]);
 
     // Check if block has expandable content
+    // #293 — PROCESS media (Playwright / computer-use screenshots) renders
+    // INSIDE this folded row, not in the conversation flow (Message.tsx hoists
+    // only artifact attachments). Memoized: attachments identity changes only
+    // when the tool state object is replaced by an SSE update.
+    const processAttachments = useMemo(
+        () => (isTool ? (block.tool?.attachments ?? []).filter((a) => a.presentation === 'process') : []),
+        [isTool, block.tool?.attachments],
+    );
+
     const hasContent =
         (isThinking && block.thinking && block.thinking.length > 0) ||
-        (isTool && block.tool && (block.tool.inputJson || block.tool.result || block.tool.isLoading || block.tool.subagentCalls?.length));
+        (isTool && block.tool && (block.tool.inputJson || block.tool.result || block.tool.isLoading || block.tool.subagentCalls?.length || processAttachments.length > 0));
 
     // 派生展开状态（无 useEffect，避免无限循环）
     // thinking 与 tool 块都默认折叠，只由用户手动点击展开。
@@ -318,6 +328,14 @@ const ProcessRow = memo(function ProcessRow({
                             {subLabel}
                         </span>
                     )}
+                    {/* #293 — process-media badge: screenshots live inside this fold;
+                        the badge is the collapsed-state affordance that they exist. */}
+                    {processAttachments.length > 0 && (
+                        <span className="flex shrink-0 items-center gap-0.5 text-xs text-[var(--ink-muted)]">
+                            <ImageIcon className="size-3" />
+                            {processAttachments.length > 1 ? `×${processAttachments.length}` : ''}
+                        </span>
+                    )}
                     {summaryNode && <span className="shrink-0 text-xs leading-none">{summaryNode}</span>}
                 </div>
 
@@ -370,6 +388,15 @@ const ProcessRow = memo(function ProcessRow({
                                 {isTool && block.tool && (
                                     <div className="w-full overflow-hidden select-text">
                                         <ToolUse tool={block.tool} />
+                                        {/* #293 — process media (screenshots) renders here inside the
+                                            fold, the inverse of the PRD 0.2.30 artifact hoist: these
+                                            are the AI's working captures, not deliverables, so they
+                                            must NOT occupy the conversation flow. */}
+                                        {processAttachments.length > 0 && (
+                                            <div className="mt-3">
+                                                <ToolAttachmentGallery attachments={processAttachments} />
+                                            </div>
+                                        )}
                                     </div>
                                 )}
                             </div>

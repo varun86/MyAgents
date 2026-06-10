@@ -66,8 +66,10 @@ export default function ToolUse({ tool: rawTool }: ToolUseProps) {
   // NOTE: tool.attachments are NOT rendered here. ToolUse lives inside
   // ProcessRow's collapsible body (BlockGroup), so rendering rich-media here
   // buried the player inside the folded tool window (PRD 0.2.30 bug). The
-  // gallery is now hoisted to the message flow in Message.tsx, so generated
-  // audio/image render as standalone, always-visible in-flow cards.
+  // split (#293, by attachment.presentation): ARTIFACT media is hoisted to the
+  // message flow in Message.tsx (standalone, always-visible in-flow cards);
+  // PROCESS media (screenshots) is rendered by ProcessRow right after this
+  // component inside the expanded body — deliberately behind the fold.
   return renderToolBody(tool);
 }
 

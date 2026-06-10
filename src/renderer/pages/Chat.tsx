@@ -1407,13 +1407,14 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     triggerWorkspaceRefresh();
   }, [triggerWorkspaceRefresh]);
 
-  // Handle Tauri file drop on directory panel
-  const handleTauriDirectoryDrop = useCallback(async (paths: string[]) => {
+  // Handle Tauri file drop on directory panel. Forward the drop position so
+  // the panel resolves the target folder from the tree row under the pointer
+  // (instead of the current selection — see DirectoryPanelHandle.handleFileDrop).
+  const handleTauriDirectoryDrop = useCallback(async (paths: string[], position?: { x: number; y: number }) => {
     if (isDebugMode()) {
-      console.log('[Chat] Tauri drop on directory panel:', paths);
+      console.log('[Chat] Tauri drop on directory panel:', paths, position);
     }
-    // DirectoryPanel handles this internally now
-    await directoryPanelRef.current?.handleFileDrop(paths);
+    await directoryPanelRef.current?.handleFileDrop(paths, position);
   }, []);
 
   // Use refs to avoid recreating onDrop callback when handlers change
@@ -1432,14 +1433,14 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     // below defaults to chat-drop regardless. Gating at the hook ensures only the
     // visible tab reacts.
     enabled: isActive,
-    onDrop: (paths, zoneId) => {
+    onDrop: (paths, zoneId, position) => {
       if (isDebugMode()) {
         console.log('[Chat] Tauri drop event - zoneId:', zoneId, 'paths:', paths);
       }
       if (zoneId === 'chat-content') {
         void handleTauriChatDropRef.current(paths);
       } else if (zoneId === 'directory-panel') {
-        void handleTauriDirectoryDropRef.current(paths);
+        void handleTauriDirectoryDropRef.current(paths, position);
       } else {
         // Default: drop to chat area
         void handleTauriChatDropRef.current(paths);
@@ -3376,7 +3377,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       >
       <div className={`flex min-w-0 flex-1 flex-col overflow-hidden ${showWorkspace && !shouldUseWorkspaceOverlay ? 'border-r border-[var(--line-subtle)]' : ''}`}>
         {/* Compact header - single row */}
-        <div className="relative z-10 flex h-12 flex-shrink-0 items-center justify-between bg-[var(--paper-elevated)] px-4 after:pointer-events-none after:absolute after:inset-x-0 after:top-full after:h-6 after:bg-gradient-to-b after:from-[var(--paper-elevated)] after:to-transparent">
+        <div className="relative z-10 flex h-12 flex-shrink-0 items-center justify-between bg-[var(--paper-elevated)] px-4 after:pointer-events-none after:absolute after:inset-x-0 after:top-full after:h-6 after:bg-gradient-to-b after:from-[var(--paper-elevated)] after:to-[var(--paper-elevated-a0)]">
           <div className="flex min-w-0 items-center gap-2">
             {onBack && (
               <button
@@ -4063,6 +4064,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
                     browserAlive={browserAlive}
                     sourceFile={browserSourceFile}
                     workspace={agentDir}
+                    layoutSignature={`${showWorkspace ? 1 : 0}:${shouldUseWorkspaceOverlay ? 1 : 0}`}
                     onBrowserCreated={handleBrowserCreated}
                     onCreateFailed={handleBrowserCreateFailed}
                     onClose={handleBrowserClose}

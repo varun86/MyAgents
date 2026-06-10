@@ -105,8 +105,35 @@ pub fn resolve_inside_workspace(workspace_root: &Path, relative: &str) -> WfResu
 
 /// Validate that an arbitrary absolute path (e.g. a file the user dragged from
 /// Finder) is safe to read from. Used by `read_files_b64` and `copy_paths`.
+///
+/// Cross-review 0.2.33 (Codex Critical): the lexical blacklist alone is
+/// defeated by an intermediate symlink component — `~/Downloads/lure/key`
+/// where `lure → ~/.ssh` doesn't start with any blacklisted prefix, but the
+/// read that follows traverses the link and exfiltrates credential bytes into
+/// the AI-readable workspace. Canonicalize and re-run the blacklist on the
+/// REAL path. This mirrors the fix `copy_internal_one` already got (5b72e25a);
+/// before this, the two sibling copy commands had divergent trust models.
+///
+/// Returns the LEXICAL path (not the canonical one) so callers keep their
+/// leaf-symlink semantics: `files_b64` rejects symlink leaves outright (its
+/// extension allow-list checks the *name*, not the target) and `copy_paths`
+/// reports them as unsupported — returning the canonical path would silently
+/// resolve the leaf and re-open that hole.
+///
+/// A path that does NOT exist passes on the lexical check alone: the
+/// symlink-escape defense is only meaningful for paths that resolve (a
+/// non-existent path can't be read; `transfer`/`files_b64` stat it right
+/// after and fail their own way), and `slash.rs` depends on validating a
+/// brand-new workspace root that hasn't been created yet — failing here
+/// would break the launcher's slash-command scan for new workspaces.
 pub fn validate_external_read_path(absolute_path: &str) -> WfResult<PathBuf> {
-    system_blacklist_check(absolute_path)
+    let lexical = system_blacklist_check(absolute_path)?;
+    if let Ok(canonical) = fs::canonicalize(&lexical) {
+        if let Some(s) = canonical.to_str() {
+            let _ = system_blacklist_check(s)?;
+        }
+    }
+    Ok(lexical)
 }
 
 /// Stricter variant of `resolve_inside_workspace` for **read-side** commands:
@@ -460,6 +487,74 @@ mod tests {
     fn validate_item_name_rejects_control_chars() {
         assert!(validate_item_name("a\x00b").is_err());
         assert!(validate_item_name("\tfoo").is_err());
+    }
+
+    // validate_external_read_path: the canonical re-check only applies to
+    // paths that EXIST. A non-existent path passes lexically — slash.rs
+    // validates brand-new workspace roots before they're created (launcher
+    // slash-command scan), and read flows stat right after anyway. The
+    // 0.2.33 symlink hardening must not break that contract (caught by
+    // align-docs reading the slash.rs caller comment).
+    #[test]
+    fn external_read_path_allows_nonexistent_path_lexically() {
+        // NOT env::temp_dir(): on macOS that's /var/folders/… and the LEXICAL
+        // blacklist rejects /var outright — use a non-existent child of a
+        // real test workspace instead.
+        let ws = make_tmp_workspace();
+        let missing = ws.join("does_not_exist_yet");
+        assert!(!missing.exists());
+        assert!(validate_external_read_path(&missing.to_string_lossy()).is_ok());
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    // …but an EXISTING path whose symlink chain lands in a blacklisted dir
+    // is rejected on the canonical form (cross-review 0.2.33, Codex
+    // Critical — the per-command test lives in transfer.rs).
+    #[cfg(unix)]
+    #[test]
+    fn external_read_path_rejects_existing_symlink_into_blacklisted_dir() {
+        use std::os::unix::fs::symlink;
+        let staging = make_tmp_workspace();
+        symlink("/etc", staging.join("lure")).unwrap();
+        let evil = staging.join("lure").join("hosts");
+        assert!(validate_external_read_path(&evil.to_string_lossy()).is_err());
+        let _ = fs::remove_dir_all(&staging);
+    }
+
+    // Rust side of the Rust↔renderer name-rule crosscheck (cross-review
+    // 0.2.33, architecture review). The renderer's `workspace-tree/
+    // nameValidation.ts` hand-mirrors this module's `validate_item_name` for
+    // live editor feedback; both sides assert against the shared fixture so
+    // a rule change on either side breaks one of the two suites — same
+    // pattern as path-safety-blacklist.json (PRD 0.2.15 §7.2).
+    #[test]
+    fn validate_item_name_matches_shared_fixture() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../src/shared/item-name-validation-cases.json"
+        ))
+        .expect("item-name-validation-cases.json parses");
+        let names = |key: &str| -> Vec<String> {
+            fixture[key]
+                .as_array()
+                .unwrap_or_else(|| panic!("fixture.{key} must be an array"))
+                .iter()
+                .map(|v| v.as_str().expect("fixture entry is a string").to_string())
+                .collect()
+        };
+        for name in names("valid") {
+            assert!(
+                validate_item_name(&name).is_ok(),
+                "fixture says {:?} is valid but validate_item_name rejected it",
+                name
+            );
+        }
+        for name in names("invalid") {
+            assert!(
+                validate_item_name(&name).is_err(),
+                "fixture says {:?} is invalid but validate_item_name accepted it",
+                name
+            );
+        }
     }
 
     #[test]

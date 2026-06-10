@@ -7967,7 +7967,11 @@ async function main() {
       // POST /api/model/set - Set default model for this session
       if (pathname === '/api/model/set' && request.method === 'POST') {
         try {
-          const payload = await request.json() as { model?: string };
+          // `imConfigSync` (#327): set by the Rust IM router's sync_ai_config, NOT
+          // by the desktop model picker. It marks this as a channel/agent config
+          // sync that must defer to a session snapshot (snapshot wins). Desktop
+          // pushes omit it and stay authoritative. See setSessionModel.
+          const payload = await request.json() as { model?: string; imConfigSync?: boolean };
           if (!payload?.model) {
             return jsonResponse({ success: false, error: 'model is required' }, 400);
           }
@@ -7975,7 +7979,7 @@ async function main() {
             await setExternalModel(payload.model);
             return jsonResponse({ success: true });
           }
-          setSessionModel(payload.model);
+          setSessionModel(payload.model, { imConfigSync: payload.imConfigSync === true });
           return jsonResponse({ success: true });
         } catch (error) {
           console.error('[api/model/set] Error:', error);

@@ -283,7 +283,9 @@ async fn ensure_sidecar_port_for_command<R: Runtime>(
     match prep {
         EnsureSidecarPrep::Healthy(port) => Ok(port),
         EnsureSidecarPrep::NeedCreate(info) => {
-            let port =
+            // Command path only needs the port; is_new is irrelevant here (no
+            // config sync). Destructure the tuple but ignore the flag.
+            let (port, _is_new) =
                 SessionRouter::create_sidecar_blocking(info.clone(), app_handle, manager).await?;
             let mut router_guard = router.lock().await;
             router_guard.commit_ensure_sidecar(session_key, &info, port);

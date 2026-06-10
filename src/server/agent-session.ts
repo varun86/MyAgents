@@ -21,7 +21,8 @@ import { deriveReloadResumeAnchor, resolveEffectiveResumeAt } from './utils/rewi
 import { buildForkUuidRemap, remapStoredSdkUuids } from './utils/fork-remap';
 import { decideInFlightActionOnResult } from './utils/inflight-terminal';
 import { shouldBlockToolInPlanMode, planModeDenyMessage, isPlanModeInEffect, PLAN_MODE_READONLY_TOOLS, PLAN_MODE_HOST_INTERACTION_TOOLS, applyPermissionModeSelection, computePlanExitState, computeRestoredPlanState } from './utils/plan-mode-gate';
-import { isEmptySuccessfulSdkResult, isRecoveredAssistantMessageError } from './utils/sdk-turn-outcome';
+import { isEmptySuccessfulSdkResult, isRecoveredAssistantMessageError, findTurnUsageStampIndex } from './utils/sdk-turn-outcome';
+import { diagnoseSdkSubprocessFailure } from './utils/sdk-subprocess-diagnostics';
 import { InactivityWatchdog } from './utils/inactivity-watchdog';
 import { WATCHDOG_RESUME_REMINDER, planWatchdogAutoResume, shouldAdoptPendingContinueIntoScheduledAutoResume, shouldConsumePendingContinueAfterAbort, shouldDeferPendingContinueToScheduledAutoResume, shouldPrependWatchdogAutoResume } from './utils/watchdog-auto-resume';
 import { processImage, resizeToolImageContent, classifyImageError } from './utils/imageResize';
@@ -51,7 +52,7 @@ import type { ToolInput } from '../renderer/types/chat';
 import { parsePartialJson } from '../shared/parsePartialJson';
 import { deriveSessionTitle } from '../shared/sessionTitle';
 import { computeContextUsage } from '../shared/contextUsage';
-import { observedContextTokens } from './runtimes/external-watchdog-policy';
+import { resolveContextOccupancyTokens } from './utils/context-occupancy';
 import type { SystemInitInfo } from '../shared/types/system';
 import { saveSessionMetadata, updateSessionTitleFromMessage, saveSessionMessages, saveAttachment, updateSessionMetadata, getSessionMetadata, getSessionData } from './SessionStore';
 import { firePostTurnTitleHook } from './turn-hooks';
@@ -80,7 +81,13 @@ import { getCurrentRuntimeType, isExternalRuntime } from './runtimes/factory';
 import { resolveLastRealUserMessagePreview } from './utils/session-message-preview';
 import { elapsedMs, emitPerfTrace, nowMs } from './utils/perf-trace';
 import type { ImagePayload } from './runtimes/types';
-import { buildBuiltinMediaAttachments } from './runtimes/builtin-media-attachments';
+import { buildBuiltinMediaAttachments, saveExtractedToolResultAttachments } from './runtimes/builtin-media-attachments';
+import {
+  appendOmittedImageNote,
+  classifyToolAttachmentPresentation,
+  extractToolResultRenderParts,
+  type ExtractedToolResultAttachment,
+} from './utils/tool-result-attachments';
 import type { ToolAttachment } from '../shared/types/tool-attachment';
 import { imEventBus, type ImEventType } from './utils/im-event-bus';
 import { imRequestRegistry } from './utils/im-request-registry';
@@ -486,6 +493,14 @@ export type MessageWire = {
     sourceId?: string;
     senderName?: string;
   };
+  // #331 — turn usage/toolCount/duration stamped onto the assistant message at
+  // handleMessageComplete so persistence serializes them FROM the object. Must
+  // not be inferred positionally ("last array element") at persist time: the
+  // turn-end persist is fire-and-forget, and messages[] can grow (queue surfacing,
+  // next turn) before it runs, which silently dropped usage → 0-token stats.
+  usage?: MessageUsage;
+  toolCount?: number;
+  durationMs?: number;
 };
 
 const requireModule = createRequire(import.meta.url);
@@ -1679,17 +1694,14 @@ function resetTurnUsage(): void {
  * `ModelUsage.contextWindow`，缺省回落 `lookupModelContextLength ?? 200K`（= auto-compact 有效窗口）。
  */
 function broadcastBuiltinContextUsage(): void {
-  // Fall back to the aggregate only when no per-message usage was captured
-  // (single-call turns make aggregate == latest, so this stays correct for the
-  // common no-tool case; multi-call providers all emit per-message usage).
-  const usageForOccupancy: MessageUsage = latestMainAssistantUsage ?? {
-    inputTokens: currentTurnUsage.inputTokens,
-    outputTokens: currentTurnUsage.outputTokens,
-    cacheReadTokens: currentTurnUsage.cacheReadTokens,
-    cacheCreationTokens: currentTurnUsage.cacheCreationTokens,
-  };
-  const occupied = observedContextTokens(usageForOccupancy);
-  if (occupied <= 0) return; // no usable data yet — don't flash a meaningless 0%
+  // 占用只取「最近一条主轮 assistant message」的 per-call usage；没有就**跳过**广播。
+  // #323 — 绝不回落到 currentTurnUsage 聚合：那是整 turn 多次调用的 cache-read 之和，
+  // `/compact` 这种控制轮（有成功 result + 大 modelUsage、却没有携带 usage 的主轮 assistant
+  // message）会把 20M+ 的求和当成当前占用 → computeContextUsage 把 % 封顶 100、却照样显示
+  // 不可能的 token 数（4.55M / 20.40M over 1M window）。跳过则保留上一可信值，下一条真实
+  // 消息（其 input ≈ 压缩后大小）自愈。与外部 runtime「缺 contextOccupiedTokens 就不发」同纪律。
+  const occupied = resolveContextOccupancyTokens(latestMainAssistantUsage);
+  if (occupied === null) return; // 无 per-call 快照（如 /compact 控制轮）— 不广播假占用
   // 窗口刻意用 `lookupModelContextLength ?? 200K`（computeContextUsage 内部回落），**不**用 SDK
   // `ModelUsage.contextWindow`：后者是 SDK `getContextWindowForModel()` 的值，对经 bridge 的第三方
   // builtin 模型（DeepSeek-128K 等）只会回落 200K 默认，与我们注入的 `CLAUDE_CODE_AUTO_COMPACT_WINDOW`
@@ -2305,9 +2317,27 @@ export function getSessionPermissionMode(): PermissionMode {
   return currentPermissionMode;
 }
 
-/** Set permission mode (called from frontend via /api/session/permission-mode) */
+/** Set permission mode (called by the Rust IM router via /api/session/permission-mode).
+ *  NOTE: desktop permission changes do NOT reach here — they ride the chat-send
+ *  payload (enqueueUserMessage's inline applySessionConfig). This endpoint is
+ *  Rust-IM-router-only. */
 export function setSessionPermissionMode(mode: PermissionMode): void {
   if (mode === currentPermissionMode) return;
+
+  // #327 — snapshot authority (see setSessionModel). Rust-IM-router-only caller;
+  // for a snapshotted owned session the channel's permission override must not
+  // change the live mode. This is security-relevant: an IM channel on fullAgency
+  // must NOT silently downgrade a desktop session's plan-mode hard gate. Pure IM
+  // sessions (not snapshotted) fall through and live-follow the channel mode.
+  if (isCurrentSessionSnapshotted()) {
+    // warn, not log: this guard is UNCONDITIONAL (no imConfigSync flag) because a
+    // caller audit proved only the Rust IM router hits this endpoint. If a future
+    // desktop/renderer caller ever lands here, its change is swallowed — make
+    // that loudly visible instead of silently dropping a user action.
+    console.warn(`[agent] config sync permissionMode '${mode}' ignored — session ${sessionId} is snapshotted (snapshot wins; endpoint is Rust-IM-router-only by contract)`);
+    return;
+  }
+
   const oldMode = currentPermissionMode;
   const oldPrePlan = prePlanPermissionMode;
   // Route through the shared transition so the UI toggle keeps the plan
@@ -2433,8 +2463,29 @@ function dispatchSetModelToSdk(model: string): Promise<void> {
   return promise;
 }
 
-export function setSessionModel(model: string): void {
+export function setSessionModel(model: string, opts?: { imConfigSync?: boolean }): void {
   if (model === currentModel) return;
+
+  // #327 — snapshot authority. An owned (snapshotted) desktop session's model is
+  // frozen at the snapshot, and the per-turn /api/im/enqueue resolver already
+  // applies "snapshot wins" (index.ts). But the Rust IM router ALSO pushes the
+  // channel's model override straight here, via sync_ai_config → /api/model/set,
+  // when it (re)warms a sidecar that is SHARED with the desktop session (the
+  // desktop↔IM handover binds the IM peer to the desktop session_id). For a
+  // snapshotted session that push must be ignored — applying it clobbers the
+  // process-global `currentModel`, which is read live by buildClaudeSessionEnv /
+  // broadcastBuiltinContextUsage. With an unregistered override (e.g.
+  // astron-code-latest) lookupModelContextLength returns undefined → the desktop
+  // tab's `chat:context-usage` window collapses to the SDK 200K default (100%),
+  // and it opens a window where the live provider/model desync into a real
+  // upstream mismatch → 500 (#327 comment). Desktop's own model push (Chat.tsx,
+  // no `imConfigSync`) stays authoritative — it updates the snapshot itself.
+  // Pure IM / cron / live-follow sessions have no snapshot, so this is a no-op
+  // for them (isCurrentSessionSnapshotted() === false) and the override applies.
+  if (opts?.imConfigSync && isCurrentSessionSnapshotted()) {
+    console.log(`[agent] IM config sync model '${model}' ignored — session ${sessionId} is snapshotted (snapshot wins)`);
+    return;
+  }
 
   const oldModel = currentModel;
   const aliasEnvChanged = modelAliasEnvChangesForModel(currentProviderEnv?.modelAliases, oldModel, model);
@@ -2510,6 +2561,25 @@ export function setSessionProviderEnv(providerEnv: ProviderEnv | undefined): voi
   // Full equality check — all ProviderEnv fields affect subprocess env (authType, apiProtocol, etc.)
   if (providerEnvEqual(currentProviderEnv, providerEnv)) return;
 
+  // #327 — snapshot authority (see setSessionModel). `/api/provider/set` is
+  // Rust-IM-router-only (no renderer caller); desktop provider changes are baked
+  // at sidecar spawn from the snapshot and re-applied per-turn inline by
+  // enqueueUserMessage — they never reach this setter. So for a snapshotted
+  // owned session, ANY call here is a channel/agent provider sync that must be
+  // ignored: the snapshot provider (self-resolved at boot) stays authoritative.
+  // This MUST no-op BEFORE mutating `currentProviderEnv` — the v0.1.69 guard
+  // below only skipped the abort/restart, so the desktop session's LIVE provider
+  // still became the channel's (e.g. Xunfei) while the resolved model stayed
+  // DeepSeek → real "Model Not Found" 500 (#327 comment). Pure IM / cron
+  // sessions (not snapshotted) fall through to the normal live-follow path.
+  if (isCurrentSessionSnapshotted()) {
+    // warn, not log: same rationale as the permissionMode guard — unconditional
+    // by caller audit (Rust-IM-router-only); a future non-IM caller's change
+    // would be swallowed here and must be loud.
+    console.warn(`[agent] config sync provider '${newLabel}' ignored — session ${sessionId} is snapshotted (snapshot wins; endpoint is Rust-IM-router-only by contract)`);
+    return;
+  }
+
   // Resume safety: entering a provider that validates signed session history requires a fresh
   // session when the previous provider did not. Anthropic validates thinking block signatures
   // that third-party providers don't, so resuming with third-party messages causes errors.
@@ -2533,13 +2603,9 @@ export function setSessionProviderEnv(providerEnv: ProviderEnv | undefined): voi
 
   // If a session is running, its subprocess has the OLD provider env.
   // Restart so the next session picks up the updated environment.
-  // v0.1.69 T14: Locked sessions own their provider — agent-level provider sync
-  // should not abort them. The snapshot in the Sidecar's startup env is
-  // authoritative; a later /api/provider/set from Rust reflecting an agent
-  // config change must be ignored at the restart-scheduling layer.
-  if (isCurrentSessionSnapshotted()) {
-    console.log(`[agent] provider changed (${oldLabel} → ${newLabel}) but session ${sessionId} is snapshotted — skip abort/restart`);
-  } else if (querySession) {
+  // (Snapshotted/owned sessions already returned above — only live-follow IM /
+  // cron sessions reach here, and they DO own provider changes via this path.)
+  if (querySession) {
     if (isProcessing && !isPreWarming) {
       // Active user turn in progress — defer restart to avoid killing mid-response.
       // The restart will fire after the current turn completes (pendingConfigRestart).
@@ -3866,9 +3932,10 @@ export function getPendingInteractiveRequests(): Array<{
  * Cursor advances on success. Rewind / fork / session-reset paths reset the
  * cursor to 0 so a full remap runs the next time.
  *
- * @param lastAssistantUsage - Usage info for the last assistant message (on message complete)
- * @param lastAssistantToolCount - Tool count for the last assistant message
- * @param lastAssistantDurationMs - Duration for the last assistant response
+ * #331 — usage/toolCount/durationMs are read off each assistant message OBJECT
+ * (stamped at handleMessageComplete), NOT passed in / inferred positionally. This
+ * makes persistence indifferent to where the assistant sits in `messages[]` when
+ * the (fire-and-forget) persist actually runs.
  */
 const persistedSessionMessageCache: SessionMessage[] = [];
 
@@ -3882,18 +3949,23 @@ const persistedSessionMessageCache: SessionMessage[] = [];
 // or fresh-session swap doesn't replay onto the wrong key).
 const persistChainBySession = new Map<string, Promise<void>>();
 
-function schedulePersist(
-  lastAssistantUsage?: MessageUsage,
-  lastAssistantToolCount?: number,
-  lastAssistantDurationMs?: number
-): Promise<void> {
+function schedulePersist(): Promise<void> {
   const key = sessionId;
   const prev = persistChainBySession.get(key) ?? Promise.resolve();
-  const next = prev.then(() => doPersistMessagesToStorage(
-    lastAssistantUsage,
-    lastAssistantToolCount,
-    lastAssistantDurationMs,
-  )).catch(err => {
+  const next = prev.then(() => {
+    // Bind the queued work to the id captured at SCHEDULE time. The module-global
+    // `sessionId` can rotate while we wait on the chain (resetSession / switch /
+    // provider-change fresh start); doPersistMessagesToStorage reads the global at
+    // RUN time, so a stale invocation would write the OLD session's tail under the
+    // NEW session's file. Every rotation path explicitly flushes before rotating,
+    // so a skipped stale persist loses nothing — but log it: this firing means a
+    // rotation overlapped an in-flight persist chain.
+    if (key !== sessionId) {
+      console.warn(`[agent-session] skipping stale queued persist: scheduled for ${key}, current session is ${sessionId}`);
+      return;
+    }
+    return doPersistMessagesToStorage();
+  }).catch(err => {
     console.warn('[agent-session] persist failed:', err);
   });
   persistChainBySession.set(key, next);
@@ -3907,21 +3979,13 @@ function schedulePersist(
   return next;
 }
 
-async function persistMessagesToStorage(
-  lastAssistantUsage?: MessageUsage,
-  lastAssistantToolCount?: number,
-  lastAssistantDurationMs?: number
-): Promise<void> {
+async function persistMessagesToStorage(): Promise<void> {
   // Top-level entry — go through the per-session serializer so concurrent
   // callers don't interleave their cursor writes.
-  return schedulePersist(lastAssistantUsage, lastAssistantToolCount, lastAssistantDurationMs);
+  return schedulePersist();
 }
 
-async function doPersistMessagesToStorage(
-  lastAssistantUsage?: MessageUsage,
-  lastAssistantToolCount?: number,
-  lastAssistantDurationMs?: number
-): Promise<void> {
+async function doPersistMessagesToStorage(): Promise<void> {
   // Defensive: if the cursor is somehow > messages.length on entry (rewind
   // race, fork side-effect), log a warning and reset rather than silently
   // skipping the rest of the work.
@@ -3936,12 +4000,14 @@ async function doPersistMessagesToStorage(
   }
 
   const tail = messages.slice(lastPersistedIndex);
-  const tailMapped: SessionMessage[] = tail.map((msg, i) => {
-    const absoluteIndex = lastPersistedIndex + i;
-    const isLastAssistant = absoluteIndex === messages.length - 1 && msg.role === 'assistant';
+  const tailMapped: SessionMessage[] = tail.map((msg) => {
     const contentForDisk = typeof msg.content === 'string'
       ? msg.content
       : JSON.stringify(stripPlaywrightResults(msg.content));
+    // #331 — usage/toolCount/duration come off the assistant message object
+    // (stamped at handleMessageComplete), never from a positional "is this the
+    // last element" check. Position is unreliable by persist time.
+    const isAssistant = msg.role === 'assistant';
     return {
       id: msg.id,
       role: msg.role,
@@ -3955,17 +4021,14 @@ async function doPersistMessagesToStorage(
         path: att.relativePath ?? '',
       })),
       metadata: msg.metadata,
-      usage: isLastAssistant && lastAssistantUsage ? lastAssistantUsage : undefined,
-      toolCount: isLastAssistant && lastAssistantToolCount ? lastAssistantToolCount : undefined,
-      durationMs: isLastAssistant && lastAssistantDurationMs ? lastAssistantDurationMs : undefined,
+      usage: isAssistant ? msg.usage : undefined,
+      toolCount: isAssistant ? msg.toolCount : undefined,
+      durationMs: isAssistant ? msg.durationMs : undefined,
     };
   });
 
   // Stitch cached head + freshly-mapped tail. Cache holds previously-persisted
   // SessionMessage objects so we don't pay map cost on them every turn.
-  // Attach last-assistant usage info onto the cached entry too if the SDK
-  // delivered usage on the trailing assistant of a *prior* turn (rare, but
-  // defensive — saveSessionMessages reads only the tail anyway).
   const sessionMessages: SessionMessage[] = persistedSessionMessageCache
     .slice(0, lastPersistedIndex)
     .concat(tailMapped);
@@ -4029,6 +4092,11 @@ export async function materializeCurrentSessionMetadataForPublishedReset(): Prom
 /** Localize SDK/system error messages for IM end-users */
 function localizeImError(rawError: string): string {
   if (!rawError) return '模型处理消息时出错';
+
+  const sdkSubprocessDiagnostic = diagnoseSdkSubprocessFailure({ errorMessage: rawError });
+  if (sdkSubprocessDiagnostic) {
+    return sdkSubprocessDiagnostic.imMessage;
+  }
 
   // Image content not supported by model
   if (rawError.includes('unknown variant') && rawError.includes('image')) {
@@ -5320,7 +5388,37 @@ function handleMessageComplete(): void {
   // Calculate duration for this turn
   const durationMs = currentTurnStartTime ? Date.now() - currentTurnStartTime : undefined;
 
-  // Persist messages with usage info after AI response completes.
+  // #331 — stamp this turn's usage onto its assistant message OBJECT, here and now,
+  // while currentTurnUsage is still this turn's. Persistence then serializes usage
+  // from the message itself (see doPersistMessagesToStorage) instead of guessing
+  // "the last array element". `findTurnUsageStampIndex` targets the trailing
+  // assistant in the not-yet-persisted range, so a user message surfaced just above
+  // (queue:started fallback) or the next turn's messages can't steal/drop the usage.
+  // (Does not retroactively fix turns whose assistant line was already appended
+  // usage-less by a mid-turn persist — queue replay / local-command echo — because
+  // the JSONL writer is append-only. KNOWN RESIDUAL, see the #331 commit message
+  // (83f2ef7d) "Known residual" section for scope/evidence: not observed in any
+  // of 782 local sessions. Candidate root fix: make the mid-turn persist cursor
+  // stop BEFORE the current turn's unfinished assistant message so its line is
+  // never appended without usage — touches the persistence core, needs its own
+  // reviewed change.)
+  const usageStampIndex = findTurnUsageStampIndex(messages, lastPersistedIndex);
+  if (usageStampIndex >= 0) {
+    const completedAssistant = messages[usageStampIndex];
+    completedAssistant.usage = {
+      inputTokens: currentTurnUsage.inputTokens,
+      outputTokens: currentTurnUsage.outputTokens,
+      cacheReadTokens: currentTurnUsage.cacheReadTokens || undefined,
+      cacheCreationTokens: currentTurnUsage.cacheCreationTokens || undefined,
+      model: currentTurnUsage.model,
+      modelUsage: currentTurnUsage.modelUsage,
+    };
+    completedAssistant.toolCount = currentTurnToolCount;
+    completedAssistant.durationMs = durationMs;
+  }
+
+  // Persist messages after AI response completes (usage now lives on the message
+  // object above, so no usage args are threaded through the persist).
   // Fire-and-forget: persistMessagesToStorage is async (cooperative file lock),
   // but the enclosing handler is a sync stream-event callback. Errors are already
   // swallowed inside SessionStore writers; surfacing them here would be no-op.
@@ -5330,14 +5428,7 @@ function handleMessageComplete(): void {
   const persistTraceStarted = nowMs();
   const persistTraceToolCount = currentTurnToolCount;
   const persistTraceMessageCount = messages.length;
-  lastTurnEndPersist = persistMessagesToStorage({
-    inputTokens: currentTurnUsage.inputTokens,
-    outputTokens: currentTurnUsage.outputTokens,
-    cacheReadTokens: currentTurnUsage.cacheReadTokens || undefined,
-    cacheCreationTokens: currentTurnUsage.cacheCreationTokens || undefined,
-    model: currentTurnUsage.model,
-    modelUsage: currentTurnUsage.modelUsage,
-  }, currentTurnToolCount, durationMs)
+  lastTurnEndPersist = persistMessagesToStorage()
     .then(() => {
       emitBuiltinTurnTrace('persist_done', {
         durationMs: elapsedMs(persistTraceStarted),
@@ -5440,7 +5531,7 @@ function handleMessageStopped(): void {
   clearBuiltinTurnTrace(stoppedTrace);
 }
 
-function handleMessageError(error: string): void {
+function handleMessageError(error: string, localizedError?: string): void {
   isStreamingMessage = false;
   const errorTrace = snapshotBuiltinTurnTrace();
   emitBuiltinTurnTrace('final', {
@@ -5465,7 +5556,7 @@ function handleMessageError(error: string): void {
   // Cross-owner fix: scope by sessionId so we only clear OUR slot.
   clearAmbientLogContextField(sessionId, 'turnId');
   // Pattern B/C/G: error → emit 'error' for head + pop queue.
-  emitImEvent('error', localizeImError(error));
+  emitImEvent('error', localizedError ?? localizeImError(error));
   const failedReq = popPendingRequest();
   if (failedReq) {
     imRequestRegistry.setStatus(failedReq, 'failed');
@@ -5680,21 +5771,32 @@ function appendToolResultContent(toolUseId: string, content: string, isError?: b
 }
 
 /**
- * PRD 0.2.30 — for builtin media tools (edge-tts audio / gemini-image image),
- * normalize the just-completed tool result into `ToolAttachment[]`, set them on
- * the persisted tool block, and return them so the caller can include them in
- * the `chat:tool-result-complete` broadcast. No-op (returns undefined) for any
- * non-media tool. Idempotent — if the block already carries attachments (e.g.
- * the result surfaced via a second delivery path), the existing set is reused
- * without re-saving to disk.
+ * PRD 0.2.30 + #293 — unified builtin tool-result media entry. Normalizes the
+ * just-completed tool result into `ToolAttachment[]`, sets them on the
+ * persisted tool block, and returns them so the caller can include them in
+ * the `chat:tool-result-complete` broadcast. Two source families, one entry:
+ *   1. file-path media in result TEXT (edge-tts audio / gemini-image image —
+ *      PRD 0.2.30, `buildBuiltinMediaAttachments`);
+ *   2. image blocks in result CONTENT (generic MCP `ImageContent` base64 /
+ *      data-URL / file ref / remote url — #293, pre-extracted by the caller
+ *      via `extractToolResultRenderParts`, saved by
+ *      `saveExtractedToolResultAttachments`).
+ * Every produced attachment is stamped with the tool's presentation class:
+ * 'process' (Playwright / computer-use screenshots → rendered inside the
+ * folded tool row) vs default artifact (in-flow card, field omitted).
  *
- * Synchronous save is fine here: the file already exists on disk and the
- * trusted-root copy is a cheap base64 round-trip; gating to two tool names
- * keeps every other tool result on the zero-cost path.
+ * No-op (returns undefined) when nothing media-like is present. Idempotent —
+ * if the block already carries attachments (e.g. the result surfaced via a
+ * second delivery path), the existing set is reused without re-saving.
+ *
+ * Synchronous save is fine here: base64 round-trips and small file copies are
+ * ms-level; non-media tools stay on the zero-cost path (both extractors
+ * return [] without touching disk).
  */
 async function attachBuiltinMediaIfAny(
   toolUseId: string,
   contentStr: string,
+  extracted?: ExtractedToolResultAttachment[],
 ): Promise<ToolAttachment[] | undefined> {
   const toolBlock = findToolBlockById(toolUseId);
   if (!toolBlock) return undefined;
@@ -5702,13 +5804,20 @@ async function attachBuiltinMediaIfAny(
     return toolBlock.tool.attachments;
   }
   try {
-    const attachments = await buildBuiltinMediaAttachments(toolBlock.tool.name, contentStr, {
-      sessionId,
-      toolUseId,
-    });
+    // workspace = agentDir → extracted images land in the unified
+    // `<workspace>/myagents_files/<tool-name>/` location (#293-followup).
+    const ctx = { sessionId, toolUseId, workspace: agentDir };
+    const attachments = [
+      ...await buildBuiltinMediaAttachments(toolBlock.tool.name, contentStr, ctx),
+      ...await saveExtractedToolResultAttachments(extracted ?? [], toolBlock.tool.name, ctx),
+    ];
     if (attachments.length === 0) return undefined;
-    toolBlock.tool.attachments = attachments;
-    return attachments;
+    const presentation = classifyToolAttachmentPresentation(toolBlock.tool.name);
+    const stamped = presentation === 'process'
+      ? attachments.map((a) => ({ ...a, presentation }))
+      : attachments; // artifact = omitted field (renderer default; old data stays valid)
+    toolBlock.tool.attachments = stamped;
+    return stamped;
   } catch (err) {
     console.warn('[agent] builtin media attachment failed:', err instanceof Error ? err.message : String(err));
     return undefined;
@@ -5992,6 +6101,14 @@ function loadMessagesFromStorage(storedMessages: SessionMessage[]): void {
         relativePath: att.path,
       })),
       metadata: storedMsg.metadata,
+      // #331 — round-trip persisted usage back onto the in-memory message so a
+      // later FULL remap (rewind / fork / session-reset resets the cursor to 0 and
+      // re-maps from these MessageWire objects) re-serializes usage instead of
+      // dropping it. The persisted-tail cache below preserves it for the common
+      // incremental path; this covers the cursor-reset path.
+      usage: storedMsg.usage,
+      toolCount: storedMsg.toolCount,
+      durationMs: storedMsg.durationMs,
     });
   }
   // Pattern 3 §3.2.4 — these messages are already on disk; seed the persist
@@ -8153,6 +8270,12 @@ export async function forkSession(assistantMessageId: string): Promise<{
             relativePath: att.path,
           })),
           metadata: m.metadata,
+          // #331 — round-trip usage here too; otherwise the fork-copy map below
+          // reads `m.usage === undefined` and the forked session loses its
+          // inherited token stats when forking from storage (not in-memory).
+          usage: m.usage,
+          toolCount: m.toolCount,
+          durationMs: m.durationMs,
         }));
       }
     }
@@ -8212,6 +8335,11 @@ export async function forkSession(assistantMessageId: string): Promise<{
         path: ('relativePath' in att ? att.relativePath : (att as { path?: string }).path) ?? '',
       })),
       metadata: m.metadata,
+      // #331 — carry token usage into the fork so the forked session's stats
+      // reflect the inherited history (this explicit map omitted them).
+      usage: m.usage,
+      toolCount: m.toolCount,
+      durationMs: m.durationMs,
     }));
 
     // Pattern 3 §3.2.4 — fix #2 (forkSession parent cursor). Snapshot the parent's persist
@@ -8401,6 +8529,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
   let preWarmStartedOk = false; // Tracks whether pre-warm received system_init
   let abortedByTimeout = false; // Distinguishes timeout abort from config-change abort
   let detectedAlreadyInUse = false; // stderr reported "Session ID already in use"
+  const recentSdkStderr: string[] = [];
   streamIndexToToolId.clear();
   streamIndexToBlockType.clear();
   imTextBlockIndices.clear();
@@ -8689,14 +8818,18 @@ async function startStreamingSession(preWarm = false): Promise<void> {
       // the SDK silently ignores the mode switch and keeps calling canUseTool.
       allowDangerouslySkipPermissions: true,
       // applyContextWindowSuffix appends [1m] when the registered contextLength
-      // is ≥1_000_000 — without it, SDK getContextWindowForModel() falls back
-      // to 200K for non-Anthropic models and /context, auto-compact, attachment
-      // trimming all use the wrong ceiling. SDK strips the suffix back out
+      // exceeds the SDK 200K default (#335) — without it, SDK
+      // getContextWindowForModel() falls back to 200K for non-Anthropic models
+      // and /context, auto-compact, attachment trimming all use the wrong
+      // ceiling; CLAUDE_CODE_AUTO_COMPACT_WINDOW then pulls the effective
+      // window back to the registry value. SDK strips the suffix back out
       // before the wire (normalizeModelStringForAPI in model.ts:616).
       model: applyContextWindowSuffix(currentModel),
       pathToClaudeCodeExecutable: resolveClaudeCodeCli(),
       env,
       stderr: (message: string) => {
+        recentSdkStderr.push(message);
+        if (recentSdkStderr.length > 20) recentSdkStderr.shift();
         // Always log stderr to help diagnose subprocess issues (especially on older Windows)
         console.error('[sdk-stderr]', message);
         // Detect "Session ID already in use" early — stderr arrives before process exit error
@@ -10064,12 +10197,11 @@ async function startStreamingSession(preWarm = false): Promise<void> {
               is_error?: boolean;
             };
 
-            let contentStr = '';
-            if (typeof toolResultBlock.content === 'string') {
-              contentStr = toolResultBlock.content;
-            } else if (toolResultBlock.content !== null && toolResultBlock.content !== undefined) {
-              contentStr = JSON.stringify(toolResultBlock.content, null, 2);
-            }
+            // #293 — never let image-block / data-URL base64 through to SSE / tool
+            // state on the start event either; attachments are produced once on the
+            // COMPLETE path (user-turn tool_result), this transient preview only
+            // needs the redacted text. renderParts.text passes plain strings through.
+            const contentStr = extractToolResultRenderParts(toolResultBlock.content).text;
 
             toolResultIndexToId.set(streamEvent.index, toolResultBlock.tool_use_id);
             if (contentStr) {
@@ -10291,16 +10423,21 @@ async function startStreamingSession(preWarm = false): Promise<void> {
                 content: string | unknown;
               };
 
+              // #293 — split image-bearing blocks out of the raw content BEFORE any
+              // stringification: extracted sources become disk-backed ToolAttachments
+              // below; the remaining text has every base64-ish payload redacted to
+              // `[N bytes omitted]`. Session JSONL / SSE only ever carry path refs —
+              // the SDK's own transcript (what the model sees) is untouched.
+              const renderParts = extractToolResultRenderParts(toolResultBlock.content);
+
               // For WebSearch/WebFetch, prefer structured tool_use_result data if available
               // This contains query, results array with titles/urls, etc.
-              let contentStr: string;
-              if (toolUseResultData && typeof toolUseResultData === 'object') {
-                contentStr = JSON.stringify(toolUseResultData);
-              } else if (typeof toolResultBlock.content === 'string') {
-                contentStr = toolResultBlock.content;
-              } else {
-                contentStr = JSON.stringify(toolResultBlock.content ?? '', null, 2);
-              }
+              // Otherwise use renderParts.text: passes plain strings / JSON through
+              // verbatim, joins non-image blocks, and (finding 2) yields '' for a bare
+              // data-URL string whose bytes were extracted — so base64 never persists.
+              const contentStr = (toolUseResultData && typeof toolUseResultData === 'object')
+                ? JSON.stringify(toolUseResultData)
+                : renderParts.text;
 
               const parentToolUseId =
                 childToolToParent.get(toolResultBlock.tool_use_id) ?? sdkMessage.parent_tool_use_id;
@@ -10311,13 +10448,21 @@ async function startStreamingSession(preWarm = false): Promise<void> {
                 broadcast('chat:subagent-tool-result-complete', {
                   parentToolUseId,
                   toolUseId: toolResultBlock.tool_use_id,
-                  content: contentStr
+                  // Subagent media is not yet attached (pipeline doc §10 residual) —
+                  // leave an honest text trace instead of silently dropping the image.
+                  content: appendOmittedImageNote(contentStr, renderParts.attachments.length)
                 });
               } else {
                 // Top-level tool result (e.g., WebSearch without parent)
                 const stripped = strippedToolResultIds.has(toolResultBlock.tool_use_id) || isPlaywrightTool(toolResultBlock.tool_use_id);
-                // PRD 0.2.30 — builtin media tools (edge-tts / gemini-image) → first-class attachments.
-                const attachments = await attachBuiltinMediaIfAny(toolResultBlock.tool_use_id, contentStr);
+                // PRD 0.2.30 + #293 — unified media entry: file-path media (edge-tts /
+                // gemini-image) AND extracted image blocks (Playwright screenshots,
+                // generic MCP ImageContent) → first-class disk-backed attachments.
+                const attachments = await attachBuiltinMediaIfAny(
+                  toolResultBlock.tool_use_id,
+                  contentStr,
+                  renderParts.attachments,
+                );
                 broadcast('chat:tool-result-complete', {
                   toolUseId: toolResultBlock.tool_use_id,
                   content: stripped ? PLAYWRIGHT_RESULT_SENTINEL : contentStr,
@@ -10427,32 +10572,15 @@ async function startStreamingSession(preWarm = false): Promise<void> {
                 is_error?: boolean;
               };
 
-              let contentStr: string;
-              if (typeof toolResultBlock.content === 'string') {
-                contentStr = toolResultBlock.content;
-              } else if (Array.isArray(toolResultBlock.content)) {
-                contentStr = toolResultBlock.content
-                  .map((c) => {
-                    if (typeof c === 'string') {
-                      return c;
-                    }
-                    if (typeof c === 'object' && c !== null) {
-                      if ('text' in c && typeof c.text === 'string') {
-                        return c.text;
-                      }
-                      if ('type' in c && c.type === 'text' && 'text' in c) {
-                        return String(c.text);
-                      }
-                      return JSON.stringify(c, null, 2);
-                    }
-                    return String(c);
-                  })
-                  .join('\n');
-              } else if (typeof toolResultBlock.content === 'object' && toolResultBlock.content) {
-                contentStr = JSON.stringify(toolResultBlock.content, null, 2);
-              } else {
-                contentStr = String(toolResultBlock.content);
-              }
+              // #293 — Site B mirrors Site A (cross-review finding 1): extract image
+              // blocks BEFORE stringification so this sibling delivery path can't
+              // re-introduce base64 into SSE / JSONL. Non-string content collapses to
+              // the redacted joined text (single text block → its inner text — same
+              // shape the old hand-rolled mapper produced for the common case).
+              const renderParts = extractToolResultRenderParts(toolResultBlock.content);
+              // renderParts.text passes plain strings through verbatim and yields ''
+              // for a bare data-URL string whose bytes were extracted (finding 2).
+              const contentStr = renderParts.text;
 
               const parentToolUseId =
                 childToolToParent.get(toolResultBlock.tool_use_id) ?? sdkMessage.parent_tool_use_id;
@@ -10463,16 +10591,19 @@ async function startStreamingSession(preWarm = false): Promise<void> {
                 broadcast('chat:subagent-tool-result-complete', {
                   parentToolUseId,
                   toolUseId: toolResultBlock.tool_use_id,
-                  content: contentStr,
+                  // Subagent media is not yet attached (pipeline doc §10 residual) —
+                  // leave an honest text trace instead of silently dropping the image.
+                  content: appendOmittedImageNote(contentStr, renderParts.attachments.length),
                   isError: toolResultBlock.is_error || false
                 });
               } else {
                 const stripped = strippedToolResultIds.has(toolResultBlock.tool_use_id) || isPlaywrightTool(toolResultBlock.tool_use_id);
-                // PRD 0.2.30 — builtin media tools (edge-tts / gemini-image) → first-class attachments.
-                // Idempotent with Site A; only one delivery path fires per tool result.
+                // PRD 0.2.30 + #293 — unified media entry (file-path media + extracted
+                // image blocks). Idempotent with Site A; only one delivery path fires
+                // per tool result.
                 const attachments = toolResultBlock.is_error
                   ? undefined
-                  : await attachBuiltinMediaIfAny(toolResultBlock.tool_use_id, contentStr);
+                  : await attachBuiltinMediaIfAny(toolResultBlock.tool_use_id, contentStr, renderParts.attachments);
                 broadcast('chat:tool-result-complete', {
                   toolUseId: toolResultBlock.tool_use_id,
                   content: stripped ? PLAYWRIGHT_RESULT_SENTINEL : contentStr,
@@ -11137,13 +11268,16 @@ async function startStreamingSession(preWarm = false): Promise<void> {
 
     // Enhanced error diagnostics for Windows subprocess failures
     let userFacingError = errorMessage;
-    if (errorMessage.includes('process exited with code 1') && process.platform === 'win32') {
-      console.error('[agent] Windows subprocess failure detected. Possible causes:');
-      console.error('[agent] 1. Git for Windows not installed (most common)');
-      console.error('[agent] 2. Git Bash not in PATH');
-      console.error('[agent] 3. CLAUDE_CODE_GIT_BASH_PATH environment variable not set');
-      console.error('[agent] Windows version:', process.env.OS || 'unknown');
-      userFacingError = '子进程启动失败 (exit code 1)。最可能原因：未安装 Git for Windows。请安装 Git：https://git-scm.com/downloads/win';
+    const sdkSubprocessDiagnostic = diagnoseSdkSubprocessFailure({
+      errorMessage,
+      stderr: recentSdkStderr,
+    });
+    if (sdkSubprocessDiagnostic) {
+      console.error(
+        `[agent] Windows SDK subprocess failure classified: kind=${sdkSubprocessDiagnostic.kind} ` +
+        `code=${sdkSubprocessDiagnostic.exitCodeHex ?? 'unknown'} os=${process.env.OS || 'unknown'}`,
+      );
+      userFacingError = sdkSubprocessDiagnostic.userMessage;
     }
 
     // Don't broadcast errors to frontend during pre-warm.
@@ -11166,7 +11300,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     // debugging, just not broadcast.
     if (!isPreWarming && !shouldAbortSession) {
       broadcast('chat:message-error', userFacingError);
-      handleMessageError(errorMessage);
+      handleMessageError(errorMessage, sdkSubprocessDiagnostic?.imMessage);
       setSessionState('error');
     } else if (shouldAbortSession) {
       console.log(`[agent] Suppressing SDK error surfaced during abort (expected): ${errorMessage}`);
