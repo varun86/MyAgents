@@ -68,19 +68,25 @@ export class TurnFinalizationGate {
     if (timeoutMs <= 0) return false;
     return new Promise<boolean>((resolve) => {
       let done = false;
-      const timer = setTimeout(() => {
-        if (!done) {
-          done = true;
-          resolve(false);
-        }
-      }, timeoutMs);
-      this.waiters.push(() => {
+      const waiter = () => {
         if (!done) {
           done = true;
           clearTimeout(timer);
           resolve(true);
         }
-      });
+      };
+      const timer = setTimeout(() => {
+        if (!done) {
+          done = true;
+          // Remove our own waiter — without this, a finalization that never
+          // settles accumulates one dead closure per timed-out settled() call
+          // until the next release() finally splices the array.
+          const idx = this.waiters.indexOf(waiter);
+          if (idx >= 0) this.waiters.splice(idx, 1);
+          resolve(false);
+        }
+      }, timeoutMs);
+      this.waiters.push(waiter);
     });
   }
 }

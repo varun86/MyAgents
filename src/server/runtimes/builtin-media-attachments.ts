@@ -190,8 +190,17 @@ export async function saveExtractedToolResultAttachments(
 
       if (item.source.kind === 'base64') {
         // Write the bytes into the per-tool workspace dir first (the unified,
-        // user-visible location), size-gated up front so a pathological image
-        // never gets fully buffered. Then take the trusted-root serving copy.
+        // user-visible location), then take the trusted-root serving copy.
+        // Size-gate on the b64 STRING length BEFORE decoding (b64 length ≥
+        // decoded bytes, so this never false-rejects) — a pathological image
+        // must not get fully buffered just to be measured. Decode ONCE and
+        // hand the bytes to saveToolAttachment for the serving copy
+        // (cross-review 0.2.33, Codex + cc: gate-after-allocate + double
+        // decode peaked at two ~25MB transient buffers).
+        if (Math.floor((item.source.data.length * 3) / 4) > MAX_TOOL_ATTACHMENT_BYTES) {
+          console.warn(`[builtin-media] extracted image exceeds ${MAX_TOOL_ATTACHMENT_BYTES} bytes (b64 length ${item.source.data.length}), skip: ${toolName}`);
+          continue;
+        }
         const bytes = Buffer.from(item.source.data, 'base64');
         if (bytes.byteLength > MAX_TOOL_ATTACHMENT_BYTES) {
           console.warn(`[builtin-media] extracted image exceeds ${MAX_TOOL_ATTACHMENT_BYTES} bytes (${bytes.byteLength}), skip: ${toolName}`);
@@ -201,7 +210,9 @@ export async function saveExtractedToolResultAttachments(
         const filename = `${Date.now().toString(36)}-${randomUUID().slice(0, 8)}.${mimeToExt(item.mimeType)}`;
         const workspaceFile = path.join(dir, filename);
         await writeFile(workspaceFile, bytes, { flag: 'wx' });
-        const attachment = await saveToolAttachment(item.source, saveCtx);
+        const attachment = await saveToolAttachment(item.source, saveCtx, {
+          decodedBase64Bytes: bytes,
+        });
         out.push({ ...attachment, sourcePath: workspaceFile });
         continue;
       }

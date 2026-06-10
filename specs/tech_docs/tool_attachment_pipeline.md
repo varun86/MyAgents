@@ -188,7 +188,18 @@ URL 下载额外防 SSRF：
 - 拒绝 `169.254/16` 链路本地（AWS/GCP/Azure metadata service）
 - 拒绝 IPv6 ULA / link-local（`fc00:` / `fd*:` / `fe80:`）
 - `redirect: 'error'` — 拒绝跨 scheme/host 跳转
-- `cancellableFetch` 30s timeout
+- DNS 解析后校验 + undici dispatcher 钉死已验证 IP（关闭 DNS-rebinding TOCTOU）
+- `withAbortSignal`（parentSignal + 30s timeout）
+- 流式读取 + 累计上限：Content-Length 可选（chunked 编码），`arrayBuffer()` 会让
+  恶意端点在尺寸检查前无界分配——按 chunk 累计超过 25MB 即 `reader.cancel()`
+
+**cancellableFetch 豁免（刻意为之，勿"修"回去）**：`downloadAndSaveUrl` 用的是
+undici 自有 `fetch` + `withAbortSignal`，**不是**红线表里的 `cancellableFetch`。
+原因：DNS 钉死需要传 per-request `dispatcher`（undici `Agent`），`cancellableFetch`
+的签名带不进去；且 repo 的 undici@8 `Agent` 混用 Node 内建 fetch 会抛
+`invalid onRequestStart method`。超时/取消语义经 `withAbortSignal` 组合后与
+`cancellableFetch` 等价。后续 lint 收紧或 review 如果把它替换回
+`cancellableFetch`，会静默丢掉 SSRF 钉死——这正是这段记录存在的原因。
 
 错误暴露面：`makeErrorAttachment(ctx, err, pendingId)` 把 throw 映射到固定 enum
 （`too_large` / `rejected_path` / `not_found` / `fetch_failed` / `unsupported_url` /

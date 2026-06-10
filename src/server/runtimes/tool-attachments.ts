@@ -132,7 +132,11 @@ async function ensureParentDir(filePath: string): Promise<void> {
   await mkdir(path.dirname(filePath), { recursive: true });
 }
 
-async function saveBase64Source(b64: string, ctx: SaveContext): Promise<ToolAttachment> {
+async function saveBase64Source(
+  b64: string,
+  ctx: SaveContext,
+  decodedBytes?: Buffer,
+): Promise<ToolAttachment> {
   if (typeof b64 !== 'string' || b64.length === 0) {
     throw new AttachmentSaveError(ATTACHMENT_ERROR_CODES.DECODE_FAILED, 'Empty base64 data');
   }
@@ -145,7 +149,11 @@ async function saveBase64Source(b64: string, ctx: SaveContext): Promise<ToolAtta
       `Base64 string too large: ~${approxBytes} bytes > ${MAX_TOOL_ATTACHMENT_BYTES}`,
     );
   }
-  const buf = Buffer.from(b64, 'base64');
+  // Callers that already decoded (e.g. saveExtractedToolResultAttachments
+  // writes the same bytes into the workspace first) pass them through —
+  // decoding a 25MB image twice means two transient ~25MB buffers
+  // (cross-review 0.2.33, Codex + cc).
+  const buf = decodedBytes ?? Buffer.from(b64, 'base64');
   if (buf.length === 0) {
     throw new AttachmentSaveError(ATTACHMENT_ERROR_CODES.DECODE_FAILED, 'Decoded empty base64');
   }
@@ -438,14 +446,40 @@ async function downloadAndSaveUrl(url: string, ctx: SaveContext, signal?: AbortS
         );
       }
     }
-    const ab = await resp.arrayBuffer();
-    if (ab.byteLength > MAX_TOOL_ATTACHMENT_BYTES) {
-      throw new AttachmentSaveError(
-        ATTACHMENT_ERROR_CODES.TOO_LARGE,
-        `URL response too large: ${ab.byteLength} bytes`,
-      );
+    // Stream with a cumulative cap — Content-Length is optional (chunked
+    // encoding), so `arrayBuffer()` would let a hostile endpoint allocate an
+    // unbounded body before the size check ever ran. The URL is
+    // model/MCP-controlled, same trust class as the SSRF guards above
+    // (cross-review 0.2.33, Codex W4). Abort the read the moment the cap is
+    // crossed; fall back to arrayBuffer only when there's no body stream.
+    if (resp.body) {
+      const reader = resp.body.getReader();
+      const chunks: Uint8Array[] = [];
+      let received = 0;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        received += value.byteLength;
+        if (received > MAX_TOOL_ATTACHMENT_BYTES) {
+          await reader.cancel().catch(() => {});
+          throw new AttachmentSaveError(
+            ATTACHMENT_ERROR_CODES.TOO_LARGE,
+            `URL response too large: >${MAX_TOOL_ATTACHMENT_BYTES} bytes (no/false Content-Length)`,
+          );
+        }
+        chunks.push(value);
+      }
+      buf = Buffer.concat(chunks);
+    } else {
+      const ab = await resp.arrayBuffer();
+      if (ab.byteLength > MAX_TOOL_ATTACHMENT_BYTES) {
+        throw new AttachmentSaveError(
+          ATTACHMENT_ERROR_CODES.TOO_LARGE,
+          `URL response too large: ${ab.byteLength} bytes`,
+        );
+      }
+      buf = Buffer.from(ab);
     }
-    buf = Buffer.from(ab);
     mime = resp.headers.get('content-type')?.split(';')[0]?.trim() || ctx.mimeType;
   } finally {
     // Per-request agent — close after the body is consumed (or on error) so we
@@ -488,11 +522,11 @@ async function downloadAndSaveUrl(url: string, ctx: SaveContext, signal?: AbortS
 export async function saveToolAttachment(
   source: AttachmentSource,
   ctx: SaveContext,
-  opts?: { signal?: AbortSignal },
+  opts?: { signal?: AbortSignal; decodedBase64Bytes?: Buffer },
 ): Promise<ToolAttachment> {
   switch (source.kind) {
     case 'base64':
-      return saveBase64Source(source.data, ctx);
+      return saveBase64Source(source.data, ctx, opts?.decodedBase64Bytes);
     case 'externalPath':
       return referenceExternalPath(source.sourcePath, ctx);
     case 'url':

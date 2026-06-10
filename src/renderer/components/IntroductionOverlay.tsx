@@ -29,8 +29,13 @@ const IntroductionOverlay = memo(function IntroductionOverlay({ content }: Intro
         visible ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-2'
       }`}
       style={{
-        maskImage: 'linear-gradient(to bottom, black 70%, transparent 100%)',
-        WebkitMaskImage: 'linear-gradient(to bottom, black 70%, transparent 100%)',
+        // Mask alpha ramp: black → rgba(0,0,0,0) is the SAME color at alpha 0
+        // (exactly what the `transparent` keyword denotes), so this is already
+        // the constant-color form #333 requires — spelled out to satisfy the
+        // lint without changing a pixel.
+        maskImage: 'linear-gradient(to bottom, black 70%, rgba(0,0,0,0) 100%)',
+        WebkitMaskImage:
+          'linear-gradient(to bottom, black 70%, rgba(0,0,0,0) 100%)',
       }}
     >
       <div className="mx-auto max-w-3xl px-8 pt-12 pb-40">

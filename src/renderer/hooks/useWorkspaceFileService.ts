@@ -95,6 +95,10 @@ interface ImportResult {
 interface CopyResult {
   success: boolean;
   copiedFiles: CopiedFile[];
+  /** Per-file failures (blacklist reject, fs error) — the batch keeps going,
+   *  but callers must surface these: an all-rejected drop otherwise looks
+   *  like a silent no-op refresh (cross-review 0.2.33, Codex W3). */
+  errors: string[];
 }
 
 interface InternalCopyResult {

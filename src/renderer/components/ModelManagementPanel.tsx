@@ -658,7 +658,7 @@ const ModelSettingsEditor = function ModelSettingsEditor({
     'w-full rounded-lg border bg-[var(--paper)] px-2.5 py-1.5 text-xs text-[var(--ink)] outline-none transition-all placeholder:text-[var(--ink-faint)] focus:bg-[var(--paper-elevated)]';
   const inputOk =
     'border-[var(--line)] focus:border-[var(--accent)] focus:shadow-[0_0_0_3px_var(--accent-warm-subtle)]';
-  const inputErr = 'border-[var(--error)] focus:shadow-[0_0_0_3px_rgba(220,38,38,0.07)]';
+  const inputErr = 'border-[var(--error)] focus:shadow-[0_0_0_3px_var(--error-subtle)]';
 
   return (
     <div

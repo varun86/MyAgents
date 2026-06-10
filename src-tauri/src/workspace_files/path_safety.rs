@@ -105,8 +105,29 @@ pub fn resolve_inside_workspace(workspace_root: &Path, relative: &str) -> WfResu
 
 /// Validate that an arbitrary absolute path (e.g. a file the user dragged from
 /// Finder) is safe to read from. Used by `read_files_b64` and `copy_paths`.
+///
+/// Cross-review 0.2.33 (Codex Critical): the lexical blacklist alone is
+/// defeated by an intermediate symlink component — `~/Downloads/lure/key`
+/// where `lure → ~/.ssh` doesn't start with any blacklisted prefix, but the
+/// read that follows traverses the link and exfiltrates credential bytes into
+/// the AI-readable workspace. Canonicalize and re-run the blacklist on the
+/// REAL path. This mirrors the fix `copy_internal_one` already got (5b72e25a);
+/// before this, the two sibling copy commands had divergent trust models.
+///
+/// Returns the LEXICAL path (not the canonical one) so callers keep their
+/// leaf-symlink semantics: `files_b64` rejects symlink leaves outright (its
+/// extension allow-list checks the *name*, not the target) and `copy_paths`
+/// reports them as unsupported — returning the canonical path would silently
+/// resolve the leaf and re-open that hole.
 pub fn validate_external_read_path(absolute_path: &str) -> WfResult<PathBuf> {
-    system_blacklist_check(absolute_path)
+    let lexical = system_blacklist_check(absolute_path)?;
+    // Read-side: the path must exist for any read to succeed, so a
+    // canonicalize failure collapses into a uniform "File not found".
+    let canonical = fs::canonicalize(&lexical).map_err(|_| "File not found".to_string())?;
+    if let Some(s) = canonical.to_str() {
+        let _ = system_blacklist_check(s)?;
+    }
+    Ok(lexical)
 }
 
 /// Stricter variant of `resolve_inside_workspace` for **read-side** commands:
@@ -460,6 +481,42 @@ mod tests {
     fn validate_item_name_rejects_control_chars() {
         assert!(validate_item_name("a\x00b").is_err());
         assert!(validate_item_name("\tfoo").is_err());
+    }
+
+    // Rust side of the Rust↔renderer name-rule crosscheck (cross-review
+    // 0.2.33, architecture review). The renderer's `workspace-tree/
+    // nameValidation.ts` hand-mirrors this module's `validate_item_name` for
+    // live editor feedback; both sides assert against the shared fixture so
+    // a rule change on either side breaks one of the two suites — same
+    // pattern as path-safety-blacklist.json (PRD 0.2.15 §7.2).
+    #[test]
+    fn validate_item_name_matches_shared_fixture() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../src/shared/item-name-validation-cases.json"
+        ))
+        .expect("item-name-validation-cases.json parses");
+        let names = |key: &str| -> Vec<String> {
+            fixture[key]
+                .as_array()
+                .unwrap_or_else(|| panic!("fixture.{key} must be an array"))
+                .iter()
+                .map(|v| v.as_str().expect("fixture entry is a string").to_string())
+                .collect()
+        };
+        for name in names("valid") {
+            assert!(
+                validate_item_name(&name).is_ok(),
+                "fixture says {:?} is valid but validate_item_name rejected it",
+                name
+            );
+        }
+        for name in names("invalid") {
+            assert!(
+                validate_item_name(&name).is_err(),
+                "fixture says {:?} is invalid but validate_item_name accepted it",
+                name
+            );
+        }
     }
 
     #[test]

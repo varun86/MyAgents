@@ -3,7 +3,9 @@
  * inline create/rename editor LIVE feedback so users never hit a Rust error
  * round-trip for a name the UI could have rejected. Rust remains the
  * authority; this must stay rule-for-rule in sync (both files reference each
- * other).
+ * other). Sync is ENFORCED by the shared fixture
+ * `src/shared/item-name-validation-cases.json` — both test suites assert
+ * against it, so update the fixture together with any rule change here.
  *
  * Returns a user-facing Chinese message, or `null` when the name is valid.
  */

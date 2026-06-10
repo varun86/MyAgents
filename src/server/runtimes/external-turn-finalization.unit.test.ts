@@ -83,6 +83,31 @@ describe('TurnFinalizationGate — external turn finalization ordering (cross-re
     await expect(gate.settled(0)).resolves.toBe(true);
   });
 
+  it('timed-out settled() removes its waiter (no dead-closure accumulation across repeated sends during one stuck finalization — cross-review 0.2.33 Codex)', async () => {
+    vi.useFakeTimers();
+    try {
+      const gate = new TurnFinalizationGate();
+      const persist = deferred();
+      gate.track(persist.promise);
+
+      // Three sends time out against the same hung finalization.
+      for (let i = 0; i < 3; i++) {
+        const result = gate.settled(1_000);
+        await vi.advanceTimersByTimeAsync(1_000);
+        await expect(result).resolves.toBe(false);
+      }
+      // Internal waiter list must not have accumulated the dead closures.
+      expect(
+        (gate as unknown as { waiters: unknown[] }).waiters,
+      ).toHaveLength(0);
+
+      persist.resolve();
+      await expect(gate.settled(1)).resolves.toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('overlapping tracks release only after ALL settle (turn_complete + session_complete both firing persistTurnResult)', async () => {
     const gate = new TurnFinalizationGate();
     const a = deferred();

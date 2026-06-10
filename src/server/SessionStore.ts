@@ -550,7 +550,11 @@ export async function saveSessionMessages(
             // unindexed file are still allowed below (legacy orphans keep their data).
             const fileAlreadyExists = existsSync(filePath) || existsSync(legacyPath);
             if (!fileAlreadyExists && !getSessionMetadata(sessionId)) {
-                console.warn(`[SessionStore] REFUSING to create JSONL for unindexed session ${sessionId} (${messages.length} in-memory messages): no sessions.json entry (deleted or never registered). Callers must persist metadata BEFORE messages.`);
+                // Include the call stack: this refusal converts a future
+                // "caller forgot to register metadata first" ordering bug from
+                // an orphan file into a silently dropped first message — the
+                // stack is the only way to identify that caller from the log.
+                console.warn(`[SessionStore] REFUSING to create JSONL for unindexed session ${sessionId} (${messages.length} in-memory messages): no sessions.json entry (deleted or never registered). Callers must persist metadata BEFORE messages.\n${new Error().stack}`);
                 return;
             }
 

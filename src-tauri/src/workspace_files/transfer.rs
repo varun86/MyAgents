@@ -36,6 +36,13 @@ pub struct CopiedFile {
 pub struct CopyResult {
     pub success: bool,
     pub copied_files: Vec<CopiedFile>,
+    /// Per-file failures (blacklist reject, fs error). Cross-review 0.2.33
+    /// (Codex W3): these were log-only, so a drop where EVERY source was
+    /// rejected returned `success:true, copiedFiles:[]` and the frontend
+    /// refreshed with no files and no explanation. Same contract as
+    /// `InternalCopyResult.errors` — the sibling paste path already
+    /// surfaces them.
+    pub errors: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -79,16 +86,19 @@ pub async fn cmd_workspace_copy_paths(
 
     let auto_rename = auto_rename.unwrap_or(true);
     let mut copied: Vec<CopiedFile> = Vec::with_capacity(source_paths.len());
+    let mut errors: Vec<String> = Vec::new();
 
     for source in source_paths {
         match copy_one_path(&source, &target_root, &workspace_root, auto_rename) {
             Ok(item) => copied.push(item),
             Err(err) => {
-                // Per-file failures get logged; the batch continues so the
-                // user keeps the files that did go through.
+                // Per-file failures continue the batch so the user keeps the
+                // files that did go through — but they must reach the caller,
+                // not just the log (cross-review 0.2.33, Codex W3).
                 // ulog_* (not log::*) per CLAUDE.md red-line — log::warn!
                 // doesn't reach `~/.myagents/logs/unified-{date}.log`.
                 crate::ulog_warn!("[workspace_files::copy] skipping {}: {}", source, err);
+                errors.push(format!("{}: {}", source, err));
             }
         }
     }
@@ -96,6 +106,7 @@ pub async fn cmd_workspace_copy_paths(
     Ok(CopyResult {
         success: true,
         copied_files: copied,
+        errors,
     })
 }
 
@@ -601,9 +612,42 @@ mod tests {
         )
         .await
         .unwrap();
-        // Per-file failures are logged but the batch returns success=true with
-        // an empty copied list.
+        // The batch returns success=true with an empty copied list — and the
+        // per-file failure is reported, not just logged (Codex W3).
         assert!(res.copied_files.is_empty());
+        assert_eq!(res.errors.len(), 1);
         let _ = fs::remove_dir_all(&ws);
+    }
+
+    // Cross-review 0.2.33 (Codex Critical): the EXTERNAL copy path validated
+    // sources purely lexically — `<dir>/lure/secret` where `lure → ~/.ssh`
+    // passes the credential-dir blacklist (the literal string doesn't start
+    // with a blacklisted prefix) while fs::copy follows the intermediate
+    // symlink, exfiltrating credential bytes into the AI-readable workspace.
+    // `validate_external_read_path` must canonicalize and re-check.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn external_copy_rejects_intermediate_symlink_into_blacklisted_dir() {
+        use std::os::unix::fs::symlink;
+        let ws = make_tmp_dir("ws");
+        let staging = make_tmp_dir("staging");
+        // `lure` resolves into /etc — a FORBIDDEN_SYSTEM_DIRS prefix on unix.
+        symlink("/etc", staging.join("lure")).unwrap();
+        let evil_source = staging.join("lure").join("hosts");
+
+        let res = cmd_workspace_copy_paths(
+            ws.to_string_lossy().to_string(),
+            vec![evil_source.to_string_lossy().to_string()],
+            "out".to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(res.copied_files.is_empty());
+        assert_eq!(res.errors.len(), 1);
+        assert!(!ws.join("out/hosts").exists());
+        let _ = fs::remove_dir_all(&ws);
+        let _ = fs::remove_dir_all(&staging);
     }
 }

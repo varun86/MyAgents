@@ -9,6 +9,7 @@ import {
   FolderOpen,
   FolderPlus,
   GitBranch,
+  ListChecks,
   LocateFixed,
   NotebookPen,
   Pencil,
@@ -438,11 +439,22 @@ const DirectoryPanel = memo(
     // clipboard event (menu Copy → `copy:` selector → `copy` event). The
     // tree's clipboard must therefore hook these EVENTS; the keydown mapping
     // only serves platforms without a pre-empting native menu.
-    const copySelectionRef = useRef<(mode: "copy" | "cut") => string | null>(
-      () => null,
-    );
+    const copySelectionRef = useRef<
+      (
+        mode: "copy" | "cut",
+        opts?: { skipAsyncOsWrite?: boolean },
+      ) => string | null
+    >(() => null);
     const pasteFromClipboardRef = useRef<() => Promise<void>>(async () => {});
     const clipboardRef = useRef<TreeClipboard>(null);
+    // The exact text we last wrote to the OS clipboard alongside an internal
+    // file copy. On paste, a mismatch means the user has copied something
+    // ELSE since (screenshot, Finder files, text) — the internal clipboard is
+    // stale and must yield to the OS content instead of silently shadowing
+    // it forever (cross-review 0.2.33, cc W2; VS Code does the same compare).
+    // Null = no successful OS write recorded → can't judge staleness, keep
+    // the internal clipboard authoritative (degrades to pre-fix behavior).
+    const lastOsClipboardTextRef = useRef<string | null>(null);
     // Undo journal for reversible mutations (move/rename/create/paste).
     // Ref — pushing/popping must not re-render the tree.
     const undoJournalRef = useRef<readonly UndoableOp[]>([]);
@@ -1484,6 +1496,11 @@ const DirectoryPanel = memo(
             autoRename: true,
           });
           if (!result.success) throw new Error("Copy failed");
+          // Per-file failures (blacklist reject, fs error) — surface like the
+          // internal paste path does, instead of a silent no-op refresh.
+          if (result.errors.length > 0) {
+            toast.warning(`部分文件未能导入：${result.errors[0]}`);
+          }
           if (isDebugMode()) {
             console.log(
               "[DirectoryPanel] Tauri drop copied files:",
@@ -1498,7 +1515,7 @@ const DirectoryPanel = memo(
           setIsUploading(false);
         }
       },
-      [isUploading, refresh, fileService],
+      [isUploading, refresh, fileService, toast],
     );
 
     // Expose imperative handle for parent to call
@@ -1852,13 +1869,27 @@ const DirectoryPanel = memo(
         // as this paste event (the native Edit menu consumes the keydown), so
         // the tree's own paste must be served here — the key handler never
         // gets a chance.
+        //
+        // …unless the OS clipboard has moved on since our copy (screenshot,
+        // Finder files, text copied elsewhere): then the internal clipboard
+        // is STALE and must yield, or it shadows the user's newer content
+        // forever with no hint (cross-review 0.2.33, cc W2). Judged by
+        // comparing e.clipboardData's text against the text we wrote
+        // alongside the copy; null record = can't judge → internal wins.
         if (
           clipboardRef.current &&
           treeContainerRef.current?.contains(document.activeElement)
         ) {
-          e.preventDefault();
-          void pasteFromClipboardRef.current();
-          return;
+          const lastWritten = lastOsClipboardTextRef.current;
+          const osTextNow = e.clipboardData?.getData("text/plain") ?? "";
+          if (lastWritten === null || osTextNow === lastWritten) {
+            e.preventDefault();
+            void pasteFromClipboardRef.current();
+            return;
+          }
+          // Stale → drop it and fall through to the OS-clipboard file path.
+          setClipboard(null);
+          clipboardRef.current = null;
         }
 
         const items = e.clipboardData?.items;
@@ -2235,7 +2266,7 @@ const DirectoryPanel = memo(
      *  nothing (实测 2026-06-11). Also mirrors the absolute paths onto the
      *  OS clipboard so the copy is pasteable into a terminal / chat. */
     const copySelection = useCallback(
-      (mode: "copy" | "cut"): string | null => {
+      (mode: "copy" | "cut", opts?: { skipAsyncOsWrite?: boolean }): string | null => {
         const nodes =
           selectedNodes.length > 0
             ? selectedNodes
@@ -2249,7 +2280,21 @@ const DirectoryPanel = memo(
           nodes.length === 1 ? `"${nodes[0].name}"` : `${nodes.length} 项`;
         toast.success(`${label} ${what}，在目标文件夹按 Cmd+V 粘贴`);
         const osText = nodes.map((n) => toAbsolutePath(n.path)).join("\n");
-        void navigator.clipboard.writeText(osText).catch(() => {});
+        // The DOM copy/cut event path writes via the synchronous
+        // e.clipboardData.setData and skips this async write — otherwise the
+        // late-resolving writeText could clobber whatever the user copies in
+        // the gap. Record the written text either way: paste compares it to
+        // judge whether the internal clipboard has gone stale.
+        if (opts?.skipAsyncOsWrite) {
+          lastOsClipboardTextRef.current = osText;
+        } else {
+          void navigator.clipboard
+            .writeText(osText)
+            .then(() => {
+              lastOsClipboardTextRef.current = osText;
+            })
+            .catch(() => {});
+        }
         // Returned so the document `copy`/`cut` event handler can ALSO stuff
         // e.clipboardData synchronously (deterministic OS-clipboard write).
         return osText;
@@ -2262,6 +2307,21 @@ const DirectoryPanel = memo(
     const pasteFromClipboard = useCallback(async () => {
       const clip = clipboard;
       if (!clip || clip.paths.length === 0) return;
+      // Staleness guard for the keydown path (Win/Linux), which has no
+      // ClipboardEvent to compare against — the macOS paste-event path
+      // already checked synchronously in handlePaste. readText failure
+      // (permission) → can't judge → internal clipboard stays authoritative.
+      const lastWritten = lastOsClipboardTextRef.current;
+      if (lastWritten !== null) {
+        const osNow = await navigator.clipboard.readText().catch(() => null);
+        if (osNow !== null && osNow !== lastWritten) {
+          setClipboard(null);
+          toast.info(
+            "系统剪贴板已有新内容，文件剪贴板已失效——请重新复制后粘贴",
+          );
+          return;
+        }
+      }
       const anchor =
         selectedNodes[0] ??
         (focusedPath ? nodeMetaByPath.get(focusedPath)?.data : undefined);
@@ -2372,10 +2432,28 @@ const DirectoryPanel = memo(
           ) {
             return;
           }
-          // A real text selection wins over file copy.
+          // Yield to native copy ONLY for a text selection INSIDE the tree
+          // (practically impossible — rows are select-none). Same rule as the
+          // keydown path below: a stale selection in ANOTHER pane (markdown
+          // preview, chat) must not beat an explicit file copy on the focused
+          // tree. Cross-review 0.2.33 (cc W3): this handler — the ONLY ⌘C
+          // path on macOS — yielded to any pane's selection while the keydown
+          // path documented the opposite, so the documented rule was violated
+          // exactly on the platform this handler serves.
           const sel = window.getSelection();
-          if (sel && !sel.isCollapsed) return;
-          const osText = copySelectionRef.current(mode);
+          if (
+            sel &&
+            !sel.isCollapsed &&
+            sel.anchorNode &&
+            treeContainerRef.current?.contains(sel.anchorNode)
+          ) {
+            return;
+          }
+          // setData below is the deterministic OS write — skip the async
+          // writeText so it can't land late and clobber a newer OS copy.
+          const osText = copySelectionRef.current(mode, {
+            skipAsyncOsWrite: true,
+          });
           if (osText !== null) {
             e.preventDefault();
             e.clipboardData?.setData("text/plain", osText);
@@ -2523,6 +2601,17 @@ const DirectoryPanel = memo(
         // the workspace, and preventDefault here would suppress that event
         // entirely (the tree usually has focus now that clicks focus it).
         if (action.type === "paste" && !clipboard) return;
+        // Nothing to copy → don't preventDefault (which would suppress the
+        // native copy command with no feedback — a silently swallowed
+        // Ctrl+C, the exact failure mode this feature's toasts exist to
+        // prevent). Mirrors copySelection's own node resolution.
+        if (
+          (action.type === "copy" || action.type === "cut") &&
+          selectedNodes.length === 0 &&
+          !(focusedPath && nodeMetaByPath.has(focusedPath))
+        ) {
+          return;
+        }
         e.preventDefault();
         e.stopPropagation();
 
@@ -2895,6 +2984,16 @@ const DirectoryPanel = memo(
             icon: <ClipboardPaste className="h-4 w-4" />,
             disabled: !clipboard,
             onClick: () => void pasteFromClipboard(),
+          },
+          {
+            // ⌘A is consumed by the native Edit menu on macOS (selectAll:
+            // selector — same pre-emption as ⌘C/⌘Z), and native select-all
+            // does nothing useful on select-none rows. The menu is the
+            // reachable entry point there (cross-review 0.2.33, cc W1).
+            label: "全选",
+            icon: <ListChecks className="h-4 w-4" />,
+            disabled: visibleRows.length === 0,
+            onClick: () => setSelectedNodes(visibleRows.map((r) => r.data)),
           },
           {
             // ⌘Z is consumed by the native Edit menu on macOS, so the menu

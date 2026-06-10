@@ -112,6 +112,15 @@ export function discoveredModelWritePlan(
  * saving must NOT silently narrow an unset model down to `['text']` — keep it
  * unset. Once the user touches the toggles (or the model already had an
  * explicit list), persist the explicit selection.
+ *
+ * The modality value space is OPEN (registry `coerceModalities` accepts any
+ * short lowercase token; LiteLLM commonly records `pdf` / `document`). The
+ * editor only renders the four EDITABLE_MODALITIES toggles, so any other
+ * stored modality is invisible here — it must be PRESERVED on save, not
+ * replaced away, or saving the editor silently revokes attachment types the
+ * model legitimately supports (cross-review 0.2.33, cc data-loss finding:
+ * `['text','pdf']` + toggle image → saved as `['text','image']`, sidecar
+ * `modelSupportsModality` starts rejecting PDFs).
  */
 export function resolveModalitiesToSave(
   touched: boolean,
@@ -119,5 +128,8 @@ export function resolveModalitiesToSave(
   selected: readonly EditableModality[],
 ): string[] | undefined {
   if (!touched && (!prev || prev.length === 0)) return undefined;
-  return [...selected];
+  const extras = (prev ?? []).filter(
+    (m) => !(EDITABLE_MODALITIES as readonly string[]).includes(m),
+  );
+  return [...selected, ...extras];
 }

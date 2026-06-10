@@ -82,6 +82,22 @@ describe('resolveModalitiesToSave', () => {
   it('persists for models that already had an explicit list, even untouched', () => {
     expect(resolveModalitiesToSave(false, ['text', 'image'], ['text', 'image'])).toEqual(['text', 'image']);
   });
+
+  it('preserves modalities the editor cannot render (open value space)', () => {
+    // Regression (cross-review 0.2.33, cc): the editor only shows the four
+    // EDITABLE_MODALITIES toggles, but the registry stores an open set
+    // (LiteLLM records `pdf` / `document`). Saving must merge the invisible
+    // extras back, not replace them away — losing `pdf` here makes the
+    // sidecar's modelSupportsModality start rejecting PDF attachments the
+    // model actually supports.
+    expect(
+      resolveModalitiesToSave(true, ['text', 'pdf'], ['text', 'image']),
+    ).toEqual(['text', 'image', 'pdf']);
+    // Untouched save of an explicit list round-trips the extras too.
+    expect(
+      resolveModalitiesToSave(false, ['text', 'document'], ['text']),
+    ).toEqual(['text', 'document']);
+  });
 });
 
 describe('discoveredModelWritePlan — re-adding a removed bundled preset (cross-review 0.2.32, codex)', () => {

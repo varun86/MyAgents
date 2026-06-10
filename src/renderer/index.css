@@ -198,6 +198,10 @@
   --error: #dc2626;
   --error-bg: #fee2e2;
   --error-hover: #b91c1c;
+  /* Faint error tint for focus rings / glows (mirrors --accent-warm-subtle). */
+  --error-subtle: rgba(220, 38, 38, 0.07);
+  /* #333 0-alpha 孪生色，与 --accent-warm-subtle 同步 */
+  --accent-warm-subtle-a0: rgba(194, 109, 58, 0);
   --warning: #d97706;
   --warning-bg: #fef3c7;
   --info: #4a7ab5;
@@ -310,6 +314,10 @@
   --error: #ef4444;
   --error-bg: rgba(239, 68, 68, 0.15);
   --error-hover: #dc2626;
+  /* Faint error tint for focus rings / glows (mirrors --accent-warm-subtle). */
+  --error-subtle: rgba(239, 68, 68, 0.12);
+  /* #333 0-alpha 孪生色，与 --accent-warm-subtle 同步 */
+  --accent-warm-subtle-a0: rgba(212, 128, 63, 0);
   --warning: #f59e0b;
   --warning-bg: rgba(245, 158, 11, 0.15);
   --info: #6b9fd4;

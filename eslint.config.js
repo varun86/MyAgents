@@ -260,6 +260,18 @@ export default defineConfig(
           selector: 'TemplateElement[value.raw=/\\b(?:to|from|via)-transparent\\b/]',
           message: 'Gradient stop `(to|from|via)-transparent` is forbidden (#333): `transparent` = rgba(0,0,0,0) and buggy gradient interpolation (macOS 27 beta WebKit, oklab path) renders the ramp through BLACK as a gray smear band. Fade to the same color at alpha 0 instead — use the `--*-a0` twin tokens from index.css, e.g. `to-[var(--paper-elevated-a0)]`.',
         },
+        // Same #333 hazard in the RAW CSS form — the original regressions
+        // (TabBar / SimpleChatInput / QueryNavigator) were inline
+        // `style={{ background: 'linear-gradient(..., transparent)' }}`
+        // strings, which the Tailwind-class selectors above never match.
+        {
+          selector: 'Literal[value=/(?:linear|radial|conic)-gradient\\(.*\\btransparent\\b/]',
+          message: 'CSS gradient with a `transparent` stop is forbidden (#333): `transparent` = rgba(0,0,0,0) and buggy gradient interpolation (macOS 27 beta WebKit, oklab path) renders the ramp through BLACK as a gray smear band. Fade to the same color at alpha 0 instead — use the `--*-a0` twin tokens from index.css, e.g. `linear-gradient(to right, var(--paper), var(--paper-a0))`.',
+        },
+        {
+          selector: 'TemplateElement[value.raw=/(?:linear|radial|conic)-gradient\\(.*\\btransparent\\b/]',
+          message: 'CSS gradient with a `transparent` stop is forbidden (#333): `transparent` = rgba(0,0,0,0) and buggy gradient interpolation (macOS 27 beta WebKit, oklab path) renders the ramp through BLACK as a gray smear band. Fade to the same color at alpha 0 instead — use the `--*-a0` twin tokens from index.css, e.g. `linear-gradient(to right, var(--paper), var(--paper-a0))`.',
+        },
         ...[
           '/api/files/import-base64',
           '/api/files/copy',

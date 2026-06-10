@@ -1869,8 +1869,11 @@ export async function sendExternalMessage(
   // the persist's feet, wiping the content blocks it still has to read — the
   // previous assistant reply would vanish from history/disk. Wait (bounded)
   // for finalization; on a pathological hang, proceed degraded rather than
-  // blocking the user's send forever — the per-field entry snapshots inside
-  // persistTurnResult keep the worst case to a stale-ordering write.
+  // blocking the user's send forever — persistTurnResult snapshots EVERY
+  // turn-scoped field (inbox meta, hints, context usage, content blocks,
+  // assistant text) before its first await and only resets accumulators it
+  // still owns, so the worst case is a stale-ordering write, not message
+  // loss (cross-review 0.2.33, Codex W1 closed the content-blocks gap).
   if (turnFinalization.inFlight) {
     const settled = await turnFinalization.settled(60_000);
     if (!settled) {
@@ -2714,15 +2717,28 @@ async function persistTurnResult(): Promise<void> {
     const turnDurationMs = currentTurnStartTime ? Date.now() - currentTurnStartTime : undefined;
     flushAllPending();
 
+    // Cross-review 0.2.33 (Codex W1) — snapshot THIS turn's content blocks and
+    // assistant text at the same synchronous discipline as the entry snapshots
+    // above (here = after flushAllPending, still before the first await). A
+    // degraded send (turnFinalization.settled timeout in sendExternalMessage)
+    // runs resetTurnAccumulators() during the await below; these were the LAST
+    // un-snapshotted fields, so the worst case was silent loss of the previous
+    // assistant message, not just stale ordering. The array is captured by
+    // REFERENCE on purpose: reset reassigns (`currentContentBlocks = []`), so
+    // the snapshot survives it, while in-place attachment patches during
+    // awaitInFlightSaves() still land in the captured blocks.
+    const turnContentBlocks = currentContentBlocks;
+    const turnAssistantText = currentAssistantText;
+
     // PRD 0.2.15 Review A4 fix — drain in-flight attachment saves so the
-    // placeholder attachments embedded in currentContentBlocks get patched
+    // placeholder attachments embedded in the turn's content blocks get patched
     // BEFORE we snapshot to disk. Without this await, large/slow saves land
     // their `tool_attachment_update` after `currentContentBlocks = []` reset
     // and the disk JSON keeps the "生成中" placeholder forever.
     await awaitInFlightSaves();
 
     const usageData = buildPersistedTurnUsage();
-    const turnToolCount = currentContentBlocks.filter(b => b.type === 'tool_use').length;
+    const turnToolCount = turnContentBlocks.filter(b => b.type === 'tool_use').length;
     const runtimeType = getCurrentRuntimeType();
     // turnContextUsage was snapshotted at the synchronous function entry (above) to
     // survive a concurrent turn's resetTurnAccumulators() during the await window.
@@ -2730,18 +2746,25 @@ async function persistTurnResult(): Promise<void> {
     // PRD 0.2.18 — capture reply text into local var BEFORE resetTurnAccumulators
     // clears the source. The finally block reads this for inbox reply pushback.
     if (turnInboxMeta) {
-      if (currentContentBlocks.length > 0) {
-        capturedReplyText = currentContentBlocks
+      if (turnContentBlocks.length > 0) {
+        capturedReplyText = turnContentBlocks
           .filter((b) => b.type === 'text' && typeof b.text === 'string')
           .map((b) => b.text ?? '')
           .join('\n\n')
           .trim();
       }
-      if (!capturedReplyText) capturedReplyText = currentAssistantText.trim();
+      if (!capturedReplyText) capturedReplyText = turnAssistantText.trim();
     }
 
-    if (currentContentBlocks.length > 0) {
-      const content = JSON.stringify(currentContentBlocks);
+    // Reset only what we still own: if a degraded concurrent send already ran
+    // resetTurnAccumulators(), the module global points at the NEW turn's
+    // array — resetting again would wipe that turn's accumulating state.
+    const resetIfStillOurs = () => {
+      if (currentContentBlocks === turnContentBlocks) resetTurnAccumulators();
+    };
+
+    if (turnContentBlocks.length > 0) {
+      const content = JSON.stringify(turnContentBlocks);
       allSessionMessages.push({
         id: `assistant-${Date.now()}`,
         role: 'assistant',
@@ -2751,18 +2774,18 @@ async function persistTurnResult(): Promise<void> {
         usage: usageData,
         toolCount: turnToolCount || undefined,
       });
-      resetTurnAccumulators();
-    } else if (currentAssistantText.trim()) {
+      resetIfStillOurs();
+    } else if (turnAssistantText.trim()) {
       // Fallback: no structured blocks, just plain text (e.g. CC slash commands)
       allSessionMessages.push({
         id: `assistant-${Date.now()}`,
         role: 'assistant',
-        content: currentAssistantText,
+        content: turnAssistantText,
         timestamp: new Date().toISOString(),
         durationMs: turnDurationMs,
         usage: usageData,
       });
-      resetTurnAccumulators();
+      resetIfStillOurs();
     }
 
     // Save cumulative messages to disk (saveSessionMessages uses .slice(existingCount) to append).

@@ -525,7 +525,7 @@ export default function BrowserPanel({
               className="pointer-events-none absolute inset-0"
               style={{
                 background:
-                  'radial-gradient(ellipse at 50% 38%, var(--accent-warm-subtle) 0%, transparent 60%)',
+                  'radial-gradient(ellipse at 50% 38%, var(--accent-warm-subtle) 0%, var(--accent-warm-subtle-a0) 60%)',
               }}
             />
             <div className="relative flex flex-col items-center gap-4">
