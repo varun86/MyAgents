@@ -50,6 +50,7 @@ const TaskCenter = lazy(() => import('@/pages/TaskCenter'));
  *  as the deferred-mount placeholder, so a chunk-load is never a jarring blank. */
 const PAGE_FALLBACK = <div className="h-full w-full bg-[var(--paper)]" />;
 import {
+  isProjectVisibleToUser,
   type Project,
 } from '@/config/types';
 import { type Tab, type InitialMessage, type SidecarConfigDisposition, createNewTab, getFolderName, buildChatFlipPatch, MAX_TABS } from '@/types/tab';
@@ -2595,7 +2596,7 @@ export default function App() {
           return;
         }
 
-        const projects = configProjectsRef.current.filter((p) => !p.internal);
+        const projects = configProjectsRef.current.filter(isProjectVisibleToUser);
         if (projects.length === 0) {
           toastRef.current?.error('还没有工作区，无法开始 AI 讨论');
           return;

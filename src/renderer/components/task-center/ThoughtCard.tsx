@@ -33,7 +33,7 @@ import { Popover } from '@/components/ui/Popover';
 import WorkspaceIcon from '@/components/launcher/WorkspaceIcon';
 import { useConfig } from '@/hooks/useConfig';
 import { getFolderName } from '@/types/tab';
-import type { Project } from '@/config/types';
+import { isProjectVisibleToUser, type Project } from '@/config/types';
 import type { Thought } from '@/../shared/types/thought';
 import { splitWithTagHighlights } from '@/utils/parseThoughtTags';
 import {
@@ -97,13 +97,13 @@ export function ThoughtCard({
   const discussAnchorRef = useRef<HTMLButtonElement>(null);
 
   // Workspace list for the AI-discussion picker. Internal projects
-  // (the ~/.myagents helper workspace) are hidden — a thought belongs
-  // to user work, not the diagnostic sandbox. Sorted by most-recently
-  // opened so the user's current work bubbles up.
+  // (the ~/.myagents helper workspace) and hidden system presets are hidden —
+  // a thought belongs to user work, not the diagnostic sandbox. Sorted by
+  // most-recently opened so the user's current work bubbles up.
   const { projects } = useConfig();
   const pickableWorkspaces = useMemo<Project[]>(() => {
     return projects
-      .filter((p) => !p.internal)
+      .filter(isProjectVisibleToUser)
       .slice()
       .sort((a, b) => {
         const ta = a.lastOpened ? new Date(a.lastOpened).getTime() : 0;

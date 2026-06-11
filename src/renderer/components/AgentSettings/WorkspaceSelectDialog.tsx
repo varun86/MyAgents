@@ -2,7 +2,7 @@
 import { useMemo } from 'react';
 import { X } from 'lucide-react';
 import { createPortal } from 'react-dom';
-import type { Project } from '@/config/types';
+import { isProjectVisibleToUser, type Project } from '@/config/types';
 import { getFolderName } from '@/types/tab';
 import { shortenPathForDisplay } from '@/utils/pathDetection';
 import { useCloseLayer } from '@/hooks/useCloseLayer';
@@ -18,7 +18,7 @@ export default function WorkspaceSelectDialog({ projects, onSelect, onClose }: W
   useCloseLayer(() => { onClose(); return true; }, 50);
 
   const eligibleProjects = useMemo(
-    () => projects.filter(p => !p.isAgent && !p.internal),
+    () => projects.filter(p => !p.isAgent && isProjectVisibleToUser(p)),
     [projects],
   );
 

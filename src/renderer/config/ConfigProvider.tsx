@@ -40,12 +40,13 @@ import {
     addProject as addProjectService,
     updateProject as updateProjectService,
     patchProject as patchProjectService,
-    removeProject as removeProjectService,
+    removeOrHideProject as removeOrHideProjectService,
     touchProject as touchProjectService,
 } from './services/projectService';
 import { migrateImBotConfigsToAgents, persistAgents, ensureAllProjectsHaveAgent, addAgentConfig, buildAgentForProject } from './services/agentConfigService';
 import { isTauriEnvironment } from '@/utils/browserMock';
 import { listenWithCleanup } from '@/utils/tauriListen';
+import { workspacePathsEqual } from '../../shared/workspacePath';
 
 /**
  * Normalize agents loaded from disk: ensure every agent has a `channels` array.
@@ -256,6 +257,19 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
                 await saveProjects(loadedProjects);
             }
 
+            const hiddenDefaultProject = loadedConfig.defaultWorkspacePath
+                ? loadedProjects.find(p => p.hidden === true && workspacePathsEqual(p.path, loadedConfig.defaultWorkspacePath))
+                : undefined;
+            if (hiddenDefaultProject) {
+                loadedConfig.defaultWorkspacePath = undefined;
+                await atomicModifyConfig(c => (
+                    workspacePathsEqual(c.defaultWorkspacePath, hiddenDefaultProject.path)
+                        ? { ...c, defaultWorkspacePath: undefined }
+                        : c
+                ));
+                console.log('[ConfigProvider] Cleared defaultWorkspacePath pointing at hidden workspace');
+            }
+
             // One-time cleanup: remove imBotConfigs entries whose credentials
             // now exist in agents[].channels[] (post-migration duplicates)
             // Re-read from disk in case migration cleared in-memory but didn't persist imBotConfigs
@@ -447,6 +461,10 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
         if (options.displayName) metadataPatch.displayName = options.displayName;
         if (options.templateId) metadataPatch.templateId = options.templateId;
         if (options.templateSource) metadataPatch.templateSource = options.templateSource;
+        if (project.hidden) {
+            metadataPatch.hidden = false;
+            metadataPatch.hiddenAt = undefined;
+        }
         if (Object.keys(metadataPatch).length > 0) {
             const updated = await patchProjectService(project.id, metadataPatch);
             if (updated) project = updated;
@@ -488,8 +506,21 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
     }, []);
 
     const removeProject = useCallback(async (projectId: string) => {
-        await removeProjectService(projectId);
-        setProjects((prev) => prev.filter((p) => p.id !== projectId));
+        const result = await removeOrHideProjectService(projectId);
+        if (!result) return;
+
+        if (result.action === 'hidden') {
+            setProjects((prev) => prev.map((p) => (p.id === projectId ? result.project : p)));
+        } else {
+            setProjects((prev) => prev.filter((p) => p.id !== projectId));
+        }
+
+        const newConfig = await atomicModifyConfig(c => (
+            workspacePathsEqual(c.defaultWorkspacePath, result.project.path)
+                ? { ...c, defaultWorkspacePath: undefined }
+                : c
+        ));
+        setConfig(newConfig);
     }, []);
 
     const touchProject = useCallback(async (projectId: string) => {

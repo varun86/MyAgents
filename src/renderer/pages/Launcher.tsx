@@ -24,7 +24,7 @@ import { AddWorkspaceMenu, BrandSection, RecentTasks, TemplateLibraryDialog, Wor
 const WorkspaceConfigPanel = lazy(() => import('@/components/WorkspaceConfigPanel'));
 import { useConfig } from '@/hooks/useConfig';
 import { useTaskCenterData } from '@/hooks/useTaskCenterData';
-import { type Project, type PermissionMode, type McpServerDefinition, type WorkspaceTemplate, isProviderEnabled } from '@/config/types';
+import { type Project, type PermissionMode, type McpServerDefinition, type WorkspaceTemplate, isProviderEnabled, isProjectVisibleToUser, isSystemPresetProject } from '@/config/types';
 import { CUSTOM_EVENTS } from '../../shared/constants';
 import { normalizeWorkspacePathIdentity, workspacePathsEqual } from '../../shared/workspacePath';
 import {
@@ -73,7 +73,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
     } = useConfig();
 
     // Filter out internal projects (e.g. ~/.myagents diagnostic workspace)
-    const visibleProjects = useMemo(() => projects.filter(p => !p.internal), [projects]);
+    const visibleProjects = useMemo(() => projects.filter(isProjectVisibleToUser), [projects]);
 
     // Poll agent statuses only when any project has proactive mode
     const hasAnyAgent = useMemo(() => visibleProjects.some(p => p.isAgent), [visibleProjects]);
@@ -819,9 +819,11 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
             {/* Remove Workspace Confirm Dialog */}
             {projectToRemove && (
                 <ConfirmDialog
-                    title="移除工作区"
-                    message={`确定要从列表中移除「${projectToRemove.name}」吗？此操作不会删除项目文件。`}
-                    confirmText="移除"
+                    title={isSystemPresetProject(projectToRemove) ? '隐藏默认工作区' : '移除工作区'}
+                    message={isSystemPresetProject(projectToRemove)
+                        ? `确定要隐藏「${projectToRemove.displayName || projectToRemove.name}」吗？此操作不会删除本地文件，后续可通过恢复入口重新显示。`
+                        : `确定要从列表中移除「${projectToRemove.name}」吗？此操作不会删除项目文件。`}
+                    confirmText={isSystemPresetProject(projectToRemove) ? '隐藏' : '移除'}
                     cancelText="取消"
                     confirmVariant="danger"
                     onConfirm={confirmRemoveProject}

@@ -27,6 +27,7 @@ import { useToast } from '@/components/Toast';
 import { useConfig } from '@/hooks/useConfig';
 import { listenWithCleanup } from '@/utils/tauriListen';
 import WorkspaceIcon from '@/components/launcher/WorkspaceIcon';
+import { isProjectVisibleToUser } from '@/config/types';
 import type { Task, TaskStatus } from '@/../shared/types/task';
 import { normalizeWorkspacePathIdentity, workspacePathsEqual } from '@/../shared/workspacePath';
 import { canAutoUpgrade, isBenignAlreadyLinked, upgradeLegacyCron, type LegacyCronRaw } from './legacyUpgrade';
@@ -43,6 +44,16 @@ import type { LegacyCronRow } from './views/types';
 type TaskCardLike =
   | { kind: 'task'; task: Task }
   | { kind: 'legacy-cron'; legacy: LegacyCronRow };
+
+export function shouldAddOrphanWorkspacePath(
+  path: string,
+  coveredIds: ReadonlySet<string>,
+  knownProjectIds: ReadonlySet<string>,
+  seenOrphan: ReadonlySet<string>,
+): boolean {
+  const id = normalizeWorkspacePathIdentity(path);
+  return !coveredIds.has(id) && !knownProjectIds.has(id) && !seenOrphan.has(id);
+}
 
 interface Props {
   highlightTaskId?: string | null;
@@ -411,8 +422,9 @@ export function TaskListPanel({ highlightTaskId, refreshKey, pendingIntent }: Pr
     for (const l of legacy) if (l.workspacePath) taskPathIds.add(normalizeWorkspacePathIdentity(l.workspacePath));
     const opts: SelectOption[] = [{ value: '', label: '全部工作区' }];
     const coveredIds = new Set<string>();
+    const knownProjectIds = new Set(projects.map((p) => normalizeWorkspacePathIdentity(p.path)));
     for (const p of projects) {
-      if (p.internal) continue;
+      if (!isProjectVisibleToUser(p)) continue;
       const id = normalizeWorkspacePathIdentity(p.path);
       if (!taskPathIds.has(id)) continue;
       coveredIds.add(id);
@@ -429,7 +441,7 @@ export function TaskListPanel({ highlightTaskId, refreshKey, pendingIntent }: Pr
     const seenOrphan = new Set<string>();
     const addOrphan = (path: string) => {
       const id = normalizeWorkspacePathIdentity(path);
-      if (coveredIds.has(id) || seenOrphan.has(id)) return;
+      if (!shouldAddOrphanWorkspacePath(path, coveredIds, knownProjectIds, seenOrphan)) return;
       seenOrphan.add(id);
       opts.push({
         value: path,

@@ -272,6 +272,9 @@ export interface Provider {
 /**
  * Project/workspace configuration
  */
+export type WorkspaceType = 'user' | 'system-preset';
+export type SystemPresetWorkspaceId = 'mino';
+
 export interface Project {
   id: string;
   name: string;
@@ -306,7 +309,17 @@ export interface Project {
   templateId?: string;
   /** Template source. Built-in templates can carry product-level Agent defaults. */
   templateSource?: WorkspaceTemplateSource;
+  /** Lifecycle owner. Missing means ordinary user workspace for backward compatibility. */
+  workspaceType?: WorkspaceType;
+  /** Stable ID for a system-preset workspace instance. Current preset set: mino. */
+  systemPresetId?: SystemPresetWorkspaceId;
+  /** Soft-delete flag. Hidden projects remain persisted but are excluded from user-facing lists. */
+  hidden?: boolean;
+  /** ISO timestamp for soft deletion. Diagnostic/future restore metadata only. */
+  hiddenAt?: string;
 }
+
+export type ProjectPatch = Partial<Omit<Project, 'id'>>;
 
 // ===== Workspace Template Types =====
 
@@ -336,6 +349,52 @@ export interface WorkspaceTemplate {
 }
 
 export const DEFAULT_BUNDLED_WORKSPACE_TEMPLATE_ID = 'mino';
+export const DEFAULT_SYSTEM_PRESET_WORKSPACE_ID: SystemPresetWorkspaceId = 'mino';
+
+export function isSystemPresetProject(
+  project: Pick<Project, 'workspaceType' | 'systemPresetId'> | null | undefined,
+): boolean {
+  return project?.workspaceType === 'system-preset' && !!project.systemPresetId;
+}
+
+export function isProjectVisibleToUser(
+  project: Pick<Project, 'internal' | 'hidden'> | null | undefined,
+): boolean {
+  return !!project && project.internal !== true && project.hidden !== true;
+}
+
+export function getSystemPresetProjectMetadata(
+  presetId: SystemPresetWorkspaceId,
+): ProjectPatch {
+  switch (presetId) {
+    case 'mino':
+      return {
+        workspaceType: 'system-preset',
+        systemPresetId: 'mino',
+        icon: 'lightning',
+        displayName: 'Mino',
+        templateId: DEFAULT_BUNDLED_WORKSPACE_TEMPLATE_ID,
+        templateSource: 'builtin',
+      };
+  }
+}
+
+export function getSystemPresetProjectMetadataPatch(
+  project: Project,
+  presetId: SystemPresetWorkspaceId,
+): ProjectPatch {
+  const metadata = getSystemPresetProjectMetadata(presetId);
+  const patch: ProjectPatch = {};
+
+  if (metadata.workspaceType && project.workspaceType !== metadata.workspaceType) patch.workspaceType = metadata.workspaceType;
+  if (metadata.systemPresetId && project.systemPresetId !== metadata.systemPresetId) patch.systemPresetId = metadata.systemPresetId;
+  if (metadata.templateId && project.templateId !== metadata.templateId) patch.templateId = metadata.templateId;
+  if (metadata.templateSource && project.templateSource !== metadata.templateSource) patch.templateSource = metadata.templateSource;
+  if (!project.icon && metadata.icon) patch.icon = metadata.icon;
+  if (!project.displayName && metadata.displayName) patch.displayName = metadata.displayName;
+
+  return patch;
+}
 
 /**
  * Preset workspace templates bundled with the app

@@ -27,6 +27,7 @@ import OverlayBackdrop from '@/components/OverlayBackdrop';
 import { useCloseLayer } from '@/hooks/useCloseLayer';
 import { useConfig } from '@/hooks/useConfig';
 import { useToast } from '@/components/Toast';
+import { isProjectVisibleToUser } from '@/config/types';
 import { taskCreateDirect, taskRun, taskWriteDoc } from '@/api/taskCenter';
 import NotificationConfigEditor from '@/components/task-center/NotificationConfigEditor';
 import { splitWithTagHighlights } from '@/utils/parseThoughtTags';
@@ -89,7 +90,7 @@ export function DispatchTaskDialog({
   }, 200);
 
   const visibleProjects = useMemo(
-    () => projects.filter((p) => !p.internal),
+    () => projects.filter(isProjectVisibleToUser),
     [projects],
   );
 
