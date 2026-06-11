@@ -74,6 +74,7 @@ const JSON_EVENTS = new Set([
     'chat:runtime-diagnostics', // Issue #194 — external-runtime self-report (auth/features/MCP/apps/effective env)
     'plugin:install-progress', // PRD 0.2.17 — Claude plugin install progress phases
     'plugins:changed', // PRD 0.2.17 — plugin install/uninstall/toggle invalidation signal
+    'chat:messages-retracted', // SDK refusal-fallback retraction (0.3.162+ protocol) — evict refused-leg bubbles by message id
 ]);
 
 // Event types that can be JSON or plain string

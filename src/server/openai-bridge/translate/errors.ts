@@ -10,10 +10,14 @@ function statusToErrorType(status: number): string {
     case 403: return 'permission_error';
     case 404: return 'not_found_error';
     case 429: return 'rate_limit_error';
+    // 529 is overloaded_error on the Anthropic wire (SDK 0.3.150+ classifies
+    // it as 'overloaded', distinct from 429 'rate_limit'). Mapping it to the
+    // generic api_error would hide the overload signal from the SDK's retry
+    // classification.
+    case 529: return 'overloaded_error';
     case 500:
     case 502:
     case 503:
-    case 529:
       return 'api_error';
     default:
       return status >= 500 ? 'api_error' : 'invalid_request_error';

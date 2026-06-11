@@ -22,6 +22,7 @@ import { buildForkUuidRemap, remapStoredSdkUuids } from './utils/fork-remap';
 import { decideInFlightActionOnResult } from './utils/inflight-terminal';
 import { shouldBlockToolInPlanMode, planModeDenyMessage, isPlanModeInEffect, PLAN_MODE_READONLY_TOOLS, PLAN_MODE_HOST_INTERACTION_TOOLS, applyPermissionModeSelection, computePlanExitState, computeRestoredPlanState } from './utils/plan-mode-gate';
 import { isEmptySuccessfulSdkResult, isRecoveredAssistantMessageError, findTurnUsageStampIndex } from './utils/sdk-turn-outcome';
+import { planRetraction } from './utils/message-retraction';
 import { diagnoseSdkSubprocessFailure } from './utils/sdk-subprocess-diagnostics';
 import { InactivityWatchdog } from './utils/inactivity-watchdog';
 import { WATCHDOG_RESUME_REMINDER, planWatchdogAutoResume, shouldAdoptPendingContinueIntoScheduledAutoResume, shouldConsumePendingContinueAfterAbort, shouldDeferPendingContinueToScheduledAutoResume, shouldPrependWatchdogAutoResume } from './utils/watchdog-auto-resume';
@@ -51,6 +52,7 @@ import { resolveAuthHeaders, onTokenChange, startTokenRefreshScheduler } from '.
 import type { ToolInput } from '../renderer/types/chat';
 import { parsePartialJson } from '../shared/parsePartialJson';
 import { deriveSessionTitle } from '../shared/sessionTitle';
+import { workspacePathsEqual } from '../shared/workspacePath';
 import { computeContextUsage } from '../shared/contextUsage';
 import { resolveContextOccupancyTokens } from './utils/context-occupancy';
 import type { SystemInitInfo } from '../shared/types/system';
@@ -400,6 +402,40 @@ export function syncProjectUserConfig(projectDir: string): void {
       }
     } catch { /* ignore */ }
   }
+
+  // The symlinks above just changed what's on disk, but the live SDK session
+  // only scans skills at startup — without a reload, a skill installed
+  // mid-session is visible in the UI (Rust scans disk) yet unusable by the AI
+  // until the next session restart. Putting the reload HERE (not at each CRUD
+  // call site) makes every present and future "refresh project config" path
+  // pick it up automatically, with the order guaranteed correct: symlinks
+  // first, SDK rescan second. No-ops when no SDK session is alive (session
+  // startup path) or when the synced dir isn't this session's workspace.
+  reloadSessionSkillsAfterSync(projectDir);
+}
+
+/**
+ * Fire-and-forget mid-session skill rescan (SDK 0.3.169+ reloadSkills control
+ * request). Failure degrades to the pre-0.2.34 behavior — skills refresh on
+ * the next session — so it never blocks the CRUD response that triggered the
+ * sync. External runtimes (Claude Code / Codex / Gemini CLI) have no such
+ * control channel; they rescan on their next session naturally.
+ */
+function reloadSessionSkillsAfterSync(syncedDir: string): void {
+  if (!querySession) return;
+  // External runtimes never populate querySession, so this guard is
+  // belt-and-suspenders — kept explicit per the external-routing red line.
+  if (isExternalRuntime(getCurrentRuntimeType())) return;
+  // Another workspace's dir was synced — this session's skill view is unaffected.
+  if (!agentDir || !workspacePathsEqual(syncedDir, agentDir)) return;
+  querySession.reloadSkills()
+    .then(res => {
+      console.log(`[agent] skills reloaded mid-session (${res.skills.length} skill commands)`);
+    })
+    .catch(err => {
+      console.warn('[agent] reloadSkills failed — skills will refresh on next session:',
+        err instanceof Error ? err.message : err);
+    });
 }
 
 // (issue #174) `starting` separates "subprocess launched, awaiting system_init"
@@ -673,6 +709,28 @@ async function awaitSessionTermination(timeoutMs = 10_000, label = ''): Promise<
 
 let isInterruptingResponse = false;
 let isStreamingMessage = false;
+// Every `system` subtype defined in SDK 0.3.173 (sdk.d.ts) — handled here or
+// deliberately untouched. A subtype outside this set means a NEWER SDK started
+// emitting a message kind we have never seen; the loop logs it once per
+// process instead of letting it vanish silently. Update this set when bumping
+// the SDK (grep sdk.d.ts for `type: 'system'` blocks).
+const KNOWN_SYSTEM_SUBTYPES = new Set([
+  'api_retry', 'commands_changed', 'compact_boundary', 'elicitation_complete',
+  'files_persisted', 'hook_progress', 'hook_response', 'hook_started', 'init',
+  'local_command_output', 'memory_recall', 'mirror_error',
+  'model_refusal_fallback', 'notification', 'permission_denied',
+  'plugin_install', 'session_state_changed', 'status', 'task_notification',
+  'task_progress', 'task_started', 'task_updated', 'thinking_tokens',
+]);
+const warnedUnknownSystemSubtypes = new Set<string>();
+// Top-level half of the same sentinel: every `type` value an SDKMessage union
+// member carries in 0.3.173. Verified 1:1 against sdk.d.ts at upgrade time
+// (the system-typed members are covered by KNOWN_SYSTEM_SUBTYPES above).
+const KNOWN_MESSAGE_TYPES = new Set([
+  'assistant', 'user', 'result', 'system', 'stream_event', 'rate_limit_event',
+  'auth_status', 'tool_progress', 'tool_use_summary', 'prompt_suggestion',
+]);
+const warnedUnknownMessageTypes = new Set<string>();
 // Post-interrupt turn-completion signal: resolves when for-await loop receives a `result` message.
 // Used by interruptCurrentResponse() to verify the SDK subprocess actually stopped after interrupt().
 let postInterruptTurnEndResolve: (() => void) | null = null;
@@ -4858,6 +4916,75 @@ function ensureAssistantMessage(): MessageWire {
   return assistant;
 }
 
+/**
+ * Apply an SDK retraction (refusal-fallback protocol, SDK 0.3.162+) to the
+ * in-memory session state and notify the frontend. Idempotent — both
+ * channels (`model_refusal_fallback.retracted_message_uuids` and the
+ * replacement assistant's `supersedes`) may name the same uuids.
+ *
+ * Must run BEFORE the replacement leg's content is appended: when the refused
+ * streaming bubble is evicted, isStreamingMessage resets so the retry starts a
+ * fresh bubble instead of concatenating refused + replacement content.
+ */
+function applyMessageRetraction(retractedUuids: readonly string[] | undefined, source: string): void {
+  if (!retractedUuids || retractedUuids.length === 0) return;
+  // fallbackToStreamingTail: a refusal cuts the stream possibly BEFORE any
+  // final assistant frame — the refused bubble then has no (or a stale)
+  // sdkUuid and uuid matching alone misses it. The open stream at retraction
+  // time IS the refused leg by protocol, so evict the tail too. Passing the
+  // live flag also keeps the double-channel replay idempotent: the first
+  // channel resets isStreamingMessage, so the second sees fallback=false and
+  // already-evicted uuids → empty plan → no second broadcast.
+  const plan = planRetraction(messages, retractedUuids, { fallbackToStreamingTail: isStreamingMessage });
+  if (plan.removedMessageIds.length > 0) {
+    const removed = new Set(plan.removedMessageIds);
+    if (plan.removedStreamingTail) {
+      isStreamingMessage = false;
+    }
+    // Persistence-cursor invariant (same surgery discipline as rewind/fork):
+    // doPersistMessagesToStorage() is cursor-based — persistedSessionMessageCache
+    // mirrors messages[0, lastPersistedIndex). Mid-turn persists (queued-command
+    // echo, local-command output) can move the cursor past a refused bubble, so
+    // splicing without re-aligning would leave the cache holding the refused
+    // message forever AND drop a legitimate message into the dead zone below
+    // the cursor where it never persists. Splice both arrays in lockstep and
+    // pull the cursor back by the number of removed entries below it.
+    let removedBelowCursor = 0;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (!removed.has(messages[i].id)) continue;
+      if (i < lastPersistedIndex) removedBelowCursor++;
+      if (i < persistedSessionMessageCache.length) persistedSessionMessageCache.splice(i, 1);
+      messages.splice(i, 1);
+    }
+    lastPersistedIndex -= removedBelowCursor;
+    // Live frontend streaming bubbles use client-generated ids that never
+    // match server messageSequence ids mid-turn (see the message-complete
+    // assistant_message_id piggyback) — the id list below only evicts
+    // RESTORED-history bubbles. The live refused bubble is evicted via
+    // retractedStreamingTail, which the renderer honors unconditionally.
+    broadcast('chat:messages-retracted', {
+      messageIds: plan.removedMessageIds,
+      retractedStreamingTail: plan.removedStreamingTail,
+    });
+    if (removedBelowCursor > 0) {
+      // Refused content already reached disk via a mid-turn persist — converge
+      // now (shrink-rewrite path) instead of leaving it until the next persist.
+      void persistMessagesToStorage();
+    }
+  } else if (retractedUuids.length > 0 && source === 'model_refusal_fallback') {
+    // Retraction named uuids but nothing matched and no stream was open —
+    // surface it: this is the observable signal for a protocol/mapping gap.
+    console.warn(`[agent] ${source}: retraction matched nothing (${retractedUuids.length} uuid(s) named)`);
+  }
+  // Retracted uuids no longer exist in the SDK transcript — drop them from the
+  // rewind/fork anchor sets so resumeSessionAt/fork never target a dead uuid.
+  for (const uuid of retractedUuids) {
+    currentSessionUuids.delete(uuid);
+    liveSessionUuids.delete(uuid);
+  }
+  console.log(`[agent] ${source}: retracted ${plan.removedMessageIds.length} message(s) / ${retractedUuids.length} uuid(s)`);
+}
+
 function ensureContentArray(message: MessageWire): ContentBlock[] {
   if (typeof message.content === 'string') {
     const contentArray: ContentBlock[] = [];
@@ -8805,6 +8932,18 @@ async function startStreamingSession(preWarm = false): Promise<void> {
       settingSources: buildSettingSources(),
       settings: {
         cleanupPeriodDays: claudeTranscriptCleanupPeriodDays,
+        // The Artifact tool (SDK 0.3.16x+) publishes HTML/MD to claude.ai —
+        // an outward data flow MyAgents has not product-decided to expose.
+        // Keep the tool surface frozen; revisit as its own feature if wanted.
+        disableArtifact: true,
+        // CC's own bundled skills duplicate the skill set MyAgents ships and
+        // seeds itself (bundled-skills/ → ~/.myagents/skills → <cwd>/.claude/skills
+        // symlinks): docx/pdf/pptx/xlsx/skill-creator all collide. Disabling
+        // removes the duplicate listings + their per-turn context cost; our
+        // seeded copies load via .claude/skills/ which this flag does NOT
+        // touch. Built-in slash commands stay typable (programmatic /compact
+        // unaffected) — they are only hidden from the model.
+        disableBundledSkills: true,
       },
       // Permission mode mapping (uses mapToSdkPermissionMode):
       // - auto → acceptEdits (auto-accept edits, check others via canUseTool)
@@ -8894,8 +9033,23 @@ async function startStreamingSession(preWarm = false): Promise<void> {
       // promote the next pending item. Without this flag the CLI silently
       // consumes queued commands and we have no mid-turn promote signal.
       extraArgs: { 'replay-user-messages': null } as Record<string, string | null>,
+      // Grep/Glob MUST be referenced here: since SDK 0.3.162 native builds default
+      // to embedded Bash find/grep search and do NOT register the dedicated
+      // Grep/Glob tools unless they are named in `tools` or `allowedTools`.
+      // Without them the model searches via Bash, which (a) the plan-mode
+      // PreToolUse gate denies (PLAN_MODE_READONLY_TOOLS has Grep/Glob, not
+      // Bash) — plan mode loses search entirely — and (b) triggers permission
+      // prompts for plain searches in default mode. Both are read-only tools,
+      // so auto-approving matches the existing getPermissionRules() semantics.
+      // 'Task' is appended when sub-agents are injected so the model can delegate.
+      allowedTools: [
+        'Grep',
+        'Glob',
+        ...(currentAgentDefinitions && Object.keys(currentAgentDefinitions).length > 0
+          ? ['Task']
+          : []),
+      ],
       // Sub-agents: inject custom agent definitions if configured
-      // When agents are injected, ensure 'Task' tool is in allowedTools so the model can delegate
       // Each sub-agent's `model` runs through applyContextWindowSuffix so a sub-agent
       // pinned to a 1M model gets the [1m] tag independently of the main session's
       // model (the parent could be on a 200K model, the sub-agent on a 1M one,
@@ -8909,7 +9063,6 @@ async function startStreamingSession(preWarm = false): Promise<void> {
                 a.model ? { ...a, model: applyContextWindowSuffix(a.model) } : a,
               ])
             ),
-            allowedTools: ['Task'],
           }
         : {}),
       // disallowedTools: group chat deny list + IM-incompatible UI-interaction tools
@@ -9978,6 +10131,40 @@ async function startStreamingSession(preWarm = false): Promise<void> {
             delayMs: retryMsg.retry_delay_ms,
           });
         }
+
+        // Refusal-fallback retraction (SDK 0.3.162+): the primary model ended
+        // the stream with stop_reason "refusal"; the SDK retries the turn once
+        // on a fallback model and names the refused leg's messages for
+        // eviction. Without this, the refused partial stays painted AND the
+        // retry's content concatenates onto the same streaming bubble.
+        // retracted_message_uuids is the complete audit record; the
+        // replacement assistant's `supersedes` (handled in the assistant
+        // branch) overlaps it — both paths are idempotent by design.
+        if (retryMsg.subtype === 'model_refusal_fallback') {
+          const rf = sdkMessage as {
+            original_model?: string;
+            fallback_model?: string;
+            api_refusal_category?: string | null;
+            retracted_message_uuids?: string[];
+          };
+          console.warn(`[agent] model refusal fallback: ${rf.original_model} → ${rf.fallback_model}` +
+            (rf.api_refusal_category ? ` (category=${rf.api_refusal_category})` : ''));
+          applyMessageRetraction(rf.retracted_message_uuids, 'model_refusal_fallback');
+        }
+
+        // Sentinel for system message kinds added by FUTURE SDK versions.
+        // The set below enumerates every system subtype in SDK 0.3.173
+        // (handled or deliberately untouched) — a subtype outside it means the
+        // SDK started emitting something we have never seen. Without this log
+        // line, new message kinds vanish silently (the pre-0.3.173 default,
+        // which is how commands_changed/model_refusal_fallback would have been
+        // missed). Warn once per subtype per process to stay grep-able without
+        // spamming every turn.
+        const sysSubtype = retryMsg.subtype;
+        if (sysSubtype && !KNOWN_SYSTEM_SUBTYPES.has(sysSubtype) && !warnedUnknownSystemSubtypes.has(sysSubtype)) {
+          warnedUnknownSystemSubtypes.add(sysSubtype);
+          console.warn(`[agent][sdk] unknown system message subtype '${sysSubtype}' (new SDK message kind?) — ignored. Check sdk.d.ts for its contract.`);
+        }
       }
 
       // Skip error extraction for api_retry — its .error field describes why the SDK
@@ -10476,6 +10663,17 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           }
         }
       } else if (sdkMessage.type === 'assistant') {
+        // Refusal-fallback supersede (SDK 0.3.162+): this assistant message is
+        // the canonical replacement for previously-delivered messages of a
+        // refused leg. Evict them BEFORE ensureAssistantMessage() — eviction
+        // resets isStreamingMessage when it removes the refused streaming
+        // bubble, so the replacement starts a fresh bubble instead of
+        // concatenating onto refused content. Idempotent with the
+        // model_refusal_fallback notice that usually precedes this message.
+        const supersedes = (sdkMessage as { supersedes?: string[] }).supersedes;
+        if (supersedes && supersedes.length > 0) {
+          applyMessageRetraction(supersedes, 'assistant.supersedes');
+        }
         // Track SDK assistant UUID for resumeSessionAt / rewindFiles
         const currentAssistant = ensureAssistantMessage();
         // 始终更新为最新的 UUID — SDK 一个回合可能输出多条 assistant 消息
@@ -11118,6 +11316,13 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           abortPersistentSession();
           schedulePreWarm();
         }
+      } else if (!KNOWN_MESSAGE_TYPES.has(sdkMessage.type) && !warnedUnknownMessageTypes.has(sdkMessage.type)) {
+        // Top-level half of the unknown-message sentinel (the system-subtype
+        // half lives in the system block above): a type outside the 0.3.173
+        // union means a NEWER SDK started emitting a message kind this loop
+        // has never seen — log once instead of letting it vanish silently.
+        warnedUnknownMessageTypes.add(sdkMessage.type);
+        console.warn(`[agent][sdk] unknown SDK message type '${sdkMessage.type}' (new SDK message kind?) — ignored. Check sdk.d.ts for its contract.`);
       }
     }
   } catch (error) {

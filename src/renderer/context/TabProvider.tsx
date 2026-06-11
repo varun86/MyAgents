@@ -1359,6 +1359,38 @@ export default function TabProvider({
                 break;
             }
 
+            case 'chat:messages-retracted': {
+                // SDK refusal-fallback retraction (0.3.162+). Two id spaces:
+                // RESTORED-history bubbles carry server messageSequence ids →
+                // evicted via the id list. LIVE bubbles carry client Date.now()
+                // ids that never match server ids mid-turn (same reason
+                // message-complete piggybacks assistant_message_id), so the
+                // refused streaming bubble is evicted via the server-computed
+                // retractedStreamingTail flag instead. Idempotent — unknown
+                // ids no-op, and the no-op path preserves array identity so
+                // Virtuoso doesn't reconcile an identical list.
+                const payload = data as { messageIds?: string[]; retractedStreamingTail?: boolean } | null;
+                const ids = payload?.messageIds;
+                if (ids && ids.length > 0) {
+                    const idSet = new Set(ids);
+                    setHistoryMessages(prev =>
+                        prev.some(m => idSet.has(m.id)) ? prev.filter(m => !idSet.has(m.id)) : prev
+                    );
+                }
+                if (payload?.retractedStreamingTail) {
+                    setStreamingMessage(null);
+                    isStreamingRef.current = false;
+                    // Un-revealed refused text must not leak into the
+                    // replacement bubble (mirrors the reset-callback reveal
+                    // cleanup; loop-stop inlined for the same TDZ reason).
+                    pendingTextRef.current = '';
+                    if (revealRafRef.current != null) { cancelAnimationFrame(revealRafRef.current); revealRafRef.current = null; }
+                    revealAccRef.current = 0;
+                    revealLastRef.current = 0;
+                }
+                break;
+            }
+
             case 'chat:status': {
                 const payload = data as { sessionState: SessionState } | null;
                 if (payload?.sessionState) {
