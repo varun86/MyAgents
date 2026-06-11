@@ -92,6 +92,7 @@
   3. 对照 Mac（应平滑）。
 - **确认后的修法（复用既有隐藏机制）**：代码已在 `isDraggingSplit` 时隐藏 webview（`BrowserPanel.tsx:262`）。把同一 `shouldShow=false` 门控扩展到"开栏过渡进行中"（监听 chat-area 的 `transitionrun`/`transitionend` 或复用 300ms 窗口），过渡中显示 paper 占位、`transitionend` 时**一次**权威 `cmd_browser_resize`。若 Mac 上隐藏导致观感变差，则按平台门控（仅 Windows 启用隐藏）。
 - **D 不变量**：Mac 开栏观感不回退；拖拽分栏（`isDraggingSplit`）现有行为不变；最终 bounds 精确。
+- **⚠️ #339 后注（v0.2.34）**：上面"`transitionend` 时一次权威 resize"的方向已被否决——#339 证明任何"等布局稳定后采样一次"的一次性机制都会被未建模的运动源（工作区 overlay 翻转的纯位移、`%` 宽度对窗口尺寸的重解析）漏掉，把 webview 永久停在中间帧。现行实现是 `BrowserPanel.tsx` 的**常驻逐帧 geometry reconciler**（webview 存活+可见期间每帧对账 rect ↔ 上次送达值，变了才 invoke、in-flight 串行化）。W4 的撕裂缓解如需做，只能做"过渡中隐藏"侧（suspension 已有），**不要**回到 transitionend 单次采样。
 
 ---
 

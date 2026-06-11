@@ -14,7 +14,7 @@ use tauri::{
 };
 
 use std::path::Path;
-use crate::ulog_info;
+use crate::{ulog_info, ulog_warn};
 
 /// User-Agent for the embedded browser webview.
 ///
@@ -482,8 +482,25 @@ pub async fn cmd_browser_resize(
         .get_webview(&session.webview_label)
         .ok_or_else(|| "Webview not found".to_string())?;
 
-    let _ = webview.set_position(LogicalPosition::new(x, y));
-    let _ = webview.set_size(LogicalSize::new(width, height));
+    // Propagate (don't swallow) native geometry failures: the renderer's
+    // reconciler marks bounds as synced when this command resolves, so a
+    // silently-dropped set_position/set_size would park the OS webview at
+    // stale bounds with no retry scheduled and zero diagnostic trail (issue
+    // #339 post-mortem). Returning Err makes the renderer clear its synced
+    // marker and retry on the next frame. Errors are exceptional (webview
+    // teardown races), so the log cannot spam.
+    webview
+        .set_position(LogicalPosition::new(x, y))
+        .map_err(|e| {
+            ulog_warn!("[browser] set_position({}, {}) failed for tab {}: {}", x, y, tab_id, e);
+            format!("set_position failed: {e}")
+        })?;
+    webview
+        .set_size(LogicalSize::new(width, height))
+        .map_err(|e| {
+            ulog_warn!("[browser] set_size({}x{}) failed for tab {}: {}", width, height, tab_id, e);
+            format!("set_size failed: {e}")
+        })?;
     Ok(())
 }
 
@@ -508,8 +525,12 @@ pub async fn cmd_browser_show(
         .ok_or_else(|| "Webview not found".to_string())?;
 
     // Restore position and show
-    let _ = webview.set_position(LogicalPosition::new(session.last_x, session.last_y));
-    let _ = webview.set_size(LogicalSize::new(session.last_width, session.last_height));
+    if let Err(e) = webview.set_position(LogicalPosition::new(session.last_x, session.last_y)) {
+        ulog_warn!("[browser] SHOW set_position failed for tab {}: {}", tab_id, e);
+    }
+    if let Err(e) = webview.set_size(LogicalSize::new(session.last_width, session.last_height)) {
+        ulog_warn!("[browser] SHOW set_size failed for tab {}: {}", tab_id, e);
+    }
     let _ = webview.show();
     session.visible = true;
     ulog_info!("[browser] SHOW webview '{}' at ({},{}) {}x{}", session.webview_label, session.last_x, session.last_y, session.last_width, session.last_height);

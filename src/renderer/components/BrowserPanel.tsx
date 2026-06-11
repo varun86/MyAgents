@@ -17,7 +17,7 @@ import { ChevronLeft, ChevronRight, Code2, RotateCw, ExternalLink, Loader2, Glob
 import { openExternal } from '@/utils/openExternal';
 import {
   BROWSER_BLANK_URL,
-  browserBoundsEqual,
+  shouldSyncBrowserBounds,
   toUsableBrowserBounds,
   type BrowserBounds,
 } from '@/components/browserConstants';
@@ -43,11 +43,6 @@ interface BrowserPanelProps {
    * drive workspace.
    */
   workspace?: string | null;
-  /**
-   * Changes when Chat performs layout moves that may affect the panel's x/y
-   * without changing its width/height (for example workspace side-panel ↔ overlay).
-   */
-  layoutSignature?: string | number;
   onBrowserCreated: () => void;
   onCreateFailed: () => void;
   onClose: () => void;
@@ -72,7 +67,6 @@ export default function BrowserPanel({
   browserAlive,
   sourceFile,
   workspace,
-  layoutSignature,
   onBrowserCreated,
   onCreateFailed,
   onClose,
@@ -122,6 +116,13 @@ export default function BrowserPanel({
   // Track the last URL we told the webview to load
   const lastRequestedUrlRef = useRef<string | null>(null);
   const lastSyncedBoundsRef = useRef<BrowserBounds | null>(null);
+  // Resize-invoke serialization marker. A ref (not effect-local state) so it
+  // survives reconciler effect restarts: if visibility toggles while a resize
+  // is pending, the restarted loop must keep deferring until that invoke
+  // settles — two in-flight resizes have no ordering guarantee on the Rust
+  // side, and the older one landing last would park the webview on stale
+  // bounds that the ref-bookkeeping believes are current.
+  const resizeInFlightRef = useRef(false);
 
   const readUsableBounds = useCallback((): BrowserBounds | null => {
     const el = containerRef.current;
@@ -129,33 +130,11 @@ export default function BrowserPanel({
     return toUsableBrowserBounds(el.getBoundingClientRect());
   }, []);
 
-  const syncBrowserBounds = useCallback((force = false) => {
-    const bounds = readUsableBounds();
-    if (!bounds) return;
-    if (!force && lastSyncedBoundsRef.current && browserBoundsEqual(lastSyncedBoundsRef.current, bounds)) {
-      return;
-    }
-    lastSyncedBoundsRef.current = bounds;
-    invoke('cmd_browser_resize', {
-      tabId,
-      x: bounds.x,
-      y: bounds.y,
-      width: bounds.width,
-      height: bounds.height,
-    }).catch(() => {});
-  }, [readUsableBounds, tabId]);
-
   // ── Create or navigate webview when url prop changes ──
   useEffect(() => {
     if (!url) return;
-    // Native child webviews do not participate in the parent CSS width
-    // transition on Windows. Wait for the split panel to settle before create
-    // or navigate so the first native geometry is the final panel geometry.
-    if (isSplitTransitioning) return;
     let cancelled = false;
     let rafId = 0;
-    let lastSample: BrowserBounds | null = null;
-    let stableFrames = 0;
 
     const createWithBounds = (bounds: BrowserBounds) => {
       creatingRef.current = true;
@@ -195,31 +174,25 @@ export default function BrowserPanel({
         .finally(() => { creatingRef.current = false; });
     };
 
-    const waitForStableBounds = () => {
+    const waitForUsableBounds = () => {
       if (cancelled || creatingRef.current) return;
       const bounds = readUsableBounds();
       if (bounds) {
-        if (lastSample && browserBoundsEqual(lastSample, bounds)) {
-          stableFrames += 1;
-        } else {
-          lastSample = bounds;
-          stableFrames = 0;
-        }
-
-        if (stableFrames >= 1) {
-          createWithBounds(bounds);
-          return;
-        }
+        createWithBounds(bounds);
+        return;
       }
-      rafId = requestAnimationFrame(waitForStableBounds);
+      rafId = requestAnimationFrame(waitForUsableBounds);
     };
 
     if (!browserAlive && !creatingRef.current && isVisible) {
-      // The container may have a real size while its viewport origin is still
-      // moving (workspace side-panel → overlay + split width transition, #329).
-      // Wait until the full rect is usable and stable across two frames before
-      // seeding Rust's native child-webview geometry cache.
-      waitForStableBounds();
+      // Create at the first usable rect (#290 degenerate-bounds floor). A
+      // mid-transition position is fine here: the geometry reconciler below
+      // converges the native webview onto the real container rect within a
+      // frame of `browserAlive` flipping true. The previous "wait for the
+      // rect to hold still across N frames" dance (a8cd4f47) is gone — a
+      // momentarily-stable sample says nothing about whether the layout will
+      // move again (#339), so create-time precision cannot be load-bearing.
+      waitForUsableBounds();
     } else if (browserAlive && url !== lastRequestedUrlRef.current) {
       lastRequestedUrlRef.current = url;
       invoke('cmd_browser_navigate', { tabId, url }).catch(() => {});
@@ -229,7 +202,7 @@ export default function BrowserPanel({
       cancelled = true;
       if (rafId) cancelAnimationFrame(rafId);
     };
-  }, [url, browserAlive, isVisible, isSplitTransitioning, tabId, onBrowserCreated, onCreateFailed, readUsableBounds]);
+  }, [url, browserAlive, isVisible, tabId, onBrowserCreated, onCreateFailed, readUsableBounds]);
 
   // ── Listen for URL/loading events from Rust ──
   useEffect(() => {
@@ -258,59 +231,64 @@ export default function BrowserPanel({
     return () => ac.abort();
   }, [browserAlive, tabId]);
 
-  // ── ResizeObserver ──
+  // ── Geometry reconciler (issue #339) ──
+  //
+  // Single always-on loop owning the invariant: while the webview is alive
+  // and this panel's tab is visible, the native webview bounds converge onto
+  // the container's DOM rect — no matter what moved it, or when.
+  //
+  // This replaces the previous one-shot mechanisms (create-time stable-frame
+  // wait, ResizeObserver, layoutSignature-keyed track-until-stable pump, show
+  // force-sync). Each of those stopped sampling once it believed the layout
+  // had settled, but the set of motion sources is open-ended — workspace
+  // overlay flips move x without resizing, %-widths re-resolve after window
+  // resizes, the 300ms width transition outlives timer-based gates — so the
+  // last delivered sample could be a mid-flight rect with nothing scheduled
+  // to ever run again (#290 → #329 → #339 are all instances of this class).
+  // A frame-paced reconciler has no "settled" heuristic to get wrong: one
+  // getBoundingClientRect per frame (≈μs, read-after-layout), an invoke only
+  // when the rect actually changed, serialized so native updates stay
+  // ordered. Same strategy as floating-ui's autoUpdate({animationFrame}).
+  //
+  // Runs even while the webview is suspension-hidden (drag / transition):
+  // cmd_browser_resize updates Rust's cached geometry on hidden webviews, so
+  // the next SHOW restores the current rect, not a stale one.
   useEffect(() => {
-    const el = containerRef.current;
-    if (!el || !browserAlive) return;
-    if (isSplitTransitioning) return;
-
-    const syncBounds = () => syncBrowserBounds();
-    const observer = new ResizeObserver(syncBounds);
-    observer.observe(el);
-    window.addEventListener('resize', syncBounds);
-    syncBrowserBounds();
-
-    return () => {
-      observer.disconnect();
-      window.removeEventListener('resize', syncBounds);
-    };
-  }, [browserAlive, isSplitTransitioning, syncBrowserBounds]);
-
-  // Track-until-stable resync (cross-review 0.2.32): a layoutSignature change
-  // (workspace panel open/close, overlay flip) can MOVE the panel without
-  // resizing it — an x/y-only animated move never fires ResizeObserver, and
-  // the previous fixed 8-frame pump (~133ms @60fps) stopped mid-way through
-  // the 300ms layout transition, leaving the native webview at a stale origin
-  // until some other trigger fired. Mirror the create path's stable-frames
-  // predicate instead: keep sampling until the rect holds still for
-  // STABLE_FRAMES consecutive frames, hard-capped as a runaway bound.
-  useEffect(() => {
-    if (!browserAlive || !isVisible || isSplitTransitioning) return;
+    if (!browserAlive || !isVisible) return;
     let rafId = 0;
-    let frames = 0;
-    let stable = 0;
-    let lastSample: BrowserBounds | null = null;
-    const STABLE_FRAMES = 3;
-    const HARD_CAP_FRAMES = 40; // ~660ms @60fps — outlives the 300ms transition with margin
+    let disposed = false;
     const tick = () => {
-      syncBrowserBounds();
+      if (disposed) return;
       const bounds = readUsableBounds();
-      if (bounds && lastSample && browserBoundsEqual(lastSample, bounds)) {
-        stable += 1;
-      } else {
-        stable = 0;
+      if (shouldSyncBrowserBounds(lastSyncedBoundsRef.current, bounds, resizeInFlightRef.current)) {
+        resizeInFlightRef.current = true;
+        lastSyncedBoundsRef.current = bounds;
+        invoke('cmd_browser_resize', {
+          tabId,
+          x: bounds.x,
+          y: bounds.y,
+          width: bounds.width,
+          height: bounds.height,
+        })
+          .catch(() => {
+            // Failed delivery must not be remembered as synced — clear so the
+            // next frame retries (invoke latency naturally paces retries).
+            // Rust propagates native set_position/set_size failures as Err,
+            // so this also covers "IPC succeeded but geometry didn't apply".
+            lastSyncedBoundsRef.current = null;
+          })
+          .finally(() => {
+            resizeInFlightRef.current = false;
+          });
       }
-      if (bounds) lastSample = bounds;
-      frames += 1;
-      if (stable < STABLE_FRAMES && frames < HARD_CAP_FRAMES) {
-        rafId = requestAnimationFrame(tick);
-      }
+      rafId = requestAnimationFrame(tick);
     };
     rafId = requestAnimationFrame(tick);
     return () => {
+      disposed = true;
       if (rafId) cancelAnimationFrame(rafId);
     };
-  }, [browserAlive, isVisible, isSplitTransitioning, layoutSignature, syncBrowserBounds, readUsableBounds]);
+  }, [browserAlive, isVisible, readUsableBounds, tabId]);
 
   // Blank-state detection.
   //
@@ -334,14 +312,14 @@ export default function BrowserPanel({
     const nativeViewSuspended = isDraggingSplit || isSplitTransitioning;
     const shouldShow = isVisible && !nativeViewSuspended && !overlayDetected && !isBlankPage;
     if (shouldShow) {
+      // SHOW restores Rust's cached geometry; the reconciler keeps that cache
+      // current (it syncs even while hidden), and corrects any residue within
+      // a frame — no force-sync needed here.
       invoke('cmd_browser_show', { tabId }).catch(() => {});
-      // Same #290 guard is inside readUsableBounds; force so SHOW refreshes
-      // Rust's cached geometry even if the last renderer sample was identical.
-      syncBrowserBounds(true);
     } else {
       invoke('cmd_browser_hide', { tabId }).catch(() => {});
     }
-  }, [isVisible, isDraggingSplit, isSplitTransitioning, overlayDetected, browserAlive, isBlankPage, tabId, syncBrowserBounds]);
+  }, [isVisible, isDraggingSplit, isSplitTransitioning, overlayDetected, browserAlive, isBlankPage, tabId]);
 
   // ── Cleanup on unmount ──
   useEffect(() => {
