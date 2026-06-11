@@ -18,8 +18,10 @@
  *   3. `PRESET_PROVIDERS` (bundled in `renderer/config/types.ts`) — fallback.
  *   4. `~/.myagents/cache/litellm_model_prices.json` — LiteLLM community data,
  *      fetched by the Rust side on a 24h cadence. LOWEST priority: fills only
- *      models none of 1–3 defined (covers third-party models whose `/v1/models`
- *      doesn't report a context window). Absent until the first fetch.
+ *      gaps 1–3 left (a model none of them defined, OR a field — e.g.
+ *      contextLength — that a higher source left undefined; see the per-field
+ *      merge below). Covers third-party models whose `/v1/models` doesn't
+ *      report a context window. Absent until the first fetch.
  *
  * Rationale for the order: it mirrors the `findProvider`-style disk-first
  * precedence elsewhere in admin-config. If a user pins a corrected
@@ -28,7 +30,16 @@
  * over the preset default — otherwise their override is silently ignored.
  *
  * Design:
- *   - Flat Map<modelId, capability>. First-wins across sources.
+ *   - Flat Map<modelId, capability>, keyed by the BARE model id. The `[1m]`
+ *     capability suffix (and the malformed ` 1m` space form users type by hand,
+ *     #338) is stripped at BOTH ingest and lookup — it is purely an SDK-ingress
+ *     decoration (re-applied by `applyContextWindowSuffix`), never a key.
+ *   - First-wins **PER FIELD** across sources (see `mergeCapabilityInto`), NOT
+ *     per-entry: a higher-priority entry that defines only some fields (e.g. a
+ *     discovered model carrying `inputModalities` but no `contextLength`) keeps
+ *     those fields but does NOT shadow a lower source's value for the fields it
+ *     left undefined. (Per-entry first-wins let an incomplete override collapse
+ *     the window to the SDK 200K default — #338.)
  *   - Rebuilt every call. Called at session-env build boundaries (Tab /
  *     CronTask / Agent / BackgroundCompletion session spawn, pre-warm,
  *     provider-verify, title-gen). Each call: ≤1 `readdirSync` + bounded
@@ -52,6 +63,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from 'fs';
 import { resolve } from 'path';
 import { getHomeDirOrNull } from './platform';
 import { stripBom } from '../../shared/utils';
+import { stripModelSuffix } from '../../shared/contextUsage';
 // PRESET_PROVIDERS now lives in src/shared/config-types (moved from
 // renderer/config/types in v0.2.9 to satisfy the dependency-cruiser
 // `sidecar-no-import-renderer` boundary rule). The historical concern
@@ -139,6 +151,38 @@ function readCapability(entry: unknown, source: ModelCapability['source']): Mode
   return { contextLength: ctx, maxOutputTokens: out, inputModalities: mods, source };
 }
 
+/**
+ * Merge a capability into the registry with **first-wins PER FIELD** (not
+ * per-entry). The earlier (higher-priority) source keeps every field it already
+ * defined; the new source only fills fields the existing entry left undefined.
+ *
+ * Why per-field and not all-or-nothing (#338): an incomplete higher-priority
+ * entry — e.g. a `presetCustomModels` model added via the UI that carries
+ * `inputModalities` but no `contextLength` — used to claim the whole key and
+ * SHADOW the bundled preset's real `contextLength`, so `lookupModelContextLength`
+ * returned `undefined` and the window silently collapsed to the SDK 200K
+ * default (clean model id, `windowSource:"default"`). Per-field merge lets the
+ * user's explicit override (e.g. modalities) win while the preset / LiteLLM
+ * fallback still fills the `contextLength` gap the override left.
+ */
+function mergeCapabilityInto(
+  map: Map<string, ModelCapability>,
+  modelId: string,
+  cap: ModelCapability,
+): void {
+  const existing = map.get(modelId);
+  if (!existing) {
+    map.set(modelId, cap);
+    return;
+  }
+  map.set(modelId, {
+    contextLength: existing.contextLength ?? cap.contextLength,
+    maxOutputTokens: existing.maxOutputTokens ?? cap.maxOutputTokens,
+    inputModalities: existing.inputModalities ?? cap.inputModalities,
+    source: existing.source, // keep the highest-priority source's label
+  });
+}
+
 function ingestProviderList(
   providers: unknown,
   map: Map<string, ModelCapability>,
@@ -151,13 +195,16 @@ function ingestProviderList(
     if (!Array.isArray(models)) continue;
     for (const m of models) {
       if (!m || typeof m !== 'object') continue;
-      const mid = (m as Record<string, unknown>).model;
-      if (typeof mid !== 'string' || !mid) continue;
-      // First-wins. Load order (disk-first) determines priority; see module
-      // header for the rationale.
-      if (map.has(mid)) continue;
+      const rawMid = (m as Record<string, unknown>).model;
+      if (typeof rawMid !== 'string' || !rawMid) continue;
+      // Registry is BARE-keyed (#338): strip the capability suffix so a model
+      // stored/typed as `claude-X[1m]` / `claude-X 1m` lands on the same key as
+      // the bundled bare `claude-X`. Load order (disk-first) + per-field merge
+      // (mergeCapabilityInto) determine priority; see module header.
+      const mid = stripModelSuffix(rawMid);
+      if (!mid) continue;
       const cap = readCapability(m, source);
-      if (cap) map.set(mid, cap);
+      if (cap) mergeCapabilityInto(map, mid, cap);
     }
   }
 }
@@ -351,11 +398,12 @@ function buildRegistry(): Map<string, ModelCapability> {
         if (!Array.isArray(models)) continue;
         for (const m of models) {
           if (!m || typeof m !== 'object') continue;
-          const mid = (m as Record<string, unknown>).model;
-          if (typeof mid !== 'string' || !mid) continue;
-          if (map.has(mid)) continue;
+          const rawMid = (m as Record<string, unknown>).model;
+          if (typeof rawMid !== 'string' || !rawMid) continue;
+          const mid = stripModelSuffix(rawMid); // bare-keyed (#338)
+          if (!mid) continue;
           const cap = readCapability(m, 'discovered');
-          if (cap) map.set(mid, cap);
+          if (cap) mergeCapabilityInto(map, mid, cap);
         }
       }
     }
@@ -371,7 +419,11 @@ function buildRegistry(): Map<string, ModelCapability> {
   //    corrects LiteLLM's wrong 1M) always win. Absent until the first fetch.
   if (home) {
     for (const [mid, cap] of loadLiteLLMCatalogFromDisk(home)) {
-      if (!map.has(mid)) map.set(mid, cap);
+      // Lowest priority: per-field merge only fills gaps the higher sources
+      // left (so a preset's hand-curated window still wins), and no longer
+      // skips a model entirely just because a higher source registered an
+      // incomplete (contextLength-less) entry for it (#338).
+      mergeCapabilityInto(map, stripModelSuffix(mid) ?? mid, cap);
     }
   }
 
@@ -394,14 +446,16 @@ export function __resetModelCapabilityCacheForTests(): void {
  * MODEL_CONTEXT_WINDOW_DEFAULT (200_000) remains in effect.
  */
 export function lookupModelContextLength(modelId: string | undefined | null): number | undefined {
-  if (!modelId) return undefined;
-  return buildRegistry().get(modelId)?.contextLength;
+  const bare = stripModelSuffix(modelId); // registry is bare-keyed (#338)
+  if (!bare) return undefined;
+  return buildRegistry().get(bare)?.contextLength;
 }
 
 /** Full capability record (contextLength + maxOutputTokens + inputModalities). */
 export function lookupModelCapability(modelId: string | undefined | null): ModelCapability | undefined {
-  if (!modelId) return undefined;
-  return buildRegistry().get(modelId);
+  const bare = stripModelSuffix(modelId); // registry is bare-keyed (#338)
+  if (!bare) return undefined;
+  return buildRegistry().get(bare);
 }
 
 /**
@@ -460,23 +514,35 @@ const CONTEXT_WINDOW_UNLOCK_THRESHOLD = 200_000;
  * before every `messages.create` call, so the suffix never leaks to the
  * upstream HTTP body.
  *
- * Returns the model unchanged when:
- *   - input is empty / undefined / null → returns `undefined` (avoids
- *     overwriting an existing SDK option with an empty model id)
- *   - already contains `[1m]` anywhere (case-insensitive) — matches SDK's
- *     own `has1mContext` semantics, so user-typed pre-wrapped values are
- *     respected even if registry has a lower ctx; also defends against
- *     pathological double-wrap on partially-tagged ids
- *   - registry has no entry, or contextLength ≤ CONTEXT_WINDOW_UNLOCK_THRESHOLD;
- *     the strict `>` comparison naturally rejects `undefined` / `NaN` /
- *     negative without an explicit `Number.isFinite` guard
+ * Behavior:
+ *   - input empty / undefined / null — or whitespace-/suffix-only (`" 1m"`,
+ *     `"   "`) that strips to nothing — → returns `undefined` (avoids
+ *     overwriting an existing SDK option with an empty / garbage model id)
+ *   - already contains `[1m]` anywhere (case-insensitive) → returned VERBATIM —
+ *     matches SDK's own `has1mContext` semantics, so user-typed pre-wrapped
+ *     values are respected even if the registry has a lower ctx; also defends
+ *     against pathological double-wrap on partially-tagged ids
+ *   - otherwise the id is normalized to its BARE form first (dropping a
+ *     malformed ` 1m` / trailing whitespace, #338) so BOTH the registry lookup
+ *     and the emitted id are clean; then:
+ *       · registry contextLength > CONTEXT_WINDOW_UNLOCK_THRESHOLD → append a
+ *         canonical `[1m]` (so a hand-typed `claude-X 1m` becomes the correct
+ *         `claude-X[1m]` instead of leaking ` 1m` to the wire)
+ *       · otherwise (no entry, or ctx ≤ threshold; the strict `>` also rejects
+ *         `undefined` / `NaN` / negative) → return the bare id
  */
 export function applyContextWindowSuffix(model: string | undefined | null): string | undefined {
   if (!model) return undefined;
   if (/\[1m\]/i.test(model)) return model;
-  const ctx = lookupModelContextLength(model);
-  if (!(typeof ctx === 'number' && ctx > CONTEXT_WINDOW_UNLOCK_THRESHOLD)) return model;
-  return `${model}[1m]`;
+  // Empty / whitespace-only / suffix-only (e.g. " 1m", "   ") strips to nothing
+  // usable — return undefined rather than feed the SDK a garbage model option.
+  const bare = stripModelSuffix(model);
+  if (!bare) return undefined;
+  const ctx = lookupModelContextLength(bare);
+  if (typeof ctx === 'number' && ctx > CONTEXT_WINDOW_UNLOCK_THRESHOLD) {
+    return `${bare}[1m]`;
+  }
+  return bare;
 }
 
 /**

@@ -4,6 +4,7 @@ import type { AnthropicRequest, AnthropicMessage, AnthropicToolResultBlock, Anth
 import type { ResponsesRequest, ResponsesInputItem, ResponsesInputContentPart, ResponsesInputFunctionCall, ResponsesToolChoice } from '../types/openai-responses';
 import type { BridgeConfig } from '../types/bridge';
 import type { ToolImageSaver } from './multimodal';
+import { stripModelSuffix } from '../../../shared/contextUsage';
 
 
 export interface TranslateRequestResponsesOptions {
@@ -29,6 +30,10 @@ export function translateRequestToResponses(
       model = mapping[req.model] ?? req.model;
     }
   }
+  // SDK-ingress-only: strip the `[1m]` / ` 1m` capability decoration before the
+  // wire (#338) — same rationale as the Chat Completions translator. Config-fed
+  // modelOverride / modelMapping can carry a stored suffix the upstream rejects.
+  model = stripModelSuffix(model) ?? model;
 
   // 2. Instructions (system prompt)
   let instructions: string | undefined;

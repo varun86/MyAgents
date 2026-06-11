@@ -17,13 +17,22 @@ import type { ContextUsage } from './types/context-usage';
 export const SDK_DEFAULT_CONTEXT_WINDOW = 200_000;
 
 /**
- * 去掉模型 id 的 `[1m]` 能力后缀。registry 的 key 是裸 id，查窗口前必须 strip——否则
+ * 去掉模型 id 的能力后缀，返回裸 id。registry 的 key 是裸 id，查窗口前必须 strip——否则
  * 1M 窗口模型（`claude-opus-4-6[1m]` 等）查不到、错误回落 200K。与 SDK
  * `normalizeModelStringForAPI` / `applyContextWindowSuffix` 的 `[1m]` 语义对齐。
+ *
+ * 处理两种后缀形态外加首尾空白（#338）：
+ *  - 规范的方括号形 `[1m]`（applyContextWindowSuffix 产出、SDK `has1mContext` 认的形式）；
+ *  - 用户手填的畸形空格形 ` 1m`（如 `claude-sonnet-4-6 1m`）——issue #338 里用户照着
+ *    `mimo-v2.5-pro[1m]` 文档却敲成空格，registry 永远查不到、且 ` 1m` 还会泄到 wire。
+ * `[1m]` 是 SDK-ingress 的装饰（applyContextWindowSuffix 末端按 registry 重新贴），
+ * **绝不**作为 registry key 或 lookup query 的一部分。
+ * 注意 `\s+1m` 要求 `1m` 前有空白，故连字符形（`foo-1m`）这类合法 id 不会被误删。
  */
 export function stripModelSuffix(model: string | undefined | null): string | undefined {
   if (!model) return undefined;
-  return model.replace(/\[1m\]$/i, '');
+  const bare = model.replace(/(?:\[1m\]|\s+1m)\s*$/i, '').trim();
+  return bare.length > 0 ? bare : undefined;
 }
 
 function finitePositive(value: unknown): number | null {

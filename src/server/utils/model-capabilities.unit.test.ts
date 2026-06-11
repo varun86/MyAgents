@@ -1,6 +1,15 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 
-import { applyContextWindowSuffix, parseLiteLLMCatalog } from './model-capabilities';
+import {
+  applyContextWindowSuffix,
+  parseLiteLLMCatalog,
+  lookupModelContextLength,
+  lookupModelCapability,
+  __resetModelCapabilityCacheForTests,
+} from './model-capabilities';
 
 // #1 recurring red line: a >=1M-context model MUST be tagged `[1m]` before it
 // reaches SDK ingress, or the SDK silently falls back to the 200K window
@@ -127,5 +136,98 @@ describe('parseLiteLLMCatalog', () => {
     expect(parseLiteLLMCatalog(null).size).toBe(0);
     expect(parseLiteLLMCatalog('nope').size).toBe(0);
     expect(parseLiteLLMCatalog({ x: null, y: 42, z: 'str' }).size).toBe(0);
+  });
+});
+
+// #338 — the configured 1M contextLength silently fell back to 200K because the
+// bare-keyed registry was queried with a suffixed/whitespace-cruft model id, OR
+// an incomplete higher-priority entry shadowed the real window. These pin BOTH
+// mechanisms. HOME is redirected to an empty temp dir so only bundled
+// PRESET_PROVIDERS load (deterministic regardless of the dev's ~/.myagents),
+// then a config.json is written per-case to exercise the disk sources.
+describe('capability-suffix tolerance + per-field merge (#338)', () => {
+  let tmpHome: string;
+  let prevHome: string | undefined;
+
+  beforeEach(() => {
+    prevHome = process.env.HOME;
+    tmpHome = mkdtempSync(join(tmpdir(), 'ma-modelcaps-'));
+    mkdirSync(join(tmpHome, '.myagents'), { recursive: true });
+    process.env.HOME = tmpHome;
+    __resetModelCapabilityCacheForTests();
+  });
+
+  afterEach(() => {
+    if (prevHome === undefined) delete process.env.HOME;
+    else process.env.HOME = prevHome;
+    __resetModelCapabilityCacheForTests();
+    rmSync(tmpHome, { recursive: true, force: true });
+  });
+
+  // Mechanism #1: a [1m] / " 1m" suffixed active model id must resolve to its
+  // BARE registry contextLength (pre-fix: lookup missed → undefined → 200K).
+  it('resolves a [1m] / " 1m" suffixed id to the bare preset contextLength', () => {
+    expect(lookupModelContextLength('claude-opus-4-6[1m]')).toBe(1_000_000);
+    expect(lookupModelContextLength('claude-opus-4-6 1m')).toBe(1_000_000);
+    expect(lookupModelContextLength('claude-sonnet-4-6[1m]')).toBe(200_000);
+    expect(lookupModelContextLength('claude-sonnet-4-6 1m')).toBe(200_000);
+  });
+
+  it('canonicalizes a hand-typed " 1m" id (#338): append [1m] >200K, strip it off otherwise', () => {
+    expect(applyContextWindowSuffix('claude-opus-4-6 1m')).toBe('claude-opus-4-6[1m]');
+    // ≤200K: drop the malformed " 1m" so it never leaks to the upstream wire.
+    expect(applyContextWindowSuffix('claude-sonnet-4-6 1m')).toBe('claude-sonnet-4-6');
+  });
+
+  // Mechanism #2: an incomplete higher-priority entry (modalities, NO
+  // contextLength) must NOT shadow the bundled preset's window. Pre-fix this
+  // exact on-disk shape (observed in a real config) made lookup return
+  // undefined for a CLEAN model id → window collapsed to the SDK 200K default.
+  it('an incomplete discovered entry does NOT shadow the preset contextLength', () => {
+    writeFileSync(
+      join(tmpHome, '.myagents', 'config.json'),
+      JSON.stringify({ presetCustomModels: { zhipu: [{ model: 'glm-5.1', inputModalities: ['text'] }] } }),
+    );
+    __resetModelCapabilityCacheForTests();
+    expect(lookupModelContextLength('glm-5.1')).toBe(204_800); // filled from preset, not shadowed
+  });
+
+  // A reseller reusing the bundled id claude-sonnet-4-6 at a 1M window, stored
+  // with the suffix baked into the model id. Bare AND suffixed lookups must see
+  // 1M (winning over the 200K bundled preset), and applyContextWindowSuffix
+  // must tag it.
+  it('a 1M override stored under a [1m]-suffixed custom key resolves by the bare id', () => {
+    writeFileSync(
+      join(tmpHome, '.myagents', 'config.json'),
+      JSON.stringify({
+        presetCustomModels: { 'custom-dragon': [{ model: 'claude-sonnet-4-6[1m]', contextLength: 1_000_000 }] },
+      }),
+    );
+    __resetModelCapabilityCacheForTests();
+    expect(lookupModelContextLength('claude-sonnet-4-6')).toBe(1_000_000);
+    expect(lookupModelContextLength('claude-sonnet-4-6[1m]')).toBe(1_000_000);
+    expect(applyContextWindowSuffix('claude-sonnet-4-6')).toBe('claude-sonnet-4-6[1m]');
+  });
+
+  // Per-field merge interaction with modalities (Codex review note): a higher-
+  // priority entry that defines inputModalities but omits contextLength keeps
+  // its explicit modalities AND inherits the preset's contextLength. This is the
+  // intended "undefined field = defer to lower source" semantics.
+  it('per-field merge: explicit modalities win, missing contextLength fills from preset', () => {
+    writeFileSync(
+      join(tmpHome, '.myagents', 'config.json'),
+      JSON.stringify({ presetCustomModels: { zhipu: [{ model: 'glm-5.1', inputModalities: ['text'] }] } }),
+    );
+    __resetModelCapabilityCacheForTests();
+    const cap = lookupModelCapability('glm-5.1');
+    expect(cap?.inputModalities).toEqual(['text']); // explicit override preserved
+    expect(cap?.contextLength).toBe(204_800);        // gap filled from the bundled preset
+  });
+
+  // applyContextWindowSuffix must not feed the SDK a garbage model option built
+  // from whitespace-/suffix-only input (Codex review edge case).
+  it('applyContextWindowSuffix returns undefined for whitespace-/suffix-only input', () => {
+    expect(applyContextWindowSuffix(' 1m')).toBeUndefined();
+    expect(applyContextWindowSuffix('   ')).toBeUndefined();
   });
 });

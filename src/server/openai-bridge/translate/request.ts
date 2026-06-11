@@ -6,6 +6,7 @@ import type { BridgeConfig } from '../types/bridge';
 import { translateMessages } from './messages';
 import { translateToolDefinitions, translateToolChoice } from './tools';
 import type { ToolImageSaver } from './multimodal';
+import { stripModelSuffix } from '../../../shared/contextUsage';
 
 
 export interface TranslateRequestOptions {
@@ -33,6 +34,13 @@ export function translateRequest(
       model = mapping[req.model] ?? req.model;
     }
   }
+  // SDK-ingress-only: the `[1m]` / ` 1m` capability decoration MUST NOT reach
+  // the upstream wire (#338). `req.model` arrives already-normalized (the SDK
+  // strips `[1m]` via normalizeModelStringForAPI), but `modelOverride` /
+  // `modelMapping` come straight from config — a stored `claude-X[1m]` or
+  // hand-typed `claude-X 1m` would otherwise be forwarded verbatim to the
+  // OpenAI-compatible API, which knows only the bare id.
+  model = stripModelSuffix(model) ?? model;
 
   // 2. Messages (system extraction + role mapping + tool_result splitting)
   const thinkingEnabled = req.thinking?.type === 'enabled';
