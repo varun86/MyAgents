@@ -14,7 +14,8 @@ import { invoke } from '@tauri-apps/api/core';
 import { listenWithCleanup } from '@/utils/tauriListen';
 import Markdown from '@/components/Markdown';
 import { track } from '@/analytics';
-import { useFloatingSession, type FbMsg } from './useFloatingSession';
+import { isImeComposingEvent, resolveEnterKeyAction } from '@/utils/chatSendKey';
+import { useFloatingSession, type FbActivity, type FbMsg } from './useFloatingSession';
 
 import './fb.css';
 
@@ -33,6 +34,23 @@ const HIDE_GRACE_MS = 280;
 function loadWinH(): number {
     const saved = parseInt(localStorage.getItem(WIN_H_KEY) ?? '', 10);
     return Number.isFinite(saved) && saved >= 360 ? Math.min(saved, 1200) : 660;
+}
+
+/** cameo 式单行活动条：状态点 + 名称 + 灰色 detail（思考带活秒表）。 */
+function ActivityRow({ label, detail, running }: { label: string; detail?: string; running: boolean }) {
+    return (
+        <div className={`fbw-act${running ? ' running' : ''}`}>
+            <span className="dot" />
+            <span className="label">{running && label === '思考' ? '思考中' : label}</span>
+            {detail && <span className="detail">{detail}</span>}
+        </div>
+    );
+}
+
+function activityDetail(a: FbActivity, _tick: number): string | undefined {
+    const ms = a.durationMs ?? (a.running ? Date.now() - a.startedAt : 0);
+    const secs = Math.round(ms / 1000);
+    return secs >= 1 ? `${secs}s` : undefined;
 }
 
 export default function CompanionWindow() {
@@ -58,6 +76,14 @@ export default function CompanionWindow() {
     const inputRef = useRef<HTMLTextAreaElement | null>(null);
     const hideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const mouseInsideRef = useRef(false);
+    // 活动行秒表（仅有 running 活动时跳动）
+    const [nowTick, setNowTick] = useState(0);
+    const hasRunningActivity = session.activities.some((a) => a.running);
+    useEffect(() => {
+        if (!hasRunningActivity) return;
+        const id = setInterval(() => setNowTick((n) => n + 1), 1000);
+        return () => clearInterval(id);
+    }, [hasRunningActivity]);
     // Eager-captured situation（最前台 app/标题）— 发送时随 user 消息走（D4）。
     const lastCtxRef = useRef<FbCtx | null>(null);
 
@@ -162,6 +188,22 @@ export default function CompanionWindow() {
             },
             ac.signal,
         );
+        // 原生 hover 信号（修 hover 失灵）：app 非激活时 WKWebView 收不到
+        // mouseMoved，DOM mouseenter/leave 不可靠——NSTrackingArea 的进出
+        // 事件经 Rust 转发到这里，驱动 peek 的 grace 计时。
+        void listenWithCleanup<{ inside?: boolean }>(
+            'fb:native-hover',
+            (e) => {
+                if (e.payload?.inside) {
+                    mouseInsideRef.current = true;
+                    if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
+                } else {
+                    mouseInsideRef.current = false;
+                    scheduleHideIfPeek();
+                }
+            },
+            ac.signal,
+        );
         // 握手（review W1）：监听就绪后告知球——球在此之前的 summon 会暂存并重放，
         // 否则 enable 后立即点击的 fb:summon 会落在监听注册前被静默丢弃。
         void invoke('cmd_fb_relay', { target: 'ball', event: 'fb:companion-ready', payload: {} }).catch(
@@ -234,15 +276,39 @@ export default function CompanionWindow() {
         });
     }, [input, quote, shot, session.busy, session.ready, send]);
 
-    const onInputKeyDown = useCallback(
-        (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-            if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
-                e.preventDefault();
-                void doSend();
-            }
-        },
-        [doSend],
-    );
+    // 输入交互与主对话框同源（用户验收裁决：复用，不自创）：
+    // chatSendKey 纯函数承担 Enter/换行语义（含 chatSendShortcut 偏好），
+    // composition ref + 事件双保险挡 IME 候选提交误发（#123 同款），
+    // 组合输入期间不写 textarea.style.height（WebKit 卡顿坑）。
+    const isComposingRef = useRef(false);
+    const doSendRef = useRef(doSend);
+    useEffect(() => {
+        doSendRef.current = doSend;
+    }, [doSend]);
+    const sendShortcutRef = useRef(session.sendShortcut);
+    useEffect(() => {
+        sendShortcutRef.current = session.sendShortcut;
+    }, [session.sendShortcut]);
+
+    const resizeInput = useCallback((el: HTMLTextAreaElement) => {
+        el.style.height = 'auto';
+        el.style.height = `${Math.min(el.scrollHeight, 110)}px`;
+    }, []);
+
+    const onInputKeyDown = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+        if (e.key !== 'Enter') return;
+        if (isComposingRef.current || isImeComposingEvent(e)) return;
+        if (resolveEnterKeyAction(e, sendShortcutRef.current) !== 'send') return;
+        e.preventDefault();
+        void doSendRef.current();
+    }, []);
+    const onCompositionStart = useCallback(() => {
+        isComposingRef.current = true;
+    }, []);
+    const onCompositionEnd = useCallback((e: React.CompositionEvent<HTMLTextAreaElement>) => {
+        isComposingRef.current = false;
+        resizeInput(e.currentTarget);
+    }, [resizeInput]);
 
     // ── 📷 快门（D7：只在点下这一刻发生） ──
     const onShot = useCallback(async () => {
@@ -378,12 +444,23 @@ export default function CompanionWindow() {
                                 {m.text}
                             </div>
                         </div>
+                    ) : m.role === 'act' ? (
+                        <ActivityRow key={m.id} label={m.label ?? ''} detail={m.detail} running={false} />
                     ) : (
                         <div className="fbw-msg ai" key={m.id}>
                             <Markdown>{m.text}</Markdown>
                         </div>
                     ),
                 )}
+                {/* 本轮进行中的活动行（思考/工具，cameo 式单行密度） */}
+                {session.activities.map((a: FbActivity) => (
+                    <ActivityRow
+                        key={a.id}
+                        label={a.label}
+                        running={a.running}
+                        detail={activityDetail(a, nowTick)}
+                    />
+                ))}
                 {session.streamText !== null && (
                     <div className="fbw-msg ai" key="streaming">
                         <Markdown>{session.streamText}</Markdown>
@@ -402,26 +479,11 @@ export default function CompanionWindow() {
                 )}
             </div>
 
-            {/* 运行状态行（含停止控制） */}
-            {session.busy && (
+            {/* 兜底状态行：仅在还没有任何可见反馈（无活动行/无流式文本）时出现 */}
+            {session.busy && session.activities.length === 0 && session.streamText === null && (
                 <div className="fbw-statusline">
                     <span className="fbw-spinner" />
-                    <span style={{ flex: 1 }}>{session.streamText === null ? 'Mino 正在处理…' : 'Mino 正在回复…'}</span>
-                    {mode === 'pin' && (
-                        <button
-                            onClick={() => void session.stop()}
-                            style={{
-                                background: 'none',
-                                border: 'none',
-                                cursor: 'pointer',
-                                fontSize: 12,
-                                color: 'var(--ink-muted, #6f6156)',
-                                padding: '1px 4px',
-                            }}
-                        >
-                            停止
-                        </button>
-                    )}
+                    <span style={{ flex: 1 }}>Mino 正在处理…</span>
                 </div>
             )}
             {session.error && session.ready && (
@@ -465,17 +527,26 @@ export default function CompanionWindow() {
                         placeholder="问问 Mino，或者派个活…"
                         onChange={(e) => {
                             setInput(e.target.value);
-                            e.target.style.height = 'auto';
-                            e.target.style.height = `${Math.min(e.target.scrollHeight, 110)}px`;
+                            // IME 组合期间不写 style（#123：触发 WebKit 候选窗重排卡顿）
+                            if (!isComposingRef.current) resizeInput(e.target);
                         }}
                         onKeyDown={onInputKeyDown}
+                        onCompositionStart={onCompositionStart}
+                        onCompositionEnd={onCompositionEnd}
                     />
                     <button className="cam" onClick={() => void onShot()} title="附上一张截屏（我授意的快门）">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" /><circle cx="12" cy="13" r="4" /></svg>
                     </button>
-                    <button className={`send${sendReady ? ' ready' : ''}`} onClick={() => void doSend()} title="发送">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M12 19V5M5 12l7-7 7 7" /></svg>
-                    </button>
+                    {/* 与主对话框同语义：运行中 = 停止（方块），否则 = 发送（箭头） */}
+                    {session.busy ? (
+                        <button className="send stop" onClick={() => void session.stop()} title="停止">
+                            <svg viewBox="0 0 24 24" fill="currentColor"><rect x="7" y="7" width="10" height="10" rx="1.5" /></svg>
+                        </button>
+                    ) : (
+                        <button className={`send${sendReady ? ' ready' : ''}`} onClick={() => void doSend()} title="发送">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M12 19V5M5 12l7-7 7 7" /></svg>
+                        </button>
+                    )}
                 </div>
             </div>
 

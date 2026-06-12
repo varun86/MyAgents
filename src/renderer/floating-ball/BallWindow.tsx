@@ -89,8 +89,13 @@ export default function BallWindow() {
     }, []);
 
     // ── hover：纯视觉瞥一眼（焦点纹丝不动，D1） ──
+    // DOM mouseenter（app 激活态）与原生 NSTrackingArea（非激活态，经
+    // fb:native-hover）两路信号汇入同一对 handler，用 ref 暴露给监听 effect。
     const hoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const hoverInsideRef = useRef(false);
     const handleMouseEnter = useCallback(() => {
+        if (hoverInsideRef.current) return; // 双路信号去重
+        hoverInsideRef.current = true;
         if (dragRef.current.active) return;
         if (companionModeRef.current === 'pin') return; // already open for real
         // Small intent delay so a fly-by cursor doesn't flash the panel.
@@ -100,12 +105,30 @@ export default function BallWindow() {
         }, 120);
     }, []);
     const handleMouseLeave = useCallback(() => {
+        if (!hoverInsideRef.current) return;
+        hoverInsideRef.current = false;
         if (hoverTimerRef.current) {
             clearTimeout(hoverTimerRef.current);
             hoverTimerRef.current = null;
         }
         void invoke('cmd_fb_relay', { target: 'companion', event: 'fb:ball-leave', payload: {} });
     }, []);
+    // 原生 hover（修 hover 失灵）：app 非激活时 WKWebView 收不到 mouseMoved，
+    // DOM mouseenter 不触发——可靠信号来自 NSTrackingArea（Rust 转发）。DOM
+    // 路径保留作激活态冗余，两路经 hoverInsideRef 去重。handlers 是空依赖
+    // useCallback（稳定身份），effect 只跑一次。
+    useEffect(() => {
+        const ac = new AbortController();
+        void listenWithCleanup<{ inside?: boolean }>(
+            'fb:native-hover',
+            (e) => {
+                if (e.payload?.inside) handleMouseEnter();
+                else handleMouseLeave();
+            },
+            ac.signal,
+        );
+        return () => ac.abort();
+    }, [handleMouseEnter, handleMouseLeave]);
 
     // ── click → summon（先抓处境，再给键盘焦点 — 顺序是红线） ──
     const summon = useCallback(async () => {

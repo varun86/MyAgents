@@ -107,7 +107,7 @@ mod imp {
         WebviewWindowBuilder,
     };
     use tauri_nspanel::{tauri_panel, CollectionBehavior, ManagerExt, PanelLevel, StyleMask,
-        WebviewWindowExt};
+        TrackingAreaOptions, WebviewWindowExt};
 
     pub const BALL_LABEL: &str = "fb-ball";
     pub const COMPANION_LABEL: &str = "fb-companion";
@@ -120,17 +120,31 @@ mod imp {
 
     tauri_panel! {
         // The ball never takes keyboard focus — pure visual + mouse target.
+        // tracking_area is load-bearing: while our app is INACTIVE (the normal
+        // state — nonactivating panels never activate it), WKWebView does not
+        // receive hover/mouseMoved events, so DOM mouseenter never fires. The
+        // NSTrackingArea with active_always is the only reliable hover signal
+        // (user-verified symptom: hover did nothing until click).
         panel!(FbBallPanel {
             config: {
                 can_become_key_window: false,
                 can_become_main_window: false,
                 is_floating_panel: true
             }
+            with: {
+                tracking_area: {
+                    options: TrackingAreaOptions::new()
+                        .active_always()
+                        .mouse_entered_and_exited(),
+                    auto_resize: true
+                }
+            }
         })
 
         // The companion can become key (so the user can type) but only when we
         // explicitly call make_key_window — `becomes_key_only_if_needed` keeps
-        // order_front_regardless (peek) from stealing focus.
+        // order_front_regardless (peek) from stealing focus. Same tracking-area
+        // rationale: the peek-grace timer needs to know the mouse is inside.
         panel!(FbCompanionPanel {
             config: {
                 can_become_key_window: true,
@@ -138,7 +152,37 @@ mod imp {
                 becomes_key_only_if_needed: true,
                 is_floating_panel: true
             }
+            with: {
+                tracking_area: {
+                    options: TrackingAreaOptions::new()
+                        .active_always()
+                        .mouse_entered_and_exited(),
+                    auto_resize: true
+                }
+            }
         })
+
+        panel_event!(FbPanelEvent {})
+    }
+
+    /// Wire native mouse enter/exit to a `fb:native-hover` event on the
+    /// panel's own webview — the JS layer keeps owning the hover semantics
+    /// (debounce / grace / pin checks), Rust only supplies the raw signal.
+    fn attach_hover_events(
+        app: &AppHandle,
+        panel: &std::sync::Arc<dyn tauri_nspanel::Panel>,
+        label: &'static str,
+    ) {
+        let handler = FbPanelEvent::new();
+        let enter_app = app.clone();
+        handler.on_mouse_entered(move |_event| {
+            let _ = enter_app.emit_to(label, "fb:native-hover", serde_json::json!({ "inside": true }));
+        });
+        let exit_app = app.clone();
+        handler.on_mouse_exited(move |_event| {
+            let _ = exit_app.emit_to(label, "fb:native-hover", serde_json::json!({ "inside": false }));
+        });
+        panel.set_event_handler(Some(handler.as_ref()));
     }
 
     fn placement_path() -> Option<PathBuf> {
@@ -205,6 +249,7 @@ mod imp {
             let panel = win
                 .to_panel::<FbBallPanel>()
                 .map_err(|e| format!("[fb] ball to_panel: {e}"))?;
+            attach_hover_events(app, &panel, BALL_LABEL);
             panel.set_level(PanelLevel::Floating.value());
             panel.set_style_mask(StyleMask::empty().nonactivating_panel().into());
             panel.set_collection_behavior(
@@ -253,6 +298,7 @@ mod imp {
             let panel = win
                 .to_panel::<FbCompanionPanel>()
                 .map_err(|e| format!("[fb] companion to_panel: {e}"))?;
+            attach_hover_events(app, &panel, COMPANION_LABEL);
             panel.set_level(PanelLevel::Floating.value());
             panel.set_style_mask(StyleMask::empty().nonactivating_panel().into());
             panel.set_collection_behavior(
@@ -466,7 +512,12 @@ mod imp {
         let mut ctx = FbContext::default();
 
         match active_win_pos_rs::get_active_window() {
-            Ok(win) => {
+            // Clicking the ball can make OUR panel the "active window" in the
+            // CGWindow sense even though the app never activates — the user
+            // saw "正在看 MyAgents — MyAgents Ball" in the title row. Filter
+            // out our own process and fall back to NSWorkspace's frontmost
+            // application (which nonactivating panels never become).
+            Ok(win) if win.process_id != std::process::id() as u64 => {
                 if !win.app_name.is_empty() {
                     ctx.app_name = Some(win.app_name);
                 }
@@ -474,8 +525,12 @@ mod imp {
                     ctx.window_title = Some(win.title);
                 }
             }
+            Ok(_) => {
+                ctx.app_name = frontmost_app_name();
+            }
             Err(_) => {
                 ulog_warn!("[fb] get_active_window failed (no frontmost window?)");
+                ctx.app_name = frontmost_app_name();
             }
         }
 
@@ -500,6 +555,20 @@ mod imp {
         }
 
         ctx
+    }
+
+    /// Frontmost application name via NSWorkspace — unlike the CGWindow-based
+    /// active-win probe this can never return our own nonactivating panels.
+    fn frontmost_app_name() -> Option<String> {
+        let ws = tauri_nspanel::objc2_app_kit::NSWorkspace::sharedWorkspace();
+        let app = ws.frontmostApplication()?;
+        let name = app.localizedName()?;
+        let name = name.to_string();
+        if name.is_empty() || name == "MyAgents" {
+            None
+        } else {
+            Some(name)
+        }
     }
 
     /// Accessibility (AX) permission probe. `prompt = true` shows the system

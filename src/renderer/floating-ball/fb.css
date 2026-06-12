@@ -393,6 +393,7 @@ html.fb-transparent #root {
   max-height: 110px;
 }
 .fbw-inputrow textarea::placeholder { color: var(--ink-subtle, #a69a90); }
+.fbw-inputrow textarea { caret-color: var(--accent, #c26d3a); }
 .fbw-inputrow .cam,
 .fbw-inputrow .send {
   flex: none;
@@ -421,6 +422,38 @@ html.fb-transparent #root {
 .fbw-inputrow .send svg { width: 16px; height: 16px; }
 .fbw-inputrow .send.ready { background: var(--accent, #c26d3a); color: #fff; }
 .fbw-inputrow .send.ready:hover { background: var(--button-primary-bg-hover, #b05e2d); }
+/* 运行中：发送钮变停止钮（与主对话框同语义） */
+.fbw-inputrow .send.stop { background: var(--ink, #1c1612); color: #fff; }
+.fbw-inputrow .send.stop:hover { background: var(--button-dark-bg-hover, #3a3532); }
+
+/* ════════ 活动行（思考/工具，cameo 式单行密度） ════════ */
+.fbw-act {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  font-size: 12.5px;
+  color: var(--ink-muted, #6f6156);
+  line-height: 1.4;
+}
+.fbw-act .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex: none;
+  background: var(--ink-subtle, #a69a90);
+}
+.fbw-act.running .dot {
+  background: var(--accent, #c26d3a);
+  animation: fb-breathe 1.2s ease-in-out infinite;
+}
+.fbw-act .label {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 70%;
+}
+.fbw-act .detail { font-size: 11px; color: var(--ink-subtle, #a69a90); }
 
 /* 高度调节柄 + 移动拖拽区 */
 .fbw-rz {

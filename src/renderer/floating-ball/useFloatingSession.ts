@@ -23,10 +23,23 @@ import { localDate } from '../../shared/logTime';
 
 export interface FbMsg {
     id: string;
-    role: 'user' | 'ai';
+    role: 'user' | 'ai' | 'act';
     text: string;
     quote?: string;
     hasShot?: boolean;
+    /** role==='act'：一行轻量活动（思考/工具），cameo 式密度。 */
+    label?: string;
+    detail?: string;
+}
+
+/** Live activity row during a turn（思考/工具调用的单行展示）。 */
+export interface FbActivity {
+    id: string;
+    kind: 'thinking' | 'tool';
+    label: string;
+    running: boolean;
+    startedAt: number;
+    durationMs?: number;
 }
 
 export interface FbPermReq {
@@ -115,6 +128,12 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
     const [busy, setBusy] = useState(false);
     const [permReq, setPermReq] = useState<FbPermReq | null>(null);
     const [unread, setUnread] = useState(0);
+    const [activities, setActivities] = useState<FbActivity[]>([]);
+    const [sendShortcut, setSendShortcut] = useState<'enter' | 'modEnter'>('enter');
+    const activitiesRef = useRef<FbActivity[]>([]);
+    useEffect(() => {
+        activitiesRef.current = activities;
+    }, [activities]);
 
     const sessionIdRef = useRef<string | null>(null);
     const sseRef = useRef<SseConnection | null>(null);
@@ -146,9 +165,38 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
         const text = streamRef.current;
         streamRef.current = null;
         setStreamText(null);
-        if (text && text.trim()) {
-            setMessages((prev) => [...prev, { id: `ai-${Date.now()}`, role: 'ai', text }]);
-        }
+        // 把本轮的活动行（思考/工具）按流序折进历史，再接正文（cameo 式：
+        // 每行一个轻量条目，永久保留在消息流里）。
+        const acts = activitiesRef.current;
+        const actMsgs: FbMsg[] = acts.map((a) => {
+            const ms = a.durationMs ?? (a.running ? Date.now() - a.startedAt : 0);
+            return {
+                id: `act-${a.id}`,
+                role: 'act' as const,
+                text: '',
+                label: a.label,
+                detail: ms >= 1000 ? `${Math.round(ms / 1000)}s` : undefined,
+            };
+        });
+        setActivities([]);
+        setMessages((prev) => {
+            const next = [...prev, ...actMsgs];
+            if (text && text.trim()) {
+                next.push({ id: `ai-${Date.now()}`, role: 'ai', text });
+            }
+            return next;
+        });
+    }, []);
+
+    /** 结束所有仍在 running 的活动行（拿到落点时间）。 */
+    const settleActivities = useCallback((predicate?: (a: FbActivity) => boolean) => {
+        setActivities((prev) =>
+            prev.map((a) =>
+                a.running && (!predicate || predicate(a))
+                    ? { ...a, running: false, durationMs: Date.now() - a.startedAt }
+                    : a,
+            ),
+        );
     }, []);
 
     const handleSseEvent = useCallback(
@@ -160,6 +208,59 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
                     streamRef.current = (streamRef.current ?? '') + chunk;
                     setStreamText(streamRef.current);
                     setBusy(true);
+                    // 正文开始 → 思考行落定（工具行等各自的 result 事件）。
+                    settleActivities((a) => a.kind === 'thinking');
+                    break;
+                }
+                case 'chat:thinking-start': {
+                    setBusy(true);
+                    setActivities((prev) => {
+                        if (prev.some((a) => a.kind === 'thinking' && a.running)) return prev;
+                        return [
+                            ...prev,
+                            {
+                                id: `th-${Date.now()}`,
+                                kind: 'thinking',
+                                label: '思考',
+                                running: true,
+                                startedAt: Date.now(),
+                            },
+                        ];
+                    });
+                    break;
+                }
+                case 'chat:tool-use-start': {
+                    const payload = data as { id?: string; name?: string } | null;
+                    setBusy(true);
+                    settleActivities((a) => a.kind === 'thinking');
+                    setActivities((prev) => [
+                        ...prev,
+                        {
+                            id: payload?.id ?? `tool-${Date.now()}`,
+                            kind: 'tool',
+                            label: payload?.name ?? '工具',
+                            running: true,
+                            startedAt: Date.now(),
+                        },
+                    ]);
+                    break;
+                }
+                case 'chat:tool-result-start':
+                case 'chat:tool-result-complete': {
+                    const payload = data as { id?: string; toolUseId?: string } | null;
+                    const target = payload?.id ?? payload?.toolUseId;
+                    setActivities((prev) => {
+                        // 按 id 落定；无 id 时落定最早一个 running 的工具行。
+                        let done = false;
+                        return prev.map((a) => {
+                            if (!a.running || a.kind !== 'tool') return a;
+                            if (target ? a.id === target : !done) {
+                                done = true;
+                                return { ...a, running: false, durationMs: Date.now() - a.startedAt };
+                            }
+                            return a;
+                        });
+                    });
                     break;
                 }
                 case 'chat:message-complete': {
@@ -229,7 +330,7 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
                     break;
             }
         },
-        [finalizeStream, modeRef],
+        [finalizeStream, settleActivities, modeRef],
     );
     const handleSseEventRef = useRef(handleSseEvent);
     handleSseEventRef.current = handleSseEvent;
@@ -289,17 +390,19 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
 
                 const [cfg, projects] = await Promise.all([loadAppConfig(), loadProjects()]);
                 analyticsRuntimeRef.current = cfg.multiAgentRuntime ? 'unknown' : 'builtin';
+                setSendShortcut(cfg.chatSendShortcut ?? 'enter');
 
-                // 渠道固定路由：Mino（默认工作区）。仅退默认工作区，不再兜底到
-                // projects[0]——把渠道静默绑到任意项目工作区违背"项目型不出来"
-                // 的定位（review 裁决），宁可报错引导。
+                // 渠道路由 = 启动页当前默认工作区（用户验收裁决：必须与 Launcher
+                // 完全一致）。镜像 Launcher.resolveDefaultWorkspace 的链：
+                // config.defaultWorkspacePath → 路径后缀 /mino → 第一个项目。
                 const mino =
-                    projects.find((p) => p.systemPresetId === 'mino' || p.templateId === 'mino')
-                    ?? projects.find(
-                        (p) => cfg.defaultWorkspacePath && workspacePathsEqual(p.path, cfg.defaultWorkspacePath),
-                    );
+                    (cfg.defaultWorkspacePath
+                        ? projects.find((p) => workspacePathsEqual(p.path, cfg.defaultWorkspacePath))
+                        : undefined)
+                    ?? projects.find((p) => p.path.replace(/\\/g, '/').endsWith('/mino'))
+                    ?? projects[0];
                 if (!mino) {
-                    throw new Error('未找到 Mino（默认工作区）——请先在 MyAgents 中完成初始化');
+                    throw new Error('没有可用的工作区——请先在 MyAgents 中完成初始化');
                 }
                 workspaceRef.current = { path: mino.path };
 
@@ -372,6 +475,7 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
         try {
             const sid = await mintSession(today);
             setMessages([]);
+            setActivities([]);
             streamRef.current = null;
             setStreamText(null);
             setPermReq(null);
@@ -560,6 +664,8 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
         busy,
         permReq,
         unread,
+        activities,
+        sendShortcut,
         send,
         stop,
         respondPermission,
