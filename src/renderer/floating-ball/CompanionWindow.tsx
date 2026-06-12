@@ -13,6 +13,7 @@ import { invoke } from '@tauri-apps/api/core';
 
 import { listenWithCleanup } from '@/utils/tauriListen';
 import Markdown from '@/components/Markdown';
+import OverlayBackdrop from '@/components/OverlayBackdrop';
 import { track } from '@/analytics';
 import { isImeComposingEvent, resolveEnterKeyAction } from '@/utils/chatSendKey';
 import { isNearBottom } from './convoAutoFollow';
@@ -26,6 +27,13 @@ interface FbCtx {
     appName?: string | null;
     windowTitle?: string | null;
     selection?: string | null;
+}
+
+/** 📷 快门结果（Rust FbScreenshot）：图 + 快门时刻的前台窗口标识。 */
+interface FbShot {
+    dataUrl: string;
+    appName?: string | null;
+    windowTitle?: string | null;
 }
 
 const WIN_W = 440;
@@ -68,7 +76,8 @@ export default function CompanionWindow() {
     const { markRead, rotateIfStale, send, suspend, resume } = session;
 
     const [quote, setQuote] = useState<string | null>(null);
-    const [shot, setShot] = useState<string | null>(null); // data URL
+    const [shot, setShot] = useState<FbShot | null>(null);
+    const [shotPreview, setShotPreview] = useState(false); // 缩略图点开的大图
     const [who, setWho] = useState<string>('Mino');
     const [input, setInput] = useState('');
     const [axNeeded, setAxNeeded] = useState(false);
@@ -108,6 +117,7 @@ export default function CompanionWindow() {
             clearTimeout(hideTimerRef.current);
             hideTimerRef.current = null;
         }
+        setShotPreview(false); // 大图预览不跨一次显隐
         applyMode('hidden');
         void invoke('cmd_fb_hide_companion');
     }, [applyMode]);
@@ -227,13 +237,18 @@ export default function CompanionWindow() {
         return () => ac.abort();
     }, [applyMode, applySummonCtx, scheduleHideIfPeek, summonPinned, hideSelf, suspend, resume]);
 
-    // ── 窗口失焦（pin 态用户点了别处）→ 收起；Esc → 收起 ──
+    // ── 窗口失焦（pin 态用户点了别处）→ 收起；Esc → 先关大图预览、再收起 ──
     useEffect(() => {
         const onBlur = () => {
             if (modeRef.current === 'pin') hideSelf();
         };
         const onKey = (e: KeyboardEvent) => {
-            if (e.key === 'Escape') hideSelf();
+            if (e.key !== 'Escape') return;
+            if (shotPreview) {
+                setShotPreview(false);
+                return;
+            }
+            hideSelf();
         };
         window.addEventListener('blur', onBlur);
         window.addEventListener('keydown', onKey);
@@ -241,7 +256,7 @@ export default function CompanionWindow() {
             window.removeEventListener('blur', onBlur);
             window.removeEventListener('keydown', onKey);
         };
-    }, [hideSelf]);
+    }, [hideSelf, shotPreview]);
 
     // ── peek → pin 升格（窗内有效行为 = 激活 + 执行该行为，0612 用户裁决） ──
     // 点击带处境抓取（点击 = "我要说话"）；滚轮只升格不抓处境（滚轮 = "我要
@@ -363,10 +378,11 @@ export default function CompanionWindow() {
         const s = shot;
         setQuote(null);
         setShot(null);
+        setShotPreview(false);
         const ctx = lastCtxRef.current;
         await send(text, {
             quote: q,
-            screenshotDataUrl: s,
+            screenshotDataUrl: s?.dataUrl ?? null,
             appName: ctx?.appName ?? null,
             windowTitle: ctx?.windowTitle ?? null,
         });
@@ -409,8 +425,8 @@ export default function CompanionWindow() {
     // ── 📷 快门（D7：只在点下这一刻发生） ──
     const onShot = useCallback(async () => {
         try {
-            const dataUrl = await invoke<string>('cmd_fb_screenshot');
-            setShot(dataUrl);
+            const res = await invoke<FbShot>('cmd_fb_screenshot');
+            setShot(res);
             track('floating_ball_summon', { kind: 'screenshot' });
         } catch (err) {
             console.warn('[fb] screenshot failed:', err);
@@ -611,8 +627,22 @@ export default function CompanionWindow() {
                 {shot && (
                     <div className="fbw-quote shot">
                         <span className="rule" />
-                        <span className="q-text">屏幕截图 · 刚刚</span>
-                        <button className="q-x" onClick={() => setShot(null)} title="去掉截图">
+                        <button className="q-thumb" onClick={() => setShotPreview(true)} title="查看大图">
+                            <img src={shot.dataUrl} alt="截图缩略图" draggable={false} />
+                        </button>
+                        <span className="q-text">
+                            {shot.appName
+                                ? `${shot.appName}${shot.windowTitle ? ` — ${shot.windowTitle}` : ''}`
+                                : '屏幕截图 · 刚刚'}
+                        </span>
+                        <button
+                            className="q-x"
+                            onClick={() => {
+                                setShot(null);
+                                setShotPreview(false);
+                            }}
+                            title="去掉截图"
+                        >
                             <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M18 6L6 18M6 6l12 12" /></svg>
                         </button>
                     </div>
@@ -652,6 +682,25 @@ export default function CompanionWindow() {
             <div className="fbw-rz top" onPointerDown={bindResize('top')} title="拖动调节高度" />
             <div className="fbw-rz bottom" onPointerDown={bindResize('bottom')} title="拖动调节高度" />
             <div className="fbw-mv" onPointerDown={onMoveDown} title="拖动移动窗口" />
+
+            {/* 截图大图预览（缩略图点开；Esc/点任意处关闭）。伴侣窗是独立
+                webview、无 Tab 体系，不接 useCloseLayer；遮罩按红线用
+                OverlayBackdrop。圆角跟玻璃容器，遮罩不溢出窗口弧度。 */}
+            {shotPreview && shot && (
+                <OverlayBackdrop
+                    variant="dark"
+                    onClose={() => setShotPreview(false)}
+                    className="z-20 rounded-[24px] cursor-zoom-out"
+                >
+                    <img
+                        src={shot.dataUrl}
+                        alt="屏幕截图"
+                        draggable={false}
+                        className="fbw-shot-full"
+                        onClick={() => setShotPreview(false)}
+                    />
+                </OverlayBackdrop>
+            )}
         </div>
     );
 }

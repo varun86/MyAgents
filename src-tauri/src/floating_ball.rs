@@ -41,6 +41,16 @@ pub struct FbContext {
     pub selection: Option<String>,
 }
 
+/// 📷 快门结果：图 + 快门按下那一刻的前台窗口标识。引用条用窗口名当
+/// 标签（比"屏幕截图 · 刚刚"信息量大），缩略图/大图直接用 data URL。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FbScreenshot {
+    pub data_url: String,
+    pub app_name: Option<String>,
+    pub window_title: Option<String>,
+}
+
 /// Persisted ball placement — `~/.myagents/floating_ball.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -713,9 +723,9 @@ mod imp {
     /// key — the probes read the *user's* frontmost app. Selection capture may
     /// fall back to a clipboard round-trip inside get-selected-text, which is
     /// acceptable here because this is only ever called on explicit summon.
-    pub fn capture_context() -> FbContext {
-        let mut ctx = FbContext::default();
-
+    /// Frontmost window identity (app name + title), self-filtered. Zero
+    /// permission. Shared by capture_context and the 📷 shutter label.
+    fn frontmost_window_info() -> (Option<String>, Option<String>) {
         match active_win_pos_rs::get_active_window() {
             // Clicking the ball can make OUR panel the "active window" in the
             // CGWindow sense even though the app never activates — the user
@@ -723,21 +733,23 @@ mod imp {
             // out our own process and fall back to NSWorkspace's frontmost
             // application (which nonactivating panels never become).
             Ok(win) if win.process_id != std::process::id() as u64 => {
-                if !win.app_name.is_empty() {
-                    ctx.app_name = Some(win.app_name);
-                }
-                if !win.title.is_empty() {
-                    ctx.window_title = Some(win.title);
-                }
+                let app = (!win.app_name.is_empty()).then_some(win.app_name);
+                let title = (!win.title.is_empty()).then_some(win.title);
+                (app, title)
             }
-            Ok(_) => {
-                ctx.app_name = frontmost_app_name();
-            }
+            Ok(_) => (frontmost_app_name(), None),
             Err(_) => {
                 ulog_warn!("[fb] get_active_window failed (no frontmost window?)");
-                ctx.app_name = frontmost_app_name();
+                (frontmost_app_name(), None)
             }
         }
+    }
+
+    pub fn capture_context() -> FbContext {
+        let mut ctx = FbContext::default();
+        let (app_name, window_title) = frontmost_window_info();
+        ctx.app_name = app_name;
+        ctx.window_title = window_title;
 
         // Don't even try selection capture without Accessibility permission —
         // get-selected-text would fall through to the Cmd+C clipboard hack and
@@ -793,8 +805,11 @@ mod imp {
     /// invoke IPC *and* the /chat/send JSON body at 5–30MB (the ">256KB into
     /// IPC JSON" red line, flagged by both review passes).
     /// First call triggers the macOS Screen Recording permission prompt.
-    pub fn screenshot() -> Result<String, String> {
+    pub fn screenshot() -> Result<super::FbScreenshot, String> {
         use base64::Engine;
+        // 快门时刻的前台窗口（nonactivating panel 不改变 frontmost，读到的
+        // 就是用户正看的窗口）——引用条拿它当标签。
+        let (app_name, window_title) = frontmost_window_info();
         let id = uuid::Uuid::new_v4();
         let tmp = std::env::temp_dir().join(format!("myagents-fb-shot-{id}.png"));
         let status = crate::process_cmd::new("/usr/sbin/screencapture")
@@ -833,7 +848,11 @@ mod imp {
             return Err("[fb] empty screenshot".to_string());
         }
         let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
-        Ok(format!("data:{mime};base64,{b64}"))
+        Ok(super::FbScreenshot {
+            data_url: format!("data:{mime};base64,{b64}"),
+            app_name,
+            window_title,
+        })
     }
 
     /// Cross-window event relay: ball ⇄ companion talk through Rust because
@@ -856,7 +875,7 @@ mod imp {
 #[cfg(target_os = "macos")]
 mod commands {
     use super::imp;
-    use super::{FbCapabilities, FbContext};
+    use super::{FbCapabilities, FbContext, FbScreenshot};
     use tauri::AppHandle;
 
     #[tauri::command]
@@ -956,7 +975,7 @@ mod commands {
     }
 
     #[tauri::command]
-    pub async fn cmd_fb_screenshot() -> Result<String, String> {
+    pub async fn cmd_fb_screenshot() -> Result<FbScreenshot, String> {
         tauri::async_runtime::spawn_blocking(imp::screenshot)
             .await
             .map_err(|e| format!("[fb] screenshot join: {e}"))?
@@ -994,7 +1013,7 @@ mod commands {
 
 #[cfg(not(target_os = "macos"))]
 mod commands {
-    use super::{FbCapabilities, FbContext};
+    use super::{FbCapabilities, FbContext, FbScreenshot};
     use tauri::AppHandle;
 
     const UNSUPPORTED: &str = "[fb] floating ball is macOS-only in phase 1";
@@ -1072,7 +1091,7 @@ mod commands {
     }
 
     #[tauri::command]
-    pub async fn cmd_fb_screenshot() -> Result<String, String> {
+    pub async fn cmd_fb_screenshot() -> Result<FbScreenshot, String> {
         Err(UNSUPPORTED.to_string())
     }
 
