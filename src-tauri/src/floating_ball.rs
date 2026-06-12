@@ -354,9 +354,13 @@ mod imp {
             //   app 永不激活（nonactivating panel），模糊会按 Inactive 弱化；
             // ③ 不要用 NSWindow.alphaValue 做 peek 半透明——它把模糊输出一起
             //   淡掉，背景文字"不模糊地"透进来，叠字不可读。
+            // 材质选型只为 peek 服务（pin 的 0.96 着色会盖住材质）：要的是
+            // "重模糊高透"——背后内容成模糊色块但明确可感。Sidebar 是系统
+            // 材质里通透度最好的浅色系之一（访达侧栏透桌面那种）；
+            // UnderWindowBackground/Popover 固有白度都太高，peek 像实纸。
             if let Err(e) = window_vibrancy::apply_vibrancy(
                 &win,
-                window_vibrancy::NSVisualEffectMaterial::UnderWindowBackground,
+                window_vibrancy::NSVisualEffectMaterial::Sidebar,
                 Some(window_vibrancy::NSVisualEffectState::Active),
                 Some(24.0),
             ) {

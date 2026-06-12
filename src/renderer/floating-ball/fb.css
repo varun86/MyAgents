@@ -157,10 +157,11 @@ html.fb-transparent #root {
   display: flex;
   flex-direction: column;
   border-radius: 24px;
-  /* 真模糊由 Rust 侧 NSVisualEffectView 提供（UnderWindowBackground +
-     强制 Active，模糊常开全强度）；透明度只由这层暖纸着色控制——
-     peek 0.45（毛玻璃+透，背景成模糊色块）→ pin 0.96（凝固成实纸） */
-  background: rgba(253, 250, 244, 0.45);
+  /* 真模糊由 Rust 侧 NSVisualEffectView 提供（Sidebar 材质 + 强制
+     Active，模糊常开全强度）；透明度只由这层暖纸着色控制——
+     peek 0.15（几乎纯毛玻璃背板，背后内容成模糊色块、明确可感）
+     → pin 0.96（凝固成实纸）。 */
+  background: rgba(253, 250, 244, 0.15);
   border: 1px solid rgba(255, 255, 255, 0.5);
   overflow: hidden;
   transition: background 280ms ease;
