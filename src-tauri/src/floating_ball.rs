@@ -59,6 +59,11 @@ pub struct FbPlacement {
     /// Vertical position as a fraction of the monitor work-area height, so the
     /// ball lands in the same relative spot across resolution changes.
     pub y_ratio: f64,
+    /// 吸附时所在显示器（tao monitor name，形如 "Monitor #<model>"）。boot
+    /// 恢复按名匹配，找不到（拔了外接屏）回退球心所在屏/主屏。旧配置文件
+    /// 无此字段 → None（serde default，红线同 CronTask 新字段）。
+    #[serde(default)]
+    pub monitor: Option<String>,
 }
 
 impl Default for FbPlacement {
@@ -66,6 +71,7 @@ impl Default for FbPlacement {
         Self {
             dock: "right".to_string(),
             y_ratio: 0.36,
+            monitor: None,
         }
     }
 }
@@ -280,25 +286,77 @@ mod imp {
         }
     }
 
-    /// Work area of the monitor the ball lives on (logical coordinates).
-    /// Falls back to the primary monitor. Uses `Monitor::work_area()` —
-    /// NSScreen visibleFrame on macOS — so the menu bar, the Dock and notch
-    /// variations are all accounted for (review fix: an earlier draft hand-
-    /// rolled a 28px inset and could clamp the ball under the Dock).
-    fn work_area(app: &AppHandle) -> Option<(f64, f64, f64, f64)> {
-        let monitor = app
-            .get_webview_window(BALL_LABEL)
-            .and_then(|w| w.current_monitor().ok().flatten())
-            .or_else(|| app.primary_monitor().ok().flatten())?;
-        let scale = monitor.scale_factor();
-        let area = monitor.work_area();
+    /// 显示器 work area（逻辑点）。`Monitor::work_area()` = NSScreen
+    /// visibleFrame——菜单栏 / Dock / 刘海都已扣除（review fix: an earlier
+    /// draft hand-rolled a 28px inset and could clamp the ball under the
+    /// Dock）。
+    fn monitor_work_area(m: &tauri::Monitor) -> (f64, f64, f64, f64) {
+        let scale = m.scale_factor();
+        let area = m.work_area();
         let pos = area.position.to_logical::<f64>(scale);
         let size = area.size.to_logical::<f64>(scale);
-        Some((pos.x, pos.y, size.width, size.height))
+        (pos.x, pos.y, size.width, size.height)
+    }
+
+    /// 球中心所在的显示器。**不**用 `current_monitor()`（= NSWindow.screen）
+    /// ——拖拽的 set_position 是排队到主线程的异步 setFrameTopLeftPoint，
+    /// 松手瞬间从命令线程读 screen 拿到的可能还是旧屏，叠加其 None→主屏
+    /// 回退，吸边就把球弹回原屏（0613 用户实测：球拖不到另一块屏）。这里
+    /// 在全局逻辑点空间（tao 物理坐标 ÷ 各自 scale 还原出的 CG 点空间）对
+    /// 全显示器列表做包含判定；球心落在缝隙/越界时取最近的显示器。
+    fn monitor_for_ball_center(app: &AppHandle) -> Option<tauri::Monitor> {
+        let ball = app.get_webview_window(BALL_LABEL)?;
+        let scale = ball.scale_factor().ok()?;
+        let pos = ball.outer_position().ok()?.to_logical::<f64>(scale);
+        let (cx, cy) = (pos.x + BALL_WIN / 2.0, pos.y + BALL_WIN / 2.0);
+        let monitors = app.available_monitors().ok()?;
+        let mut nearest: Option<(f64, tauri::Monitor)> = None;
+        for m in monitors {
+            let ms = m.scale_factor();
+            let mp = m.position().to_logical::<f64>(ms);
+            let msz = m.size().to_logical::<f64>(ms);
+            let inside = cx >= mp.x
+                && cx < mp.x + msz.width
+                && cy >= mp.y
+                && cy < mp.y + msz.height;
+            if inside {
+                return Some(m);
+            }
+            let dx = (mp.x - cx).max(cx - (mp.x + msz.width)).max(0.0);
+            let dy = (mp.y - cy).max(cy - (mp.y + msz.height)).max(0.0);
+            let d2 = dx * dx + dy * dy;
+            if nearest.as_ref().map(|(best, _)| d2 < *best).unwrap_or(true) {
+                nearest = Some((d2, m));
+            }
+        }
+        nearest.map(|(_, m)| m)
+    }
+
+    /// Work area of the monitor the ball lives on (logical coordinates),
+    /// falling back to the primary monitor.
+    fn work_area(app: &AppHandle) -> Option<(f64, f64, f64, f64)> {
+        let monitor = monitor_for_ball_center(app)
+            .or_else(|| app.primary_monitor().ok().flatten())?;
+        Some(monitor_work_area(&monitor))
     }
 
     fn ball_xy_for_placement(app: &AppHandle, p: &FbPlacement) -> (f64, f64) {
-        let (ax, ay, aw, ah) = work_area(app).unwrap_or((0.0, 28.0, 1440.0, 872.0));
+        // 优先按持久化的显示器名恢复（boot 时球还停在出生位置，球心定位
+        // 不可信）；找不到该屏（外接屏已拔）再回退球心所在屏/主屏。
+        let monitor = p
+            .monitor
+            .as_deref()
+            .and_then(|name| {
+                app.available_monitors()
+                    .ok()?
+                    .into_iter()
+                    .find(|m| m.name().map(|n| n.as_str()) == Some(name))
+            })
+            .or_else(|| monitor_for_ball_center(app))
+            .or_else(|| app.primary_monitor().ok().flatten());
+        let (ax, ay, aw, ah) = monitor
+            .map(|m| monitor_work_area(&m))
+            .unwrap_or((0.0, 28.0, 1440.0, 872.0));
         let x = if p.dock == "left" {
             ax + EDGE_MARGIN
         } else {
@@ -670,6 +728,10 @@ mod imp {
     }
 
     /// Snap the ball to the nearest screen edge and persist placement.
+    /// MUST run on the main thread（经命令层 run_on_main_thread 调度）：拖拽
+    /// 的 setFrameTopLeftPoint 都排在主队列里，排在它们之后执行才能读到
+    /// 拖拽落定后的真实位置——命令线程上立刻读会拿到旧 frame，跨屏拖拽
+    /// 会被按旧屏吸回去。
     pub fn snap_ball(app: &AppHandle) -> Result<SnapResult, String> {
         let ball = app
             .get_webview_window(BALL_LABEL)
@@ -679,7 +741,12 @@ mod imp {
             .outer_position()
             .map_err(|e| format!("[fb] ball position: {e}"))?
             .to_logical::<f64>(scale);
-        let (ax, ay, aw, ah) = work_area(app).unwrap_or((0.0, 28.0, 1440.0, 872.0));
+        let monitor = monitor_for_ball_center(app)
+            .or_else(|| app.primary_monitor().ok().flatten());
+        let (ax, ay, aw, ah) = monitor
+            .as_ref()
+            .map(monitor_work_area)
+            .unwrap_or((0.0, 28.0, 1440.0, 872.0));
 
         let dock = if pos.x + BALL_WIN / 2.0 < ax + aw / 2.0 {
             "left"
@@ -689,6 +756,7 @@ mod imp {
         let placement = FbPlacement {
             dock: dock.to_string(),
             y_ratio: ((pos.y - ay) / ah).clamp(0.02, 0.92),
+            monitor: monitor.as_ref().and_then(|m| m.name().cloned()),
         };
         let (x, y) = ball_xy_for_placement(app, &placement);
         let _ = ball.set_position(LogicalPosition::new(x, y));
@@ -979,14 +1047,29 @@ mod commands {
             .map_err(|e| format!("[fb] main thread dispatch: {e}"))
     }
 
+    /// 主线程执行（fire-and-forget）：读 frame + setFrameTopLeftPoint 在主
+    /// 队列上串行化。命令线程上"读旧 frame + 排队异步 set"会丢增量、且让
+    /// 紧随其后的 snap 读到拖拽中途的位置。
     #[tauri::command]
     pub async fn cmd_fb_drag_ball(app: AppHandle, dx: f64, dy: f64) -> Result<(), String> {
-        imp::drag_ball(&app, dx, dy)
+        app.clone()
+            .run_on_main_thread(move || {
+                let _ = imp::drag_ball(&app, dx, dy);
+            })
+            .map_err(|e| format!("[fb] main thread dispatch: {e}"))
     }
 
+    /// channel-join 主线程：排在拖拽的全部异步 set 之后执行，读到的才是
+    /// 松手时的真实位置（见 imp::snap_ball 注释——跨屏拖拽弹回的根因）。
     #[tauri::command]
     pub async fn cmd_fb_snap_ball(app: AppHandle) -> Result<imp::SnapResult, String> {
-        imp::snap_ball(&app)
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.clone()
+            .run_on_main_thread(move || {
+                let _ = tx.send(imp::snap_ball(&app));
+            })
+            .map_err(|e| format!("[fb] main thread dispatch: {e}"))?;
+        rx.recv().map_err(|e| format!("[fb] snap join: {e}"))?
     }
 
     #[tauri::command]
