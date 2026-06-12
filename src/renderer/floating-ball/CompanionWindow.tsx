@@ -15,6 +15,7 @@ import { listenWithCleanup } from '@/utils/tauriListen';
 import Markdown from '@/components/Markdown';
 import { track } from '@/analytics';
 import { isImeComposingEvent, resolveEnterKeyAction } from '@/utils/chatSendKey';
+import { isNearBottom } from './convoAutoFollow';
 import { useFloatingSession, type FbActivity, type FbMsg } from './useFloatingSession';
 
 import './fb.css';
@@ -145,8 +146,13 @@ export default function CompanionWindow() {
         [],
     );
 
+    // 贴底跟随开关：只有本就贴底才自动滚底（isNearBottom），显式唤起/发送
+    // 时强制回贴底。没有它，滚轮上翻阅读会被流式新内容持续拽回底部。
+    const stickToBottomRef = useRef(true);
+
     const summonPinned = useCallback(
         async (ctx: FbCtx | null | undefined) => {
+            stickToBottomRef.current = true; // 显式唤起 = 看最新
             applyMode('pin');
             await applySummonCtx(ctx);
             track('floating_ball_summon', { kind: 'pin' });
@@ -237,27 +243,94 @@ export default function CompanionWindow() {
         };
     }, [hideSelf]);
 
-    // ── peek 态点击任意处 → 升格 pin（即时；处境并行抓、到了再补） ──
-    const onWinClick = useCallback(() => {
-        if (modeRef.current !== 'peek') return;
-        void invoke('cmd_fb_pin_companion').catch((err) => {
-            console.error('[fb] pin failed:', err);
-        });
-        void summonPinned(null);
-        void (async () => {
+    // ── peek → pin 升格（窗内有效行为 = 激活 + 执行该行为，0612 用户裁决） ──
+    // 点击带处境抓取（点击 = "我要说话"）；滚轮只升格不抓处境（滚轮 = "我要
+    // 读"，且选区探针的剪贴板兜底——模拟 Cmd+C——不该被一次滚动引爆）。
+    const promoteToPin = useCallback(
+        async (kind: 'click' | 'wheel') => {
+            if (modeRef.current !== 'peek') return;
+            applyMode('pin');
+            track('floating_ball_summon', { kind: kind === 'click' ? 'pin' : 'wheel' });
             try {
-                const ctx = await invoke<FbCtx>('cmd_fb_capture_context');
-                await applySummonCtx(ctx);
-            } catch {
-                // capture 失败不阻断 pin
+                // 等 make_key_window 真正落地再聚焦：窗口还不是 key window 时
+                // focus() 不出光标——这就是"点了面板输入框却没光标"的根因。
+                await invoke('cmd_fb_pin_companion');
+            } catch (err) {
+                console.error('[fb] pin failed:', err);
             }
-        })();
-    }, [summonPinned, applySummonCtx]);
+            // applyMode 已把 modeRef 翻到 pin；重新读一次（窗口可能在 IPC
+            // 期间被 Esc 关掉，hidden 时不再聚焦）。as FbMode 抵消 TS 对
+            // ref.current 的过期 narrowing（它看不见 applyMode 的写入）。
+            if ((modeRef.current as FbMode) === 'pin') inputRef.current?.focus();
+            void rotateIfStale();
+            if (kind === 'click') {
+                void applySummonCtx(null);
+                void (async () => {
+                    try {
+                        const ctx = await invoke<FbCtx>('cmd_fb_capture_context');
+                        await applySummonCtx(ctx);
+                    } catch {
+                        // capture 失败不阻断 pin
+                    }
+                })();
+            }
+        },
+        [applyMode, applySummonCtx, rotateIfStale],
+    );
 
-    // ── 自动滚底 ──
+    // ── 焦点纪律：pin 态输入框光标常驻 ──
+    // mousedown 阶段就把焦点按住（retainFocusOnMouseDown 同款 preventDefault，
+    // 不给非交互区域转移焦点的机会）；交互件与会话选文区放行。
+    const onWinMouseDown = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+        if (e.button !== 0) return;
+        if (modeRef.current === 'peek') {
+            // peek 整窗是一个"大按钮"：mousedown 永不转移焦点。
+            e.preventDefault();
+            return;
+        }
+        const target = e.target as Element;
+        if (target.closest('textarea, input, button, a, .fbw-convo')) return;
+        e.preventDefault();
+    }, []);
+
+    const onWinClick = useCallback(
+        (e: React.MouseEvent<HTMLDivElement>) => {
+            if (modeRef.current === 'peek') {
+                void promoteToPin('click');
+                return;
+            }
+            if (modeRef.current !== 'pin') return;
+            // pin 态点窗内非交互区域 = 把光标还给输入框（正在选文本除外）。
+            const target = e.target as Element;
+            if (target.closest('textarea, input, button, a')) return;
+            const sel = window.getSelection();
+            if (sel && !sel.isCollapsed) return;
+            inputRef.current?.focus();
+        },
+        [promoteToPin],
+    );
+
+    // ── peek 滚轮：直接滚动会话流 + 升格 pin ──
+    // peek 下 convo 是 pointer-events:none（整窗单击语义），原生滚动到不了
+    // 它——首程 delta 手动喂给会话流，升格后的后续滚轮由原生接管。
+    const onWinWheel = useCallback(
+        (e: React.WheelEvent<HTMLDivElement>) => {
+            if (modeRef.current !== 'peek') return;
+            const el = convoRef.current;
+            if (el) el.scrollTop += e.deltaY;
+            void promoteToPin('wheel');
+        },
+        [promoteToPin],
+    );
+
+    // ── 自动滚底（贴底跟随，唯贴底才跟随） ──
+    const onConvoScroll = useCallback(() => {
+        const el = convoRef.current;
+        if (el) stickToBottomRef.current = isNearBottom(el);
+    }, []);
     useEffect(() => {
         const el = convoRef.current;
-        if (el) el.scrollTop = el.scrollHeight;
+        if (el && stickToBottomRef.current) el.scrollTop = el.scrollHeight;
     }, [session.messages, session.streamText, mode]);
 
     // ── 初始高度（记忆） ──
@@ -269,6 +342,7 @@ export default function CompanionWindow() {
     const doSend = useCallback(async () => {
         const text = input.trim();
         if (!text || session.busy || !session.ready) return;
+        stickToBottomRef.current = true; // 发送 = 跟住回复
         setInput('');
         const q = quote;
         const s = shot;
@@ -412,8 +486,10 @@ export default function CompanionWindow() {
 
     return (
         <div
-            className={`fbw-win ${mode === 'pin' ? 'pin' : 'peek'}`}
+            className={`fbw-win ${mode === 'pin' ? 'pin' : 'peek'}${mode === 'hidden' ? ' hidden' : ''}`}
+            onMouseDown={onWinMouseDown}
             onClick={onWinClick}
+            onWheel={onWinWheel}
             onMouseEnter={() => {
                 mouseInsideRef.current = true;
                 if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
@@ -435,7 +511,7 @@ export default function CompanionWindow() {
             </div>
 
             {/* 会话流 */}
-            <div className="fbw-convo" ref={convoRef}>
+            <div className="fbw-convo" ref={convoRef} onScroll={onConvoScroll}>
                 {!session.ready && !session.error && (
                     <div className="fbw-divider">正在连接 {session.workspaceName}…</div>
                 )}

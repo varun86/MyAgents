@@ -466,6 +466,42 @@ mod imp {
         let _ = companion.set_position(LogicalPosition::new(x, y));
     }
 
+    // ── 伴侣窗出入场渐变（窗口层 alpha） ──
+    //
+    // 为什么必须在 NSWindow 层做而不是 CSS：毛玻璃 NSVisualEffectView 垫在
+    // （透明的）webview 底下，DOM opacity 管不到它——CSS 渐显会让模糊背板
+    // "啪"地全强度出现（与 peek 透明度同一个坑，见 ensure_windows 注释）。
+    // NSWindow.alphaValue 把模糊层、内容、窗口阴影一起淡入/淡出。
+    //
+    // 动画走 NSAnimationContext + animator proxy（系统隐式动画，可中途
+    // retarget：淡出半程再 hover 回来，直接朝 1.0 收敛、无跳变）。淡出后的
+    // orderOut 延迟执行，用 generation 计数器守卫——期间任何一次 show/pin
+    // 都让计数器前进，过期的延迟 orderOut 自动作废。
+    const FADE_IN_PEEK_S: f64 = 0.18;
+    const FADE_IN_PIN_S: f64 = 0.12;
+    const FADE_OUT_S: f64 = 0.13;
+
+    static COMPANION_VIS_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    /// Animate the companion NSWindow's alphaValue. Main thread only (every
+    /// caller is already inside run_on_main_thread).
+    fn animate_companion_alpha(app: &AppHandle, to: f64, duration_s: f64) {
+        use tauri_nspanel::objc2::rc::Retained;
+        use tauri_nspanel::objc2::runtime::AnyObject;
+        use tauri_nspanel::objc2::msg_send;
+        use tauri_nspanel::objc2_app_kit::NSAnimationContext;
+        let Some(win) = app.get_webview_window(COMPANION_LABEL) else { return };
+        let Ok(raw) = win.ns_window() else { return };
+        unsafe {
+            NSAnimationContext::beginGrouping();
+            NSAnimationContext::currentContext().setDuration(duration_s);
+            let obj = &*(raw as *const AnyObject);
+            let animator: Retained<AnyObject> = msg_send![obj, animator];
+            let _: () = msg_send![&*animator, setAlphaValue: to];
+            NSAnimationContext::endGrouping();
+        }
+    }
+
     /// Position the companion next to the ball (dock-aware) and show it.
     /// mode = "peek" (no keyboard focus) | "pin" (becomes key window).
     pub fn show_companion(app: &AppHandle, mode: &str) -> Result<(), String> {
@@ -478,21 +514,25 @@ mod imp {
         let panel = app
             .get_webview_panel(COMPANION_LABEL)
             .map_err(|_| "[fb] companion panel missing".to_string())?;
-        match mode {
-            "pin" => {
-                panel.order_front_regardless();
-                panel.show();
-                // Keyboard focus moves to the panel; the user's app stays
-                // frontmost because of the nonactivating style mask.
-                panel.make_key_window();
-            }
-            _ => {
-                // Peek: visible but never key — D1. 半透明由 DOM 着色层表达
-                // （毛玻璃常开，见 ensure_windows 的 vibrancy 注释）。
-                panel.order_front_regardless();
-                panel.show();
-            }
+        // 任何一次 show 都让 generation 前进——作废 in-flight 的淡出 orderOut。
+        COMPANION_VIS_GEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let was_visible = companion.is_visible().unwrap_or(false);
+        if !was_visible {
+            // 从隐藏出场：alpha 先归零再 orderFront，首帧不闪全亮。
+            panel.set_alpha_value(0.0);
         }
+        panel.order_front_regardless();
+        panel.show();
+        if mode == "pin" {
+            // Keyboard focus moves to the panel; the user's app stays
+            // frontmost because of the nonactivating style mask.
+            panel.make_key_window();
+        }
+        // Peek: visible but never key — D1. 半透明由 DOM 着色层表达
+        // （毛玻璃常开，见 ensure_windows 的 vibrancy 注释）。
+        // 已可见时同样 animate：把可能在淡出半程的 alpha 拉回 1（retarget）。
+        let dur = if mode == "pin" { FADE_IN_PIN_S } else { FADE_IN_PEEK_S };
+        animate_companion_alpha(app, 1.0, dur);
         Ok(())
     }
 
@@ -501,19 +541,44 @@ mod imp {
         let panel = app
             .get_webview_panel(COMPANION_LABEL)
             .map_err(|_| "[fb] companion panel missing".to_string())?;
+        COMPANION_VIS_GEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         panel.order_front_regardless();
         panel.show();
         panel.make_key_window();
+        // peek→pin 时窗口已在 alpha 1（no-op）；这里只救"淡出半程被点住"。
+        animate_companion_alpha(app, 1.0, FADE_IN_PIN_S);
         Ok(())
     }
 
     pub fn hide_companion(app: &AppHandle) {
-        if let Ok(panel) = app.get_webview_panel(COMPANION_LABEL) {
-            // hide()/orderOut is sufficient — AppKit reassigns key to the
-            // frontmost app on its own. (Do NOT call resign_key_window
-            // directly; AppKit docs reserve it as a system callback.)
-            panel.hide();
+        let Some(win) = app.get_webview_window(COMPANION_LABEL) else { return };
+        if !win.is_visible().unwrap_or(false) {
+            return;
         }
+        let generation =
+            COMPANION_VIS_GEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        animate_companion_alpha(app, 0.0, FADE_OUT_S);
+        // 淡出完成后才真正 orderOut。hide()/orderOut is sufficient — AppKit
+        // reassigns key to the frontmost app on its own. (Do NOT call
+        // resign_key_window directly; AppKit docs reserve it as a system
+        // callback.)
+        let app2 = app.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(
+                (FADE_OUT_S * 1000.0) as u64 + 30,
+            ))
+            .await;
+            let app3 = app2.clone();
+            let _ = app2.run_on_main_thread(move || {
+                if COMPANION_VIS_GEN.load(std::sync::atomic::Ordering::SeqCst) != generation {
+                    return; // 淡出期间又被唤起，本次 orderOut 作废
+                }
+                if let Ok(panel) = app3.get_webview_panel(COMPANION_LABEL) {
+                    panel.hide();
+                    panel.set_alpha_value(1.0); // 复位（下次 show 会先归零）
+                }
+            });
+        });
     }
 
     pub fn drag_ball(app: &AppHandle, dx: f64, dy: f64) -> Result<(), String> {
