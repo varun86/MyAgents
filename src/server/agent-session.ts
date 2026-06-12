@@ -55,7 +55,7 @@ import { deriveSessionTitle } from '../shared/sessionTitle';
 import { workspacePathsEqual } from '../shared/workspacePath';
 import { normalizeReasoningEffort, isSdkEffortLevel } from '../shared/reasoningEffort';
 import { computeContextUsage } from '../shared/contextUsage';
-import { resolveContextOccupancyTokens } from './utils/context-occupancy';
+import { resolveContextOccupancyFromSdkBreakdown, resolveContextOccupancyTokens } from './utils/context-occupancy';
 import type { SystemInitInfo } from '../shared/types/system';
 import { saveSessionMetadata, updateSessionTitleFromMessage, saveSessionMessages, saveAttachment, updateSessionMetadata, getSessionMetadata, getSessionData } from './SessionStore';
 import { firePostTurnTitleHook } from './turn-hooks';
@@ -1757,35 +1757,63 @@ function resetTurnUsage(): void {
 /**
  * PRD 0.2.32 — broadcast 归一化的 context 用量快照（builtin runtime）。
  *
- * 占用 = 最近一条**主轮** assistant message 的 `input + cacheRead + cacheCreation`
- * （Anthropic 系，input 不含 cache）。**不**用 currentTurnUsage（那是整 turn 多次调用的
- * 聚合，会把重发的上下文求和、严重高估）。窗口优先用 SDK 运行时填充的
- * `ModelUsage.contextWindow`，缺省回落 `lookupModelContextLength ?? 200K`（= auto-compact 有效窗口）。
+ * 两条占用源（按代价递增）：
+ *  1. 快路径：最近一条**主轮** assistant message 的 per-call `usage.input + cacheRead + cacheCreation`。
+ *     Anthropic 直连和大部分填 `BetaMessage.usage` 的兼容供应商命中此路，零额外 SDK 往返。
+ *  2. 回落（#343）：当 #1 缺失（火山方舟 MiniMax M3 等 Anthropic-compat 第三方供应商只回
+ *     `result.modelUsage` 聚合、不填 streamed assistant frame 的 `message.usage`，且 `/compact`
+ *     控制轮无主轮 assistant message），改向 SDK 控制面 `querySession.getContextUsage()` 取数——
+ *     这是 `/context` 斜杠命令同源，**SDK 自身追踪的当前窗口占用** (`totalTokens`)，与提供商
+ *     wire 是否回传 per-message usage 无关。
+ *
+ * 为什么 SDK 源能同时安然处理 #323 `/compact` 场景：`totalTokens` 是 SDK 当前窗口占用估算
+ * （categories + apiUsage），不是 turn 聚合 cache-read 求和。`/compact` 落地后这个数等于压缩
+ * **后**的新（小）窗口——正是圆环该显示的值。#323 的 4.55M / 20.40M 灾难只来自盲目用
+ * `currentTurnUsage.cacheReadTokens`（N 次工具调用求和），此源无该坑。
+ *
+ * 窗口：优先 `lookupModelContextLength`（与注入的 `CLAUDE_CODE_AUTO_COMPACT_WINDOW` 同源），
+ * 缺省 SDK 200K。**不**用 SDK `ModelUsage.contextWindow`（对 bridge 的第三方 builtin 模型只回
+ * 200K 默认，与 auto-compact 实际窗口失配）。
  */
-function broadcastBuiltinContextUsage(): void {
-  // 占用只取「最近一条主轮 assistant message」的 per-call usage；没有就**跳过**广播。
-  // #323 — 绝不回落到 currentTurnUsage 聚合：那是整 turn 多次调用的 cache-read 之和，
-  // `/compact` 这种控制轮（有成功 result + 大 modelUsage、却没有携带 usage 的主轮 assistant
-  // message）会把 20M+ 的求和当成当前占用 → computeContextUsage 把 % 封顶 100、却照样显示
-  // 不可能的 token 数（4.55M / 20.40M over 1M window）。跳过则保留上一可信值，下一条真实
-  // 消息（其 input ≈ 压缩后大小）自愈。与外部 runtime「缺 contextOccupiedTokens 就不发」同纪律。
-  const occupied = resolveContextOccupancyTokens(latestMainAssistantUsage);
-  if (occupied === null) return; // 无 per-call 快照（如 /compact 控制轮）— 不广播假占用
-  // 窗口刻意用 `lookupModelContextLength ?? 200K`（computeContextUsage 内部回落），**不**用 SDK
-  // `ModelUsage.contextWindow`：后者是 SDK `getContextWindowForModel()` 的值，对经 bridge 的第三方
-  // builtin 模型（DeepSeek-128K 等）只会回落 200K 默认，与我们注入的 `CLAUDE_CODE_AUTO_COMPACT_WINDOW`
-  // （= lookupModelContextLength）不一致。圆环要对应 auto-compact，所以分母必须用同一来源（registry ?? 200K）。
+async function broadcastBuiltinContextUsage(): Promise<void> {
+  // **同步捕获** turn-末 state，再进入可能 await 的回落分支。`broadcastBuiltinContextUsage()`
+  // 现在以 `void` 形式从 result 处理器 fire-and-forget；如果不抓快照，await 期间下一轮的
+  // `resetTurnUsage()` 可能把 `currentTurnUsage.model`/`sessionId` 改掉，给本轮的 broadcast/
+  // 持久化盖错头。`latestMainAssistantUsage` 在函数入口同步读，已经天然是快照。
+  const occupiedFromPerCall = resolveContextOccupancyTokens(latestMainAssistantUsage);
+  const snapshotModel = currentTurnUsage.model;
+  const snapshotSessionId = sessionId;
+  const snapshotQuerySession = querySession;
+
+  let occupied = occupiedFromPerCall;
+
+  // 快路径 miss → 问 SDK 自己的 context-usage 源（`/context` 命令同源）。这条修复了：
+  //   (a) #343：火山方舟等兼容供应商不填 per-message usage 时圆环一直空（`chat:context-usage`
+  //       永不广播），即便 `/context` 命令在终端能正常显示 122.8k/512k；
+  //   (b) #323 的善后：`/compact` 后改为显示真实的压缩**后**占用，而不是「跳过、等下条消息自愈」。
+  // SDK 控制请求 reject 的话静默回落到老的「跳过」语义；不引入新失败模式。
+  if (occupied === null && snapshotQuerySession) {
+    try {
+      const ctx = await snapshotQuerySession.getContextUsage();
+      occupied = resolveContextOccupancyFromSdkBreakdown(ctx);
+    } catch (err) {
+      console.debug('[agent] getContextUsage fallback failed (will skip context-usage broadcast):', err);
+    }
+  }
+
+  if (occupied === null) return; // 两源都拿不到 — 不广播假占用，前端保留上次可信值
+
   const usage = computeContextUsage({
     occupiedTokens: occupied,
     runtimeWindow: null,
     source: 'builtin',
-    model: currentTurnUsage.model,
+    model: snapshotModel,
     lookupWindow: lookupModelContextLength,
   });
   broadcast('chat:context-usage', usage);
   // PRD 0.2.32 — 持久化**同一个**快照到 session 记录（单一数据源）。每轮末一次写盘，
   // 重开会话时前端从 session metadata seed → 环立即显示且与会话期间一致。fire-and-forget。
-  void updateSessionMetadata(sessionId, { lastContextUsage: usage }).catch((err) =>
+  void updateSessionMetadata(snapshotSessionId, { lastContextUsage: usage }).catch((err) =>
     console.warn('[agent] persist lastContextUsage failed:', err),
   );
 }
@@ -11278,10 +11306,11 @@ async function startStreamingSession(preWarm = false): Promise<void> {
             assistant_message_id: lastAssistant?.id,
           });
 
-          // PRD 0.2.32 — 并发 context 用量快照。占用取「最近一条主轮 message」（非聚合
-          // currentTurnUsage），窗口用 lookupModelContextLength ?? 200K（对齐 auto-compact，
-          // **不**用 SDK contextWindow，理由见 broadcastBuiltinContextUsage）。
-          broadcastBuiltinContextUsage();
+          // PRD 0.2.32 — 并发 context 用量快照。快路径取「最近一条主轮 message」per-call usage；
+          // 缺失时回落 SDK `getContextUsage()`（/context 命令同源），覆盖 #343 / #323-善后两类。
+          // 窗口用 lookupModelContextLength ?? 200K（对齐 auto-compact，**不**用 SDK contextWindow，
+          // 理由见 broadcastBuiltinContextUsage）。fire-and-forget — 持久化在内部已经异步。
+          void broadcastBuiltinContextUsage();
 
           // Server-side unified analytics: covers all sources (desktop/cron/im).
           // PRD 0.2.19 — `session_id` lets analytics join this back to the renderer's
