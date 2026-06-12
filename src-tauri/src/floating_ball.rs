@@ -117,12 +117,6 @@ mod imp {
     const COMPANION_W: f64 = 440.0;
     const COMPANION_H: f64 = 660.0;
     const COMPANION_GAP: f64 = 10.0;
-    /// Peek translucency lives at the NSWindow level (alphaValue), NOT in CSS:
-    /// the NSVisualEffectView vibrancy layer under the DOM is itself fairly
-    /// opaque, so CSS background-alpha differences get visually crushed —
-    /// user-verified symptom: "hover 出现的就是点击后的效果". Window alpha
-    /// dims the vibrancy layer along with everything else.
-    const PEEK_ALPHA: f64 = 0.62;
 
     tauri_panel! {
         // The ball never takes keyboard focus — pure visual + mouse target.
@@ -351,13 +345,19 @@ mod imp {
                 .map_err(|e| format!("[fb] create companion window: {e}"))?;
 
             // True frosted glass: NSVisualEffectView under the (transparent)
-            // webview, rounded to match the DOM panel radius. Material choice
-            // mirrors the playground's warm glass — HudWindow reads too dark,
-            // Popover matches the paper tones best.
+            // webview, rounded to match the DOM panel radius.
+            //
+            // 透明度模型（用户两轮实测收敛）：模糊永远全强度，透明度只由 DOM
+            // 着色层（fb.css --glass-ghost/--glass-solid）控制。两个坑别再踩：
+            // ① 材质必须够通透（Popover 太奶白，把 CSS tint 差全部吃掉）；
+            // ② state 必须强制 Active——默认 FollowsWindowActiveState，而本
+            //   app 永不激活（nonactivating panel），模糊会按 Inactive 弱化；
+            // ③ 不要用 NSWindow.alphaValue 做 peek 半透明——它把模糊输出一起
+            //   淡掉，背景文字"不模糊地"透进来，叠字不可读。
             if let Err(e) = window_vibrancy::apply_vibrancy(
                 &win,
-                window_vibrancy::NSVisualEffectMaterial::Popover,
-                None,
+                window_vibrancy::NSVisualEffectMaterial::UnderWindowBackground,
+                Some(window_vibrancy::NSVisualEffectState::Active),
                 Some(24.0),
             ) {
                 ulog_warn!("[fb] companion vibrancy failed (non-fatal): {e}");
@@ -469,7 +469,6 @@ mod imp {
             .map_err(|_| "[fb] companion panel missing".to_string())?;
         match mode {
             "pin" => {
-                panel.set_alpha_value(1.0);
                 panel.order_front_regardless();
                 panel.show();
                 // Keyboard focus moves to the panel; the user's app stays
@@ -477,9 +476,8 @@ mod imp {
                 panel.make_key_window();
             }
             _ => {
-                // Peek: visible but never key — D1. 半透明在窗口层（见
-                // PEEK_ALPHA 注释——CSS 透明度被毛玻璃层吃掉）。
-                panel.set_alpha_value(PEEK_ALPHA);
+                // Peek: visible but never key — D1. 半透明由 DOM 着色层表达
+                // （毛玻璃常开，见 ensure_windows 的 vibrancy 注释）。
                 panel.order_front_regardless();
                 panel.show();
             }
@@ -492,7 +490,6 @@ mod imp {
         let panel = app
             .get_webview_panel(COMPANION_LABEL)
             .map_err(|_| "[fb] companion panel missing".to_string())?;
-        panel.set_alpha_value(1.0);
         panel.order_front_regardless();
         panel.show();
         panel.make_key_window();

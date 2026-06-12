@@ -157,15 +157,17 @@ html.fb-transparent #root {
   display: flex;
   flex-direction: column;
   border-radius: 24px;
-  /* 真模糊由 Rust 侧 NSVisualEffectView 提供；这里只做暖纸着色层 */
-  background: rgba(253, 250, 244, 0.52);
+  /* 真模糊由 Rust 侧 NSVisualEffectView 提供（UnderWindowBackground +
+     强制 Active，模糊常开全强度）；透明度只由这层暖纸着色控制——
+     peek 0.45（毛玻璃+透，背景成模糊色块）→ pin 0.96（凝固成实纸） */
+  background: rgba(253, 250, 244, 0.45);
   border: 1px solid rgba(255, 255, 255, 0.5);
   overflow: hidden;
   transition: background 280ms ease;
   -webkit-user-select: none;
   user-select: none;
 }
-.fbw-win.pin { background: rgba(253, 250, 244, 0.93); }
+.fbw-win.pin { background: rgba(253, 250, 244, 0.96); }
 .fbw-win.peek { cursor: pointer; }
 .fbw-win.peek .fbw-inputarea { opacity: 0.5; pointer-events: none; }
 .fbw-win.peek .fbw-convo { pointer-events: none; }
