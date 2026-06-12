@@ -31,6 +31,7 @@ import { useTabState, useTabActive } from '@/context/TabContext';
 import { useVirtuosoScroll } from '@/hooks/useVirtuosoScroll';
 import { useAgentStatuses } from '@/hooks/useAgentStatuses';
 import { useSessionSurfaces } from '@/hooks/useSessionSurfaces';
+import { resolveFloatingBallBoundSession } from '@/hooks/taskCenterStore';
 import { useConfig } from '@/hooks/useConfig';
 import { useFileDropZone } from '@/hooks/useFileDropZone';
 import { useTauriFileDrop } from '@/hooks/useTauriFileDrop';
@@ -3536,8 +3537,12 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
                 />
               </>
             )}
-            {/* Surface tags (channel/cron pill) — display-only since the menu owns actions */}
-            <SessionSurfaceTags channel={surfaces.channel} cron={surfaces.cron} />
+            {/* Surface tags (channel/cron/floating-ball pill) — display-only since the menu owns actions */}
+            <SessionSurfaceTags
+              channel={surfaces.channel}
+              cron={surfaces.cron}
+              floatingBall={!!sessionId && resolveFloatingBallBoundSession(config) === sessionId}
+            />
             {/* Session ⋯ menu — rename/favorite/export/stats/bot binding/delete */}
             {sessionId && agentDir && (
               <SessionMenuButton

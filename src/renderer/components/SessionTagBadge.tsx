@@ -25,12 +25,19 @@ const TAG_STYLES = {
         text: 'text-[var(--accent)]',
         bg: 'bg-[color-mix(in_srgb,var(--accent)_8%,transparent)]',
     },
+    /** Floating ball desktop channel — info blue（区别于 IM 绿 / 定时棕） */
+    floatingBall: {
+        dot: 'bg-[var(--info)]',
+        text: 'text-[var(--info)]',
+        bg: 'bg-[color-mix(in_srgb,var(--info)_10%,transparent)]',
+    },
 } as const;
 
 /** Labels */
 const TAG_LABELS: Record<string, string> = {
     cron: '定时',
     background: '后台',
+    floatingBall: '悬浮球',
 };
 
 export default function SessionTagBadge({ tag }: { tag: SessionTag }) {
