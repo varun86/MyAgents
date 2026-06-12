@@ -281,17 +281,32 @@ export default function CompanionWindow() {
     // ── 焦点纪律：pin 态输入框光标常驻 ──
     // mousedown 阶段就把焦点按住（retainFocusOnMouseDown 同款 preventDefault，
     // 不给非交互区域转移焦点的机会）；交互件与会话选文区放行。
+    // 仅 pin 态生效：peek 态没有任何已聚焦元素可保护，而非 key 窗口的首次
+    // 点击（first mouse）在 WebKit 里本就走特殊路径，别去碰它的默认行为。
     const onWinMouseDown = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
         if (e.button !== 0) return;
-        if (modeRef.current === 'peek') {
-            // peek 整窗是一个"大按钮"：mousedown 永不转移焦点。
-            e.preventDefault();
-            return;
-        }
+        if (modeRef.current !== 'pin') return;
         const target = e.target as Element;
         if (target.closest('textarea, input, button, a, .fbw-convo')) return;
         e.preventDefault();
     }, []);
+
+    // ── key window 收敛兜底 ──
+    // 窗口成为 key window 的任何路径（我们的 pin invoke / AppKit 对
+    // becomesKeyOnlyIfNeeded panel 的点击自动升 key / 未来新入口），都收敛
+    // 到正确终态：peek → 走升格流程；其余 → 光标归位输入框。这是确定性
+    // 信号（键盘真的到窗了才 fire），不依赖事件竞速。
+    useEffect(() => {
+        const onFocus = () => {
+            if (modeRef.current === 'peek') {
+                void promoteToPin('click');
+                return;
+            }
+            inputRef.current?.focus();
+        };
+        window.addEventListener('focus', onFocus);
+        return () => window.removeEventListener('focus', onFocus);
+    }, [promoteToPin]);
 
     const onWinClick = useCallback(
         (e: React.MouseEvent<HTMLDivElement>) => {

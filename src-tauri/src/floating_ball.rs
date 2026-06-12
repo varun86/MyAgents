@@ -309,6 +309,13 @@ mod imp {
                 .shadow(false)
                 .visible(false)
                 .skip_taskbar(true)
+                // 非 key 窗口的第一次点击必须直达 webview。wry 默认 false：
+                // WKWebView 子类的 acceptsFirstMouse: 返回 NO → AppKit 把
+                // first mouse 消费成"选中窗口"，DOM 收不到 mousedown/click
+                // （0612 二轮实测：peek 面板第一下轻触/点按无反应，第二下才
+                // 激活——第一下只让 panel 变成了 key window）。fb 两窗永远
+                // 以非 key 态接受第一击，必须显式开。
+                .accept_first_mouse(true)
                 .build()
                 .map_err(|e| format!("[fb] create ball window: {e}"))?;
 
@@ -344,6 +351,8 @@ mod imp {
                 .shadow(true)
                 .visible(false)
                 .skip_taskbar(true)
+                // 同球窗：peek 态（非 key）的第一击必须进 DOM，见上注释。
+                .accept_first_mouse(true)
                 .build()
                 .map_err(|e| format!("[fb] create companion window: {e}"))?;
 
@@ -835,15 +844,19 @@ mod commands {
             .map_err(|e| format!("[fb] main thread dispatch: {e}"))
     }
 
+    /// NOTE: channel-join 等主线程真正执行完 make_key_window 才 resolve——
+    /// `run_on_main_thread` 只是派发不等待，renderer 的 `await invoke(pin)`
+    /// 之后立刻 focus() 需要窗口已是 key window（非 key 窗口 focus 不出
+    /// 光标，0612 二轮实测）。cmd_fb_enable 同款模式。
     #[tauri::command]
     pub async fn cmd_fb_pin_companion(app: AppHandle) -> Result<(), String> {
+        let (tx, rx) = std::sync::mpsc::channel();
         app.clone()
             .run_on_main_thread(move || {
-                if let Err(e) = imp::pin_companion(&app) {
-                    crate::ulog_error!("[fb] pin_companion: {e}");
-                }
+                let _ = tx.send(imp::pin_companion(&app));
             })
-            .map_err(|e| format!("[fb] main thread dispatch: {e}"))
+            .map_err(|e| format!("[fb] main thread dispatch: {e}"))?;
+        rx.recv().map_err(|e| format!("[fb] pin join: {e}"))?
     }
 
     #[tauri::command]
