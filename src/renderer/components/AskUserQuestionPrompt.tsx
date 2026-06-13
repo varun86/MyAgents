@@ -229,15 +229,17 @@ export function AskUserQuestionPrompt({ request, onSubmit, onCancel }: AskUserQu
 
     return (
         <div className="animate-in fade-in slide-in-from-bottom-2 duration-200">
-            <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] shadow-sm overflow-hidden">
+            {/* 反相版（PRD 0.2.34）：padded 白卡，去 header 分隔线 / footer 内嵌栏，
+                颜色只落在被选中的选项上（accent 赭石）。交互逻辑一行未动。 */}
+            <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-4 shadow-sm">
                 {/* Header row */}
-                <div className="flex items-center gap-3 px-4 py-3 border-b border-[var(--line-subtle)]">
+                <div className="flex items-center gap-2.5">
                     <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-[var(--accent)]/10">
                         <MessageCircleQuestion className="size-4 text-[var(--accent)]" />
                     </div>
                     <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2">
-                            <span className="text-xs font-medium text-[var(--ink-muted)] px-1.5 py-0.5 bg-[var(--paper-inset)] rounded">
+                            <span className="text-xs font-semibold text-[var(--accent)] px-2 py-0.5 bg-[var(--accent)]/15 rounded-md">
                                 {currentQuestion.header}
                             </span>
                             {totalQuestions > 1 && (
@@ -253,7 +255,7 @@ export function AskUserQuestionPrompt({ request, onSubmit, onCancel }: AskUserQu
                 </div>
 
                 {/* Options */}
-                <div className="p-4 space-y-2">
+                <div className="mt-3 space-y-2">
                     {currentQuestion.options.map((option) => {
                         const isSelected = currentAnswer.includes(option.label);
                         const hasPreview = !!option.preview;
@@ -266,8 +268,8 @@ export function AskUserQuestionPrompt({ request, onSubmit, onCancel }: AskUserQu
                                     aria-pressed={isSelected}
                                     className={`w-full text-left px-4 py-3 rounded-lg border transition-all
                                         ${isSelected
-                                            ? 'border-[var(--accent)] bg-[var(--accent)]/5 ring-1 ring-[var(--accent)]/20'
-                                            : 'border-[var(--line-subtle)] hover:border-[var(--line)] hover:bg-[var(--paper-inset)]'
+                                            ? 'border-[var(--accent)] bg-[var(--accent)]/8 ring-1 ring-[var(--accent)]/25'
+                                            : 'border-[var(--line-subtle)] bg-[var(--paper)] hover:border-[var(--line)] hover:bg-[var(--paper-inset)]'
                                         }
                                         disabled:opacity-50 disabled:cursor-not-allowed`}
                                 >
@@ -345,8 +347,8 @@ export function AskUserQuestionPrompt({ request, onSubmit, onCancel }: AskUserQu
                     <div
                         className={`w-full text-left px-4 py-3 rounded-lg border transition-all
                             ${isCustomSelected
-                                ? 'border-[var(--accent)] bg-[var(--accent)]/5 ring-1 ring-[var(--accent)]/20'
-                                : 'border-[var(--line-subtle)] hover:border-[var(--line)]'
+                                ? 'border-[var(--accent)] bg-[var(--accent)]/8 ring-1 ring-[var(--accent)]/25'
+                                : 'border-[var(--line-subtle)] bg-[var(--paper)] hover:border-[var(--line)]'
                             }`}
                     >
                         <div className="flex items-start gap-3">
@@ -385,7 +387,7 @@ export function AskUserQuestionPrompt({ request, onSubmit, onCancel }: AskUserQu
 
                 {/* Progress indicators (for multi-question) */}
                 {totalQuestions > 1 && (
-                    <div className="flex justify-center gap-1.5 px-4 pb-3" role="tablist" aria-label="问题进度">
+                    <div className="mt-3 flex justify-center gap-1.5" role="tablist" aria-label="问题进度">
                         {request.questions.map((q, idx) => {
                             const isAnswered = (answers[idx]?.length ?? 0) > 0;
                             const isCurrent = idx === currentIndex;
@@ -412,13 +414,13 @@ export function AskUserQuestionPrompt({ request, onSubmit, onCancel }: AskUserQu
                 )}
 
                 {/* Action buttons */}
-                <div className="flex items-center justify-between gap-2 px-4 py-3 bg-[var(--paper-inset)] border-t border-[var(--line-subtle)]">
+                <div className="mt-3 flex items-center justify-between gap-2">
                     <button
                         onClick={handleCancel}
                         disabled={isSubmitting}
                         className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg
                             text-[var(--ink-muted)] hover:text-[var(--ink)]
-                            border border-[var(--line-subtle)] hover:border-[var(--line)] hover:bg-[var(--paper-elevated)]
+                            border border-[var(--line-subtle)] hover:border-[var(--line)] hover:bg-[var(--paper-inset)]
                             transition-colors disabled:opacity-50"
                     >
                         <X className="size-3.5" />
@@ -433,7 +435,7 @@ export function AskUserQuestionPrompt({ request, onSubmit, onCancel }: AskUserQu
                                 disabled={isSubmitting}
                                 className="flex items-center gap-1 px-3 py-1.5 text-xs font-medium rounded-lg
                                     text-[var(--ink-muted)] hover:text-[var(--ink)]
-                                    border border-[var(--line-subtle)] hover:border-[var(--line)] hover:bg-[var(--paper-elevated)]
+                                    border border-[var(--line-subtle)] hover:border-[var(--line)] hover:bg-[var(--paper-inset)]
                                     transition-colors disabled:opacity-50"
                             >
                                 <ChevronLeft className="size-3.5" />
