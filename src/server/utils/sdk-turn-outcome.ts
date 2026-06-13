@@ -73,3 +73,123 @@ export function findTurnUsageStampIndex(
   }
   return -1;
 }
+
+/**
+ * #358 — pure extraction of per-turn usage from an SDK `result` message.
+ *
+ * The SDK puts a per-model breakdown in `modelUsage` (camelCase, preferred —
+ * lets `byModel` stats show separate rows per provider/upstream model) and
+ * falls back to the flat `usage` aggregate (snake_case). Both shapes can be
+ * partial — fields are independently optional and missing entries are 0.
+ *
+ * Why extract this from the inline result handler:
+ *  - Lets the result handler stamp the assistant message with usage *before*
+ *    deciding which terminal branch to take (success / empty-success / error),
+ *    instead of only on the success branch via handleMessageComplete. Coupling
+ *    usage persistence to chat:message-complete dispatch was the architectural
+ *    flaw behind #358 — any short-circuit in the dispatch path (mid-turn
+ *    persist race, empty-success branch firing despite real usage in result,
+ *    silent broadcast skip) silently zeroed `/sessions/:id/stats`.
+ *  - Makes the model-id-key invariant testable in isolation. Stats aggregation
+ *    keys on whatever string the SDK put in modelUsage — including suffixes
+ *    like `mimo-v2.5-pro[1m]`. We don't normalize that key here; the byModel
+ *    breakdown surfaces it verbatim to the UI.
+ */
+export interface SdkResultUsageRaw {
+  modelUsage?: Record<string, {
+    inputTokens?: number;
+    outputTokens?: number;
+    cacheReadInputTokens?: number;
+    cacheCreationInputTokens?: number;
+  }>;
+  usage?: {
+    input_tokens?: number;
+    output_tokens?: number;
+    cache_read_input_tokens?: number;
+    cache_creation_input_tokens?: number;
+  };
+}
+
+export interface ModelUsageEntryLike {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens?: number;
+  cacheCreationTokens?: number;
+}
+
+export interface TurnUsageBreakdown {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  /** Highest-token model id (verbatim, including any `[1m]` suffix). */
+  model: string | undefined;
+  /** Per-model breakdown, undefined when SDK only emits aggregate `usage`. */
+  modelUsage: Record<string, ModelUsageEntryLike> | undefined;
+}
+
+export function extractTurnUsageFromSdkResult(input: SdkResultUsageRaw): TurnUsageBreakdown {
+  if (input.modelUsage && Object.keys(input.modelUsage).length > 0) {
+    let totalInput = 0;
+    let totalOutput = 0;
+    let totalCacheRead = 0;
+    let totalCacheCreation = 0;
+    let primaryModel: string | undefined;
+    let maxModelTokens = 0;
+    const modelUsageMap: Record<string, ModelUsageEntryLike> = {};
+
+    for (const [model, stats] of Object.entries(input.modelUsage)) {
+      const modelInput = stats.inputTokens ?? 0;
+      const modelOutput = stats.outputTokens ?? 0;
+      const modelCacheRead = stats.cacheReadInputTokens ?? 0;
+      const modelCacheCreation = stats.cacheCreationInputTokens ?? 0;
+
+      totalInput += modelInput;
+      totalOutput += modelOutput;
+      totalCacheRead += modelCacheRead;
+      totalCacheCreation += modelCacheCreation;
+
+      modelUsageMap[model] = {
+        inputTokens: modelInput,
+        outputTokens: modelOutput,
+        cacheReadTokens: modelCacheRead || undefined,
+        cacheCreationTokens: modelCacheCreation || undefined,
+      };
+
+      const modelTotal = modelInput + modelOutput;
+      if (modelTotal > maxModelTokens) {
+        maxModelTokens = modelTotal;
+        primaryModel = model;
+      }
+    }
+
+    return {
+      inputTokens: totalInput,
+      outputTokens: totalOutput,
+      cacheReadTokens: totalCacheRead,
+      cacheCreationTokens: totalCacheCreation,
+      model: primaryModel,
+      modelUsage: modelUsageMap,
+    };
+  }
+
+  if (input.usage) {
+    return {
+      inputTokens: input.usage.input_tokens ?? 0,
+      outputTokens: input.usage.output_tokens ?? 0,
+      cacheReadTokens: input.usage.cache_read_input_tokens ?? 0,
+      cacheCreationTokens: input.usage.cache_creation_input_tokens ?? 0,
+      model: undefined,
+      modelUsage: undefined,
+    };
+  }
+
+  return {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheCreationTokens: 0,
+    model: undefined,
+    modelUsage: undefined,
+  };
+}

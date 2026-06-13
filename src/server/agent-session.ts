@@ -21,7 +21,7 @@ import { deriveReloadResumeAnchor, resolveEffectiveResumeAt } from './utils/rewi
 import { buildForkUuidRemap, remapStoredSdkUuids } from './utils/fork-remap';
 import { decideInFlightActionOnResult } from './utils/inflight-terminal';
 import { shouldBlockToolInPlanMode, planModeDenyMessage, isPlanModeInEffect, PLAN_MODE_READONLY_TOOLS, PLAN_MODE_HOST_INTERACTION_TOOLS, applyPermissionModeSelection, computePlanExitState, computeRestoredPlanState } from './utils/plan-mode-gate';
-import { isEmptySuccessfulSdkResult, isRecoveredAssistantMessageError, findTurnUsageStampIndex } from './utils/sdk-turn-outcome';
+import { isEmptySuccessfulSdkResult, isRecoveredAssistantMessageError, findTurnUsageStampIndex, extractTurnUsageFromSdkResult } from './utils/sdk-turn-outcome';
 import { planRetraction } from './utils/message-retraction';
 import { diagnoseSdkSubprocessFailure } from './utils/sdk-subprocess-diagnostics';
 import { InactivityWatchdog } from './utils/inactivity-watchdog';
@@ -11112,67 +11112,58 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           }
         }
 
-        // Prefer modelUsage (per-model breakdown), fallback to aggregate usage
-        if (resultMessage.modelUsage) {
-          let totalInput = 0;
-          let totalOutput = 0;
-          let totalCacheRead = 0;
-          let totalCacheCreation = 0;
-          let primaryModel: string | undefined;
-          let maxModelTokens = 0;
-          const modelUsageMap: Record<string, ModelUsageEntry> = {};
-
-          for (const [model, stats] of Object.entries(resultMessage.modelUsage)) {
-            const modelInput = stats.inputTokens ?? 0;
-            const modelOutput = stats.outputTokens ?? 0;
-            const modelCacheRead = stats.cacheReadInputTokens ?? 0;
-            const modelCacheCreation = stats.cacheCreationInputTokens ?? 0;
-
-            totalInput += modelInput;
-            totalOutput += modelOutput;
-            totalCacheRead += modelCacheRead;
-            totalCacheCreation += modelCacheCreation;
-
-            // Save per-model breakdown
-            modelUsageMap[model] = {
-              inputTokens: modelInput,
-              outputTokens: modelOutput,
-              cacheReadTokens: modelCacheRead || undefined,
-              cacheCreationTokens: modelCacheCreation || undefined,
-            };
-
-            // Track primary model (highest token usage)
-            const modelTotal = modelInput + modelOutput;
-            if (modelTotal > maxModelTokens) {
-              maxModelTokens = modelTotal;
-              primaryModel = model;
-            }
+        // Prefer modelUsage (per-model breakdown), fallback to aggregate usage.
+        // Pure extraction lives in sdk-turn-outcome.ts so the shape contract is
+        // unit-tested (#358 regression).
+        const turnUsage = extractTurnUsageFromSdkResult(resultMessage);
+        currentTurnUsage.inputTokens = turnUsage.inputTokens;
+        currentTurnUsage.outputTokens = turnUsage.outputTokens;
+        currentTurnUsage.cacheReadTokens = turnUsage.cacheReadTokens;
+        currentTurnUsage.cacheCreationTokens = turnUsage.cacheCreationTokens;
+        currentTurnUsage.model = turnUsage.model;
+        currentTurnUsage.modelUsage = turnUsage.modelUsage;
+        if (isDebugMode) {
+          if (turnUsage.modelUsage) {
+            console.log(`[agent] Token usage from result.modelUsage: input=${turnUsage.inputTokens}, output=${turnUsage.outputTokens}, models=${Object.keys(turnUsage.modelUsage).join(', ')}`);
+          } else if (resultMessage.usage) {
+            console.log(`[agent] Token usage from result.usage: input=${turnUsage.inputTokens}, output=${turnUsage.outputTokens}`);
           }
-
-          currentTurnUsage.inputTokens = totalInput;
-          currentTurnUsage.outputTokens = totalOutput;
-          currentTurnUsage.cacheReadTokens = totalCacheRead;
-          currentTurnUsage.cacheCreationTokens = totalCacheCreation;
-          currentTurnUsage.model = primaryModel;
-          currentTurnUsage.modelUsage = modelUsageMap;
-
-          if (isDebugMode) {
-            console.log(`[agent] Token usage from result.modelUsage: input=${totalInput}, output=${totalOutput}, models=${Object.keys(modelUsageMap).join(', ')}`);
-          }
-        } else if (resultMessage.usage) {
-          currentTurnUsage.inputTokens = resultMessage.usage.input_tokens ?? 0;
-          currentTurnUsage.outputTokens = resultMessage.usage.output_tokens ?? 0;
-          currentTurnUsage.cacheReadTokens = resultMessage.usage.cache_read_input_tokens ?? 0;
-          currentTurnUsage.cacheCreationTokens = resultMessage.usage.cache_creation_input_tokens ?? 0;
-          if (isDebugMode) {
-            console.log(`[agent] Token usage from result.usage: input=${currentTurnUsage.inputTokens}, output=${currentTurnUsage.outputTokens}`);
-          }
-        } else {
+        }
+        if (!resultMessage.modelUsage && !resultMessage.usage) {
           console.warn('[agent] Result message has no usage data, token statistics may be incomplete');
         }
 
         // Calculate duration for analytics
         const durationMs = currentTurnStartTime ? Date.now() - currentTurnStartTime : 0;
+
+        // #358 — stamp turn usage onto the trailing assistant message NOW, before
+        // the empty-success / error / success branching decides whether
+        // handleMessageComplete runs. Stats persistence used to live inside
+        // handleMessageComplete, which is only reached on the success branch
+        // (else of emptySuccessfulResult). Any path that finalized the turn
+        // through chat:message-error / chat:agent-error — empty success, silent
+        // sub-agent intermediate result, third-party Anthropic-compat upstream
+        // shape that race-zeroed the result handler's downstream view — left
+        // the assistant on disk usage-less and `/sessions/:id/stats` summed 0
+        // forever (the JSONL writer is append-only). Stamping here, immediately
+        // after the SDK-authoritative usage is extracted, makes stats correct
+        // even when the broadcast path short-circuits later. handleMessageComplete
+        // still calls findTurnUsageStampIndex on its own branch — that becomes
+        // an idempotent no-op (`usage === undefined` returns -1).
+        const earlyStampIndex = findTurnUsageStampIndex(messages, lastPersistedIndex);
+        if (earlyStampIndex >= 0) {
+          const stampedAssistant = messages[earlyStampIndex];
+          stampedAssistant.usage = {
+            inputTokens: currentTurnUsage.inputTokens,
+            outputTokens: currentTurnUsage.outputTokens,
+            cacheReadTokens: currentTurnUsage.cacheReadTokens || undefined,
+            cacheCreationTokens: currentTurnUsage.cacheCreationTokens || undefined,
+            model: currentTurnUsage.model,
+            modelUsage: currentTurnUsage.modelUsage,
+          };
+          stampedAssistant.toolCount = currentTurnToolCount;
+          stampedAssistant.durationMs = durationMs || undefined;
+        }
 
         // Surface SDK-level errors that produced no assistant output (e.g. "Unknown skill: xxx").
         // These results have non-empty result text but no visible assistant text was streamed.

@@ -4,6 +4,7 @@ import {
   isEmptySuccessfulSdkResult,
   isRecoveredAssistantMessageError,
   findTurnUsageStampIndex,
+  extractTurnUsageFromSdkResult,
 } from './sdk-turn-outcome';
 
 describe('isEmptySuccessfulSdkResult', () => {
@@ -165,5 +166,102 @@ describe('findTurnUsageStampIndex (#331 — usage must land on the right assista
   it('clamps a negative / oversized fromIndex safely', () => {
     expect(findTurnUsageStampIndex([u, a], -5)).toBe(1);
     expect(findTurnUsageStampIndex([u, a], 99)).toBe(-1);
+  });
+});
+
+describe('extractTurnUsageFromSdkResult (#358 — stats source-of-truth contract)', () => {
+  it('aggregates modelUsage and tracks the highest-token model as primary', () => {
+    // Single-model turn — the reported mimo case. Suffixed key must survive verbatim.
+    const out = extractTurnUsageFromSdkResult({
+      modelUsage: {
+        'mimo-v2.5-pro[1m]': {
+          inputTokens: 426563,
+          outputTokens: 28308,
+          cacheReadInputTokens: 1270784,
+        },
+      },
+    });
+    expect(out.inputTokens).toBe(426563);
+    expect(out.outputTokens).toBe(28308);
+    expect(out.cacheReadTokens).toBe(1270784);
+    expect(out.cacheCreationTokens).toBe(0);
+    expect(out.model).toBe('mimo-v2.5-pro[1m]');
+    expect(out.modelUsage).toEqual({
+      'mimo-v2.5-pro[1m]': {
+        inputTokens: 426563,
+        outputTokens: 28308,
+        cacheReadTokens: 1270784,
+        cacheCreationTokens: undefined,
+      },
+    });
+  });
+
+  it('sums across multiple models, primary = highest in+out total', () => {
+    const out = extractTurnUsageFromSdkResult({
+      modelUsage: {
+        'small-helper': { inputTokens: 100, outputTokens: 50 },
+        'main-model': { inputTokens: 5000, outputTokens: 800, cacheReadInputTokens: 200, cacheCreationInputTokens: 10 },
+      },
+    });
+    expect(out.inputTokens).toBe(5100);
+    expect(out.outputTokens).toBe(850);
+    expect(out.cacheReadTokens).toBe(200);
+    expect(out.cacheCreationTokens).toBe(10);
+    expect(out.model).toBe('main-model');
+  });
+
+  it('falls back to flat usage (snake_case) when modelUsage is absent', () => {
+    const out = extractTurnUsageFromSdkResult({
+      usage: {
+        input_tokens: 1000,
+        output_tokens: 200,
+        cache_read_input_tokens: 50,
+        cache_creation_input_tokens: 5,
+      },
+    });
+    expect(out.inputTokens).toBe(1000);
+    expect(out.outputTokens).toBe(200);
+    expect(out.cacheReadTokens).toBe(50);
+    expect(out.cacheCreationTokens).toBe(5);
+    expect(out.model).toBeUndefined();
+    expect(out.modelUsage).toBeUndefined();
+  });
+
+  it('treats an empty modelUsage map as no breakdown — falls back to flat usage', () => {
+    // Without this fallback, an upstream that emits modelUsage:{} alongside a
+    // valid flat usage would zero out the turn. Empty map carries no signal.
+    const out = extractTurnUsageFromSdkResult({
+      modelUsage: {},
+      usage: { input_tokens: 7, output_tokens: 3 },
+    });
+    expect(out.inputTokens).toBe(7);
+    expect(out.outputTokens).toBe(3);
+  });
+
+  it('returns zeros (not undefined fields) when SDK result has neither modelUsage nor usage', () => {
+    const out = extractTurnUsageFromSdkResult({});
+    expect(out.inputTokens).toBe(0);
+    expect(out.outputTokens).toBe(0);
+    expect(out.cacheReadTokens).toBe(0);
+    expect(out.cacheCreationTokens).toBe(0);
+    expect(out.model).toBeUndefined();
+    expect(out.modelUsage).toBeUndefined();
+  });
+
+  it('treats missing numeric fields in a model entry as 0 (does not poison aggregate with NaN)', () => {
+    const out = extractTurnUsageFromSdkResult({
+      modelUsage: {
+        'partial': { outputTokens: 10 },
+      },
+    });
+    expect(out.inputTokens).toBe(0);
+    expect(out.outputTokens).toBe(10);
+    expect(out.cacheReadTokens).toBe(0);
+    expect(out.modelUsage?.partial).toEqual({
+      inputTokens: 0,
+      outputTokens: 10,
+      cacheReadTokens: undefined,
+      cacheCreationTokens: undefined,
+    });
   });
 });
