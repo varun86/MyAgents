@@ -2564,13 +2564,27 @@ async function main() {
         if (!queueId) {
           return jsonResponse({ success: false, error: 'queueId is required' }, 400);
         }
-        const cancelledText = shouldUseExternalRuntime()
-          ? cancelExternalQueueItem(queueId)
-          : cancelQueueItem(queueId);
-        if (cancelledText === null) {
+        const cancelResult = shouldUseExternalRuntime()
+          ? (() => {
+              const cancelledText = cancelExternalQueueItem(queueId);
+              return cancelledText === null
+                ? { status: 'not_found' as const }
+                : { status: 'cancelled' as const, cancelledText };
+            })()
+          : await cancelQueueItem(queueId);
+        if (cancelResult.status !== 'cancelled') {
+          if (cancelResult.status === 'not_cancelled') {
+            return jsonResponse({ success: false, error: 'Queue item was already accepted by SDK' }, 409);
+          }
+          if (cancelResult.status === 'unavailable') {
+            return jsonResponse({ success: false, error: 'Queue cancellation is unavailable for this session' }, 503);
+          }
+          if (cancelResult.status === 'error') {
+            return jsonResponse({ success: false, error: 'Queue cancellation failed' }, 500);
+          }
           return jsonResponse({ success: false, error: 'Queue item not found' }, 404);
         }
-        return jsonResponse({ success: true, cancelledText });
+        return jsonResponse({ success: true, cancelledText: cancelResult.cancelledText });
       }
 
       // Force-execute a queued message (interrupt current + run queued)
@@ -3472,7 +3486,7 @@ async function main() {
             if (!completed) {
               console.warn(`[cron] execute-sync taskId=${taskId} timed out`);
               if (enqueueResult.queued && enqueueResult.queueId) {
-                cancelQueueItem(enqueueResult.queueId);
+                await cancelQueueItem(enqueueResult.queueId);
               }
               clearCronTaskContext(effectiveSessionId);
               resetInteractionScenario();

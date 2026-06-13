@@ -2554,9 +2554,9 @@ export default function TabProvider({
                 // A message was queued — add to frontend queue state for UI rendering.
                 // Deduplication: sendMessage's .then() may also add the same queueId,
                 // and optimistic entries (opt-*) may already exist from sendMessage.
-                // (v0.2.12) `isInFlight` indicates the backend has already yielded
-                // this item to the SDK CLI — it is in CLI's commandQueue and the
-                // X cancel button must be hidden (see QueuedMessageBubble).
+                // `isInFlight` indicates the backend has already yielded this item
+                // to the SDK CLI. It remains conditionally cancellable via the
+                // SDK control plane until replay/dequeue confirmation arrives.
                 const payload = data as { queueId: string; messageText: string; isInFlight?: boolean } | null;
                 if (payload?.queueId) {
                     console.log(`[TabProvider] queue:added queueId=${payload.queueId} isInFlight=${!!payload.isInFlight}`);
