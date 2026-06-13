@@ -14,7 +14,7 @@ import { execFile } from 'node:child_process';
 import { lstatSync, mkdirSync } from 'node:fs';
 import { cp as fsCp } from 'node:fs/promises';
 import { promisify } from 'node:util';
-import type { McpServerDefinition } from '../shared/config-types';
+import { splitProviderModelInput, type McpServerDefinition } from '../shared/config-types';
 import { deriveCliToolKind, type CliToolRegistryEntry } from '../shared/types/cliTools';
 import { workspacePathsEqual } from '../shared/workspacePath';
 import { SDK_RESERVED_MCP_NAMES } from './agent-session';
@@ -925,13 +925,31 @@ export function handleModelAdd(payload: {
 
   // Build model entities
   const modelSeries = (p.modelSeries as string) || String(p.id);
-  const modelIds = p.models as string[];
-  const modelNames = (p.modelNames as string[]) || modelIds;
-  const models = modelIds.map((model, i) => ({
-    model,
-    modelName: modelNames[i] || model,
-    modelSeries,
-  }));
+  const expandedModelIds = (p.models as unknown[]).flatMap(model => splitProviderModelInput(String(model)));
+  if (expandedModelIds.length === 0) {
+    return { success: false, error: 'Missing required field: models (at least one model ID required)' };
+  }
+  const modelNameInputs = Array.isArray(p.modelNames)
+    ? (p.modelNames as unknown[]).map(name => String(name).trim())
+    : [];
+  const seenModelIds = new Set<string>();
+  const uniqueModelRefs = expandedModelIds.flatMap((model, expandedIndex) => {
+    if (seenModelIds.has(model)) return [];
+    seenModelIds.add(model);
+    return [{ model, expandedIndex }];
+  });
+  const modelNamesUseExpandedIndex = modelNameInputs.length === expandedModelIds.length;
+  const models = uniqueModelRefs.map(({ model, expandedIndex }, uniqueIndex) => {
+    const modelName = modelNamesUseExpandedIndex
+      ? modelNameInputs[expandedIndex]
+      : modelNameInputs[uniqueIndex];
+    return {
+      model,
+      modelName: modelName || model,
+      modelSeries,
+    };
+  });
+  const modelIds = models.map(model => model.model);
 
   // Build aliases
   let modelAliases: Record<string, string> | undefined;
@@ -948,7 +966,7 @@ export function handleModelAdd(payload: {
     vendor: String(p.vendor ?? p.name),
     cloudProvider: String(p.cloudProvider ?? ''),
     type: 'api' as const,
-    primaryModel: String(p.primaryModel ?? modelIds[0]),
+    primaryModel: p.primaryModel ? String(p.primaryModel).trim() || modelIds[0] : modelIds[0],
     isBuiltin: false,
     config: {
       baseUrl: String(p.baseUrl),

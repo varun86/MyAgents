@@ -19,7 +19,7 @@ import {
   resolveModalitiesToSave,
   type EditableModality,
 } from '@/utils/modelSettingsForm';
-import { PRESET_PROVIDERS, type Provider, type ModelEntity, type AppConfig } from '@/config/types';
+import { PRESET_PROVIDERS, splitProviderModelInput, type Provider, type ModelEntity, type AppConfig } from '@/config/types';
 import {
   fetchProviderModels,
   toModelEntity,
@@ -70,6 +70,14 @@ export default function ModelManagementPanel({
   const activeModelIds = useMemo(
     () => new Set(provider.models.map(m => m.model)),
     [provider.models],
+  );
+  const customInputModelIds = useMemo(
+    () => splitProviderModelInput(customInput),
+    [customInput],
+  );
+  const hasAddableCustomInput = useMemo(
+    () => customInputModelIds.some(id => !activeModelIds.has(id)),
+    [customInputModelIds, activeModelIds],
   );
 
   useEffect(() => {
@@ -148,24 +156,30 @@ export default function ModelManagementPanel({
   }, [provider, config.presetCustomModels, primaryModel, onSaveCustomModels, onUpdateCustomProvider, onSetPrimaryModel, onRefresh]);
 
   const handleAddCustomModel = useCallback(async () => {
-    const id = customInput.trim();
-    if (!id || activeModelIds.has(id)) return;
+    const seen = new Set(activeModelIds);
+    const modelIds = customInputModelIds.filter(id => {
+      if (seen.has(id)) return false;
+      seen.add(id);
+      return true;
+    });
+    if (modelIds.length === 0) return;
 
-    const entity: ModelEntity = {
-      model: id, modelName: id,
+    const entities: ModelEntity[] = modelIds.map(id => ({
+      model: id,
+      modelName: id,
       modelSeries: provider.vendor.toLowerCase(),
       source: 'manual',
-    };
+    }));
 
     if (provider.isBuiltin) {
       const existing = config.presetCustomModels?.[provider.id] ?? [];
-      await onSaveCustomModels(provider.id, [...existing, entity]);
+      await onSaveCustomModels(provider.id, [...existing, ...entities]);
     } else if (onUpdateCustomProvider) {
-      await onUpdateCustomProvider({ ...provider, models: [...provider.models, entity] });
+      await onUpdateCustomProvider({ ...provider, models: [...provider.models, ...entities] });
     }
     setCustomInput('');
     await onRefresh();
-  }, [customInput, activeModelIds, provider, config.presetCustomModels, onSaveCustomModels, onUpdateCustomProvider, onRefresh]);
+  }, [customInputModelIds, activeModelIds, provider, config.presetCustomModels, onSaveCustomModels, onUpdateCustomProvider, onRefresh]);
 
   // #325 — which rows get the ⚙ settings button. On a custom provider every
   // model lives in the provider file → all editable. On a builtin (preset)
@@ -352,7 +366,7 @@ export default function ModelManagementPanel({
               <button
                 type="button"
                 onClick={handleAddCustomModel}
-                disabled={!customInput.trim() || activeModelIds.has(customInput.trim())}
+                disabled={!hasAddableCustomInput}
                 className="rounded-lg bg-[var(--paper-inset)] px-2.5 py-1.5 text-[var(--ink-muted)] transition-colors hover:text-[var(--ink)] disabled:opacity-40"
               >
                 <Plus className="h-4 w-4" />

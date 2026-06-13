@@ -5,6 +5,7 @@ import {
   DEFAULT_CONFIG,
   normalizeClaudeTranscriptCleanupPeriodDays,
   normalizeProviderOrder,
+  splitProviderModelInput,
 } from './config-types';
 
 // normalizeProviderOrder reconciles a persisted provider order against the set
@@ -31,6 +32,20 @@ describe('normalizeProviderOrder', () => {
 
   it('returns empty for no known providers', () => {
     expect(normalizeProviderOrder([], ['a', 'b'])).toEqual([]);
+  });
+});
+
+describe('splitProviderModelInput', () => {
+  it('preserves a single model id when no comma separator is present', () => {
+    expect(splitProviderModelInput(' sensenova-6.7-flash-lite ')).toEqual(['sensenova-6.7-flash-lite']);
+  });
+
+  it('splits ASCII and Chinese comma-separated model ids and trims whitespace', () => {
+    expect(splitProviderModelInput('m1, m2， m3')).toEqual(['m1', 'm2', 'm3']);
+  });
+
+  it('drops empty segments created by extra separators', () => {
+    expect(splitProviderModelInput(' m1, ,，m2，')).toEqual(['m1', 'm2']);
   });
 });
 

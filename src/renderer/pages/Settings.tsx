@@ -27,6 +27,7 @@ import {
     getEffectiveModelAliases,
     normalizeDisabledProviderIds,
     normalizeProviderOrder,
+    splitProviderModelInput,
     type AppConfig,
     type ModelAliases,
     type Provider,
@@ -517,11 +518,19 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
     const [disabledProviderDraft, setDisabledProviderDraft] = useState<string[]>([]);
     const customModelInputRef = useRef<HTMLInputElement>(null);
     const addCustomModelFromInput = () => {
-        const val = customModelInputRef.current?.value.trim();
-        if (val && !customForm.models.includes(val)) {
-            setCustomForm((p) => ({ ...p, models: [...p.models, val] }));
-            if (customModelInputRef.current) customModelInputRef.current.value = '';
-        }
+        const modelIds = splitProviderModelInput(customModelInputRef.current?.value ?? '');
+        if (modelIds.length === 0) return;
+        setCustomForm((p) => {
+            const existing = new Set(p.models);
+            const added = modelIds.filter(id => {
+                if (existing.has(id)) return false;
+                existing.add(id);
+                return true;
+            });
+            if (added.length === 0) return p;
+            return { ...p, models: [...p.models, ...added] };
+        });
+        if (customModelInputRef.current) customModelInputRef.current.value = '';
     };
     // Provider edit/manage panel state
     const [editingProvider, setEditingProvider] = useState<ProviderEditForm | null>(null);

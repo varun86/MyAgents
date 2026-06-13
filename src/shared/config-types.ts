@@ -69,6 +69,18 @@ export interface ModelEntity {
   source?: 'preset' | 'discovered' | 'manual';
 }
 
+const PROVIDER_MODEL_LIST_SEPARATOR_RE = /[,，]/;
+
+export function splitProviderModelInput(value: string): string[] {
+  const trimmed = value.trim();
+  if (!trimmed) return [];
+  if (!PROVIDER_MODEL_LIST_SEPARATOR_RE.test(trimmed)) return [trimmed];
+  return trimmed
+    .split(PROVIDER_MODEL_LIST_SEPARATOR_RE)
+    .map(part => part.trim())
+    .filter(Boolean);
+}
+
 /**
  * Model type for model selection (API code)
  */
