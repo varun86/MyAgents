@@ -86,7 +86,7 @@ export function PermissionPrompt({ request, onDecision }: PermissionPromptProps)
                         {formatToolName(request.toolName)}
                     </span>
                     {formattedInput && (
-                        <div className="whitespace-pre-wrap break-all font-mono text-xs leading-relaxed text-[var(--ink-secondary)]">
+                        <div className="max-h-48 overflow-y-auto whitespace-pre-wrap break-all font-mono text-xs leading-relaxed text-[var(--ink-secondary)]">
                             {formattedInput}
                         </div>
                     )}
@@ -121,7 +121,7 @@ export function PermissionPrompt({ request, onDecision }: PermissionPromptProps)
                         onClick={() => handleDecision('allow_once')}
                         disabled={isResponding}
                         className="flex items-center gap-1.5 rounded-lg bg-[var(--warning)] px-3 py-1.5 text-xs font-medium
-                            text-white transition hover:brightness-110 disabled:opacity-50"
+                            text-white transition-colors hover:brightness-110 disabled:opacity-50"
                     >
                         <Check className="size-3.5" />
                         <span>允许</span>
