@@ -1085,3 +1085,29 @@ code {
 .monaco-editor-host .myagents-monaco-search-focus-line {
   background-color: var(--accent-warm-subtle) !important;
 }
+
+/* Monaco's find widget creates its own hover popovers for the Aa/ab/.* controls.
+ * Those popovers can sit directly over the button and intercept clicks. The editor
+ * wrapper renders a scoped MyAgents tooltip instead, so the built-in one is hidden
+ * only for Monaco instances mounted through this host.
+ */
+.monaco-editor-host .monaco-hover {
+  display: none !important;
+}
+
+.myagents-monaco-find-tooltip {
+  pointer-events: none;
+  position: fixed;
+  z-index: 330;
+  max-width: min(260px, calc(100vw - 16px));
+  transform: translateX(-50%);
+  padding: 6px 10px;
+  border: 1px solid color-mix(in srgb, var(--button-dark-bg) 72%, var(--line-strong));
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--button-dark-bg) 94%, transparent);
+  color: var(--button-primary-text);
+  box-shadow: var(--shadow-lg);
+  font-size: var(--text-xs);
+  line-height: 1.35;
+  white-space: normal;
+}

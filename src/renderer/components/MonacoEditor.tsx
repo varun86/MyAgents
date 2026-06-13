@@ -12,6 +12,11 @@ import Editor, { loader, type Monaco } from '@monaco-editor/react';
 import { ClipboardPaste, Copy, Loader2, Quote, Scissors, Search, TextSelect } from 'lucide-react';
 import * as monaco from 'monaco-editor';
 import { retainFocusOnMouseDown } from '@/utils/focusRetention';
+import {
+    closestMonacoFindButton,
+    computeMonacoFindTooltipPosition,
+    resolveMonacoFindTooltipLabel,
+} from '@/utils/monacoFindTooltip';
 import ContextMenu, { type ContextMenuItem } from './ContextMenu';
 import editorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker';
 import jsonWorker from 'monaco-editor/esm/vs/language/json/json.worker?worker';
@@ -252,7 +257,48 @@ export default function MonacoEditor({
     const focusMountTimerRef = useRef<number | null>(null);
     const focusTargetRef = useRef(focusTarget);
     const lastAppliedFocusTargetRef = useRef<FilePreviewFocusTarget | null>(null);
+    const [findTooltip, setFindTooltip] = useState<{ label: string; x: number; top: number } | null>(null);
+    const findTooltipTimerRef = useRef<number | null>(null);
+    const activeFindTooltipButtonRef = useRef<HTMLElement | null>(null);
     useEffect(() => { focusTargetRef.current = focusTarget; }, [focusTarget]);
+
+    const clearFindTooltipTimer = useCallback(() => {
+        if (findTooltipTimerRef.current !== null) {
+            window.clearTimeout(findTooltipTimerRef.current);
+            findTooltipTimerRef.current = null;
+        }
+    }, []);
+
+    const hideFindTooltip = useCallback(() => {
+        clearFindTooltipTimer();
+        activeFindTooltipButtonRef.current = null;
+        setFindTooltip(null);
+    }, [clearFindTooltipTimer]);
+
+    const showFindTooltipForButton = useCallback((button: HTMLElement) => {
+        const label = resolveMonacoFindTooltipLabel(button);
+        if (!label) {
+            hideFindTooltip();
+            return;
+        }
+
+        const position = computeMonacoFindTooltipPosition(button.getBoundingClientRect(), {
+            width: window.innerWidth,
+            height: window.innerHeight,
+        });
+        setFindTooltip({ label, ...position });
+    }, [hideFindTooltip]);
+
+    const scheduleFindTooltip = useCallback((button: HTMLElement) => {
+        clearFindTooltipTimer();
+        activeFindTooltipButtonRef.current = button;
+        findTooltipTimerRef.current = window.setTimeout(() => {
+            findTooltipTimerRef.current = null;
+            if (activeFindTooltipButtonRef.current === button) {
+                showFindTooltipForButton(button);
+            }
+        }, 180);
+    }, [clearFindTooltipTimer, showFindTooltipForButton]);
 
     const clearPendingFocusTimer = useCallback(() => {
         if (focusMountTimerRef.current !== null) {
@@ -420,6 +466,54 @@ export default function MonacoEditor({
         // viewport coordinates move. Without this the menu would visually detach from the
         // selection during scroll.
         disposables.push(editor.onDidScrollChange(() => { scheduleQuoteMenuUpdate(); }));
+        const editorDom = editor.getDomNode();
+        if (editorDom) {
+            const stayedInsideButton = (button: HTMLElement, relatedTarget: EventTarget | null) => {
+                const relatedNode = relatedTarget instanceof Node ? relatedTarget : null;
+                return !!relatedNode && button.contains(relatedNode);
+            };
+            const onMouseOver = (event: MouseEvent) => {
+                const button = closestMonacoFindButton(event.target);
+                if (!button || stayedInsideButton(button, event.relatedTarget)) return;
+                scheduleFindTooltip(button);
+            };
+            const onMouseOut = (event: MouseEvent) => {
+                const button = closestMonacoFindButton(event.target);
+                if (!button || stayedInsideButton(button, event.relatedTarget)) return;
+                hideFindTooltip();
+            };
+            const onFocusIn = (event: FocusEvent) => {
+                const button = closestMonacoFindButton(event.target);
+                if (button) showFindTooltipForButton(button);
+            };
+            const onFocusOut = (event: FocusEvent) => {
+                const button = closestMonacoFindButton(event.target);
+                if (!button || stayedInsideButton(button, event.relatedTarget)) return;
+                hideFindTooltip();
+            };
+            const onPointerDown = (event: PointerEvent) => {
+                if (closestMonacoFindButton(event.target)) hideFindTooltip();
+            };
+
+            editorDom.addEventListener('mouseover', onMouseOver);
+            editorDom.addEventListener('mouseout', onMouseOut);
+            editorDom.addEventListener('focusin', onFocusIn);
+            editorDom.addEventListener('focusout', onFocusOut);
+            editorDom.addEventListener('pointerdown', onPointerDown);
+            window.addEventListener('resize', hideFindTooltip);
+            disposables.push({
+                dispose: () => {
+                    editorDom.removeEventListener('mouseover', onMouseOver);
+                    editorDom.removeEventListener('mouseout', onMouseOut);
+                    editorDom.removeEventListener('focusin', onFocusIn);
+                    editorDom.removeEventListener('focusout', onFocusOut);
+                    editorDom.removeEventListener('pointerdown', onPointerDown);
+                    window.removeEventListener('resize', hideFindTooltip);
+                    clearFindTooltipTimer();
+                    activeFindTooltipButtonRef.current = null;
+                },
+            });
+        }
         // When the editor loses focus to a click outside (e.g. the menu button itself
         // intercepts mousedown to preserve selection), Monaco still keeps the selection.
         // No extra blur handling needed — selection-change covers clearing.
@@ -452,7 +546,20 @@ export default function MonacoEditor({
             // Use setTimeout to ensure editor is fully ready
             setTimeout(() => editor.focus(), 0);
         }
-    }, [applyFocusTarget, autoFocus, activeTheme, clearFocusDecoration, clearPendingFocusTimer, focusTarget, initialLineNumber, scheduleQuoteMenuUpdate]);
+    }, [
+        applyFocusTarget,
+        autoFocus,
+        activeTheme,
+        clearFindTooltipTimer,
+        clearFocusDecoration,
+        clearPendingFocusTimer,
+        focusTarget,
+        hideFindTooltip,
+        initialLineNumber,
+        scheduleFindTooltip,
+        scheduleQuoteMenuUpdate,
+        showFindTooltipForButton,
+    ]);
 
     useEffect(() => {
         if (!focusTarget || lastAppliedFocusTargetRef.current === focusTarget) return;
@@ -465,9 +572,10 @@ export default function MonacoEditor({
     // Cancel any pending RAF on unmount to avoid setState-after-unmount warning.
     useEffect(() => () => {
         if (quoteRafRef.current !== null) cancelAnimationFrame(quoteRafRef.current);
+        clearFindTooltipTimer();
         clearPendingFocusTimer();
         clearFocusDecoration();
-    }, [clearFocusDecoration, clearPendingFocusTimer]);
+    }, [clearFindTooltipTimer, clearFocusDecoration, clearPendingFocusTimer]);
 
     // Defense for `onQuote` flipping defined → undefined mid-session: the JSX render-side
     // guard `{onQuote && quoteMenu && ...}` already hides the stale menu visually, and the
@@ -707,6 +815,15 @@ export default function MonacoEditor({
                     // default z-50 would render the menu behind the backdrop.
                     zIndex={320}
                 />,
+                document.body,
+            )}
+            {findTooltip && createPortal(
+                <div
+                    className="myagents-monaco-find-tooltip"
+                    style={{ left: findTooltip.x, top: findTooltip.top }}
+                >
+                    {findTooltip.label}
+                </div>,
                 document.body,
             )}
         </div>
