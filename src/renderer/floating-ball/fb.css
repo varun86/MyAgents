@@ -180,6 +180,28 @@ html.fb-transparent #root {
 .fbw-win.peek .fbw-inputarea { opacity: 0.5; pointer-events: none; }
 .fbw-win.peek .fbw-convo { pointer-events: none; }
 
+/* 顶部暖纸渐隐幕（pin 态收口）：浮动 chrome 本身无背板，靠这层正向的纸幕
+   给标题一块可读的「纸架」，会话正文随 .fbw-convo 顶部 mask 向上溶进幕里，
+   不再与标题字叠字。幕下整片保持通透。只在 pin 出现——peek 是纯毛玻璃纯视觉，
+   一条不透明纸带会破掉它的通透。z 序：convo(in-flow) < 幕(1) < mv(2) < chrome(3)。
+   父容器 overflow:hidden 已把幕裁进 24px 圆角，不溢出窗口弧度。 */
+.fbw-win.pin::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 56px;
+  z-index: 1;
+  pointer-events: none;
+  background: linear-gradient(
+    to bottom,
+    rgba(253, 250, 244, 0.95) 0,
+    rgba(253, 250, 244, 0.72) 46%,
+    rgba(253, 250, 244, 0) 100%
+  );
+}
+
 /* chrome：pin 态悬停浮现 */
 .fbw-chrome {
   position: absolute;
@@ -226,8 +248,10 @@ html.fb-transparent #root {
   min-height: 0;
   overflow-y: auto;
   padding: 30px 22px 4px;
-  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 26px);
-          mask-image: linear-gradient(to bottom, transparent 0, #000 26px);
+  /* 渐隐拉长到 44px：让正文在抵达顶部 chrome 带（~36px）之前就溶尽，
+     与上面的暖纸幕配合——负向(内容隐) × 正向(纸幕显)一起收口顶部。 */
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 44px);
+          mask-image: linear-gradient(to bottom, transparent 0, #000 44px);
   -webkit-user-select: text;
   user-select: text;
 }
