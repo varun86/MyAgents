@@ -8,8 +8,9 @@
  *   hidden → peek（hover：半透明，纯视觉，焦点纹丝不动）
  *          → pin （点击/球点击：变实 + 拿键盘焦点；窗口失焦/Esc/×/再点球 → hidden）
  */
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { AlertCircle, Brain, Image as ImageIcon, Loader2, StopCircle, XCircle } from 'lucide-react';
 
 import { listenWithCleanup } from '@/utils/tauriListen';
 import Markdown from '@/components/Markdown';
@@ -20,9 +21,12 @@ import { AskUserQuestionPrompt } from '@/components/AskUserQuestionPrompt';
 import { ExitPlanModePrompt } from '@/components/ExitPlanModePrompt';
 import { track } from '@/analytics';
 import { isImeComposingEvent, resolveEnterKeyAction } from '@/utils/chatSendKey';
+import { formatDuration, getToolBadgeConfig, getToolLabel, getToolMainLabel, getToolSummaryNode, isSubagentContainerTool } from '@/components/tools/toolBadgeConfig';
+import { groupContentBlocksForDisplay } from '@/utils/contentBlockDisplay';
+import type { ContentBlock } from '@/types/chat';
 import { computeDragOrigin } from './fbDrag';
 import { isNearBottom } from './convoAutoFollow';
-import { useFloatingSession, type FbActivity, type FbMsg } from './useFloatingSession';
+import { useFloatingSession, type FbMsg } from './useFloatingSession';
 
 import './fb.css';
 
@@ -50,21 +54,117 @@ function loadWinH(): number {
     return Number.isFinite(saved) && saved >= 360 ? Math.min(saved, 1200) : 660;
 }
 
-/** cameo 式单行活动条：状态点 + 名称 + 灰色 detail（思考带活秒表）。 */
-function ActivityRow({ label, detail, running }: { label: string; detail?: string; running: boolean }) {
+/** cameo 式单行活动条：状态点 + 主端同款过程摘要，但不可展开。 */
+function ActivityRow({ block, isStreaming, tick }: { block: ContentBlock; isStreaming: boolean; tick: number }) {
+    const isThinking = block.type === 'thinking';
+    const isTool = block.type === 'tool_use' || block.type === 'server_tool_use';
+    const tool = isTool ? block.tool : undefined;
+    const isTaskTool = !!tool?.name && isSubagentContainerTool(tool.name);
+    const isThinkingActive = isThinking && block.isComplete !== true && isStreaming;
+    const isToolActive = !!tool?.isLoading;
+    const isTaskRunning = isTaskTool && !!tool?.isLoading && !tool?.result;
+    const isRunning = isThinkingActive || isToolActive || isTaskRunning;
+
+    let icon: ReactNode = null;
+    let mainLabel = '';
+    let subLabel = '';
+    let taskDuration: string | null = null;
+    const summaryNode = tool ? getToolSummaryNode(tool) : null;
+    const processAttachments = tool?.attachments?.filter((a) => a.presentation === 'process') ?? [];
+
+    if (isThinking) {
+        const durationMs = block.thinkingDurationMs ?? (isThinkingActive && block.thinkingStartedAt ? tick - block.thinkingStartedAt : undefined);
+        const durationSec = durationMs ? Math.floor(durationMs / 1000) : 0;
+        if (isThinkingActive) {
+            mainLabel = durationSec > 0 ? `思考中… (${durationSec}s)` : '思考中…';
+            icon = <Loader2 className="size-4 animate-spin" />;
+        } else if (block.isFailed) {
+            mainLabel = durationSec > 0 ? `思考失败 (${durationSec}s)` : '思考失败';
+            icon = <XCircle className="size-4 text-[var(--error)]" />;
+        } else if (block.isStopped) {
+            mainLabel = durationSec > 0 ? `思考中断 (${durationSec}s)` : '思考中断';
+            icon = <StopCircle className="size-4 text-[var(--warning)]" />;
+        } else {
+            mainLabel = `思考了 ${Math.max(durationSec, 1)}s`;
+            icon = <Brain className="size-4" />;
+        }
+    } else if (tool) {
+        const config = getToolBadgeConfig(tool.name);
+        const toolLabel = getToolLabel(tool);
+        mainLabel = getToolMainLabel(tool);
+        subLabel = toolLabel !== mainLabel ? toolLabel : '';
+        if (isTaskRunning && tool.taskStartTime) {
+            taskDuration = formatDuration(tick - tool.taskStartTime);
+        } else if (isTaskTool && tool.result) {
+            try {
+                const parsed = JSON.parse(tool.result) as { totalDurationMs?: number };
+                if (parsed.totalDurationMs) taskDuration = formatDuration(parsed.totalDurationMs);
+            } catch {
+                taskDuration = null;
+            }
+        }
+        if (isToolActive || isTaskRunning) {
+            icon = <Loader2 className="size-4 animate-spin" />;
+        } else if (tool.isFailed) {
+            icon = <XCircle className="size-4 text-[var(--error)]" />;
+        } else if (tool.isStopped) {
+            icon = <StopCircle className="size-4 text-[var(--warning)]" />;
+        } else if (tool.isError) {
+            icon = <AlertCircle className="size-4 text-[var(--error)]" />;
+        } else {
+            icon = config.icon;
+        }
+    }
+
     return (
-        <div className={`fbw-act${running ? ' running' : ''}`}>
+        <div className={`fbw-act${isRunning ? ' running' : ''}`} data-tick={tick}>
             <span className="dot" />
-            <span className="label">{running && label === '思考' ? '思考中' : label}</span>
-            {detail && <span className="detail">{detail}</span>}
+            <span className="icon">{icon}</span>
+            <span className="label">{mainLabel}</span>
+            {isTaskTool && (tool?.parsedInput as unknown as Record<string, unknown> | undefined)?.run_in_background === true && (
+                <span className="badge">后台</span>
+            )}
+            {taskDuration && <span className="detail">{taskDuration}</span>}
+            {subLabel && <span className="sub">{subLabel}</span>}
+            {processAttachments.length > 0 && (
+                <span className="media">
+                    <ImageIcon className="size-3" />
+                    {processAttachments.length > 1 ? `×${processAttachments.length}` : ''}
+                </span>
+            )}
+            {summaryNode && <span className="summary">{summaryNode}</span>}
         </div>
     );
 }
 
-function activityDetail(a: FbActivity, _tick: number): string | undefined {
-    const ms = a.durationMs ?? (a.running ? Date.now() - a.startedAt : 0);
-    const secs = Math.round(ms / 1000);
-    return secs >= 1 ? `${secs}s` : undefined;
+function AssistantMessage({ message, isStreaming, tick }: { message: Extract<FbMsg, { role: 'ai' }>; isStreaming: boolean; tick: number }) {
+    const groupedBlocks = groupContentBlocksForDisplay(message.content);
+    return (
+        <>
+            {groupedBlocks.map((item, index) => {
+                if (Array.isArray(item)) {
+                    return (
+                        <div className="fbw-process-group" key={`g-${index}`}>
+                            {item.map((block, blockIndex) => (
+                                <ActivityRow
+                                    key={`${block.type}-${blockIndex}-${block.tool?.id ?? block.thinkingStreamIndex ?? index}`}
+                                    block={block}
+                                    isStreaming={isStreaming}
+                                    tick={tick}
+                                />
+                            ))}
+                        </div>
+                    );
+                }
+                return (
+                    <div className="fbw-msg ai ai-message-content" key={`t-${index}`}>
+                        <Markdown>{item.text ?? ''}</Markdown>
+                        {isStreaming && message.streamingTextActive && index === groupedBlocks.length - 1 && <span className="fbw-caret" />}
+                    </div>
+                );
+            })}
+        </>
+    );
 }
 
 export default function CompanionWindow() {
@@ -93,11 +193,11 @@ export default function CompanionWindow() {
     const hideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const mouseInsideRef = useRef(false);
     // 活动行秒表（仅有 running 活动时跳动）
-    const [nowTick, setNowTick] = useState(0);
+    const [nowTick, setNowTick] = useState(() => Date.now());
     const hasRunningActivity = session.activities.some((a) => a.running);
     useEffect(() => {
         if (!hasRunningActivity) return;
-        const id = setInterval(() => setNowTick((n) => n + 1), 1000);
+        const id = setInterval(() => setNowTick(Date.now()), 1000);
         return () => clearInterval(id);
     }, [hasRunningActivity]);
     // Eager-captured situation（最前台 app/标题）— 发送时随 user 消息走（D4）。
@@ -373,7 +473,7 @@ export default function CompanionWindow() {
     useEffect(() => {
         const el = convoRef.current;
         if (el && stickToBottomRef.current) el.scrollTop = el.scrollHeight;
-    }, [session.messages, session.streamText, mode]);
+    }, [session.messages, session.liveMessage, mode]);
 
     // ── 初始高度（记忆） ──
     useEffect(() => {
@@ -585,29 +685,11 @@ export default function CompanionWindow() {
                                 {m.text}
                             </div>
                         </div>
-                    ) : m.role === 'act' ? (
-                        <ActivityRow key={m.id} label={m.label ?? ''} detail={m.detail} running={false} />
                     ) : (
-                        <div className="fbw-msg ai ai-message-content" key={m.id}>
-                            <Markdown>{m.text}</Markdown>
-                        </div>
+                        <AssistantMessage key={m.id} message={m} isStreaming={false} tick={nowTick} />
                     ),
                 )}
-                {/* 本轮进行中的活动行（思考/工具，cameo 式单行密度） */}
-                {session.activities.map((a: FbActivity) => (
-                    <ActivityRow
-                        key={a.id}
-                        label={a.label}
-                        running={a.running}
-                        detail={activityDetail(a, nowTick)}
-                    />
-                ))}
-                {session.streamText !== null && (
-                    <div className="fbw-msg ai ai-message-content" key="streaming">
-                        <Markdown>{session.streamText}</Markdown>
-                        <span className="fbw-caret" />
-                    </div>
-                )}
+                {session.liveMessage && <AssistantMessage message={session.liveMessage} isStreaming tick={nowTick} />}
                 {/* 交互表单（D13）：复用主 Chat 同款组件，能力对等、视觉随设计
                     token 收敛。fb 窗是主 Vite app 的懒加载路由，Tailwind + @theme
                     token 天然可用，组件原样渲染。每类卡片缺一不可——漏接会让本轮
@@ -640,7 +722,7 @@ export default function CompanionWindow() {
             </div>
 
             {/* 兜底状态行：仅在还没有任何可见反馈（无活动行/无流式文本）时出现 */}
-            {session.busy && session.activities.length === 0 && session.streamText === null && (
+            {session.busy && session.activities.length === 0 && !session.liveMessage && (
                 <div className="fbw-statusline">
                     <span className="fbw-spinner" />
                     <span style={{ flex: 1 }}>Mino 正在处理…</span>

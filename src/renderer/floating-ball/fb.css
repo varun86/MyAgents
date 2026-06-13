@@ -604,16 +604,25 @@ html.fb-transparent #root {
 .fbw-inputrow .send.stop { background: var(--ink, #1c1612); color: #fff; }
 .fbw-inputrow .send.stop:hover { background: var(--button-dark-bg-hover, #3a3532); }
 
-/* ════════ 活动行（思考/工具，cameo 式单行密度） ════════ */
+/* ════════ 过程组（思考/工具，主端 BlockGroup 的单行降级态） ════════ */
+.fbw-process-group {
+  margin: 6px 0 14px;
+  overflow: hidden;
+  border: 1px solid var(--line-subtle, rgba(28, 22, 18, 0.08));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--paper-inset, #f4eee8) 45%, transparent);
+}
 .fbw-act {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-bottom: 10px;
+  min-height: 34px;
+  padding: 8px 10px;
   font-size: var(--text-sm, 14px);
   color: var(--ink-muted, #6f6156);
   line-height: 1.4;
 }
+.fbw-act + .fbw-act { border-top: 1px solid var(--line-subtle, rgba(28, 22, 18, 0.08)); }
 .fbw-act .dot {
   width: 6px;
   height: 6px;
@@ -625,13 +634,59 @@ html.fb-transparent #root {
   background: var(--accent, #c26d3a);
   animation: fb-breathe 1.2s ease-in-out infinite;
 }
+.fbw-act .icon {
+  display: flex;
+  width: 16px;
+  height: 16px;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  color: var(--ink-muted, #6f6156);
+}
+.fbw-act .icon svg { width: 16px; height: 16px; }
 .fbw-act .label {
+  min-width: 0;
+  max-width: 48%;
+  color: var(--ink, #1c1612);
+  font-weight: 500;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  max-width: 70%;
+}
+.fbw-act .sub {
+  min-width: 0;
+  max-width: 44%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace);
+  font-size: var(--text-xs, 12px);
+  color: var(--ink-subtle, #a69a90);
 }
 .fbw-act .detail { font-size: var(--text-xs, 12px); color: var(--ink-subtle, #a69a90); }
+.fbw-act .badge {
+  flex: none;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent, #c26d3a) 12%, transparent);
+  padding: 1px 6px;
+  font-size: var(--text-xs, 12px);
+  font-weight: 500;
+  color: var(--accent, #c26d3a);
+}
+.fbw-act .media {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 2px;
+  font-size: var(--text-xs, 12px);
+  color: var(--ink-subtle, #a69a90);
+}
+.fbw-act .media svg { width: 12px; height: 12px; }
+.fbw-act .summary {
+  flex: none;
+  min-width: fit-content;
+  font-size: var(--text-xs, 12px);
+}
 
 /* 高度调节柄 + 移动拖拽区 */
 .fbw-rz {

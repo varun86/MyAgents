@@ -11,6 +11,7 @@ import { parseWidgetTags, hasWidgetTags } from '@/components/tools/widgetTagPars
 import Tip from '@/components/Tip';
 import ToolAttachmentGallery from '@/components/tools/ToolAttachmentGallery';
 import { buildReplyMarkdown, downloadMarkdown, localDateStr } from '@/utils/markdownExport';
+import { groupContentBlocksForDisplay } from '@/utils/contentBlockDisplay';
 import { useImagePreview } from '@/context/ImagePreviewContext';
 import type { ContentBlock, Message as MessageType } from '@/types/chat';
 import { SOURCE_LABELS, type MessageSource } from '../../shared/types/im';
@@ -494,37 +495,7 @@ const Message = memo(function Message({ message, isLoading = false, onRewind, on
     );
   }
 
-  // Group consecutive thinking/tool blocks together, merge adjacent text blocks
-  const groupedBlocks: (ContentBlock | ContentBlock[])[] = [];
-  let currentGroup: ContentBlock[] = [];
-
-  for (const block of message.content) {
-    if (block.type === 'text') {
-      // If we have a group, add it before the text block
-      if (currentGroup.length > 0) {
-        groupedBlocks.push([...currentGroup]);
-        currentGroup = [];
-      }
-      // Merge consecutive text blocks into one (defensive: prevents split rendering)
-      const prev = groupedBlocks[groupedBlocks.length - 1];
-      if (prev && !Array.isArray(prev) && prev.type === 'text') {
-        groupedBlocks[groupedBlocks.length - 1] = {
-          ...prev,
-          text: (prev.text || '') + '\n\n' + (block.text || '')
-        };
-      } else {
-        groupedBlocks.push(block);
-      }
-    } else if (block.type === 'thinking' || block.type === 'tool_use' || block.type === 'server_tool_use') {
-      // Add to current group (server_tool_use is treated like tool_use for display)
-      currentGroup.push(block);
-    }
-  }
-
-  // Add any remaining group
-  if (currentGroup.length > 0) {
-    groupedBlocks.push(currentGroup);
-  }
+  const groupedBlocks = groupContentBlocksForDisplay(message.content);
 
   // Determine which BlockGroup is the latest active section
   // Find the last BlockGroup index

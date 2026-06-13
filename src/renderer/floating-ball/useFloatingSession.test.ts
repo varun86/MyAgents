@@ -53,12 +53,44 @@ describe('parseSessionHistory', () => {
         const out = parseSessionHistory(payload, 50);
         expect(out).toHaveLength(2);
         expect(out[0]).toMatchObject({ id: 'm1', role: 'user', text: '你好' });
-        expect(out[1]).toMatchObject({ id: 'm2', role: 'ai', text: '在的' });
+        expect(out[1]).toMatchObject({ id: 'm2', role: 'ai', content: [{ type: 'text', text: '在的' }] });
     });
 
     it('returns empty for the OLD (wrong) top-level shape instead of crashing', () => {
         const wrong = { messages: [{ id: 'm1', role: 'user', content: 'x' }] };
         expect(parseSessionHistory(wrong, 50)).toEqual([]);
+    });
+
+    it('preserves assistant content block order instead of flattening text away from process rows', () => {
+        const payload = wrap([
+            {
+                id: 'a-blocks',
+                role: 'assistant',
+                content: JSON.stringify([
+                    { type: 'text', text: '先说一句' },
+                    { type: 'thinking', thinking: '思路', isComplete: true, thinkingDurationMs: 6000 },
+                    {
+                        type: 'tool_use',
+                        tool: {
+                            id: 'tool-1',
+                            name: 'Bash',
+                            input: {},
+                            streamIndex: 1,
+                            inputJson: '{"description":"检查日志"}',
+                            parsedInput: { description: '检查日志' },
+                            isLoading: false,
+                        },
+                    },
+                    { type: 'text', text: '再给结论' },
+                ]),
+            },
+        ]);
+
+        const out = parseSessionHistory(payload, 50);
+        expect(out).toHaveLength(1);
+        expect(out[0].role).toBe('ai');
+        if (out[0].role !== 'ai') throw new Error('expected assistant message');
+        expect(out[0].content.map((block) => block.type)).toEqual(['text', 'thinking', 'tool_use', 'text']);
     });
 
     it('filters non-chat roles, empty texts, and applies the tail limit', () => {
@@ -70,7 +102,7 @@ describe('parseSessionHistory', () => {
             { id: 'd', role: 'assistant', content: '3' },
         ]);
         const out = parseSessionHistory(payload, 2);
-        expect(out.map((m) => m.text)).toEqual(['2', '3']);
+        expect(out.map((m) => (m.role === 'user' ? m.text : m.content[0]?.text))).toEqual(['2', '3']);
     });
 
     it('tolerates null / malformed payloads', () => {

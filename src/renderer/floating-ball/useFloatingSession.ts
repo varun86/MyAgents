@@ -19,32 +19,42 @@ import { createSession } from '@/api/sessionClient';
 import { initAnalytics, setAnalyticsContext, track } from '@/analytics';
 import { loadAppConfig, atomicModifyConfig } from '@/config/services/appConfigService';
 import { loadProjects } from '@/config/services/projectService';
+import { parsePartialJson } from '@/utils/parsePartialJson';
+import { isSubagentContainerTool } from '@/components/tools/toolBadgeConfig';
 import { workspacePathsEqual } from '../../shared/workspacePath';
 import { localDate } from '../../shared/logTime';
 import type { AskUserQuestionRequest } from '../../shared/types/askUserQuestion';
 import type { ExitPlanModeRequest } from '../../shared/types/planMode';
 import type { FbPendingKind } from './petStateMapper';
 import { resolveBoundWorkspace, type FbProject } from './workspaceBinding';
+import type { ContentBlock, ToolAttachment, ToolInput, ToolUseSimple } from '@/types/chat';
+import type { ToolUse } from '@/types/stream';
 
-export interface FbMsg {
+export interface FbUserMsg {
     id: string;
-    role: 'user' | 'ai' | 'act';
+    role: 'user';
     text: string;
     quote?: string;
     hasShot?: boolean;
-    /** role==='act'：一行轻量活动（思考/工具），cameo 式密度。 */
-    label?: string;
-    detail?: string;
 }
 
-/** Live activity row during a turn（思考/工具调用的单行展示）。 */
+export interface FbAssistantMsg {
+    id: string;
+    role: 'ai';
+    content: ContentBlock[];
+    streamingTextActive?: boolean;
+}
+
+export type FbMsg = FbUserMsg | FbAssistantMsg;
+
+/** Derived live activity row during a turn（思考/工具调用的单行展示）。 */
 export interface FbActivity {
     id: string;
     kind: 'thinking' | 'tool';
-    label: string;
     running: boolean;
     startedAt: number;
     durationMs?: number;
+    tool?: ToolUseSimple;
 }
 
 export interface FbPermReq {
@@ -63,6 +73,115 @@ export interface FbSendOpts {
 
 const OWNER_ID = 'floating-ball';
 const HISTORY_LIMIT = 50;
+const TOOL_RESULT_DISPLAY_CAP = 8 * 1024;
+const TOOL_RESULT_TAIL_KEEP = 1024;
+
+function isContentBlock(value: unknown): value is ContentBlock {
+    if (!value || typeof value !== 'object') return false;
+    const type = (value as { type?: unknown }).type;
+    return type === 'text' || type === 'thinking' || type === 'tool_use' || type === 'server_tool_use';
+}
+
+function parseAssistantContent(content: string): ContentBlock[] {
+    if (!content) return [];
+    const trimmed = content.trim();
+    if (trimmed.startsWith('[')) {
+        try {
+            const parsed: unknown = JSON.parse(trimmed);
+            if (Array.isArray(parsed)) return parsed.filter(isContentBlock);
+        } catch {
+            // Fall through to plain text.
+        }
+    }
+    if (trimmed.startsWith('{')) {
+        try {
+            const parsed: unknown = JSON.parse(trimmed);
+            if (parsed && typeof parsed === 'object') {
+                const obj = parsed as { text?: unknown; content?: unknown };
+                const text = typeof obj.text === 'string'
+                    ? obj.text
+                    : typeof obj.content === 'string'
+                        ? obj.content
+                        : '';
+                return text ? [{ type: 'text', text }] : [];
+            }
+        } catch {
+            // Fall through to plain text.
+        }
+    }
+    return content ? [{ type: 'text', text: content }] : [];
+}
+
+function isToolBlock(block: ContentBlock): block is ContentBlock & { tool: ToolUseSimple } {
+    return (block.type === 'tool_use' || block.type === 'server_tool_use') && !!block.tool;
+}
+
+function closeOpenThinkingBlocks(content: ContentBlock[], now = Date.now()): ContentBlock[] {
+    if (!content.some((b) => b.type === 'thinking' && !b.isComplete)) return content;
+    return content.map((b) =>
+        b.type === 'thinking' && !b.isComplete
+            ? { ...b, isComplete: true, thinkingDurationMs: b.thinkingStartedAt ? now - b.thinkingStartedAt : undefined }
+            : b,
+    );
+}
+
+function clampToolResult(existing: string, delta: string): string {
+    let nextResult = existing + delta;
+    if (nextResult.length > TOOL_RESULT_DISPLAY_CAP) {
+        const head = nextResult.slice(0, TOOL_RESULT_DISPLAY_CAP - TOOL_RESULT_TAIL_KEEP);
+        const tail = nextResult.slice(-TOOL_RESULT_TAIL_KEEP);
+        nextResult = `${head}\n…[truncated for display; full result available on completion]…\n${tail}`;
+    }
+    return nextResult;
+}
+
+function mergeAttachmentsByPendingId(
+    existing: ToolAttachment[] | undefined,
+    incoming: ToolAttachment[] | undefined,
+): ToolAttachment[] | undefined {
+    if (!incoming?.length) return existing;
+    if (!existing?.length) return incoming;
+    const byPending = new Map<string, number>();
+    existing.forEach((att, idx) => {
+        if (att.pendingId) byPending.set(att.pendingId, idx);
+    });
+    const merged = [...existing];
+    for (const att of incoming) {
+        const idx = att.pendingId ? byPending.get(att.pendingId) : undefined;
+        if (idx !== undefined) {
+            merged[idx] = att;
+        } else {
+            merged.push(att);
+        }
+    }
+    return merged;
+}
+
+function deriveActivities(message: FbAssistantMsg | null): FbActivity[] {
+    if (!message) return [];
+    return message.content.flatMap((block, index): FbActivity[] => {
+        if (block.type === 'thinking') {
+            return [{
+                id: `${message.id}-thinking-${block.thinkingStreamIndex ?? index}`,
+                kind: 'thinking',
+                running: block.isComplete !== true && !block.isFailed && !block.isStopped,
+                startedAt: block.thinkingStartedAt ?? 0,
+                durationMs: block.thinkingDurationMs,
+            }];
+        }
+        if (isToolBlock(block)) {
+            return [{
+                id: block.tool.id,
+                kind: 'tool',
+                running: Boolean(block.tool.isLoading),
+                startedAt: block.tool.taskStartTime ?? 0,
+                durationMs: block.tool.resultMeta?.durationMs ?? undefined,
+                tool: block.tool,
+            }];
+        }
+        return [];
+    });
+}
 
 /** Best-effort text extraction from SessionMessage.content (JSON blocks or plain). */
 export function extractMessageText(content: string): string {
@@ -109,12 +228,27 @@ export function parseSessionHistory(payload: unknown, limit: number): FbMsg[] {
     return raw
         .filter((m) => m.role === 'user' || m.role === 'assistant')
         .slice(-limit)
-        .map<FbMsg>((m, i) => ({
-            id: m.id ?? `h-${i}`,
-            role: m.role === 'user' ? 'user' : 'ai',
-            text: extractMessageText(m.content ?? ''),
-        }))
-        .filter((m) => m.text.trim().length > 0);
+        .map<FbMsg | null>((m, i) => {
+            if (m.role === 'assistant') {
+                const content = parseAssistantContent(m.content ?? '');
+                if (content.length === 0) return null;
+                return {
+                    id: m.id ?? 'h-' + i,
+                    role: 'ai',
+                    content,
+                };
+            }
+            return {
+                id: m.id ?? 'h-' + i,
+                role: 'user',
+                text: extractMessageText(m.content ?? ''),
+            };
+        })
+        .filter((m): m is FbMsg => {
+            if (!m) return false;
+            if (m.role === 'ai') return m.content.length > 0;
+            return m.text.trim().length > 0;
+        });
 }
 
 async function sessionBaseUrl(sessionId: string): Promise<string | null> {
@@ -143,7 +277,7 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
     const [workspacePath, setWorkspacePath] = useState<string | null>(null);
     const [workspaceName, setWorkspaceName] = useState<string>('Mino');
     const [messages, setMessages] = useState<FbMsg[]>([]);
-    const [streamText, setStreamText] = useState<string | null>(null);
+    const [liveMessage, setLiveMessage] = useState<FbAssistantMsg | null>(null);
     const [busy, setBusy] = useState(false);
     const [permReq, setPermReq] = useState<FbPermReq | null>(null);
     // 交互表单（D13）：用户提问 / 方案审核。与 permReq 并列驱动「等我」球态。
@@ -157,16 +291,11 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
     const [projects, setProjects] = useState<FbProject[]>([]);
     const [workspaceOverride, setWorkspaceOverride] = useState<string | null>(null);
     const [unread, setUnread] = useState(0);
-    const [activities, setActivities] = useState<FbActivity[]>([]);
     const [sendShortcut, setSendShortcut] = useState<'enter' | 'modEnter'>('enter');
-    const activitiesRef = useRef<FbActivity[]>([]);
-    useEffect(() => {
-        activitiesRef.current = activities;
-    }, [activities]);
+    const liveMessageRef = useRef<FbAssistantMsg | null>(null);
 
     const sessionIdRef = useRef<string | null>(null);
     const sseRef = useRef<SseConnection | null>(null);
-    const streamRef = useRef<string | null>(null);
     const bootedRef = useRef(false);
     const busyRef = useRef(false);
     useEffect(() => {
@@ -211,43 +340,158 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
         }).catch(() => undefined);
     }, [permReq, askReq, planReq, busy, unread, error]);
 
-    const finalizeStream = useCallback(() => {
-        const text = streamRef.current;
-        streamRef.current = null;
-        setStreamText(null);
-        // 把本轮的活动行（思考/工具）按流序折进历史，再接正文（cameo 式：
-        // 每行一个轻量条目，永久保留在消息流里）。
-        const acts = activitiesRef.current;
-        const actMsgs: FbMsg[] = acts.map((a) => {
-            const ms = a.durationMs ?? (a.running ? Date.now() - a.startedAt : 0);
-            return {
-                id: `act-${a.id}`,
-                role: 'act' as const,
-                text: '',
-                label: a.label,
-                detail: ms >= 1000 ? `${Math.round(ms / 1000)}s` : undefined,
-            };
-        });
-        setActivities([]);
-        setMessages((prev) => {
-            const next = [...prev, ...actMsgs];
-            if (text && text.trim()) {
-                next.push({ id: `ai-${Date.now()}`, role: 'ai', text });
-            }
-            return next;
-        });
+    const replaceLiveMessage = useCallback((updater: (current: FbAssistantMsg | null) => FbAssistantMsg | null) => {
+        const next = updater(liveMessageRef.current);
+        liveMessageRef.current = next;
+        setLiveMessage(next);
     }, []);
 
-    /** 结束所有仍在 running 的活动行（拿到落点时间）。 */
-    const settleActivities = useCallback((predicate?: (a: FbActivity) => boolean) => {
-        setActivities((prev) =>
-            prev.map((a) =>
-                a.running && (!predicate || predicate(a))
-                    ? { ...a, running: false, durationMs: Date.now() - a.startedAt }
-                    : a,
-            ),
-        );
-    }, []);
+    const updateLiveContent = useCallback((
+        updater: (content: ContentBlock[], current: FbAssistantMsg | null) => { content: ContentBlock[]; streamingTextActive?: boolean },
+    ) => {
+        replaceLiveMessage((current) => {
+            const base: FbAssistantMsg = current ?? {
+                id: `ai-${Date.now()}`,
+                role: 'ai',
+                content: [],
+                streamingTextActive: false,
+            };
+            const next = updater(base.content, base);
+            return {
+                ...base,
+                content: next.content,
+                streamingTextActive: next.streamingTextActive ?? base.streamingTextActive,
+            };
+        });
+    }, [replaceLiveMessage]);
+
+    const appendTextChunk = useCallback((chunk: string) => {
+        updateLiveContent((content) => {
+            const next = closeOpenThinkingBlocks(content);
+            const last = next.at(-1);
+            if (last?.type === 'text') {
+                return {
+                    content: [
+                        ...next.slice(0, -1),
+                        { ...last, text: (last.text ?? '') + chunk },
+                    ],
+                    streamingTextActive: true,
+                };
+            }
+            return {
+                content: [...next, { type: 'text', text: chunk }],
+                streamingTextActive: true,
+            };
+        });
+    }, [updateLiveContent]);
+
+    const markTextStopped = useCallback(() => {
+        replaceLiveMessage((current) => current ? { ...current, streamingTextActive: false } : current);
+    }, [replaceLiveMessage]);
+
+    const appendThinkingBlock = useCallback((index: number | undefined) => {
+        const now = Date.now();
+        updateLiveContent((content) => {
+            const closed = closeOpenThinkingBlocks(content, now);
+            if (index !== undefined && closed.some((b) => b.type === 'thinking' && b.thinkingStreamIndex === index && !b.isComplete)) {
+                return { content: closed, streamingTextActive: false };
+            }
+            return {
+                content: [
+                    ...closed,
+                    {
+                        type: 'thinking',
+                        thinking: '',
+                        thinkingStreamIndex: index,
+                        thinkingStartedAt: now,
+                    },
+                ],
+                streamingTextActive: false,
+            };
+        });
+    }, [updateLiveContent]);
+
+    const appendToolBlock = useCallback((payload: ToolUse, blockType: 'tool_use' | 'server_tool_use') => {
+        const initialInputJson = Object.keys(payload.input ?? {}).length > 0
+            ? JSON.stringify(payload.input, null, 2)
+            : '';
+        const initialParsedInput = Object.keys(payload.input ?? {}).length > 0
+            ? payload.input as unknown as ToolInput
+            : undefined;
+        const taskFields = isSubagentContainerTool(payload.name)
+            ? {
+                taskStartTime: Date.now(),
+                taskStats: { toolCount: 0, inputTokens: 0, outputTokens: 0 },
+            }
+            : {};
+        const tool: ToolUseSimple = {
+            ...payload,
+            inputJson: initialInputJson,
+            parsedInput: initialParsedInput,
+            isLoading: true,
+            ...taskFields,
+        };
+        updateLiveContent((content) => ({
+            content: [
+                ...closeOpenThinkingBlocks(content),
+                { type: blockType, tool },
+            ],
+            streamingTextActive: false,
+        }));
+    }, [updateLiveContent]);
+
+    const updateToolBlock = useCallback((
+        toolUseId: string | undefined,
+        updater: (tool: ToolUseSimple) => ToolUseSimple,
+    ) => {
+        if (!toolUseId) return;
+        updateLiveContent((content, current) => ({
+            content: content.map((block) => {
+                if (!isToolBlock(block) || block.tool.id !== toolUseId) return block;
+                return { ...block, tool: updater(block.tool) };
+            }),
+            streamingTextActive: current?.streamingTextActive ?? false,
+        }));
+    }, [updateLiveContent]);
+
+    const finalizeStream = useCallback((terminal?: 'stopped' | 'failed') => {
+        const current = liveMessageRef.current;
+        if (!current || current.content.length === 0) {
+            replaceLiveMessage(() => null);
+            return;
+        }
+        const now = Date.now();
+        const finalized: FbAssistantMsg = {
+            ...current,
+            streamingTextActive: false,
+            content: closeOpenThinkingBlocks(current.content, now).map((block) => {
+                if (block.type === 'thinking') {
+                    return {
+                        ...block,
+                        isComplete: true,
+                        isStopped: terminal === 'stopped' ? true : block.isStopped,
+                        isFailed: terminal === 'failed' ? true : block.isFailed,
+                        thinkingDurationMs: block.thinkingDurationMs
+                            ?? (block.thinkingStartedAt ? now - block.thinkingStartedAt : undefined),
+                    };
+                }
+                if (isToolBlock(block)) {
+                    return {
+                        ...block,
+                        tool: {
+                            ...block.tool,
+                            isLoading: false,
+                            isStopped: terminal === 'stopped' ? true : block.tool.isStopped,
+                            isFailed: terminal === 'failed' ? true : block.tool.isFailed,
+                        },
+                    };
+                }
+                return block;
+            }),
+        };
+        replaceLiveMessage(() => null);
+        setMessages((prev) => [...prev, finalized]);
+    }, [replaceLiveMessage]);
 
     const handleSseEvent = useCallback(
         (eventName: string, data: unknown) => {
@@ -255,61 +499,135 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
                 case 'chat:message-chunk': {
                     const chunk = typeof data === 'string' ? data : '';
                     if (!chunk) break;
-                    streamRef.current = (streamRef.current ?? '') + chunk;
-                    setStreamText(streamRef.current);
+                    appendTextChunk(chunk);
                     setBusy(true);
-                    // 正文开始 → 思考行落定（工具行等各自的 result 事件）。
-                    settleActivities((a) => a.kind === 'thinking');
                     break;
                 }
                 case 'chat:thinking-start': {
+                    const payload = data as { index?: number } | null;
                     setBusy(true);
-                    setActivities((prev) => {
-                        if (prev.some((a) => a.kind === 'thinking' && a.running)) return prev;
-                        return [
-                            ...prev,
-                            {
-                                id: `th-${Date.now()}`,
-                                kind: 'thinking',
-                                label: '思考',
-                                running: true,
-                                startedAt: Date.now(),
-                            },
-                        ];
-                    });
+                    appendThinkingBlock(payload?.index);
+                    break;
+                }
+                case 'chat:thinking-chunk': {
+                    const payload = data as { index?: number; delta?: string } | null;
+                    if (payload?.index === undefined || !payload.delta) break;
+                    updateLiveContent((content, current) => ({
+                        content: content.map((block) => {
+                            if (block.type !== 'thinking' || block.thinkingStreamIndex !== payload.index || block.isComplete) return block;
+                            return { ...block, thinking: (block.thinking ?? '') + payload.delta };
+                        }),
+                        streamingTextActive: current?.streamingTextActive ?? false,
+                    }));
                     break;
                 }
                 case 'chat:tool-use-start': {
-                    const payload = data as { id?: string; name?: string } | null;
+                    const payload = data as ToolUse | null;
+                    if (!payload?.id || !payload.name) break;
                     setBusy(true);
-                    settleActivities((a) => a.kind === 'thinking');
-                    setActivities((prev) => [
-                        ...prev,
-                        {
-                            id: payload?.id ?? `tool-${Date.now()}`,
-                            kind: 'tool',
-                            label: payload?.name ?? '工具',
-                            running: true,
-                            startedAt: Date.now(),
-                        },
-                    ]);
+                    appendToolBlock(payload, 'tool_use');
+                    break;
+                }
+                case 'chat:server-tool-use-start': {
+                    const payload = data as ToolUse | null;
+                    if (!payload?.id || !payload.name) break;
+                    setBusy(true);
+                    appendToolBlock(payload, 'server_tool_use');
+                    break;
+                }
+                case 'chat:tool-input-delta': {
+                    const payload = data as { toolId?: string; delta?: string } | null;
+                    if (!payload?.toolId || !payload.delta) break;
+                    updateToolBlock(payload.toolId, (tool) => {
+                        const inputJson = (tool.inputJson ?? '') + payload.delta;
+                        const parsedInput = parsePartialJson<ToolInput>(inputJson);
+                        return {
+                            ...tool,
+                            inputJson,
+                            parsedInput: parsedInput ?? tool.parsedInput,
+                        };
+                    });
+                    break;
+                }
+                case 'chat:content-block-stop': {
+                    const payload = data as { index?: number; toolId?: string; type?: string } | null;
+                    if (payload?.type === 'text') {
+                        markTextStopped();
+                        break;
+                    }
+                    if (payload?.type === 'thinking' || payload?.index !== undefined) {
+                        updateLiveContent((content, current) => ({
+                            content: content.map((block) => {
+                                if (block.type !== 'thinking' || block.thinkingStreamIndex !== payload.index || block.isComplete) return block;
+                                return {
+                                    ...block,
+                                    isComplete: true,
+                                    thinkingDurationMs: block.thinkingStartedAt ? Date.now() - block.thinkingStartedAt : undefined,
+                                };
+                            }),
+                            streamingTextActive: current?.streamingTextActive ?? false,
+                        }));
+                    }
+                    if (payload?.toolId) {
+                        updateToolBlock(payload.toolId, (tool) => {
+                            if (!tool.inputJson) return tool;
+                            let parsedInput: ToolInput | undefined;
+                            try {
+                                parsedInput = JSON.parse(tool.inputJson) as ToolInput;
+                            } catch {
+                                parsedInput = parsePartialJson<ToolInput>(tool.inputJson) ?? undefined;
+                            }
+                            return { ...tool, parsedInput };
+                        });
+                    }
+                    break;
+                }
+                case 'chat:tool-result-delta': {
+                    const payload = data as { toolUseId?: string; delta?: string } | null;
+                    if (!payload?.toolUseId || !payload.delta) break;
+                    updateToolBlock(payload.toolUseId, (tool) => ({
+                        ...tool,
+                        result: clampToolResult(tool.result ?? '', payload.delta ?? ''),
+                        isLoading: true,
+                    }));
+                    break;
+                }
+                case 'chat:tool-attachment-update': {
+                    const payload = data as { toolUseId?: string; pendingId?: string; attachment?: ToolAttachment } | null;
+                    if (!payload?.toolUseId || !payload.pendingId || !payload.attachment) break;
+                    const attachment = payload.attachment;
+                    updateToolBlock(payload.toolUseId, (tool) => {
+                        const attachments = tool.attachments ?? [];
+                        const idx = attachments.findIndex((att) => att.pendingId === payload.pendingId);
+                        if (idx === -1) return tool;
+                        const next = [...attachments];
+                        next[idx] = attachment;
+                        return { ...tool, attachments: next };
+                    });
                     break;
                 }
                 case 'chat:tool-result-start':
                 case 'chat:tool-result-complete': {
-                    const payload = data as { id?: string; toolUseId?: string } | null;
-                    const target = payload?.id ?? payload?.toolUseId;
-                    setActivities((prev) => {
-                        // 按 id 落定；无 id 时落定最早一个 running 的工具行。
-                        let done = false;
-                        return prev.map((a) => {
-                            if (!a.running || a.kind !== 'tool') return a;
-                            if (target ? a.id === target : !done) {
-                                done = true;
-                                return { ...a, running: false, durationMs: Date.now() - a.startedAt };
-                            }
-                            return a;
-                        });
+                    const payload = data as {
+                        id?: string;
+                        toolUseId?: string;
+                        content?: string;
+                        isError?: boolean;
+                        metadata?: ToolUseSimple['resultMeta'];
+                        attachments?: ToolAttachment[];
+                    } | null;
+                    const target = payload?.toolUseId ?? payload?.id;
+                    updateToolBlock(target, (tool) => {
+                        const incoming = payload?.content;
+                        const attachments = mergeAttachmentsByPendingId(tool.attachments, payload?.attachments);
+                        return {
+                            ...tool,
+                            result: incoming ?? tool.result,
+                            isError: payload?.isError,
+                            isLoading: eventName !== 'chat:tool-result-complete',
+                            resultMeta: payload?.metadata ?? tool.resultMeta,
+                            attachments,
+                        };
                     });
                     break;
                 }
@@ -333,7 +651,7 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
                             : data && typeof data === 'object' && 'message' in data
                                 ? String((data as { message?: unknown }).message ?? '')
                                 : '回复出错了';
-                    finalizeStream();
+                    finalizeStream('failed');
                     setBusy(false);
                     setPermReq(null);
                     setAskReq(null);
@@ -342,7 +660,7 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
                     break;
                 }
                 case 'chat:message-stopped': {
-                    finalizeStream();
+                    finalizeStream('stopped');
                     setBusy(false);
                     setPermReq(null);
                     setAskReq(null);
@@ -374,7 +692,7 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
                     // 这条而非 message-error——漏接会让"发完就走"的任务静默死掉、
                     // 球退回 idle（review W2）。
                     const msg = typeof data === 'string' ? data : 'Agent 出错了，点 ↗ 去主窗口查看';
-                    finalizeStream();
+                    finalizeStream('failed');
                     setBusy(false);
                     // 会话失效自愈：SDK 在当前工作区找不到这条对话（典型：persisted
                     // sid 的 SDK 数据被清理）。直接轮换新 session，别让用户卡死在
@@ -464,7 +782,16 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
                     break;
             }
         },
-        [finalizeStream, settleActivities, modeRef],
+        [
+            appendTextChunk,
+            appendThinkingBlock,
+            appendToolBlock,
+            finalizeStream,
+            markTextStopped,
+            modeRef,
+            updateLiveContent,
+            updateToolBlock,
+        ],
     );
     const handleSseEventRef = useRef(handleSseEvent);
     handleSseEventRef.current = handleSseEvent;
@@ -650,9 +977,7 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
             setWorkspacePath(workspace.path);
             if (workspace.name) setWorkspaceName(workspace.name);
             setMessages([]);
-            setActivities([]);
-            streamRef.current = null;
-            setStreamText(null);
+            replaceLiveMessage(() => null);
             setPermReq(null);
             setAskReq(null);
             setPlanReq(null);
@@ -675,7 +1000,7 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
             }
             console.info(`[fb] session rotated · session=${sid} workspace=${workspace.path}`);
         },
-        [mintSession, connectSession],
+        [mintSession, connectSession, replaceLiveMessage],
     );
 
     useEffect(() => {
@@ -972,6 +1297,8 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
         }
     }, [connectSession]);
 
+    const activities = deriveActivities(liveMessage);
+
     return {
         ready,
         error,
@@ -980,7 +1307,8 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
         workspacePath,
         workspaceName,
         messages,
-        streamText,
+        liveMessage,
+        streamText: null,
         busy,
         permReq,
         askReq,
