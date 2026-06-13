@@ -40,8 +40,11 @@ export interface NormalizedPetManifest {
 export interface PetPack {
     id: string;
     displayName: string;
+    description?: string;
+    source?: 'builtin' | 'imported';
     spritesheetUrl: string;
     atlas: PetSpriteAtlas;
+    spriteFilter?: string;
 }
 
 export const CODEX_PET_ATLAS = {

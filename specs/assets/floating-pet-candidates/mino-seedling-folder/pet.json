@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "id": "mino-seedling-folder",
+  "displayName": "Mino Seedling Folder",
+  "description": "Growing folder creature for Always Evolving.",
+  "author": "MyAgents / image-gen / hatch-pet workflow",
+  "license": "Candidate asset - internal review before distribution",
+  "spritesheetPath": "spritesheet.webp"
+}

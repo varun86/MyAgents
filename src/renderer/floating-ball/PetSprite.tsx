@@ -43,8 +43,9 @@ export function PetSprite({ pack, animation, className, title, onLoadError }: Pe
             backgroundImage: `url("${pack.spritesheetUrl}")`,
             backgroundSize,
             backgroundPosition: initialBackgroundPosition,
+            filter: pack.spriteFilter,
         }),
-        [backgroundSize, initialBackgroundPosition, pack.spritesheetUrl],
+        [backgroundSize, initialBackgroundPosition, pack.spriteFilter, pack.spritesheetUrl],
     );
 
     useEffect(() => {

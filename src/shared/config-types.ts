@@ -555,6 +555,8 @@ export interface AppConfig {
   floatingBallEnabled?: boolean;
   /** 悬浮球本体外观。缺省视同 'pet'（PRD 0.2.34 floating_ball_pet_mode Phase 1）。 */
   floatingBallAppearance?: 'pet' | 'orb';
+  /** 当前选中的桌宠资源包。缺省视同内置 Mino。 */
+  floatingBallPetId?: string;
   /** 桌面渠道持久 session id（伴侣窗自铸 UUID v4；轮换见下两个字段，PRD §6.2）。 */
   floatingBallSessionId?: string;
   /** 上述 session 的铸造日期（本地 YYYY-MM-DD）。与今天不同时轮换新 session。 */

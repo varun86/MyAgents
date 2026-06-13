@@ -81,6 +81,7 @@ import { shouldDebounceAutoVerify } from '@/utils/apiKeyAutoVerify';
 import { DEFAULT_SUMMON_ACCELERATOR } from '../../shared/config-types';
 import { workspacePathsEqual } from '../../shared/workspacePath';
 import ProviderEnableOrderDialog from '@/components/ProviderEnableOrderDialog';
+import FloatingBallPetSettings from '@/components/FloatingBallPetSettings';
 
 /** Parse a string as a positive integer, returning undefined for invalid/non-positive values */
 function parsePositiveInt(value: string): number | undefined {
@@ -89,7 +90,7 @@ function parsePositiveInt(value: string): number | undefined {
 }
 
 // Settings sub-sections
-type SettingsSection = 'general' | 'shortcuts' | 'providers' | 'mcp' | 'skills' | 'sub-agents' | 'plugins' | 'agent' | 'usage-stats' | 'about';
+type SettingsSection = 'general' | 'shortcuts' | 'providers' | 'mcp' | 'skills' | 'sub-agents' | 'plugins' | 'agent' | 'usage-stats' | 'desktop-pet' | 'about';
 
 import type { SubscriptionStatusWithVerify } from '@/types/subscription';
 
@@ -205,7 +206,7 @@ interface SettingsProps {
     onRestartAndUpdate?: () => void;
 }
 
-const VALID_SECTIONS: SettingsSection[] = ['general', 'shortcuts', 'providers', 'mcp', 'skills', 'sub-agents', 'plugins', 'agent', 'usage-stats', 'about'];
+const VALID_SECTIONS: SettingsSection[] = ['general', 'shortcuts', 'providers', 'mcp', 'skills', 'sub-agents', 'plugins', 'agent', 'usage-stats', 'desktop-pet', 'about'];
 
 // Memoized component for model tag list to avoid recreating presetModelIds on every render
 /** Default args for Playwright MCP: persistent profile mode (preserves login state, single-session) */
@@ -272,6 +273,9 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
     // Determine initial section: use initialSection if valid, otherwise default to 'providers'
     const getInitialSection = (): SettingsSection => {
         if (initialSection && VALID_SECTIONS.includes(initialSection as SettingsSection)) {
+            if (initialSection === 'desktop-pet' && !config.floatingBallDevGate) {
+                return 'about';
+            }
             return initialSection as SettingsSection;
         }
         return 'providers';
@@ -356,10 +360,21 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
     // Handle initial section from props (for deep linking)
     useEffect(() => {
         if (initialSection && VALID_SECTIONS.includes(initialSection as SettingsSection)) {
+            if (initialSection === 'desktop-pet' && !config.floatingBallDevGate) {
+                setActiveSection('about');
+                onSectionChangeRef.current?.();
+                return;
+            }
             setActiveSection(initialSection as SettingsSection);
             onSectionChangeRef.current?.();
         }
-    }, [initialSection]);
+    }, [config.floatingBallDevGate, initialSection]);
+
+    useEffect(() => {
+        if (activeSection === 'desktop-pet' && !config.floatingBallDevGate) {
+            setActiveSection('about');
+        }
+    }, [activeSection, config.floatingBallDevGate]);
 
     const navigateToProxySettings = useCallback(() => {
         setActiveSection('general');
@@ -2526,7 +2541,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
     };
 
     return (
-        <div className="flex h-full bg-[var(--paper)]">
+        <div className="settings-root flex h-full bg-[var(--paper)]">
             {/* Logs Panel */}
             <UnifiedLogsPanel
                 sseLogs={sseLogs}
@@ -2550,7 +2565,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                     )}
                 </div>
 
-                <nav className="space-y-1">
+                <nav className="settings-nav space-y-1">
                     <button
                         onClick={() => setActiveSection('providers')}
                         className={`w-full rounded-lg px-3 py-2.5 text-left text-base font-medium transition-colors ${activeSection === 'providers'
@@ -2614,6 +2629,17 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                     >
                         通用设置
                     </button>
+                    {config.floatingBallDevGate && (
+                        <button
+                            onClick={() => setActiveSection('desktop-pet')}
+                            className={`w-full rounded-lg px-3 py-2.5 text-left text-base font-medium transition-colors ${activeSection === 'desktop-pet'
+                                ? 'settings-nav-active bg-[var(--hover-bg)] text-[var(--ink)]'
+                                : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
+                                }`}
+                        >
+                            桌面宠物
+                        </button>
+                    )}
                     <button
                         onClick={() => setActiveSection('shortcuts')}
                         className={`w-full rounded-lg px-3 py-2.5 text-left text-base font-medium transition-colors ${activeSection === 'shortcuts'
@@ -2673,6 +2699,10 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                     <div className="mx-auto max-w-4xl px-8 py-8">
                         <UsageStatsPanel />
                     </div>
+                )}
+
+                {activeSection === 'desktop-pet' && config.floatingBallDevGate && (
+                    <FloatingBallPetSettings />
                 )}
 
                 {/* Providers section uses wider layout */}
@@ -2976,7 +3006,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                 )}
 
                 {/* Other sections use narrower layout */}
-                <div className={`mx-auto max-w-xl px-8 py-8 ${['skills', 'agents', 'plugins', 'providers', 'mcp'].includes(activeSection) ? 'hidden' : ''}`}>
+                <div className={`mx-auto max-w-xl px-8 py-8 ${['skills', 'agents', 'plugins', 'providers', 'mcp', 'desktop-pet'].includes(activeSection) ? 'hidden' : ''}`}>
 
                     {activeSection === 'shortcuts' && (
                         <div className="space-y-6">

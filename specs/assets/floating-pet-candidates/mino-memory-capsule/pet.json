@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "id": "mino-memory-capsule",
+  "displayName": "Mino Memory Capsule",
+  "description": "Archive capsule with memory-card accents for the memory-brain direction.",
+  "author": "MyAgents / image-gen / hatch-pet workflow",
+  "license": "Candidate asset - internal review before distribution",
+  "spritesheetPath": "spritesheet.webp"
+}

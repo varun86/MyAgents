@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "id": "mino-compass",
+  "displayName": "Mino Compass",
+  "description": "Compass-like companion for strong opinions and direction.",
+  "author": "MyAgents / image-gen / hatch-pet workflow",
+  "license": "Candidate asset - internal review before distribution",
+  "spritesheetPath": "spritesheet.webp"
+}

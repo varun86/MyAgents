@@ -31,7 +31,7 @@ log = "0.4"
 # `macos-private-api` is required for transparent webview windows on macOS —
 # the floating ball / companion panels (PRD 0.2.35) are transparent NSPanels.
 # Main window is unaffected (it never sets transparent(true)).
-tauri = { version = "2.9.6", features = ["tray-icon", "devtools", "image-png", "unstable", "webview-data-url", "macos-private-api"] }
+tauri = { version = "2.9.6", features = ["tray-icon", "devtools", "image-png", "unstable", "webview-data-url", "macos-private-api", "protocol-asset"] }
 tauri-plugin-log = "2"
 tauri-plugin-fs = "2.4.5"
 tauri-plugin-dialog = "2.6.0"
@@ -69,6 +69,7 @@ tantivy-jieba = "0.11"
 notify-debouncer-full = "0.6"
 sysinfo = { version = "0.33", default-features = false, features = ["system"] }
 trash = "5.2.3"
+image = { version = "0.25.10", default-features = false, features = ["png", "webp"] }
 
 # Pattern 5: stale-lock recovery needs `kill(pid, 0)` for liveness probing on Unix.
 # The `signal` feature pulls in just `nix::sys::signal::kill` + `nix::unistd::Pid`,

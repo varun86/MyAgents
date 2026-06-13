@@ -837,6 +837,59 @@ pre code {
   background: var(--accent);
 }
 
+@media (max-width: 640px) {
+  .settings-root {
+    flex-direction: column;
+  }
+
+  .settings-sidebar {
+    width: 100%;
+    flex-shrink: 0;
+    padding: 16px;
+  }
+
+  .settings-sidebar::after {
+    left: 16px;
+    right: 16px;
+    top: auto;
+    bottom: 0;
+    width: auto;
+    height: 1px;
+  }
+
+  .settings-nav {
+    display: flex;
+    gap: 8px;
+    margin: 0 -4px;
+    overflow-x: auto;
+    padding: 0 4px 4px;
+    scrollbar-width: none;
+  }
+
+  .settings-nav::-webkit-scrollbar {
+    display: none;
+  }
+
+  .settings-nav > button {
+    width: auto;
+    flex: 0 0 auto;
+    white-space: nowrap;
+  }
+
+  .settings-nav > :not([hidden]) ~ :not([hidden]) {
+    margin-top: 0;
+  }
+
+  .settings-nav-active::before {
+    left: 8px;
+    right: 8px;
+    top: auto;
+    bottom: 0;
+    width: auto;
+    height: 3px;
+  }
+}
+
 /* ============================================
    AI Content Styles
    ============================================ */

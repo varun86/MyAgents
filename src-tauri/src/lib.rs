@@ -8,6 +8,7 @@ pub mod config_io;
 mod commands;
 pub mod cron_task;
 pub mod floating_ball;
+pub mod floating_ball_pets;
 mod global_shortcut;
 pub mod im;
 pub mod inbox;
@@ -405,6 +406,9 @@ pub fn run() {
             floating_ball::cmd_fb_enable,
             floating_ball::cmd_fb_disable,
             floating_ball::cmd_fb_capabilities,
+            floating_ball_pets::cmd_fb_pet_list_installed,
+            floating_ball_pets::cmd_fb_pet_import_path,
+            floating_ball_pets::cmd_fb_pet_import_codex,
             floating_ball::cmd_fb_show_companion,
             floating_ball::cmd_fb_pin_companion,
             floating_ball::cmd_fb_hide_companion,

@@ -17,14 +17,13 @@ import { listenWithCleanup } from '@/utils/tauriListen';
 
 import { MINO_DEFAULT_PET_PACK } from './defaultPetPack';
 import { computeDragOrigin } from './fbDrag';
+import { resolveSelectedPetPack } from './petPackLibrary';
 import { PetSprite } from './PetSprite';
 import { getPetAnimationDuration } from './petAtlas';
 import { derivePetAnimation, type FbBallState, type FbPendingKind, type PetDragDirection } from './petStateMapper';
 import './fb.css';
 
 const DRAG_THRESHOLD = 4;
-const SUMMON_PULSE_MS = getPetAnimationDuration(MINO_DEFAULT_PET_PACK.atlas, 'jumping');
-const DONE_PULSE_MS = getPetAnimationDuration(MINO_DEFAULT_PET_PACK.atlas, 'waving');
 const BALL_STATE_LABEL: Record<FbBallState, string> = {
     idle: '空闲',
     running: '正在处理',
@@ -43,6 +42,9 @@ export default function BallWindow() {
     const [hasError, setHasError] = useState(false);
     const [petLoadFailed, setPetLoadFailed] = useState(false);
     const [appearance, setAppearance] = useState<'pet' | 'orb'>('pet');
+    const [petPack, setPetPack] = useState(MINO_DEFAULT_PET_PACK);
+    const summonPulseMs = useMemo(() => getPetAnimationDuration(petPack.atlas, 'jumping'), [petPack]);
+    const donePulseMs = useMemo(() => getPetAnimationDuration(petPack.atlas, 'waving'), [petPack]);
 
     // Companion mode mirror (companion relays its mode changes) so a click on
     // the ball can toggle: hidden/peek → summon, pinned → close.
@@ -108,7 +110,7 @@ export default function BallWindow() {
                     popTimerRef.current = setTimeout(() => {
                         setPop(false);
                         popTimerRef.current = null;
-                    }, DONE_PULSE_MS);
+                    }, donePulseMs);
                 }
                 prevStateRef.current = next;
                 setState(next);
@@ -138,7 +140,7 @@ export default function BallWindow() {
             ac.signal,
         );
         return () => ac.abort();
-    }, []);
+    }, [donePulseMs]);
 
     useEffect(() => {
         return () => {
@@ -147,20 +149,41 @@ export default function BallWindow() {
         };
     }, []);
 
+    const loadVisualConfig = useCallback(async () => {
+        const cfg = await loadAppConfig();
+        setAppearance(cfg.floatingBallAppearance ?? 'pet');
+        const nextPack = await resolveSelectedPetPack(cfg.floatingBallPetId);
+        setPetPack(nextPack);
+        setPetLoadFailed(false);
+    }, []);
+
     useEffect(() => {
         let cancelled = false;
-        void loadAppConfig()
-            .then((cfg) => {
-                if (cancelled) return;
-                setAppearance(cfg.floatingBallAppearance ?? 'pet');
-            })
-            .catch((err) => {
+        const timer = window.setTimeout(() => {
+            if (cancelled) return;
+            void loadVisualConfig().catch((err) => {
                 console.warn('[fb-ball] load config failed for appearance:', err);
             });
+        }, 0);
         return () => {
             cancelled = true;
+            window.clearTimeout(timer);
         };
-    }, []);
+    }, [loadVisualConfig]);
+
+    useEffect(() => {
+        const ac = new AbortController();
+        void listenWithCleanup(
+            'fb:appearance-changed',
+            () => {
+                void loadVisualConfig().catch((err) => {
+                    console.warn('[fb-ball] reload appearance failed:', err);
+                });
+            },
+            ac.signal,
+        );
+        return () => ac.abort();
+    }, [loadVisualConfig]);
 
     const setDragDirectionStable = useCallback((next: PetDragDirection) => {
         if (dragDirectionRef.current === next) return;
@@ -174,8 +197,8 @@ export default function BallWindow() {
         summonPulseTimerRef.current = setTimeout(() => {
             setSummonPulse(false);
             summonPulseTimerRef.current = null;
-        }, SUMMON_PULSE_MS);
-    }, []);
+        }, summonPulseMs);
+    }, [summonPulseMs]);
 
     // ── hover：纯视觉瞥一眼（焦点纹丝不动，D1） ──
     // DOM mouseenter（app 激活态）与原生 NSTrackingArea（非激活态，经
@@ -389,9 +412,9 @@ export default function BallWindow() {
                         <span className="ripple r1" />
                         <span className="ripple r2" />
                         <PetSprite
-                            pack={MINO_DEFAULT_PET_PACK}
+                            pack={petPack}
                             animation={petAnimation}
-                            title={`${MINO_DEFAULT_PET_PACK.displayName} · ${BALL_STATE_LABEL[state]}`}
+                            title={`${petPack.displayName} · ${BALL_STATE_LABEL[state]}`}
                             onLoadError={handlePetLoadError}
                         />
                     </>
