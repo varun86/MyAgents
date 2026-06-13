@@ -505,6 +505,27 @@ export default function App() {
     });
   }, []);
 
+  // Helper-overlay launches must hand `handleLaunchProject` a real, committed
+  // active launcher tab. Mutating activeTabIdRef before React has committed the
+  // tab produces `view=undefined` and can let the new Chat auto-send while hidden.
+  const openLaunchTabNow = useCallback((newTab: Tab) => {
+    flushSync(() => {
+      setTabs((prev) => [...prev, newTab]);
+      setActiveTabId(newTab.id);
+    });
+    activeTabIdRef.current = newTab.id;
+  }, []);
+
+  const removeUnusedPrecreatedLaunchTab = useCallback((tabId: string) => {
+    setTabs((prev) => {
+      const created = prev.find(t => t.id === tabId);
+      if (created && !created.sessionId && !created.agentDir) {
+        return prev.filter(t => t.id !== tabId);
+      }
+      return prev;
+    });
+  }, []);
+
   // Analytics Active Context — propagate active tab's sessionId/tabId so that
   // downstream track() calls auto-inject these into params (see analytics/tracker.ts).
   // Pending session ids (createPendingSessionId placeholders) are filtered out:
@@ -2886,19 +2907,11 @@ export default function App() {
           // own Tab internally for that branch and our pre-created one is
           // left empty).
           const newTab = createNewTab();
-          setTabs((prev) => [...prev, newTab]);
-          setActiveTabId(newTab.id);
-          activeTabIdRef.current = newTab.id;
+          openLaunchTabNow(newTab);
           try {
             await handleLaunchProject(project, resumeSessionId, undefined);
           } finally {
-            setTabs((prev) => {
-              const created = prev.find(t => t.id === newTab.id);
-              if (created && !created.sessionId && !created.agentDir) {
-                return prev.filter(t => t.id !== newTab.id);
-              }
-              return prev;
-            });
+            removeUnusedPrecreatedLaunchTab(newTab.id);
           }
           return;
         }
@@ -2966,18 +2979,20 @@ export default function App() {
         };
 
         const newTab = createNewTab();
-        setTabs((prev) => [...prev, newTab]);
-        setActiveTabId(newTab.id);
-        activeTabIdRef.current = newTab.id;
+        openLaunchTabNow(newTab);
 
-        await handleLaunchProject(project, undefined, initialMessage);
+        try {
+          await handleLaunchProject(project, undefined, initialMessage);
 
-        // Override tab title
-        setTabs((prev) =>
-          prev.map((t) =>
-            t.id === newTab.id ? { ...t, title: '问题诊断' } : t
-          )
-        );
+          // Override tab title
+          setTabs((prev) =>
+            prev.map((t) =>
+              t.id === newTab.id ? { ...t, title: '问题诊断' } : t
+            )
+          );
+        } finally {
+          removeUnusedPrecreatedLaunchTab(newTab.id);
+        }
       } catch (err) {
         console.error('[App] Failed to launch bug report:', err);
       }
