@@ -29,7 +29,10 @@ import type { ExitPlanModeRequest, EnterPlanModeRequest, ExitPlanModeAllowedProm
 import { CUSTOM_EVENTS, isPendingSessionId } from '../../shared/constants';
 import { TabContext, TabApiContext, TabActiveContext, type SessionState, type SystemNotice, type TabContextValue, type TabApiContextValue } from './TabContext';
 import { shouldSkipHistoryReplay, shouldClearHistoryOnInit } from './sessionRestoreGuards';
-import { shouldAcceptSessionScopedSseSnapshot } from './sessionScopedEventGuards';
+import {
+    shouldAcceptSessionScopedSseSnapshot,
+    shouldPreserveSnapshotOnPendingBirthPropSync,
+} from './sessionScopedEventGuards';
 import { isSubagentContainerTool } from '@/components/tools/toolBadgeConfig';
 import type { Message, ContentBlock, ToolUseSimple, ToolInput, TaskStats, SubagentToolCall } from '@/types/chat';
 import type { ToolUse } from '@/types/stream';
@@ -450,9 +453,21 @@ export default function TabProvider({
 
     // Track started queueIds to prevent sendMessage .then() from re-adding them
     const startedQueueIdsRef = useRef(new Set<string>());
+    const previousSessionPropRef = useRef<string | null>(sessionId);
 
     // Sync currentSessionId when prop changes (e.g., from parent re-initializing)
     useEffect(() => {
+        const previousSessionId = previousSessionPropRef.current;
+        const currentSessionIdBeforePropSync = currentSessionIdRef.current;
+        previousSessionPropRef.current = sessionId;
+        const shouldPreserveSdkSlashCommands = shouldPreserveSnapshotOnPendingBirthPropSync({
+            previousSessionId,
+            nextSessionId: sessionId,
+            currentSessionIdBeforeSync: currentSessionIdBeforePropSync,
+            wasPreviousSessionPending: previousSessionId ? isPendingSessionId(previousSessionId) : false,
+            isNextSessionPending: sessionId ? isPendingSessionId(sessionId) : false,
+        });
+
         currentSessionIdRef.current = sessionId;
         setCurrentSessionId(sessionId);
         // PRD 0.2.32 — clear the context 用量 ring synchronously the moment the session
@@ -463,7 +478,9 @@ export default function TabProvider({
         // (review: stale-source transient). loadSession then re-seeds from the persisted
         // lastContextUsage; new-session paths (reset/adopt) also clear explicitly for immediacy.
         setContextUsage(null);
-        setSdkSlashCommands([]);
+        if (!shouldPreserveSdkSlashCommands) {
+            setSdkSlashCommands([]);
+        }
     }, [sessionId]);
 
     // Store callbacks in refs to avoid triggering effects on every render
@@ -2254,10 +2271,12 @@ export default function TabProvider({
                 const payload = data as { commands?: SlashCommand[]; sessionId?: string; runtime?: string } | null;
                 const payloadSessionId = payload?.sessionId;
                 const currentId = currentSessionIdRef.current;
+                const connectedId = connectedSseSessionIdRef.current;
                 if (!shouldAcceptSessionScopedSseSnapshot({
-                    connectedSessionId: connectedSseSessionIdRef.current,
+                    connectedSessionId: connectedId,
                     currentSessionId: currentId,
                     payloadSessionId,
+                    isConnectedSessionPending: connectedId ? isPendingSessionId(connectedId) : false,
                     isCurrentSessionPending: currentId ? isPendingSessionId(currentId) : false,
                 })) {
                     console.log(`[TabProvider ${tabId}] Ignoring slash commands for stale session ${payloadSessionId}`);
