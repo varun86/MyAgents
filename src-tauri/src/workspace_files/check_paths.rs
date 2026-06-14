@@ -151,10 +151,7 @@ mod tests {
         .await
         .unwrap();
         // Both invalid → exists:false, no error surfaced (mirrors sidecar).
-        assert_eq!(
-            res.results.get("../etc/hosts").unwrap().exists,
-            false
-        );
+        assert_eq!(res.results.get("../etc/hosts").unwrap().exists, false);
         assert_eq!(res.results.get("/etc/passwd").unwrap().exists, false);
         let _ = fs::remove_dir_all(&ws);
     }
@@ -162,12 +159,9 @@ mod tests {
     #[tokio::test]
     async fn empty_batch_is_ok() {
         let ws = make_test_workspace("check_paths_empty");
-        let res = cmd_workspace_check_paths(
-            ws.to_string_lossy().to_string(),
-            vec![],
-        )
-        .await
-        .unwrap();
+        let res = cmd_workspace_check_paths(ws.to_string_lossy().to_string(), vec![])
+            .await
+            .unwrap();
         assert!(res.results.is_empty());
         let _ = fs::remove_dir_all(&ws);
     }
@@ -175,14 +169,8 @@ mod tests {
     #[tokio::test]
     async fn rejects_oversized_batch() {
         let ws = make_test_workspace("check_paths_too_many");
-        let paths: Vec<String> = (0..MAX_BATCH_SIZE + 1)
-            .map(|i| format!("p{}", i))
-            .collect();
-        let res = cmd_workspace_check_paths(
-            ws.to_string_lossy().to_string(),
-            paths,
-        )
-        .await;
+        let paths: Vec<String> = (0..MAX_BATCH_SIZE + 1).map(|i| format!("p{}", i)).collect();
+        let res = cmd_workspace_check_paths(ws.to_string_lossy().to_string(), paths).await;
         assert!(res.is_err());
         assert!(res.unwrap_err().contains("max"));
         let _ = fs::remove_dir_all(&ws);
@@ -214,10 +202,7 @@ mod tests {
     async fn rejects_symlink_escape_as_not_found() {
         use std::os::unix::fs::symlink;
         let ws = make_test_workspace("check_paths_symlink_escape");
-        let outside = std::env::temp_dir().join(format!(
-            "check_outside_{}",
-            std::process::id()
-        ));
+        let outside = std::env::temp_dir().join(format!("check_outside_{}", std::process::id()));
         fs::create_dir_all(&outside).unwrap();
         let target = outside.join("secret.txt");
         fs::write(&target, "secret").unwrap();
@@ -242,12 +227,10 @@ mod tests {
     async fn response_keys_echo_input() {
         let ws = make_test_workspace("check_paths_echo");
         fs::write(ws.join("a.txt"), "").unwrap();
-        let res = cmd_workspace_check_paths(
-            ws.to_string_lossy().to_string(),
-            vec!["a.txt".to_string()],
-        )
-        .await
-        .unwrap();
+        let res =
+            cmd_workspace_check_paths(ws.to_string_lossy().to_string(), vec!["a.txt".to_string()])
+                .await
+                .unwrap();
         assert!(res.results.contains_key("a.txt"));
         let _ = fs::remove_dir_all(&ws);
     }

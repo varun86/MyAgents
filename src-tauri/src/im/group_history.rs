@@ -99,7 +99,10 @@ impl GroupHistoryBuffer {
         let mut lines = vec!["[以下是上次回复后的群聊记录，仅供参考]".to_string()];
         for entry in entries {
             let ts = entry.timestamp.format("%Y-%m-%d %H:%M:%S");
-            lines.push(format!("[from: {} {}] {}", entry.sender_name, ts, entry.text));
+            lines.push(format!(
+                "[from: {} {}] {}",
+                entry.sender_name, ts, entry.text
+            ));
         }
         lines.push("[以下是当前消息，请回复]".to_string());
         Some(lines.join("\n"))

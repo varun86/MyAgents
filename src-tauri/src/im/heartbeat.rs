@@ -2,8 +2,8 @@
 // Periodically checks a user-defined checklist and pushes results to IM.
 // Supports active hours, instant wake (from cron completion), and dedup.
 
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Timelike;
@@ -12,7 +12,7 @@ use tauri::{AppHandle, Runtime};
 use tokio::sync::{mpsc, watch, Mutex, RwLock};
 
 use crate::sidecar::ManagedSidecarManager;
-use crate::{ulog_info, ulog_warn, ulog_debug};
+use crate::{ulog_debug, ulog_info, ulog_warn};
 
 use super::adapter::push_text_preferring_stream;
 use super::router::{EnsureSidecarPrep, SessionRouter};
@@ -22,7 +22,7 @@ use super::{AnyAdapter, PeerLocks};
 /// Response from sidecar /api/im/heartbeat endpoint
 #[derive(Debug, Deserialize)]
 struct HeartbeatResponse {
-    status: String,       // "silent" | "content" | "error"
+    status: String, // "silent" | "content" | "error"
     text: Option<String>,
     #[allow(dead_code)]
     reason: Option<String>,
@@ -97,7 +97,12 @@ impl HeartbeatRunner {
         memory_update_config: Option<super::types::MemoryAutoUpdateConfig>,
         pending_cron_events: Arc<Mutex<Vec<PendingCronEvent>>>,
         self_wake_tx: mpsc::Sender<WakeReason>,
-    ) -> (Self, Arc<RwLock<HeartbeatConfig>>, Arc<RwLock<Option<super::types::MemoryAutoUpdateConfig>>>, Arc<AtomicBool>) {
+    ) -> (
+        Self,
+        Arc<RwLock<HeartbeatConfig>>,
+        Arc<RwLock<Option<super::types::MemoryAutoUpdateConfig>>>,
+        Arc<AtomicBool>,
+    ) {
         let config = Arc::new(RwLock::new(config));
         let mau_config = Arc::new(RwLock::new(memory_update_config));
         let mau_running = Arc::new(AtomicBool::new(false));
@@ -164,7 +169,7 @@ impl HeartbeatRunner {
                     );
                     interval = tokio::time::interval(desired);
                     interval.tick().await; // skip immediate tick
-                    // Config changed — reset error counter to give the new config a chance
+                                           // Config changed — reset error counter to give the new config a chance
                     consecutive_errors = 0;
                     pause_notified = false;
                 }
@@ -186,8 +191,13 @@ impl HeartbeatRunner {
                         rg.find_any_peer_session()
                     };
                     if let Some((_session_key, _source, source_id)) = notify_target {
-                        let error_detail = self.last_error_text.lock().await.take()
-                            .map(|d| if d.len() > 200 { format!("{}...", &d[..200]) } else { d });
+                        let error_detail = self.last_error_text.lock().await.take().map(|d| {
+                            if d.len() > 200 {
+                                format!("{}...", &d[..200])
+                            } else {
+                                d
+                            }
+                        });
                         let msg = if let Some(detail) = error_detail {
                             format!(
                                 "[MyAgents] {} 心跳连续 {} 次失败，已暂停。\n\n错误: {}\n\n请在客户端重启该 Channel 或开始新对话以恢复。",
@@ -199,7 +209,9 @@ impl HeartbeatRunner {
                                 self.bot_label, MAX_CONSECUTIVE_ERRORS
                             )
                         };
-                        if let Err(e) = push_text_preferring_stream(adapter.as_ref(), &source_id, &msg).await {
+                        if let Err(e) =
+                            push_text_preferring_stream(adapter.as_ref(), &source_id, &msg).await
+                        {
                             ulog_warn!("[heartbeat] Failed to send pause notification: {}", e);
                         }
                     }
@@ -332,7 +344,9 @@ impl HeartbeatRunner {
                 }
                 drop(executing);
                 if start.elapsed() > Duration::from_secs(60) {
-                    ulog_warn!("[heartbeat] High-priority wake timed out waiting for concurrent execution");
+                    ulog_warn!(
+                        "[heartbeat] High-priority wake timed out waiting for concurrent execution"
+                    );
                     return false;
                 }
                 tokio::time::sleep(Duration::from_millis(500)).await;
@@ -355,7 +369,10 @@ impl HeartbeatRunner {
                 Some(info) => info,
                 None => {
                     // No peer sessions at all — no one has ever talked to this bot
-                    ulog_debug!("[heartbeat] No peer sessions for {}, skipping", self.bot_label);
+                    ulog_debug!(
+                        "[heartbeat] No peer sessions for {}, skipping",
+                        self.bot_label
+                    );
                     *self.executing.lock().await = false;
                     return true; // No peers is not a failure
                 }
@@ -390,8 +407,12 @@ impl HeartbeatRunner {
             EnsureSidecarPrep::NeedCreate(info) => {
                 // Phase 2: Create sidecar (NO lock held — blocking up to 5 min)
                 match super::router::SessionRouter::create_sidecar_blocking(
-                    info.clone(), app_handle, sidecar_manager,
-                ).await {
+                    info.clone(),
+                    app_handle,
+                    sidecar_manager,
+                )
+                .await
+                {
                     // #327: use the authoritative is_new — a reused sidecar (the
                     // manager kept an existing healthy one for this session_id)
                     // reports false so the config sync below is skipped.
@@ -404,7 +425,11 @@ impl HeartbeatRunner {
                         (port, is_new)
                     }
                     Err(e) => {
-                        ulog_warn!("[heartbeat] Failed to ensure sidecar for {}: {}", self.bot_label, e);
+                        ulog_warn!(
+                            "[heartbeat] Failed to ensure sidecar for {}: {}",
+                            self.bot_label,
+                            e
+                        );
                         *self.executing.lock().await = false;
                         return false;
                     }
@@ -432,8 +457,13 @@ impl HeartbeatRunner {
                 model.as_deref(),
                 mcp.as_deref(),
                 penv.as_ref(),
-            ).await;
-            ulog_info!("[heartbeat] Woke up sidecar for {} on port {}", self.bot_label, port);
+            )
+            .await;
+            ulog_info!(
+                "[heartbeat] Woke up sidecar for {} on port {}",
+                self.bot_label,
+                port
+            );
         }
 
         // Touch session activity BEFORE the HTTP call.
@@ -452,7 +482,9 @@ impl HeartbeatRunner {
         // field (Rust-side truth source, see PendingCronEvent doc); legacy
         // non-cron system events still flow through the sidecar's in-memory
         // `systemEventQueue` and get drained server-side.
-        let now_text = chrono::Local::now().format("%Y-%m-%d %H:%M (%Z)").to_string();
+        let now_text = chrono::Local::now()
+            .format("%Y-%m-%d %H:%M (%Z)")
+            .to_string();
         let prompt = format!(
             "This is a heartbeat from the system.\n\
              Read HEARTBEAT.md if it exists (workspace context). Follow it strictly.\n\
@@ -477,13 +509,18 @@ impl HeartbeatRunner {
         // immediately; n events drain in n heartbeat cycles, not n intervals.
         let pending_snapshot: Vec<PendingCronEvent> = {
             let pending = self.pending_cron_events.lock().await;
-            pending.first().cloned().map(|e| vec![e]).unwrap_or_default()
+            pending
+                .first()
+                .cloned()
+                .map(|e| vec![e])
+                .unwrap_or_default()
         };
         if !pending_snapshot.is_empty() {
             let total_pending = self.pending_cron_events.lock().await.len();
             ulog_info!(
                 "[heartbeat] Shipping cron event task_id={} to sidecar (1 of {} pending)",
-                pending_snapshot[0].task_id, total_pending
+                pending_snapshot[0].task_id,
+                total_pending
             );
         }
 
@@ -500,7 +537,11 @@ impl HeartbeatRunner {
         };
 
         let url = format!("http://127.0.0.1:{}/api/im/heartbeat", port);
-        ulog_debug!("[heartbeat] Calling {} (reason={:?})", url, reason_label(&reason));
+        ulog_debug!(
+            "[heartbeat] Calling {} (reason={:?})",
+            url,
+            reason_label(&reason)
+        );
 
         let result = match self.http_client.post(&url).json(&request).send().await {
             Ok(resp) => {
@@ -509,8 +550,13 @@ impl HeartbeatRunner {
                 let body_text = match resp.text().await {
                     Ok(t) => t,
                     Err(e) => {
-                        ulog_warn!("[heartbeat] Failed to read response body: {} (status={})", e, status_code);
-                        *self.last_error_text.lock().await = Some(format!("HTTP read error: {}", e));
+                        ulog_warn!(
+                            "[heartbeat] Failed to read response body: {} (status={})",
+                            e,
+                            status_code
+                        );
+                        *self.last_error_text.lock().await =
+                            Some(format!("HTTP read error: {}", e));
                         *self.executing.lock().await = false;
                         return false;
                     }
@@ -519,9 +565,19 @@ impl HeartbeatRunner {
                     Ok(r) => r,
                     Err(e) => {
                         // Log truncated body for debugging (cap at 300 chars)
-                        let preview = if body_text.len() > 300 { &body_text[..300] } else { &body_text };
-                        ulog_warn!("[heartbeat] Failed to parse response: {} (status={}, body={})", e, status_code, preview);
-                        *self.last_error_text.lock().await = Some(format!("Response parse error (status={})", status_code));
+                        let preview = if body_text.len() > 300 {
+                            &body_text[..300]
+                        } else {
+                            &body_text
+                        };
+                        ulog_warn!(
+                            "[heartbeat] Failed to parse response: {} (status={}, body={})",
+                            e,
+                            status_code,
+                            preview
+                        );
+                        *self.last_error_text.lock().await =
+                            Some(format!("Response parse error (status={})", status_code));
                         *self.executing.lock().await = false;
                         return false;
                     }
@@ -564,8 +620,8 @@ impl HeartbeatRunner {
                     // dedup-hit as "delivered" would clear pending and silently drop
                     // today's report; instead, cron cycles always attempt the push
                     // and let the platform decide.
-                    let dedup_hit = !is_cron_triggered
-                        && last_push.as_deref() == Some(text.as_str());
+                    let dedup_hit =
+                        !is_cron_triggered && last_push.as_deref() == Some(text.as_str());
 
                     let push_succeeded = if dedup_hit {
                         ulog_debug!("[heartbeat] Dedup suppressed (same content as last push)");
@@ -576,7 +632,8 @@ impl HeartbeatRunner {
                         // the push. Writing `last_push` on failure turns dedup into a
                         // dead-letter — the next heartbeat carrying the same content
                         // would be silently suppressed.
-                        match push_text_preferring_stream(adapter.as_ref(), &source_id, text).await {
+                        match push_text_preferring_stream(adapter.as_ref(), &source_id, text).await
+                        {
                             Ok(_) => {
                                 *last_push = Some(text.clone());
                                 true
@@ -613,7 +670,8 @@ impl HeartbeatRunner {
                                 cron_event_acked_this_cycle = true;
                                 ulog_info!(
                                     "[heartbeat] Acked {} cron event(s); {} still pending",
-                                    cleared, pending.len()
+                                    cleared,
+                                    pending.len()
                                 );
                             }
                         } else {
@@ -689,8 +747,10 @@ impl HeartbeatRunner {
                 {
                     let cfg = self.config.read().await;
                     cfg.active_hours.as_ref().map(|ah| ah.timezone.clone())
-                }.as_deref(),
-            ).await;
+                }
+                .as_deref(),
+            )
+            .await;
         }
 
         success
@@ -703,7 +763,10 @@ pub fn is_in_active_hours(hours: &ActiveHours) -> bool {
     let tz: chrono_tz::Tz = match hours.timezone.parse() {
         Ok(tz) => tz,
         Err(_) => {
-            ulog_warn!("[heartbeat] Invalid timezone '{}', assuming active", hours.timezone);
+            ulog_warn!(
+                "[heartbeat] Invalid timezone '{}', assuming active",
+                hours.timezone
+            );
             return true;
         }
     };

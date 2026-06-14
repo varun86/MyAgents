@@ -238,7 +238,10 @@ pub fn has_matching_processes(patterns: &[ProcessPattern]) -> bool {
             continue;
         }
         let cmd_norm = normalize(&cmd_raw);
-        if norm_patterns.iter().any(|np| cmd_norm.contains(np.as_str())) {
+        if norm_patterns
+            .iter()
+            .any(|np| cmd_norm.contains(np.as_str()))
+        {
             return true;
         }
     }

@@ -58,10 +58,10 @@ use tauri::{AppHandle, Emitter, Runtime};
 #[cfg(not(target_os = "windows"))]
 use tauri_plugin_notification::NotificationExt;
 
-use crate::utils::bom::strip_bom;
-use crate::{ulog_debug, ulog_info, ulog_warn};
 #[cfg(target_os = "windows")]
 use crate::ulog_error;
+use crate::utils::bom::strip_bom;
+use crate::{ulog_debug, ulog_info, ulog_warn};
 
 /// How long an unconsumed deep-link target stays valid on macOS / Linux.
 ///
@@ -94,7 +94,9 @@ enum PendingState {
     /// Two-or-more notifications stacked unconsumed. Tracked timestamp is
     /// the *earliest* queue entry's `queued_at` so TTL still expires the
     /// state.
-    Ambiguous { queued_at: Instant },
+    Ambiguous {
+        queued_at: Instant,
+    },
 }
 
 #[cfg(not(target_os = "windows"))]

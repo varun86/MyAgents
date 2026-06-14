@@ -149,10 +149,7 @@ mod tests {
     async fn rejects_symlink_escape() {
         use std::os::unix::fs::symlink;
         let ws = make_test_workspace("save_symlink_escape");
-        let outside = std::env::temp_dir().join(format!(
-            "save_outside_{}",
-            std::process::id()
-        ));
+        let outside = std::env::temp_dir().join(format!("save_outside_{}", std::process::id()));
         fs::create_dir_all(&outside).unwrap();
         let real = outside.join("real.md");
         fs::write(&real, "OUTSIDE").unwrap();
@@ -201,7 +198,10 @@ mod tests {
         )
         .await;
         assert!(res.is_err());
-        assert_eq!(fs::metadata(ws.join("a.md")).unwrap().len(), huge_external.len() as u64);
+        assert_eq!(
+            fs::metadata(ws.join("a.md")).unwrap().len(),
+            huge_external.len() as u64
+        );
         let _ = fs::remove_dir_all(&ws);
     }
 

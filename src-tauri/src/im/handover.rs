@@ -481,7 +481,12 @@ pub async fn cmd_handover_session_to_channel<R: Runtime>(
             last_active: Instant::now(),
         });
 
-        (source_id, prior_session_id, prior_sidecar_port, router.active_sessions())
+        (
+            source_id,
+            prior_session_id,
+            prior_sidecar_port,
+            router.active_sessions(),
+        )
     };
     ulog_info!(
         "[handover] step5 peer_session upserted: chat_id={} prior_session={}",

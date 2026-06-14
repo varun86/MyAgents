@@ -7,13 +7,13 @@ use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::{Child, Stdio};
 use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
 #[cfg(unix)]
 use std::sync::Once;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use crate::{ulog_info, ulog_warn, ulog_error, ulog_debug};
+use crate::{ulog_debug, ulog_error, ulog_info, ulog_warn};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, Runtime};
@@ -289,7 +289,8 @@ mod session_activation_tab_uniqueness_tests {
 
     /// Helper: collect (session_id, tab_id) pairs for assertion clarity.
     fn snapshot(mgr: &SidecarManager) -> Vec<(String, Option<String>)> {
-        let mut v: Vec<(String, Option<String>)> = mgr.session_activations
+        let mut v: Vec<(String, Option<String>)> = mgr
+            .session_activations
             .iter()
             .map(|(sid, a)| (sid.clone(), a.tab_id.clone()))
             .collect();
@@ -313,10 +314,13 @@ mod session_activation_tab_uniqueness_tests {
 
         let snap = snapshot(&mgr);
         // session_X's tab_id MUST be cleared. session_Y MUST own T_A.
-        assert_eq!(snap, vec![
-            ("session_X".to_string(), None),
-            ("session_Y".to_string(), Some("T_A".to_string())),
-        ]);
+        assert_eq!(
+            snap,
+            vec![
+                ("session_X".to_string(), None),
+                ("session_Y".to_string(), Some("T_A".to_string())),
+            ]
+        );
     }
 
     #[test]
@@ -330,10 +334,13 @@ mod session_activation_tab_uniqueness_tests {
         mgr.update_session_tab("session_Y", Some("T_A".to_string()));
 
         let snap = snapshot(&mgr);
-        assert_eq!(snap, vec![
-            ("session_X".to_string(), None),
-            ("session_Y".to_string(), Some("T_A".to_string())),
-        ]);
+        assert_eq!(
+            snap,
+            vec![
+                ("session_X".to_string(), None),
+                ("session_Y".to_string(), Some("T_A".to_string())),
+            ]
+        );
     }
 
     #[test]
@@ -347,10 +354,13 @@ mod session_activation_tab_uniqueness_tests {
         mgr.update_session_tab("session_X", None);
 
         let snap = snapshot(&mgr);
-        assert_eq!(snap, vec![
-            ("session_X".to_string(), None),
-            ("session_Y".to_string(), Some("T_B".to_string())),
-        ]);
+        assert_eq!(
+            snap,
+            vec![
+                ("session_X".to_string(), None),
+                ("session_Y".to_string(), Some("T_B".to_string())),
+            ]
+        );
     }
 
     #[test]
@@ -363,7 +373,10 @@ mod session_activation_tab_uniqueness_tests {
         activate(&mut mgr, "session_X", Some("T_A"), 31418);
 
         let snap = snapshot(&mgr);
-        assert_eq!(snap, vec![("session_X".to_string(), Some("T_A".to_string()))]);
+        assert_eq!(
+            snap,
+            vec![("session_X".to_string(), Some("T_A".to_string()))]
+        );
     }
 
     #[test]
@@ -375,11 +388,14 @@ mod session_activation_tab_uniqueness_tests {
 
         // Three tabs each on their own session — no interference.
         let snap = snapshot(&mgr);
-        assert_eq!(snap, vec![
-            ("session_X".to_string(), Some("T_A".to_string())),
-            ("session_Y".to_string(), Some("T_B".to_string())),
-            ("session_Z".to_string(), Some("T_C".to_string())),
-        ]);
+        assert_eq!(
+            snap,
+            vec![
+                ("session_X".to_string(), Some("T_A".to_string())),
+                ("session_Y".to_string(), Some("T_B".to_string())),
+                ("session_Z".to_string(), Some("T_C".to_string())),
+            ]
+        );
     }
 
     #[test]
@@ -408,7 +424,10 @@ mod session_activation_tab_uniqueness_tests {
             false,
         );
 
-        let session_x = mgr.session_activations.get("session_X").expect("session_X stays");
+        let session_x = mgr
+            .session_activations
+            .get("session_X")
+            .expect("session_X stays");
         assert_eq!(session_x.tab_id, None);
         assert_eq!(session_x.task_id.as_deref(), Some("task-123"));
         assert_eq!(session_x.port, 31418);
@@ -428,11 +447,18 @@ mod session_activation_tab_uniqueness_tests {
         activate(&mut mgr, "session_Y", Some("T_A"), 31419); // T_A switches to session_Y
 
         // Find by tab_id == T_A: must be session_Y (port 31419), not session_X.
-        let matches: Vec<(String, u16)> = mgr.session_activations.values()
+        let matches: Vec<(String, u16)> = mgr
+            .session_activations
+            .values()
             .filter(|a| a.tab_id.as_deref() == Some("T_A"))
             .map(|a| (a.session_id.clone(), a.port))
             .collect();
-        assert_eq!(matches.len(), 1, "tab_id uniqueness violated: {:?}", matches);
+        assert_eq!(
+            matches.len(),
+            1,
+            "tab_id uniqueness violated: {:?}",
+            matches
+        );
         assert_eq!(matches[0], ("session_Y".to_string(), 31419));
     }
 }
@@ -443,11 +469,23 @@ mod stderr_classifier_tests {
 
     #[test]
     fn anchored_prefixes_demote_only_when_at_line_start() {
-        assert!(matches!(classify_sidecar_stderr("[startup] init"), SidecarStderrLevel::Info));
-        assert!(matches!(classify_sidecar_stderr("[log-retention] sweep done"), SidecarStderrLevel::Info));
-        assert!(matches!(classify_sidecar_stderr("[sdk-shim] foo() not implemented"), SidecarStderrLevel::Warn));
+        assert!(matches!(
+            classify_sidecar_stderr("[startup] init"),
+            SidecarStderrLevel::Info
+        ));
+        assert!(matches!(
+            classify_sidecar_stderr("[log-retention] sweep done"),
+            SidecarStderrLevel::Info
+        ));
+        assert!(matches!(
+            classify_sidecar_stderr("[sdk-shim] foo() not implemented"),
+            SidecarStderrLevel::Warn
+        ));
         // Leading whitespace OK.
-        assert!(matches!(classify_sidecar_stderr("  [startup] foo"), SidecarStderrLevel::Info));
+        assert!(matches!(
+            classify_sidecar_stderr("  [startup] foo"),
+            SidecarStderrLevel::Info
+        ));
         // Embedded prefix in a real error MUST stay ERROR.
         assert!(matches!(
             classify_sidecar_stderr("Error: failed to parse '[log-retention]' user input"),
@@ -458,7 +496,10 @@ mod stderr_classifier_tests {
             SidecarStderrLevel::Error
         ));
         // Default = ERROR.
-        assert!(matches!(classify_sidecar_stderr("ReferenceError: x is not defined"), SidecarStderrLevel::Error));
+        assert!(matches!(
+            classify_sidecar_stderr("ReferenceError: x is not defined"),
+            SidecarStderrLevel::Error
+        ));
     }
 }
 
@@ -592,8 +633,6 @@ pub fn cleanup_stale_sidecars(had_prior_instance: bool) {
     mark_startup_cleanup_done();
 }
 
-
-
 // ============= Session-Centric Sidecar Architecture =============
 // Sidecar is a service process for Sessions, not for Tabs or CronTasks.
 // Multiple owners (Tabs, CronTasks) can share a Session's Sidecar.
@@ -657,11 +696,20 @@ impl RuntimeDriftResult {
 }
 
 enum ExistingSidecarReuse {
-    Healthy { port: u16, generation: u64, runtime: String },
+    Healthy {
+        port: u16,
+        generation: u64,
+        runtime: String,
+    },
     /// `owner_added` = whether THIS ensure call newly inserted its owner when it
     /// joined the still-starting Sidecar. Only true means a readiness-timeout
     /// detach may safely remove that owner (see `add_owner`).
-    Starting { port: u16, generation: u64, runtime: String, owner_added: bool },
+    Starting {
+        port: u16,
+        generation: u64,
+        runtime: String,
+        owner_added: bool,
+    },
 }
 
 fn normalize_runtime_name(runtime: Option<&str>) -> &str {
@@ -672,7 +720,9 @@ fn normalize_runtime_name(runtime: Option<&str>) -> &str {
 }
 
 fn sidecar_has_non_agent_owner(owners: &HashSet<SidecarOwner>) -> bool {
-    owners.iter().any(|owner| !matches!(owner, SidecarOwner::Agent(_)))
+    owners
+        .iter()
+        .any(|owner| !matches!(owner, SidecarOwner::Agent(_)))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -772,15 +822,24 @@ mod lifecycle_contract_tests {
     fn terminal_removal_requires_no_remaining_owners() {
         assert_eq!(
             sidecar_removal_event_policy(&HashSet::new()),
-            SidecarRemovalEventPolicy { emit_stop: true, emit_terminal: true }
+            SidecarRemovalEventPolicy {
+                emit_stop: true,
+                emit_terminal: true
+            }
         );
         assert_eq!(
             sidecar_removal_event_policy(&owners(vec![SidecarOwner::Tab("tab-a".to_string())])),
-            SidecarRemovalEventPolicy { emit_stop: true, emit_terminal: false }
+            SidecarRemovalEventPolicy {
+                emit_stop: true,
+                emit_terminal: false
+            }
         );
         assert_eq!(
             sidecar_removal_event_policy(&owners(vec![SidecarOwner::Agent("agent-a".to_string())])),
-            SidecarRemovalEventPolicy { emit_stop: true, emit_terminal: false }
+            SidecarRemovalEventPolicy {
+                emit_stop: true,
+                emit_terminal: false
+            }
         );
     }
 
@@ -856,7 +915,9 @@ mod lifecycle_contract_tests {
     fn generation_for_requires_current_sidecar_entry() {
         let mut manager = SidecarManager::new();
         insert_test_sidecar(&mut manager, "session-a", SidecarState::Healthy);
-        let generation = manager.generation_for("session-a").expect("current generation");
+        let generation = manager
+            .generation_for("session-a")
+            .expect("current generation");
 
         manager.remove_sidecar("session-a");
 
@@ -961,7 +1022,9 @@ impl Drop for SessionSidecar {
     fn drop(&mut self) {
         ulog_info!(
             "[sidecar] Drop: killing SessionSidecar for session {} on port {} (state: {:?})",
-            self.session_id, self.port, self.state
+            self.session_id,
+            self.port,
+            self.state
         );
         let _ = kill_process(&mut self.process);
     }
@@ -994,7 +1057,7 @@ impl SidecarInstance {
         if !self.healthy {
             return false;
         }
-        
+
         // Try to check if process has exited
         match self.process.try_wait() {
             Ok(Some(_)) => {
@@ -1016,7 +1079,7 @@ impl Drop for SidecarInstance {
     fn drop(&mut self) {
         ulog_info!("[sidecar] Drop: killing process on port {}", self.port);
         let _ = kill_process(&mut self.process);
-        
+
         // Clean up temp directory for global sidecar
         if self.is_global {
             if let Some(ref dir) = self.agent_dir {
@@ -1219,27 +1282,33 @@ impl SidecarManager {
     /// Get the current generation counter for a session (0 if never created
     /// or has been cleared). 0 is never a real generation (counter starts at 1).
     fn current_generation(&self, session_id: &str) -> u64 {
-        self.sidecar_generations.get(session_id).copied().unwrap_or(0)
+        self.sidecar_generations
+            .get(session_id)
+            .copied()
+            .unwrap_or(0)
     }
 
     /// Get the next available port with max attempts to prevent infinite loop
     pub fn allocate_port(&self) -> Result<u16, String> {
         const MAX_ATTEMPTS: u32 = 200;
-        
+
         for _ in 0..MAX_ATTEMPTS {
             let port = self.port_counter.fetch_add(1, Ordering::SeqCst);
-            
+
             // Reset counter if we've gone past the range
             if port > BASE_PORT + PORT_RANGE {
                 self.port_counter.store(BASE_PORT, Ordering::SeqCst);
             }
-            
+
             if is_port_available(port) {
                 return Ok(port);
             }
         }
-        
-        Err(format!("No available port found after {} attempts", MAX_ATTEMPTS))
+
+        Err(format!(
+            "No available port found after {} attempts",
+            MAX_ATTEMPTS
+        ))
     }
 
     /// Check if a Tab has a running instance
@@ -1374,16 +1443,12 @@ impl SidecarManager {
     /// Skips the entry whose key matches `keeper_session_id` (the
     /// caller's own session_id) so we don't clobber the write we're
     /// about to make.
-    fn clear_tab_id_from_other_activations(
-        &mut self,
-        keeper_session_id: &str,
-        tab_id: &str,
-    ) {
-        let stale_session_ids: Vec<String> = self.session_activations
+    fn clear_tab_id_from_other_activations(&mut self, keeper_session_id: &str, tab_id: &str) {
+        let stale_session_ids: Vec<String> = self
+            .session_activations
             .iter()
             .filter(|(sid, a)| {
-                sid.as_str() != keeper_session_id
-                    && a.tab_id.as_deref() == Some(tab_id)
+                sid.as_str() != keeper_session_id && a.tab_id.as_deref() == Some(tab_id)
             })
             .map(|(sid, _)| sid.clone())
             .collect();
@@ -1410,7 +1475,11 @@ impl SidecarManager {
     ) {
         ulog_info!(
             "[sidecar] Activating session {} on port {}, tab: {:?}, task: {:?}, cron: {}",
-            session_id, port, tab_id, task_id, is_cron_task
+            session_id,
+            port,
+            tab_id,
+            task_id,
+            is_cron_task
         );
         // (v0.2.12 — issue #169 fix) Enforce tab_id uniqueness BEFORE
         // inserting the new activation, so the new entry's tab_id is the
@@ -1449,7 +1518,9 @@ impl SidecarManager {
         if let Some(activation) = self.session_activations.get_mut(session_id) {
             ulog_info!(
                 "[sidecar] Updating session {} tab: {:?} -> {:?}",
-                session_id, activation.tab_id, tab_id
+                session_id,
+                activation.tab_id,
+                tab_id
             );
             activation.tab_id = tab_id;
             // If a tab connects, it's no longer a pure cron task session
@@ -1512,8 +1583,13 @@ impl SidecarManager {
     /// Get session IDs that have a BackgroundCompletion owner
     /// Used by Task Center to show [后台] tags on sessions
     pub fn get_background_session_ids(&self) -> Vec<String> {
-        self.sidecars.iter()
-            .filter(|(_, sc)| sc.owners.iter().any(|o| matches!(o, SidecarOwner::BackgroundCompletion(_))))
+        self.sidecars
+            .iter()
+            .filter(|(_, sc)| {
+                sc.owners
+                    .iter()
+                    .any(|o| matches!(o, SidecarOwner::BackgroundCompletion(_)))
+            })
             .map(|(sid, _)| sid.clone())
             .collect()
     }
@@ -1633,7 +1709,9 @@ impl SidecarManager {
         if let Some(sidecar) = self.sidecars.get_mut(session_id) {
             ulog_info!(
                 "[sidecar] Adding owner {:?} to session {} (port {})",
-                owner, session_id, sidecar.port
+                owner,
+                session_id,
+                sidecar.port
             );
             sidecar.add_owner(owner);
             true
@@ -1649,7 +1727,9 @@ impl SidecarManager {
         let should_stop = if let Some(sidecar) = self.sidecars.get_mut(session_id) {
             ulog_info!(
                 "[sidecar] Removing owner {:?} from session {} (port {})",
-                owner, session_id, sidecar.port
+                owner,
+                session_id,
+                sidecar.port
             );
             sidecar.remove_owner(owner) // Returns true if this was the last owner
         } else {
@@ -1676,7 +1756,8 @@ impl SidecarManager {
     pub fn upgrade_session_id(&mut self, old_session_id: &str, new_session_id: &str) -> bool {
         ulog_info!(
             "[sidecar] Upgrading session ID: {} -> {}",
-            old_session_id, new_session_id
+            old_session_id,
+            new_session_id
         );
 
         let mut upgraded = false;
@@ -1690,14 +1771,16 @@ impl SidecarManager {
             self.sidecars.insert(new_session_id.to_string(), sidecar);
             ulog_info!(
                 "[sidecar] Upgraded sidecars HashMap: {} -> {}",
-                old_session_id, new_session_id
+                old_session_id,
+                new_session_id
             );
             upgraded = true;
         }
 
         // 2. Migrate generation counter
         if let Some(gen) = self.sidecar_generations.remove(old_session_id) {
-            self.sidecar_generations.insert(new_session_id.to_string(), gen);
+            self.sidecar_generations
+                .insert(new_session_id.to_string(), gen);
         }
 
         // Note: deliberately NOT broadcasting a stop event for
@@ -1722,10 +1805,12 @@ impl SidecarManager {
         if let Some(mut activation) = self.session_activations.remove(old_session_id) {
             // Update the session_id field in the activation itself
             activation.session_id = new_session_id.to_string();
-            self.session_activations.insert(new_session_id.to_string(), activation);
+            self.session_activations
+                .insert(new_session_id.to_string(), activation);
             ulog_info!(
                 "[sidecar] Upgraded session_activations HashMap: {} -> {}",
-                old_session_id, new_session_id
+                old_session_id,
+                new_session_id
             );
             upgraded = true;
         }
@@ -1745,10 +1830,13 @@ impl SidecarManager {
     pub fn session_has_persistent_owners(&self, session_id: &str) -> bool {
         self.sidecars
             .get(session_id)
-            .map(|s| s.owners.iter().any(|o| matches!(o, SidecarOwner::CronTask(_) | SidecarOwner::Agent(_))))
+            .map(|s| {
+                s.owners
+                    .iter()
+                    .any(|o| matches!(o, SidecarOwner::CronTask(_) | SidecarOwner::Agent(_)))
+            })
             .unwrap_or(false)
     }
-
 }
 
 impl Default for SidecarManager {
@@ -1774,10 +1862,10 @@ pub fn create_sidecar_manager() -> ManagedSidecarManager {
 
 // ============= Legacy compatibility types =============
 // These are kept for backward compatibility during migration
-// 
+//
 // TODO(PRD 0.1.0): Remove legacy API after confirming all frontend code
 // uses the new multi-instance API (startTabSidecar, stopTabSidecar, etc.)
-// 
+//
 // Legacy functions to remove:
 // - start_sidecar, stop_sidecar, get_sidecar_status
 // - restart_sidecar, ensure_sidecar_running, check_process_alive
@@ -1878,9 +1966,14 @@ fn kill_process(child: &mut Child) -> std::io::Result<()> {
 
                 if result > 0 {
                     // Direct child exited; give group members a brief grace period then SIGKILL the group
-                    ulog_debug!("[sidecar] Process {} exited gracefully, cleaning up process group", pid);
+                    ulog_debug!(
+                        "[sidecar] Process {} exited gracefully, cleaning up process group",
+                        pid
+                    );
                     std::thread::sleep(Duration::from_millis(500));
-                    unsafe { libc::kill(-(pid as i32), libc::SIGKILL); }
+                    unsafe {
+                        libc::kill(-(pid as i32), libc::SIGKILL);
+                    }
                     return;
                 } else if result < 0 {
                     // Error (process might already be gone)
@@ -1891,7 +1984,9 @@ fn kill_process(child: &mut Child) -> std::io::Result<()> {
 
                 if start.elapsed() > timeout {
                     ulog_warn!("[sidecar] Process {} didn't exit after SIGTERM, force killing process group", pid);
-                    unsafe { libc::kill(-(pid as i32), libc::SIGKILL); }
+                    unsafe {
+                        libc::kill(-(pid as i32), libc::SIGKILL);
+                    }
                     return;
                 }
 
@@ -1964,7 +2059,10 @@ fn diagnose_node_not_found<R: Runtime>(app_handle: &AppHandle<R>) -> String {
 }
 
 /// Diagnose why bun process exited immediately and return a user-friendly error message.
-fn diagnose_immediate_exit(status: &std::process::ExitStatus, node_path: &std::path::Path) -> String {
+fn diagnose_immediate_exit(
+    status: &std::process::ExitStatus,
+    node_path: &std::path::Path,
+) -> String {
     let status_str = format!("{:?}", status);
 
     #[cfg(target_os = "windows")]
@@ -2073,7 +2171,10 @@ fn find_node_executable_inner<R: Runtime>(app_handle: &AppHandle<R>) -> Option<P
             }
         }
         Err(e) => {
-            ulog_warn!("[sidecar] resource_dir() failed: {}, will try exe-relative fallback", e);
+            ulog_warn!(
+                "[sidecar] resource_dir() failed: {}, will try exe-relative fallback",
+                e
+            );
         }
     }
 
@@ -2085,8 +2186,16 @@ fn find_node_executable_inner<R: Runtime>(app_handle: &AppHandle<R>) -> Option<P
             #[cfg(target_os = "macos")]
             let layouts: [PathBuf; 2] = [
                 // Inside the .app bundle: Contents/Resources/nodejs/bin/node
-                exe_dir.parent().map(|p| p.join("Resources").join("nodejs").join("bin").join("node"))
-                    .unwrap_or_else(|| exe_dir.join("Resources").join("nodejs").join("bin").join("node")),
+                exe_dir
+                    .parent()
+                    .map(|p| p.join("Resources").join("nodejs").join("bin").join("node"))
+                    .unwrap_or_else(|| {
+                        exe_dir
+                            .join("Resources")
+                            .join("nodejs")
+                            .join("bin")
+                            .join("node")
+                    }),
                 exe_dir.join("nodejs").join("bin").join("node"),
             ];
             #[cfg(target_os = "windows")]
@@ -2096,7 +2205,11 @@ fn find_node_executable_inner<R: Runtime>(app_handle: &AppHandle<R>) -> Option<P
             ];
             #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
             let layouts: [PathBuf; 2] = [
-                exe_dir.join("resources").join("nodejs").join("bin").join("node"),
+                exe_dir
+                    .join("resources")
+                    .join("nodejs")
+                    .join("bin")
+                    .join("node"),
                 exe_dir.join("nodejs").join("bin").join("node"),
             ];
 
@@ -2113,8 +2226,8 @@ fn find_node_executable_inner<R: Runtime>(app_handle: &AppHandle<R>) -> Option<P
     // `./start_dev.sh` works on machines where bundled Node hasn't been downloaded yet.
     #[cfg(target_os = "windows")]
     {
-        if let Some(path) = crate::system_binary::find("node.exe")
-            .or_else(|| crate::system_binary::find("node"))
+        if let Some(path) =
+            crate::system_binary::find("node.exe").or_else(|| crate::system_binary::find("node"))
         {
             ulog_info!("Using system node: {:?}", path);
             return Some(path);
@@ -2142,7 +2255,9 @@ fn find_server_script_inner<R: Runtime>(_app_handle: &AppHandle<R>) -> Option<Pa
     // 1. First check for bundled server-dist.js (Production)
     // Modified: Only check bundled script in Release mode, so Dev mode uses source
     #[cfg(debug_assertions)]
-    ulog_info!("[sidecar] Debug mode detected, SKIPPING bundled script check (forcing source usage)");
+    ulog_info!(
+        "[sidecar] Debug mode detected, SKIPPING bundled script check (forcing source usage)"
+    );
 
     #[cfg(not(debug_assertions))]
     {
@@ -2150,7 +2265,10 @@ fn find_server_script_inner<R: Runtime>(_app_handle: &AppHandle<R>) -> Option<Pa
             Ok(resource_dir) => {
                 let bundled_script = resource_dir.join("server-dist.js");
                 if bundled_script.exists() {
-                    ulog_info!("Using bundled server script (bundled): {:?}", bundled_script);
+                    ulog_info!(
+                        "Using bundled server script (bundled): {:?}",
+                        bundled_script
+                    );
                     return Some(bundled_script);
                 }
 
@@ -2244,7 +2362,11 @@ fn wait_for_health(port: u16, alive_check: Option<Box<dyn Fn() -> bool>>) -> Res
             Duration::from_millis(HEALTH_CHECK_TIMEOUT_MS),
         ) {
             Ok(_) => {
-                ulog_info!("[sidecar] TCP health check passed after {} attempts on port {}", attempt, port);
+                ulog_info!(
+                    "[sidecar] TCP health check passed after {} attempts on port {}",
+                    attempt,
+                    port
+                );
                 return Ok(());
             }
             Err(_) => {
@@ -2311,8 +2433,13 @@ fn wait_for_readiness(port: u16, timeout_secs: u64) -> Result<(), String> {
         }
         std::thread::sleep(Duration::from_millis(250));
     }
-    let phase_part = last_phase.map(|p| format!(" (last phase: {})", p)).unwrap_or_default();
-    Err(format!("sidecar /health/ready timed out after {}s{}", timeout_secs, phase_part))
+    let phase_part = last_phase
+        .map(|p| format!(" (last phase: {})", p))
+        .unwrap_or_default();
+    Err(format!(
+        "sidecar /health/ready timed out after {}s{}",
+        timeout_secs, phase_part
+    ))
 }
 
 /// Quick HTTP health check for existing sidecar (non-blocking style with short timeout)
@@ -2323,7 +2450,8 @@ fn check_sidecar_http_health(port: u16) -> bool {
     // Short timeout for quick check - sidecar should respond immediately if healthy
     let client = match crate::local_http::blocking_builder()
         .timeout(Duration::from_millis(HTTP_HEALTH_CHECK_TIMEOUT_MS))
-        .build() {
+        .build()
+    {
         Ok(c) => c,
         Err(_) => return false,
     };
@@ -2362,7 +2490,11 @@ pub fn start_tab_sidecar<R: Runtime>(
     // Check if already running for this tab
     if let Some(instance) = manager_guard.get_instance_mut(tab_id) {
         if instance.is_running() {
-            ulog_info!("[sidecar] Tab {} already has running instance on port {}", tab_id, instance.port);
+            ulog_info!(
+                "[sidecar] Tab {} already has running instance on port {}",
+                tab_id,
+                instance.port
+            );
             return Ok(instance.port);
         }
     }
@@ -2371,17 +2503,19 @@ pub fn start_tab_sidecar<R: Runtime>(
     manager_guard.remove_instance(tab_id);
 
     // Find executables
-    let node_path = find_node_executable(app_handle)
-        .ok_or_else(|| diagnose_node_not_found(app_handle))?;
-    let script_path = find_server_script(app_handle)
-        .ok_or_else(|| "Server script not found".to_string())?;
+    let node_path =
+        find_node_executable(app_handle).ok_or_else(|| diagnose_node_not_found(app_handle))?;
+    let script_path =
+        find_server_script(app_handle).ok_or_else(|| "Server script not found".to_string())?;
 
     // Allocate port
     let port = manager_guard.allocate_port()?;
 
     ulog_info!(
         "[sidecar] Starting for tab {} on port {}, agent_dir: {:?}",
-        tab_id, port, agent_dir
+        tab_id,
+        port,
+        agent_dir
     );
 
     // Build command — node directly executes server-dist.js (esbuild output).
@@ -2417,7 +2551,9 @@ pub fn start_tab_sidecar<R: Runtime>(
                 "[sidecar] Failed to create temp directory {:?}: {}. \
                  Check permissions on TEMP directory ({}). \
                  This directory is required for Global Sidecar to store runtime data.",
-                temp_dir, e, std::env::temp_dir().display()
+                temp_dir,
+                e,
+                std::env::temp_dir().display()
             );
             ulog_error!("{}", err);
             err
@@ -2474,7 +2610,10 @@ pub fn start_tab_sidecar<R: Runtime>(
 
     ulog_info!(
         "[sidecar] Spawning: bun={:?}, script={:?}, port={}, is_global={}",
-        node_path, script_path, port, is_global
+        node_path,
+        script_path,
+        port,
+        is_global
     );
 
     // Spawn
@@ -2514,12 +2653,11 @@ pub fn start_tab_sidecar<R: Runtime>(
             let reader = BufReader::new(stderr);
             for line in reader.lines().flatten() {
                 match classify_sidecar_stderr(&line) {
-                    SidecarStderrLevel::Info =>
-                        ulog_info!("[bun-err][{}] {}", tab_id_clone, line),
-                    SidecarStderrLevel::Warn =>
-                        ulog_warn!("[bun-err][{}] {}", tab_id_clone, line),
-                    SidecarStderrLevel::Error =>
-                        ulog_error!("[bun-err][{}] {}", tab_id_clone, line),
+                    SidecarStderrLevel::Info => ulog_info!("[bun-err][{}] {}", tab_id_clone, line),
+                    SidecarStderrLevel::Warn => ulog_warn!("[bun-err][{}] {}", tab_id_clone, line),
+                    SidecarStderrLevel::Error => {
+                        ulog_error!("[bun-err][{}] {}", tab_id_clone, line)
+                    }
                 }
             }
         });
@@ -2532,7 +2670,10 @@ pub fn start_tab_sidecar<R: Runtime>(
     if let Ok(Some(status)) = child.try_wait() {
         // Crash detected — give the stderr reader a brief window to flush.
         thread::sleep(Duration::from_millis(100));
-        ulog_error!("[sidecar] Process exited immediately with status: {:?}", status);
+        ulog_error!(
+            "[sidecar] Process exited immediately with status: {:?}",
+            status
+        );
         #[cfg(target_os = "windows")]
         maybe_mark_crashed_node(&status, &node_path);
         let diag = diagnose_immediate_exit(&status, &node_path);
@@ -2638,7 +2779,11 @@ pub fn stop_tab_sidecar(manager: &ManagedSidecarManager, tab_id: &str) -> Result
     let mut manager_guard = manager.lock().map_err(|e| e.to_string())?;
 
     if let Some(instance) = manager_guard.remove_instance(tab_id) {
-        ulog_info!("[sidecar] Stopped instance for tab {} on port {}", tab_id, instance.port);
+        ulog_info!(
+            "[sidecar] Stopped instance for tab {} on port {}",
+            tab_id,
+            instance.port
+        );
         // Instance is dropped here, killing the process
     } else {
         ulog_debug!("[sidecar] No instance found for tab {}", tab_id);
@@ -2663,22 +2808,30 @@ pub fn get_tab_server_url(manager: &ManagedSidecarManager, tab_id: &str) -> Resu
     }
 
     // Priority 2: Check session_activations to find the Session-centric sidecar
-    let activation_session = manager_guard.session_activations.values()
+    let activation_session = manager_guard
+        .session_activations
+        .values()
         .find(|a| a.tab_id.as_deref() == Some(tab_id))
         .map(|a| (a.session_id.clone(), a.port));
 
     if let Some((session_id, port)) = activation_session {
         // Verify the sidecar is still healthy in Session-centric storage
-        let is_healthy = manager_guard.sidecars.get_mut(&session_id)
+        let is_healthy = manager_guard
+            .sidecars
+            .get_mut(&session_id)
             .map(|s| s.is_ready_for_requests())
             .unwrap_or(false)
-            || manager_guard.instances.values_mut()
+            || manager_guard
+                .instances
+                .values_mut()
                 .any(|i| i.port == port && i.is_running());
 
         if is_healthy {
             ulog_info!(
                 "[sidecar] Tab {} using session {} sidecar on port {} (via session_activation)",
-                tab_id, session_id, port
+                tab_id,
+                session_id,
+                port
             );
             return Ok(format!("http://127.0.0.1:{}", port));
         }
@@ -2689,7 +2842,10 @@ pub fn get_tab_server_url(manager: &ManagedSidecarManager, tab_id: &str) -> Resu
 
 /// Get status for a Tab's sidecar
 /// This function checks multiple sources (same as get_tab_server_url)
-pub fn get_tab_sidecar_status(manager: &ManagedSidecarManager, tab_id: &str) -> Result<SidecarStatus, String> {
+pub fn get_tab_sidecar_status(
+    manager: &ManagedSidecarManager,
+    tab_id: &str,
+) -> Result<SidecarStatus, String> {
     let mut manager_guard = manager.lock().map_err(|e| e.to_string())?;
 
     // Priority 1: Check direct Tab sidecar instances (Global Sidecar)
@@ -2697,23 +2853,31 @@ pub fn get_tab_sidecar_status(manager: &ManagedSidecarManager, tab_id: &str) -> 
         return Ok(SidecarStatus {
             running: instance.is_running(),
             port: instance.port,
-            agent_dir: instance.agent_dir.as_ref()
+            agent_dir: instance
+                .agent_dir
+                .as_ref()
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_default(),
         });
     }
 
     // Priority 2: Check session_activations for Session-centric sidecar
-    let activation_info = manager_guard.session_activations.values()
+    let activation_info = manager_guard
+        .session_activations
+        .values()
         .find(|a| a.tab_id.as_deref() == Some(tab_id))
         .map(|a| (a.session_id.clone(), a.port, a.workspace_path.clone()));
 
     if let Some((session_id, port, workspace_path)) = activation_info {
         // Check if the sidecar is healthy in Session-centric storage
-        let is_running = manager_guard.sidecars.get_mut(&session_id)
+        let is_running = manager_guard
+            .sidecars
+            .get_mut(&session_id)
             .map(|s| s.is_ready_for_requests())
             .unwrap_or(false)
-            || manager_guard.instances.values_mut()
+            || manager_guard
+                .instances
+                .values_mut()
                 .any(|i| i.port == port && i.is_running());
 
         return Ok(SidecarStatus {
@@ -2747,7 +2911,9 @@ pub fn start_global_sidecar<R: Runtime>(
 /// - None: sidecar was never started (no instance in manager) → skip
 /// - Some((port, true, created_at)):  process alive → do HTTP health check (if past grace)
 /// - Some((port, false, created_at)): process dead → needs restart immediately
-fn check_global_sidecar_status(manager: &ManagedSidecarManager) -> Option<(u16, bool, std::time::Instant)> {
+fn check_global_sidecar_status(
+    manager: &ManagedSidecarManager,
+) -> Option<(u16, bool, std::time::Instant)> {
     let mut guard = manager.lock().ok()?;
     let instance = guard.get_instance_mut(GLOBAL_SIDECAR_ID)?;
     let created_at = instance.created_at;
@@ -2912,7 +3078,10 @@ mod global_restart_decision_tests {
         let (restart, after_recover) = global_restart_decision(true, true, after_first, T);
         assert_eq!((restart, after_recover), (false, 0));
         // Next blip starts the count over, so one more blip alone won't restart.
-        assert_eq!(global_restart_decision(true, false, after_recover, T), (false, 1));
+        assert_eq!(
+            global_restart_decision(true, false, after_recover, T),
+            (false, 1)
+        );
     }
 }
 
@@ -2924,8 +3093,8 @@ pub async fn monitor_global_sidecar(
     manager: ManagedSidecarManager,
     shutdown: Arc<std::sync::atomic::AtomicBool>,
 ) {
-    use std::sync::atomic::Ordering::Relaxed;
     use crate::logger;
+    use std::sync::atomic::Ordering::Relaxed;
 
     const CHECK_INTERVAL_SECS: u64 = 15;
     const MAX_RESTART_FAILURES: u32 = 5;
@@ -2938,7 +3107,10 @@ pub async fn monitor_global_sidecar(
     let mut consecutive_health_failures: u32 = 0;
     let mut is_first_check = true;
 
-    logger::info(&app_handle, "[sidecar] Global sidecar health monitor started".to_string());
+    logger::info(
+        &app_handle,
+        "[sidecar] Global sidecar health monitor started".to_string(),
+    );
 
     loop {
         // First iteration: short delay (let Global Sidecar start up)
@@ -2949,7 +3121,8 @@ pub async fn monitor_global_sidecar(
         } else if consecutive_restart_failures > 0 {
             // Exponential backoff: 30s, 60s, 120s, 240s, 300s, 300s, ...
             let backoff = std::cmp::min(
-                CHECK_INTERVAL_SECS.saturating_mul(2u64.saturating_pow(consecutive_restart_failures)),
+                CHECK_INTERVAL_SECS
+                    .saturating_mul(2u64.saturating_pow(consecutive_restart_failures)),
                 MAX_BACKOFF_SECS,
             );
             tokio::time::sleep(Duration::from_secs(backoff)).await;
@@ -2958,7 +3131,10 @@ pub async fn monitor_global_sidecar(
         }
 
         if shutdown.load(Relaxed) {
-            logger::info(&app_handle, "[sidecar] Global sidecar monitor stopping (app shutdown)".to_string());
+            logger::info(
+                &app_handle,
+                "[sidecar] Global sidecar monitor stopping (app shutdown)".to_string(),
+            );
             break;
         }
 
@@ -3046,10 +3222,8 @@ pub async fn monitor_global_sidecar(
 
         let app_clone = app_handle.clone();
         let mgr_clone = manager.clone();
-        match tokio::task::spawn_blocking(move || {
-            start_global_sidecar(&app_clone, &mgr_clone)
-        })
-        .await
+        match tokio::task::spawn_blocking(move || start_global_sidecar(&app_clone, &mgr_clone))
+            .await
         {
             Ok(Ok(new_port)) => {
                 consecutive_restart_failures = 0;
@@ -3057,7 +3231,10 @@ pub async fn monitor_global_sidecar(
                 let new_url = format!("http://127.0.0.1:{}", new_port);
                 logger::info(
                     &app_handle,
-                    format!("[sidecar] Global sidecar auto-restarted on port {} ({})", new_port, new_url),
+                    format!(
+                        "[sidecar] Global sidecar auto-restarted on port {} ({})",
+                        new_port, new_url
+                    ),
                 );
                 let _ = app_handle.emit("global-sidecar:restarted", &new_url);
             }
@@ -3066,12 +3243,19 @@ pub async fn monitor_global_sidecar(
                 if consecutive_restart_failures >= MAX_RESTART_FAILURES {
                     ulog_error!("[sidecar] Failed to auto-restart global sidecar ({} consecutive failures, backing off): {}", consecutive_restart_failures, e);
                 } else {
-                    ulog_error!("[sidecar] Failed to auto-restart global sidecar (attempt {}): {}", consecutive_restart_failures, e);
+                    ulog_error!(
+                        "[sidecar] Failed to auto-restart global sidecar (attempt {}): {}",
+                        consecutive_restart_failures,
+                        e
+                    );
                 }
             }
             Err(e) => {
                 consecutive_restart_failures += 1;
-                ulog_error!("[sidecar] spawn_blocking failed during global sidecar restart: {}", e);
+                ulog_error!(
+                    "[sidecar] spawn_blocking failed during global sidecar restart: {}",
+                    e
+                );
             }
         }
     }
@@ -3222,12 +3406,15 @@ pub async fn monitor_session_sidecars(
             };
             for (sid, sc) in guard.sidecars.iter_mut() {
                 if sc.is_dead() && !sc.owners.is_empty() && !recovery.contains_key(sid) {
-                    recovery.insert(sid.clone(), RecoveryEntry {
-                        workspace: sc.workspace_path.clone(),
-                        owners: sc.owners.iter().cloned().collect(),
-                        runtime: sc.runtime.clone(),
-                        failures: 0,
-                    });
+                    recovery.insert(
+                        sid.clone(),
+                        RecoveryEntry {
+                            workspace: sc.workspace_path.clone(),
+                            owners: sc.owners.iter().cloned().collect(),
+                            runtime: sc.runtime.clone(),
+                            failures: 0,
+                        },
+                    );
                 }
             }
         }
@@ -3293,7 +3480,12 @@ pub async fn monitor_session_sidecars(
 
             match tokio::task::spawn_blocking(move || {
                 ensure_session_sidecar_with_runtime_override(
-                    &app, &mgr, &sid, &workspace, first_owner, pinned_runtime,
+                    &app,
+                    &mgr,
+                    &sid,
+                    &workspace,
+                    first_owner,
+                    pinned_runtime,
                 )
             })
             .await
@@ -3436,10 +3628,16 @@ fn ensure_session_sidecar_attempt<R: Runtime>(
             session_id, MAX_ENSURE_ATTEMPTS
         ));
     }
-    ulog_info!("[sidecar] ensure_session_sidecar called for session: {}, owner: {:?} (attempt {})", session_id, owner, attempt);
+    ulog_info!(
+        "[sidecar] ensure_session_sidecar called for session: {}, owner: {:?} (attempt {})",
+        session_id,
+        owner,
+        attempt
+    );
     let ensure_started = trace_start();
     let owner_for_trace = format!("{:?}", owner);
-    let requested_runtime_for_trace = normalize_runtime_name(runtime_override.as_deref()).to_string();
+    let requested_runtime_for_trace =
+        normalize_runtime_name(runtime_override.as_deref()).to_string();
     emit_perf_trace(
         PerfTrace::new(PerfTraceName::SidecarBoot, "ensure_start")
             .session_id(Some(session_id))
@@ -3517,9 +3715,15 @@ fn ensure_session_sidecar_attempt<R: Runtime>(
                 // Add the owner now, then wait for /health/ready outside the lock.
                 ulog_info!(
                     "[sidecar] Session {} Sidecar still starting on port {}, adding owner {:?}",
-                    session_id, sidecar.port, owner
+                    session_id,
+                    sidecar.port,
+                    owner
                 );
-                validate_sidecar_runtime_invariant(session_id, sidecar.runtime.as_deref(), "reuse-starting");
+                validate_sidecar_runtime_invariant(
+                    session_id,
+                    sidecar.runtime.as_deref(),
+                    "reuse-starting",
+                );
                 let owner_added = sidecar.add_owner(owner.clone());
                 Some(ExistingSidecarReuse::Starting {
                     port: sidecar.port,
@@ -3538,14 +3742,20 @@ fn ensure_session_sidecar_attempt<R: Runtime>(
     // can replace the sidecar during this window. We use a generation counter to detect this
     // and avoid accidentally killing the healthy replacement.
     if let Some(existing) = existing_sidecar_info {
-        let (port, pre_gen, runtime_for_trace, wait_for_starting, joined_owner_added) = match existing {
-            ExistingSidecarReuse::Healthy { port, generation, runtime } => {
-                (port, generation, runtime, false, false)
-            }
-            ExistingSidecarReuse::Starting { port, generation, runtime, owner_added } => {
-                (port, generation, runtime, true, owner_added)
-            }
-        };
+        let (port, pre_gen, runtime_for_trace, wait_for_starting, joined_owner_added) =
+            match existing {
+                ExistingSidecarReuse::Healthy {
+                    port,
+                    generation,
+                    runtime,
+                } => (port, generation, runtime, false, false),
+                ExistingSidecarReuse::Starting {
+                    port,
+                    generation,
+                    runtime,
+                    owner_added,
+                } => (port, generation, runtime, true, owner_added),
+            };
         drop(manager_guard);
 
         let check_started = trace_start();
@@ -3589,9 +3799,15 @@ fn ensure_session_sidecar_attempt<R: Runtime>(
                 if !sidecar.is_dead() {
                     ulog_info!(
                         "[sidecar] Session {} replacement on port {} is {:?}, retrying ensure",
-                        session_id, sidecar.port, sidecar.state
+                        session_id,
+                        sidecar.port,
+                        sidecar.state
                     );
-                    validate_sidecar_runtime_invariant(session_id, sidecar.runtime.as_deref(), "reuse-replacement");
+                    validate_sidecar_runtime_invariant(
+                        session_id,
+                        sidecar.runtime.as_deref(),
+                        "reuse-replacement",
+                    );
                     drop(manager_guard);
                     return ensure_session_sidecar_attempt(
                         app_handle,
@@ -3611,9 +3827,15 @@ fn ensure_session_sidecar_attempt<R: Runtime>(
                 if sidecar.port == port && sidecar.is_reusable() {
                     ulog_info!(
                         "[sidecar] Session {} Sidecar HTTP healthy on port {}, adding owner {:?}",
-                        session_id, port, owner
+                        session_id,
+                        port,
+                        owner
                     );
-                    validate_sidecar_runtime_invariant(session_id, sidecar.runtime.as_deref(), "reuse-http-healthy");
+                    validate_sidecar_runtime_invariant(
+                        session_id,
+                        sidecar.runtime.as_deref(),
+                        "reuse-http-healthy",
+                    );
                     sidecar.add_owner(owner.clone());
                     emit_perf_trace(
                         PerfTrace::new(PerfTraceName::SidecarBoot, "ensure_done")
@@ -3623,7 +3845,14 @@ fn ensure_session_sidecar_attempt<R: Runtime>(
                             .status("ok")
                             .detail("port", port)
                             .detail("is_new", false)
-                            .detail("reuse", if wait_for_starting { "starting-ready" } else { "healthy" }),
+                            .detail(
+                                "reuse",
+                                if wait_for_starting {
+                                    "starting-ready"
+                                } else {
+                                    "healthy"
+                                },
+                            ),
                     );
                     return Ok(EnsureSidecarResult {
                         port,
@@ -3635,7 +3864,11 @@ fn ensure_session_sidecar_attempt<R: Runtime>(
                         "[sidecar] Session {} starting Sidecar reached readiness on port {}, adding owner {:?}",
                         session_id, port, owner
                     );
-                    validate_sidecar_runtime_invariant(session_id, sidecar.runtime.as_deref(), "reuse-starting-ready");
+                    validate_sidecar_runtime_invariant(
+                        session_id,
+                        sidecar.runtime.as_deref(),
+                        "reuse-starting-ready",
+                    );
                     sidecar.state = SidecarState::Healthy;
                     sidecar.add_owner(owner.clone());
                     emit_perf_trace(
@@ -3789,17 +4022,19 @@ fn create_new_session_sidecar<R: Runtime>(
 
     // Need to start a new Sidecar
     // First, find executables
-    let node_path = find_node_executable(app_handle)
-        .ok_or_else(|| diagnose_node_not_found(app_handle))?;
-    let script_path = find_server_script(app_handle)
-        .ok_or_else(|| "Server script not found".to_string())?;
+    let node_path =
+        find_node_executable(app_handle).ok_or_else(|| diagnose_node_not_found(app_handle))?;
+    let script_path =
+        find_server_script(app_handle).ok_or_else(|| "Server script not found".to_string())?;
 
     // Allocate port
     let port = manager_guard.allocate_port()?;
 
     ulog_info!(
         "[sidecar] Starting SessionSidecar for session {} on port {}, owner: {:?}",
-        session_id, port, owner
+        session_id,
+        port,
+        owner
     );
 
     // Build command (see sibling SessionSidecar path for the tsx-loader rationale)
@@ -3861,7 +4096,8 @@ fn create_new_session_sidecar<R: Runtime>(
     //     gemini→builtin switch), defeating the whole point of the IM drift
     //     semantics. A None result here means "spawn as builtin (no env var)"
     //     which is exactly correct — the user explicitly asked for builtin.
-    let resolved_runtime = runtime_override.map(|runtime| runtime.to_string())
+    let resolved_runtime = runtime_override
+        .map(|runtime| runtime.to_string())
         .or_else(|| {
             if matches!(owner, SidecarOwner::Agent(_)) {
                 resolve_agent_runtime_from_config(workspace_path)
@@ -3945,12 +4181,15 @@ fn create_new_session_sidecar<R: Runtime>(
             let reader = BufReader::new(stderr);
             for line in reader.lines().flatten() {
                 match classify_sidecar_stderr(&line) {
-                    SidecarStderrLevel::Info =>
-                        ulog_info!("[bun-err][session:{}] {}", session_id_for_log, line),
-                    SidecarStderrLevel::Warn =>
-                        ulog_warn!("[bun-err][session:{}] {}", session_id_for_log, line),
-                    SidecarStderrLevel::Error =>
-                        ulog_error!("[bun-err][session:{}] {}", session_id_for_log, line),
+                    SidecarStderrLevel::Info => {
+                        ulog_info!("[bun-err][session:{}] {}", session_id_for_log, line)
+                    }
+                    SidecarStderrLevel::Warn => {
+                        ulog_warn!("[bun-err][session:{}] {}", session_id_for_log, line)
+                    }
+                    SidecarStderrLevel::Error => {
+                        ulog_error!("[bun-err][session:{}] {}", session_id_for_log, line)
+                    }
                 }
             }
         });
@@ -3960,7 +4199,10 @@ fn create_new_session_sidecar<R: Runtime>(
     // the health-loop's alive_check catches any crash this probe misses.
     if let Ok(Some(status)) = child.try_wait() {
         thread::sleep(Duration::from_millis(100));
-        ulog_error!("[sidecar] SessionSidecar exited immediately with status: {:?}", status);
+        ulog_error!(
+            "[sidecar] SessionSidecar exited immediately with status: {:?}",
+            status
+        );
         #[cfg(target_os = "windows")]
         maybe_mark_crashed_node(&status, &node_path);
         let diag = diagnose_immediate_exit(&status, &node_path);
@@ -4029,7 +4271,11 @@ fn create_new_session_sidecar<R: Runtime>(
             // long-running migration / SDK init budgets.
             let readiness_started = trace_start();
             if let Err(e) = wait_for_readiness(port, 30) {
-                ulog_error!("[sidecar] Session {} /health/ready failed: {}", session_id, e);
+                ulog_error!(
+                    "[sidecar] Session {} /health/ready failed: {}",
+                    session_id,
+                    e
+                );
                 emit_perf_trace(
                     PerfTrace::new(PerfTraceName::SidecarBoot, "ready_failed")
                         .duration_ms(elapsed_ms(readiness_started))
@@ -4040,7 +4286,9 @@ fn create_new_session_sidecar<R: Runtime>(
                         .detail("error", &e),
                 );
                 let mut manager_guard = manager.lock().map_err(|_| e.clone())?;
-                let port_matches = manager_guard.sidecars.get(session_id)
+                let port_matches = manager_guard
+                    .sidecars
+                    .get(session_id)
                     .map(|s| s.port == port)
                     .unwrap_or(false);
                 if port_matches {
@@ -4063,7 +4311,8 @@ fn create_new_session_sidecar<R: Runtime>(
             }
             ulog_info!(
                 "[sidecar] SessionSidecar for session {} is healthy on port {}",
-                session_id, port
+                session_id,
+                port
             );
             emit_perf_trace(
                 PerfTrace::new(PerfTraceName::SidecarBoot, "ready_ok")
@@ -4073,10 +4322,7 @@ fn create_new_session_sidecar<R: Runtime>(
                     .status("ok")
                     .detail("port", port),
             );
-            Ok(EnsureSidecarResult {
-                port,
-                is_new: true,
-            })
+            Ok(EnsureSidecarResult { port, is_new: true })
         }
         Err(e) => {
             ulog_error!("[sidecar] SessionSidecar health check failed: {}", e);
@@ -4091,7 +4337,9 @@ fn create_new_session_sidecar<R: Runtime>(
             );
             let mut manager_guard = manager.lock().map_err(|_| e.clone())?;
             // Verify port before acting — another thread may have replaced the sidecar
-            let port_matches = manager_guard.sidecars.get(session_id)
+            let port_matches = manager_guard
+                .sidecars
+                .get(session_id)
                 .map(|s| s.port == port)
                 .unwrap_or(false);
             if port_matches {
@@ -4134,19 +4382,22 @@ pub fn release_session_sidecar(
             manager_guard.clear_generation(session_id);
             ulog_info!(
                 "[sidecar] Released owner {:?} from session {}, Sidecar stopped (last owner)",
-                owner, session_id
+                owner,
+                session_id
             );
         } else {
             ulog_info!(
                 "[sidecar] Released owner {:?} from session {}, Sidecar continues running",
-                owner, session_id
+                owner,
+                session_id
             );
         }
         Ok(stopped)
     } else {
         ulog_debug!(
             "[sidecar] Session {} has no Sidecar to release owner {:?} from",
-            session_id, owner
+            session_id,
+            owner
         );
         Ok(false)
     }
@@ -4319,7 +4570,8 @@ fn check_sidecar_session_state(port: u16) -> Option<String> {
     let url = format!("http://127.0.0.1:{}/api/session-state", port);
     let client = match crate::local_http::blocking_builder()
         .timeout(Duration::from_secs(3))
-        .build() {
+        .build()
+    {
         Ok(c) => c,
         Err(_) => return None,
     };
@@ -4367,8 +4619,14 @@ pub fn start_background_completion<R: Runtime>(
     let port = match port {
         Some(p) => p,
         None => {
-            ulog_debug!("[bg-completion] No running sidecar for session {}", session_id);
-            return Ok(BackgroundCompletionResult { started: false, session_id: result_id });
+            ulog_debug!(
+                "[bg-completion] No running sidecar for session {}",
+                session_id
+            );
+            return Ok(BackgroundCompletionResult {
+                started: false,
+                session_id: result_id,
+            });
         }
     };
 
@@ -4383,7 +4641,10 @@ pub fn start_background_completion<R: Runtime>(
 
     if !is_active {
         ulog_info!("[bg-completion] Session {} is not active (state: {:?}), no background completion needed", session_id, state);
-        return Ok(BackgroundCompletionResult { started: false, session_id: result_id });
+        return Ok(BackgroundCompletionResult {
+            started: false,
+            session_id: result_id,
+        });
     }
 
     // Phase 3: Add BackgroundCompletion owner (with lock)
@@ -4392,14 +4653,30 @@ pub fn start_background_completion<R: Runtime>(
         if let Some(sidecar) = manager_guard.sidecars.get_mut(session_id) {
             let bg_owner = SidecarOwner::BackgroundCompletion(session_id.to_string());
             if sidecar.owners.contains(&bg_owner) {
-                ulog_info!("[bg-completion] Session {} already has a BackgroundCompletion owner", session_id);
-                return Ok(BackgroundCompletionResult { started: true, session_id: result_id });
+                ulog_info!(
+                    "[bg-completion] Session {} already has a BackgroundCompletion owner",
+                    session_id
+                );
+                return Ok(BackgroundCompletionResult {
+                    started: true,
+                    session_id: result_id,
+                });
             }
             sidecar.add_owner(bg_owner);
-            ulog_info!("[bg-completion] Added BackgroundCompletion owner to session {} (port {})", session_id, port);
+            ulog_info!(
+                "[bg-completion] Added BackgroundCompletion owner to session {} (port {})",
+                session_id,
+                port
+            );
         } else {
-            ulog_warn!("[bg-completion] Sidecar disappeared during state check for session {}", session_id);
-            return Ok(BackgroundCompletionResult { started: false, session_id: result_id });
+            ulog_warn!(
+                "[bg-completion] Sidecar disappeared during state check for session {}",
+                session_id
+            );
+            return Ok(BackgroundCompletionResult {
+                started: false,
+                session_id: result_id,
+            });
         }
     }
 
@@ -4409,15 +4686,13 @@ pub fn start_background_completion<R: Runtime>(
     let app_handle_clone = app_handle.clone();
 
     thread::spawn(move || {
-        poll_background_completion(
-            &app_handle_clone,
-            &manager_clone,
-            &session_id_clone,
-            port,
-        );
+        poll_background_completion(&app_handle_clone, &manager_clone, &session_id_clone, port);
     });
 
-    Ok(BackgroundCompletionResult { started: true, session_id: result_id })
+    Ok(BackgroundCompletionResult {
+        started: true,
+        session_id: result_id,
+    })
 }
 
 /// Polling loop that runs in a background thread.
@@ -4429,7 +4704,11 @@ fn poll_background_completion<R: Runtime>(
     session_id: &str,
     port: u16,
 ) {
-    ulog_info!("[bg-completion] Starting polling for session {} on port {}", session_id, port);
+    ulog_info!(
+        "[bg-completion] Starting polling for session {} on port {}",
+        session_id,
+        port
+    );
     let start_time = std::time::Instant::now();
     let max_duration = Duration::from_secs(BG_MAX_DURATION_SECS);
     let poll_interval = Duration::from_secs(BG_POLL_INTERVAL_SECS);
@@ -4442,7 +4721,11 @@ fn poll_background_completion<R: Runtime>(
 
         // Safety timeout
         if start_time.elapsed() > max_duration {
-            ulog_warn!("[bg-completion] Session {} hit safety timeout ({} min), stopping", session_id, BG_MAX_DURATION_SECS / 60);
+            ulog_warn!(
+                "[bg-completion] Session {} hit safety timeout ({} min), stopping",
+                session_id,
+                BG_MAX_DURATION_SECS / 60
+            );
             break;
         }
 
@@ -4461,12 +4744,18 @@ fn poll_background_completion<R: Runtime>(
                     }
                     // Process died
                     if sidecar.is_dead() {
-                        ulog_warn!("[bg-completion] Sidecar process died for session {}", session_id);
+                        ulog_warn!(
+                            "[bg-completion] Sidecar process died for session {}",
+                            session_id
+                        );
                         break;
                     }
                 }
                 None => {
-                    ulog_info!("[bg-completion] Sidecar removed for session {}, exiting poll", session_id);
+                    ulog_info!(
+                        "[bg-completion] Sidecar removed for session {}, exiting poll",
+                        session_id
+                    );
                     return; // Sidecar already gone, nothing to clean up
                 }
             }
@@ -4478,11 +4767,19 @@ fn poll_background_completion<R: Runtime>(
         match check_sidecar_session_state(port) {
             Some(ref state) if state == "running" || state == "starting" => {
                 consecutive_http_failures = 0;
-                ulog_debug!("[bg-completion] Session {} still active (state: {}), continuing poll", session_id, state);
+                ulog_debug!(
+                    "[bg-completion] Session {} still active (state: {}), continuing poll",
+                    session_id,
+                    state
+                );
                 continue;
             }
             Some(ref state) => {
-                ulog_info!("[bg-completion] Session {} finished (state: {})", session_id, state);
+                ulog_info!(
+                    "[bg-completion] Session {} finished (state: {})",
+                    session_id,
+                    state
+                );
                 break;
             }
             None => {
@@ -4496,7 +4793,9 @@ fn poll_background_completion<R: Runtime>(
                 }
                 ulog_warn!(
                     "[bg-completion] Session {} HTTP unreachable ({}/{}), retrying...",
-                    session_id, consecutive_http_failures, MAX_HTTP_FAILURES
+                    session_id,
+                    consecutive_http_failures,
+                    MAX_HTTP_FAILURES
                 );
                 continue;
             }
@@ -4507,21 +4806,29 @@ fn poll_background_completion<R: Runtime>(
     let sidecar_stopped = match release_session_sidecar(manager, session_id, &bg_owner) {
         Ok(stopped) => stopped,
         Err(e) => {
-            ulog_error!("[bg-completion] Failed to release owner for session {}: {}", session_id, e);
+            ulog_error!(
+                "[bg-completion] Failed to release owner for session {}: {}",
+                session_id,
+                e
+            );
             false
         }
     };
 
     ulog_info!(
         "[bg-completion] Session {} background completion finished, sidecar_stopped: {}",
-        session_id, sidecar_stopped
+        session_id,
+        sidecar_stopped
     );
 
     // Emit Tauri event to notify frontend
-    let _ = app_handle.emit("session:background-complete", serde_json::json!({
-        "sessionId": session_id,
-        "sidecarStopped": sidecar_stopped,
-    }));
+    let _ = app_handle.emit(
+        "session:background-complete",
+        serde_json::json!({
+            "sessionId": session_id,
+            "sidecarStopped": sidecar_stopped,
+        }),
+    );
 }
 
 /// Cancel background completion for a session (e.g., when user reconnects).
@@ -4566,7 +4873,8 @@ pub fn cancel_background_completion(
     let stopped = release_session_sidecar(manager, session_id, &bg_owner)?;
     ulog_info!(
         "[bg-completion] Cancelled background completion for session {} (sidecar_stopped: {})",
-        session_id, stopped
+        session_id,
+        stopped
     );
     Ok(true)
 }
@@ -4715,10 +5023,10 @@ pub fn start_sidecar<R: Runtime>(
 ) -> Result<u16, String> {
     // Use legacy tab ID
     const LEGACY_TAB_ID: &str = "__legacy__";
-    
+
     // Stop any existing legacy instance
     let _ = stop_tab_sidecar(state, LEGACY_TAB_ID);
-    
+
     // Start new instance
     start_tab_sidecar(app_handle, state, LEGACY_TAB_ID, Some(config.agent_dir))
 }
@@ -4739,7 +5047,7 @@ pub fn get_sidecar_status(state: &ManagedSidecar) -> Result<SidecarStatus, Strin
 pub fn check_process_alive(state: &ManagedSidecar) -> Result<bool, String> {
     const LEGACY_TAB_ID: &str = "__legacy__";
     let mut manager_guard = state.lock().map_err(|e| e.to_string())?;
-    
+
     if let Some(instance) = manager_guard.get_instance_mut(LEGACY_TAB_ID) {
         Ok(instance.is_running())
     } else {
@@ -4753,17 +5061,18 @@ pub fn restart_sidecar<R: Runtime>(
     state: &ManagedSidecar,
 ) -> Result<u16, String> {
     const LEGACY_TAB_ID: &str = "__legacy__";
-    
+
     // Get current config
     let agent_dir = {
         let manager_guard = state.lock().map_err(|e| e.to_string())?;
-        manager_guard.get_instance(LEGACY_TAB_ID)
+        manager_guard
+            .get_instance(LEGACY_TAB_ID)
             .and_then(|i| i.agent_dir.clone())
     };
-    
+
     // Stop and restart
     let _ = stop_tab_sidecar(state, LEGACY_TAB_ID);
-    
+
     if let Some(dir) = agent_dir {
         start_tab_sidecar(app_handle, state, LEGACY_TAB_ID, Some(dir))
     } else {
@@ -4945,7 +5254,8 @@ pub async fn execute_cron_task<R: Runtime>(
 ) -> Result<CronExecuteResponse, String> {
     ulog_info!(
         "[sidecar] execute_cron_task called for task {} in workspace {}",
-        payload.task_id, workspace_path
+        payload.task_id,
+        workspace_path
     );
     let cron_started = trace_start();
     let cron_task_id = payload.task_id.clone();
@@ -4953,7 +5263,10 @@ pub async fn execute_cron_task<R: Runtime>(
 
     // Require session_id for Session-centric Sidecar
     let session_id = payload.session_id.clone().ok_or_else(|| {
-        let err = format!("[sidecar] execute_cron_task requires session_id for task {}", payload.task_id);
+        let err = format!(
+            "[sidecar] execute_cron_task requires session_id for task {}",
+            payload.task_id
+        );
         ulog_error!("{}", err);
         emit_perf_trace(
             PerfTrace::new(PerfTraceName::BackgroundJob, "cron_execute")
@@ -4967,10 +5280,13 @@ pub async fn execute_cron_task<R: Runtime>(
     })?;
 
     // Emit debug event
-    let _ = app_handle.emit("cron:debug", serde_json::json!({
-        "taskId": payload.task_id,
-        "message": "execute_cron_task: about to call ensure_session_sidecar"
-    }));
+    let _ = app_handle.emit(
+        "cron:debug",
+        serde_json::json!({
+            "taskId": payload.task_id,
+            "message": "execute_cron_task: about to call ensure_session_sidecar"
+        }),
+    );
 
     // Ensure Sidecar is running for this session with CronTask as owner
     // IMPORTANT: Use spawn_blocking because ensure_session_sidecar uses reqwest::blocking::Client
@@ -5009,12 +5325,19 @@ pub async fn execute_cron_task<R: Runtime>(
         err
     })?
     .map_err(|e| {
-        ulog_error!("[sidecar] ensure_session_sidecar failed for task {}: {}", payload.task_id, e);
-        let _ = app_handle.emit("cron:debug", serde_json::json!({
-            "taskId": payload.task_id,
-            "message": format!("execute_cron_task: ensure_session_sidecar FAILED: {}", e),
-            "error": true
-        }));
+        ulog_error!(
+            "[sidecar] ensure_session_sidecar failed for task {}: {}",
+            payload.task_id,
+            e
+        );
+        let _ = app_handle.emit(
+            "cron:debug",
+            serde_json::json!({
+                "taskId": payload.task_id,
+                "message": format!("execute_cron_task: ensure_session_sidecar FAILED: {}", e),
+                "error": true
+            }),
+        );
         emit_perf_trace(
             PerfTrace::new(PerfTraceName::BackgroundJob, "cron_execute")
                 .duration_ms(elapsed_ms(cron_started))
@@ -5038,55 +5361,72 @@ pub async fn execute_cron_task<R: Runtime>(
 
     ulog_info!(
         "[sidecar] Cron sidecar ready for task {} on port {} (isNew={})",
-        payload.task_id, port, result.is_new
+        payload.task_id,
+        port,
+        result.is_new
     );
 
     // Also record in session_activations for Session singleton tracking
     {
-        let _ = app_handle.emit("cron:debug", serde_json::json!({
-            "taskId": payload.task_id,
-            "message": "execute_cron_task: recording session activation"
-        }));
+        let _ = app_handle.emit(
+            "cron:debug",
+            serde_json::json!({
+                "taskId": payload.task_id,
+                "message": "execute_cron_task: recording session activation"
+            }),
+        );
 
         let mut manager_guard = manager.lock().map_err(|e| {
-            let _ = app_handle.emit("cron:debug", serde_json::json!({
-                "taskId": payload.task_id,
-                "message": format!("execute_cron_task: mutex lock FAILED: {}", e),
-                "error": true
-            }));
+            let _ = app_handle.emit(
+                "cron:debug",
+                serde_json::json!({
+                    "taskId": payload.task_id,
+                    "message": format!("execute_cron_task: mutex lock FAILED: {}", e),
+                    "error": true
+                }),
+            );
             e.to_string()
         })?;
 
         manager_guard.activate_session(
             session_id.clone(),
-            None,  // No tab_id for cron tasks
-            Some(payload.task_id.clone()),  // Store task_id for Tab connection
+            None,                          // No tab_id for cron tasks
+            Some(payload.task_id.clone()), // Store task_id for Tab connection
             port,
             workspace_path.to_string(),
-            true,  // is_cron_task = true
+            true, // is_cron_task = true
         );
 
-        let _ = app_handle.emit("cron:debug", serde_json::json!({
-            "taskId": payload.task_id,
-            "message": "execute_cron_task: session activation recorded"
-        }));
+        let _ = app_handle.emit(
+            "cron:debug",
+            serde_json::json!({
+                "taskId": payload.task_id,
+                "message": "execute_cron_task: session activation recorded"
+            }),
+        );
 
         ulog_info!(
             "[sidecar] Cron task {} activated session {} as cron (port {})",
-            payload.task_id, session_id, port
+            payload.task_id,
+            session_id,
+            port
         );
     }
 
     let url = format!("http://127.0.0.1:{}/cron/execute-sync", port);
 
-    let _ = app_handle.emit("cron:debug", serde_json::json!({
-        "taskId": payload.task_id,
-        "message": format!("execute_cron_task: about to send HTTP request to {}", url)
-    }));
+    let _ = app_handle.emit(
+        "cron:debug",
+        serde_json::json!({
+            "taskId": payload.task_id,
+            "message": format!("execute_cron_task: about to send HTTP request to {}", url)
+        }),
+    );
 
     ulog_info!(
         "[sidecar] Executing cron task {} via {}",
-        payload.task_id, url
+        payload.task_id,
+        url
     );
 
     // Create HTTP client with generous timeout (cron tasks can take long)
@@ -5096,17 +5436,16 @@ pub async fn execute_cron_task<R: Runtime>(
         .build()
         .map_err(|e| format!("[sidecar] Failed to create HTTP client: {}", e))?;
 
-    let _ = app_handle.emit("cron:debug", serde_json::json!({
-        "taskId": payload.task_id,
-        "message": "execute_cron_task: HTTP client created, sending request..."
-    }));
+    let _ = app_handle.emit(
+        "cron:debug",
+        serde_json::json!({
+            "taskId": payload.task_id,
+            "message": "execute_cron_task: HTTP client created, sending request..."
+        }),
+    );
 
     // Send request to Sidecar
-    let response = client
-        .post(&url)
-        .json(&payload)
-        .send()
-        .await;
+    let response = client.post(&url).json(&payload).send().await;
 
     // Deactivate session after execution (regardless of success/failure)
     // Note: We keep the session activated between cron executions to protect Sidecar.
@@ -5128,48 +5467,52 @@ pub async fn execute_cron_task<R: Runtime>(
     })?;
 
     let status = response.status();
-    let body = response
-        .text()
-        .await
-        .map_err(|e| {
-            let err = format!("[sidecar] Failed to read response body: {}", e);
-            emit_perf_trace(
-                PerfTrace::new(PerfTraceName::BackgroundJob, "cron_execute")
-                    .duration_ms(elapsed_ms(cron_started))
-                    .session_id(Some(&session_id))
-                    .runtime(Some(&cron_runtime))
-                    .status("error")
-                    .detail("taskId", &cron_task_id)
-                    .detail("error", &err),
-            );
-            err
-        })?;
+    let body = response.text().await.map_err(|e| {
+        let err = format!("[sidecar] Failed to read response body: {}", e);
+        emit_perf_trace(
+            PerfTrace::new(PerfTraceName::BackgroundJob, "cron_execute")
+                .duration_ms(elapsed_ms(cron_started))
+                .session_id(Some(&session_id))
+                .runtime(Some(&cron_runtime))
+                .status("error")
+                .detail("taskId", &cron_task_id)
+                .detail("error", &err),
+        );
+        err
+    })?;
 
     ulog_info!(
         "[sidecar] Cron task {} response: status={}, body={}",
-        payload.task_id, status, body.chars().take(500).collect::<String>()
+        payload.task_id,
+        status,
+        body.chars().take(500).collect::<String>()
     );
 
     // Parse response
-    let result: CronExecuteResponse = serde_json::from_str(&body)
-        .map_err(|e| {
-            let err = format!("[sidecar] Failed to parse response JSON: {} (body: {})", e, body);
-            emit_perf_trace(
-                PerfTrace::new(PerfTraceName::BackgroundJob, "cron_execute")
-                    .duration_ms(elapsed_ms(cron_started))
-                    .session_id(Some(&session_id))
-                    .runtime(Some(&cron_runtime))
-                    .status("error")
-                    .detail("taskId", &cron_task_id)
-                    .detail("statusCode", status.as_u16())
-                    .detail("error", &err),
-            );
-            err
-        })?;
+    let result: CronExecuteResponse = serde_json::from_str(&body).map_err(|e| {
+        let err = format!(
+            "[sidecar] Failed to parse response JSON: {} (body: {})",
+            e, body
+        );
+        emit_perf_trace(
+            PerfTrace::new(PerfTraceName::BackgroundJob, "cron_execute")
+                .duration_ms(elapsed_ms(cron_started))
+                .session_id(Some(&session_id))
+                .runtime(Some(&cron_runtime))
+                .status("error")
+                .detail("taskId", &cron_task_id)
+                .detail("statusCode", status.as_u16())
+                .detail("error", &err),
+        );
+        err
+    })?;
 
     ulog_info!(
         "[sidecar] Cron task {} parsed response: success={}, error={:?}, ai_requested_exit={:?}",
-        payload.task_id, result.success, result.error, result.ai_requested_exit
+        payload.task_id,
+        result.success,
+        result.error,
+        result.ai_requested_exit
     );
     emit_perf_trace(
         PerfTrace::new(PerfTraceName::BackgroundJob, "cron_execute")
@@ -5327,11 +5670,7 @@ pub async fn cmd_propagate_proxy(
         }
     }
 
-    ulog_info!(
-        "[proxy-propagate] Done: {} updated, {} failed",
-        ok,
-        fail
-    );
+    ulog_info!("[proxy-propagate] Done: {} updated, {} failed", ok, fail);
     Ok(serde_json::json!({ "updated": ok, "failed": fail }))
 }
 
@@ -5352,7 +5691,11 @@ fn resolve_agent_runtime_from_config(workspace_path: &std::path::Path) -> Option
 
     // Gate: multi-agent runtime feature must be explicitly enabled (developer mode)
     // When off, all sidecars start as builtin regardless of agent config
-    if !cfg.get("multiAgentRuntime").and_then(|v| v.as_bool()).unwrap_or(false) {
+    if !cfg
+        .get("multiAgentRuntime")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
         return None;
     }
 
@@ -5384,7 +5727,11 @@ fn resolve_session_runtime(session_id: &str) -> Option<String> {
     let config_path = dirs::home_dir()?.join(".myagents").join("config.json");
     let config_content = std::fs::read_to_string(&config_path).ok()?;
     let cfg: serde_json::Value = serde_json::from_str(strip_bom(&config_content)).ok()?;
-    if !cfg.get("multiAgentRuntime").and_then(|v| v.as_bool()).unwrap_or(false) {
+    if !cfg
+        .get("multiAgentRuntime")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
         return None;
     }
 
@@ -5474,11 +5821,7 @@ pub fn cmd_can_restore_session(sessionId: String, agentDir: String) -> bool {
 /// user-visible regression. The IM-router drift check at
 /// `kill_sidecar_if_runtime_differs` is still the correct place to kill, and
 /// only fires when all owners are Agent-type.
-fn validate_sidecar_runtime_invariant(
-    session_id: &str,
-    sidecar_runtime: Option<&str>,
-    site: &str,
-) {
+fn validate_sidecar_runtime_invariant(session_id: &str, sidecar_runtime: Option<&str>, site: &str) {
     let sidecar_rt = sidecar_runtime.unwrap_or("builtin");
     let session_rt = resolve_session_runtime(session_id);
     let session_rt_str = session_rt.as_deref().unwrap_or("builtin");

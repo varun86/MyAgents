@@ -98,7 +98,8 @@ async fn http_post_drain(port: u16, message: &PendingInboxMessage) -> DeliverOut
                         let reason = drain_resp.reason.unwrap_or_else(|| "unknown".to_string());
                         ulog_warn!(
                             "[inbox] target accepted HTTP but rejected message {}: {}",
-                            message_id, reason
+                            message_id,
+                            reason
                         );
                         DeliverOutcome::Rejected { reason }
                     }
@@ -111,7 +112,8 @@ async fn http_post_drain(port: u16, message: &PendingInboxMessage) -> DeliverOut
                 let reason = format!("HTTP {}", status.as_u16());
                 ulog_warn!(
                     "[inbox] delivery failed: {} (msg_id={})",
-                    reason, message_id
+                    reason,
+                    message_id
                 );
                 DeliverOutcome::DeliveryFailed { reason }
             }
@@ -120,7 +122,9 @@ async fn http_post_drain(port: u16, message: &PendingInboxMessage) -> DeliverOut
             let reason = format!("network error: {}", e);
             ulog_error!(
                 "[inbox] HTTP POST to {} failed: {} (msg_id={})",
-                url, e, message_id
+                url,
+                e,
+                message_id
             );
             DeliverOutcome::DeliveryFailed { reason }
         }
@@ -137,7 +141,11 @@ pub async fn deliver_inbox_message(
 
     ulog_info!(
         "[inbox] cmd_inbox_deliver kind={:?} from={} to={} reply_back={} msg_id={}",
-        message.kind, message.from_session_id, to_sid, message.reply_back, message.message_id
+        message.kind,
+        message.from_session_id,
+        to_sid,
+        message.reply_back,
+        message.message_id
     );
 
     let Some(port) = lookup_target_port(manager, &to_sid) else {
@@ -191,7 +199,8 @@ pub async fn deliver_with_resume(
 
     ulog_info!(
         "[inbox] resuming target session {} for inbox delivery (transient owner={})",
-        to_sid, owner_id
+        to_sid,
+        owner_id
     );
 
     // spawn_blocking because ensure_session_sidecar uses blocking reqwest.

@@ -39,19 +39,19 @@
 //! A non-acquired lock is functionally identical to "just running without
 //! wake-lock", which is what we had before this module.
 
+#[cfg(target_os = "linux")]
+mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "windows")]
 mod windows;
-#[cfg(target_os = "linux")]
-mod linux;
 
+#[cfg(target_os = "linux")]
+use linux::PlatformImpl;
 #[cfg(target_os = "macos")]
 use macos::PlatformImpl;
 #[cfg(target_os = "windows")]
 use windows::PlatformImpl;
-#[cfg(target_os = "linux")]
-use linux::PlatformImpl;
 
 #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 mod noop {
@@ -138,11 +138,10 @@ fn read_force_wake_lock_from(config_path: &std::path::Path) -> bool {
         Ok(s) => s,
         Err(_) => return false,
     };
-    let cfg: PartialForceWakeLockConfig =
-        match serde_json::from_str(strip_bom(&content)) {
-            Ok(c) => c,
-            Err(_) => return false,
-        };
+    let cfg: PartialForceWakeLockConfig = match serde_json::from_str(strip_bom(&content)) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
     cfg.force_wake_lock.unwrap_or(false)
 }
 
@@ -234,9 +233,7 @@ pub fn apply_force_wake_lock(app: &AppHandle, value: bool) {
         None => {
             // Should never happen post-setup — but if it does, persisting +
             // emitting still gives us a hope of correctness next start.
-            ulog_warn!(
-                "[force-wake-lock] ForceWakeLockState not registered; OS toggle skipped"
-            );
+            ulog_warn!("[force-wake-lock] ForceWakeLockState not registered; OS toggle skipped");
             if let Err(e) = persist_to_disk(value) {
                 ulog_warn!("[force-wake-lock] persist failed: {e}");
             }

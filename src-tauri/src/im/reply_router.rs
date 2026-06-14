@@ -1,20 +1,20 @@
 #![allow(dead_code)] // Wired up in Pattern C-6 (mod.rs spawn refactor).
-// IM Pipeline v2 — Pattern C: ReplyRouter
-//
-// Per peer_session reply state machine. Replaces the per-request SSE consumer
-// that lived inside `stream_to_im` (legacy /api/im/chat path). For each
-// in-flight requestId, holds a `ReplySlot` capturing block-text accumulator,
-// draft / placeholder message IDs, and stream protocol state. Events arrive
-// from `ImEventConsumer` (which long-polls /api/im/events), get routed by
-// requestId, mutate the slot, then dispatch the appropriate adapter call
-// (send / edit / finalize / abort).
-//
-// Architectural note: ReplyRouter is owned by a single `ImEventConsumer`
-// task, so all event handling is naturally serialized — adapter calls
-// (Telegram/Feishu/Bridge HTTP) get sequenced anyway by their underlying
-// transport, so per-event serialization adds no real latency cost. The
-// "concurrent in-flight requests" win comes from the protocol split (peer_lock
-// only covers /api/im/enqueue), not from parallelizing reply renders.
+                     // IM Pipeline v2 — Pattern C: ReplyRouter
+                     //
+                     // Per peer_session reply state machine. Replaces the per-request SSE consumer
+                     // that lived inside `stream_to_im` (legacy /api/im/chat path). For each
+                     // in-flight requestId, holds a `ReplySlot` capturing block-text accumulator,
+                     // draft / placeholder message IDs, and stream protocol state. Events arrive
+                     // from `ImEventConsumer` (which long-polls /api/im/events), get routed by
+                     // requestId, mutate the slot, then dispatch the appropriate adapter call
+                     // (send / edit / finalize / abort).
+                     //
+                     // Architectural note: ReplyRouter is owned by a single `ImEventConsumer`
+                     // task, so all event handling is naturally serialized — adapter calls
+                     // (Telegram/Feishu/Bridge HTTP) get sequenced anyway by their underlying
+                     // transport, so per-event serialization adds no real latency cost. The
+                     // "concurrent in-flight requests" win comes from the protocol split (peer_lock
+                     // only covers /api/im/enqueue), not from parallelizing reply renders.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -23,13 +23,13 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 use tokio::sync::Mutex;
 
-use crate::{ulog_info, ulog_warn, ulog_error};
 use super::adapter::{self, ImStreamAdapter};
 use super::types::ImSourceType;
 use super::{
-    PendingApproval, PendingApprovals, finalize_block, format_draft_text,
-    has_sentence_boundary, THINKING_PLACEHOLDER, GroupStreamContext,
+    finalize_block, format_draft_text, has_sentence_boundary, GroupStreamContext, PendingApproval,
+    PendingApprovals, THINKING_PLACEHOLDER,
 };
+use crate::{ulog_error, ulog_info, ulog_warn};
 
 /// Per-requestId reply state. Mirrors the locals previously declared at the
 /// top of `stream_to_im` / `stream_to_im_streaming`. One slot per in-flight
@@ -100,7 +100,10 @@ pub struct ReplyRouter {
 
 impl ReplyRouter {
     pub(crate) fn new(pending_approvals: PendingApprovals) -> Self {
-        Self { slots: HashMap::new(), pending_approvals }
+        Self {
+            slots: HashMap::new(),
+            pending_approvals,
+        }
     }
 
     /// Pre-register a slot when /api/im/enqueue accepts the request.
@@ -120,7 +123,13 @@ impl ReplyRouter {
             group_ctx.map(|g| &g.activation),
             Some(super::types::GroupActivation::Always),
         );
-        let slot = ReplySlot::new(request_id.clone(), chat_id, message_id, source_type, group_activation_always);
+        let slot = ReplySlot::new(
+            request_id.clone(),
+            chat_id,
+            message_id,
+            source_type,
+            group_activation_always,
+        );
         self.slots.insert(request_id, slot);
     }
 
@@ -153,7 +162,8 @@ impl ReplyRouter {
         if !self.slots.contains_key(&request_id) {
             ulog_warn!(
                 "[reply-router] Dropped event for unregistered requestId={} type={}",
-                request_id, event_type,
+                request_id,
+                event_type,
             );
             return None;
         }
@@ -167,9 +177,11 @@ impl ReplyRouter {
         }
 
         let outcome = if adapter.supports_streaming() {
-            self.dispatch_streaming(event_type, event, &request_id, adapter, sidecar_port).await
+            self.dispatch_streaming(event_type, event, &request_id, adapter, sidecar_port)
+                .await
         } else {
-            self.dispatch_edit_based(event_type, event, &request_id, adapter, sidecar_port).await
+            self.dispatch_edit_based(event_type, event, &request_id, adapter, sidecar_port)
+                .await
         };
 
         // Pattern C: terminal cleanup hooks. Fire AFTER inner dispatch completes
@@ -216,7 +228,9 @@ impl ReplyRouter {
                     && has_sentence_boundary(&slot.block_text)
                 {
                     let display = format_draft_text(&slot.block_text, adapter.max_message_length());
-                    if let Ok(Some(id)) = adapter.send_message_returning_id(&chat_id, &display).await {
+                    if let Ok(Some(id)) =
+                        adapter.send_message_returning_id(&chat_id, &display).await
+                    {
                         slot.draft_id = Some(id);
                         slot.last_edit = Instant::now();
                     }
@@ -228,7 +242,8 @@ impl ReplyRouter {
                     let throttle = Duration::from_millis(adapter.preferred_throttle_ms());
                     if slot.last_edit.elapsed() >= throttle {
                         slot.last_edit = Instant::now();
-                        let display = format_draft_text(&slot.block_text, adapter.max_message_length());
+                        let display =
+                            format_draft_text(&slot.block_text, adapter.max_message_length());
                         let _ = adapter.edit_message(&chat_id, did, &display).await;
                     }
                 }
@@ -268,7 +283,8 @@ impl ReplyRouter {
                 // the peer_session, not from the event payload. Returning None here
                 // tells the caller "use the existing peer_session_id".
                 let trimmed_last = slot.last_block_text.trim();
-                let is_no_reply = (slot.group_activation_always || matches!(slot.source_type, ImSourceType::Group))
+                let is_no_reply = (slot.group_activation_always
+                    || matches!(slot.source_type, ImSourceType::Group))
                     && (trimmed_last == "<NO_REPLY>" || trimmed_last == "NO_REPLY");
 
                 if is_no_reply {
@@ -279,19 +295,32 @@ impl ReplyRouter {
                         let _ = adapter.delete_message(&chat_id, pid).await;
                     }
                     slot.is_done = true;
-                    return Some(TerminalOutcome { session_id: None, silent: true });
+                    return Some(TerminalOutcome {
+                        session_id: None,
+                        silent: true,
+                    });
                 }
 
                 // Flush any remaining block text
                 if !slot.block_text.trim().is_empty() {
-                    finalize_block(adapter, &chat_id, slot.draft_id.clone(), &slot.block_text.clone()).await;
+                    finalize_block(
+                        adapter,
+                        &chat_id,
+                        slot.draft_id.clone(),
+                        &slot.block_text.clone(),
+                    )
+                    .await;
                     slot.any_text_sent = true;
                 } else if let Some(ref did) = slot.draft_id {
                     let _ = adapter.delete_message(&chat_id, did).await;
                 }
                 if !slot.any_text_sent {
                     if let Some(ref pid) = slot.placeholder_id {
-                        if adapter.edit_message(&chat_id, pid, "(No response)").await.is_err() {
+                        if adapter
+                            .edit_message(&chat_id, pid, "(No response)")
+                            .await
+                            .is_err()
+                        {
                             let _ = adapter.delete_message(&chat_id, pid).await;
                             let _ = adapter.send_message(&chat_id, "(No response)").await;
                         }
@@ -300,14 +329,20 @@ impl ReplyRouter {
                     }
                 }
                 slot.is_done = true;
-                Some(TerminalOutcome { session_id: None, silent: false })
+                Some(TerminalOutcome {
+                    session_id: None,
+                    silent: false,
+                })
             }
 
             "permission-request" => {
                 let raw = data.and_then(|v| v.as_str()).unwrap_or("");
                 let json_payload: Value = serde_json::from_str(raw).unwrap_or(Value::Null);
                 let perm_request_id = json_payload["requestId"].as_str().unwrap_or("").to_string();
-                let tool_name = json_payload["toolName"].as_str().unwrap_or("unknown").to_string();
+                let tool_name = json_payload["toolName"]
+                    .as_str()
+                    .unwrap_or("unknown")
+                    .to_string();
                 let tool_input_str = match json_payload["input"] {
                     Value::String(ref s) => s.clone(),
                     Value::Null => String::new(),
@@ -318,7 +353,10 @@ impl ReplyRouter {
                     tool_name,
                     &perm_request_id[..perm_request_id.len().min(16)],
                 );
-                let card_msg_id = match adapter.send_approval_card(&chat_id, &perm_request_id, &tool_name, &tool_input_str).await {
+                let card_msg_id = match adapter
+                    .send_approval_card(&chat_id, &perm_request_id, &tool_name, &tool_input_str)
+                    .await
+                {
                     Ok(Some(mid)) => mid,
                     Ok(None) => String::new(),
                     Err(e) => {
@@ -329,13 +367,18 @@ impl ReplyRouter {
                 {
                     let mut guard = self.pending_approvals.lock().await;
                     let now = Instant::now();
-                    guard.retain(|_, p| now.duration_since(p.created_at) < Duration::from_secs(15 * 60));
-                    guard.insert(perm_request_id, PendingApproval {
-                        sidecar_port,
-                        chat_id: chat_id.clone(),
-                        card_message_id: card_msg_id,
-                        created_at: now,
+                    guard.retain(|_, p| {
+                        now.duration_since(p.created_at) < Duration::from_secs(15 * 60)
                     });
+                    guard.insert(
+                        perm_request_id,
+                        PendingApproval {
+                            sidecar_port,
+                            chat_id: chat_id.clone(),
+                            card_message_id: card_msg_id,
+                            created_at: now,
+                        },
+                    );
                 }
                 None
             }
@@ -344,7 +387,10 @@ impl ReplyRouter {
                 // Non-text block (thinking / tool_use). Show placeholder if user
                 // hasn't seen any content yet.
                 if !slot.first_content_sent && slot.placeholder_id.is_none() {
-                    if let Ok(Some(id)) = adapter.send_message_returning_id(&chat_id, THINKING_PLACEHOLDER).await {
+                    if let Ok(Some(id)) = adapter
+                        .send_message_returning_id(&chat_id, THINKING_PLACEHOLDER)
+                        .await
+                    {
                         slot.placeholder_id = Some(id);
                     }
                     slot.first_content_sent = true;
@@ -370,7 +416,10 @@ impl ReplyRouter {
                 };
                 let _ = adapter.send_message(&chat_id, &user_msg).await;
                 slot.is_done = true;
-                Some(TerminalOutcome { session_id: None, silent: false })
+                Some(TerminalOutcome {
+                    session_id: None,
+                    silent: false,
+                })
             }
 
             _ => None, // unknown event type — ignore
@@ -411,7 +460,9 @@ impl ReplyRouter {
                     }
                 } else if let Some(ref sid) = slot.stream_id {
                     slot.sequence += 1;
-                    let _ = adapter.stream_chunk(&chat_id, sid, &slot.block_text, slot.sequence, false).await;
+                    let _ = adapter
+                        .stream_chunk(&chat_id, sid, &slot.block_text, slot.sequence, false)
+                        .await;
                 }
                 None
             }
@@ -419,9 +470,14 @@ impl ReplyRouter {
             "activity" => {
                 if let Some(ref sid) = slot.stream_id {
                     slot.sequence += 1;
-                    let _ = adapter.stream_chunk(&chat_id, sid, "", slot.sequence, true).await;
+                    let _ = adapter
+                        .stream_chunk(&chat_id, sid, "", slot.sequence, true)
+                        .await;
                 } else if !slot.first_content_sent {
-                    if let Ok(Some(id)) = adapter.send_message_returning_id(&chat_id, THINKING_PLACEHOLDER).await {
+                    if let Ok(Some(id)) = adapter
+                        .send_message_returning_id(&chat_id, THINKING_PLACEHOLDER)
+                        .await
+                    {
                         slot.placeholder_id = Some(id);
                     }
                     slot.first_content_sent = true;
@@ -469,14 +525,21 @@ impl ReplyRouter {
                         let _ = adapter.delete_message(&chat_id, pid).await;
                     }
                     slot.is_done = true;
-                    return Some(TerminalOutcome { session_id: None, silent: true });
+                    return Some(TerminalOutcome {
+                        session_id: None,
+                        silent: true,
+                    });
                 }
 
                 if !slot.block_text.trim().is_empty() {
                     if let Some(ref sid) = slot.stream_id {
-                        let _ = adapter.finalize_stream(&chat_id, sid, &slot.block_text.clone()).await;
+                        let _ = adapter
+                            .finalize_stream(&chat_id, sid, &slot.block_text.clone())
+                            .await;
                     } else {
-                        let _ = adapter.send_message(&chat_id, &slot.block_text.clone()).await;
+                        let _ = adapter
+                            .send_message(&chat_id, &slot.block_text.clone())
+                            .await;
                     }
                     slot.any_text_sent = true;
                 } else if let Some(ref sid) = slot.stream_id {
@@ -484,7 +547,11 @@ impl ReplyRouter {
                 }
                 if !slot.any_text_sent {
                     if let Some(ref pid) = slot.placeholder_id {
-                        if adapter.edit_message(&chat_id, pid, "(No response)").await.is_err() {
+                        if adapter
+                            .edit_message(&chat_id, pid, "(No response)")
+                            .await
+                            .is_err()
+                        {
                             let _ = adapter.delete_message(&chat_id, pid).await;
                             let _ = adapter.send_message(&chat_id, "(No response)").await;
                         }
@@ -493,7 +560,10 @@ impl ReplyRouter {
                     }
                 }
                 slot.is_done = true;
-                Some(TerminalOutcome { session_id: None, silent: false })
+                Some(TerminalOutcome {
+                    session_id: None,
+                    silent: false,
+                })
             }
 
             "permission-request" => {
@@ -501,7 +571,10 @@ impl ReplyRouter {
                 let raw = data.and_then(|v| v.as_str()).unwrap_or("");
                 let json_payload: Value = serde_json::from_str(raw).unwrap_or(Value::Null);
                 let perm_request_id = json_payload["requestId"].as_str().unwrap_or("").to_string();
-                let tool_name = json_payload["toolName"].as_str().unwrap_or("unknown").to_string();
+                let tool_name = json_payload["toolName"]
+                    .as_str()
+                    .unwrap_or("unknown")
+                    .to_string();
                 let tool_input_str = match json_payload["input"] {
                     Value::String(ref s) => s.clone(),
                     Value::Null => String::new(),
@@ -516,13 +589,18 @@ impl ReplyRouter {
                 {
                     let mut guard = self.pending_approvals.lock().await;
                     let now = Instant::now();
-                    guard.retain(|_, p| now.duration_since(p.created_at) < Duration::from_secs(15 * 60));
-                    guard.insert(perm_request_id, PendingApproval {
-                        sidecar_port,
-                        chat_id: chat_id.clone(),
-                        card_message_id: card_msg_id,
-                        created_at: now,
+                    guard.retain(|_, p| {
+                        now.duration_since(p.created_at) < Duration::from_secs(15 * 60)
                     });
+                    guard.insert(
+                        perm_request_id,
+                        PendingApproval {
+                            sidecar_port,
+                            chat_id: chat_id.clone(),
+                            card_message_id: card_msg_id,
+                            created_at: now,
+                        },
+                    );
                 }
                 None
             }
@@ -545,7 +623,10 @@ impl ReplyRouter {
                 };
                 let _ = adapter.send_message(&chat_id, &user_msg).await;
                 slot.is_done = true;
-                Some(TerminalOutcome { session_id: None, silent: false })
+                Some(TerminalOutcome {
+                    session_id: None,
+                    silent: false,
+                })
             }
 
             _ => None,
@@ -590,7 +671,9 @@ impl ReplyRouter {
             });
         ulog_warn!(
             "[reply-router] gap event observed reason={} dropped={:?} active_slots={}",
-            reason, dropped_seqs, self.slots.len(),
+            reason,
+            dropped_seqs,
+            self.slots.len(),
         );
         // For each active slot, surface a one-line warning so the user
         // doesn't see partial replies as truthful complete content. Skip

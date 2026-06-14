@@ -3,13 +3,13 @@
 
 use serde::Deserialize;
 use std::fs;
-use tauri::{
-    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    menu::{CheckMenuItem, CheckMenuItemBuilder, MenuBuilder, MenuItemBuilder},
-    Emitter, Manager, Runtime, Wry,
-};
 #[cfg(target_os = "macos")]
 use tauri::image::Image;
+use tauri::{
+    menu::{CheckMenuItem, CheckMenuItemBuilder, MenuBuilder, MenuItemBuilder},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    Emitter, Manager, Runtime, Wry,
+};
 
 use crate::utils::bom::strip_bom;
 use crate::{ulog_debug, ulog_error, ulog_info};

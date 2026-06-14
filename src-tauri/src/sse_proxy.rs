@@ -4,12 +4,12 @@
 
 use std::collections::HashMap;
 use std::error::Error;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::Mutex;
 
-use crate::{ulog_info, ulog_error, ulog_debug};
+use crate::{ulog_debug, ulog_error, ulog_info};
 
 /// Monotonically increasing connection id used to distinguish a "stale" task
 /// (one whose entry has already been replaced by a newer connection) from
@@ -169,7 +169,7 @@ pub async fn start_sse_proxy(
     tab_id: Option<String>,
 ) -> Result<(), String> {
     let tab_id = tab_id.unwrap_or_else(|| "__default__".to_string());
-    
+
     let mut connections = state.connections.lock().await;
 
     // Check if already running for this tab. Pattern 1, audit A: only
@@ -178,12 +178,16 @@ pub async fn start_sse_proxy(
     // cleanup, and we must replace it (otherwise the tab stays muted forever).
     if let Some(conn) = connections.get(&tab_id) {
         if conn.is_alive() {
-            ulog_debug!("[sse-proxy] Tab {} already has an active connection", tab_id);
+            ulog_debug!(
+                "[sse-proxy] Tab {} already has an active connection",
+                tab_id
+            );
             return Ok(());
         }
         ulog_debug!(
             "[sse-proxy] Tab {} prior task ended (gen={}); replacing",
-            tab_id, conn.generation
+            tab_id,
+            conn.generation
         );
     }
 
@@ -224,7 +228,10 @@ pub async fn start_sse_proxy(
         let outcome = connect_sse(&app_handle, &url, &running, &tab_id_clone).await;
         match outcome {
             Ok(_) => {
-                ulog_debug!("[sse-proxy] Tab {} connection closed normally", tab_id_clone);
+                ulog_debug!(
+                    "[sse-proxy] Tab {} connection closed normally",
+                    tab_id_clone
+                );
             }
             Err(e) => {
                 ulog_error!("[sse-proxy] Tab {} connection error: {}", tab_id_clone, e);
@@ -246,13 +253,16 @@ pub async fn start_sse_proxy(
                 connections.remove(&tab_id_clone);
                 ulog_debug!(
                     "[sse-proxy] Tab {} cleaned own entry (gen={})",
-                    tab_id_clone, my_gen
+                    tab_id_clone,
+                    my_gen
                 );
             }
             Some(entry) => {
                 ulog_debug!(
                     "[sse-proxy] Tab {} task exit (gen={}) superseded by gen={}; not clearing",
-                    tab_id_clone, my_gen, entry.generation
+                    tab_id_clone,
+                    my_gen,
+                    entry.generation
                 );
             }
             None => { /* already removed elsewhere */ }
@@ -262,7 +272,11 @@ pub async fn start_sse_proxy(
     conn.abort_handle = Some(handle);
     connections.insert(tab_id.clone(), conn);
 
-    ulog_info!("[sse-proxy] Started connection for tab {} (gen={})", tab_id, my_gen);
+    ulog_info!(
+        "[sse-proxy] Started connection for tab {} (gen={})",
+        tab_id,
+        my_gen
+    );
 
     Ok(())
 }
@@ -302,15 +316,18 @@ pub async fn stop_all_sse_proxies(
 
 /// Connect to SSE endpoint and forward events with Tab prefix
 async fn connect_sse(
-    app: &AppHandle, 
+    app: &AppHandle,
     url: &str,
     running: &AtomicBool,
     tab_id: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    use futures_util::StreamExt;
     use crate::logger;
+    use futures_util::StreamExt;
 
-    logger::info(app, format!("[sse-proxy] Tab {} connecting to {}", tab_id, url));
+    logger::info(
+        app,
+        format!("[sse-proxy] Tab {} connecting to {}", tab_id, url),
+    );
 
     // Build client with read_timeout (idle timeout) for SSE long connections
     // IMPORTANT: Do NOT use timeout() which is total request time - SSE connections are meant to be long-lived
@@ -323,12 +340,12 @@ async fn connect_sse(
     let client = crate::local_http::builder()
         .read_timeout(std::time::Duration::from_secs(SSE_READ_TIMEOUT_SECS))
         .tcp_nodelay(true)
-        .http1_only()  // Force HTTP/1.1 for SSE compatibility
+        .http1_only() // Force HTTP/1.1 for SSE compatibility
         .pool_idle_timeout(std::time::Duration::from_secs(5))
         .pool_max_idle_per_host(2)
         .build()
         .map_err(|e| format!("[sse-proxy] Failed to create HTTP client: {}", e))?;
-    
+
     let response = client
         .get(url)
         .header("Accept", "text/event-stream")
@@ -336,15 +353,24 @@ async fn connect_sse(
         .await?;
 
     if !response.status().is_success() {
-        let err = format!("[sse-proxy] Tab {} connection failed: {}", tab_id, response.status());
+        let err = format!(
+            "[sse-proxy] Tab {} connection failed: {}",
+            tab_id,
+            response.status()
+        );
         logger::error(app, &err);
         return Err(err.into());
     }
 
-    logger::info(app, format!(
-        "[sse-proxy] Tab {} connected, status: {}, read_timeout: {}s (heartbeat interval: 15s)",
-        tab_id, response.status(), SSE_READ_TIMEOUT_SECS
-    ));
+    logger::info(
+        app,
+        format!(
+            "[sse-proxy] Tab {} connected, status: {}, read_timeout: {}s (heartbeat interval: 15s)",
+            tab_id,
+            response.status(),
+            SSE_READ_TIMEOUT_SECS
+        ),
+    );
 
     let mut stream = response.bytes_stream();
     // Pattern 1 fix #7A: byte-level buffer + CRLF-aware split.
@@ -370,7 +396,13 @@ async fn connect_sse(
         let lf = buf.windows(2).position(|w| w == b"\n\n");
         let crlf = buf.windows(4).position(|w| w == b"\r\n\r\n");
         match (lf, crlf) {
-            (Some(l), Some(c)) => if l <= c { Some((l, 2)) } else { Some((c, 4)) },
+            (Some(l), Some(c)) => {
+                if l <= c {
+                    Some((l, 2))
+                } else {
+                    Some((c, 4))
+                }
+            }
             (Some(l), None) => Some((l, 2)),
             (None, Some(c)) => Some((c, 4)),
             (None, None) => None,
@@ -410,19 +442,28 @@ async fn connect_sse(
                     // Parse and emit SSE event with Tab prefix
                     if let Some((event_name, data)) = parse_sse_event(&event_str) {
                         // Log critical state-changing events
-                        if event_name == "chat:message-complete" || event_name == "chat:message-stopped" || event_name == "chat:message-error" {
-                            logger::info(app, format!(
-                                "[sse-proxy] Tab {} emitting critical event: {}",
-                                tab_id, event_name
-                            ));
+                        if event_name == "chat:message-complete"
+                            || event_name == "chat:message-stopped"
+                            || event_name == "chat:message-error"
+                        {
+                            logger::info(
+                                app,
+                                format!(
+                                    "[sse-proxy] Tab {} emitting critical event: {}",
+                                    tab_id, event_name
+                                ),
+                            );
                         }
                         // Emit with tab_id prefix: sse:tab_id:event_name
                         let prefixed_event = format!("sse:{}:{}", tab_id, event_name);
                         if let Err(e) = app.emit(&prefixed_event, data) {
-                            logger::error(app, format!(
-                                "[sse-proxy] Tab {} failed to emit {}: {}",
-                                tab_id, prefixed_event, e
-                            ));
+                            logger::error(
+                                app,
+                                format!(
+                                    "[sse-proxy] Tab {} failed to emit {}: {}",
+                                    tab_id, prefixed_event, e
+                                ),
+                            );
                         }
                     }
                 }
@@ -445,17 +486,32 @@ async fn connect_sse(
                     tab_id, chunk_count, e, err_detail, buffer_preview
                 ));
 
-                let err = format!("[sse-proxy] Tab {} stream error after {} chunks: {}", tab_id, chunk_count, e);
+                let err = format!(
+                    "[sse-proxy] Tab {} stream error after {} chunks: {}",
+                    tab_id, chunk_count, e
+                );
                 return Err(err.into());
             }
             None => {
-                logger::info(app, format!("[sse-proxy] Tab {} stream ended after {} chunks", tab_id, chunk_count));
+                logger::info(
+                    app,
+                    format!(
+                        "[sse-proxy] Tab {} stream ended after {} chunks",
+                        tab_id, chunk_count
+                    ),
+                );
                 break;
             }
         }
     }
 
-    logger::info(app, format!("[sse-proxy] Tab {} connection closed, processed {} chunks", tab_id, chunk_count));
+    logger::info(
+        app,
+        format!(
+            "[sse-proxy] Tab {} connection closed, processed {} chunks",
+            tab_id, chunk_count
+        ),
+    );
     Ok(())
 }
 
@@ -529,18 +585,21 @@ const PROXY_STREAM_THRESHOLD_BYTES: u64 = 1024 * 1024;
 /// Check if content type indicates binary data
 fn is_binary_content_type(content_type: &str) -> bool {
     let ct = content_type.to_lowercase();
-    ct.starts_with("image/") ||
-    ct.starts_with("audio/") ||
-    ct.starts_with("video/") ||
-    ct.starts_with("application/octet-stream") ||
-    ct.starts_with("application/pdf")
+    ct.starts_with("image/")
+        || ct.starts_with("audio/")
+        || ct.starts_with("video/")
+        || ct.starts_with("application/octet-stream")
+        || ct.starts_with("application/pdf")
 }
 
 /// Proxy an HTTP request through Rust - completely bypasses WebView CORS
 #[tauri::command]
-pub async fn proxy_http_request(app: AppHandle, request: HttpRequest) -> Result<HttpResponse, String> {
-    use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+pub async fn proxy_http_request(
+    app: AppHandle,
+    request: HttpRequest,
+) -> Result<HttpResponse, String> {
     use crate::logger;
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 
     // CRITICAL: Validate URL is absolute before forwarding to reqwest.
     // Relative URLs (e.g., "/api/something") cause reqwest to fail with an opaque
@@ -603,7 +662,7 @@ pub async fn proxy_http_request(app: AppHandle, request: HttpRequest) -> Result<
         crate::proxy_config::build_client_with_proxy(external_builder)
             .inspect_err(|e| logger::error(&app, e))?
     };
-    
+
     let mut req_builder = match request.method.to_uppercase().as_str() {
         "GET" => client.get(&request.url),
         "POST" => client.post(&request.url),
@@ -629,7 +688,7 @@ pub async fn proxy_http_request(app: AppHandle, request: HttpRequest) -> Result<
         req_builder = req_builder.header("Content-Type", "application/json");
         req_builder = req_builder.body(body.clone());
     }
-    
+
     // Send request with detailed error logging.
     //
     // Log severity is classified by error kind because localhost connections
@@ -680,9 +739,9 @@ pub async fn proxy_http_request(app: AppHandle, request: HttpRequest) -> Result<
         }
         e.to_string()
     })?;
-    
+
     let status = response.status().as_u16();
-    
+
     // Collect response headers
     let mut resp_headers = std::collections::HashMap::new();
     for (key, value) in response.headers() {
@@ -690,9 +749,10 @@ pub async fn proxy_http_request(app: AppHandle, request: HttpRequest) -> Result<
             resp_headers.insert(key.to_string(), v.to_string());
         }
     }
-    
+
     // Check if this is binary content
-    let content_type = resp_headers.get("content-type")
+    let content_type = resp_headers
+        .get("content-type")
         .map(|s| s.as_str())
         .unwrap_or("");
 
@@ -715,7 +775,8 @@ pub async fn proxy_http_request(app: AppHandle, request: HttpRequest) -> Result<
     // Content-Length is still useful as an early-decision fast path: if
     // the upstream advertises >threshold up front, we go straight to spill
     // without a wasted memory buffer.
-    let content_length_hint: Option<u64> = resp_headers.get("content-length")
+    let content_length_hint: Option<u64> = resp_headers
+        .get("content-length")
         .and_then(|s| s.parse::<u64>().ok());
     let header_says_spill = content_length_hint
         .map(|len| len > PROXY_STREAM_THRESHOLD_BYTES)
@@ -727,14 +788,25 @@ pub async fn proxy_http_request(app: AppHandle, request: HttpRequest) -> Result<
         content_type,
         &request.url,
         header_says_spill,
-    ).await;
+    )
+    .await;
 
     let (body, is_base64) = match stream_outcome {
         StreamOutcome::Spilled(spill) => {
             if !is_noisy_path {
                 let elapsed = start.elapsed().as_millis();
-                logger::debug(&app, format!("[proxy] {} {} -> {} (spilled {}B, {}ms, ref={})",
-                    request.method, request.url, status, spill.size_bytes, elapsed, spill.ref_url));
+                logger::debug(
+                    &app,
+                    format!(
+                        "[proxy] {} {} -> {} (spilled {}B, {}ms, ref={})",
+                        request.method,
+                        request.url,
+                        status,
+                        spill.size_bytes,
+                        elapsed,
+                        spill.ref_url
+                    ),
+                );
             }
             return Ok(HttpResponse {
                 status,
@@ -775,11 +847,29 @@ pub async fn proxy_http_request(app: AppHandle, request: HttpRequest) -> Result<
     if !is_noisy_path {
         let elapsed = start.elapsed().as_millis();
         if status >= 200 && status < 300 {
-            logger::debug(&app, format!("[proxy] {} {} -> {} ({}B, {}ms)",
-                request.method, request.url, status, body.len(), elapsed));
+            logger::debug(
+                &app,
+                format!(
+                    "[proxy] {} {} -> {} ({}B, {}ms)",
+                    request.method,
+                    request.url,
+                    status,
+                    body.len(),
+                    elapsed
+                ),
+            );
         } else {
-            logger::warn(&app, format!("[proxy] {} {} -> {} ({}B, {}ms)",
-                request.method, request.url, status, body.len(), elapsed));
+            logger::warn(
+                &app,
+                format!(
+                    "[proxy] {} {} -> {} ({}B, {}ms)",
+                    request.method,
+                    request.url,
+                    status,
+                    body.len(),
+                    elapsed
+                ),
+            );
         }
     }
 
@@ -824,8 +914,8 @@ async fn stream_or_spill_response_body(
     request_url: &str,
     force_spill: bool,
 ) -> StreamOutcome {
-    use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
     use crate::logger;
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
     use futures_util::StreamExt;
     use std::path::PathBuf;
     use tokio::fs::{create_dir_all, File};
@@ -875,7 +965,13 @@ async fn stream_or_spill_response_body(
                 return Err(err);
             }
         };
-        Ok(SpillState { file, body_path, meta_path, id, refs_dir })
+        Ok(SpillState {
+            file,
+            body_path,
+            meta_path,
+            id,
+            refs_dir,
+        })
     }
 
     if force_spill {
@@ -901,7 +997,9 @@ async fn stream_or_spill_response_body(
 
         size_bytes += chunk.len() as u64;
         if preview_buf.len() < preview_cap {
-            let take = preview_cap.saturating_sub(preview_buf.len()).min(chunk.len());
+            let take = preview_cap
+                .saturating_sub(preview_buf.len())
+                .min(chunk.len());
             preview_buf.extend_from_slice(&chunk[..take]);
         }
 
@@ -974,7 +1072,7 @@ async fn stream_or_spill_response_body(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0))
-        .saturating_add(60 * 60 * 1000);
+    .saturating_add(60 * 60 * 1000);
 
     let meta_json = serde_json::json!({
         "kind": "ref",
@@ -984,7 +1082,12 @@ async fn stream_or_spill_response_body(
         "preview": preview,
         "expiresAt": expires_at_ms,
     });
-    if let Err(e) = tokio::fs::write(&s.meta_path, serde_json::to_vec(&meta_json).unwrap_or_default()).await {
+    if let Err(e) = tokio::fs::write(
+        &s.meta_path,
+        serde_json::to_vec(&meta_json).unwrap_or_default(),
+    )
+    .await
+    {
         let err = format!("[proxy] failed to write ref meta: {}", e);
         logger::warn(app, &err);
         let _ = tokio::fs::remove_file(&s.body_path).await;
@@ -1003,7 +1106,11 @@ async fn stream_or_spill_response_body(
         .map(|origin| format!("{}/refs/{}", origin, s.id))
         .unwrap_or_else(|| format!("http://127.0.0.1/refs/{}", s.id));
 
-    StreamOutcome::Spilled(SpilledBody { ref_url, mimetype, size_bytes })
+    StreamOutcome::Spilled(SpilledBody {
+        ref_url,
+        mimetype,
+        size_bytes,
+    })
 }
 
 /// Extract the `scheme://host[:port]` portion of an absolute http(s) URL.
@@ -1013,7 +1120,9 @@ fn origin_of(absolute_url: &str) -> Option<String> {
     let scheme_end = absolute_url.find("://")?;
     let after = &absolute_url[scheme_end + 3..];
     // Authority ends at the first '/', '?' or '#'.
-    let auth_end = after.find(|c: char| c == '/' || c == '?' || c == '#').unwrap_or(after.len());
+    let auth_end = after
+        .find(|c: char| c == '/' || c == '?' || c == '#')
+        .unwrap_or(after.len());
     let authority = &after[..auth_end];
     Some(format!("{}://{}", &absolute_url[..scheme_end], authority))
 }
@@ -1026,16 +1135,26 @@ mod tests {
     fn loopback_sidecar_urls_bypass_proxy() {
         // The sidecar is always http://127.0.0.1:<port>/... — these MUST stay on
         // the no_proxy client or a system proxy 502s every UI request.
-        assert!(request_target_is_loopback("http://127.0.0.1:31415/api/agents/set"));
-        assert!(request_target_is_loopback("http://127.0.0.1:31900/health/ready"));
-        assert!(request_target_is_loopback("http://localhost:31415/chat/stream"));
+        assert!(request_target_is_loopback(
+            "http://127.0.0.1:31415/api/agents/set"
+        ));
+        assert!(request_target_is_loopback(
+            "http://127.0.0.1:31900/health/ready"
+        ));
+        assert!(request_target_is_loopback(
+            "http://localhost:31415/chat/stream"
+        ));
         assert!(request_target_is_loopback("http://127.0.0.5:8080/x")); // whole 127.0.0.0/8
         assert!(request_target_is_loopback("http://[::1]:31415/refs/abc"));
-        assert!(request_target_is_loopback("http://[0:0:0:0:0:0:0:1]:31415/x"));
+        assert!(request_target_is_loopback(
+            "http://[0:0:0:0:0:0:0:1]:31415/x"
+        ));
         // Case-insensitive host.
         assert!(request_target_is_loopback("http://LOCALHOST:31415/x"));
         // userinfo prefix on a genuine loopback host is still loopback.
-        assert!(request_target_is_loopback("http://user:pass@127.0.0.1:31415/x"));
+        assert!(request_target_is_loopback(
+            "http://user:pass@127.0.0.1:31415/x"
+        ));
         // No path, only query/fragment.
         assert!(request_target_is_loopback("http://127.0.0.1:31415?x=1"));
         assert!(request_target_is_loopback("http://127.0.0.1:31415#f"));
@@ -1045,19 +1164,29 @@ mod tests {
     fn external_urls_are_not_loopback() {
         // The analytics endpoint (and any future external POST) MUST route
         // through the proxy-aware client, so it must NOT classify as loopback.
-        assert!(!request_target_is_loopback("https://analytics.myagents.io/api/track"));
-        assert!(!request_target_is_loopback("https://download.myagents.io/update/x.json"));
+        assert!(!request_target_is_loopback(
+            "https://analytics.myagents.io/api/track"
+        ));
+        assert!(!request_target_is_loopback(
+            "https://download.myagents.io/update/x.json"
+        ));
         // Look-alikes that are NOT loopback hosts.
         assert!(!request_target_is_loopback("http://127.0.0.1.evil.com/x"));
         assert!(!request_target_is_loopback("http://localhost.evil.com/x"));
-        assert!(!request_target_is_loopback("https://user:pass@analytics.myagents.io/track"));
+        assert!(!request_target_is_loopback(
+            "https://user:pass@analytics.myagents.io/track"
+        ));
         // Parser-disagreement guard: a backslash is a path separator to the real
         // URL parser, so the true host is `evil.com`, NOT `127.0.0.1`. Must be
         // external (else a hostile URL would bypass the proxy). This is the case
         // a hand-rolled "last @ wins" parser gets wrong.
-        assert!(!request_target_is_loopback("http://evil.com\\@127.0.0.1/path"));
+        assert!(!request_target_is_loopback(
+            "http://evil.com\\@127.0.0.1/path"
+        ));
         // IPv4-mapped IPv6 is not ::1 loopback.
-        assert!(!request_target_is_loopback("http://[::ffff:127.0.0.1]:80/x"));
+        assert!(!request_target_is_loopback(
+            "http://[::ffff:127.0.0.1]:80/x"
+        ));
         // Not an absolute URL → not loopback (caller already guards relative URLs).
         assert!(!request_target_is_loopback("/api/something"));
     }

@@ -3,63 +3,74 @@
 
 pub mod app_dirs;
 pub mod attachment_protocol;
+pub mod browser;
 pub mod cli;
-pub mod config_io;
 mod commands;
+pub mod config_io;
 pub mod cron_task;
 pub mod floating_ball;
 pub mod floating_ball_pets;
 mod global_shortcut;
 pub mod im;
 pub mod inbox;
-pub mod notification;
-pub mod local_http;
-mod litellm_cache;
-pub mod logger;
 pub mod legacy_upgrade;
+mod litellm_cache;
+pub mod local_http;
+pub mod logger;
 #[cfg(target_os = "macos")]
 mod macos_arrow_filter;
 #[cfg(target_os = "macos")]
 mod macos_traffic_light;
 pub mod management_api;
+pub mod notification;
 pub mod perf_trace;
 pub mod process_cleanup;
 pub mod process_cmd;
 mod proxy_config;
-pub mod system_binary;
+pub mod search;
 mod sidecar;
 mod sse_proxy;
+pub mod system_binary;
 pub mod task;
 pub mod terminal;
-pub mod browser;
-pub mod search;
 pub mod thought;
-pub mod workspace_files;
 mod tray;
 mod updater;
 pub mod utils;
 pub mod wake_lock;
+pub mod workspace_files;
 
 use sidecar::{
-    cleanup_stale_sidecars, cleanup_stale_sidecars_preamble, init_startup_cleanup_barrier,
-    create_sidecar_state, stop_all_sidecars,
-    // Session activation commands (for Session singleton tracking)
-    cmd_get_session_activation, cmd_activate_session, cmd_deactivate_session,
-    cmd_update_session_tab,
+    cleanup_stale_sidecars,
+    cleanup_stale_sidecars_preamble,
+    cmd_activate_session,
+    cmd_can_restore_session,
+    cmd_cancel_background_completion,
+    cmd_deactivate_session,
+    // Session-centric Sidecar API (v0.1.11)
+    cmd_ensure_session_sidecar,
     // Cron task execution command
     cmd_execute_cron_task,
-    // Session-centric Sidecar API (v0.1.11)
-    cmd_ensure_session_sidecar, cmd_release_session_sidecar, cmd_get_session_port,
-    cmd_has_session_sidecar, cmd_get_session_generation,
-    cmd_upgrade_session_id, cmd_session_has_persistent_owners, cmd_can_restore_session,
-    // Background session completion
-    cmd_start_background_completion, cmd_cancel_background_completion,
     cmd_get_background_sessions,
+    // Session activation commands (for Session singleton tracking)
+    cmd_get_session_activation,
+    cmd_get_session_generation,
+    cmd_get_session_port,
+    cmd_has_session_sidecar,
     // Proxy hot-reload
     cmd_propagate_proxy,
+    cmd_release_session_sidecar,
+    cmd_session_has_persistent_owners,
+    // Background session completion
+    cmd_start_background_completion,
+    cmd_update_session_tab,
+    cmd_upgrade_session_id,
+    create_sidecar_state,
+    init_startup_cleanup_barrier,
+    stop_all_sidecars,
 };
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 use tauri::{Emitter, Listener, Manager, Url, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_autostart::MacosLauncher;
 
@@ -235,8 +246,7 @@ pub fn run() {
     let data_dir = app_dirs::myagents_data_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
     let thought_state: thought::ManagedThoughtStore =
         Arc::new(thought::ThoughtStore::new(data_dir.join("thoughts")));
-    let task_state: task::ManagedTaskStore =
-        Arc::new(task::TaskStore::new(data_dir.clone()));
+    let task_state: task::ManagedTaskStore = Arc::new(task::TaskStore::new(data_dir.clone()));
     // Expose the same Arcs via OnceLock singletons so the Rust Management API
     // (used by Bun CLI bridge → /api/admin/task/*) can read/write tasks without
     // access to Tauri `State`. They point at the same inner store.
@@ -279,7 +289,10 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_notification::init())
-        .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, Some(vec!["--minimized"])))
+        .plugin(tauri_plugin_autostart::init(
+            MacosLauncher::LaunchAgent,
+            Some(vec!["--minimized"]),
+        ))
         .plugin(global_shortcut::build_plugin());
 
     // Floating ball panels need the NSPanel plugin (macOS only).
@@ -1143,7 +1156,9 @@ pub fn run() {
                 // Only cleanup once (Relaxed is sufficient for simple flag)
                 use std::sync::atomic::Ordering::Relaxed;
                 if !cleanup_done_for_exit.swap(true, Relaxed) {
-                    ulog_info!("[App] Exit requested (Cmd+Q or Dock quit), cleaning up sidecars...");
+                    ulog_info!(
+                        "[App] Exit requested (Cmd+Q or Dock quit), cleaning up sidecars..."
+                    );
                     // Record a deliberate-quit marker so the next boot starts
                     // fresh instead of restoring the session (Issue #309), UNLESS
                     // this is an update-restart. Both update paths — plugin
@@ -1229,7 +1244,10 @@ mod nav_guard_tests {
 
     #[test]
     fn routes_external_urls_to_os_browser() {
-        assert_eq!(decide("https://evil.example.com/"), NavDecision::OpenExternally);
+        assert_eq!(
+            decide("https://evil.example.com/"),
+            NavDecision::OpenExternally
+        );
         assert_eq!(decide("mailto:a@b.com"), NavDecision::OpenExternally);
         assert_eq!(decide("tel:+123"), NavDecision::OpenExternally);
     }

@@ -202,8 +202,8 @@ fn validate_external_open_path(
     // Canonicalize the candidate first — fails clean if the path doesn't
     // exist, which is the right surface for a reveal-in-finder call (the
     // sidecar returned 404 in this case; we surface it as an error).
-    let canonical = std::fs::canonicalize(&target)
-        .map_err(|_| "File or folder not found".to_string())?;
+    let canonical =
+        std::fs::canonicalize(&target).map_err(|_| "File or folder not found".to_string())?;
 
     let home = home_dir().ok_or_else(|| "Cannot resolve home directory".to_string())?;
     let canonical_home = std::fs::canonicalize(&home).unwrap_or(home);
@@ -233,12 +233,17 @@ fn validate_external_open_path(
 
     // Prefix-check against canonicalized roots so a symlink chain can't
     // escape into /etc via a tmp/home/workspace-shaped lure.
-    let Some(TrustedPrefixMatch { in_home, in_tmp, in_workspace }) = match_trusted_prefix(
+    let Some(TrustedPrefixMatch {
+        in_home,
+        in_tmp,
+        in_workspace,
+    }) = match_trusted_prefix(
         &canonical,
         &canonical_home,
         &canonical_tmp,
         canonical_workspace.as_deref(),
-    ) else {
+    )
+    else {
         return Err("Path not allowed".to_string());
     };
     // Apply the project-wide credential / system blacklist on the
@@ -292,7 +297,8 @@ fn validate_external_open_path(
     // trusted by the existing rules, and tmp on macOS lives under
     // `/private/var/folders/...` which would otherwise trip the
     // canonicalized `/var` entry.
-    if in_workspace && !in_home && !in_tmp && canonical_starts_with_canonical_blacklist(&canonical) {
+    if in_workspace && !in_home && !in_tmp && canonical_starts_with_canonical_blacklist(&canonical)
+    {
         return Err("Path not allowed".to_string());
     }
     Ok(canonical)
@@ -307,8 +313,19 @@ fn validate_external_open_path(
 fn canonical_starts_with_canonical_blacklist(canonical: &Path) -> bool {
     #[cfg(not(windows))]
     let raw_roots: &[&str] = &[
-        "/etc", "/var", "/usr", "/bin", "/sbin", "/boot", "/root", "/sys",
-        "/proc", "/dev", "/System", "/Library/Keychains", "/Library/Cookies",
+        "/etc",
+        "/var",
+        "/usr",
+        "/bin",
+        "/sbin",
+        "/boot",
+        "/root",
+        "/sys",
+        "/proc",
+        "/dev",
+        "/System",
+        "/Library/Keychains",
+        "/Library/Cookies",
     ];
     #[cfg(windows)]
     let raw_roots: &[&str] = &[
@@ -371,7 +388,11 @@ fn match_trusted_prefix(
     if !in_home && !in_tmp && !in_workspace {
         return None;
     }
-    Some(TrustedPrefixMatch { in_home, in_tmp, in_workspace })
+    Some(TrustedPrefixMatch {
+        in_home,
+        in_tmp,
+        in_workspace,
+    })
 }
 
 /// Cross-platform home dir lookup. We avoid the `home` crate to keep
@@ -512,8 +533,8 @@ mod tests {
 
     #[tokio::test]
     async fn open_path_external_rejects_missing() {
-        let nonexistent = std::env::temp_dir()
-            .join(format!("ws_open_external_missing_{}", std::process::id()));
+        let nonexistent =
+            std::env::temp_dir().join(format!("ws_open_external_missing_{}", std::process::id()));
         // Don't create — should fail at canonicalize.
         let res = cmd_open_path_external(nonexistent.to_string_lossy().to_string(), None).await;
         assert!(res.is_err());
@@ -527,10 +548,8 @@ mod tests {
         // (which we just created via make_test_workspace).
         let ws = make_test_workspace("system_open_external_home");
         fs::write(ws.join("inside.md"), "x").unwrap();
-        let res = validate_external_open_path(
-            ws.join("inside.md").to_string_lossy().as_ref(),
-            None,
-        );
+        let res =
+            validate_external_open_path(ws.join("inside.md").to_string_lossy().as_ref(), None);
         assert!(res.is_ok(), "home-dir path should validate, got {:?}", res);
         let _ = fs::remove_dir_all(&ws);
     }
@@ -542,8 +561,7 @@ mod tests {
     // Linux temp is `/tmp`, so a Linux-only CI won't catch a re-break here.
     #[test]
     fn validate_external_open_accepts_tmp_path() {
-        let p = std::env::temp_dir()
-            .join(format!("ws_open_tmp_test_{}", std::process::id()));
+        let p = std::env::temp_dir().join(format!("ws_open_tmp_test_{}", std::process::id()));
         fs::write(&p, "x").unwrap();
         let res = validate_external_open_path(p.to_string_lossy().as_ref(), None);
         assert!(res.is_ok(), "tmp path should validate, got {:?}", res);
@@ -605,10 +623,7 @@ mod tests {
         if !ssh_dir.is_dir() {
             return; // Skip on systems without ~/.ssh.
         }
-        let stub = ssh_dir.join(format!(
-            "myagents_ws_bypass_test_{}",
-            std::process::id()
-        ));
+        let stub = ssh_dir.join(format!("myagents_ws_bypass_test_{}", std::process::id()));
         if std::fs::write(&stub, b"x").is_err() {
             return;
         }
@@ -645,15 +660,15 @@ mod tests {
     #[cfg(not(windows))]
     #[test]
     fn validate_external_open_rejects_filesystem_root_workspace() {
-        let p = std::env::temp_dir()
-            .join(format!("ws_open_root_arg_{}", std::process::id()));
+        let p = std::env::temp_dir().join(format!("ws_open_root_arg_{}", std::process::id()));
         fs::write(&p, "x").unwrap();
-        let res = validate_external_open_path(
-            p.to_string_lossy().as_ref(),
-            Some("/"),
-        );
+        let res = validate_external_open_path(p.to_string_lossy().as_ref(), Some("/"));
         let _ = fs::remove_file(&p);
-        assert!(res.is_err(), "workspace='/' must be rejected, got {:?}", res);
+        assert!(
+            res.is_err(),
+            "workspace='/' must be rejected, got {:?}",
+            res
+        );
         let err = res.unwrap_err();
         assert!(
             err.contains("filesystem root") || err.contains("not allowed"),
@@ -814,13 +829,20 @@ mod tests {
     // workspace ?? null` without surprising errors.
     #[test]
     fn validate_external_open_treats_empty_workspace_as_none() {
-        let p = std::env::temp_dir()
-            .join(format!("ws_open_empty_arg_{}", std::process::id()));
+        let p = std::env::temp_dir().join(format!("ws_open_empty_arg_{}", std::process::id()));
         fs::write(&p, "x").unwrap();
         let res = validate_external_open_path(p.to_string_lossy().as_ref(), Some(""));
-        assert!(res.is_ok(), "empty workspace should be ignored, got {:?}", res);
+        assert!(
+            res.is_ok(),
+            "empty workspace should be ignored, got {:?}",
+            res
+        );
         let res2 = validate_external_open_path(p.to_string_lossy().as_ref(), Some("   "));
-        assert!(res2.is_ok(), "whitespace workspace should be ignored, got {:?}", res2);
+        assert!(
+            res2.is_ok(),
+            "whitespace workspace should be ignored, got {:?}",
+            res2
+        );
         let _ = fs::remove_file(&p);
     }
 
@@ -838,10 +860,7 @@ mod tests {
         let home = std::env::var_os("HOME").map(PathBuf::from);
         let Some(home) = home else { return };
         let ssh_dir = home.join(".ssh");
-        let stub = ssh_dir.join(format!(
-            "myagents_test_stub_{}",
-            std::process::id()
-        ));
+        let stub = ssh_dir.join(format!("myagents_test_stub_{}", std::process::id()));
         // Skip if we can't create (no .ssh dir, permission, etc.) — rather
         // than trying to mkdir which would touch real config.
         if !ssh_dir.is_dir() {
@@ -866,8 +885,7 @@ mod tests {
     #[test]
     fn validate_external_open_blocks_symlink_escape() {
         use std::os::unix::fs::symlink;
-        let lure = std::env::temp_dir()
-            .join(format!("ws_open_lure_{}", std::process::id()));
+        let lure = std::env::temp_dir().join(format!("ws_open_lure_{}", std::process::id()));
         // Symlink in tmp (allowed prefix) → /etc/hosts (forbidden target).
         let target = "/etc/hosts";
         if !std::path::Path::new(target).exists() {
@@ -877,7 +895,11 @@ mod tests {
         let _ = std::fs::remove_file(&lure);
         symlink(target, &lure).unwrap();
         let res = validate_external_open_path(lure.to_string_lossy().as_ref(), None);
-        assert!(res.is_err(), "symlink to /etc must be rejected, got {:?}", res);
+        assert!(
+            res.is_err(),
+            "symlink to /etc must be rejected, got {:?}",
+            res
+        );
         let _ = std::fs::remove_file(&lure);
     }
 
@@ -898,8 +920,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn workspace_open_blocks_symlink_to_credential() {
-        use std::os::unix::fs::symlink;
         use crate::workspace_files::path_safety::resolve_existing_inside_workspace;
+        use std::os::unix::fs::symlink;
 
         let target = "/etc/hosts";
         if !std::path::Path::new(target).exists() {
@@ -939,8 +961,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn workspace_open_allows_inside_workspace_symlink() {
-        use std::os::unix::fs::symlink;
         use crate::workspace_files::path_safety::resolve_existing_inside_workspace;
+        use std::os::unix::fs::symlink;
 
         let Some(home) = home_dir() else { return };
         let ws_root = home.join(format!(".myagents-test-ws-sym-in-{}", std::process::id()));
@@ -952,7 +974,11 @@ mod tests {
         let res = resolve_existing_inside_workspace(&ws_root, "latest/file.txt");
         let cleanup = std::fs::remove_dir_all(&ws_root);
 
-        assert!(res.is_ok(), "in-workspace symlink must resolve, got {:?}", res);
+        assert!(
+            res.is_ok(),
+            "in-workspace symlink must resolve, got {:?}",
+            res
+        );
         let _ = cleanup;
     }
 }

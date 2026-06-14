@@ -85,7 +85,9 @@ unsafe fn install_insert_text_filter(cls: &AnyClass) {
     if added.as_bool() {
         crate::ulog_info!("[macos_arrow_filter] insertText: filter installed");
     } else {
-        crate::ulog_info!("[macos_arrow_filter] WryWebView already overrides insertText:; skipping");
+        crate::ulog_info!(
+            "[macos_arrow_filter] WryWebView already overrides insertText:; skipping"
+        );
     }
 }
 

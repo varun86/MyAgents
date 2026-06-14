@@ -78,9 +78,7 @@ pub struct SlashCommandsResponse {
 }
 
 #[tauri::command]
-pub async fn cmd_list_slash_commands(
-    workspace: String,
-) -> Result<SlashCommandsResponse, String> {
+pub async fn cmd_list_slash_commands(workspace: String) -> Result<SlashCommandsResponse, String> {
     // workspace may not exist yet (e.g. brand-new workspace selected in the
     // launcher before any chat has touched it), but it MUST still pass the
     // system-directory blacklist — otherwise a caller passing `/etc` or
@@ -162,9 +160,7 @@ pub async fn cmd_list_slash_commands(
     let global_skill_folder_names: Vec<String> = commands
         .iter()
         .filter(|c| {
-            c.source == "skill"
-                && c.scope.as_deref() == Some("user")
-                && c.folder_name.is_some()
+            c.source == "skill" && c.scope.as_deref() == Some("user") && c.folder_name.is_some()
         })
         .filter_map(|c| c.folder_name.clone())
         .collect();
@@ -220,12 +216,7 @@ fn scan_commands_dir(dir: &Path, scope: &str, out: &mut Vec<SlashCommand>) {
     }
 }
 
-fn scan_skills_dir(
-    dir: &Path,
-    scope: &str,
-    disabled: &[String],
-    out: &mut Vec<SlashCommand>,
-) {
+fn scan_skills_dir(dir: &Path, scope: &str, disabled: &[String], out: &mut Vec<SlashCommand>) {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         Err(_) => return,
@@ -343,7 +334,9 @@ fn extract_frontmatter_str(content: &str) -> Option<String> {
     // Pattern: optional CR before first `---`, content body until next `---`.
     let s = content.trim_start();
     let stripped = s.strip_prefix("---")?;
-    let after_first = stripped.strip_prefix('\n').or_else(|| stripped.strip_prefix("\r\n"))?;
+    let after_first = stripped
+        .strip_prefix('\n')
+        .or_else(|| stripped.strip_prefix("\r\n"))?;
     // Find the closing `---` on its own line.
     let mut depth = 0;
     for (idx, line) in after_first.split_inclusive('\n').enumerate() {

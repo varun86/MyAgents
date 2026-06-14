@@ -17,12 +17,12 @@ use serde_json::{json, Value};
 use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio::time::sleep;
 
-use futures::StreamExt;
 use futures::SinkExt;
+use futures::StreamExt;
 
-use super::types::{ImConfig, ImMessage, ImPlatform, ImSourceType, GroupEvent};
+use super::types::{GroupEvent, ImConfig, ImMessage, ImPlatform, ImSourceType};
 use super::ApprovalCallback;
-use crate::{proxy_config, ulog_info, ulog_warn, ulog_error, ulog_debug};
+use crate::{proxy_config, ulog_debug, ulog_error, ulog_info, ulog_warn};
 
 // ── Constants ───────────────────────────────────────────────
 
@@ -154,17 +154,18 @@ impl DingtalkAdapter {
     ) -> Self {
         // External host (open-dingtalk.com) — system proxy wanted.
         #[allow(clippy::disallowed_methods)]
-        let client_builder = Client::builder()
-            .timeout(Duration::from_secs(30));
-        let client = proxy_config::build_client_with_proxy(client_builder)
-            .unwrap_or_else(|e| {
-                ulog_warn!("[dingtalk] Failed to build client with proxy: {}, falling back to direct", e);
-                #[allow(clippy::disallowed_methods)]
-                Client::builder()
-                    .timeout(Duration::from_secs(30))
-                    .build()
-                    .expect("Failed to create HTTP client")
-            });
+        let client_builder = Client::builder().timeout(Duration::from_secs(30));
+        let client = proxy_config::build_client_with_proxy(client_builder).unwrap_or_else(|e| {
+            ulog_warn!(
+                "[dingtalk] Failed to build client with proxy: {}, falling back to direct",
+                e
+            );
+            #[allow(clippy::disallowed_methods)]
+            Client::builder()
+                .timeout(Duration::from_secs(30))
+                .build()
+                .expect("Failed to create HTTP client")
+        });
 
         let dedup_cache = Self::load_dedup_cache(dedup_path.as_deref());
 
@@ -207,28 +208,26 @@ impl DingtalkAdapter {
             _ => return HashMap::new(),
         };
         match std::fs::read_to_string(path) {
-            Ok(content) => {
-                match serde_json::from_str::<HashMap<String, u64>>(&content) {
-                    Ok(mut cache) => {
-                        let now = SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs();
-                        let before = cache.len();
-                        cache.retain(|_, ts| now.saturating_sub(*ts) < DEDUP_TTL_SECS);
-                        ulog_info!(
-                            "[dingtalk] Loaded dedup cache from disk: {} entries ({} expired)",
-                            cache.len(),
-                            before - cache.len()
-                        );
-                        cache
-                    }
-                    Err(e) => {
-                        ulog_warn!("[dingtalk] Failed to parse dedup cache file: {}", e);
-                        HashMap::new()
-                    }
+            Ok(content) => match serde_json::from_str::<HashMap<String, u64>>(&content) {
+                Ok(mut cache) => {
+                    let now = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    let before = cache.len();
+                    cache.retain(|_, ts| now.saturating_sub(*ts) < DEDUP_TTL_SECS);
+                    ulog_info!(
+                        "[dingtalk] Loaded dedup cache from disk: {} entries ({} expired)",
+                        cache.len(),
+                        before - cache.len()
+                    );
+                    cache
                 }
-            }
+                Err(e) => {
+                    ulog_warn!("[dingtalk] Failed to parse dedup cache file: {}", e);
+                    HashMap::new()
+                }
+            },
             Err(e) => {
                 ulog_warn!("[dingtalk] Failed to read dedup cache file: {}", e);
                 HashMap::new()
@@ -241,13 +240,18 @@ impl DingtalkAdapter {
         if let Some(path) = &self.dedup_persist_path {
             let snapshot = self.dedup_cache.lock().await.clone();
             save_dedup_cache_to_disk(path, &snapshot);
-            ulog_info!("[dingtalk] Dedup cache flushed to disk ({} entries)", snapshot.len());
+            ulog_info!(
+                "[dingtalk] Dedup cache flushed to disk ({} entries)",
+                snapshot.len()
+            );
         }
     }
 
     /// Debounced dedup cache persistence (at most once per DEDUP_PERSIST_INTERVAL_MS).
     async fn maybe_persist_dedup(&self) {
-        let Some(path) = &self.dedup_persist_path else { return };
+        let Some(path) = &self.dedup_persist_path else {
+            return;
+        };
         let now_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -328,7 +332,8 @@ impl DingtalkAdapter {
             "appSecret": self.client_secret,
         });
 
-        let resp = self.client
+        let resp = self
+            .client
             .post(&url)
             .json(&body)
             .send()
@@ -352,7 +357,8 @@ impl DingtalkAdapter {
             .to_string();
 
         let expire = json["expireIn"].as_u64().unwrap_or(TOKEN_VALIDITY_SECS);
-        let expires_at = Instant::now() + Duration::from_secs(expire.saturating_sub(TOKEN_REFRESH_MARGIN_SECS));
+        let expires_at =
+            Instant::now() + Duration::from_secs(expire.saturating_sub(TOKEN_REFRESH_MARGIN_SECS));
 
         {
             let mut cache = self.token_cache.write().await;
@@ -368,7 +374,12 @@ impl DingtalkAdapter {
 
     /// Make an authenticated DingTalk API call (new API v1.0/v2.0).
     /// Auto-retries once on 401 (token expired).
-    async fn api_call(&self, method: &str, url: &str, body: Option<&Value>) -> Result<Value, String> {
+    async fn api_call(
+        &self,
+        method: &str,
+        url: &str,
+        body: Option<&Value>,
+    ) -> Result<Value, String> {
         let mut retries = 0;
 
         loop {
@@ -387,7 +398,9 @@ impl DingtalkAdapter {
                 req = req.json(b);
             }
 
-            let resp = req.send().await
+            let resp = req
+                .send()
+                .await
                 .map_err(|e| format!("DingTalk API error: {}", e))?;
 
             let status = resp.status();
@@ -408,8 +421,7 @@ impl DingtalkAdapter {
                 return Err(format!("DingTalk API HTTP {}: {}", status, text));
             }
 
-            let json: Value = serde_json::from_str(&text)
-                .unwrap_or_else(|_| json!({}));
+            let json: Value = serde_json::from_str(&text).unwrap_or_else(|_| json!({}));
 
             return Ok(json);
         }
@@ -434,7 +446,11 @@ impl DingtalkAdapter {
     // ===== Message sending =====
 
     /// Send a Markdown message to a single user (1:1 chat).
-    async fn send_private_message(&self, user_id: &str, text: &str) -> Result<Option<String>, String> {
+    async fn send_private_message(
+        &self,
+        user_id: &str,
+        text: &str,
+    ) -> Result<Option<String>, String> {
         let url = format!("{}/v1.0/robot/oToMessages/batchSend", DINGTALK_API_BASE);
         let body = json!({
             "robotCode": self.robot_code,
@@ -452,7 +468,11 @@ impl DingtalkAdapter {
     }
 
     /// Send a Markdown message to a group chat.
-    async fn send_group_message(&self, conversation_id: &str, text: &str) -> Result<Option<String>, String> {
+    async fn send_group_message(
+        &self,
+        conversation_id: &str,
+        text: &str,
+    ) -> Result<Option<String>, String> {
         let url = format!("{}/v1.0/robot/groupMessages/send", DINGTALK_API_BASE);
         let body = json!({
             "robotCode": self.robot_code,
@@ -472,7 +492,11 @@ impl DingtalkAdapter {
     /// Unified send: auto-detect private vs group by chat_id format.
     /// Convention: group chat IDs are stored as "group:{openConversationId}"
     /// Private chat IDs are stored as the raw staffId.
-    pub async fn send_text_message(&self, chat_id: &str, text: &str) -> Result<Option<String>, String> {
+    pub async fn send_text_message(
+        &self,
+        chat_id: &str,
+        text: &str,
+    ) -> Result<Option<String>, String> {
         if let Some(group_id) = chat_id.strip_prefix("group:") {
             self.send_group_message(group_id, text).await
         } else {
@@ -482,7 +506,12 @@ impl DingtalkAdapter {
 
     /// Edit a message — only works for AI Card streaming updates.
     /// For regular messages, DingTalk does not support editing → returns Err.
-    pub async fn edit_text_message(&self, chat_id: &str, _message_id: &str, text: &str) -> Result<(), String> {
+    pub async fn edit_text_message(
+        &self,
+        chat_id: &str,
+        _message_id: &str,
+        text: &str,
+    ) -> Result<(), String> {
         if !self.use_ai_card {
             // DingTalk regular messages can't be edited via Robot API.
             // Returning Err lets callers fall back to delete+send when needed
@@ -493,7 +522,9 @@ impl DingtalkAdapter {
         // Look up active card for this chat
         let card_state = {
             let cards = self.active_cards.lock().await;
-            cards.get(chat_id).map(|c| (c.out_track_id.clone(), c.last_content.clone()))
+            cards
+                .get(chat_id)
+                .map(|c| (c.out_track_id.clone(), c.last_content.clone()))
         };
 
         let Some((out_track_id, last_content)) = card_state else {
@@ -529,7 +560,11 @@ impl DingtalkAdapter {
     }
 
     /// Delete a message — DingTalk Robot API does not support message deletion.
-    pub async fn delete_text_message(&self, _chat_id: &str, _message_id: &str) -> Result<(), String> {
+    pub async fn delete_text_message(
+        &self,
+        _chat_id: &str,
+        _message_id: &str,
+    ) -> Result<(), String> {
         // DingTalk Robot messages cannot be recalled/deleted via API
         ulog_debug!("[dingtalk] delete_text_message: not supported by DingTalk Robot API");
         Ok(())
@@ -540,31 +575,34 @@ impl DingtalkAdapter {
     /// Create a new AI Card instance and deliver it to the conversation.
     /// Returns the card_instance_id.
     async fn create_ai_card(&self, chat_id: &str, initial_text: &str) -> Result<String, String> {
-        let template_id = self.card_template_id.as_deref()
+        let template_id = self
+            .card_template_id
+            .as_deref()
             .ok_or_else(|| "AI Card template ID not configured".to_string())?;
 
         let out_track_id = uuid::Uuid::new_v4().to_string();
 
         // Build card data with conversation scope
-        let (open_space_id, im_group_open_deliver_model, im_robot_open_deliver_model) = if let Some(group_id) = chat_id.strip_prefix("group:") {
-            // Group chat
-            (
-                format!("dtv1.card//IM_GROUP.{}", group_id),
-                Some(json!({
-                    "robotCode": self.robot_code,
-                })),
-                None,
-            )
-        } else {
-            // Private chat
-            (
-                format!("dtv1.card//IM_ROBOT.{}", chat_id),
-                None,
-                Some(json!({
-                    "robotCode": self.robot_code,
-                })),
-            )
-        };
+        let (open_space_id, im_group_open_deliver_model, im_robot_open_deliver_model) =
+            if let Some(group_id) = chat_id.strip_prefix("group:") {
+                // Group chat
+                (
+                    format!("dtv1.card//IM_GROUP.{}", group_id),
+                    Some(json!({
+                        "robotCode": self.robot_code,
+                    })),
+                    None,
+                )
+            } else {
+                // Private chat
+                (
+                    format!("dtv1.card//IM_ROBOT.{}", chat_id),
+                    None,
+                    Some(json!({
+                        "robotCode": self.robot_code,
+                    })),
+                )
+            };
 
         let url = format!("{}/v1.0/card/instances/createAndDeliver", DINGTALK_API_BASE);
         let mut body = json!({
@@ -593,14 +631,21 @@ impl DingtalkAdapter {
         // Track the active card
         {
             let mut cards = self.active_cards.lock().await;
-            cards.insert(chat_id.to_string(), ActiveCardState {
-                out_track_id: out_track_id.clone(),
-                last_content: initial_text.to_string(),
-                created_at: Instant::now(),
-            });
+            cards.insert(
+                chat_id.to_string(),
+                ActiveCardState {
+                    out_track_id: out_track_id.clone(),
+                    last_content: initial_text.to_string(),
+                    created_at: Instant::now(),
+                },
+            );
         }
 
-        ulog_info!("[dingtalk] Created AI Card for chat {}: outTrackId={}", chat_id, out_track_id);
+        ulog_info!(
+            "[dingtalk] Created AI Card for chat {}: outTrackId={}",
+            chat_id,
+            out_track_id
+        );
         Ok(out_track_id)
     }
 
@@ -631,7 +676,11 @@ impl DingtalkAdapter {
                 ulog_info!("[dingtalk] Finalized AI Card for chat {}", chat_id);
             }
             Err(e) => {
-                ulog_warn!("[dingtalk] Failed to finalize AI Card for chat {}: {}", chat_id, e);
+                ulog_warn!(
+                    "[dingtalk] Failed to finalize AI Card for chat {}: {}",
+                    chat_id,
+                    e
+                );
             }
         }
     }
@@ -744,7 +793,8 @@ impl DingtalkAdapter {
             ],
         });
 
-        let resp = self.client
+        let resp = self
+            .client
             .post(&register_url)
             .json(&register_body)
             .send()
@@ -849,7 +899,9 @@ impl DingtalkAdapter {
         &self,
         text: &str,
         ws_write: &mut futures::stream::SplitSink<
-            tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+            tokio_tungstenite::WebSocketStream<
+                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+            >,
             tokio_tungstenite::tungstenite::Message,
         >,
     ) {
@@ -867,7 +919,12 @@ impl DingtalkAdapter {
         let message_id = headers["messageId"].as_str().unwrap_or("");
         let topic = headers["topic"].as_str().unwrap_or("");
 
-        ulog_debug!("[dingtalk] WS frame: type={}, topic={}, specVersion={}", frame_type, topic, spec_version);
+        ulog_debug!(
+            "[dingtalk] WS frame: type={}, topic={}, specVersion={}",
+            frame_type,
+            topic,
+            spec_version
+        );
 
         // Handle SYSTEM frames (ping/pong, disconnect notice)
         if frame_type == "SYSTEM" {
@@ -881,7 +938,12 @@ impl DingtalkAdapter {
                         "data": frame["data"],
                     });
                     let pong_text = serde_json::to_string(&pong).unwrap_or_default();
-                    if let Err(e) = ws_write.send(tokio_tungstenite::tungstenite::Message::Text(pong_text.into())).await {
+                    if let Err(e) = ws_write
+                        .send(tokio_tungstenite::tungstenite::Message::Text(
+                            pong_text.into(),
+                        ))
+                        .await
+                    {
                         ulog_warn!("[dingtalk] Failed to send pong: {}", e);
                     }
                 }
@@ -916,8 +978,17 @@ impl DingtalkAdapter {
                 "data": ack_data,
             });
             let ack_text = serde_json::to_string(&ack).unwrap_or_default();
-            if let Err(e) = ws_write.send(tokio_tungstenite::tungstenite::Message::Text(ack_text.into())).await {
-                ulog_warn!("[dingtalk] Failed to send ACK for {} frame: {}", frame_type, e);
+            if let Err(e) = ws_write
+                .send(tokio_tungstenite::tungstenite::Message::Text(
+                    ack_text.into(),
+                ))
+                .await
+            {
+                ulog_warn!(
+                    "[dingtalk] Failed to send ACK for {} frame: {}",
+                    frame_type,
+                    e
+                );
             }
         }
 
@@ -988,12 +1059,11 @@ impl DingtalkAdapter {
         // Extract text content
         let msg_type = data["msgtype"].as_str().unwrap_or("text");
         let text_content = match msg_type {
-            "text" => {
-                data["text"]["content"].as_str()
-                    .unwrap_or("")
-                    .trim()
-                    .to_string()
-            }
+            "text" => data["text"]["content"]
+                .as_str()
+                .unwrap_or("")
+                .trim()
+                .to_string(),
             "richText" => {
                 // Rich text: try to extract plain text
                 data["content"]["richText"]
@@ -1059,11 +1129,7 @@ impl DingtalkAdapter {
                 .as_bool()
                 .or_else(|| data["isInAtList"].as_str().map(|s| s == "true"))
                 .unwrap_or(false);
-            (
-                ImSourceType::Group,
-                chat_id_full,
-                is_in_at_list,
-            )
+            (ImSourceType::Group, chat_id_full, is_in_at_list)
         } else {
             // Private chat (1:1)
             (ImSourceType::Private, sender_staff_id.to_string(), true)
@@ -1105,7 +1171,11 @@ impl DingtalkAdapter {
     async fn handle_card_callback(&self, data: &Value) {
         let action = data["action"].as_str().unwrap_or("");
         let out_track_id = data["outTrackId"].as_str().unwrap_or("");
-        ulog_debug!("[dingtalk] Card callback: action={}, outTrackId={}", action, out_track_id);
+        ulog_debug!(
+            "[dingtalk] Card callback: action={}, outTrackId={}",
+            action,
+            out_track_id
+        );
 
         // Card callbacks for approval will be handled if we implement interactive cards
         // For now, approvals are text-based
@@ -1126,9 +1196,7 @@ impl DingtalkAdapter {
             // and may fire first (or simultaneously), so mod.rs deduplicates via
             // "already approved" check.
             "im_cool_app_install" => {
-                let open_conv_id = data["openConversationId"]
-                    .as_str()
-                    .unwrap_or("");
+                let open_conv_id = data["openConversationId"].as_str().unwrap_or("");
                 if open_conv_id.is_empty() {
                     ulog_warn!("[dingtalk] im_cool_app_install missing openConversationId");
                     return;
@@ -1141,12 +1209,19 @@ impl DingtalkAdapter {
                     groups.insert(chat_id.clone())
                 };
                 if !is_new {
-                    ulog_debug!("[dingtalk] Group {} already known, skipping im_cool_app_install", chat_id);
+                    ulog_debug!(
+                        "[dingtalk] Group {} already known, skipping im_cool_app_install",
+                        chat_id
+                    );
                     return;
                 }
 
                 let operator = data["operator"].as_str().unwrap_or("").to_string();
-                let added_by = if operator.is_empty() { None } else { Some(operator) };
+                let added_by = if operator.is_empty() {
+                    None
+                } else {
+                    Some(operator)
+                };
 
                 ulog_info!("[dingtalk] Bot added to group via event: {}", chat_id);
                 if self
@@ -1266,7 +1341,10 @@ impl super::adapter::ImStreamAdapter for DingtalkAdapter {
             match self.create_ai_card(chat_id, text).await {
                 Ok(out_track_id) => return Ok(Some(out_track_id)),
                 Err(e) => {
-                    ulog_warn!("[dingtalk] AI Card creation failed, falling back to Markdown: {}", e);
+                    ulog_warn!(
+                        "[dingtalk] AI Card creation failed, falling back to Markdown: {}",
+                        e
+                    );
                     // Fall through to regular send below
                 }
             }
@@ -1314,7 +1392,8 @@ impl super::adapter::ImStreamAdapter for DingtalkAdapter {
         tool_name: &str,
         tool_input: &str,
     ) -> super::adapter::AdapterResult<Option<String>> {
-        self.send_approval_card(chat_id, request_id, tool_name, tool_input).await
+        self.send_approval_card(chat_id, request_id, tool_name, tool_input)
+            .await
     }
 
     async fn update_approval_status(
@@ -1323,7 +1402,8 @@ impl super::adapter::ImStreamAdapter for DingtalkAdapter {
         message_id: &str,
         status: &str,
     ) -> super::adapter::AdapterResult<()> {
-        self.update_approval_status(chat_id, message_id, status).await
+        self.update_approval_status(chat_id, message_id, status)
+            .await
     }
 
     async fn send_photo(

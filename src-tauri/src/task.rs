@@ -883,8 +883,7 @@ impl TaskStore {
                         at: now,
                         actor: TransitionActor::System,
                         message: Some(
-                            "上次运行被应用重启中断,调度器将在下次计划时间继续触发"
-                                .to_string(),
+                            "上次运行被应用重启中断,调度器将在下次计划时间继续触发".to_string(),
                         ),
                         source: Some(TransitionSource::Crash),
                     });
@@ -899,10 +898,7 @@ impl TaskStore {
                     to: TaskStatus::Blocked,
                     at: now,
                     actor: TransitionActor::System,
-                    message: Some(
-                        "上次运行被应用重启中断,可重新派发以继续"
-                            .to_string(),
-                    ),
+                    message: Some("上次运行被应用重启中断,可重新派发以继续".to_string()),
                     source: Some(TransitionSource::Crash),
                 });
             }
@@ -958,13 +954,9 @@ impl TaskStore {
     /// rename, then fsync the containing directory. On any error the tmp file is
     /// best-effort unlinked. Caller MUST hold `inner.write()`; this function does
     /// not take the lock itself.
-    fn persist_locked(
-        path: &Path,
-        map: &HashMap<String, Task>,
-    ) -> Result<(), String> {
+    fn persist_locked(path: &Path, map: &HashMap<String, Task>) -> Result<(), String> {
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|e| format!("Failed to create tasks dir: {}", e))?;
+            fs::create_dir_all(parent).map_err(|e| format!("Failed to create tasks dir: {}", e))?;
         }
         let tmp = path.with_extension("jsonl.tmp");
         let write_res = (|| -> Result<(), String> {
@@ -978,8 +970,8 @@ impl TaskStore {
             let mut rows: Vec<&Task> = map.values().collect();
             rows.sort_by_key(|t| t.created_at);
             for t in rows {
-                let line = serde_json::to_string(t)
-                    .map_err(|e| format!("serialize task: {}", e))?;
+                let line =
+                    serde_json::to_string(t).map_err(|e| format!("serialize task: {}", e))?;
                 file.write_all(line.as_bytes())
                     .map_err(|e| format!("write task line: {}", e))?;
                 file.write_all(b"\n")
@@ -1029,11 +1021,8 @@ impl TaskStore {
         // expression that would make it die silently at first fire.
         if let Some(expr) = input.cron_expression.as_deref() {
             if !expr.trim().is_empty() {
-                crate::cron_task::validate_cron_expression(
-                    expr,
-                    input.cron_timezone.as_deref(),
-                )
-                .map_err(|e| format!("cron expression invalid: {}", e))?;
+                crate::cron_task::validate_cron_expression(expr, input.cron_timezone.as_deref())
+                    .map_err(|e| format!("cron expression invalid: {}", e))?;
             }
         }
         let now = now_ms();
@@ -1467,12 +1456,7 @@ impl TaskStore {
     /// a doc on an already-executing task. PRD §9.4.
     ///
     /// On success `updated_at` is bumped so listings re-sort.
-    pub async fn write_doc(
-        &self,
-        id: &str,
-        filename: &str,
-        content: &str,
-    ) -> Result<(), String> {
+    pub async fn write_doc(&self, id: &str, filename: &str, content: &str) -> Result<(), String> {
         let mut inner = self.inner.write().await;
         let existing = inner
             .get(id)
@@ -1482,9 +1466,7 @@ impl TaskStore {
             return Err(String::from(TaskOpError::already_deleted()));
         }
         if matches!(existing.status, TaskStatus::Running | TaskStatus::Verifying) {
-            return Err(String::from(
-                TaskOpError::update_rejected_while_running(),
-            ));
+            return Err(String::from(TaskOpError::update_rejected_while_running()));
         }
         // Resolve path through the sandbox guard — rejects id escape.
         let dir = task_docs_dir(&existing.id)?;
@@ -1537,9 +1519,7 @@ impl TaskStore {
             return Err(String::from(TaskOpError::already_deleted()));
         }
         if matches!(existing.status, TaskStatus::Running | TaskStatus::Verifying) {
-            return Err(String::from(
-                TaskOpError::update_rejected_while_running(),
-            ));
+            return Err(String::from(TaskOpError::update_rejected_while_running()));
         }
         // PRD 0.2.9 invariant 3 — reject contradictory clear-vs-set inputs at
         // the input layer (rather than silently letting the merge order
@@ -1686,11 +1666,8 @@ impl TaskStore {
         // the task "running" but never ticking).
         if let Some(expr) = updated.cron_expression.as_deref() {
             if !expr.trim().is_empty() {
-                crate::cron_task::validate_cron_expression(
-                    expr,
-                    updated.cron_timezone.as_deref(),
-                )
-                .map_err(|e| format!("cron expression invalid: {}", e))?;
+                crate::cron_task::validate_cron_expression(expr, updated.cron_timezone.as_deref())
+                    .map_err(|e| format!("cron expression invalid: {}", e))?;
             }
         }
 
@@ -1705,13 +1682,11 @@ impl TaskStore {
             }
             if matches!(updated.dispatch_origin, TaskDispatchOrigin::AiAligned) {
                 return Err(
-                    "ai-aligned tasks use /task-implement; edit alignment.md instead"
-                        .to_string(),
+                    "ai-aligned tasks use /task-implement; edit alignment.md instead".to_string(),
                 );
             }
             let dir = task_docs_dir(&updated.id)?;
-            fs::create_dir_all(&dir)
-                .map_err(|e| format!("mkdir task dir: {}", e))?;
+            fs::create_dir_all(&dir).map_err(|e| format!("mkdir task dir: {}", e))?;
             write_atomic_text(&dir.join("task.md"), prompt)?;
         }
 
@@ -1820,8 +1795,7 @@ impl TaskStore {
                         let cron_ec: crate::cron_task::EndConditions = ec.into();
                         patch.insert(
                             "endConditions".to_string(),
-                            serde_json::to_value(&cron_ec)
-                                .unwrap_or(serde_json::Value::Null),
+                            serde_json::to_value(&cron_ec).unwrap_or(serde_json::Value::Null),
                         );
                     }
                 }
@@ -1951,10 +1925,7 @@ impl TaskStore {
                             }),
                         );
                     } else {
-                        patch.insert(
-                            "clearDelivery".to_string(),
-                            serde_json::Value::Bool(true),
-                        );
+                        patch.insert("clearDelivery".to_string(), serde_json::Value::Bool(true));
                     }
                 }
 
@@ -1964,11 +1935,7 @@ impl TaskStore {
                         .update_task_fields(&cron_id, serde_json::Value::Object(patch))
                         .await
                     {
-                        ulog_warn!(
-                            "[task] CronTask {} projection failed: {}",
-                            cron_id,
-                            e
-                        );
+                        ulog_warn!("[task] CronTask {} projection failed: {}", cron_id, e);
                     }
                 }
             }
@@ -2163,7 +2130,10 @@ impl TaskStore {
                 }
                 (
                     TaskExecutionMode::Recurring,
-                    ScheduleBackfill::Cron { expression, timezone },
+                    ScheduleBackfill::Cron {
+                        expression,
+                        timezone,
+                    },
                 ) => {
                     updated.cron_expression = Some(expression);
                     updated.cron_timezone = timezone;
@@ -2228,7 +2198,6 @@ impl TaskStore {
         }
         Ok(updated)
     }
-
 
     pub async fn set_cron_task_id(
         &self,
@@ -2311,7 +2280,11 @@ impl TaskStore {
         let manager = crate::cron_task::get_cron_task_manager();
         if let Ok(n) = manager.delete_by_task_id(id).await {
             if n > 0 {
-                ulog_info!("[task] soft-deleted id={} + removed {} linked CronTask(s)", id, n);
+                ulog_info!(
+                    "[task] soft-deleted id={} + removed {} linked CronTask(s)",
+                    id,
+                    n
+                );
                 return Ok(());
             }
         }
@@ -2365,9 +2338,8 @@ pub fn validate_safe_id(value: &str, label: &str) -> Result<(), String> {
     }
     let upper = value.to_ascii_uppercase();
     const WINDOWS_RESERVED: &[&str] = &[
-        "CON", "PRN", "AUX", "NUL",
-        "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
-        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+        "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
     ];
     if WINDOWS_RESERVED.iter().any(|r| upper == *r) {
         return Err(format!(
@@ -2550,8 +2522,7 @@ fn task_docs_root() -> Result<PathBuf, String> {
 /// on any failure. Mirrors `persist_locked` guarantees for arbitrary files.
 fn write_atomic_text(path: &Path, content: &str) -> Result<(), String> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("Failed to create dir: {}", e))?;
+        fs::create_dir_all(parent).map_err(|e| format!("Failed to create dir: {}", e))?;
     }
     let tmp = path.with_extension("tmp");
     let write_res = (|| -> Result<(), String> {
@@ -2742,14 +2713,12 @@ fn dispatch_notification(task: &Task, t: &StatusTransition) {
     };
 
     let cfg = task.notification.as_ref();
-    let subscribed: Vec<String> = cfg
-        .and_then(|c| c.events.clone())
-        .unwrap_or_else(|| {
-            DEFAULT_NOTIFICATION_EVENTS
-                .iter()
-                .map(|s| s.to_string())
-                .collect()
-        });
+    let subscribed: Vec<String> = cfg.and_then(|c| c.events.clone()).unwrap_or_else(|| {
+        DEFAULT_NOTIFICATION_EVENTS
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    });
     if !subscribed.iter().any(|e| e == event_key) {
         return;
     }
@@ -3063,7 +3032,11 @@ pub async fn cmd_task_delete(
     task_state.delete(&id).await?;
     if let Some(thought_id) = source_thought_id {
         if let Err(e) = thought_state.unlink_task(&thought_id, &id).await {
-            ulog_warn!("[task] deleted {} but thought unlink_task failed: {}", id, e);
+            ulog_warn!(
+                "[task] deleted {} but thought unlink_task failed: {}",
+                id,
+                e
+            );
         }
     }
     Ok(())
@@ -3366,8 +3339,8 @@ mod tests {
     #[test]
     fn transition_table_rejects_bad_paths() {
         use TaskStatus::*;
-        assert!(!is_transition_legal(Todo, Done));        // no skipping run
-        assert!(!is_transition_legal(Todo, Archived));    // archive only from done
+        assert!(!is_transition_legal(Todo, Done)); // no skipping run
+        assert!(!is_transition_legal(Todo, Archived)); // archive only from done
         assert!(!is_transition_legal(Blocked, Archived)); // must reset first
         assert!(!is_transition_legal(Stopped, Archived));
         assert!(!is_transition_legal(Running, Archived));
@@ -3688,12 +3661,8 @@ mod tests {
         .is_ok());
 
         // 3. providerId without model — rejected (cross-provider misroute risk).
-        let err = validate_task_provider_routing(
-            &Some("openai-x".into()),
-            &None,
-            &None,
-        )
-        .unwrap_err();
+        let err =
+            validate_task_provider_routing(&Some("openai-x".into()), &None, &None).unwrap_err();
         assert!(err.contains("providerId"), "got: {}", err);
         assert!(err.contains("model"), "got: {}", err);
 
@@ -3710,21 +3679,13 @@ mod tests {
         }
 
         // 5. Legacy `model`-only (pre-0.2.9 task) — accepted as FollowAgent.
-        assert!(validate_task_provider_routing(
-            &None,
-            &Some("legacy-model".into()),
-            &None,
-        )
-        .is_ok());
+        assert!(
+            validate_task_provider_routing(&None, &Some("legacy-model".into()), &None,).is_ok()
+        );
 
         // 6. External runtime without provider override — accepted (the
         //    common case for codex/gemini/cc tasks).
-        assert!(validate_task_provider_routing(
-            &None,
-            &None,
-            &Some("codex".into()),
-        )
-        .is_ok());
+        assert!(validate_task_provider_routing(&None, &None, &Some("codex".into()),).is_ok());
     }
 
     /// PRD 0.2.9 — verify `pin_runtime_for_provider_id` materialises
@@ -3813,8 +3774,7 @@ mod tests {
     async fn status_filter_accepts_single_or_array() {
         use serde_json::json;
         // Single value
-        let f: TaskListFilter =
-            serde_json::from_value(json!({"status": "running"})).unwrap();
+        let f: TaskListFilter = serde_json::from_value(json!({"status": "running"})).unwrap();
         assert!(f.status.is_some());
         // Array of values
         let f: TaskListFilter =
@@ -3882,7 +3842,10 @@ mod tests {
         store.append_session(&created.id, "sess-1").await.unwrap();
         store.append_session(&created.id, "sess-2").await.unwrap();
         let reloaded = store.get(&created.id).await.unwrap();
-        assert_eq!(reloaded.session_ids, vec!["sess-1".to_string(), "sess-2".to_string()]);
+        assert_eq!(
+            reloaded.session_ids,
+            vec!["sess-1".to_string(), "sess-2".to_string()]
+        );
     }
 
     // Removed `update_progress_appends_to_file` test: targeted `TaskStore::update_progress`

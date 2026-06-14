@@ -22,12 +22,12 @@ use tokio::sync::RwLock;
 use tokio::time::Duration;
 use uuid::Uuid;
 
+use crate::sidecar::{
+    ensure_session_sidecar, execute_cron_task, release_session_sidecar, CronExecutePayload,
+    ManagedSidecarManager, ProviderEnv, SidecarOwner,
+};
 use crate::utils::bom::strip_bom;
 use crate::{ulog_debug, ulog_error, ulog_info, ulog_warn};
-use crate::sidecar::{
-    execute_cron_task, CronExecutePayload, ManagedSidecarManager, ProviderEnv,
-    SidecarOwner, ensure_session_sidecar, release_session_sidecar,
-};
 
 /// Normalize a path for comparison across persisted and caller-supplied forms.
 /// Cron tasks may be stored with POSIX separators while Windows callers query
@@ -69,8 +69,7 @@ pub(crate) fn normalize_path(path: &str) -> String {
     }
 
     let is_windows_identity =
-        (normalized.len() >= 2 && normalized.as_bytes()[1] == b':')
-        || normalized.starts_with("//");
+        (normalized.len() >= 2 && normalized.as_bytes()[1] == b':') || normalized.starts_with("//");
     if is_windows_identity {
         normalized = normalized.to_lowercase();
     }
@@ -234,20 +233,34 @@ fn next_cron_fire_time(expr: &str, tz: Option<&str>) -> Result<DateTime<Utc>, St
             5 => {
                 // Unix 5-field: translate DOW (the 5th field) from Unix to crate semantics.
                 let dow_translated = translate_unix_dow_to_crate_dow(fields[4]);
-                format!("0 {} {} {} {} {} *", fields[0], fields[1], fields[2], fields[3], dow_translated)
+                format!(
+                    "0 {} {} {} {} {} *",
+                    fields[0], fields[1], fields[2], fields[3], dow_translated
+                )
             }
-            6 => format!("{} *", expr.trim()),     // crate-native 6-field (sec min hour dom month dow) — append year
-            7 => expr.trim().to_string(),            // already full 7-field
-            _ => return Err(format!("Invalid cron expression '{}': expected 5-7 fields, got {}", expr, fields.len())),
+            6 => format!("{} *", expr.trim()), // crate-native 6-field (sec min hour dom month dow) — append year
+            7 => expr.trim().to_string(),      // already full 7-field
+            _ => {
+                return Err(format!(
+                    "Invalid cron expression '{}': expected 5-7 fields, got {}",
+                    expr,
+                    fields.len()
+                ))
+            }
         }
     };
 
-    let schedule = CronExprSchedule::from_str(&expr7)
-        .map_err(|e| format!("Failed to parse cron expression '{}' (normalized: '{}'): {}", expr, expr7, e))?;
+    let schedule = CronExprSchedule::from_str(&expr7).map_err(|e| {
+        format!(
+            "Failed to parse cron expression '{}' (normalized: '{}'): {}",
+            expr, expr7, e
+        )
+    })?;
 
     // Resolve timezone
     let now = if let Some(tz_str) = tz {
-        let tz: chrono_tz::Tz = tz_str.parse()
+        let tz: chrono_tz::Tz = tz_str
+            .parse()
             .map_err(|_| format!("Invalid timezone '{}' for cron expression", tz_str))?;
         Utc::now().with_timezone(&tz)
     } else {
@@ -255,7 +268,9 @@ fn next_cron_fire_time(expr: &str, tz: Option<&str>) -> Result<DateTime<Utc>, St
         Utc::now().with_timezone(&chrono_tz::UTC)
     };
 
-    let next = schedule.after(&now).next()
+    let next = schedule
+        .after(&now)
+        .next()
         .ok_or_else(|| format!("No upcoming fire time for cron expression '{}'", expr))?;
 
     Ok(next.with_timezone(&Utc))
@@ -282,7 +297,10 @@ async fn sleep_until_wallclock(
         }
         // Check shutdown flag
         if *shutdown.read().await {
-            ulog_info!("[CronTask] Task {} wallclock sleep interrupted by shutdown", task_id);
+            ulog_info!(
+                "[CronTask] Task {} wallclock sleep interrupted by shutdown",
+                task_id
+            );
             return false;
         }
         // Sleep for min(remaining, POLL_SECS) — short sleeps survive system suspend
@@ -310,7 +328,9 @@ async fn atomic_save_tasks(
     };
     // Lock released here
 
-    let store = CronTaskStore { tasks: tasks_snapshot };
+    let store = CronTaskStore {
+        tasks: tasks_snapshot,
+    };
     let task_count = store.tasks.len();
 
     let content = serde_json::to_string_pretty(&store)
@@ -492,7 +512,11 @@ pub enum CronSchedule {
     /// One-shot: execute at a specific time, then stop
     At { at: String },
     /// Recurring interval in minutes, with optional delayed start
-    Every { minutes: u32, #[serde(default, skip_serializing_if = "Option::is_none")] start_at: Option<String> },
+    Every {
+        minutes: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        start_at: Option<String>,
+    },
     /// Cron expression with optional timezone
     Cron { expr: String, tz: Option<String> },
     /// Ralph Loop: completion-triggered re-execution (no time-based scheduling)
@@ -733,11 +757,11 @@ const TERMINAL_STOP_SENTINEL: &str = "__TERMINAL_STOP__:";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CronRunRecord {
-    pub ts: i64,                    // Unix timestamp (ms)
-    pub ok: bool,                   // Whether execution succeeded
-    pub duration_ms: u64,           // Execution duration
-    pub content: Option<String>,    // AI output text (delivery content)
-    pub error: Option<String>,      // Error message on failure
+    pub ts: i64,                 // Unix timestamp (ms)
+    pub ok: bool,                // Whether execution succeeded
+    pub duration_ms: u64,        // Execution duration
+    pub content: Option<String>, // AI output text (delivery content)
+    pub error: Option<String>,   // Error message on failure
 }
 
 /// PRD 0.2.5 R4 — return shape for `trigger_now()`. Echoed back to the
@@ -752,9 +776,7 @@ pub struct TriggerNowInfo {
 
 /// Sanitize task_id to prevent path traversal (remove path separators and dots sequences)
 fn sanitize_task_id(task_id: &str) -> String {
-    task_id
-        .replace(['/', '\\', '\0'], "")
-        .replace("..", "")
+    task_id.replace(['/', '\\', '\0'], "").replace("..", "")
 }
 
 /// Get the JSONL file path for a task's run records
@@ -772,8 +794,7 @@ fn run_record_path(task_id: &str) -> PathBuf {
 pub fn record_cron_run(task_id: &str, record: &CronRunRecord) -> Result<(), String> {
     let path = run_record_path(task_id);
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("Failed to create cron_runs dir: {}", e))?;
+        fs::create_dir_all(parent).map_err(|e| format!("Failed to create cron_runs dir: {}", e))?;
     }
 
     let line = serde_json::to_string(record)
@@ -951,21 +972,17 @@ fn compute_next_execution(task: &CronTask) -> Option<String> {
             }
             // First ever run with no last_executed_at → scheduler fires +2s.
             if task.execution_count == 0 && task.last_executed_at.is_none() {
-                return Some(
-                    (Utc::now() + chrono::Duration::seconds(2)).to_rfc3339(),
-                );
+                return Some((Utc::now() + chrono::Duration::seconds(2)).to_rfc3339());
             }
             let base = task.last_executed_at.unwrap_or(task.created_at);
             let next = base + chrono::Duration::minutes(*minutes as i64);
             // Past-due (catch-up after sleep) → scheduler fires +5s.
             Some(clamp_forward(next, 5).to_rfc3339())
         }
-        Some(CronSchedule::Cron { expr, tz }) => {
-            match next_cron_fire_time(expr, tz.as_deref()) {
-                Ok(next) => Some(next.to_rfc3339()),
-                Err(_) => None,
-            }
-        }
+        Some(CronSchedule::Cron { expr, tz }) => match next_cron_fire_time(expr, tz.as_deref()) {
+            Ok(next) => Some(next.to_rfc3339()),
+            Err(_) => None,
+        },
         Some(CronSchedule::Loop) => {
             // Ralph Loop: no scheduled time, triggered by completion
             None
@@ -973,9 +990,7 @@ fn compute_next_execution(task: &CronTask) -> Option<String> {
         None => {
             // Legacy: use interval_minutes — same cold-start clamp as `Every`.
             if task.execution_count == 0 && task.last_executed_at.is_none() {
-                return Some(
-                    (Utc::now() + chrono::Duration::seconds(2)).to_rfc3339(),
-                );
+                return Some((Utc::now() + chrono::Duration::seconds(2)).to_rfc3339());
             }
             let base = task.last_executed_at.unwrap_or(task.created_at);
             let next = base + chrono::Duration::minutes(task.interval_minutes as i64);
@@ -1101,11 +1116,8 @@ impl CronTaskManager {
         // Try whole-store deserialization first (fast path)
         match serde_json::from_str::<CronTaskStore>(content_no_bom) {
             Ok(store) => {
-                let result: HashMap<String, CronTask> = store
-                    .tasks
-                    .into_iter()
-                    .map(|t| (t.id.clone(), t))
-                    .collect();
+                let result: HashMap<String, CronTask> =
+                    store.tasks.into_iter().map(|t| (t.id.clone(), t)).collect();
                 // PRD 0.2.9 R9 — Count tasks still carrying the deprecated
                 // `provider_env` snapshot (apiKey + baseUrl frozen at create
                 // time). The sidecar live-resolves provider_id on every tick
@@ -1124,7 +1136,10 @@ impl CronTaskManager {
                 return result;
             }
             Err(e) => {
-                ulog_warn!("[CronTask] Whole-store parse failed ({}), trying per-task fallback", e);
+                ulog_warn!(
+                    "[CronTask] Whole-store parse failed ({}), trying per-task fallback",
+                    e
+                );
             }
         }
 
@@ -1132,7 +1147,10 @@ impl CronTaskManager {
         let raw: serde_json::Value = match serde_json::from_str(content_no_bom) {
             Ok(v) => v,
             Err(e) => {
-                ulog_warn!("[CronTask] Failed to parse cron tasks as JSON at all: {}", e);
+                ulog_warn!(
+                    "[CronTask] Failed to parse cron tasks as JSON at all: {}",
+                    e
+                );
                 return HashMap::new();
             }
         };
@@ -1153,12 +1171,15 @@ impl CronTaskManager {
                     result.insert(task.id.clone(), task);
                 }
                 Err(e) => {
-                    let task_id = task_val.get("id")
+                    let task_id = task_val
+                        .get("id")
                         .and_then(|v| v.as_str())
                         .unwrap_or("unknown");
                     ulog_warn!(
                         "[CronTask] Skipping corrupted task[{}] id={}: {}",
-                        i, task_id, e
+                        i,
+                        task_id,
+                        e
                     );
                     skipped += 1;
                 }
@@ -1168,7 +1189,8 @@ impl CronTaskManager {
         if skipped > 0 {
             ulog_warn!(
                 "[CronTask] Per-task fallback: loaded {} tasks, skipped {} corrupted",
-                result.len(), skipped
+                result.len(),
+                skipped
             );
         }
 
@@ -1186,7 +1208,9 @@ impl CronTaskManager {
     /// Start the scheduler for a task
     /// This spawns a background tokio task that directly executes via Sidecar at intervals
     pub async fn start_task_scheduler(&self, task_id: &str) -> Result<(), String> {
-        let task = self.get_task(task_id).await
+        let task = self
+            .get_task(task_id)
+            .await
             .ok_or_else(|| format!("Task not found: {}", task_id))?;
 
         if task.status != TaskStatus::Running {
@@ -1223,7 +1247,10 @@ impl CronTaskManager {
             // `is_finished` lives on the inner one (the wrapper exposes Future +
             // `abort()` only).
             if !existing.inner().is_finished() {
-                ulog_info!("[CronTask] Scheduler already running for task {}, skipping", task_id);
+                ulog_info!(
+                    "[CronTask] Scheduler already running for task {}, skipping",
+                    task_id
+                );
                 return Ok(());
             }
             // Stale: previous tokio task panicked / aborted / returned early
@@ -1259,12 +1286,18 @@ impl CronTaskManager {
 
         // Spawn the scheduler loop and store the JoinHandle for graceful shutdown
         let handle = tauri::async_runtime::spawn(async move {
-            ulog_info!("[CronTask] Scheduler started for task {} (interval: {} min, executions: {})", task_id_owned, interval_mins, execution_count);
+            ulog_info!(
+                "[CronTask] Scheduler started for task {} (interval: {} min, executions: {})",
+                task_id_owned,
+                interval_mins,
+                execution_count
+            );
 
             // Wait for app_handle to be available (with timeout)
             // This handles the race condition where scheduler starts before initialize_cron_manager completes
             let mut app_handle_ready = false;
-            for i in 0..50 {  // 5 seconds max wait (50 * 100ms)
+            for i in 0..50 {
+                // 5 seconds max wait (50 * 100ms)
                 let handle_opt = app_handle.read().await;
                 if handle_opt.is_some() {
                     app_handle_ready = true;
@@ -1272,7 +1305,10 @@ impl CronTaskManager {
                 }
                 drop(handle_opt);
                 if i == 0 {
-                    ulog_warn!("[CronTask] App handle not ready for task {}, waiting...", task_id_owned);
+                    ulog_warn!(
+                        "[CronTask] App handle not ready for task {}, waiting...",
+                        task_id_owned
+                    );
                 }
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
@@ -1291,11 +1327,14 @@ impl CronTaskManager {
             {
                 let handle_opt = app_handle.read().await;
                 if let Some(ref handle) = *handle_opt {
-                    let _ = handle.emit("cron:scheduler-started", serde_json::json!({
-                        "taskId": task_id_owned,
-                        "intervalMinutes": interval_mins,
-                        "executionCount": execution_count
-                    }));
+                    let _ = handle.emit(
+                        "cron:scheduler-started",
+                        serde_json::json!({
+                            "taskId": task_id_owned,
+                            "intervalMinutes": interval_mins,
+                            "executionCount": execution_count
+                        }),
+                    );
                 }
             }
 
@@ -1316,16 +1355,26 @@ impl CronTaskManager {
             // during system sleep/suspend.
             let initial_target: Option<DateTime<Utc>> = if is_loop {
                 // Ralph Loop: execute immediately (2s startup delay)
-                ulog_info!("[CronTask] Task {} Ralph Loop mode, executing in 2 seconds", task_id_owned);
+                ulog_info!(
+                    "[CronTask] Task {} Ralph Loop mode, executing in 2 seconds",
+                    task_id_owned
+                );
                 Some(Utc::now() + chrono::Duration::seconds(2))
             } else if let Some(CronSchedule::At { ref at }) = schedule {
                 // One-shot: target is the specified time
-                match DateTime::parse_from_rfc3339(at).or_else(|_| DateTime::parse_from_str(at, "%Y-%m-%dT%H:%M:%S")) {
+                match DateTime::parse_from_rfc3339(at)
+                    .or_else(|_| DateTime::parse_from_str(at, "%Y-%m-%dT%H:%M:%S"))
+                {
                     Ok(target) => {
                         let target_utc = target.with_timezone(&Utc);
                         let now = Utc::now();
                         if target_utc > now {
-                            ulog_info!("[CronTask] Task {} scheduled at {}, waiting {} seconds", task_id_owned, at, (target_utc - now).num_seconds());
+                            ulog_info!(
+                                "[CronTask] Task {} scheduled at {}, waiting {} seconds",
+                                task_id_owned,
+                                at,
+                                (target_utc - now).num_seconds()
+                            );
                             Some(target_utc)
                         } else {
                             ulog_info!("[CronTask] Task {} target time {} already passed, executing immediately", task_id_owned, at);
@@ -1333,7 +1382,12 @@ impl CronTaskManager {
                         }
                     }
                     Err(e) => {
-                        ulog_warn!("[CronTask] Task {} invalid 'at' time '{}': {}, executing in 2s", task_id_owned, at, e);
+                        ulog_warn!(
+                            "[CronTask] Task {} invalid 'at' time '{}': {}, executing in 2s",
+                            task_id_owned,
+                            at,
+                            e
+                        );
                         Some(Utc::now() + chrono::Duration::seconds(2))
                     }
                 }
@@ -1346,7 +1400,11 @@ impl CronTaskManager {
                         Some(target)
                     }
                     Err(e) => {
-                        ulog_error!("[CronTask] Task {} invalid cron config: {}, stopping scheduler", task_id_owned, e);
+                        ulog_error!(
+                            "[CronTask] Task {} invalid cron config: {}, stopping scheduler",
+                            task_id_owned,
+                            e
+                        );
                         {
                             let mut active = active_schedulers.write().await;
                             active.remove(&task_id_owned);
@@ -1354,7 +1412,11 @@ impl CronTaskManager {
                         return;
                     }
                 }
-            } else if let Some(CronSchedule::Every { start_at: Some(ref sa), .. }) = schedule {
+            } else if let Some(CronSchedule::Every {
+                start_at: Some(ref sa),
+                ..
+            }) = schedule
+            {
                 // Every with start_at: wait until the specified start time for first execution
                 if execution_count == 0 {
                     match DateTime::parse_from_rfc3339(sa) {
@@ -1362,7 +1424,12 @@ impl CronTaskManager {
                             let target_utc = target.with_timezone(&Utc);
                             let now = Utc::now();
                             if target_utc > now {
-                                ulog_info!("[CronTask] Task {} delayed start at {}, waiting {} seconds", task_id_owned, sa, (target_utc - now).num_seconds());
+                                ulog_info!(
+                                    "[CronTask] Task {} delayed start at {}, waiting {} seconds",
+                                    task_id_owned,
+                                    sa,
+                                    (target_utc - now).num_seconds()
+                                );
                                 Some(target_utc)
                             } else {
                                 ulog_info!("[CronTask] Task {} start time {} already passed, executing in 2 seconds", task_id_owned, sa);
@@ -1370,7 +1437,11 @@ impl CronTaskManager {
                             }
                         }
                         Err(_) => {
-                            ulog_warn!("[CronTask] Task {} invalid start_at '{}', starting in 2 seconds", task_id_owned, sa);
+                            ulog_warn!(
+                                "[CronTask] Task {} invalid start_at '{}', starting in 2 seconds",
+                                task_id_owned,
+                                sa
+                            );
                             Some(Utc::now() + chrono::Duration::seconds(2))
                         }
                     }
@@ -1381,7 +1452,10 @@ impl CronTaskManager {
                     Some(Utc::now() + chrono::Duration::seconds(2))
                 }
             } else if execution_count == 0 {
-                ulog_info!("[CronTask] Task {} first execution, starting in 2 seconds", task_id_owned);
+                ulog_info!(
+                    "[CronTask] Task {} first execution, starting in 2 seconds",
+                    task_id_owned
+                );
                 Some(Utc::now() + chrono::Duration::seconds(2))
             } else if let Some(last_exec) = last_executed {
                 let next_exec = last_exec + chrono::Duration::seconds(interval_secs);
@@ -1391,11 +1465,18 @@ impl CronTaskManager {
                         task_id_owned, next_exec, (next_exec - now).num_seconds());
                     Some(next_exec)
                 } else {
-                    ulog_info!("[CronTask] Task {} is past due, executing in 5 seconds", task_id_owned);
+                    ulog_info!(
+                        "[CronTask] Task {} is past due, executing in 5 seconds",
+                        task_id_owned
+                    );
                     Some(now + chrono::Duration::seconds(5))
                 }
             } else {
-                ulog_info!("[CronTask] Task {} no lastExecutedAt but count={}, waiting full interval", task_id_owned, execution_count);
+                ulog_info!(
+                    "[CronTask] Task {} no lastExecutedAt but count={}, waiting full interval",
+                    task_id_owned,
+                    execution_count
+                );
                 Some(Utc::now() + chrono::Duration::seconds(interval_secs))
             };
 
@@ -1413,7 +1494,6 @@ impl CronTaskManager {
             }
 
             loop {
-
                 // Check shutdown flag
                 {
                     let shutdown_flag = shutdown.read().await;
@@ -1432,21 +1512,31 @@ impl CronTaskManager {
                 let task = match task_opt {
                     Some(t) => t,
                     None => {
-                        ulog_info!("[CronTask] Task {} no longer exists, stopping scheduler", task_id_owned);
+                        ulog_info!(
+                            "[CronTask] Task {} no longer exists, stopping scheduler",
+                            task_id_owned
+                        );
                         break;
                     }
                 };
 
                 // Only execute if task is still running
                 if task.status != TaskStatus::Running {
-                    ulog_info!("[CronTask] Task {} status changed to {:?}, stopping scheduler", task_id_owned, task.status);
+                    ulog_info!(
+                        "[CronTask] Task {} status changed to {:?}, stopping scheduler",
+                        task_id_owned,
+                        task.status
+                    );
                     break;
                 }
 
                 // Check end conditions before execution
                 let should_complete = check_end_conditions_static(&task);
                 if should_complete {
-                    ulog_info!("[CronTask] Task {} reached end condition, completing", task_id_owned);
+                    ulog_info!(
+                        "[CronTask] Task {} reached end condition, completing",
+                        task_id_owned
+                    );
                     // Complete task and deactivate session
                     if let Some(ref handle) = *app_handle.read().await {
                         stop_task_internal(handle, &tasks, &task_id_owned, None).await;
@@ -1462,7 +1552,10 @@ impl CronTaskManager {
                 };
 
                 let Some(handle) = handle_opt else {
-                    ulog_error!("[CronTask] No app handle available for task {}, will retry next interval", task_id_owned);
+                    ulog_error!(
+                        "[CronTask] No app handle available for task {}, will retry next interval",
+                        task_id_owned
+                    );
                     // Short wait before retrying (prevents tight loop)
                     tokio::time::sleep(Duration::from_secs(30)).await;
                     continue;
@@ -1481,45 +1574,68 @@ impl CronTaskManager {
                     }
                 };
                 if !reserved {
-                    ulog_warn!("[CronTask] Task {} is still executing, skipping this interval", task_id_owned);
+                    ulog_warn!(
+                        "[CronTask] Task {} is still executing, skipping this interval",
+                        task_id_owned
+                    );
                     tokio::time::sleep(Duration::from_secs(30)).await;
                     continue;
                 }
 
                 let is_first = task.execution_count == 0;
-                ulog_info!("[CronTask] Executing task {} (execution #{})", task_id_owned, task.execution_count + 1);
+                ulog_info!(
+                    "[CronTask] Executing task {} (execution #{})",
+                    task_id_owned,
+                    task.execution_count + 1
+                );
 
                 // Emit execution starting event to frontend
-                let _ = handle.emit("cron:execution-starting", serde_json::json!({
-                    "taskId": task_id_owned,
-                    "executionNumber": task.execution_count + 1,
-                    "isFirstExecution": is_first
-                }));
+                let _ = handle.emit(
+                    "cron:execution-starting",
+                    serde_json::json!({
+                        "taskId": task_id_owned,
+                        "executionNumber": task.execution_count + 1,
+                        "isFirstExecution": is_first
+                    }),
+                );
 
-                ulog_info!("[CronTask] About to call execute_task_directly for task {}", task_id_owned);
+                ulog_info!(
+                    "[CronTask] About to call execute_task_directly for task {}",
+                    task_id_owned
+                );
 
                 // Emit debug event for frontend visibility
-                let _ = handle.emit("cron:debug", serde_json::json!({
-                    "taskId": task_id_owned,
-                    "message": "About to call execute_task_directly"
-                }));
+                let _ = handle.emit(
+                    "cron:debug",
+                    serde_json::json!({
+                        "taskId": task_id_owned,
+                        "message": "About to call execute_task_directly"
+                    }),
+                );
 
                 // Execute directly via Sidecar with timeout to prevent indefinite hanging
                 let exec_start = std::time::Instant::now();
                 let execution_result = tokio::time::timeout(
                     Duration::from_secs(3600), // 60 minutes timeout
-                    execute_task_directly(&handle, &task, is_first)
-                ).await;
+                    execute_task_directly(&handle, &task, is_first),
+                )
+                .await;
 
                 let execution_result = match execution_result {
                     Ok(result) => result,
                     Err(_) => {
-                        ulog_error!("[CronTask] Task {} execution timed out after 60 minutes", task_id_owned);
-                        let _ = handle.emit("cron:debug", serde_json::json!({
-                            "taskId": task_id_owned,
-                            "message": "Execution timed out after 60 minutes",
-                            "error": true
-                        }));
+                        ulog_error!(
+                            "[CronTask] Task {} execution timed out after 60 minutes",
+                            task_id_owned
+                        );
+                        let _ = handle.emit(
+                            "cron:debug",
+                            serde_json::json!({
+                                "taskId": task_id_owned,
+                                "message": "Execution timed out after 60 minutes",
+                                "error": true
+                            }),
+                        );
                         Err("Execution timed out".to_string())
                     }
                 };
@@ -1531,7 +1647,8 @@ impl CronTaskManager {
                 // Detect graceful terminal-state short-circuit (H2 sentinel).
                 // Pulled out of the match below so every side-effect arm can
                 // short-circuit uniformly without re-parsing the prefix.
-                let terminal_stop = matches!(&execution_result, Err(e) if e.starts_with(TERMINAL_STOP_SENTINEL));
+                let terminal_stop =
+                    matches!(&execution_result, Err(e) if e.starts_with(TERMINAL_STOP_SENTINEL));
 
                 // PRD 0.2.5 cross-review C5 — if the task was deleted while
                 // this tick was in flight, skip the JSONL write so we don't
@@ -1555,7 +1672,8 @@ impl CronTaskManager {
                             content: output_text.as_ref().map(|t| {
                                 if t.len() > MAX_CONTENT_LEN {
                                     // Find a valid UTF-8 boundary near the limit
-                                    let end = t.char_indices()
+                                    let end = t
+                                        .char_indices()
                                         .take_while(|(i, _)| *i < MAX_CONTENT_LEN)
                                         .last()
                                         .map(|(i, c)| i + c.len_utf8())
@@ -1572,7 +1690,10 @@ impl CronTaskManager {
                                 ulog_warn!("[CronTask] Failed to record run: {}", e);
                             }
                         } else {
-                            ulog_info!("[CronTask] Skip recording run for deleted task {}", task_id_owned);
+                            ulog_info!(
+                                "[CronTask] Skip recording run for deleted task {}",
+                                task_id_owned
+                            );
                         }
                     }
                     Err(_) if terminal_stop => {
@@ -1610,12 +1731,19 @@ impl CronTaskManager {
                         // redundant failure.
                     }
                     Err(ref e) => {
-                        ulog_warn!("[CronTask] execute_task_directly failed for task {}: {}", task_id_owned, e);
-                        let _ = handle.emit("cron:debug", serde_json::json!({
-                            "taskId": task_id_owned,
-                            "message": format!("execute_task_directly failed: {}", e),
-                            "error": true
-                        }));
+                        ulog_warn!(
+                            "[CronTask] execute_task_directly failed for task {}: {}",
+                            task_id_owned,
+                            e
+                        );
+                        let _ = handle.emit(
+                            "cron:debug",
+                            serde_json::json!({
+                                "taskId": task_id_owned,
+                                "message": format!("execute_task_directly failed: {}", e),
+                                "error": true
+                            }),
+                        );
                     }
                 }
 
@@ -1660,12 +1788,22 @@ impl CronTaskManager {
                                 loop_consecutive_failures += 1;
                                 if loop_consecutive_failures >= 10 {
                                     ulog_error!("[CronTask] Task {} Ralph Loop: 10 consecutive failures (logical), stopping", task_id_owned);
-                                    stop_task_internal(&handle, &tasks, &task_id_owned,
-                                        Some("Ralph Loop: 10 consecutive failures".to_string())).await;
+                                    stop_task_internal(
+                                        &handle,
+                                        &tasks,
+                                        &task_id_owned,
+                                        Some("Ralph Loop: 10 consecutive failures".to_string()),
+                                    )
+                                    .await;
                                     break;
                                 }
                                 let backoff_secs = match loop_consecutive_failures {
-                                    1 => 3, 2 => 10, 3 => 30, 4 => 60, 5 => 120, _ => 300,
+                                    1 => 3,
+                                    2 => 10,
+                                    3 => 30,
+                                    4 => 60,
+                                    5 => 120,
+                                    _ => 300,
                                 };
                                 ulog_warn!("[CronTask] Task {} Ralph Loop: logical failure #{}, backoff {}s",
                                     task_id_owned, loop_consecutive_failures, backoff_secs);
@@ -1676,21 +1814,30 @@ impl CronTaskManager {
                         // (one-shot, AI exit, end condition, and normal continue)
                         // Must happen before any break so frontend always gets the update
                         ulog_info!("[CronTask] Emitting cron:execution-complete for task {} with executionCount={}", task_id_owned, updated_execution_count);
-                        let _ = handle.emit("cron:execution-complete", serde_json::json!({
-                            "taskId": task_id_owned,
-                            "success": success,
-                            "executionCount": updated_execution_count,
-                            "internalSessionId": internal_sid
-                        }));
+                        let _ = handle.emit(
+                            "cron:execution-complete",
+                            serde_json::json!({
+                                "taskId": task_id_owned,
+                                "success": success,
+                                "executionCount": updated_execution_count,
+                                "internalSessionId": internal_sid
+                            }),
+                        );
 
                         // Deliver results to IM Bot + wake heartbeat (v0.1.21)
                         // Use actual AI output when available, fallback to generic summary
                         if let Some(ref delivery) = task.delivery {
                             let content = output_text.unwrap_or_else(|| {
                                 if success {
-                                    format!("Cron task '{}' completed successfully.", task.name.as_deref().unwrap_or(&task_id_owned))
+                                    format!(
+                                        "Cron task '{}' completed successfully.",
+                                        task.name.as_deref().unwrap_or(&task_id_owned)
+                                    )
                                 } else {
-                                    format!("Cron task '{}' completed with issues.", task.name.as_deref().unwrap_or(&task_id_owned))
+                                    format!(
+                                        "Cron task '{}' completed with issues.",
+                                        task.name.as_deref().unwrap_or(&task_id_owned)
+                                    )
                                 }
                             });
                             // Pass the run's actual session id (not a re-read of
@@ -1698,12 +1845,23 @@ impl CronTaskManager {
                             // rotated session_id between L1588 (executing cleared)
                             // and here can't smuggle the wrong id into the
                             // follow-up envelope. #225 review (Codex).
-                            deliver_cron_result_to_bot(&handle, delivery, &task_id_owned, &content, internal_sid.as_deref()).await;
+                            deliver_cron_result_to_bot(
+                                &handle,
+                                delivery,
+                                &task_id_owned,
+                                &content,
+                                internal_sid.as_deref(),
+                            )
+                            .await;
                         }
 
                         // Check if AI requested exit
                         if let Some(reason) = ai_exit_reason {
-                            ulog_info!("[CronTask] Task {} AI requested exit: {}", task_id_owned, reason);
+                            ulog_info!(
+                                "[CronTask] Task {} AI requested exit: {}",
+                                task_id_owned,
+                                reason
+                            );
                             stop_task_internal(&handle, &tasks, &task_id_owned, Some(reason)).await;
                             break;
                         }
@@ -1711,7 +1869,13 @@ impl CronTaskManager {
                         // One-shot tasks (CronSchedule::At) auto-delete after first execution
                         if is_one_shot {
                             ulog_info!("[CronTask] Task {} is one-shot (schedule::at), auto-deleting after execution", task_id_owned);
-                            stop_task_internal(&handle, &tasks, &task_id_owned, Some("One-shot task completed".to_string())).await;
+                            stop_task_internal(
+                                &handle,
+                                &tasks,
+                                &task_id_owned,
+                                Some("One-shot task completed".to_string()),
+                            )
+                            .await;
                             // Remove from persistence (CT-08: one-shot tasks auto-delete)
                             {
                                 let mut tasks_guard = tasks.write().await;
@@ -1719,7 +1883,10 @@ impl CronTaskManager {
                             }
                             let manager = get_cron_task_manager();
                             if let Err(e) = manager.save_to_disk().await {
-                                ulog_warn!("[CronTask] Failed to save after one-shot deletion: {}", e);
+                                ulog_warn!(
+                                    "[CronTask] Failed to save after one-shot deletion: {}",
+                                    e
+                                );
                             }
                             break;
                         }
@@ -1727,12 +1894,16 @@ impl CronTaskManager {
                         // Check end conditions after execution
                         let should_stop = {
                             let tasks_guard = tasks.read().await;
-                            tasks_guard.get(&task_id_owned)
+                            tasks_guard
+                                .get(&task_id_owned)
                                 .map(|t| check_end_conditions_static(t))
                                 .unwrap_or(false)
                         };
                         if should_stop {
-                            ulog_info!("[CronTask] Task {} reached end condition after execution", task_id_owned);
+                            ulog_info!(
+                                "[CronTask] Task {} reached end condition after execution",
+                                task_id_owned
+                            );
                             stop_task_internal(&handle, &tasks, &task_id_owned, None).await;
                             break;
                         }
@@ -1765,28 +1936,51 @@ impl CronTaskManager {
                             }
                         }
                         // Emit error event for frontend
-                        let _ = handle.emit("cron:execution-error", serde_json::json!({
-                            "taskId": task_id_owned,
-                            "error": e
-                        }));
+                        let _ = handle.emit(
+                            "cron:execution-error",
+                            serde_json::json!({
+                                "taskId": task_id_owned,
+                                "error": e
+                            }),
+                        );
 
                         // Ralph Loop: exponential backoff on failure (3→10→30→60→120→300s, max 10 consecutive)
                         if is_loop {
                             loop_consecutive_failures += 1;
                             if loop_consecutive_failures >= 10 {
                                 ulog_error!("[CronTask] Task {} Ralph Loop: 10 consecutive failures, stopping", task_id_owned);
-                                stop_task_internal(&handle, &tasks, &task_id_owned,
-                                    Some("Ralph Loop: 10 consecutive failures".to_string())).await;
+                                stop_task_internal(
+                                    &handle,
+                                    &tasks,
+                                    &task_id_owned,
+                                    Some("Ralph Loop: 10 consecutive failures".to_string()),
+                                )
+                                .await;
                                 break;
                             }
                             let backoff_secs = match loop_consecutive_failures {
-                                1 => 3, 2 => 10, 3 => 30, 4 => 60, 5 => 120, _ => 300,
+                                1 => 3,
+                                2 => 10,
+                                3 => 30,
+                                4 => 60,
+                                5 => 120,
+                                _ => 300,
                             };
-                            ulog_warn!("[CronTask] Task {} Ralph Loop: failure #{}, backoff {}s",
-                                task_id_owned, loop_consecutive_failures, backoff_secs);
-                            let backoff_target = Utc::now() + chrono::Duration::seconds(backoff_secs as i64);
-                            if !sleep_until_wallclock(backoff_target, &shutdown, &task_id_owned).await {
-                                ulog_info!("[CronTask] Task {} shutdown during Loop backoff", task_id_owned);
+                            ulog_warn!(
+                                "[CronTask] Task {} Ralph Loop: failure #{}, backoff {}s",
+                                task_id_owned,
+                                loop_consecutive_failures,
+                                backoff_secs
+                            );
+                            let backoff_target =
+                                Utc::now() + chrono::Duration::seconds(backoff_secs as i64);
+                            if !sleep_until_wallclock(backoff_target, &shutdown, &task_id_owned)
+                                .await
+                            {
+                                ulog_info!(
+                                    "[CronTask] Task {} shutdown during Loop backoff",
+                                    task_id_owned
+                                );
                                 break;
                             }
                         }
@@ -1801,10 +1995,16 @@ impl CronTaskManager {
 
                 // Ralph Loop: skip time-based scheduling, re-execute after 3s buffer
                 if is_loop {
-                    ulog_info!("[CronTask] Task {} Ralph Loop: next execution in 3 seconds", task_id_owned);
+                    ulog_info!(
+                        "[CronTask] Task {} Ralph Loop: next execution in 3 seconds",
+                        task_id_owned
+                    );
                     let buffer_target = Utc::now() + chrono::Duration::seconds(3);
                     if !sleep_until_wallclock(buffer_target, &shutdown, &task_id_owned).await {
-                        ulog_info!("[CronTask] Task {} shutdown during Loop buffer", task_id_owned);
+                        ulog_info!(
+                            "[CronTask] Task {} shutdown during Loop buffer",
+                            task_id_owned
+                        );
                         break;
                     }
                     continue;
@@ -1817,12 +2017,20 @@ impl CronTaskManager {
                     if let Some((ref expr, ref tz)) = cron_expr_info {
                         match next_cron_fire_time(expr, tz.as_deref()) {
                             Ok(target) => {
-                                ulog_info!("[CronTask] Task {} cron next fire at {} (in {} seconds)",
-                                    task_id_owned, target, (target - Utc::now()).num_seconds());
+                                ulog_info!(
+                                    "[CronTask] Task {} cron next fire at {} (in {} seconds)",
+                                    task_id_owned,
+                                    target,
+                                    (target - Utc::now()).num_seconds()
+                                );
                                 target
                             }
                             Err(e) => {
-                                ulog_error!("[CronTask] Task {} cron schedule error: {}, stopping", task_id_owned, e);
+                                ulog_error!(
+                                    "[CronTask] Task {} cron schedule error: {}, stopping",
+                                    task_id_owned,
+                                    e
+                                );
                                 break;
                             }
                         }
@@ -1832,8 +2040,12 @@ impl CronTaskManager {
                 } else {
                     // Fixed interval: next = now + interval
                     let target = Utc::now() + chrono::Duration::seconds(interval_secs);
-                    ulog_info!("[CronTask] Task {} next execution at {} (in {} minutes)",
-                        task_id_owned, target, interval_mins);
+                    ulog_info!(
+                        "[CronTask] Task {} next execution at {} (in {} minutes)",
+                        task_id_owned,
+                        target,
+                        interval_mins
+                    );
                     target
                 };
                 if !sleep_until_wallclock(next_target, &shutdown, &task_id_owned).await {
@@ -1847,7 +2059,10 @@ impl CronTaskManager {
                 let mut active = active_schedulers.write().await;
                 active.remove(&task_id_owned);
             }
-            ulog_info!("[CronTask] Scheduler loop exited for task {}", task_id_owned);
+            ulog_info!(
+                "[CronTask] Scheduler loop exited for task {}",
+                task_id_owned
+            );
         });
 
         // Store JoinHandle under the same critical section that gated the
@@ -1924,13 +2139,19 @@ impl CronTaskManager {
     ///
     /// Returns `(taskId, sessionId, dispatchedAtRfc3339)` for the CLI to print.
     pub async fn trigger_now(&self, task_id: &str) -> Result<TriggerNowInfo, String> {
-        let task = self.get_task(task_id).await
+        let task = self
+            .get_task(task_id)
+            .await
             .ok_or_else(|| format!("Task not found: {}", task_id))?;
 
         // PRD 0.2.5 cross-review I1 — validate app_handle BEFORE reserving
         // the executing slot. Otherwise an early Err here would leak the
         // reservation forever (no cleanup path).
-        let handle = self.app_handle.read().await.clone()
+        let handle = self
+            .app_handle
+            .read()
+            .await
+            .clone()
             .ok_or_else(|| "App handle not initialized".to_string())?;
 
         // PRD 0.2.5 cross-review C4 — atomic check-and-reserve. Closes the
@@ -1962,7 +2183,10 @@ impl CronTaskManager {
                 tasks.get(&task_id_owned).cloned()
             };
             let Some(t) = task_snapshot else {
-                ulog_warn!("[CronTask] trigger_now: task {} disappeared before dispatch", task_id_owned);
+                ulog_warn!(
+                    "[CronTask] trigger_now: task {} disappeared before dispatch",
+                    task_id_owned
+                );
                 let mut executing = executing_tasks.write().await;
                 executing.remove(&task_id_owned);
                 return;
@@ -1971,12 +2195,15 @@ impl CronTaskManager {
             // PRD 0.2.5 cross-review I3 — emit execution-starting event so
             // frontend/IM users see the same lifecycle signals as a scheduled
             // tick (the scheduler emits this before each tick).
-            let _ = handle.emit("cron:execution-starting", serde_json::json!({
-                "taskId": task_id_owned,
-                "executionNumber": t.execution_count + 1,
-                "isFirstExecution": false,
-                "trigger": "manual",  // distinguishes from scheduler ticks
-            }));
+            let _ = handle.emit(
+                "cron:execution-starting",
+                serde_json::json!({
+                    "taskId": task_id_owned,
+                    "executionNumber": t.execution_count + 1,
+                    "isFirstExecution": false,
+                    "trigger": "manual",  // distinguishes from scheduler ticks
+                }),
+            );
 
             // PRD 0.2.5 cross-review I3 — 60min timeout matches scheduler's
             // `tokio::time::timeout(Duration::from_secs(3600), ...)`. Without
@@ -1986,12 +2213,16 @@ impl CronTaskManager {
             let timed = tokio::time::timeout(
                 Duration::from_secs(3600),
                 execute_task_directly(&handle, &t, false /* is_first_execution */),
-            ).await;
+            )
+            .await;
             let duration_ms = exec_start.elapsed().as_millis() as u64;
             let result = match timed {
                 Ok(r) => r,
                 Err(_) => {
-                    ulog_error!("[CronTask] trigger_now: task {} timed out after 60 minutes", task_id_owned);
+                    ulog_error!(
+                        "[CronTask] trigger_now: task {} timed out after 60 minutes",
+                        task_id_owned
+                    );
                     Err("Execution timed out".to_string())
                 }
             };
@@ -2014,7 +2245,8 @@ impl CronTaskManager {
                         duration_ms,
                         content: output_text.as_ref().map(|t| {
                             if t.len() > MAX_CONTENT_LEN {
-                                let end = t.char_indices()
+                                let end = t
+                                    .char_indices()
                                     .take_while(|(i, _)| *i < MAX_CONTENT_LEN)
                                     .last()
                                     .map(|(i, c)| i + c.len_utf8())
@@ -2050,44 +2282,68 @@ impl CronTaskManager {
                         }
                     };
 
-                    let _ = handle.emit("cron:execution-complete", serde_json::json!({
-                        "taskId": task_id_owned,
-                        "success": success,
-                        "executionCount": updated_execution_count,
-                        "internalSessionId": internal_sid,
-                        "trigger": "manual",
-                    }));
+                    let _ = handle.emit(
+                        "cron:execution-complete",
+                        serde_json::json!({
+                            "taskId": task_id_owned,
+                            "success": success,
+                            "executionCount": updated_execution_count,
+                            "internalSessionId": internal_sid,
+                            "trigger": "manual",
+                        }),
+                    );
 
                     // IM delivery — AI output to configured channel
                     if let Some(ref delivery) = t.delivery {
                         let content = output_text.clone().unwrap_or_else(|| {
                             if *success {
-                                format!("Cron task '{}' completed successfully.", t.name.as_deref().unwrap_or(&task_id_owned))
+                                format!(
+                                    "Cron task '{}' completed successfully.",
+                                    t.name.as_deref().unwrap_or(&task_id_owned)
+                                )
                             } else {
-                                format!("Cron task '{}' completed with issues.", t.name.as_deref().unwrap_or(&task_id_owned))
+                                format!(
+                                    "Cron task '{}' completed with issues.",
+                                    t.name.as_deref().unwrap_or(&task_id_owned)
+                                )
                             }
                         });
                         // Same rationale as scheduler-loop site: pass the run's
                         // actual session id explicitly. See #225 review.
-                        deliver_cron_result_to_bot(&handle, delivery, &task_id_owned, &content, internal_sid.as_deref()).await;
+                        deliver_cron_result_to_bot(
+                            &handle,
+                            delivery,
+                            &task_id_owned,
+                            &content,
+                            internal_sid.as_deref(),
+                        )
+                        .await;
                     }
 
                     // ai_exit_reason → stop the task. Even on a manual
                     // trigger, if the AI calls ExitCronTask we honor the
                     // request (consistent with scheduler behavior).
                     if let Some(reason) = ai_exit_reason.clone() {
-                        ulog_info!("[CronTask] trigger_now: task {} AI requested exit: {}", task_id_owned, reason);
+                        ulog_info!(
+                            "[CronTask] trigger_now: task {} AI requested exit: {}",
+                            task_id_owned,
+                            reason
+                        );
                         stop_task_internal(&handle, &tasks_arc, &task_id_owned, Some(reason)).await;
                     } else {
                         // End condition check (deadline / max_executions)
                         let should_stop = {
                             let tasks_guard = tasks_arc.read().await;
-                            tasks_guard.get(&task_id_owned)
+                            tasks_guard
+                                .get(&task_id_owned)
                                 .map(check_end_conditions_static)
                                 .unwrap_or(false)
                         };
                         if should_stop {
-                            ulog_info!("[CronTask] trigger_now: task {} reached end condition", task_id_owned);
+                            ulog_info!(
+                                "[CronTask] trigger_now: task {} reached end condition",
+                                task_id_owned
+                            );
                             stop_task_internal(&handle, &tasks_arc, &task_id_owned, None).await;
                         }
                     }
@@ -2114,24 +2370,34 @@ impl CronTaskManager {
                             t.last_run_duration_ms = Some(duration_ms);
                         }
                     }
-                    let _ = handle.emit("cron:execution-error", serde_json::json!({
-                        "taskId": task_id_owned,
-                        "error": e,
-                        "trigger": "manual",
-                    }));
+                    let _ = handle.emit(
+                        "cron:execution-error",
+                        serde_json::json!({
+                            "taskId": task_id_owned,
+                            "error": e,
+                            "trigger": "manual",
+                        }),
+                    );
                 }
             }
 
             // Persist updates (best-effort) via singleton.
             if let Err(e) = get_cron_task_manager().save_to_disk().await {
-                ulog_warn!("[CronTask] trigger_now: failed to persist post-run state: {}", e);
+                ulog_warn!(
+                    "[CronTask] trigger_now: failed to persist post-run state: {}",
+                    e
+                );
             }
 
             // Release the executing lock — must run on every path.
             let mut executing = executing_tasks.write().await;
             executing.remove(&task_id_owned);
 
-            ulog_info!("[CronTask] trigger_now completed for task {} in {}ms", task_id_owned, duration_ms);
+            ulog_info!(
+                "[CronTask] trigger_now completed for task {} in {}ms",
+                task_id_owned,
+                duration_ms
+            );
         });
 
         Ok(TriggerNowInfo {
@@ -2159,14 +2425,10 @@ impl CronTaskManager {
             config.runtime = Some("builtin".to_string());
         }
         if config.provider_id.is_some() && config.model.is_none() {
-            return Err(
-                "providerId 必须与 model 配对设置（CronTask 创建路径校验）".to_string(),
-            );
+            return Err("providerId 必须与 model 配对设置（CronTask 创建路径校验）".to_string());
         }
         if let Some(rt) = config.runtime.as_deref() {
-            if matches!(rt, "claude-code" | "codex" | "gemini")
-                && config.provider_id.is_some()
-            {
+            if matches!(rt, "claude-code" | "codex" | "gemini") && config.provider_id.is_some() {
                 return Err(format!(
                     "外部 runtime '{}' 不允许同时指定 providerId（CronTask 创建路径校验）",
                     rt
@@ -2175,7 +2437,10 @@ impl CronTaskManager {
         }
 
         let task = CronTask {
-            id: format!("cron_{}", Uuid::new_v4().to_string().replace("-", "")[..12].to_string()),
+            id: format!(
+                "cron_{}",
+                Uuid::new_v4().to_string().replace("-", "")[..12].to_string()
+            ),
             workspace_path: config.workspace_path,
             session_id: config.session_id,
             prompt: config.prompt,
@@ -2204,7 +2469,7 @@ impl CronTaskManager {
             delivery: config.delivery,
             schedule: config.schedule,
             name: config.name,
-            next_execution_at: None, // Enriched at read time
+            next_execution_at: None,   // Enriched at read time
             internal_session_id: None, // Set after first execution
             updated_at: Utc::now(),
             task_id: config.task_id.clone(),
@@ -2275,7 +2540,9 @@ impl CronTaskManager {
 
         ulog_debug!(
             "[CronTask] get_tasks_for_workspace: query='{}' (normalized='{}'), found {} tasks",
-            workspace_path, normalized_query, result.len()
+            workspace_path,
+            normalized_query,
+            result.len()
         );
 
         result
@@ -2313,7 +2580,11 @@ impl CronTaskManager {
     }
 
     /// Update task fields (partial update, for management API)
-    pub async fn update_task_fields(&self, task_id: &str, patch: serde_json::Value) -> Result<CronTask, String> {
+    pub async fn update_task_fields(
+        &self,
+        task_id: &str,
+        patch: serde_json::Value,
+    ) -> Result<CronTask, String> {
         // Capture pre-patch state so we can decide whether the scheduler needs
         // to be bounced. The scheduler tokio task captures `schedule`/
         // `interval_mins`/`cron_expr_info` by value at spawn time
@@ -2358,7 +2629,9 @@ impl CronTaskManager {
             task.name = Some(name.to_string());
         }
         // Accept both "prompt" and "message" (Bun normalizes, but defend in depth)
-        if let Some(prompt) = patch.get("prompt").and_then(|v| v.as_str())
+        if let Some(prompt) = patch
+            .get("prompt")
+            .and_then(|v| v.as_str())
             .or_else(|| patch.get("message").and_then(|v| v.as_str()))
         {
             task.prompt = prompt.to_string();
@@ -2384,9 +2657,14 @@ impl CronTaskManager {
                 // user's explicit intent.
                 let merged = match (&prev_schedule, s) {
                     (
-                        Some(CronSchedule::Cron { tz: Some(prev_tz), .. }),
+                        Some(CronSchedule::Cron {
+                            tz: Some(prev_tz), ..
+                        }),
                         CronSchedule::Cron { expr, tz: None },
-                    ) => CronSchedule::Cron { expr, tz: Some(prev_tz.clone()) },
+                    ) => CronSchedule::Cron {
+                        expr,
+                        tz: Some(prev_tz.clone()),
+                    },
                     (_, other) => other,
                 };
                 // Mirror interval_minutes when switching to a fixed-interval schedule,
@@ -2413,7 +2691,8 @@ impl CronTaskManager {
                         task.end_conditions.deadline = if v.is_null() {
                             None
                         } else {
-                            serde_json::from_value(v.clone()).unwrap_or(task.end_conditions.deadline)
+                            serde_json::from_value(v.clone())
+                                .unwrap_or(task.end_conditions.deadline)
                         };
                     }
                 }
@@ -2422,7 +2701,9 @@ impl CronTaskManager {
                         task.end_conditions.max_executions = if v.is_null() {
                             None
                         } else {
-                            v.as_u64().map(|n| n as u32).or(task.end_conditions.max_executions)
+                            v.as_u64()
+                                .map(|n| n as u32)
+                                .or(task.end_conditions.max_executions)
                         };
                     }
                 }
@@ -2431,7 +2712,9 @@ impl CronTaskManager {
                         task.end_conditions.ai_can_exit = b;
                     }
                 }
-            } else if let Ok(ec) = serde_json::from_value::<EndConditions>(end_conditions_val.clone()) {
+            } else if let Ok(ec) =
+                serde_json::from_value::<EndConditions>(end_conditions_val.clone())
+            {
                 // Non-object form (e.g. legacy callers passing a fully-typed
                 // struct) — fall back to wholesale replace, which is what
                 // the old behavior was. The merge above only kicks in for
@@ -2481,7 +2764,11 @@ impl CronTaskManager {
             if runtime_val.is_null() {
                 task.runtime = None;
             } else if let Some(s) = runtime_val.as_str() {
-                task.runtime = if s.is_empty() { None } else { Some(s.to_string()) };
+                task.runtime = if s.is_empty() {
+                    None
+                } else {
+                    Some(s.to_string())
+                };
             }
         }
         if let Some(rc_val) = patch.get("runtimeConfig") {
@@ -2527,14 +2814,10 @@ impl CronTaskManager {
             task.runtime = Some("builtin".to_string());
         }
         if task.provider_id.is_some() && task.model.is_none() {
-            return Err(
-                "providerId 必须与 model 配对设置（CronTask 更新路径校验）".to_string(),
-            );
+            return Err("providerId 必须与 model 配对设置（CronTask 更新路径校验）".to_string());
         }
         if let Some(rt) = task.runtime.as_deref() {
-            if matches!(rt, "claude-code" | "codex" | "gemini")
-                && task.provider_id.is_some()
-            {
+            if matches!(rt, "claude-code" | "codex" | "gemini") && task.provider_id.is_some() {
                 return Err(format!(
                     "外部 runtime '{}' 不允许同时指定 providerId（CronTask 更新路径校验）",
                     rt
@@ -2592,7 +2875,8 @@ impl CronTaskManager {
         require_null: bool,
     ) -> Result<CronTask, String> {
         let mut tasks = self.tasks.write().await;
-        let task = tasks.get_mut(cron_task_id)
+        let task = tasks
+            .get_mut(cron_task_id)
             .ok_or_else(|| format!("CronTask not found: {}", cron_task_id))?;
         if require_null {
             if let Some(existing) = &task.task_id {
@@ -2617,7 +2901,8 @@ impl CronTaskManager {
     /// Can start a task in Stopped status (e.g., after creation or after previous stop)
     pub async fn start_task(&self, task_id: &str) -> Result<CronTask, String> {
         let mut tasks = self.tasks.write().await;
-        let task = tasks.get_mut(task_id)
+        let task = tasks
+            .get_mut(task_id)
             .ok_or_else(|| format!("Task not found: {}", task_id))?;
 
         if task.status == TaskStatus::Running {
@@ -2638,9 +2923,14 @@ impl CronTaskManager {
     /// Stop a task (with optional exit reason)
     /// Also deactivates the associated session and unregisters the CronTask user
     /// exit_reason can be set when AI calls ExitCronTask tool or end conditions are met
-    pub async fn stop_task(&self, task_id: &str, exit_reason: Option<String>) -> Result<CronTask, String> {
+    pub async fn stop_task(
+        &self,
+        task_id: &str,
+        exit_reason: Option<String>,
+    ) -> Result<CronTask, String> {
         let mut tasks = self.tasks.write().await;
-        let task = tasks.get_mut(task_id)
+        let task = tasks
+            .get_mut(task_id)
             .ok_or_else(|| format!("Task not found: {}", task_id))?;
 
         let session_id = task.session_id.clone();
@@ -2652,7 +2942,8 @@ impl CronTaskManager {
 
         // Release CronTask's ownership of the Session Sidecar
         // If Tab still owns it, Sidecar continues running
-        self.stop_cron_task_sidecar_internal(&session_id, task_id).await;
+        self.stop_cron_task_sidecar_internal(&session_id, task_id)
+            .await;
 
         // Deactivate session via app handle
         self.deactivate_session_internal(&session_id).await;
@@ -2662,13 +2953,20 @@ impl CronTaskManager {
         // Emit stopped event for frontend listeners (e.g., RecentTasks badge refresh)
         let handle_opt = self.app_handle.read().await;
         if let Some(ref handle) = *handle_opt {
-            let _ = handle.emit("cron:task-stopped", serde_json::json!({
-                "taskId": task_id,
-                "exitReason": exit_reason
-            }));
+            let _ = handle.emit(
+                "cron:task-stopped",
+                serde_json::json!({
+                    "taskId": task_id,
+                    "exitReason": exit_reason
+                }),
+            );
         }
 
-        ulog_info!("[CronTask] Stopped task: {} (CronTask released from session {})", task_id, session_id);
+        ulog_info!(
+            "[CronTask] Stopped task: {} (CronTask released from session {})",
+            task_id,
+            session_id
+        );
 
         Ok(task_clone)
     }
@@ -2684,14 +2982,24 @@ impl CronTaskManager {
                         ulog_debug!("[CronTask] Deactivated session: {}", session_id);
                     }
                     Err(e) => {
-                        ulog_error!("[CronTask] Cannot deactivate session {}: lock poisoned: {}", session_id, e);
+                        ulog_error!(
+                            "[CronTask] Cannot deactivate session {}: lock poisoned: {}",
+                            session_id,
+                            e
+                        );
                     }
                 }
             } else {
-                ulog_warn!("[CronTask] Cannot deactivate session {}: SidecarManager state not found", session_id);
+                ulog_warn!(
+                    "[CronTask] Cannot deactivate session {}: SidecarManager state not found",
+                    session_id
+                );
             }
         } else {
-            ulog_warn!("[CronTask] Cannot deactivate session {}: app handle not available", session_id);
+            ulog_warn!(
+                "[CronTask] Cannot deactivate session {}: app handle not available",
+                session_id
+            );
         }
     }
 
@@ -2720,15 +3028,23 @@ impl CronTaskManager {
                     Err(e) => {
                         ulog_error!(
                             "[CronTask] Failed to release CronTask {} from session {}: {}",
-                            task_id, session_id, e
+                            task_id,
+                            session_id,
+                            e
                         );
                     }
                 }
             } else {
-                ulog_warn!("[CronTask] Cannot release CronTask {}: SidecarManager state not found", task_id);
+                ulog_warn!(
+                    "[CronTask] Cannot release CronTask {}: SidecarManager state not found",
+                    task_id
+                );
             }
         } else {
-            ulog_warn!("[CronTask] Cannot release CronTask {}: app handle not available", task_id);
+            ulog_warn!(
+                "[CronTask] Cannot release CronTask {}: app handle not available",
+                task_id
+            );
         }
     }
 
@@ -2736,7 +3052,8 @@ impl CronTaskManager {
     /// Also releases CronTask's Sidecar ownership and deactivates session if task was running
     pub async fn delete_task(&self, task_id: &str) -> Result<(), String> {
         let mut tasks = self.tasks.write().await;
-        let task = tasks.remove(task_id)
+        let task = tasks
+            .remove(task_id)
             .ok_or_else(|| format!("Task not found: {}", task_id))?;
 
         let session_id = task.session_id.clone();
@@ -2745,7 +3062,8 @@ impl CronTaskManager {
 
         // Release CronTask's Sidecar ownership and deactivate session if task was running
         if was_running {
-            self.stop_cron_task_sidecar_internal(&session_id, task_id).await;
+            self.stop_cron_task_sidecar_internal(&session_id, task_id)
+                .await;
             self.deactivate_session_internal(&session_id).await;
         }
 
@@ -2757,11 +3075,19 @@ impl CronTaskManager {
         if runs_path.exists() {
             match std::fs::remove_file(&runs_path) {
                 Ok(()) => ulog_info!("[CronTask] Removed run history: {}", runs_path.display()),
-                Err(e) => ulog_warn!("[CronTask] Failed to remove run history {}: {}", runs_path.display(), e),
+                Err(e) => ulog_warn!(
+                    "[CronTask] Failed to remove run history {}: {}",
+                    runs_path.display(),
+                    e
+                ),
             }
         }
 
-        ulog_info!("[CronTask] Deleted task: {} (was_running: {}, CronTask released)", task_id, was_running);
+        ulog_info!(
+            "[CronTask] Deleted task: {} (was_running: {}, CronTask released)",
+            task_id,
+            was_running
+        );
 
         Ok(())
     }
@@ -2769,7 +3095,8 @@ impl CronTaskManager {
     /// Record task execution
     pub async fn record_execution(&self, task_id: &str) -> Result<CronTask, String> {
         let mut tasks = self.tasks.write().await;
-        let task = tasks.get_mut(task_id)
+        let task = tasks
+            .get_mut(task_id)
             .ok_or_else(|| format!("Task not found: {}", task_id))?;
 
         let now = Utc::now();
@@ -2804,7 +3131,11 @@ impl CronTaskManager {
         // Check max executions
         if let Some(max) = task.end_conditions.max_executions {
             if task.execution_count >= max {
-                ulog_info!("[CronTask] Task {} reached max executions ({})", task.id, max);
+                ulog_info!(
+                    "[CronTask] Task {} reached max executions ({})",
+                    task.id,
+                    max
+                );
                 return true;
             }
         }
@@ -2824,9 +3155,14 @@ impl CronTaskManager {
     }
 
     /// Update task's tab association
-    pub async fn update_task_tab(&self, task_id: &str, tab_id: Option<String>) -> Result<CronTask, String> {
+    pub async fn update_task_tab(
+        &self,
+        task_id: &str,
+        tab_id: Option<String>,
+    ) -> Result<CronTask, String> {
         let mut tasks = self.tasks.write().await;
-        let task = tasks.get_mut(task_id)
+        let task = tasks
+            .get_mut(task_id)
             .ok_or_else(|| format!("Task not found: {}", task_id))?;
 
         task.tab_id = tab_id;
@@ -2839,12 +3175,22 @@ impl CronTaskManager {
     }
 
     /// Update task's session ID (called when session is created after task creation)
-    pub async fn update_task_session(&self, task_id: &str, session_id: String) -> Result<CronTask, String> {
+    pub async fn update_task_session(
+        &self,
+        task_id: &str,
+        session_id: String,
+    ) -> Result<CronTask, String> {
         let mut tasks = self.tasks.write().await;
-        let task = tasks.get_mut(task_id)
+        let task = tasks
+            .get_mut(task_id)
             .ok_or_else(|| format!("Task not found: {}", task_id))?;
 
-        ulog_info!("[CronTask] Updating task {} sessionId: {:?} -> {}", task_id, task.session_id, session_id);
+        ulog_info!(
+            "[CronTask] Updating task {} sessionId: {:?} -> {}",
+            task_id,
+            task.session_id,
+            session_id
+        );
         task.session_id = session_id;
         let task_clone = task.clone();
         drop(tasks);
@@ -2899,7 +3245,11 @@ fn check_end_conditions_static(task: &CronTask) -> bool {
     // Check max executions
     if let Some(max) = task.end_conditions.max_executions {
         if task.execution_count >= max {
-            ulog_info!("[CronTask] Task {} reached max executions ({})", task.id, max);
+            ulog_info!(
+                "[CronTask] Task {} reached max executions ({})",
+                task.id,
+                max
+            );
             return true;
         }
     }
@@ -2937,7 +3287,8 @@ async fn rotate_new_session_id(handle: &AppHandle, task: &CronTask) -> Result<St
             // until another owner releases it or the app exits.
             ulog_warn!(
                 "[CronTask] rotate_new_session_id: release old session {} failed: {} (non-fatal)",
-                old_session_id, e
+                old_session_id,
+                e
             );
         }
     }
@@ -2976,7 +3327,9 @@ async fn rotate_new_session_id(handle: &AppHandle, task: &CronTask) -> Result<St
 
     ulog_info!(
         "[CronTask] new_session rotate: task {} session_id {} → {}",
-        task.id, old_session_id, new_session_id
+        task.id,
+        old_session_id,
+        new_session_id
     );
 
     Ok(new_session_id)
@@ -2989,7 +3342,10 @@ async fn execute_task_directly(
     task: &CronTask,
     is_first_execution: bool,
 ) -> Result<(bool, Option<String>, Option<String>, Option<String>), String> {
-    ulog_info!("[CronTask] execute_task_directly starting for task {}", task.id);
+    ulog_info!(
+        "[CronTask] execute_task_directly starting for task {}",
+        task.id
+    );
 
     // Hold a system wake-lock for the duration of this cron execution to
     // prevent idle-sleep from killing the SDK's long-lived HTTPS stream to
@@ -3004,33 +3360,49 @@ async fn execute_task_directly(
         task.name.as_deref().unwrap_or("unnamed")
     ))
     .map_err(|e| {
-        ulog_warn!("[CronTask] wake-lock acquire failed for {}: {} — continuing without protection", task.id, e);
+        ulog_warn!(
+            "[CronTask] wake-lock acquire failed for {}: {} — continuing without protection",
+            task.id,
+            e
+        );
         e
     })
     .ok();
 
     // Emit debug event: entering function
-    let _ = handle.emit("cron:debug", serde_json::json!({
-        "taskId": task.id,
-        "message": "execute_task_directly: entering function"
-    }));
+    let _ = handle.emit(
+        "cron:debug",
+        serde_json::json!({
+            "taskId": task.id,
+            "message": "execute_task_directly: entering function"
+        }),
+    );
 
     // Get SidecarManager state
     let sidecar_state = match handle.try_state::<ManagedSidecarManager>() {
         Some(state) => {
-            let _ = handle.emit("cron:debug", serde_json::json!({
-                "taskId": task.id,
-                "message": "execute_task_directly: got SidecarManager state"
-            }));
+            let _ = handle.emit(
+                "cron:debug",
+                serde_json::json!({
+                    "taskId": task.id,
+                    "message": "execute_task_directly: got SidecarManager state"
+                }),
+            );
             state
         }
         None => {
-            ulog_error!("[CronTask] SidecarManager state not available for task {}", task.id);
-            let _ = handle.emit("cron:debug", serde_json::json!({
-                "taskId": task.id,
-                "message": "execute_task_directly: SidecarManager state NOT available",
-                "error": true
-            }));
+            ulog_error!(
+                "[CronTask] SidecarManager state not available for task {}",
+                task.id
+            );
+            let _ = handle.emit(
+                "cron:debug",
+                serde_json::json!({
+                    "taskId": task.id,
+                    "message": "execute_task_directly: SidecarManager state NOT available",
+                    "error": true
+                }),
+            );
             return Err("SidecarManager state not available".to_string());
         }
     };
@@ -3229,26 +3601,40 @@ async fn execute_task_directly(
         "message": format!("execute_task_directly: calling execute_cron_task, workspace={}", task.workspace_path)
     }));
 
-    ulog_info!("[CronTask] Built payload for task {}, calling execute_cron_task with workspace: {}", task.id, task.workspace_path);
+    ulog_info!(
+        "[CronTask] Built payload for task {}, calling execute_cron_task with workspace: {}",
+        task.id,
+        task.workspace_path
+    );
 
     // Execute via Sidecar
-    let result = execute_cron_task(handle, &sidecar_state, &task.workspace_path, payload).await
-        .map_err(|e| {
-            ulog_error!("[CronTask] execute_cron_task failed for task {}: {}", task.id, e);
-            let _ = handle.emit("cron:debug", serde_json::json!({
+    let result =
+        execute_cron_task(handle, &sidecar_state, &task.workspace_path, payload)
+            .await
+            .map_err(|e| {
+                ulog_error!(
+                    "[CronTask] execute_cron_task failed for task {}: {}",
+                    task.id,
+                    e
+                );
+                let _ = handle.emit("cron:debug", serde_json::json!({
                 "taskId": task.id,
                 "message": format!("execute_task_directly: execute_cron_task FAILED: {}", e),
                 "error": true
             }));
-            e
-        })?;
+                e
+            })?;
 
     let _ = handle.emit("cron:debug", serde_json::json!({
         "taskId": task.id,
         "message": format!("execute_task_directly: execute_cron_task completed, task_success={}", result.success)
     }));
 
-    ulog_info!("[CronTask] execute_cron_task completed for task {}, task_success={}", task.id, result.success);
+    ulog_info!(
+        "[CronTask] execute_cron_task completed for task {}, task_success={}",
+        task.id,
+        result.success
+    );
 
     // PRD 0.2.9 — Provider-resolution failure should permanently Block the
     // linked Task, not just record `last_run_ok=false`. The sidecar surfaces
@@ -3264,8 +3650,7 @@ async fn execute_task_directly(
     if !result.success {
         let err_msg = result.error.clone().unwrap_or_default();
         let is_provider_resolution_failure = err_msg.starts_with("Provider '")
-            && (err_msg.contains("not found in config")
-                || err_msg.contains("has no API Key"));
+            && (err_msg.contains("not found in config") || err_msg.contains("has no API Key"));
         if is_provider_resolution_failure {
             if let Some(ta_id) = task.task_id.as_ref() {
                 ulog_error!(
@@ -3306,7 +3691,12 @@ async fn execute_task_directly(
         None
     };
 
-    Ok((result.success, ai_exit_reason, result.output_text, result.session_id))
+    Ok((
+        result.success,
+        ai_exit_reason,
+        result.output_text,
+        result.session_id,
+    ))
 }
 
 /// Stop a task, unregister CronTask user, and deactivate its session (internal helper)
@@ -3325,7 +3715,10 @@ async fn stop_task_internal(
     };
 
     let Some(session_id) = session_id else {
-        ulog_warn!("[CronTask] Task {} not found in stop_task_internal", task_id);
+        ulog_warn!(
+            "[CronTask] Task {} not found in stop_task_internal",
+            task_id
+        );
         return;
     };
 
@@ -3337,19 +3730,23 @@ async fn stop_task_internal(
                 if stopped {
                     ulog_info!(
                         "[CronTask] Released CronTask {} from session {}, Sidecar stopped",
-                        task_id, session_id
+                        task_id,
+                        session_id
                     );
                 } else {
                     ulog_info!(
                         "[CronTask] Released CronTask {} from session {}, Sidecar continues",
-                        task_id, session_id
+                        task_id,
+                        session_id
                     );
                 }
             }
             Err(e) => {
                 ulog_error!(
                     "[CronTask] Failed to release CronTask {} from session {}: {}",
-                    task_id, session_id, e
+                    task_id,
+                    session_id,
+                    e
                 );
             }
         }
@@ -3357,7 +3754,11 @@ async fn stop_task_internal(
         // Deactivate session (for legacy session tracking)
         if let Ok(mut manager) = sidecar_state.lock() {
             manager.deactivate_session(&session_id);
-            ulog_info!("[CronTask] Deactivated session {} for stopped task {}", session_id, task_id);
+            ulog_info!(
+                "[CronTask] Deactivated session {} for stopped task {}",
+                session_id,
+                task_id
+            );
         }
     }
 
@@ -3379,10 +3780,13 @@ async fn stop_task_internal(
     }
 
     // Emit stopped event
-    let _ = handle.emit("cron:task-stopped", serde_json::json!({
-        "taskId": task_id,
-        "exitReason": exit_reason.clone()
-    }));
+    let _ = handle.emit(
+        "cron:task-stopped",
+        serde_json::json!({
+            "taskId": task_id,
+            "exitReason": exit_reason.clone()
+        }),
+    );
 
     // PRD §11 — propagate completion to Task Center if this CronTask is linked
     // to a Task (best-effort, failures logged).
@@ -3448,13 +3852,17 @@ pub async fn cmd_start_cron_task(
 
     ulog_info!(
         "[CronTask] Started cron task {} for workspace {}",
-        task.id, task.workspace_path
+        task.id,
+        task.workspace_path
     );
 
     // Emit event so frontend task list refreshes immediately
-    let _ = app_handle.emit("cron:task-started", serde_json::json!({
-        "taskId": task.id,
-    }));
+    let _ = app_handle.emit(
+        "cron:task-started",
+        serde_json::json!({
+            "taskId": task.id,
+        }),
+    );
 
     Ok(task)
 }
@@ -3462,7 +3870,10 @@ pub async fn cmd_start_cron_task(
 /// Stop a cron task (with optional exit reason)
 /// exit_reason can be set when AI calls ExitCronTask or end conditions are met
 #[tauri::command]
-pub async fn cmd_stop_cron_task(task_id: String, exit_reason: Option<String>) -> Result<CronTask, String> {
+pub async fn cmd_stop_cron_task(
+    task_id: String,
+    exit_reason: Option<String>,
+) -> Result<CronTask, String> {
     let manager = get_cron_task_manager();
     manager.stop_task(&task_id, exit_reason).await
 }
@@ -3475,7 +3886,10 @@ pub async fn cmd_delete_cron_task(
 ) -> Result<(), String> {
     let manager = get_cron_task_manager();
     manager.delete_task(&task_id).await?;
-    let _ = app_handle.emit("cron:task-deleted", serde_json::json!({ "taskId": task_id }));
+    let _ = app_handle.emit(
+        "cron:task-deleted",
+        serde_json::json!({ "taskId": task_id }),
+    );
     Ok(())
 }
 
@@ -3483,7 +3897,9 @@ pub async fn cmd_delete_cron_task(
 #[tauri::command]
 pub async fn cmd_get_cron_task(task_id: String) -> Result<CronTask, String> {
     let manager = get_cron_task_manager();
-    manager.get_task(&task_id).await
+    manager
+        .get_task(&task_id)
+        .await
         .ok_or_else(|| format!("Task not found: {}", task_id))
 }
 
@@ -3526,14 +3942,20 @@ pub async fn cmd_record_cron_execution(task_id: String) -> Result<CronTask, Stri
 
 /// Update task's tab association
 #[tauri::command]
-pub async fn cmd_update_cron_task_tab(task_id: String, tab_id: Option<String>) -> Result<CronTask, String> {
+pub async fn cmd_update_cron_task_tab(
+    task_id: String,
+    tab_id: Option<String>,
+) -> Result<CronTask, String> {
     let manager = get_cron_task_manager();
     manager.update_task_tab(&task_id, tab_id).await
 }
 
 /// Update task's session ID (called when session is created after task creation)
 #[tauri::command]
-pub async fn cmd_update_cron_task_session(task_id: String, session_id: String) -> Result<CronTask, String> {
+pub async fn cmd_update_cron_task_session(
+    task_id: String,
+    session_id: String,
+) -> Result<CronTask, String> {
     let manager = get_cron_task_manager();
     manager.update_task_session(&task_id, session_id).await
 }
@@ -3553,15 +3975,24 @@ pub async fn cmd_start_cron_scheduler(
     app_handle: tauri::AppHandle,
     task_id: String,
 ) -> Result<(), String> {
-    ulog_info!("[CronTask] cmd_start_cron_scheduler called for task: {}", task_id);
+    ulog_info!(
+        "[CronTask] cmd_start_cron_scheduler called for task: {}",
+        task_id
+    );
 
     let manager = get_cron_task_manager();
     ulog_debug!("[CronTask] Got manager, getting task...");
 
     // Get task info for session activation
-    let task = manager.get_task(&task_id).await
+    let task = manager
+        .get_task(&task_id)
+        .await
         .ok_or_else(|| format!("Task not found: {}", task_id))?;
-    ulog_debug!("[CronTask] Got task: {}, session_id: {}", task_id, task.session_id);
+    ulog_debug!(
+        "[CronTask] Got task: {}, session_id: {}",
+        task_id,
+        task.session_id
+    );
 
     // Ensure Session has a Sidecar with CronTask as owner
     // IMPORTANT: Use spawn_blocking because ensure_session_sidecar uses reqwest::blocking::Client
@@ -3578,12 +4009,21 @@ pub async fn cmd_start_cron_scheduler(
         let task_id_for_log = task_id.clone();
         let tab_id = task.tab_id.clone();
 
-        ulog_info!("[CronTask] Calling ensure_session_sidecar for session: {}", session_id);
+        ulog_info!(
+            "[CronTask] Calling ensure_session_sidecar for session: {}",
+            session_id
+        );
 
         // Run blocking sidecar operations in a dedicated thread pool
         let result = tokio::task::spawn_blocking(move || {
             let workspace = std::path::Path::new(&workspace_path);
-            ensure_session_sidecar(&app_handle_clone, &sidecar_state_clone, &session_id, workspace, owner)
+            ensure_session_sidecar(
+                &app_handle_clone,
+                &sidecar_state_clone,
+                &session_id,
+                workspace,
+                owner,
+            )
         })
         .await
         .map_err(|e| format!("spawn_blocking failed: {}", e))?;
@@ -3592,7 +4032,9 @@ pub async fn cmd_start_cron_scheduler(
             Ok(result) => {
                 ulog_info!(
                     "[CronTask] Ensured Sidecar for session {} (port={}, is_new={})",
-                    task.session_id, result.port, result.is_new
+                    task.session_id,
+                    result.port,
+                    result.is_new
                 );
 
                 // Activate session (for legacy session tracking)
@@ -3610,7 +4052,8 @@ pub async fn cmd_start_cron_scheduler(
             Err(e) => {
                 ulog_error!(
                     "[CronTask] Failed to ensure Sidecar for task {}: {}",
-                    task_id, e
+                    task_id,
+                    e
                 );
                 return Err(e);
             }
@@ -3646,7 +4089,10 @@ pub async fn cmd_is_task_executing(task_id: String) -> Result<bool, String> {
 
 /// Get execution history (run records) for a cron task
 #[tauri::command]
-pub fn cmd_get_cron_runs(task_id: String, limit: Option<usize>) -> Result<Vec<CronRunRecord>, String> {
+pub fn cmd_get_cron_runs(
+    task_id: String,
+    limit: Option<usize>,
+) -> Result<Vec<CronRunRecord>, String> {
     Ok(read_cron_runs(&task_id, limit.unwrap_or(20)))
 }
 
@@ -3720,7 +4166,10 @@ pub async fn cmd_update_cron_task_fields(
         .update_task_fields(&task_id, serde_json::Value::Object(patch))
         .await?;
 
-    let _ = app_handle.emit("cron:task-updated", serde_json::json!({ "taskId": task_id }));
+    let _ = app_handle.emit(
+        "cron:task-updated",
+        serde_json::json!({ "taskId": task_id }),
+    );
     Ok(updated)
 }
 
@@ -3857,7 +4306,9 @@ async fn deliver_cron_result_to_bot(
 
     ulog_info!(
         "[CronTask] Delivering result for task {} to bot {} (platform: {})",
-        task_id, delivery.bot_id, delivery.platform
+        task_id,
+        delivery.bot_id,
+        delivery.platform
     );
 
     // Look up the bot's pending vec + wake channel. We try the Agent state
@@ -3940,7 +4391,8 @@ async fn deliver_cron_result_to_bot(
         });
         ulog_info!(
             "[CronTask] Appended cron event to bot {} pending (now {} pending)",
-            delivery.bot_id, pending.len()
+            delivery.bot_id,
+            pending.len()
         );
     }
 
@@ -3993,9 +4445,7 @@ async fn resolve_cron_inbox_label(task_id: &str) -> Option<String> {
         task.name
             .clone()
             .map(|n| format!("Cron: {n}"))
-            .unwrap_or_else(|| {
-                format!("Cron task {}", &task_id[..task_id.len().min(8)])
-            }),
+            .unwrap_or_else(|| format!("Cron task {}", &task_id[..task_id.len().min(8)])),
     )
 }
 
@@ -4083,7 +4533,9 @@ async fn heal_task_schedule_fields(manager: &CronTaskManager) {
                     timezone: tz.clone(),
                 },
                 CronSchedule::At { at } => crate::task::ScheduleBackfill::DispatchAt(
-                    chrono::DateTime::parse_from_rfc3339(at).ok()?.timestamp_millis(),
+                    chrono::DateTime::parse_from_rfc3339(at)
+                        .ok()?
+                        .timestamp_millis(),
                 ),
                 CronSchedule::Loop => return None,
             };
@@ -4120,12 +4572,15 @@ async fn recover_running_tasks(handle: &AppHandle) {
     if tasks_to_recover.is_empty() {
         ulog_info!("[CronTask] No tasks to recover");
         // Emit empty summary
-        let _ = handle.emit("cron:recovery-summary", CronRecoverySummaryPayload {
-            total_tasks: 0,
-            recovered_count: 0,
-            failed_count: 0,
-            failed_tasks: vec![],
-        });
+        let _ = handle.emit(
+            "cron:recovery-summary",
+            CronRecoverySummaryPayload {
+                total_tasks: 0,
+                recovered_count: 0,
+                failed_count: 0,
+                failed_tasks: vec![],
+            },
+        );
         return;
     }
 
@@ -4134,7 +4589,10 @@ async fn recover_running_tasks(handle: &AppHandle) {
     // persisted Running tasks to a fresh Sidecar, which is the normal
     // happy path, not error remediation. (cron:task-recovered / cron:recovery-summary
     // event names retained for frontend compatibility.)
-    ulog_info!("[CronTask] Reattaching {} scheduled task(s) (status=Running)...", tasks_to_recover.len());
+    ulog_info!(
+        "[CronTask] Reattaching {} scheduled task(s) (status=Running)...",
+        tasks_to_recover.len()
+    );
 
     let mut recovered_count = 0u32;
     let mut failed_tasks: Vec<CronRecoveryFailedTask> = vec![];
@@ -4146,15 +4604,18 @@ async fn recover_running_tasks(handle: &AppHandle) {
                 ulog_info!("[CronTask] Reattached task {} on port {}", task.id, port);
 
                 // Emit task-recovered event for frontend
-                let _ = handle.emit("cron:task-recovered", CronTaskRecoveredPayload {
-                    task_id: task.id.clone(),
-                    session_id: task.session_id.clone(),
-                    workspace_path: task.workspace_path.clone(),
-                    port,
-                    status: "running".to_string(),
-                    execution_count: task.execution_count,
-                    interval_minutes: task.interval_minutes,
-                });
+                let _ = handle.emit(
+                    "cron:task-recovered",
+                    CronTaskRecoveredPayload {
+                        task_id: task.id.clone(),
+                        session_id: task.session_id.clone(),
+                        workspace_path: task.workspace_path.clone(),
+                        port,
+                        status: "running".to_string(),
+                        execution_count: task.execution_count,
+                        interval_minutes: task.interval_minutes,
+                    },
+                );
             }
             Err(e) => {
                 ulog_error!("[CronTask] Failed to reattach task {}: {}", task.id, e);
@@ -4172,16 +4633,21 @@ async fn recover_running_tasks(handle: &AppHandle) {
 
     ulog_info!(
         "[CronTask] Reattach complete: {}/{} tasks reattached, {} failed",
-        recovered_count, total, failed_count
+        recovered_count,
+        total,
+        failed_count
     );
 
     // Emit recovery summary
-    let _ = handle.emit("cron:recovery-summary", CronRecoverySummaryPayload {
-        total_tasks: total,
-        recovered_count,
-        failed_count,
-        failed_tasks,
-    });
+    let _ = handle.emit(
+        "cron:recovery-summary",
+        CronRecoverySummaryPayload {
+            total_tasks: total,
+            recovered_count,
+            failed_count,
+            failed_tasks,
+        },
+    );
 }
 
 /// Try to recover a single task
@@ -4189,13 +4655,15 @@ async fn recover_running_tasks(handle: &AppHandle) {
 async fn try_recover_single_task(handle: &AppHandle, task: &CronTask) -> Result<u16, String> {
     ulog_info!(
         "[CronTask] Reattaching task {} for workspace {}",
-        task.id, task.workspace_path
+        task.id,
+        task.workspace_path
     );
 
     // Step 1: Ensure Session has a Sidecar with CronTask as owner
     // IMPORTANT: Use spawn_blocking because ensure_session_sidecar uses reqwest::blocking::Client
     // which cannot be called from within a tokio async runtime (causes deadlock)
-    let sidecar_state = handle.try_state::<ManagedSidecarManager>()
+    let sidecar_state = handle
+        .try_state::<ManagedSidecarManager>()
         .ok_or_else(|| "SidecarManager state not available".to_string())?;
 
     // Clone data for spawn_blocking (requires 'static lifetime)
@@ -4210,19 +4678,28 @@ async fn try_recover_single_task(handle: &AppHandle, task: &CronTask) -> Result<
     // Run blocking sidecar operations in a dedicated thread pool
     let result = tokio::task::spawn_blocking(move || {
         let workspace = std::path::Path::new(&workspace_path);
-        ensure_session_sidecar(&handle_clone, &sidecar_state_clone, &session_id, workspace, owner)
+        ensure_session_sidecar(
+            &handle_clone,
+            &sidecar_state_clone,
+            &session_id,
+            workspace,
+            owner,
+        )
     })
     .await
     .map_err(|e| format!("spawn_blocking failed: {}", e))??;
 
     ulog_info!(
         "[CronTask] Session {} Sidecar ensured: port={}, is_new={}",
-        task.session_id, result.port, result.is_new
+        task.session_id,
+        result.port,
+        result.is_new
     );
 
     // Step 2: Activate session (for legacy session tracking)
     {
-        let mut manager = sidecar_state.lock()
+        let mut manager = sidecar_state
+            .lock()
             .map_err(|e| format!("Failed to lock SidecarManager: {}", e))?;
 
         manager.activate_session(
@@ -4233,7 +4710,11 @@ async fn try_recover_single_task(handle: &AppHandle, task: &CronTask) -> Result<
             task.workspace_path.clone(),
             true, // is_cron_task = true
         );
-        ulog_info!("[CronTask] Session {} activated for task {}", task.session_id, task.id);
+        ulog_info!(
+            "[CronTask] Session {} activated for task {}",
+            task.session_id,
+            task.id
+        );
     }
 
     // Step 3: Start scheduler
@@ -4341,23 +4822,23 @@ mod cron_dialect_tests {
     #[test]
     fn translate_dow_handles_singletons_ranges_lists_steps_names() {
         // Singletons
-        assert_eq!(translate_unix_dow_to_crate_dow("0"), "1");   // Sunday
-        assert_eq!(translate_unix_dow_to_crate_dow("7"), "1");   // Sunday alias
-        assert_eq!(translate_unix_dow_to_crate_dow("1"), "2");   // Monday
-        assert_eq!(translate_unix_dow_to_crate_dow("6"), "7");   // Saturday
-        // Wildcards
+        assert_eq!(translate_unix_dow_to_crate_dow("0"), "1"); // Sunday
+        assert_eq!(translate_unix_dow_to_crate_dow("7"), "1"); // Sunday alias
+        assert_eq!(translate_unix_dow_to_crate_dow("1"), "2"); // Monday
+        assert_eq!(translate_unix_dow_to_crate_dow("6"), "7"); // Saturday
+                                                               // Wildcards
         assert_eq!(translate_unix_dow_to_crate_dow("*"), "*");
-        assert_eq!(translate_unix_dow_to_crate_dow("?"), "?");   // Quartz wildcard, pass through
-        // Forward ranges (no Sunday-alias wrap)
-        assert_eq!(translate_unix_dow_to_crate_dow("1-5"), "2-6");   // Mon-Fri
-        assert_eq!(translate_unix_dow_to_crate_dow("0-6"), "*");     // all days, Unix Sun=0 form
-        assert_eq!(translate_unix_dow_to_crate_dow("0-7"), "*");     // wraps → all days
-        assert_eq!(translate_unix_dow_to_crate_dow("1-7"), "*");     // wraps → all days
-        // Wrap-around ranges that hit Sunday-alias 7 — must enumerate, not
-        // produce invalid descending crate ranges like "6-1"
+        assert_eq!(translate_unix_dow_to_crate_dow("?"), "?"); // Quartz wildcard, pass through
+                                                               // Forward ranges (no Sunday-alias wrap)
+        assert_eq!(translate_unix_dow_to_crate_dow("1-5"), "2-6"); // Mon-Fri
+        assert_eq!(translate_unix_dow_to_crate_dow("0-6"), "*"); // all days, Unix Sun=0 form
+        assert_eq!(translate_unix_dow_to_crate_dow("0-7"), "*"); // wraps → all days
+        assert_eq!(translate_unix_dow_to_crate_dow("1-7"), "*"); // wraps → all days
+                                                                 // Wrap-around ranges that hit Sunday-alias 7 — must enumerate, not
+                                                                 // produce invalid descending crate ranges like "6-1"
         assert_eq!(translate_unix_dow_to_crate_dow("5-7"), "1,6,7"); // Fri-Sun
         assert_eq!(translate_unix_dow_to_crate_dow("2-7"), "1,3-7"); // Tue-Sun
-        // Lists
+                                                                     // Lists
         assert_eq!(translate_unix_dow_to_crate_dow("0,3,5"), "1,4,6");
         assert_eq!(translate_unix_dow_to_crate_dow("1,3,5"), "2,4,6");
         // Step values — must produce same days as the Unix expression
@@ -4365,7 +4846,7 @@ mod cron_dialect_tests {
         assert_eq!(translate_unix_dow_to_crate_dow("*/2"), "1,3,5,7");
         assert_eq!(translate_unix_dow_to_crate_dow("0/2"), "1,3,5,7");
         assert_eq!(translate_unix_dow_to_crate_dow("1-5/2"), "2,4,6"); // Mon,Wed,Fri
-        // 1-7/2 Unix = Mon,Wed,Fri,Sun (NOT */2 phase). Must preserve phase.
+                                                                       // 1-7/2 Unix = Mon,Wed,Fri,Sun (NOT */2 phase). Must preserve phase.
         assert_eq!(translate_unix_dow_to_crate_dow("1-7/2"), "1,2,4,6");
         // Named days pass through unchanged (cron crate already accepts them)
         assert_eq!(translate_unix_dow_to_crate_dow("SUN"), "SUN");
@@ -4393,7 +4874,10 @@ mod cron_dialect_tests {
         let next = next_cron_fire_time("0 8 * * 1-5", Some("UTC")).unwrap();
         let weekday = next.format("%A").to_string();
         assert!(
-            matches!(weekday.as_str(), "Monday" | "Tuesday" | "Wednesday" | "Thursday" | "Friday"),
+            matches!(
+                weekday.as_str(),
+                "Monday" | "Tuesday" | "Wednesday" | "Thursday" | "Friday"
+            ),
             "weekday cron should fire Mon-Fri, got {}",
             weekday
         );

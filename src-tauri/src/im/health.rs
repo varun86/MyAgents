@@ -109,8 +109,8 @@ impl HealthManager {
         let mut state = self.state.lock().await;
         state.last_persisted = chrono::Utc::now().to_rfc3339();
 
-        let json = serde_json::to_string_pretty(&*state)
-            .map_err(|e| format!("Serialize error: {}", e))?;
+        let json =
+            serde_json::to_string_pretty(&*state).map_err(|e| format!("Serialize error: {}", e))?;
 
         // Ensure parent directory exists
         if let Some(parent) = self.persist_path.parent() {
@@ -269,7 +269,8 @@ pub fn migrate_bot_data_to_agent(channel_id: &str, agent_id: &str) {
     if let Err(e) = std::fs::create_dir_all(&new_dir) {
         ulog_warn!(
             "[im-health] Failed to create agent channel dir {:?}: {}, skipping migration",
-            new_dir, e
+            new_dir,
+            e
         );
         return;
     }
@@ -284,12 +285,16 @@ pub fn migrate_bot_data_to_agent(channel_id: &str, agent_id: &str) {
             match std::fs::copy(&old_path, &new_path) {
                 Ok(_) => ulog_info!(
                     "[im-health] Migrated {} from im_bots/{} to agents/{}/channels/{}",
-                    file, channel_id, agent_id, channel_id
+                    file,
+                    channel_id,
+                    agent_id,
+                    channel_id
                 ),
                 Err(e) => {
                     ulog_warn!(
                         "[im-health] Failed to copy {} during migration: {}",
-                        file, e
+                        file,
+                        e
                     );
                     all_copied = false;
                 }
@@ -306,7 +311,8 @@ pub fn migrate_bot_data_to_agent(channel_id: &str, agent_id: &str) {
             ),
             Err(e) => ulog_warn!(
                 "[im-health] Failed to remove old bot dir {:?}: {}",
-                old_dir, e
+                old_dir,
+                e
             ),
         }
     }
@@ -319,11 +325,13 @@ pub fn cleanup_agent_channel_data(agent_id: &str, channel_id: &str) {
         match std::fs::remove_dir_all(&dir) {
             Ok(_) => ulog_info!(
                 "[im-health] Cleaned agent channel data: agents/{}/channels/{}",
-                agent_id, channel_id
+                agent_id,
+                channel_id
             ),
             Err(e) => ulog_warn!(
                 "[im-health] Failed to remove agent channel dir {:?}: {}",
-                dir, e
+                dir,
+                e
             ),
         }
     }
@@ -334,16 +342,26 @@ pub fn cleanup_agent_channel_data(agent_id: &str, channel_id: &str) {
 // ---------------------------------------------------------------------------
 
 /// v1 legacy: single-bot era — ~/.myagents/im_state.json
-fn legacy_health_path() -> PathBuf { myagents_dir().join("im_state.json") }
+fn legacy_health_path() -> PathBuf {
+    myagents_dir().join("im_state.json")
+}
 /// v1 legacy: single-bot era — ~/.myagents/im_buffer.json
-fn legacy_buffer_path() -> PathBuf { myagents_dir().join("im_buffer.json") }
+fn legacy_buffer_path() -> PathBuf {
+    myagents_dir().join("im_buffer.json")
+}
 
 /// v2 flat: multi-bot era — ~/.myagents/im_{botId}_state.json
-fn flat_health_path(bot_id: &str) -> PathBuf { myagents_dir().join(format!("im_{}_state.json", bot_id)) }
+fn flat_health_path(bot_id: &str) -> PathBuf {
+    myagents_dir().join(format!("im_{}_state.json", bot_id))
+}
 /// v2 flat: multi-bot era — ~/.myagents/im_{botId}_buffer.json
-fn flat_buffer_path(bot_id: &str) -> PathBuf { myagents_dir().join(format!("im_{}_buffer.json", bot_id)) }
+fn flat_buffer_path(bot_id: &str) -> PathBuf {
+    myagents_dir().join(format!("im_{}_buffer.json", bot_id))
+}
 /// v2 flat: multi-bot era — ~/.myagents/im_{botId}_dedup.json
-fn flat_dedup_path(bot_id: &str) -> PathBuf { myagents_dir().join(format!("im_{}_dedup.json", bot_id)) }
+fn flat_dedup_path(bot_id: &str) -> PathBuf {
+    myagents_dir().join(format!("im_{}_dedup.json", bot_id))
+}
 
 // ---------------------------------------------------------------------------
 // Migration: v1 (single-bot) + v2 (flat) → v3 (subdir)
@@ -356,25 +374,29 @@ pub fn migrate_legacy_files(bot_id: &str) {
     // Ensure target directory exists
     let target_dir = bot_data_dir(bot_id);
     if let Err(e) = std::fs::create_dir_all(&target_dir) {
-        ulog_warn!("[im-health] Failed to create bot data dir {:?}: {}, skipping migration", target_dir, e);
+        ulog_warn!(
+            "[im-health] Failed to create bot data dir {:?}: {}, skipping migration",
+            target_dir,
+            e
+        );
         return;
     }
 
     // --- v1: single-bot era → v3 subdir ---
-    migrate_single_file(
-        &legacy_health_path(),
+    migrate_single_file(&legacy_health_path(), &bot_health_path(bot_id), "health");
+    migrate_single_file(&legacy_buffer_path(), &bot_buffer_path(bot_id), "buffer");
+
+    // --- v2: flat multi-bot → v3 subdir ---
+    migrate_flat_file(
+        &flat_health_path(bot_id),
         &bot_health_path(bot_id),
         "health",
     );
-    migrate_single_file(
-        &legacy_buffer_path(),
+    migrate_flat_file(
+        &flat_buffer_path(bot_id),
         &bot_buffer_path(bot_id),
         "buffer",
     );
-
-    // --- v2: flat multi-bot → v3 subdir ---
-    migrate_flat_file(&flat_health_path(bot_id), &bot_health_path(bot_id), "health");
-    migrate_flat_file(&flat_buffer_path(bot_id), &bot_buffer_path(bot_id), "buffer");
     migrate_flat_file(&flat_dedup_path(bot_id), &bot_dedup_path(bot_id), "dedup");
 
     // --- One-time cleanup of orphaned flat files + legacy markers ---
@@ -394,7 +416,11 @@ fn migrate_single_file(legacy: &Path, target: &Path, label: &str) {
             ulog_info!("[im-health] Migrated legacy {} → {:?}", label, target);
             let migrated = legacy.with_extension("json.migrated");
             if let Err(e) = std::fs::rename(legacy, &migrated) {
-                ulog_warn!("[im-health] Failed to rename legacy {} to .migrated: {}", label, e);
+                ulog_warn!(
+                    "[im-health] Failed to rename legacy {} to .migrated: {}",
+                    label,
+                    e
+                );
             }
         }
         Err(e) => {
@@ -411,7 +437,12 @@ fn migrate_flat_file(src: &Path, dst: &Path, label: &str) {
     match std::fs::copy(src, dst) {
         Ok(_) => {
             if let Err(e) = std::fs::remove_file(src) {
-                ulog_warn!("[im-health] Migrated flat {} → {:?} but failed to remove source: {}", label, dst, e);
+                ulog_warn!(
+                    "[im-health] Migrated flat {} → {:?} but failed to remove source: {}",
+                    label,
+                    dst,
+                    e
+                );
             } else {
                 ulog_info!("[im-health] Migrated flat {} → {:?}", label, dst);
             }
@@ -436,7 +467,11 @@ pub fn cleanup_bot_data(bot_id: &str) {
     }
 
     // Clean up any residual v2 flat files
-    for path in [flat_health_path(bot_id), flat_buffer_path(bot_id), flat_dedup_path(bot_id)] {
+    for path in [
+        flat_health_path(bot_id),
+        flat_buffer_path(bot_id),
+        flat_dedup_path(bot_id),
+    ] {
         let _ = std::fs::remove_file(&path);
     }
 }

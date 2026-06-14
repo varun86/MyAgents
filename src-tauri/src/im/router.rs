@@ -207,7 +207,8 @@ impl SessionRouter {
         // #327: forward the manager's authoritative is_new — a reused sidecar
         // reports false here so the caller skips sync_ai_config (which would
         // otherwise push channel config onto a shared/snapshotted session).
-        let (port, is_new) = Self::create_sidecar_blocking(info.clone(), app_handle, manager).await?;
+        let (port, is_new) =
+            Self::create_sidecar_blocking(info.clone(), app_handle, manager).await?;
 
         // Phase 3: Write result back
         self.commit_ensure_sidecar(session_key, &info, port);

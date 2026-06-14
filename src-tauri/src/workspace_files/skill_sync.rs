@@ -32,8 +32,8 @@ use std::path::Path;
 
 use crate::{ulog_debug, ulog_warn};
 
-use super::skills_config::read_disabled_list;
 use super::platform_blocks::is_skill_blocked_on_platform;
+use super::skills_config::read_disabled_list;
 
 /// Idempotent: symlink user-level skills + commands into `<workspace>/.claude/`.
 ///
@@ -262,11 +262,7 @@ fn sync_commands_subtree(workspace: &Path, myagents_root: &Path) {
 /// so the canonicalize approach silently skipped every dangling link → they
 /// accumulated forever. Use lexical `read_link` + `path.parent().join(target)`
 /// so broken links resolve to a path we can prefix-check.
-fn cleanup_dangling_symlinks(
-    project_dir: &Path,
-    user_dir: &Path,
-    keep: &HashSet<String>,
-) {
+fn cleanup_dangling_symlinks(project_dir: &Path, user_dir: &Path, keep: &HashSet<String>) {
     let entries = match fs::read_dir(project_dir) {
         Ok(e) => e,
         Err(_) => return,
