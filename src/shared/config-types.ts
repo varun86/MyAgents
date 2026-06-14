@@ -569,6 +569,9 @@ export interface AppConfig {
    *  工作区（config.defaultWorkspacePath）；设为具体工作区路径 = 钉死在该工作区
    *  （不再跟随默认）。切换它触发 session 轮换（铸新 owned session）。 */
   floatingBallWorkspaceOverride?: string | null;
+  /** 鼠标悬停悬浮球时自动展开半透明伴侣窗。缺省视同 true；关闭后点击
+   *  悬浮球仍会打开 pin 态窗口。 */
+  floatingBallHoverPeekEnabled?: boolean;
   /** 开发者：定期从 LiteLLM (GitHub) 拉取 model_prices_and_context_window.json，
    *  作为模型 contextLength/maxOutputTokens 的最低优先级兜底数据源。缺省视同 true。
    *  抓取在 Rust 侧（启动条件检查 + 24h interval，ETag/If-None-Match 增量）。 */
@@ -1399,6 +1402,7 @@ export const DEFAULT_CONFIG: AppConfig = {
   minimizeToTray: true,   // 默认开启最小化到托盘
   forceWakeLock: false,   // 默认关闭常开阻睡（智能模式仍在跑，覆盖 AI 工作期间）
   showDevTools: false,
+  floatingBallHoverPeekEnabled: true,
   liteLLMModelDataRefresh: true, // 默认开启 LiteLLM 模型数据兜底刷新（开发者可关）
   claudeTranscriptCleanupPeriodDays: DEFAULT_CLAUDE_TRANSCRIPT_CLEANUP_PERIOD_DAYS,
   autoStart: false,       // 默认不开启开机启动

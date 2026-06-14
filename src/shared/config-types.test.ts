@@ -66,3 +66,9 @@ describe('normalizeClaudeTranscriptCleanupPeriodDays', () => {
     expect(normalizeClaudeTranscriptCleanupPeriodDays(-12)).toBe(1);
   });
 });
+
+describe('desktop pet defaults', () => {
+  it('keeps hover peek enabled for existing desktop pet behavior', () => {
+    expect(DEFAULT_CONFIG.floatingBallHoverPeekEnabled).toBe(true);
+  });
+});

@@ -67,6 +67,9 @@ export default function BallWindow() {
     const dragDirectionRef = useRef<PetDragDirection>('none');
     const summonPulseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const popTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const hoverPeekEnabledRef = useRef(true);
+    const hoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const hoverInsideRef = useRef(false);
 
     // 原生坐标拖拽（修副屏跳屏）：renderer 只负责 pointer 生命周期和
     // threshold/动画；窗口落点由 Rust 用 NSEvent.mouseLocation + 当前窗口
@@ -134,44 +137,57 @@ export default function BallWindow() {
         return () => {
             if (summonPulseTimerRef.current) clearTimeout(summonPulseTimerRef.current);
             if (popTimerRef.current) clearTimeout(popTimerRef.current);
+            if (hoverTimerRef.current) clearTimeout(hoverTimerRef.current);
         };
     }, []);
 
-    const loadVisualConfig = useCallback(async () => {
+    const loadBallConfig = useCallback(async () => {
         const cfg = await loadAppConfig();
         setAppearance(cfg.floatingBallAppearance ?? 'pet');
+        hoverPeekEnabledRef.current = cfg.floatingBallHoverPeekEnabled !== false;
+        if (!hoverPeekEnabledRef.current) {
+            if (hoverTimerRef.current) {
+                clearTimeout(hoverTimerRef.current);
+                hoverTimerRef.current = null;
+            }
+            hoverInsideRef.current = false;
+            if (companionModeRef.current === 'peek') {
+                void invoke('cmd_fb_hide_companion');
+                relayToCompanion('fb:force-hidden', {});
+            }
+        }
         const nextPack = await resolveSelectedPetPack(cfg.floatingBallPetId);
         setPetPack(nextPack);
         setPetLoadFailed(false);
-    }, []);
+    }, [relayToCompanion]);
 
     useEffect(() => {
         let cancelled = false;
         const timer = window.setTimeout(() => {
             if (cancelled) return;
-            void loadVisualConfig().catch((err) => {
-                console.warn('[fb-ball] load config failed for appearance:', err);
+            void loadBallConfig().catch((err) => {
+                console.warn('[fb-ball] load config failed:', err);
             });
         }, 0);
         return () => {
             cancelled = true;
             window.clearTimeout(timer);
         };
-    }, [loadVisualConfig]);
+    }, [loadBallConfig]);
 
     useEffect(() => {
         const ac = new AbortController();
         void listenWithCleanup(
-            'fb:appearance-changed',
+            'fb:config-changed',
             () => {
-                void loadVisualConfig().catch((err) => {
-                    console.warn('[fb-ball] reload appearance failed:', err);
+                void loadBallConfig().catch((err) => {
+                    console.warn('[fb-ball] reload config failed:', err);
                 });
             },
             ac.signal,
         );
         return () => ac.abort();
-    }, [loadVisualConfig]);
+    }, [loadBallConfig]);
 
     const setDragDirectionStable = useCallback((next: PetDragDirection) => {
         if (dragDirectionRef.current === next) return;
@@ -191,9 +207,8 @@ export default function BallWindow() {
     // ── hover：纯视觉瞥一眼（焦点纹丝不动，D1） ──
     // DOM mouseenter（app 激活态）与原生 NSTrackingArea（非激活态，经
     // fb:native-hover）两路信号汇入同一对 handler，用 ref 暴露给监听 effect。
-    const hoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-    const hoverInsideRef = useRef(false);
     const handleMouseEnter = useCallback(() => {
+        if (!hoverPeekEnabledRef.current) return;
         if (hoverInsideRef.current) return; // 双路信号去重
         hoverInsideRef.current = true;
         if (dragRef.current.active) return;

@@ -33,14 +33,14 @@ interface FbCapabilities {
     active: boolean;
 }
 
-function notifyBallAppearanceChanged() {
+function notifyBallConfigChanged() {
     if (!isTauriEnvironment()) return;
     void invoke('cmd_fb_relay', {
         target: 'ball',
-        event: 'fb:appearance-changed',
+        event: 'fb:config-changed',
         payload: {},
     }).catch((err) => {
-        console.warn('[FloatingBallPetSettings] relay appearance change failed:', err);
+        console.warn('[FloatingBallPetSettings] relay config change failed:', err);
     });
 }
 
@@ -265,6 +265,7 @@ export default function FloatingBallPetSettings() {
     const mountedRef = useRef(true);
 
     const selectedPetId = config.floatingBallPetId ?? 'mino-default';
+    const hoverPeekEnabled = config.floatingBallHoverPeekEnabled !== false;
     const stylePacks = useMemo<PetPack[]>(
         () => [...BUILTIN_PET_PACKS, ...installedPacks],
         [installedPacks],
@@ -316,7 +317,7 @@ export default function FloatingBallPetSettings() {
                 floatingBallAppearance: 'pet',
                 floatingBallPetId: pack.id,
             });
-            notifyBallAppearanceChanged();
+            notifyBallConfigChanged();
             track('floating_ball_pet_select', { pet_id: pack.id, source: pack.source ?? 'builtin' });
         },
         [updateConfig],
@@ -331,7 +332,7 @@ export default function FloatingBallPetSettings() {
                 if (selectedPetId === pack.id) {
                     await updateConfig({ floatingBallPetId: 'mino-default' });
                     if ((config.floatingBallAppearance ?? 'pet') === 'pet') {
-                        notifyBallAppearanceChanged();
+                        notifyBallConfigChanged();
                     }
                 }
                 await refreshInstalled();
@@ -550,6 +551,33 @@ export default function FloatingBallPetSettings() {
                             }}
                             className="w-full shrink-0 sm:w-72"
                         />
+                    </div>
+                    <div className="mt-4 flex flex-col items-start gap-4 border-t border-[var(--line)] pt-4 sm:flex-row sm:items-center sm:justify-between sm:gap-6">
+                        <div className="min-w-0 flex-1">
+                            <p className="text-sm font-medium text-[var(--ink)]">悬停预览浮窗</p>
+                            <p className="mt-1 text-sm text-[var(--ink-muted)]">
+                                鼠标移到悬浮球上时自动展开半透明浮窗；关闭后点击悬浮球仍可打开。
+                            </p>
+                        </div>
+                        <button
+                            type="button"
+                            onClick={async () => {
+                                const next = !hoverPeekEnabled;
+                                await updateConfig({ floatingBallHoverPeekEnabled: next });
+                                notifyBallConfigChanged();
+                                toast.success(next ? '已开启悬停预览浮窗' : '已关闭悬停预览浮窗');
+                            }}
+                            className={`relative h-6 w-11 shrink-0 cursor-pointer rounded-full transition-colors ${
+                                hoverPeekEnabled ? 'bg-[var(--accent)]' : 'bg-[var(--line-strong)]'
+                            }`}
+                            aria-pressed={hoverPeekEnabled}
+                        >
+                            <span
+                                className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-[var(--toggle-thumb)] shadow transition-transform ${
+                                    hoverPeekEnabled ? 'translate-x-5' : 'translate-x-0'
+                                }`}
+                            />
+                        </button>
                     </div>
                 </section>
 
