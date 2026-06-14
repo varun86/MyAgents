@@ -250,7 +250,7 @@ html.fb-transparent #root {
   display: flex;
   flex-direction: column;
   border-radius: 24px;
-  /* 真模糊由 Rust 侧 NSVisualEffectView 提供（Sidebar 材质 + 强制
+  /* macOS 真模糊由 Rust 侧 NSVisualEffectView 提供（Sidebar 材质 + 强制
      Active，模糊常开全强度）；透明度只由这层暖纸着色控制——
      peek 0.15（几乎纯毛玻璃背板，背后内容成模糊色块、明确可感）
      → pin 0.96（凝固成实纸）。 */
@@ -273,8 +273,8 @@ html.fb-transparent #root {
 .fbw-win.peek .fbw-inputarea { opacity: 0.5; pointer-events: none; }
 .fbw-win.peek .fbw-convo { opacity: 0.82; pointer-events: none; }
 
-/* Windows 没有 macOS 的 NSVisualEffectView 兜底时，透明 layered WebView 会
-   直接透出桌面。原生 acrylic 失败或被系统禁用时，用更实的纸面保证可读。 */
+/* Windows 不用 native acrylic：HWND/material 是矩形，无法被 DOM 圆角裁切，
+   会在四角漏出灰底。这里让 DOM 圆角面板成为唯一可见层。 */
 html.platform-windows.fb-transparent .fbw-win {
   background: color-mix(in srgb, var(--paper-elevated) 92%, transparent);
   border-color: color-mix(in srgb, var(--line-strong) 78%, transparent);

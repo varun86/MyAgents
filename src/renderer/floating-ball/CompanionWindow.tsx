@@ -28,13 +28,13 @@ import { loadAppConfig, mergePresetCustomModels } from '@/config/services/appCon
 import { getAllProviders, modelSupportsModality } from '@/config/services/providerService';
 import { applyProviderEnablementAndOrder, type Provider } from '@/config/types';
 import { ALLOWED_IMAGE_MIME_TYPES, isImageFile, isImageMimeType } from '../../shared/fileTypes';
-import { isImeComposingEvent, resolveEnterKeyAction } from '@/utils/chatSendKey';
 import { renameIfBareClipboardImage } from '@/utils/clipboardImage';
 import { formatDuration, getToolBadgeConfig, getToolLabel, getToolMainLabel, getToolSummaryNode, isSubagentContainerTool } from '@/components/tools/toolBadgeConfig';
 import { groupContentBlocksForDisplay } from '@/utils/contentBlockDisplay';
 import type { ContentBlock } from '@/types/chat';
 import { isNearBottom } from './convoAutoFollow';
 import { useFloatingSession, type FbAttachment, type FbMsg } from './useFloatingSession';
+import { useFloatingComposerKeydown } from './useFloatingComposerKeydown';
 
 import './fb.css';
 
@@ -451,21 +451,13 @@ export default function CompanionWindow() {
         return () => ac.abort();
     }, [applyMode, applySummonCtx, scheduleHideIfPeek, summonPinned, hideSelf, suspend, resume]);
 
-    // ── 窗口失焦（pin 态用户点了别处）→ 收起；Esc → 先关大图预览、再收起 ──
+    // ── 窗口失焦（pin 态用户点了别处）→ 收起。Esc 由 composer keydown owner 处理 ──
     useEffect(() => {
         const onBlur = () => {
             if (modeRef.current === 'pin') hideSelf();
         };
-        const onKey = (e: KeyboardEvent) => {
-            if (e.key !== 'Escape') return;
-            hideSelf();
-        };
         window.addEventListener('blur', onBlur);
-        window.addEventListener('keydown', onKey);
-        return () => {
-            window.removeEventListener('blur', onBlur);
-            window.removeEventListener('keydown', onKey);
-        };
+        return () => window.removeEventListener('blur', onBlur);
     }, [hideSelf]);
 
     // ── peek → pin 升格（窗内有效行为 = 激活 + 执行该行为，0612 用户裁决） ──
@@ -835,39 +827,19 @@ export default function CompanionWindow() {
         });
     }, [imageDrafts, input, quote, session.busy, session.ready, send]);
 
-    // 输入交互与主对话框同源（用户验收裁决：复用，不自创）：
-    // chatSendKey 纯函数承担 Enter/换行语义（含 chatSendShortcut 偏好），
-    // composition ref + 事件双保险挡 IME 候选提交误发（#123 同款），
-    // 组合输入期间不写 textarea.style.height（WebKit 卡顿坑）。
-    const isComposingRef = useRef(false);
-    const doSendRef = useRef(doSend);
-    useEffect(() => {
-        doSendRef.current = doSend;
-    }, [doSend]);
-    const sendShortcutRef = useRef(session.sendShortcut);
-    useEffect(() => {
-        sendShortcutRef.current = session.sendShortcut;
-    }, [session.sendShortcut]);
-
     const resizeInput = useCallback((el: HTMLTextAreaElement) => {
         el.style.height = 'auto';
         el.style.height = `${Math.min(el.scrollHeight, 110)}px`;
     }, []);
 
-    const onInputKeyDown = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-        if (e.key !== 'Enter') return;
-        if (isComposingRef.current || isImeComposingEvent(e)) return;
-        if (resolveEnterKeyAction(e, sendShortcutRef.current) !== 'send') return;
-        e.preventDefault();
-        void doSendRef.current();
-    }, []);
-    const onCompositionStart = useCallback(() => {
-        isComposingRef.current = true;
-    }, []);
-    const onCompositionEnd = useCallback((e: React.CompositionEvent<HTMLTextAreaElement>) => {
-        isComposingRef.current = false;
-        resizeInput(e.currentTarget);
-    }, [resizeInput]);
+    // 输入键盘入口：Ctrl/Cmd+A 全选、Esc、Enter/换行语义和 IME 防误发统一在
+    // hook 内维护。悬浮窗是独立 WebView，不会经过 App.tsx 的全局快捷键路由。
+    const composerKeydown = useFloatingComposerKeydown({
+        sendShortcut: session.sendShortcut,
+        onSend: doSend,
+        onEscape: hideSelf,
+        onCompositionEndResize: resizeInput,
+    });
 
     // ── 📷 快门（D7：只在点下这一刻发生） ──
     const onShot = useCallback(async () => {
@@ -1188,12 +1160,12 @@ export default function CompanionWindow() {
                         onChange={(e) => {
                             setInput(e.target.value);
                             // IME 组合期间不写 style（#123：触发 WebKit 候选窗重排卡顿）
-                            if (!isComposingRef.current) resizeInput(e.target);
+                            if (!composerKeydown.isComposing()) resizeInput(e.target);
                         }}
-                        onKeyDown={onInputKeyDown}
+                        onKeyDown={composerKeydown.onKeyDown}
                         onPaste={onInputPaste}
-                        onCompositionStart={onCompositionStart}
-                        onCompositionEnd={onCompositionEnd}
+                        onCompositionStart={composerKeydown.onCompositionStart}
+                        onCompositionEnd={composerKeydown.onCompositionEnd}
                     />
                     <button className="cam" onClick={() => void onShot()} title="添加屏幕截图">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" /><circle cx="12" cy="13" r="4" /></svg>

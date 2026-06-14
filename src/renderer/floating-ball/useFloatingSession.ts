@@ -1431,6 +1431,7 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
                         text: finalText,
                         images,
                         permissionMode: sendMode,
+                        analyticsSource: 'floating_ball',
                     }),
                 });
                 if (!resp.ok) {

@@ -50,7 +50,7 @@ import {
 } from '../utils/session-materialization';
 import { findAgentByWorkspacePath, isCliToolRegistryEnabled } from '../utils/admin-config';
 import type { AgentConfig } from '../../shared/types/agent';
-import type { MessageUsage, SessionMessage } from '../types/session';
+import type { MessageUsage, SessionMessage, TurnAnalyticsSource } from '../types/session';
 import type { SystemInitInfo } from '../../shared/types/system';
 import { trackServer } from '../analytics';
 import {
@@ -113,6 +113,7 @@ let watchdogTimer: ReturnType<typeof setInterval> | null = null;  // Hung proces
 let lastSessionId = '';
 let lastWorkspacePath = '';
 let lastScenario: InteractionScenario = { type: 'desktop' };
+let lastAnalyticsSource: TurnAnalyticsSource = 'desktop';
 let lastRuntimeSessionId = '';  // Runtime's session ID (CC: from hook/init; Codex: threadId)
 let lastModel = '';             // Latest model from config sync (passed on resume)
 let lastRuntimeReportedModel = ''; // Actual model reported by runtime (session_init/model_update)
@@ -133,6 +134,7 @@ let currentTurnStartTime = 0;
 let externalTurnSeq = 0;
 let currentTurnTraceId = '';
 let currentTurnTraceSessionId = '';
+let currentTurnAnalyticsSource: TurnAnalyticsSource | null = null;
 let currentTurnTraceRequestId: string | undefined;
 let currentTurnTraceRuntime = '';
 let currentTurnTraceStartMs = 0;
@@ -395,11 +397,13 @@ function resetModuleState(): void {
   lastRuntimeReportedModel = '';
   lastPermissionMode = '';
   lastReasoningEffort = '';
+  lastAnalyticsSource = 'desktop';
   lastPersistedRuntimeUsageTotals = null;
   currentTurnContextUsage = null;
   allSessionMessages = [];
   currentAssistantText = '';
   currentTurnStartTime = 0;
+  currentTurnAnalyticsSource = null;
   currentContentBlocks = [];
   pendingTextBuffer = '';
   pendingThinkingText = '';
@@ -1299,6 +1303,7 @@ export function restoreExternalSessionState(
   lastSessionId = sessionId;
   lastWorkspacePath = workspacePath;
   lastScenario = scenario;
+  lastAnalyticsSource = scenario.type;
 
   // Restore the runtime's own session ID from persisted metadata.
   // Four cases:
@@ -1966,6 +1971,7 @@ export async function startExternalSession(options: {
    *  default (records over a stale module value); absent = keep module state. */
   reasoningEffort?: string;
   scenario: InteractionScenario;
+  analyticsSource?: TurnAnalyticsSource;
   resumeSessionId?: string;
   /** Issue #194 — per-agent env policy (proxy: myagents/terminal/direct). */
   envPolicy?: import('../../shared/types/runtime').RuntimeEnvPolicy;
@@ -2009,6 +2015,7 @@ async function _doStartExternalSession(options: {
   permissionMode?: string;
   reasoningEffort?: string;
   scenario: InteractionScenario;
+  analyticsSource?: TurnAnalyticsSource;
   resumeSessionId?: string;
   envPolicy?: import('../../shared/types/runtime').RuntimeEnvPolicy;
   recordConfigState?: boolean;
@@ -2164,6 +2171,8 @@ async function _doStartExternalSession(options: {
   lastSessionId = options.sessionId;
   lastWorkspacePath = options.workspacePath;
   lastScenario = options.scenario;
+  lastAnalyticsSource = options.analyticsSource ?? options.scenario.type;
+  currentTurnAnalyticsSource = options.initialMessage ? lastAnalyticsSource : null;
 
   // Set isRunning BEFORE spawning — prevents waitForExternalSessionIdle from
   // seeing the pre-start state and returning true prematurely. Reset in catch.
@@ -2256,6 +2265,9 @@ export interface ExternalSendContext {
   sessionId: string;
   workspacePath: string;
   scenario: InteractionScenario;
+  /** Per-turn analytics attribution. Does not alter the interaction scenario
+   *  used for prompt assembly or session materialization. */
+  analyticsSource?: TurnAnalyticsSource;
   permissionMode?: string;
   model?: string;  // Runtime-specific model (e.g., "sonnet", "opus")
   /** #324 — RAW effort setting ('default' | level). Tri-state contract:
@@ -2321,6 +2333,7 @@ export async function sendExternalMessage(
   preBroadcasted?: SessionMessage,
 ): Promise<{ queued: boolean; error?: string }> {
   const hasImages = images && images.length > 0;
+  const turnAnalyticsSource = context?.analyticsSource ?? context?.scenario.type ?? lastAnalyticsSource;
 
   // Show user message immediately — don't block on pre-warm or turn serialization.
   // The message appears in the chat as soon as the user presses send, giving
@@ -2429,7 +2442,7 @@ export async function sendExternalMessage(
     sizeBytes: Buffer.byteLength(text, 'utf8'),
     count: hasImages ? images?.length : 0,
     detail: {
-      source: context?.scenario.type ?? lastScenario.type,
+      source: turnAnalyticsSource,
       hasImages: Boolean(hasImages),
       preBroadcasted: Boolean(preBroadcasted),
     },
@@ -2451,6 +2464,7 @@ export async function sendExternalMessage(
         permissionMode: context.permissionMode ?? lastPermissionMode,
         reasoningEffort: resolveTurnReasoningEffort(context),
         scenario: context.scenario,
+        analyticsSource: turnAnalyticsSource,
         recordConfigState: !hasQueuedExternalConfigOperation(),
       });
       return { queued: true };
@@ -2482,6 +2496,7 @@ export async function sendExternalMessage(
         permissionMode: nextPermissionMode,
         reasoningEffort: resolveTurnReasoningEffort(context), // #324
         scenario: nextScenario,
+        analyticsSource: turnAnalyticsSource,
         resumeSessionId: resumeId, // CC: --resume <myagents-session-id>; Codex: --resume <threadId>
         recordConfigState: !hasQueuedExternalConfigOperation(),
       });
@@ -2517,6 +2532,8 @@ export async function sendExternalMessage(
     turnCompleted = false;
     lastTurnSucceeded = false;  // Reset for this turn (prevents stale text on failure)
     resetTurnAccumulators();
+    currentTurnAnalyticsSource = turnAnalyticsSource;
+    lastAnalyticsSource = turnAnalyticsSource;
     seedTurnWatchdogEstimate();
     resetWatchdog();  // Start watchdog for this turn (Case 3 bypasses startExternalSession)
     currentTurnStartTime = Date.now();
@@ -3307,6 +3324,7 @@ async function persistTurnResult(): Promise<void> {
   // the inbox-meta discipline. Null = no usage event this turn → persist must OMIT
   // the field (never write undefined, which would erase the prior persisted value).
   const turnContextUsage = currentTurnContextUsage;
+  const turnAnalyticsSource = currentTurnAnalyticsSource ?? lastAnalyticsSource;
   const persistTraceStarted = nowMs();
   let persistFailed = false;
   let persistFailureReason: string | undefined;
@@ -3459,7 +3477,7 @@ async function persistTurnResult(): Promise<void> {
     // coerce empty to null here. Analytics tolerates null and groups those as
     // "pre-session" (negligible volume — only first turn before any id lands).
     trackServer('ai_turn_complete', {
-      source: lastScenario.type,
+      source: turnAnalyticsSource,
       session_id: lastSessionId || null,
       platform: lastScenario.type === 'im' ? lastScenario.platform : null,
       runtime: runtimeType,

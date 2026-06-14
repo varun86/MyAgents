@@ -33,12 +33,13 @@ export interface BaseEventParams {
  *
  * 取值约定：
  *   - `desktop`     桌面端 GUI（未来若有移动端 app，再加 `mobile`）
+ *   - `floating_ball` 桌面悬浮球伴侣窗（独立于主 Tab 的 AI turn）
  *   - `cli`         用户在终端手动跑 `myagents` 命令
  *   - `cli_agent`   AI 子进程（agent）通过 CLI 调用（`MYAGENTS_PORT` 在环境里）
  *   - `cron`        定时任务调度器
  *   - `im`          IM Bot（飞书 / Telegram / 钉钉）
  */
-export type Source = 'desktop' | 'cli' | 'cli_agent' | 'cron' | 'im';
+export type Source = 'desktop' | 'floating_ball' | 'cli' | 'cli_agent' | 'cron' | 'im';
 
 /**
  * UI 入口面 —— `source` 维度内"desktop 渠道"的二级细分。

@@ -1185,8 +1185,9 @@ mod imp {
     use std::ffi::OsString;
     use std::os::windows::ffi::OsStringExt;
     use std::path::{Path, PathBuf};
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
     use std::sync::{Mutex, OnceLock};
+    use std::time::{SystemTime, UNIX_EPOCH};
     use tauri::{
         AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, PhysicalPosition, WebviewUrl,
         WebviewWindow, WebviewWindowBuilder,
@@ -1214,7 +1215,9 @@ mod imp {
     const COMPANION_GAP: f64 = 10.0;
 
     static HOVER_POLLER_RUNNING: AtomicBool = AtomicBool::new(false);
+    static FOREGROUND_POLLER_STARTED: AtomicBool = AtomicBool::new(false);
     static COMPANION_PINNED: AtomicBool = AtomicBool::new(false);
+    static COMPANION_PINNED_AT_MS: AtomicU64 = AtomicU64::new(0);
     static BALL_HWND: AtomicUsize = AtomicUsize::new(0);
     static COMPANION_HWND: AtomicUsize = AtomicUsize::new(0);
     static LAST_FOREGROUND_HWND: AtomicUsize = AtomicUsize::new(0);
@@ -1319,15 +1322,6 @@ mod imp {
         }
         install_noactivate_proc(hwnd)?;
         Ok(())
-    }
-
-    fn apply_companion_material(win: &WebviewWindow) {
-        // Mirror the macOS native-material contract. The renderer still keeps a
-        // high-opacity Windows fallback because acrylic can be disabled by OS
-        // version, battery/accessibility settings, or remote/virtualized GPUs.
-        if let Err(e) = window_vibrancy::apply_acrylic(win, Some((253, 250, 244, 96))) {
-            ulog_warn!("[fb] companion windows acrylic failed (css fallback active): {e}");
-        }
     }
 
     fn show_no_activate(win: &WebviewWindow) -> Result<(), String> {
@@ -1481,7 +1475,6 @@ mod imp {
             let hwnd = hwnd_for(&win)?;
             COMPANION_HWND.store(hwnd as usize, Ordering::SeqCst);
             apply_tool_window_styles(&win, true)?;
-            apply_companion_material(&win);
             position_companion_near_ball(app, &win);
         }
         Ok(())
@@ -1499,6 +1492,7 @@ mod imp {
             serde_json::json!({ "active": true }),
         );
         start_hover_poller(app);
+        start_foreground_poller(app);
         ulog_info!("[fb] floating ball enabled on Windows");
         Ok(())
     }
@@ -1612,6 +1606,50 @@ mod imp {
 
     fn stop_hover_poller() {
         HOVER_POLLER_RUNNING.store(false, Ordering::SeqCst);
+    }
+
+    fn now_millis() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0)
+    }
+
+    fn start_foreground_poller(app: &AppHandle) {
+        if FOREGROUND_POLLER_STARTED.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+                if !COMPANION_PINNED.load(Ordering::SeqCst) {
+                    continue;
+                }
+                let pinned_at = COMPANION_PINNED_AT_MS.load(Ordering::SeqCst);
+                if now_millis().saturating_sub(pinned_at) < 350 {
+                    continue;
+                }
+                let foreground = unsafe { GetForegroundWindow() };
+                if foreground.is_null() || hwnd_is_ours(foreground) {
+                    continue;
+                }
+
+                ulog_info!("[fb] windows companion hiding after foreground moved outside");
+                hide_companion(&app);
+                let _ = app.emit_to(
+                    BALL_LABEL,
+                    "fb:companion-mode",
+                    serde_json::json!({ "mode": "hidden" }),
+                );
+                let _ = app.emit_to(
+                    COMPANION_LABEL,
+                    "fb:force-hidden",
+                    serde_json::json!({ "reason": "foreground-lost" }),
+                );
+            }
+        });
+        ulog_info!("[fb] windows foreground poller started");
     }
 
     fn window_origin(win: &WebviewWindow) -> Result<(f64, f64), String> {
@@ -1759,6 +1797,7 @@ mod imp {
             remember_foreground_context();
             apply_tool_window_styles(&companion, false)?;
             COMPANION_PINNED.store(true, Ordering::SeqCst);
+            COMPANION_PINNED_AT_MS.store(now_millis(), Ordering::SeqCst);
             let _ = companion.show();
             unsafe {
                 let hwnd = hwnd_for(&companion)?;
@@ -1767,6 +1806,7 @@ mod imp {
             let _ = companion.set_focus();
         } else {
             COMPANION_PINNED.store(false, Ordering::SeqCst);
+            COMPANION_PINNED_AT_MS.store(0, Ordering::SeqCst);
             apply_tool_window_styles(&companion, true)?;
             show_no_activate(&companion)?;
         }
@@ -1781,6 +1821,7 @@ mod imp {
         remember_foreground_context();
         apply_tool_window_styles(&companion, false)?;
         COMPANION_PINNED.store(true, Ordering::SeqCst);
+        COMPANION_PINNED_AT_MS.store(now_millis(), Ordering::SeqCst);
         let _ = companion.show();
         unsafe {
             let hwnd = hwnd_for(&companion)?;
@@ -1792,6 +1833,7 @@ mod imp {
 
     pub fn hide_companion(app: &AppHandle) {
         COMPANION_PINNED.store(false, Ordering::SeqCst);
+        COMPANION_PINNED_AT_MS.store(0, Ordering::SeqCst);
         let should_restore_focus = unsafe { hwnd_is_ours(GetForegroundWindow()) };
         if let Some(companion) = app.get_webview_window(COMPANION_LABEL) {
             let _ = apply_tool_window_styles(&companion, true);

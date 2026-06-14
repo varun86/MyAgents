@@ -161,6 +161,11 @@ export interface MessageUsage {
 /** Session source: 'desktop' for desktop, '{platform}_{private|group}' for IM/channels (supports bridge plugins with dynamic platform names) */
 export type SessionSource = 'desktop' | `${string}_private` | `${string}_group`;
 
+/** Analytics source for a completed AI turn. Kept separate from SessionSource:
+ *  SessionSource drives persistence / IM mirroring, while this is per-turn
+ *  attribution for product analytics. */
+export type TurnAnalyticsSource = 'desktop' | 'floating_ball' | 'cron' | 'im' | 'agent-channel';
+
 /**
  * Message source metadata (IM integration)
  */

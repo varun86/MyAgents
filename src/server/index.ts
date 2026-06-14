@@ -105,7 +105,7 @@ async function schedulePluginRestartLazy(): Promise<void> {
     console.warn('[plugins] schedulePluginRestartLazy failed (non-fatal):', err);
   }
 }
-import type { SessionSource } from './types/session';
+import type { SessionSource, TurnAnalyticsSource } from './types/session';
 import { parseAgentFrontmatter, parseFullAgentContent, serializeAgentContent } from '../shared/agentCommands';
 import { scanAgents, readWorkspaceConfig, writeWorkspaceConfig, loadEnabledAgents, readAgentMeta, writeAgentMeta, findAgent } from './agents/agent-loader';
 import type { AgentFrontmatter, AgentMeta, AgentWorkspaceConfig } from '../shared/agentTypes';
@@ -666,6 +666,8 @@ type SendMessagePayload = {
   // #324 — reasoning effort setting ('default' | level). Omitted by IM/Cron
   // callers (keep current session value); desktop sends its picker state.
   reasoningEffort?: string;
+  /** Per-turn analytics attribution; prompt scenario remains desktop. */
+  analyticsSource?: TurnAnalyticsSource;
   // 'subscription' = explicit switch to Anthropic subscription (from desktop)
   // undefined/missing = "keep current provider" (safe default for IM/Cron callers)
   // object = use this specific third-party provider
@@ -2258,6 +2260,8 @@ async function main() {
         const model = payload?.model;
         const providerEnv = payload?.providerEnv;
         const reasoningEffort = typeof payload?.reasoningEffort === 'string' ? payload.reasoningEffort : undefined;
+        const analyticsSource: TurnAnalyticsSource | undefined =
+          payload?.analyticsSource === 'floating_ball' ? 'floating_ball' : undefined;
 
         // Allow sending with just images or just text
         if (!text && images.length === 0) {
@@ -2294,6 +2298,7 @@ async function main() {
             sessionId: getSessionId(),
             workspacePath: agentDir,
             scenario: { type: 'desktop' as const },
+            analyticsSource,
             permissionMode,
             model: model ?? undefined,
             reasoningEffort,
@@ -2340,6 +2345,9 @@ async function main() {
             providerEnv,
             reasoningEffort,
             { source: 'desktop' as SessionSource },
+            undefined,
+            undefined,
+            analyticsSource,
           );
           if (result.error) {
             return jsonResponse({ success: false, error: result.error }, 429);
