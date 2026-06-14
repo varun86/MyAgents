@@ -875,10 +875,12 @@ export const PRESET_PROVIDERS: Provider[] = [
       timeout: 600000,
       disableNonessential: true,
     },
-    modelAliases: { sonnet: 'glm-5.1', opus: 'glm-5.1', haiku: 'glm-5.1' },
+    modelAliases: { sonnet: 'glm-5.1', opus: 'glm-5.2', haiku: 'glm-5.1' },
     models: [
+      // GLM-5.2 Coding Plan 官方接入文档公布 1M 上下文 / 131072 max tokens；
       // GLM-5.1 / 5-Turbo 官方公布 200K 上下文（docs.bigmodel.cn / z.ai），其余系列以 LiteLLM 数据为准
       // GLM-5.x / 4.x chat 端点为纯文本；视觉能力在独立的 GLM-4V / GLM-5V 模型族
+      { model: 'glm-5.2', modelName: 'GLM 5.2', modelSeries: 'zhipu', contextLength: 1_000_000, maxOutputTokens: 131_072, inputModalities: ['text'] },
       { model: 'glm-5.1', modelName: 'GLM 5.1', modelSeries: 'zhipu', contextLength: 204_800, maxOutputTokens: 131_072, inputModalities: ['text'] },
       { model: 'glm-5-turbo', modelName: 'GLM 5 Turbo', modelSeries: 'zhipu', contextLength: 202_752, maxOutputTokens: 131_072, inputModalities: ['text'] },
       { model: 'glm-4.7', modelName: 'GLM 4.7', modelSeries: 'zhipu', contextLength: 200_000, maxOutputTokens: 128_000, inputModalities: ['text'] },
@@ -907,10 +909,12 @@ export const PRESET_PROVIDERS: Provider[] = [
       baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
       timeout: 600000,
     },
-    modelAliases: { sonnet: 'glm-5.1', opus: 'glm-5.1', haiku: 'glm-5.1' },
+    modelAliases: { sonnet: 'glm-5.1', opus: 'glm-5.2', haiku: 'glm-5.1' },
     models: [
+      // GLM-5.2 Coding Plan 官方接入文档公布 1M 上下文 / 131072 max tokens；
       // GLM-5.1 / 5-Turbo 官方公布 200K 上下文（docs.bigmodel.cn / z.ai），其余系列以 LiteLLM 数据为准
       // GLM-5.x / 4.x chat 端点为纯文本；视觉能力在独立的 GLM-4V / GLM-5V 模型族
+      { model: 'glm-5.2', modelName: 'GLM 5.2', modelSeries: 'zhipu', contextLength: 1_000_000, maxOutputTokens: 131_072, inputModalities: ['text'] },
       { model: 'glm-5.1', modelName: 'GLM 5.1', modelSeries: 'zhipu', contextLength: 204_800, maxOutputTokens: 131_072, inputModalities: ['text'] },
       { model: 'glm-5-turbo', modelName: 'GLM 5 Turbo', modelSeries: 'zhipu', contextLength: 202_752, maxOutputTokens: 131_072, inputModalities: ['text'] },
       { model: 'glm-4.7', modelName: 'GLM 4.7', modelSeries: 'zhipu', contextLength: 200_000, maxOutputTokens: 128_000, inputModalities: ['text'] },
