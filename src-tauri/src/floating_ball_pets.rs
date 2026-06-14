@@ -692,6 +692,43 @@ fn list_installed_pets_blocking() -> Result<Vec<FbPetEntry>, String> {
     list_pet_dirs(&root, "myagents")
 }
 
+fn delete_installed_pet_blocking(id: String) -> Result<(), String> {
+    let id = id.trim().to_string();
+    if !is_safe_pet_id(&id) {
+        return Err("宠物 ID 不安全".to_string());
+    }
+    if RESERVED_BUILTIN_PET_IDS.contains(&id.as_str()) {
+        return Err("内置宠物不能删除".to_string());
+    }
+
+    let root = pets_dir()?;
+    let root_meta = match std::fs::symlink_metadata(&root) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(format!("读取 pets 目录失败：{} ({})", root.display(), e)),
+    };
+    if root_meta.file_type().is_symlink() || !root_meta.is_dir() {
+        return Err(format!("pets 目录非法：{}", root.display()));
+    }
+    let root_canon = canonicalize_checked(&root)?;
+    let target = root_canon.join(&id);
+    let target_meta = match std::fs::symlink_metadata(&target) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(format!("读取宠物目录失败：{} ({})", target.display(), e)),
+    };
+    if target_meta.file_type().is_symlink() {
+        return Err(format!("宠物目录不能是符号链接：{}", target.display()));
+    }
+    if !target_meta.is_dir() {
+        return Err(format!("宠物目录非法：{}", target.display()));
+    }
+    let target_canon = canonicalize_checked(&target)?;
+    ensure_child_of(&target_canon, &root_canon, "pet 目录")?;
+    std::fs::remove_dir_all(&target_canon)
+        .map_err(|e| format!("删除宠物素材失败：{} ({})", target_canon.display(), e))
+}
+
 fn import_pet_path_blocking(path: String) -> Result<FbPetImportSummary, String> {
     let validated = crate::commands::validate_file_path(&path)?;
     let meta = std::fs::symlink_metadata(&validated)
@@ -941,6 +978,13 @@ pub async fn cmd_fb_pet_list_installed() -> Result<Vec<FbPetEntry>, String> {
     tauri::async_runtime::spawn_blocking(list_installed_pets_blocking)
         .await
         .map_err(|e| format!("[fb-pet] list join: {e}"))?
+}
+
+#[tauri::command]
+pub async fn cmd_fb_pet_delete_installed(id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || delete_installed_pet_blocking(id))
+        .await
+        .map_err(|e| format!("[fb-pet] delete join: {e}"))?
 }
 
 #[tauri::command]

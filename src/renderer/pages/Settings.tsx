@@ -3701,25 +3701,35 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                     </button>
                                 </div>
 
-                                {/* #264 — Background-agent permission policy */}
+                                {/* Floating Ball Dev Gate (PRD 0.2.35 — 先开发不发布，D10) */}
                                 <div className="mt-4 flex items-center justify-between border-t border-[var(--line)] pt-4">
                                     <div className="flex-1 pr-4">
-                                        <p className="text-sm font-medium text-[var(--ink)]">后台 Agent 权限</p>
+                                        <p className="text-sm font-medium text-[var(--ink)]">桌面宠物</p>
                                         <p className="text-xs text-[var(--ink-muted)]">
-                                            通过 <span className="font-mono">run_in_background</span> 启动的后台 Agent 没有权限弹窗。「继承已授权」只放行你已点过「始终允许」的工具，其余拒绝并提示；「全自动」允许后台 Agent 使用所有非交互工具（权限更宽，请谨慎）。
+                                            Mino 的桌面宠物：屏幕边缘常驻悬浮球，hover 瞥一眼、点击即问，发完就走由球替你跑（仅 macOS）。开启后 Tab 栏出现显隐开关。
                                         </p>
                                     </div>
-                                    <CustomSelect
-                                        value={config.backgroundAgentPermissionMode ?? 'inherit'}
-                                        options={[
-                                            { value: 'inherit', label: '继承已授权' },
-                                            { value: 'fullAgency', label: '全自动' },
-                                        ]}
-                                        onChange={(val) => {
-                                            updateConfig({ backgroundAgentPermissionMode: val as 'inherit' | 'fullAgency' });
+                                    <button
+                                        onClick={() => {
+                                            const next = !config.floatingBallDevGate;
+                                            updateConfig({
+                                                floatingBallDevGate: next,
+                                                // 总门控开 → 球默认随之启用；关 → 球一并收走
+                                                floatingBallEnabled: next,
+                                            });
+                                            track('floating_ball_toggle', { gate: true, enabled: next });
+                                            void invoke(next ? 'cmd_fb_enable' : 'cmd_fb_disable').catch((err) => {
+                                                console.warn('[Settings] floating ball toggle:', err);
+                                            });
                                         }}
-                                        className="w-32 shrink-0"
-                                    />
+                                        className={`relative h-6 w-11 shrink-0 cursor-pointer rounded-full transition-colors ${config.floatingBallDevGate ? 'bg-[var(--accent)]' : 'bg-[var(--line-strong)]'
+                                            }`}
+                                    >
+                                        <span
+                                            className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-[var(--toggle-thumb)] shadow transition-transform ${config.floatingBallDevGate ? 'translate-x-5' : 'translate-x-0'
+                                                }`}
+                                        />
+                                    </button>
                                 </div>
                             </div>
 
@@ -3853,36 +3863,26 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                             </div>
                                         </div>
 
-                                        {/* Floating Ball Dev Gate (PRD 0.2.35 — 先开发不发布，D10) */}
+                                        {/* #264 — Background-agent permission policy */}
                                         <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
                                             <div className="flex items-center justify-between">
-                                                <div>
-                                                    <h3 className="text-sm font-medium text-[var(--ink)]">桌面悬浮球（实验）</h3>
+                                                <div className="flex-1 pr-4">
+                                                    <h3 className="text-sm font-medium text-[var(--ink)]">后台 Agent 权限</h3>
                                                     <p className="mt-1 text-xs text-[var(--ink-muted)]">
-                                                        Mino 的桌面渠道：屏幕边缘常驻悬浮球，hover 瞥一眼、点击即问，发完就走由球替你跑（仅 macOS）。开启后 Tab 栏出现显隐开关。
+                                                        通过 <span className="font-mono">run_in_background</span> 启动的后台 Agent 没有权限弹窗。「继承已授权」只放行你已点过「始终允许」的工具，其余拒绝并提示；「全自动」允许后台 Agent 使用所有非交互工具（权限更宽，请谨慎）。
                                                     </p>
                                                 </div>
-                                                <button
-                                                    onClick={() => {
-                                                        const next = !config.floatingBallDevGate;
-                                                        updateConfig({
-                                                            floatingBallDevGate: next,
-                                                            // 总门控开 → 球默认随之启用；关 → 球一并收走
-                                                            floatingBallEnabled: next,
-                                                        });
-                                                        track('floating_ball_toggle', { gate: true, enabled: next });
-                                                        void invoke(next ? 'cmd_fb_enable' : 'cmd_fb_disable').catch((err) => {
-                                                            console.warn('[Settings] floating ball toggle:', err);
-                                                        });
+                                                <CustomSelect
+                                                    value={config.backgroundAgentPermissionMode ?? 'inherit'}
+                                                    options={[
+                                                        { value: 'inherit', label: '继承已授权' },
+                                                        { value: 'fullAgency', label: '全自动' },
+                                                    ]}
+                                                    onChange={(val) => {
+                                                        updateConfig({ backgroundAgentPermissionMode: val as 'inherit' | 'fullAgency' });
                                                     }}
-                                                    className={`relative h-6 w-11 shrink-0 cursor-pointer rounded-full transition-colors ${config.floatingBallDevGate ? 'bg-[var(--accent)]' : 'bg-[var(--line-strong)]'
-                                                        }`}
-                                                >
-                                                    <span
-                                                        className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-[var(--toggle-thumb)] shadow transition-transform ${config.floatingBallDevGate ? 'translate-x-5' : 'translate-x-0'
-                                                            }`}
-                                                    />
-                                                </button>
+                                                    className="w-32 shrink-0"
+                                                />
                                             </div>
                                         </div>
 

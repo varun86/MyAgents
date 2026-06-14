@@ -407,6 +407,7 @@ pub fn run() {
             floating_ball::cmd_fb_disable,
             floating_ball::cmd_fb_capabilities,
             floating_ball_pets::cmd_fb_pet_list_installed,
+            floating_ball_pets::cmd_fb_pet_delete_installed,
             floating_ball_pets::cmd_fb_pet_import_path,
             floating_ball_pets::cmd_fb_pet_import_codex,
             floating_ball_pets::cmd_fb_pet_import_petdex,

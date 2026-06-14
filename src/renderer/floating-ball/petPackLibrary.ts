@@ -63,6 +63,11 @@ export async function listInstalledPetPacks(): Promise<PetPack[]> {
     return installedPetRecordsToPacks(records);
 }
 
+export async function deleteInstalledPetPack(id: string): Promise<void> {
+    if (!isTauriEnvironment()) throw new Error('当前环境不支持删除桌宠素材');
+    await invoke('cmd_fb_pet_delete_installed', { id });
+}
+
 export async function importPetFromPath(path: string): Promise<PetImportSummary> {
     if (!isTauriEnvironment()) throw new Error('当前环境不支持本地导入');
     return invoke<PetImportSummary>('cmd_fb_pet_import_path', { path });

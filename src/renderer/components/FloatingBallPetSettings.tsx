@@ -1,7 +1,8 @@
-import { Check, Download, ExternalLink as ExternalLinkIcon, FolderOpen, Link2, Loader2, RefreshCw, UploadCloud, X } from 'lucide-react';
+import { Check, Download, ExternalLink as ExternalLinkIcon, FolderOpen, Link2, Loader2, RefreshCw, Trash2, UploadCloud, X } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 
+import ConfirmDialog from '@/components/ConfirmDialog';
 import CustomSelect from '@/components/CustomSelect';
 import { ExternalLink } from '@/components/ExternalLink';
 import OverlayBackdrop from '@/components/OverlayBackdrop';
@@ -15,6 +16,7 @@ import { shortenPathForDisplay } from '@/utils/pathDetection';
 import { workspacePathsEqual } from '../../shared/workspacePath';
 import { BUILTIN_PET_PACKS } from '@/floating-ball/defaultPetPack';
 import {
+    deleteInstalledPetPack,
     importPetFromPath,
     importPetFromPetdex,
     importPetsFromCodex,
@@ -51,38 +53,102 @@ function formatImportToast(summary: PetImportSummary): string {
 function PetStyleCard({
     pack,
     active,
+    deleting = false,
+    removable = false,
     onSelect,
+    onDelete,
 }: {
     pack: PetPack;
     active: boolean;
+    deleting?: boolean;
+    removable?: boolean;
     onSelect: () => void;
+    onDelete?: () => void;
 }) {
+    const description = pack.description?.trim();
+
     return (
-        <button
-            type="button"
-            onClick={onSelect}
-            className={`group flex min-h-32 flex-col items-start gap-3 rounded-xl border bg-[var(--paper)] p-4 text-left transition-all sm:flex-row sm:items-center sm:gap-4 ${
+        <div
+            className={`group relative rounded-xl border bg-[var(--paper)] transition-all ${
                 active
                     ? 'border-[var(--accent)] shadow-[0_0_0_3px_var(--accent-warm-subtle)]'
                     : 'border-[var(--line)] hover:border-[var(--ink-subtle)] hover:bg-[var(--paper-elevated)]'
             }`}
         >
-            <div className="flex h-20 w-20 shrink-0 items-center justify-center rounded-xl bg-[var(--paper-inset)]">
-                <PetSprite pack={pack} animation="idle" title={pack.displayName} />
-            </div>
-            <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-2">
-                    <span className="truncate text-base font-semibold text-[var(--ink)]">{pack.displayName}</span>
-                    {active && <Check className="h-4 w-4 shrink-0 text-[var(--accent)]" />}
+            <button
+                type="button"
+                onClick={onSelect}
+                disabled={deleting}
+                className={`flex min-h-28 w-full items-center gap-4 rounded-xl p-4 text-left transition-opacity disabled:cursor-wait disabled:opacity-70 ${
+                    removable ? 'pr-12' : ''
+                }`}
+            >
+                <div className="flex h-20 w-20 shrink-0 items-center justify-center">
+                    <PetSprite pack={pack} animation="idle" title={pack.displayName} />
                 </div>
-                {pack.description && (
-                    <p className="mt-1 text-sm text-[var(--ink-muted)]">{pack.description}</p>
-                )}
-                <p className="mt-2 text-xs text-[var(--ink-faint)]">
-                    {pack.source === 'imported' ? '已导入 Codex Pets 素材' : '内置样式'}
-                </p>
-            </div>
-        </button>
+                <div className="min-w-0 flex-1">
+                    <div className="flex min-w-0 items-center gap-2">
+                        <span className="line-clamp-1 min-w-0 text-base font-semibold text-[var(--ink)]">
+                            {pack.displayName}
+                        </span>
+                        {active && <Check className="h-4 w-4 shrink-0 text-[var(--accent)]" />}
+                    </div>
+                    {description && (
+                        <p className="mt-1 line-clamp-2 text-sm leading-6 text-[var(--ink-muted)]">
+                            {description}
+                        </p>
+                    )}
+                </div>
+            </button>
+            {removable && onDelete && (
+                <button
+                    type="button"
+                    onClick={(event) => {
+                        event.stopPropagation();
+                        onDelete();
+                    }}
+                    disabled={deleting}
+                    className={`absolute right-3 top-3 inline-flex h-8 w-8 items-center justify-center rounded-full border border-[var(--line)] bg-[var(--paper-elevated)] text-[var(--ink-muted)] shadow-sm transition-all hover:border-[var(--error)] hover:bg-[var(--error-bg)] hover:text-[var(--error)] focus:opacity-100 focus:outline-none focus:ring-2 focus:ring-[var(--error-subtle)] disabled:cursor-wait ${
+                        deleting ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
+                    }`}
+                    aria-label={`删除 ${pack.displayName}`}
+                    title="删除"
+                >
+                    {deleting ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                        <Trash2 className="h-4 w-4" />
+                    )}
+                </button>
+            )}
+        </div>
+    );
+}
+
+function DeletePetConfirmDialog({
+    target,
+    deleting,
+    onConfirm,
+    onCancel,
+}: {
+    target: PetPack | null;
+    deleting: boolean;
+    onConfirm: (pack: PetPack) => void;
+    onCancel: () => void;
+}) {
+    if (!target) return null;
+
+    return (
+        <ConfirmDialog
+            title="删除桌宠素材"
+            message={`确定要删除「${target.displayName}」吗？\n删除后这个素材会从本机导入列表移除。`}
+            confirmText="删除"
+            cancelText="取消"
+            confirmVariant="danger"
+            loading={deleting}
+            onConfirm={() => onConfirm(target)}
+            onCancel={onCancel}
+        />
     );
 }
 
@@ -192,11 +258,17 @@ export default function FloatingBallPetSettings() {
     const [importing, setImporting] = useState(false);
     const [petdexDialogOpen, setPetdexDialogOpen] = useState(false);
     const [petdexUrl, setPetdexUrl] = useState('');
+    const [deleteTarget, setDeleteTarget] = useState<PetPack | null>(null);
+    const [deletingPetId, setDeletingPetId] = useState<string | null>(null);
     const dropZoneRef = useRef<HTMLDivElement | null>(null);
     const refreshSeqRef = useRef(0);
     const mountedRef = useRef(true);
 
     const selectedPetId = config.floatingBallPetId ?? 'mino-default';
+    const stylePacks = useMemo<PetPack[]>(
+        () => [...BUILTIN_PET_PACKS, ...installedPacks],
+        [installedPacks],
+    );
     const workspaceOptions = useMemo(
         () => [
             { value: '', label: '跟随默认工作区' },
@@ -248,6 +320,32 @@ export default function FloatingBallPetSettings() {
             track('floating_ball_pet_select', { pet_id: pack.id, source: pack.source ?? 'builtin' });
         },
         [updateConfig],
+    );
+
+    const deletePetPack = useCallback(
+        async (pack: PetPack) => {
+            if (pack.source !== 'imported' || deletingPetId) return;
+            setDeletingPetId(pack.id);
+            try {
+                await deleteInstalledPetPack(pack.id);
+                if (selectedPetId === pack.id) {
+                    await updateConfig({ floatingBallPetId: 'mino-default' });
+                    if ((config.floatingBallAppearance ?? 'pet') === 'pet') {
+                        notifyBallAppearanceChanged();
+                    }
+                }
+                await refreshInstalled();
+                setDeleteTarget(null);
+                toast.success('已删除桌宠素材');
+            } catch (err) {
+                toast.error(`删除桌宠素材失败：${err instanceof Error ? err.message : String(err)}`);
+            } finally {
+                if (mountedRef.current) {
+                    setDeletingPetId(null);
+                }
+            }
+        },
+        [config.floatingBallAppearance, deletingPetId, refreshInstalled, selectedPetId, toast, updateConfig],
     );
 
     const setEnabled = useCallback(
@@ -387,6 +485,15 @@ export default function FloatingBallPetSettings() {
                 onSubmit={() => void importFromPetdex()}
                 onClose={() => setPetdexDialogOpen(false)}
             />
+            <DeletePetConfirmDialog
+                target={deleteTarget}
+                deleting={!!deleteTarget && deletingPetId === deleteTarget.id}
+                onConfirm={(pack) => void deletePetPack(pack)}
+                onCancel={() => {
+                    if (deletingPetId) return;
+                    setDeleteTarget(null);
+                }}
+            />
             <div className="mb-8">
                 <h2 className="text-xl font-semibold text-[var(--ink)]">桌面宠物</h2>
                 <p className="mt-2 max-w-2xl text-sm leading-6 text-[var(--ink-muted)]">
@@ -464,29 +571,19 @@ export default function FloatingBallPetSettings() {
                         </button>
                     </div>
 
-                    <div className="grid gap-3 md:grid-cols-3">
-                        {BUILTIN_PET_PACKS.map((pack) => (
+                    <div className="grid gap-3 md:grid-cols-2">
+                        {stylePacks.map((pack) => (
                             <PetStyleCard
                                 key={pack.id}
                                 pack={pack}
                                 active={(config.floatingBallAppearance ?? 'pet') === 'pet' && selectedPetId === pack.id}
+                                deleting={deletingPetId === pack.id}
+                                removable={pack.source === 'imported'}
                                 onSelect={() => void selectPetPack(pack)}
+                                onDelete={() => setDeleteTarget(pack)}
                             />
                         ))}
                     </div>
-
-                    {installedPacks.length > 0 && (
-                        <div className="mt-4 grid gap-3 md:grid-cols-3">
-                            {installedPacks.map((pack) => (
-                                <PetStyleCard
-                                    key={pack.id}
-                                    pack={pack}
-                                    active={(config.floatingBallAppearance ?? 'pet') === 'pet' && selectedPetId === pack.id}
-                                    onSelect={() => void selectPetPack(pack)}
-                                />
-                            ))}
-                        </div>
-                    )}
 
                     <div
                         ref={dropZoneRef}
