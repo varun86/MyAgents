@@ -785,6 +785,19 @@ export default function App() {
         listenerAc.signal,
       );
 
+      void listenWithCleanup(
+        'fb:open-desktop-pet-settings',
+        () => {
+          if (!mountedRef.current) return;
+          window.dispatchEvent(
+            new CustomEvent(CUSTOM_EVENTS.OPEN_SETTINGS, {
+              detail: { section: 'desktop-pet' },
+            }),
+          );
+        },
+        listenerAc.signal,
+      );
+
       // Listen for individual task recovered events
       void listenWithCleanup<CronTaskRecoveredPayload>(
         CRON_EVENTS.TASK_RECOVERED,

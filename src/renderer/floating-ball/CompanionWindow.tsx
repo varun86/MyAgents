@@ -10,12 +10,10 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { AlertCircle, Brain, Image as ImageIcon, Loader2, StopCircle, XCircle } from 'lucide-react';
+import { AlertCircle, Brain, Image as ImageIcon, Loader2, Settings as SettingsIcon, StopCircle, XCircle } from 'lucide-react';
 
 import { listenWithCleanup } from '@/utils/tauriListen';
 import Markdown from '@/components/Markdown';
-import OverlayBackdrop from '@/components/OverlayBackdrop';
-import CustomSelect from '@/components/CustomSelect';
 import AttachmentPreviewList from '@/components/AttachmentPreviewList';
 import { PermissionPrompt } from '@/components/PermissionPrompt';
 import { AskUserQuestionPrompt } from '@/components/AskUserQuestionPrompt';
@@ -35,7 +33,6 @@ import { renameIfBareClipboardImage } from '@/utils/clipboardImage';
 import { formatDuration, getToolBadgeConfig, getToolLabel, getToolMainLabel, getToolSummaryNode, isSubagentContainerTool } from '@/components/tools/toolBadgeConfig';
 import { groupContentBlocksForDisplay } from '@/utils/contentBlockDisplay';
 import type { ContentBlock } from '@/types/chat';
-import { computeDragOrigin } from './fbDrag';
 import { isNearBottom } from './convoAutoFollow';
 import { useFloatingSession, type FbAttachment, type FbMsg } from './useFloatingSession';
 
@@ -257,7 +254,6 @@ export default function CompanionWindow() {
     const [who, setWho] = useState<string>('Mino');
     const [input, setInput] = useState('');
     const [axNeeded, setAxNeeded] = useState(false);
-    const [showSettings, setShowSettings] = useState(false); // 设置面板（齿轮，D17）
     const [providerForCapability, setProviderForCapability] = useState<Provider | null>(null);
     const [isDraggingFiles, setIsDraggingFiles] = useState(false);
 
@@ -336,7 +332,6 @@ export default function CompanionWindow() {
             clearTimeout(hideTimerRef.current);
             hideTimerRef.current = null;
         }
-        setShowSettings(false); // 设置面板不跨一次显隐
         applyMode('hidden');
         void invoke('cmd_fb_hide_companion');
     }, [applyMode]);
@@ -463,11 +458,6 @@ export default function CompanionWindow() {
         };
         const onKey = (e: KeyboardEvent) => {
             if (e.key !== 'Escape') return;
-            // Esc 逐层收口：设置面板 → 大图预览 → 关窗。
-            if (showSettings) {
-                setShowSettings(false);
-                return;
-            }
             hideSelf();
         };
         window.addEventListener('blur', onBlur);
@@ -476,7 +466,7 @@ export default function CompanionWindow() {
             window.removeEventListener('blur', onBlur);
             window.removeEventListener('keydown', onKey);
         };
-    }, [hideSelf, showSettings]);
+    }, [hideSelf]);
 
     // ── peek → pin 升格（窗内有效行为 = 激活 + 执行该行为，0612 用户裁决） ──
     // 点击带处境抓取（点击 = "我要说话"）；滚轮只升格不抓处境（滚轮 = "我要
@@ -918,6 +908,13 @@ export default function CompanionWindow() {
         hideSelf();
     }, [session.sessionId, session.workspacePath, hideSelf]);
 
+    const onOpenDesktopPetSettings = useCallback(() => {
+        void invoke('cmd_fb_open_desktop_pet_settings').catch((err) => {
+            console.error('[fb] open desktop pet settings failed:', err);
+            toast.error('打开桌面宠物设置失败');
+        });
+    }, [toast]);
+
     const onOpenMyAgentsPreview = useCallback((path: string, options?: { displayPath?: string; initialLineNumber?: number }) => {
         if (!session.sessionId || !session.workspacePath) return;
         track('floating_ball_expand', { kind: 'file_preview' });
@@ -941,10 +938,11 @@ export default function CompanionWindow() {
     }, []);
 
     // ── 高度调节（顶/底边拖） + 移动（顶部标题栏地带拖） ──
-    // 位置一律走绝对落点（与球同源，见 fbDrag.ts），绝不回读 outer_position：
+    // 平移拖拽由 Rust 读取 NSEvent.mouseLocation + 当前窗口 frame 计算，避免把
+    // WebView screenX/Y 混成 AppKit/Tauri 窗口坐标；高度调节仍由 JS 锚定当前
+    // 窗口几何做局部尺寸变化。
     // 底边拖只改高度（origin 不动，height 是 JS 本地累计、本就无回读）；顶边拖
-    // 锚定底边、让顶边跟随光标（newTop=光标−抓取偏移、height=底锚−newTop）；
-    // 标题栏自由拖是纯平移（origin=光标−抓取偏移）。
+    // 锚定底边、让顶边跟随光标（newTop=光标−抓取偏移、height=底锚−newTop）。
     const bindResize = useCallback((edge: 'top' | 'bottom') => {
         return (e: React.PointerEvent<HTMLDivElement>) => {
             if (modeRef.current !== 'pin') return;
@@ -993,22 +991,35 @@ export default function CompanionWindow() {
         const target = e.currentTarget;
         target.setPointerCapture(e.pointerId);
         target.classList.add('active');
-        // 抓取偏移在按下时锁定；落点 = 光标 − 抓取偏移（绝对，跨屏不闪）。尺寸
-        // 不变，纯平移走 move（不动 size）。
-        const grabX = e.clientX;
-        const grabY = e.clientY;
+        void invoke('cmd_fb_drag_companion_start').catch((err) => {
+            console.warn('[fb] start companion native drag failed:', err);
+        });
+        let cleaned = false;
         const onMove = (ev: PointerEvent) => {
-            const { x, y } = computeDragOrigin(ev.screenX, ev.screenY, grabX, grabY);
-            void invoke('cmd_fb_move_companion_to', { x, y });
+            ev.preventDefault();
+            void invoke('cmd_fb_drag_companion_move');
         };
-        const onUp = (ev: PointerEvent) => {
-            target.releasePointerCapture(ev.pointerId);
+        const cleanup = (ev: PointerEvent) => {
+            if (cleaned) return;
+            cleaned = true;
+            try {
+                target.releasePointerCapture(ev.pointerId);
+            } catch {
+                // capture may already be gone on pointercancel / lostpointercapture
+            }
             target.classList.remove('active');
             target.removeEventListener('pointermove', onMove);
-            target.removeEventListener('pointerup', onUp);
+            target.removeEventListener('pointerup', cleanup);
+            target.removeEventListener('pointercancel', cleanup);
+            target.removeEventListener('lostpointercapture', cleanup);
+            void invoke('cmd_fb_drag_companion_end').catch((err) => {
+                console.warn('[fb] end companion native drag failed:', err);
+            });
         };
         target.addEventListener('pointermove', onMove);
-        target.addEventListener('pointerup', onUp);
+        target.addEventListener('pointerup', cleanup);
+        target.addEventListener('pointercancel', cleanup);
+        target.addEventListener('lostpointercapture', cleanup);
     }, []);
 
     const sendReady = (input.trim().length > 0 || imageDrafts.length > 0) && !session.busy && session.ready;
@@ -1034,8 +1045,8 @@ export default function CompanionWindow() {
             {/* chrome：pin 悬停浮现 */}
             <div className="fbw-chrome">
                 <span className="who">{who}</span>
-                <button onClick={() => setShowSettings((s) => !s)} title="悬浮球设置（工作区 / 新对话）">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" /></svg>
+                <button onClick={onOpenDesktopPetSettings} title="打开桌面宠物设置">
+                    <SettingsIcon className="size-4" />
                 </button>
                 <button onClick={onExpand} title="在 MyAgents 中打开（新 Tab 接上这条会话）">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M7 17L17 7" /><path d="M9 7h8v8" /></svg>
@@ -1197,46 +1208,6 @@ export default function CompanionWindow() {
             <div className="fbw-rz top" onPointerDown={bindResize('top')} title="拖动调节高度" />
             <div className="fbw-rz bottom" onPointerDown={bindResize('bottom')} title="拖动调节高度" />
             <div className="fbw-mv" onPointerDown={onMoveDown} title="拖动移动窗口" />
-
-            {/* 设置面板（齿轮，D17）：当前唯一有效内容 = 工作区绑定 + 新对话。
-                遮罩同 lightbox 走 OverlayBackdrop（伴侣窗无 Tab 体系不接
-                useCloseLayer）。OverlayBackdrop 以 onMouseDown + target===currentTarget
-                判关闭，子元素点击本就不冒泡触发关闭，故面板无需 stopPropagation。 */}
-            {showSettings && (
-                <OverlayBackdrop
-                    variant="dark"
-                    onClose={() => setShowSettings(false)}
-                    className="z-20 rounded-[24px]"
-                >
-                    <div className="fbw-settings">
-                        <div className="fbw-settings-title">悬浮球设置</div>
-                        <div className="fbw-settings-row">
-                            <span className="fbw-settings-label">绑定工作区</span>
-                            <CustomSelect
-                                value={session.workspaceOverride ?? ''}
-                                size="md"
-                                options={[
-                                    { value: '', label: '跟随默认工作区' },
-                                    ...session.projects.map((p) => ({ value: p.path, label: p.name })),
-                                ]}
-                                onChange={(v) => void session.setWorkspaceBinding(v || null)}
-                            />
-                        </div>
-                        <button
-                            className="fbw-settings-action"
-                            onClick={() => {
-                                void session.newConversation();
-                                setShowSettings(false);
-                            }}
-                        >
-                            新对话
-                        </button>
-                        <div className="fbw-settings-hint">
-                            默认跟随启动页默认工作区；选具体工作区则钉死在它。切换工作区或新对话都会开启一条全新会话（旧会话留在历史，可经 ↗ 找回）。
-                        </div>
-                    </div>
-                </OverlayBackdrop>
-            )}
         </div>
     );
 }

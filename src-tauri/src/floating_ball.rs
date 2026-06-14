@@ -117,6 +117,7 @@ mod imp {
     use crate::{ulog_error, ulog_info, ulog_warn};
     use serde::Serialize;
     use std::path::PathBuf;
+    use std::sync::Mutex;
     use tauri::{
         AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, WebviewUrl, WebviewWindowBuilder,
     };
@@ -169,6 +170,17 @@ mod imp {
     static HOVER_POLLER_RUNNING: std::sync::atomic::AtomicBool =
         std::sync::atomic::AtomicBool::new(false);
 
+    #[derive(Debug, Clone, Copy)]
+    struct NativeDragSession {
+        grab_x: f64,
+        grab_y: f64,
+        last_x: f64,
+        last_y: f64,
+    }
+
+    static BALL_DRAG: Mutex<Option<NativeDragSession>> = Mutex::new(None);
+    static COMPANION_DRAG: Mutex<Option<NativeDragSession>> = Mutex::new(None);
+
     fn mouse_in_window(win: &tauri::WebviewWindow, mouse_top_left: (f64, f64)) -> bool {
         let Ok(scale) = win.scale_factor() else {
             return false;
@@ -197,6 +209,111 @@ mod imp {
         let primary = screens.iter().next()?;
         let height = primary.frame().size.height;
         Some((loc.x, height - loc.y))
+    }
+
+    fn window_origin(win: &tauri::WebviewWindow) -> Result<(f64, f64), String> {
+        let scale = win
+            .scale_factor()
+            .map_err(|e| format!("[fb] read window scale: {e}"))?;
+        let pos = win
+            .outer_position()
+            .map_err(|e| format!("[fb] read window position: {e}"))?
+            .to_logical::<f64>(scale);
+        Ok((pos.x, pos.y))
+    }
+
+    fn start_native_drag(
+        app: &AppHandle,
+        label: &str,
+        slot: &Mutex<Option<NativeDragSession>>,
+    ) -> Result<(), String> {
+        let win = app
+            .get_webview_window(label)
+            .ok_or_else(|| format!("[fb] {label} window missing"))?;
+        let (mx, my) = mouse_location_top_left().ok_or("[fb] mouse location unavailable")?;
+        let (wx, wy) = window_origin(&win)?;
+        let mut guard = slot
+            .lock()
+            .map_err(|_| "[fb] native drag lock poisoned".to_string())?;
+        *guard = Some(NativeDragSession {
+            grab_x: mx - wx,
+            grab_y: my - wy,
+            last_x: wx,
+            last_y: wy,
+        });
+        Ok(())
+    }
+
+    fn move_native_drag_to_mouse(
+        app: &AppHandle,
+        label: &str,
+        slot: &Mutex<Option<NativeDragSession>>,
+    ) -> Result<Option<(f64, f64)>, String> {
+        let win = app
+            .get_webview_window(label)
+            .ok_or_else(|| format!("[fb] {label} window missing"))?;
+        let Some((mx, my)) = mouse_location_top_left() else {
+            return Ok(None);
+        };
+        let mut guard = slot
+            .lock()
+            .map_err(|_| "[fb] native drag lock poisoned".to_string())?;
+        let Some(session) = guard.as_mut() else {
+            return Ok(None);
+        };
+        let x = mx - session.grab_x;
+        let y = my - session.grab_y;
+        session.last_x = x;
+        session.last_y = y;
+        let _ = win.set_position(LogicalPosition::new(x, y));
+        Ok(Some((x, y)))
+    }
+
+    fn end_native_drag(
+        slot: &Mutex<Option<NativeDragSession>>,
+    ) -> Result<Option<NativeDragSession>, String> {
+        let mut guard = slot
+            .lock()
+            .map_err(|_| "[fb] native drag lock poisoned".to_string())?;
+        Ok(guard.take())
+    }
+
+    pub fn start_ball_drag(app: &AppHandle) -> Result<(), String> {
+        start_native_drag(app, BALL_LABEL, &BALL_DRAG)
+    }
+
+    pub fn move_ball_drag(app: &AppHandle) -> Result<(), String> {
+        let _ = move_native_drag_to_mouse(app, BALL_LABEL, &BALL_DRAG)?;
+        Ok(())
+    }
+
+    pub fn end_ball_drag(app: &AppHandle) -> Result<SnapResult, String> {
+        let session = end_native_drag(&BALL_DRAG)?.ok_or("[fb] ball native drag is not active")?;
+        let (x, y) = if let Some((mx, my)) = mouse_location_top_left() {
+            (mx - session.grab_x, my - session.grab_y)
+        } else {
+            (session.last_x, session.last_y)
+        };
+        snap_ball(app, x, y)
+    }
+
+    pub fn cancel_ball_drag() -> Result<(), String> {
+        let _ = end_native_drag(&BALL_DRAG)?;
+        Ok(())
+    }
+
+    pub fn start_companion_drag(app: &AppHandle) -> Result<(), String> {
+        start_native_drag(app, COMPANION_LABEL, &COMPANION_DRAG)
+    }
+
+    pub fn move_companion_drag(app: &AppHandle) -> Result<(), String> {
+        let _ = move_native_drag_to_mouse(app, COMPANION_LABEL, &COMPANION_DRAG)?;
+        Ok(())
+    }
+
+    pub fn end_companion_drag() -> Result<(), String> {
+        let _ = end_native_drag(&COMPANION_DRAG)?;
+        Ok(())
     }
 
     fn start_hover_poller(app: &AppHandle) {
@@ -733,14 +850,10 @@ mod imp {
         fade_companion_to(app, generation, 0.0, FADE_OUT_MS, true);
     }
 
-    /// 拖拽落点（绝对）：球原点直接置到 (x, y)——全局逻辑点、左上原点，与
-    /// 浏览器 `e.screenX/Y`（CSS 点）同空间。**绝不回读 `outer_position`**：
-    /// tao 的 set_frame 是 GCD 异步（`exec_async` 排到主队列尾、本次 set 调用
-    /// 返回时尚未落地，见 tao util/async.rs），连续多个 drag 闭包会读到同一未
-    /// 更新的旧 frame、增量互相覆盖 → 位置在「累计落点」与「旧点+单帧增量」
-    /// 间高频振荡 = 跨屏拖拽闪烁，跨 Retina↔非 Retina 边界还反复重建透明
-    /// backing store = 闪空、拖不过去。绝对落点是纯函数（无回读、无累计、
-    /// last-wins 即正确终态），按构造收敛、天然跨屏（点空间统一、scale 无关）。
+    /// Legacy absolute-position command kept for compatibility. Runtime drag
+    /// no longer feeds browser `screenX/Y` into this path; multi-display window
+    /// movement is owned by `start/move/end_*_drag`, which reads native mouse
+    /// location and native window frame on the main thread.
     pub fn move_ball_to(app: &AppHandle, x: f64, y: f64) -> Result<(), String> {
         let ball = app
             .get_webview_window(BALL_LABEL)
@@ -770,11 +883,11 @@ mod imp {
         (dock, y_ratio)
     }
 
-    /// 吸附到最近屏幕边并持久化。落点 (ball_x, ball_y) 由 JS 传入（松手时光标
-    /// 推算的权威全局点），**不回读** `outer_position`——回读会撞上 set_frame 的
-    /// GCD 异步：读到拖拽尾帧尚未落地的旧值，按旧屏/主屏吸回 = 跨屏拖不过去
-    /// （#bb535240 的残根，与 `move_ball_to` 同源）。仍 channel-join 到主线程，
-    /// 因为 work_area / available_monitors 读 NSScreen 须主线程。
+    /// 吸附到最近屏幕边并持久化。落点 (ball_x, ball_y) 来自同一 native drag
+    /// session 的最终位置，**不回读** `outer_position`——回读会撞上 set_frame 的
+    /// GCD 异步：读到拖拽尾帧尚未落地的旧值，按旧屏/主屏吸回 = 跨屏拖不过去。
+    /// 仍 channel-join 到主线程，因为 work_area / available_monitors 读 NSScreen
+    /// 须主线程。
     pub fn snap_ball(app: &AppHandle, ball_x: f64, ball_y: f64) -> Result<SnapResult, String> {
         let ball = app
             .get_webview_window(BALL_LABEL)
@@ -808,10 +921,9 @@ mod imp {
         Ok(())
     }
 
-    /// 伴侣窗拖拽落点（绝对）：窗口原点直接置到 (x, y)，与球的 `move_ball_to`
-    /// 同源——**不回读** `outer_position`（避免 GCD 异步 set × 同步 read 的读改写
-    /// 振荡 = 跨屏拖拽闪烁）。(x, y) 为全局逻辑点、左上原点（与浏览器 e.screenX/Y
-    /// 同空间）。
+    /// Legacy absolute-position command kept for the resize edge path. Free
+    /// movement drag uses `cmd_fb_drag_companion_*`, not browser-derived
+    /// absolute coordinates.
     pub fn move_companion_to(app: &AppHandle, x: f64, y: f64) -> Result<(), String> {
         let companion = app
             .get_webview_window(COMPANION_LABEL)
@@ -1130,16 +1242,96 @@ mod commands {
             .map_err(|e| format!("[fb] main thread dispatch: {e}"))
     }
 
-    /// 拖拽落点（绝对，fire-and-forget）。set_position 本身是 GCD 异步、线程
-    /// 安全，无需 run_on_main_thread。绝对落点不依赖回读，IPC 批处理/丢帧只
-    /// 意味着球跳到最新光标目标，正确收敛（见 imp::move_ball_to）。
+    #[tauri::command]
+    pub async fn cmd_fb_drag_ball_start(app: AppHandle) -> Result<(), String> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.clone()
+            .run_on_main_thread(move || {
+                let _ = tx.send(imp::start_ball_drag(&app));
+            })
+            .map_err(|e| format!("[fb] main thread dispatch: {e}"))?;
+        rx.recv()
+            .map_err(|e| format!("[fb] ball drag start join: {e}"))?
+    }
+
+    #[tauri::command]
+    pub async fn cmd_fb_drag_ball_move(app: AppHandle) -> Result<(), String> {
+        app.clone()
+            .run_on_main_thread(move || {
+                if let Err(e) = imp::move_ball_drag(&app) {
+                    crate::ulog_warn!("[fb] ball drag move failed: {e}");
+                }
+            })
+            .map_err(|e| format!("[fb] main thread dispatch: {e}"))
+    }
+
+    #[tauri::command]
+    pub async fn cmd_fb_drag_ball_end(app: AppHandle) -> Result<imp::SnapResult, String> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.clone()
+            .run_on_main_thread(move || {
+                let _ = tx.send(imp::end_ball_drag(&app));
+            })
+            .map_err(|e| format!("[fb] main thread dispatch: {e}"))?;
+        rx.recv()
+            .map_err(|e| format!("[fb] ball drag end join: {e}"))?
+    }
+
+    #[tauri::command]
+    pub async fn cmd_fb_drag_ball_cancel(app: AppHandle) -> Result<(), String> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.run_on_main_thread(move || {
+            let _ = tx.send(imp::cancel_ball_drag());
+        })
+        .map_err(|e| format!("[fb] main thread dispatch: {e}"))?;
+        rx.recv()
+            .map_err(|e| format!("[fb] ball drag cancel join: {e}"))?
+    }
+
+    #[tauri::command]
+    pub async fn cmd_fb_drag_companion_start(app: AppHandle) -> Result<(), String> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.clone()
+            .run_on_main_thread(move || {
+                let _ = tx.send(imp::start_companion_drag(&app));
+            })
+            .map_err(|e| format!("[fb] main thread dispatch: {e}"))?;
+        rx.recv()
+            .map_err(|e| format!("[fb] companion drag start join: {e}"))?
+    }
+
+    #[tauri::command]
+    pub async fn cmd_fb_drag_companion_move(app: AppHandle) -> Result<(), String> {
+        app.clone()
+            .run_on_main_thread(move || {
+                if let Err(e) = imp::move_companion_drag(&app) {
+                    crate::ulog_warn!("[fb] companion drag move failed: {e}");
+                }
+            })
+            .map_err(|e| format!("[fb] main thread dispatch: {e}"))
+    }
+
+    #[tauri::command]
+    pub async fn cmd_fb_drag_companion_end(app: AppHandle) -> Result<(), String> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.run_on_main_thread(move || {
+            let _ = tx.send(imp::end_companion_drag());
+        })
+        .map_err(|e| format!("[fb] main thread dispatch: {e}"))?;
+        rx.recv()
+            .map_err(|e| format!("[fb] companion drag end join: {e}"))?
+    }
+
+    /// Legacy absolute-position command. Runtime drag uses `cmd_fb_drag_ball_*`
+    /// so native mouse/window coordinates stay in Rust.
     #[tauri::command]
     pub async fn cmd_fb_move_ball_to(app: AppHandle, x: f64, y: f64) -> Result<(), String> {
         imp::move_ball_to(&app, x, y)
     }
 
-    /// channel-join 主线程（work_area/available_monitors 读 NSScreen 须主线程）。
-    /// 落点 (x, y) = 松手时光标推算的权威全局点，snap 不回读 frame。
+    /// Legacy snap command kept for compatibility. Runtime ball drag ends via
+    /// `cmd_fb_drag_ball_end`, which computes the final point from the native
+    /// drag session before calling `snap_ball`.
     #[tauri::command]
     pub async fn cmd_fb_snap_ball(
         app: AppHandle,
@@ -1231,6 +1423,19 @@ mod commands {
         )
         .map_err(|e| format!("[fb] emit open-session: {e}"))
     }
+
+    /// Summon the main app and navigate to Settings → Desktop Pet.
+    #[tauri::command]
+    pub async fn cmd_fb_open_desktop_pet_settings(app: AppHandle) -> Result<(), String> {
+        use tauri::Emitter;
+        crate::tray::show_main_window(&app);
+        app.emit_to(
+            "main",
+            "fb:open-desktop-pet-settings",
+            serde_json::json!({}),
+        )
+        .map_err(|e| format!("[fb] emit open-desktop-pet-settings: {e}"))
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -1270,6 +1475,41 @@ mod commands {
 
     #[tauri::command]
     pub async fn cmd_fb_hide_companion(_app: AppHandle) -> Result<(), String> {
+        Ok(())
+    }
+
+    #[tauri::command]
+    pub async fn cmd_fb_drag_ball_start(_app: AppHandle) -> Result<(), String> {
+        Err(UNSUPPORTED.to_string())
+    }
+
+    #[tauri::command]
+    pub async fn cmd_fb_drag_ball_move(_app: AppHandle) -> Result<(), String> {
+        Err(UNSUPPORTED.to_string())
+    }
+
+    #[tauri::command]
+    pub async fn cmd_fb_drag_ball_end(_app: AppHandle) -> Result<SnapResult, String> {
+        Err(UNSUPPORTED.to_string())
+    }
+
+    #[tauri::command]
+    pub async fn cmd_fb_drag_ball_cancel(_app: AppHandle) -> Result<(), String> {
+        Ok(())
+    }
+
+    #[tauri::command]
+    pub async fn cmd_fb_drag_companion_start(_app: AppHandle) -> Result<(), String> {
+        Err(UNSUPPORTED.to_string())
+    }
+
+    #[tauri::command]
+    pub async fn cmd_fb_drag_companion_move(_app: AppHandle) -> Result<(), String> {
+        Err(UNSUPPORTED.to_string())
+    }
+
+    #[tauri::command]
+    pub async fn cmd_fb_drag_companion_end(_app: AppHandle) -> Result<(), String> {
         Ok(())
     }
 
@@ -1336,6 +1576,18 @@ mod commands {
         _preview_line: Option<u32>,
     ) -> Result<(), String> {
         Err(UNSUPPORTED.to_string())
+    }
+
+    #[tauri::command]
+    pub async fn cmd_fb_open_desktop_pet_settings(app: AppHandle) -> Result<(), String> {
+        use tauri::Emitter;
+        crate::tray::show_main_window(&app);
+        app.emit_to(
+            "main",
+            "fb:open-desktop-pet-settings",
+            serde_json::json!({}),
+        )
+        .map_err(|e| format!("[fb] emit open-desktop-pet-settings: {e}"))
     }
 }
 
