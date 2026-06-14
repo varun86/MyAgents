@@ -75,6 +75,7 @@ import { normalizeRuntime, resolveEffectiveRuntime, planSessionOpen } from '@/ut
 import { resolveNotificationClickRoute } from '@/utils/notificationClickRoute';
 import { applyTerminalSessionToTabs } from '@/utils/sessionTermination';
 import { listenWithCleanup } from '@/utils/tauriListen';
+import { migrateFloatingBallSessionBinding } from '@/floating-ball/sessionBinding';
 import { CUSTOM_EVENTS, createPendingSessionId, isPendingSessionId } from '../shared/constants';
 import { workspacePathsEqual } from '../shared/workspacePath';
 import type { CapabilityInitialSelect } from '../shared/skillsTypes';
@@ -1016,6 +1017,12 @@ export default function App() {
     if (oldSessionId && oldSessionId !== newSessionId) {
       const upgraded = await upgradeSessionId(oldSessionId, newSessionId);
       console.log(`[App] Rust HashMap upgrade: ${oldSessionId} -> ${newSessionId}, success=${upgraded}`);
+      if (upgraded) {
+        const fbResult = await migrateFloatingBallSessionBinding(oldSessionId, newSessionId);
+        if (fbResult.migrated) {
+          console.log(`[App] Floating ball session binding migrated: ${oldSessionId} -> ${newSessionId}, notified=${fbResult.notified}`);
+        }
+      }
     }
 
     // Update UI state
@@ -2280,6 +2287,10 @@ export default function App() {
             : t
         )
       );
+      const fbResult = await migrateFloatingBallSessionBinding(oldSessionId, pendingSessionId);
+      if (fbResult.migrated) {
+        console.log(`[App] Floating ball session binding migrated to pending session: ${oldSessionId} -> ${pendingSessionId}, notified=${fbResult.notified}`);
+      }
       console.log(`[App] handleNewSession: Created new Sidecar for pending session ${pendingSessionId} on port ${result.port}`);
       return true;
     } catch (error) {

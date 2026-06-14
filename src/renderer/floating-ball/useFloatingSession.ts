@@ -22,6 +22,7 @@ import { getAllMcpServersFromConfig } from '@/config/services/mcpService';
 import { loadProjects } from '@/config/services/projectService';
 import type { AppConfig, Project } from '@/config/types';
 import { resolveAttachmentUrl } from '@/utils/attachmentUrl';
+import { listenWithCleanup } from '@/utils/tauriListen';
 import { parsePartialJson } from '@/utils/parsePartialJson';
 import { isSubagentContainerTool } from '@/components/tools/toolBadgeConfig';
 import { workspacePathsEqual } from '../../shared/workspacePath';
@@ -30,6 +31,7 @@ import type { AskUserQuestionRequest } from '../../shared/types/askUserQuestion'
 import type { ExitPlanModeRequest } from '../../shared/types/planMode';
 import type { FbPendingKind } from './petStateMapper';
 import { resolveBoundWorkspace, type FbProject } from './workspaceBinding';
+import { SESSION_MIGRATED_EVENT, type FloatingBallSessionMigratedPayload } from './sessionBinding';
 import type { ContentBlock, ToolAttachment, ToolInput, ToolUseSimple } from '@/types/chat';
 import type { ToolUse } from '@/types/stream';
 
@@ -408,6 +410,8 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
     const sseRef = useRef<SseConnection | null>(null);
     const bootedRef = useRef(false);
     const busyRef = useRef(false);
+    const migrationInFlightRef = useRef(false);
+    const queuedMigrationEventsRef = useRef<FloatingBallSessionMigratedPayload[]>([]);
     useEffect(() => {
         busyRef.current = busy;
     }, [busy]);
@@ -992,6 +996,81 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
             throw err;
         }
     }, []);
+
+    const adoptMigratedSession = useCallback(
+        async (payload: FloatingBallSessionMigratedPayload) => {
+            if (!payload?.oldSessionId || !payload.newSessionId) return;
+            queuedMigrationEventsRef.current.push(payload);
+            if (migrationInFlightRef.current) return;
+
+            migrationInFlightRef.current = true;
+            try {
+                while (queuedMigrationEventsRef.current.length > 0) {
+                    const nextPayload = queuedMigrationEventsRef.current.shift();
+                    if (!nextPayload) continue;
+
+                    const oldSid = sessionIdRef.current;
+                    if (oldSid === nextPayload.newSessionId) continue;
+                    if (oldSid !== nextPayload.oldSessionId) continue;
+
+                    const workspace = workspaceRef.current?.path ?? nextPayload.workspacePath;
+                    if (!workspace) continue;
+
+                    const oldHadPendingForm = pendingFormRef.current;
+                    workspaceRef.current = { path: workspace };
+                    setWorkspacePath(workspace);
+                    setMessages([]);
+                    replaceLiveMessage(() => null);
+                    setPermReq(null);
+                    setAskReq(null);
+                    setPlanReq(null);
+                    setUnread(0);
+                    setError(null);
+                    setBusy(false);
+
+                    try {
+                        const [cfg, projects] = await Promise.all([loadAppConfig(), loadProjects()]);
+                        await connectSession(nextPayload.newSessionId, workspace, cfg, projects);
+                        setReady(true);
+                        if (oldSid && oldSid !== nextPayload.newSessionId) {
+                            try {
+                                if (oldHadPendingForm) {
+                                    const base = await sessionBaseUrl(oldSid);
+                                    if (base) {
+                                        await floatingProxyFetch(oldSid, `${base}/chat/stop`, { method: 'POST' });
+                                    }
+                                }
+                                await startBackgroundCompletion(oldSid);
+                                await releaseSessionSidecar(oldSid, 'tab', OWNER_ID);
+                            } catch (err) {
+                                console.warn('[fb] migrated old session handover failed (non-fatal):', err);
+                            }
+                        }
+                        console.info(`[fb] session binding migrated · ${nextPayload.oldSessionId} -> ${nextPayload.newSessionId}`);
+                    } catch (err) {
+                        console.warn('[fb] adopt migrated session failed:', err);
+                        setReady(false);
+                        setError(err instanceof Error ? err.message : String(err));
+                    }
+                }
+            } finally {
+                migrationInFlightRef.current = false;
+            }
+        },
+        [connectSession, replaceLiveMessage],
+    );
+
+    useEffect(() => {
+        const ac = new AbortController();
+        void listenWithCleanup<FloatingBallSessionMigratedPayload>(
+            SESSION_MIGRATED_EVENT,
+            (event) => {
+                void adoptMigratedSession(event.payload);
+            },
+            ac.signal,
+        );
+        return () => ac.abort();
+    }, [adoptMigratedSession]);
 
     // ── boot：解析 Mino → session 轮换 → ensure → SSE → 历史 ──
     useEffect(() => {
