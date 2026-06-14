@@ -67,7 +67,7 @@ myagents-releases/
 
 **构建流程**：
 1. 加载 `.env` 签名配置
-2. 检查依赖 (Rust, Node.js, codesign)
+2. 检查依赖（Rust 通过 `rustup` 使用仓库 `rust-toolchain.toml` 固定版本、Node.js、codesign）
 3. 配置生产环境 CSP
 4. TypeScript 类型检查
 5. 构建前端和服务端代码

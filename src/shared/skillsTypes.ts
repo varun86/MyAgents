@@ -108,8 +108,8 @@ export type CapabilityKind = 'skill' | 'command' | 'agent';
  *
  * Display names can be overridden via frontmatter and are not stable —
  * disk identifiers are. Compare with `SlashCommand.source` in `slashCommands.ts`,
- * which has overlapping but narrower domain (no 'agent', plus 'builtin') and
- * therefore can't be reused directly.
+ * which has overlapping but different domain (no 'agent', plus 'builtin' /
+ * SDK runtime commands) and therefore can't be reused directly.
  */
 export type CapabilityInitialSelect =
     | { kind: 'skill'; folderName: string; scope: 'user' | 'project' }

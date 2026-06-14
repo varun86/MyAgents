@@ -40,12 +40,13 @@ import {
     addProject as addProjectService,
     updateProject as updateProjectService,
     patchProject as patchProjectService,
-    removeProject as removeProjectService,
+    removeOrHideProject as removeOrHideProjectService,
     touchProject as touchProjectService,
 } from './services/projectService';
 import { migrateImBotConfigsToAgents, persistAgents, ensureAllProjectsHaveAgent, addAgentConfig, buildAgentForProject } from './services/agentConfigService';
 import { isTauriEnvironment } from '@/utils/browserMock';
 import { listenWithCleanup } from '@/utils/tauriListen';
+import { workspacePathsEqual } from '../../shared/workspacePath';
 
 /**
  * Normalize agents loaded from disk: ensure every agent has a `channels` array.
@@ -256,6 +257,19 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
                 await saveProjects(loadedProjects);
             }
 
+            const hiddenDefaultProject = loadedConfig.defaultWorkspacePath
+                ? loadedProjects.find(p => p.hidden === true && workspacePathsEqual(p.path, loadedConfig.defaultWorkspacePath))
+                : undefined;
+            if (hiddenDefaultProject) {
+                loadedConfig.defaultWorkspacePath = undefined;
+                await atomicModifyConfig(c => (
+                    workspacePathsEqual(c.defaultWorkspacePath, hiddenDefaultProject.path)
+                        ? { ...c, defaultWorkspacePath: undefined }
+                        : c
+                ));
+                console.log('[ConfigProvider] Cleared defaultWorkspacePath pointing at hidden workspace');
+            }
+
             // One-time cleanup: remove imBotConfigs entries whose credentials
             // now exist in agents[].channels[] (post-migration duplicates)
             // Re-read from disk in case migration cleared in-memory but didn't persist imBotConfigs
@@ -352,6 +366,12 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
 
         void listenWithCleanup<{ botId: string }>('im:bot-config-changed', refreshOnEvent, ac.signal);
         void listenWithCleanup('agent:config-changed', refreshOnEvent, ac.signal);
+        // PRD 0.2.35 — the Rust `cmd_set_force_wake_lock` command (called from
+        // Settings.tsx OR triggered by the tray CheckMenuItem click) writes
+        // disk and emits this event. We re-read disk so the React state
+        // matches the durable truth. Without this, a tray-side toggle would
+        // leave Settings.tsx stuck on its last-rendered value.
+        void listenWithCleanup<boolean>('force-wake-lock-changed', refreshOnEvent, ac.signal);
 
         return () => ac.abort();
     }, []);
@@ -375,6 +395,31 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
     // ============= Actions =============
 
     const updateConfig = useCallback(async (updates: Partial<AppConfig>) => {
+        // PRD 0.2.35 D2 — `forceWakeLock` has OS-level side effects (acquire /
+        // drop an IOPMAssertion-class lock, sync the tray CheckMenuItem, emit
+        // to all renderers). Going through atomicModifyConfig writes disk
+        // *before* Rust toggles the OS lock, opening a window where the
+        // disk truth and the live OS state disagree. The Rust command is the
+        // single chokepoint that does all four mirrors atomically — route
+        // through it for this field; let any other co-updated keys flow
+        // through the default path so we don't lose them.
+        if ('forceWakeLock' in updates) {
+            const value = !!updates.forceWakeLock;
+            try {
+                const { invoke } = await import('@tauri-apps/api/core');
+                await invoke('cmd_set_force_wake_lock', { value });
+                // Optimistic local mirror: snappy UI; the
+                // `force-wake-lock-changed` listener will re-read disk and
+                // arrive at the same value (no-op).
+                setConfig(prev => ({ ...prev, forceWakeLock: value }));
+            } catch (err) {
+                console.error('[ConfigProvider] cmd_set_force_wake_lock failed:', err);
+                throw err;
+            }
+            const { forceWakeLock: _, ...rest } = updates;
+            if (Object.keys(rest).length === 0) return;
+            updates = rest;
+        }
         const newConfig = await atomicModifyConfig(c => ({ ...c, ...updates }));
         setConfig(newConfig);
         // No more CONFIG_CHANGED event — all consumers share this Context
@@ -447,6 +492,10 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
         if (options.displayName) metadataPatch.displayName = options.displayName;
         if (options.templateId) metadataPatch.templateId = options.templateId;
         if (options.templateSource) metadataPatch.templateSource = options.templateSource;
+        if (project.hidden) {
+            metadataPatch.hidden = false;
+            metadataPatch.hiddenAt = undefined;
+        }
         if (Object.keys(metadataPatch).length > 0) {
             const updated = await patchProjectService(project.id, metadataPatch);
             if (updated) project = updated;
@@ -488,8 +537,21 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
     }, []);
 
     const removeProject = useCallback(async (projectId: string) => {
-        await removeProjectService(projectId);
-        setProjects((prev) => prev.filter((p) => p.id !== projectId));
+        const result = await removeOrHideProjectService(projectId);
+        if (!result) return;
+
+        if (result.action === 'hidden') {
+            setProjects((prev) => prev.map((p) => (p.id === projectId ? result.project : p)));
+        } else {
+            setProjects((prev) => prev.filter((p) => p.id !== projectId));
+        }
+
+        const newConfig = await atomicModifyConfig(c => (
+            workspacePathsEqual(c.defaultWorkspacePath, result.project.path)
+                ? { ...c, defaultWorkspacePath: undefined }
+                : c
+        ));
+        setConfig(newConfig);
     }, []);
 
     const touchProject = useCallback(async (projectId: string) => {

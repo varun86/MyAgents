@@ -98,7 +98,9 @@ impl Drop for PlatformImpl {
             let kill_result = child.kill();
             let wait_result = child.wait();
             if let Err(e) = kill_result {
-                ulog_warn!("[wake-lock] kill on systemd-inhibit pid={pid}: {e} (proceeded to wait)");
+                ulog_warn!(
+                    "[wake-lock] kill on systemd-inhibit pid={pid}: {e} (proceeded to wait)"
+                );
             }
             if let Err(e) = wait_result {
                 ulog_warn!("[wake-lock] wait on systemd-inhibit pid={pid}: {e}");

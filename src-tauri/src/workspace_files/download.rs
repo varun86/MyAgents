@@ -165,12 +165,10 @@ mod tests {
     async fn downloads_file_as_b64() {
         let ws = make_test_workspace("download_ok");
         fs::write(ws.join("pic.png"), b"\x89PNG\r\n").unwrap();
-        let res = cmd_workspace_download_file(
-            ws.to_string_lossy().to_string(),
-            "pic.png".to_string(),
-        )
-        .await
-        .unwrap();
+        let res =
+            cmd_workspace_download_file(ws.to_string_lossy().to_string(), "pic.png".to_string())
+                .await
+                .unwrap();
         assert_eq!(res.name, "pic.png");
         assert_eq!(res.mime_type, "image/png");
         assert!(!res.data.is_empty());
@@ -189,11 +187,9 @@ mod tests {
         let p = ws.join("huge.bin");
         let buf = vec![0u8; (MAX_DOWNLOAD_BYTES + 1) as usize];
         fs::write(&p, &buf).unwrap();
-        let res = cmd_workspace_download_file(
-            ws.to_string_lossy().to_string(),
-            "huge.bin".to_string(),
-        )
-        .await;
+        let res =
+            cmd_workspace_download_file(ws.to_string_lossy().to_string(), "huge.bin".to_string())
+                .await;
         assert!(res.is_err());
         assert!(res.unwrap_err().contains("too large"));
         let _ = fs::remove_dir_all(&ws);
@@ -202,11 +198,9 @@ mod tests {
     #[tokio::test]
     async fn rejects_missing() {
         let ws = make_test_workspace("download_missing");
-        let res = cmd_workspace_download_file(
-            ws.to_string_lossy().to_string(),
-            "nope.png".to_string(),
-        )
-        .await;
+        let res =
+            cmd_workspace_download_file(ws.to_string_lossy().to_string(), "nope.png".to_string())
+                .await;
         assert!(res.is_err());
         let _ = fs::remove_dir_all(&ws);
     }
@@ -232,10 +226,7 @@ mod tests {
     async fn rejects_symlink_escape() {
         use std::os::unix::fs::symlink;
         let ws = make_test_workspace("download_symlink_escape");
-        let outside = std::env::temp_dir().join(format!(
-            "download_outside_{}",
-            std::process::id()
-        ));
+        let outside = std::env::temp_dir().join(format!("download_outside_{}", std::process::id()));
         fs::create_dir_all(&outside).unwrap();
         let secret = outside.join("secret.png");
         fs::write(&secret, b"\x89PNG\rTOP-SECRET-BYTES").unwrap();

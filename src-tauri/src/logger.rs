@@ -244,9 +244,8 @@ pub fn init_buffered_writer() {
         // Open the current day's file. Re-open on day rollover.
         let mut current_path = get_log_file_path();
         let mut writer: Option<BufWriter<std::fs::File>> = None;
-        let mut interval = tokio::time::interval(std::time::Duration::from_millis(
-            WRITER_FLUSH_INTERVAL_MS,
-        ));
+        let mut interval =
+            tokio::time::interval(std::time::Duration::from_millis(WRITER_FLUSH_INTERVAL_MS));
 
         loop {
             tokio::select! {
@@ -331,12 +330,24 @@ fn enqueue_or_sync_append(line: String) {
 fn format_line(entry: &LogEntry) -> String {
     // Compose correlation-tag suffix in a fixed order so log diffs stay stable.
     let mut tags: Vec<String> = Vec::new();
-    if let Some(ref v) = entry.session_id { tags.push(format!("sid={}", v)); }
-    if let Some(ref v) = entry.turn_id { tags.push(format!("turn={}", v)); }
-    if let Some(ref v) = entry.request_id { tags.push(format!("req={}", v)); }
-    if let Some(ref v) = entry.tab_id { tags.push(format!("tab={}", v)); }
-    if let Some(ref v) = entry.runtime { tags.push(format!("rt={}", v)); }
-    if let Some(ref v) = entry.owner_id { tags.push(format!("owner={}", v)); }
+    if let Some(ref v) = entry.session_id {
+        tags.push(format!("sid={}", v));
+    }
+    if let Some(ref v) = entry.turn_id {
+        tags.push(format!("turn={}", v));
+    }
+    if let Some(ref v) = entry.request_id {
+        tags.push(format!("req={}", v));
+    }
+    if let Some(ref v) = entry.tab_id {
+        tags.push(format!("tab={}", v));
+    }
+    if let Some(ref v) = entry.runtime {
+        tags.push(format!("rt={}", v));
+    }
+    if let Some(ref v) = entry.owner_id {
+        tags.push(format!("owner={}", v));
+    }
     let tag_suffix = if tags.is_empty() {
         String::new()
     } else {

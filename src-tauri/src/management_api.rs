@@ -14,13 +14,13 @@ use tokio::net::TcpListener;
 use crate::cron_task::{
     self, CronDelivery, CronSchedule, CronTask, CronTaskConfig, ProviderIntent, TaskProviderEnv,
 };
-use crate::{ulog_debug, ulog_info, ulog_warn, ulog_error};
-use crate::im::{self, ManagedImBots, ManagedAgents};
 use crate::im::adapter::{ImAdapter, ImStreamAdapter};
 use crate::im::bridge;
 use crate::im::types::MediaType;
+use crate::im::{self, ManagedAgents, ManagedImBots};
 use crate::task;
 use crate::thought;
+use crate::{ulog_debug, ulog_error, ulog_info, ulog_warn};
 
 /// Global management API port (set once at startup)
 static MANAGEMENT_PORT: OnceLock<u16> = OnceLock::new();
@@ -101,7 +101,10 @@ pub async fn start_management_api() -> Result<u16, String> {
         .route("/api/plugin/list", get(list_plugins_handler))
         .route("/api/plugin/install", post(install_plugin_handler))
         .route("/api/plugin/uninstall", post(uninstall_plugin_handler))
-        .route("/api/agent/runtime-status", get(agent_runtime_status_handler))
+        .route(
+            "/api/agent/runtime-status",
+            get(agent_runtime_status_handler),
+        )
         // Task Center (v0.1.69) — HTTP surface for the `myagents task` CLI.
         .route("/api/task/list", get(task_list_handler))
         .route("/api/task/get", get(task_get_handler))
@@ -112,7 +115,10 @@ pub async fn start_management_api() -> Result<u16, String> {
         )
         .route("/api/task/update", post(task_update_handler))
         .route("/api/task/update-status", post(task_update_status_handler))
-        .route("/api/task/append-session", post(task_append_session_handler))
+        .route(
+            "/api/task/append-session",
+            post(task_append_session_handler),
+        )
         .route("/api/task/archive", post(task_archive_handler))
         .route("/api/task/delete", post(task_delete_handler))
         .route("/api/task/run", post(task_run_handler))
@@ -133,10 +139,7 @@ pub async fn start_management_api() -> Result<u16, String> {
         }
     });
 
-    ulog_info!(
-        "[management-api] Started on http://127.0.0.1:{}",
-        port
-    );
+    ulog_info!("[management-api] Started on http://127.0.0.1:{}", port);
     Ok(port)
 }
 
@@ -278,9 +281,7 @@ struct ApiResponse {
 
 // ===== Handlers =====
 
-async fn create_cron_handler(
-    Json(req): Json<CreateCronRequest>,
-) -> Json<serde_json::Value> {
+async fn create_cron_handler(Json(req): Json<CreateCronRequest>) -> Json<serde_json::Value> {
     let manager = cron_task::get_cron_task_manager();
 
     let is_loop = matches!(&req.schedule, Some(CronSchedule::Loop));
@@ -297,7 +298,7 @@ async fn create_cron_handler(
         Some(CronSchedule::Every { minutes, .. }) => *minutes,
         Some(CronSchedule::At { .. }) => 60, // placeholder, not used for one-shot
         Some(CronSchedule::Cron { .. }) => 60, // placeholder, calculated by cron expression
-        Some(CronSchedule::Loop) => 0, // not used, Loop is completion-triggered
+        Some(CronSchedule::Loop) => 0,       // not used, Loop is completion-triggered
         None => req.interval_minutes.unwrap_or(30),
     };
 
@@ -338,13 +339,23 @@ async fn create_cron_handler(
             // Auto-start the task
             let task_id = task.id.clone();
             if let Err(e) = manager.start_task(&task_id).await {
-                ulog_warn!("[management-api] Created task {} but failed to start: {}", task_id, e);
+                ulog_warn!(
+                    "[management-api] Created task {} but failed to start: {}",
+                    task_id,
+                    e
+                );
             } else if let Err(e) = manager.start_task_scheduler(&task_id).await {
-                ulog_warn!("[management-api] Started task {} but failed to start scheduler: {}", task_id, e);
+                ulog_warn!(
+                    "[management-api] Started task {} but failed to start scheduler: {}",
+                    task_id,
+                    e
+                );
             }
 
             // Fetch enriched task to get computed nextExecutionAt
-            let next_exec = manager.get_task(&task_id).await
+            let next_exec = manager
+                .get_task(&task_id)
+                .await
                 .and_then(|t| t.next_execution_at);
 
             Json(serde_json::json!({
@@ -361,9 +372,7 @@ async fn create_cron_handler(
     }
 }
 
-async fn list_cron_handler(
-    Query(query): Query<ListCronQuery>,
-) -> Json<serde_json::Value> {
+async fn list_cron_handler(Query(query): Query<ListCronQuery>) -> Json<serde_json::Value> {
     let manager = cron_task::get_cron_task_manager();
 
     let tasks = if let Some(bot_id) = &query.source_bot_id {
@@ -390,9 +399,7 @@ async fn list_cron_handler(
     Json(serde_json::json!({ "ok": true, "tasks": summaries }))
 }
 
-async fn update_cron_handler(
-    Json(req): Json<UpdateCronRequest>,
-) -> Json<serde_json::Value> {
+async fn update_cron_handler(Json(req): Json<UpdateCronRequest>) -> Json<serde_json::Value> {
     let manager = cron_task::get_cron_task_manager();
 
     match manager.update_task_fields(&req.task_id, req.patch).await {
@@ -416,16 +423,19 @@ async fn update_cron_handler(
     }
 }
 
-async fn delete_cron_handler(
-    Json(req): Json<TaskIdRequest>,
-) -> Json<ApiResponse> {
+async fn delete_cron_handler(Json(req): Json<TaskIdRequest>) -> Json<ApiResponse> {
     let manager = cron_task::get_cron_task_manager();
 
     // Stop first if running
-    let _ = manager.stop_task(&req.task_id, Some("Deleted via management API".to_string())).await;
+    let _ = manager
+        .stop_task(&req.task_id, Some("Deleted via management API".to_string()))
+        .await;
 
     match manager.delete_task(&req.task_id).await {
-        Ok(()) => Json(ApiResponse { ok: true, error: None }),
+        Ok(()) => Json(ApiResponse {
+            ok: true,
+            error: None,
+        }),
         Err(e) => Json(ApiResponse {
             ok: false,
             error: Some(e),
@@ -433,9 +443,7 @@ async fn delete_cron_handler(
     }
 }
 
-async fn run_cron_handler(
-    Json(req): Json<TaskIdRequest>,
-) -> Json<ApiResponse> {
+async fn run_cron_handler(Json(req): Json<TaskIdRequest>) -> Json<ApiResponse> {
     let manager = cron_task::get_cron_task_manager();
 
     // Check task exists
@@ -465,16 +473,17 @@ async fn run_cron_handler(
         }
     }
 
-    Json(ApiResponse { ok: true, error: None })
+    Json(ApiResponse {
+        ok: true,
+        error: None,
+    })
 }
 
 /// PRD 0.2.5 R4 — POST /api/cron/trigger
 /// Fire one immediate execution of an existing cron task without modifying
 /// its schedule or status. Fire-and-forget: returns as soon as the dispatch
 /// kicks off (does NOT wait for the AI to finish).
-async fn trigger_cron_handler(
-    Json(req): Json<TaskIdRequest>,
-) -> Json<serde_json::Value> {
+async fn trigger_cron_handler(Json(req): Json<TaskIdRequest>) -> Json<serde_json::Value> {
     let manager = cron_task::get_cron_task_manager();
     match manager.trigger_now(&req.task_id).await {
         Ok(info) => Json(serde_json::json!({
@@ -512,9 +521,7 @@ struct RunsQuery {
     limit: Option<usize>,
 }
 
-async fn runs_cron_handler(
-    Query(params): Query<RunsQuery>,
-) -> Json<serde_json::Value> {
+async fn runs_cron_handler(Query(params): Query<RunsQuery>) -> Json<serde_json::Value> {
     let limit = params.limit.unwrap_or(20);
     let runs = cron_task::read_cron_runs(&params.task_id, limit);
     Json(serde_json::json!({ "ok": true, "runs": runs }))
@@ -527,9 +534,7 @@ struct StatusQuery {
     workspace_path: Option<String>,
 }
 
-async fn status_cron_handler(
-    Query(params): Query<StatusQuery>,
-) -> Json<serde_json::Value> {
+async fn status_cron_handler(Query(params): Query<StatusQuery>) -> Json<serde_json::Value> {
     let manager = cron_task::get_cron_task_manager();
     let tasks = if let Some(bot_id) = &params.bot_id {
         manager.get_tasks_for_bot(bot_id).await
@@ -540,9 +545,15 @@ async fn status_cron_handler(
     };
 
     let total = tasks.len();
-    let running = tasks.iter().filter(|t| t.status == cron_task::TaskStatus::Running).count();
+    let running = tasks
+        .iter()
+        .filter(|t| t.status == cron_task::TaskStatus::Running)
+        .count();
     let last_executed = tasks.iter().filter_map(|t| t.last_executed_at).max();
-    let next_execution = tasks.iter().filter_map(|t| t.next_execution_at.clone()).min();
+    let next_execution = tasks
+        .iter()
+        .filter_map(|t| t.next_execution_at.clone())
+        .min();
 
     Json(serde_json::json!({
         "ok": true,
@@ -563,7 +574,9 @@ struct WakeRequest {
 /// Look up a bot instance by ID — checks ManagedAgents first (primary path), then
 /// falls back to ManagedImBots (legacy compatibility, usually empty after migration).
 /// Returns (router Arc, heartbeat wake_tx) with locks already dropped.
-async fn find_bot_refs(bot_id: &str) -> Option<(
+async fn find_bot_refs(
+    bot_id: &str,
+) -> Option<(
     std::sync::Arc<tokio::sync::Mutex<im::router::SessionRouter>>,
     Option<tokio::sync::mpsc::Sender<im::types::WakeReason>>,
 )> {
@@ -636,7 +649,11 @@ async fn list_im_channels_handler() -> Json<serde_json::Value> {
                 let platform_str = serde_json::to_value(&ch_inst.bot_instance.platform)
                     .and_then(|v| serde_json::from_value::<String>(v))
                     .unwrap_or_else(|_| "unknown".to_string());
-                let name = ch_inst.bot_instance.config.name.clone()
+                let name = ch_inst
+                    .bot_instance
+                    .config
+                    .name
+                    .clone()
                     .unwrap_or_else(|| ch_id.clone());
                 snapshots.push(ChannelSnapshot {
                     bot_id: ch_id.clone(),
@@ -660,7 +677,10 @@ async fn list_im_channels_handler() -> Json<serde_json::Value> {
             let platform_str = serde_json::to_value(&instance.platform)
                 .and_then(|v| serde_json::from_value::<String>(v))
                 .unwrap_or_else(|_| "unknown".to_string());
-            let name = instance.config.name.clone()
+            let name = instance
+                .config
+                .name
+                .clone()
                 .unwrap_or_else(|| bot_id.clone());
             snapshots.push(ChannelSnapshot {
                 bot_id: bot_id.clone(),
@@ -691,9 +711,7 @@ async fn list_im_channels_handler() -> Json<serde_json::Value> {
     Json(serde_json::json!({ "ok": true, "channels": channels }))
 }
 
-async fn wake_bot_handler(
-    Json(payload): Json<WakeRequest>,
-) -> Json<serde_json::Value> {
+async fn wake_bot_handler(Json(payload): Json<WakeRequest>) -> Json<serde_json::Value> {
     let (router, wake_tx) = match find_bot_refs(&payload.bot_id).await {
         Some(refs) => refs,
         None => return Json(serde_json::json!({ "ok": false, "error": "Bot not found" })),
@@ -724,7 +742,9 @@ async fn wake_bot_handler(
     if let Some(ref wake_tx) = wake_tx {
         match wake_tx.send(im::types::WakeReason::Manual).await {
             Ok(_) => Json(serde_json::json!({ "ok": true })),
-            Err(e) => Json(serde_json::json!({ "ok": false, "error": format!("Wake failed: {}", e) })),
+            Err(e) => {
+                Json(serde_json::json!({ "ok": false, "error": format!("Wake failed: {}", e) }))
+            }
         }
     } else {
         Json(serde_json::json!({ "ok": false, "error": "Heartbeat not configured for this bot" }))
@@ -744,15 +764,15 @@ struct SendMediaRequest {
     caption: Option<String>,
 }
 
-async fn send_media_handler(
-    Json(req): Json<SendMediaRequest>,
-) -> Json<serde_json::Value> {
+async fn send_media_handler(Json(req): Json<SendMediaRequest>) -> Json<serde_json::Value> {
     // Get adapter from the bot instance (checks legacy IM bots, then agent channels)
     let adapter: std::sync::Arc<im::AnyAdapter> = match find_bot_adapter(&req.bot_id).await {
         Some(a) => a,
-        None => return Json(serde_json::json!({
-            "ok": false, "error": format!("Bot not found: {}", req.bot_id)
-        })),
+        None => {
+            return Json(serde_json::json!({
+                "ok": false, "error": format!("Bot not found: {}", req.bot_id)
+            }))
+        }
     };
 
     // Read the file
@@ -762,16 +782,15 @@ async fn send_media_handler(
         .and_then(|n| n.to_str())
         .unwrap_or("file")
         .to_string();
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("");
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
     let data = match tokio::fs::read(&req.file_path).await {
         Ok(d) => d,
-        Err(e) => return Json(serde_json::json!({
-            "ok": false, "error": format!("File not found or unreadable: {}", e)
-        })),
+        Err(e) => {
+            return Json(serde_json::json!({
+                "ok": false, "error": format!("File not found or unreadable: {}", e)
+            }))
+        }
     };
 
     let data_len = data.len() as u64;
@@ -786,8 +805,16 @@ async fn send_media_handler(
                     "error": format!("Image too large: {:.1} MB (max 10 MB)", data_len as f64 / (1024.0 * 1024.0))
                 }));
             }
-            ulog_info!("[send-media] Sending image: {} ({} bytes) to {}", filename, data_len, req.chat_id);
-            match adapter.send_photo(&req.chat_id, data, &filename, req.caption.as_deref()).await {
+            ulog_info!(
+                "[send-media] Sending image: {} ({} bytes) to {}",
+                filename,
+                data_len,
+                req.chat_id
+            );
+            match adapter
+                .send_photo(&req.chat_id, data, &filename, req.caption.as_deref())
+                .await
+            {
                 Ok(_) => Json(serde_json::json!({
                     "ok": true, "fileName": filename, "fileSize": data_len
                 })),
@@ -819,8 +846,17 @@ async fn send_media_handler(
                 "txt" => "text/plain",
                 _ => "application/octet-stream",
             };
-            ulog_info!("[send-media] Sending file: {} ({} bytes, {}) to {}", filename, data_len, mime, req.chat_id);
-            match adapter.send_file(&req.chat_id, data, &filename, mime, req.caption.as_deref()).await {
+            ulog_info!(
+                "[send-media] Sending file: {} ({} bytes, {}) to {}",
+                filename,
+                data_len,
+                mime,
+                req.chat_id
+            );
+            match adapter
+                .send_file(&req.chat_id, data, &filename, mime, req.caption.as_deref())
+                .await
+            {
                 Ok(_) => Json(serde_json::json!({
                     "ok": true, "fileName": filename, "fileSize": data_len
                 })),
@@ -829,12 +865,10 @@ async fn send_media_handler(
                 })),
             }
         }
-        MediaType::NonMedia => {
-            Json(serde_json::json!({
-                "ok": false,
-                "error": format!("Unsupported file type: .{} — only images, documents, media, and archives can be sent", ext)
-            }))
-        }
+        MediaType::NonMedia => Json(serde_json::json!({
+            "ok": false,
+            "error": format!("Unsupported file type: .{} — only images, documents, media, and archives can be sent", ext)
+        })),
     }
 }
 
@@ -842,9 +876,18 @@ async fn send_media_handler(
 
 async fn stop_cron_handler(Json(req): Json<TaskIdRequest>) -> Json<ApiResponse> {
     let manager = cron_task::get_cron_task_manager();
-    match manager.stop_task(&req.task_id, Some("Stopped via admin CLI".to_string())).await {
-        Ok(_) => Json(ApiResponse { ok: true, error: None }),
-        Err(e) => Json(ApiResponse { ok: false, error: Some(e) }),
+    match manager
+        .stop_task(&req.task_id, Some("Stopped via admin CLI".to_string()))
+        .await
+    {
+        Ok(_) => Json(ApiResponse {
+            ok: true,
+            error: None,
+        }),
+        Err(e) => Json(ApiResponse {
+            ok: false,
+            error: Some(e),
+        }),
     }
 }
 
@@ -882,7 +925,9 @@ struct UninstallPluginRequest {
     plugin_id: String,
 }
 
-async fn uninstall_plugin_handler(Json(req): Json<UninstallPluginRequest>) -> Json<serde_json::Value> {
+async fn uninstall_plugin_handler(
+    Json(req): Json<UninstallPluginRequest>,
+) -> Json<serde_json::Value> {
     match bridge::uninstall_openclaw_plugin(&req.plugin_id).await {
         Ok(()) => Json(serde_json::json!({ "ok": true })),
         Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
@@ -954,12 +999,15 @@ async fn agent_runtime_status_handler() -> Json<serde_json::Value> {
                 "restartCount": health_state.restart_count,
             }));
         }
-        result.insert(snap.agent_id.clone(), serde_json::json!({
-            "agentId": snap.agent_id,
-            "agentName": snap.agent_name,
-            "enabled": snap.enabled,
-            "channels": channels,
-        }));
+        result.insert(
+            snap.agent_id.clone(),
+            serde_json::json!({
+                "agentId": snap.agent_id,
+                "agentName": snap.agent_name,
+                "enabled": snap.enabled,
+                "channels": channels,
+            }),
+        );
     }
 
     Json(serde_json::json!({ "ok": true, "agents": result }))
@@ -990,7 +1038,7 @@ struct BridgeMessagePayload {
     sender_id: String,
     sender_name: Option<String>,
     text: String,
-    chat_type: String,       // "direct" | "group"
+    chat_type: String, // "direct" | "group"
     chat_id: String,
     message_id: Option<String>,
     #[allow(dead_code)]
@@ -1058,7 +1106,9 @@ async fn handle_bridge_message(
         ImSourceType::Private
     };
     // Default: private=true (directed at bot), group=false (only if explicitly flagged)
-    let is_mention = payload.is_mention.unwrap_or(source_type == ImSourceType::Private);
+    let is_mention = payload
+        .is_mention
+        .unwrap_or(source_type == ImSourceType::Private);
 
     // Decode base64 media attachments from Bridge
     let mut im_attachments: Vec<ImAttachment> = Vec::new();
@@ -1097,7 +1147,9 @@ async fn handle_bridge_message(
 
     let msg = ImMessage {
         chat_id: payload.chat_id,
-        message_id: payload.message_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+        message_id: payload
+            .message_id
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
         text: payload.text,
         sender_id: payload.sender_id,
         sender_name: payload.sender_name,
@@ -1157,9 +1209,7 @@ struct TaskListQuery {
     include_deleted: Option<bool>,
 }
 
-async fn task_list_handler(
-    Query(q): Query<TaskListQuery>,
-) -> Json<serde_json::Value> {
+async fn task_list_handler(Query(q): Query<TaskListQuery>) -> Json<serde_json::Value> {
     let Some(store) = task::get_task_store() else {
         return Json(serde_json::json!({
             "ok": false,
@@ -1202,9 +1252,7 @@ struct TaskGetQuery {
     id: String,
 }
 
-async fn task_get_handler(
-    Query(q): Query<TaskGetQuery>,
-) -> Json<serde_json::Value> {
+async fn task_get_handler(Query(q): Query<TaskGetQuery>) -> Json<serde_json::Value> {
     let Some(store) = task::get_task_store() else {
         return Json(serde_json::json!({
             "ok": false,
@@ -1261,9 +1309,7 @@ async fn task_create_direct_handler(
     }
 }
 
-async fn task_update_handler(
-    Json(input): Json<task::TaskUpdateInput>,
-) -> Json<serde_json::Value> {
+async fn task_update_handler(Json(input): Json<task::TaskUpdateInput>) -> Json<serde_json::Value> {
     let Some(store) = task::get_task_store() else {
         return Json(serde_json::json!({
             "ok": false,
@@ -1373,9 +1419,7 @@ struct TaskArchiveApiRequest {
     message: Option<String>,
 }
 
-async fn task_archive_handler(
-    Json(req): Json<TaskArchiveApiRequest>,
-) -> Json<serde_json::Value> {
+async fn task_archive_handler(Json(req): Json<TaskArchiveApiRequest>) -> Json<serde_json::Value> {
     let Some(store) = task::get_task_store() else {
         return Json(serde_json::json!({
             "ok": false,
@@ -1394,9 +1438,7 @@ struct TaskDeleteApiRequest {
     id: String,
 }
 
-async fn task_delete_handler(
-    Json(req): Json<TaskDeleteApiRequest>,
-) -> Json<serde_json::Value> {
+async fn task_delete_handler(Json(req): Json<TaskDeleteApiRequest>) -> Json<serde_json::Value> {
     let Some(store) = task::get_task_store() else {
         return Json(serde_json::json!({
             "ok": false,
@@ -1428,9 +1470,7 @@ struct ThoughtListQuery {
     archived: Option<String>,
 }
 
-async fn thought_list_handler(
-    Query(q): Query<ThoughtListQuery>,
-) -> Json<serde_json::Value> {
+async fn thought_list_handler(Query(q): Query<ThoughtListQuery>) -> Json<serde_json::Value> {
     let Some(store) = thought::get_thought_store() else {
         return Json(serde_json::json!({
             "ok": false,
@@ -1514,9 +1554,7 @@ async fn task_create_from_alignment_handler(
 /// - For `executionMode = 'once'` the CronTask is `At { at: now }` so it fires
 ///   once and stays stopped after.
 /// - For scheduled/recurring/loop the CronTask schedule mirrors the Task.
-async fn task_run_handler(
-    Json(req): Json<TaskIdApiRequest>,
-) -> Json<serde_json::Value> {
+async fn task_run_handler(Json(req): Json<TaskIdApiRequest>) -> Json<serde_json::Value> {
     let Some(task_store) = task::get_task_store() else {
         return Json(serde_json::json!({ "ok": false, "error": "task store not initialized" }));
     };
@@ -1570,9 +1608,7 @@ async fn task_run_handler(
 /// a proper audited transition) then invoke the `run` flow. Used when a task
 /// is stuck in `blocked` / `stopped` / `done` / `archived` and the user wants
 /// to try again from scratch.
-async fn task_rerun_handler(
-    Json(req): Json<TaskIdApiRequest>,
-) -> Json<serde_json::Value> {
+async fn task_rerun_handler(Json(req): Json<TaskIdApiRequest>) -> Json<serde_json::Value> {
     let Some(task_store) = task::get_task_store() else {
         return Json(serde_json::json!({ "ok": false, "error": "task store not initialized" }));
     };
@@ -1612,9 +1648,7 @@ async fn task_rerun_handler(
     // clean slate (particularly important if the previous CronTask has
     // exhausted endConditions).
     if let Some(stale) = ta.cron_task_id.as_deref() {
-        let _ = cron_task::get_cron_task_manager()
-            .delete_task(stale)
-            .await;
+        let _ = cron_task::get_cron_task_manager().delete_task(stale).await;
         let _ = task_store.set_cron_task_id(&ta.id, None).await;
     }
 
@@ -1685,9 +1719,7 @@ struct TaskWriteDocRequest {
 /// Delegates to `TaskStore::write_doc`, which enforces the running/verifying
 /// lock atomically with the file write (PRD §9.4). `progress.md` is
 /// explicitly rejected here — only the runtime agent appends to it.
-async fn task_write_doc_handler(
-    Json(req): Json<TaskWriteDocRequest>,
-) -> Json<serde_json::Value> {
+async fn task_write_doc_handler(Json(req): Json<TaskWriteDocRequest>) -> Json<serde_json::Value> {
     let Some(store) = task::get_task_store() else {
         return Json(serde_json::json!({ "ok": false, "error": "task store not initialized" }));
     };
@@ -1751,10 +1783,7 @@ async fn ensure_cron_for_task(ta: &task::Task) -> Result<String, String> {
     // no-restrictions, gemini: yolo). Hardcoding "fullAgency" here was
     // wrong for Codex/Gemini — those runtimes don't recognize
     // "fullAgency" and fell through to interactive defaults.
-    let desired_permission_mode = ta
-        .permission_mode
-        .clone()
-        .unwrap_or_default();
+    let desired_permission_mode = ta.permission_mode.clone().unwrap_or_default();
 
     // Candidate IDs: the Task's own cached `cron_task_id`, and any other
     // CronTask that carries this Task's id as a back-pointer (defensive —
@@ -1867,7 +1896,10 @@ async fn ensure_cron_for_task(ta: &task::Task) -> Result<String, String> {
     let config = cron_task::CronTaskConfig {
         workspace_path: ta.workspace_path.clone(),
         session_id,
-        prompt: format!("(dynamic — built from ~/.myagents/tasks/{}/task.md at dispatch)", ta.id),
+        prompt: format!(
+            "(dynamic — built from ~/.myagents/tasks/{}/task.md at dispatch)",
+            ta.id
+        ),
         interval_minutes,
         end_conditions,
         run_mode,
@@ -2002,10 +2034,7 @@ fn resolve_run_mode(ta: &task::Task) -> cron_task::RunMode {
 /// stored RFC3339 string exactly (we never re-compute `At` timestamps, so an
 /// identical string means the schedule hasn't drifted). Returns `false` if
 /// the stored schedule is `None` and the desired one is any concrete variant.
-fn schedules_equivalent(
-    a: &Option<cron_task::CronSchedule>,
-    b: &cron_task::CronSchedule,
-) -> bool {
+fn schedules_equivalent(a: &Option<cron_task::CronSchedule>, b: &cron_task::CronSchedule) -> bool {
     let Some(a) = a else { return false };
     use cron_task::CronSchedule::*;
     match (a, b) {
@@ -2087,9 +2116,7 @@ async fn find_channel_for_session(
     None
 }
 
-async fn mirror_to_channel_handler(
-    Json(req): Json<MirrorRequest>,
-) -> Json<serde_json::Value> {
+async fn mirror_to_channel_handler(Json(req): Json<MirrorRequest>) -> Json<serde_json::Value> {
     let resolved = match find_channel_for_session(&req.session_id).await {
         Some(t) => t,
         None => {
@@ -2128,9 +2155,7 @@ async fn mirror_to_channel_handler(
                 let payload = format!("{}\n{}", DESKTOP_USER_PREFIX, body);
                 adapter.send_message(&chat_id, &payload).await
             }
-            _ => {
-                im::adapter::push_text_preferring_stream(adapter.as_ref(), &chat_id, &body).await
-            }
+            _ => im::adapter::push_text_preferring_stream(adapter.as_ref(), &chat_id, &body).await,
         };
         match result {
             Ok(_) => sent_text = true,
@@ -2159,8 +2184,7 @@ async fn mirror_to_channel_handler(
     // `MIRROR_IMAGE_MAX_BASE64_CHARS` in agent-session.ts:toMirrorImages
     // — otherwise the boundary 5 MiB image is accepted on one side and
     // rejected on the other (review-by-codex F4).
-    const MIRROR_IMAGE_MAX_BASE64_LEN: usize =
-        ((MIRROR_IMAGE_MAX_BYTES + 2) / 3) * 4 + 64;
+    const MIRROR_IMAGE_MAX_BASE64_LEN: usize = ((MIRROR_IMAGE_MAX_BYTES + 2) / 3) * 4 + 64;
 
     let mut sent_images = 0usize;
     let mut skipped_images = 0usize;
@@ -2283,9 +2307,7 @@ struct InboxDeliverRequest {
 ///   - Target sidecar's turn-end hook for reply pushback
 ///
 /// Body: `{ message: PendingInboxMessage, resume_workspace_path?: string }`
-async fn inbox_deliver_handler(
-    Json(req): Json<InboxDeliverRequest>,
-) -> Json<serde_json::Value> {
+async fn inbox_deliver_handler(Json(req): Json<InboxDeliverRequest>) -> Json<serde_json::Value> {
     let Some(manager) = get_sidecar_state() else {
         return Json(serde_json::json!({
             "ok": false,
@@ -2293,7 +2315,10 @@ async fn inbox_deliver_handler(
         }));
     };
 
-    let resume_path = req.resume_workspace_path.as_ref().map(std::path::PathBuf::from);
+    let resume_path = req
+        .resume_workspace_path
+        .as_ref()
+        .map(std::path::PathBuf::from);
 
     let outcome = if resume_path.is_some() {
         let Some(app_handle) = crate::logger::get_app_handle() else {

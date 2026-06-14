@@ -94,10 +94,10 @@ function ProviderOrderRow({ provider, index, isLast, enabled, onMove, onToggle }
             <div className="min-w-0 flex-1">
                 <div className="flex min-w-0 items-center gap-2">
                     <p className="truncate text-sm font-medium text-[var(--ink)]">{provider.name}</p>
-                    <span className="shrink-0 rounded bg-[var(--paper-inset)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--ink-muted)]">
+                    <span className="shrink-0 rounded bg-[var(--paper-inset)] px-1.5 py-0.5 text-xs font-medium text-[var(--ink-muted)]">
                         {provider.cloudProvider}
                     </span>
-                    <span className="shrink-0 rounded bg-[var(--paper-inset)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--ink-muted)]">
+                    <span className="shrink-0 rounded bg-[var(--paper-inset)] px-1.5 py-0.5 text-xs font-medium text-[var(--ink-muted)]">
                         {provider.type === 'subscription' ? '订阅' : 'API'}
                     </span>
                 </div>
@@ -198,7 +198,7 @@ export default function ProviderEnableOrderDialog({
                     <div className="flex items-center justify-between">
                         <div>
                             <h3 className="text-lg font-semibold text-[var(--ink)]">启用和排序</h3>
-                            <p className="mt-1 text-sm text-[var(--ink-muted)]">
+                            <p className="mt-1 text-xs text-[var(--ink-muted)]">
                                 控制可被对话、任务和聊天机器人使用的供应商，以及它们在模型选择器中的顺序。
                             </p>
                         </div>

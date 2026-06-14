@@ -91,6 +91,7 @@ export const SSE_EVENT_PRIORITIES: Readonly<Record<string, SseEventPriority>> = 
   // content-block-stop → tool-use-start → …); coalescing any of them
   // would corrupt the renderer's structural state machine.
   'chat:system-init': 'critical',
+  'chat:slash-commands': 'critical',
   'chat:system-status': 'critical',
   'chat:status': 'critical',
   'chat:init': 'critical',
@@ -218,10 +219,12 @@ const HEARTBEAT_INTERVAL_MS = 15000;
 // Solves the "late joiner" problem: when a Tab connects to a session already in progress
 // (e.g., IM Bot mid-flight), it immediately receives the current session state instead
 // of showing idle until the next live event arrives.
-// Only cache chat:status — chat:system-init is already replayed inline by the /chat/stream
-// handler (index.ts), so caching it here would cause duplicate delivery that poisons
-// isStreamingRef in the frontend.
-const CACHED_EVENTS = new Set(['chat:status']);
+// chat:system-init is already replayed inline by the /chat/stream handler
+// (index.ts), so caching it here would cause duplicate delivery that poisons
+// isStreamingRef in the frontend. SDK slash commands are cached because the
+// SDK control-plane initialize can complete before the renderer has finished
+// attaching its SSE listeners; the slash menu still needs that latest snapshot.
+const CACHED_EVENTS = new Set(['chat:status', 'chat:slash-commands']);
 const LAST_VALUE_CACHE_KEY = '__myagents_sse_lvc__';
 const lastValueCache: Map<string, unknown> =
   (globalThis as Record<string, unknown>)[LAST_VALUE_CACHE_KEY] as Map<string, unknown> ??

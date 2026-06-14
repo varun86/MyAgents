@@ -68,8 +68,8 @@ impl PlatformImpl {
     pub fn acquire(reason: &str) -> Result<Self, String> {
         // Create CFString for assertion type. Static literal, safe to
         // unwrap CString::new since it has no interior NUL.
-        let type_cstr = CString::new(ASSERTION_TYPE_NAME)
-            .expect("ASSERTION_TYPE_NAME has no interior NUL");
+        let type_cstr =
+            CString::new(ASSERTION_TYPE_NAME).expect("ASSERTION_TYPE_NAME has no interior NUL");
         // Reason may contain unexpected content; sanitize NULs.
         let reason_cstr = CString::new(reason.replace('\0', ""))
             .map_err(|e| format!("reason has interior NUL: {e}"))?;
@@ -78,22 +78,14 @@ impl PlatformImpl {
         // default), a valid C string pointer, and a known UTF-8 encoding
         // constant. Returns NULL on failure, which we check below.
         let type_cf = unsafe {
-            CFStringCreateWithCString(
-                ptr::null(),
-                type_cstr.as_ptr(),
-                K_CF_STRING_ENCODING_UTF8,
-            )
+            CFStringCreateWithCString(ptr::null(), type_cstr.as_ptr(), K_CF_STRING_ENCODING_UTF8)
         };
         if type_cf.is_null() {
             return Err("CFStringCreateWithCString(type) returned null".to_string());
         }
 
         let name_cf = unsafe {
-            CFStringCreateWithCString(
-                ptr::null(),
-                reason_cstr.as_ptr(),
-                K_CF_STRING_ENCODING_UTF8,
-            )
+            CFStringCreateWithCString(ptr::null(), reason_cstr.as_ptr(), K_CF_STRING_ENCODING_UTF8)
         };
         if name_cf.is_null() {
             // Release the already-allocated type string before bailing.
@@ -141,7 +133,10 @@ impl Drop for PlatformImpl {
         // IOPMAssertionCreateWithName call in `acquire`.
         let result = unsafe { IOPMAssertionRelease(self.assertion_id) };
         if result == K_IO_RETURN_SUCCESS {
-            ulog_debug!("[wake-lock] macOS assertion released: id={}", self.assertion_id);
+            ulog_debug!(
+                "[wake-lock] macOS assertion released: id={}",
+                self.assertion_id
+            );
         } else {
             // Release failure is non-actionable — log and move on. The
             // assertion will eventually clear when the process exits.

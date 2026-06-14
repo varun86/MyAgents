@@ -103,7 +103,10 @@ fn parse_accelerator(input: &str) -> Result<Shortcut, String> {
 
     for part in normalized.split('+').map(str::trim) {
         if part.is_empty() {
-            return Err(format!("[global-shortcut] malformed accelerator: '{}'", normalized));
+            return Err(format!(
+                "[global-shortcut] malformed accelerator: '{}'",
+                normalized
+            ));
         }
         let lower = part.to_ascii_lowercase();
         match lower.as_str() {
@@ -129,9 +132,8 @@ fn parse_accelerator(input: &str) -> Result<Shortcut, String> {
         }
     }
 
-    let code = key_code.ok_or_else(|| {
-        format!("[global-shortcut] missing main key in '{}'", normalized)
-    })?;
+    let code = key_code
+        .ok_or_else(|| format!("[global-shortcut] missing main key in '{}'", normalized))?;
 
     Ok(Shortcut::new(Some(modifiers), code))
 }
@@ -143,23 +145,46 @@ fn parse_code(s: &str) -> Result<Code, String> {
         if c.is_ascii_alphabetic() {
             let upper = c.to_ascii_uppercase();
             return match upper {
-                'A' => Ok(Code::KeyA), 'B' => Ok(Code::KeyB), 'C' => Ok(Code::KeyC),
-                'D' => Ok(Code::KeyD), 'E' => Ok(Code::KeyE), 'F' => Ok(Code::KeyF),
-                'G' => Ok(Code::KeyG), 'H' => Ok(Code::KeyH), 'I' => Ok(Code::KeyI),
-                'J' => Ok(Code::KeyJ), 'K' => Ok(Code::KeyK), 'L' => Ok(Code::KeyL),
-                'M' => Ok(Code::KeyM), 'N' => Ok(Code::KeyN), 'O' => Ok(Code::KeyO),
-                'P' => Ok(Code::KeyP), 'Q' => Ok(Code::KeyQ), 'R' => Ok(Code::KeyR),
-                'S' => Ok(Code::KeyS), 'T' => Ok(Code::KeyT), 'U' => Ok(Code::KeyU),
-                'V' => Ok(Code::KeyV), 'W' => Ok(Code::KeyW), 'X' => Ok(Code::KeyX),
-                'Y' => Ok(Code::KeyY), 'Z' => Ok(Code::KeyZ),
+                'A' => Ok(Code::KeyA),
+                'B' => Ok(Code::KeyB),
+                'C' => Ok(Code::KeyC),
+                'D' => Ok(Code::KeyD),
+                'E' => Ok(Code::KeyE),
+                'F' => Ok(Code::KeyF),
+                'G' => Ok(Code::KeyG),
+                'H' => Ok(Code::KeyH),
+                'I' => Ok(Code::KeyI),
+                'J' => Ok(Code::KeyJ),
+                'K' => Ok(Code::KeyK),
+                'L' => Ok(Code::KeyL),
+                'M' => Ok(Code::KeyM),
+                'N' => Ok(Code::KeyN),
+                'O' => Ok(Code::KeyO),
+                'P' => Ok(Code::KeyP),
+                'Q' => Ok(Code::KeyQ),
+                'R' => Ok(Code::KeyR),
+                'S' => Ok(Code::KeyS),
+                'T' => Ok(Code::KeyT),
+                'U' => Ok(Code::KeyU),
+                'V' => Ok(Code::KeyV),
+                'W' => Ok(Code::KeyW),
+                'X' => Ok(Code::KeyX),
+                'Y' => Ok(Code::KeyY),
+                'Z' => Ok(Code::KeyZ),
                 _ => Err(format!("[global-shortcut] unsupported key '{}'", s)),
             };
         }
         if c.is_ascii_digit() {
             return match c {
-                '0' => Ok(Code::Digit0), '1' => Ok(Code::Digit1), '2' => Ok(Code::Digit2),
-                '3' => Ok(Code::Digit3), '4' => Ok(Code::Digit4), '5' => Ok(Code::Digit5),
-                '6' => Ok(Code::Digit6), '7' => Ok(Code::Digit7), '8' => Ok(Code::Digit8),
+                '0' => Ok(Code::Digit0),
+                '1' => Ok(Code::Digit1),
+                '2' => Ok(Code::Digit2),
+                '3' => Ok(Code::Digit3),
+                '4' => Ok(Code::Digit4),
+                '5' => Ok(Code::Digit5),
+                '6' => Ok(Code::Digit6),
+                '7' => Ok(Code::Digit7),
+                '8' => Ok(Code::Digit8),
                 '9' => Ok(Code::Digit9),
                 _ => unreachable!(),
             };
@@ -186,10 +211,18 @@ fn parse_code(s: &str) -> Result<Code, String> {
         "bracketright" | "]" => Ok(Code::BracketRight),
         "minus" | "-" => Ok(Code::Minus),
         "equal" | "=" => Ok(Code::Equal),
-        "f1" => Ok(Code::F1), "f2" => Ok(Code::F2), "f3" => Ok(Code::F3),
-        "f4" => Ok(Code::F4), "f5" => Ok(Code::F5), "f6" => Ok(Code::F6),
-        "f7" => Ok(Code::F7), "f8" => Ok(Code::F8), "f9" => Ok(Code::F9),
-        "f10" => Ok(Code::F10), "f11" => Ok(Code::F11), "f12" => Ok(Code::F12),
+        "f1" => Ok(Code::F1),
+        "f2" => Ok(Code::F2),
+        "f3" => Ok(Code::F3),
+        "f4" => Ok(Code::F4),
+        "f5" => Ok(Code::F5),
+        "f6" => Ok(Code::F6),
+        "f7" => Ok(Code::F7),
+        "f8" => Ok(Code::F8),
+        "f9" => Ok(Code::F9),
+        "f10" => Ok(Code::F10),
+        "f11" => Ok(Code::F11),
+        "f12" => Ok(Code::F12),
         _ => Err(format!("[global-shortcut] unsupported key '{}'", s)),
     }
 }
@@ -271,10 +304,7 @@ pub fn register<R: Runtime>(app: &AppHandle<R>, accelerator: &str) -> Result<(),
 
 /// Unregister the currently-active shortcut, if any.
 pub fn unregister<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
-    let prev = CURRENT_ACCELERATOR
-        .lock()
-        .ok()
-        .and_then(|m| m.clone());
+    let prev = CURRENT_ACCELERATOR.lock().ok().and_then(|m| m.clone());
     if let Some(accel) = prev {
         if let Ok(shortcut) = parse_accelerator(&accel) {
             app.global_shortcut()

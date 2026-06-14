@@ -160,7 +160,10 @@ pub fn validate_external_read_path(absolute_path: &str) -> WfResult<PathBuf> {
 /// **Do not** use for write/create commands — `fs::canonicalize` fails on
 /// paths that don't exist, so `new_file`/`new_folder` etc. must use the
 /// lexical helper.
-pub fn resolve_existing_inside_workspace(workspace_root: &Path, relative: &str) -> WfResult<PathBuf> {
+pub fn resolve_existing_inside_workspace(
+    workspace_root: &Path,
+    relative: &str,
+) -> WfResult<PathBuf> {
     // Lexical pre-check first — same `..`/absolute/blacklist rules.
     let lexical = resolve_inside_workspace(workspace_root, relative)?;
 
@@ -172,8 +175,7 @@ pub fn resolve_existing_inside_workspace(workspace_root: &Path, relative: &str) 
     // Canonicalize the candidate. Failure means the path doesn't exist (or is
     // unreadable for permission reasons) — the caller would surface an error
     // either way, so collapse this branch into a uniform "not found".
-    let canonical = fs::canonicalize(&lexical)
-        .map_err(|_| "File not found".to_string())?;
+    let canonical = fs::canonicalize(&lexical).map_err(|_| "File not found".to_string())?;
 
     if !canonical.starts_with(&canonical_root)
         && !is_trusted_managed_target(&canonical, &trusted_managed_roots())
@@ -195,7 +197,9 @@ pub fn resolve_existing_inside_workspace(workspace_root: &Path, relative: &str) 
 /// dirs become trusted without a sidecar restart; the work is three
 /// `fs::canonicalize` calls, dwarfed by the file read that follows.
 fn trusted_managed_roots() -> Vec<PathBuf> {
-    let Some(home) = dirs::home_dir() else { return Vec::new() };
+    let Some(home) = dirs::home_dir() else {
+        return Vec::new();
+    };
     let myagents = home.join(".myagents");
     ["skills", "commands", "agents"]
         .iter()
@@ -225,7 +229,10 @@ pub fn validate_item_name(name: &str) -> WfResult<()> {
     if name.contains('/') || name.contains('\\') || name.contains("..") {
         return Err("Name cannot contain path separators or '..'".to_string());
     }
-    if name.chars().any(|c| matches!(c, '<' | '>' | ':' | '"' | '|' | '?' | '*')) {
+    if name
+        .chars()
+        .any(|c| matches!(c, '<' | '>' | ':' | '"' | '|' | '?' | '*'))
+    {
         return Err("Name contains invalid characters".to_string());
     }
     if name.chars().any(|c| (c as u32) < 0x20 || c == '\x7f') {
@@ -251,11 +258,28 @@ fn is_windows_reserved_name(name: &str) -> bool {
         .to_ascii_uppercase();
     matches!(
         stem.as_str(),
-        "CON" | "PRN" | "AUX" | "NUL"
-            | "COM1" | "COM2" | "COM3" | "COM4" | "COM5"
-            | "COM6" | "COM7" | "COM8" | "COM9"
-            | "LPT1" | "LPT2" | "LPT3" | "LPT4" | "LPT5"
-            | "LPT6" | "LPT7" | "LPT8" | "LPT9"
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
     )
 }
 
@@ -301,17 +325,12 @@ fn atomic_write_file_inner(
 
     static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let tmp_name = format!(
-        ".{}.myagents-{}-{}.tmp",
-        file_name,
-        std::process::id(),
-        n
-    );
+    let tmp_name = format!(".{}.myagents-{}-{}.tmp", file_name, std::process::id(), n);
     let tmp_path = parent.join(&tmp_name);
 
     {
-        let mut tmp_file = fs::File::create(&tmp_path)
-            .map_err(|e| format!("Failed to create tmp file: {}", e))?;
+        let mut tmp_file =
+            fs::File::create(&tmp_path).map_err(|e| format!("Failed to create tmp file: {}", e))?;
         tmp_file
             .write_all(bytes)
             .map_err(|e| format!("Failed to write tmp file: {}", e))?;
@@ -627,10 +646,7 @@ mod tests {
         use std::os::unix::fs::symlink;
         let ws = make_tmp_workspace();
         // Target outside the workspace.
-        let outside_dir = std::env::temp_dir().join(format!(
-            "ws_outside_{}",
-            std::process::id()
-        ));
+        let outside_dir = std::env::temp_dir().join(format!("ws_outside_{}", std::process::id()));
         fs::create_dir_all(&outside_dir).unwrap();
         let outside_file = outside_dir.join("secret.txt");
         fs::write(&outside_file, "secret").unwrap();
@@ -719,10 +735,7 @@ mod tests {
         use std::os::unix::fs::symlink;
         let ws = make_tmp_workspace();
         // Stand in for `~/.myagents/skills/`.
-        let managed = std::env::temp_dir().join(format!(
-            "managed_skills_{}",
-            std::process::id()
-        ));
+        let managed = std::env::temp_dir().join(format!("managed_skills_{}", std::process::id()));
         let managed_skill = managed.join("baoyu-imagine");
         fs::create_dir_all(&managed_skill).unwrap();
         let real_md = managed_skill.join("SKILL.md");
@@ -738,11 +751,8 @@ mod tests {
 
         // Direct: bypass `trusted_managed_roots()` (which reads real
         // `~/.myagents/`) and inject our tmp root via the pure helper.
-        let lexical = resolve_inside_workspace(
-            &ws,
-            ".claude/skills/baoyu-imagine/SKILL.md",
-        )
-        .unwrap();
+        let lexical =
+            resolve_inside_workspace(&ws, ".claude/skills/baoyu-imagine/SKILL.md").unwrap();
         let canonical = fs::canonicalize(&lexical).unwrap();
         assert!(
             is_trusted_managed_target(&canonical, &[canonical_managed]),

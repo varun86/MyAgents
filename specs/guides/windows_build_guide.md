@@ -46,9 +46,8 @@ myagents-releases/
 
 | 软件 | 用途 | 安装方式 |
 |------|------|---------|
-| **Rust** | 编译 Tauri 后端 | https://rustup.rs |
-| **Node.js** | 前端构建工具 | https://nodejs.org |
-| **Bun** | 包管理和服务端运行时 | https://bun.sh |
+| **Rust** | 编译 Tauri 后端 | https://rustup.rs（必须使用 rustup；仓库 `rust-toolchain.toml` 固定实际 toolchain） |
+| **Node.js / npm** | 前端构建、Node bundle 打包、依赖安装 | https://nodejs.org |
 | **Visual Studio Build Tools** | MSVC 编译器 | 见下方说明 |
 | **rclone** | 发布到 R2 (仅发布时需要) | https://rclone.org |
 
@@ -71,9 +70,10 @@ myagents-releases/
 
 此脚本会：
 1. 检查所有依赖是否已安装
-2. 下载 Bun 二进制文件到 `src-tauri/binaries/`
-3. 安装前端依赖 (`bun install`)
-4. 检查 Rust 依赖
+2. 按 `rust-toolchain.toml` 准备 Rust toolchain、`rustfmt` / `clippy`、`x86_64-pc-windows-msvc` target
+3. 下载 bundled Node.js v24 运行时、cuse、Git 安装包和 VC++ Runtime DLL
+4. 安装前端/后端依赖 (`npm install`)
+5. 下载 Rust crates（`cargo fetch`）
 
 ### Git 安装包（构建必需）
 
@@ -88,6 +88,30 @@ NSIS 安装程序会内置 Git for Windows，需要手动放置安装包：
 ---
 
 ## 构建流程
+
+### build_dev_win.ps1
+
+**用途**：快速打一个带 DevTools 的 Windows debug 构建，用于真机功能验证；默认不生成安装包。
+
+**运行方式**：
+
+```powershell
+.\build_dev_win.ps1
+```
+
+默认产物：
+
+```
+src-tauri/target/x86_64-pc-windows-msvc/debug/myagents.exe
+```
+
+如果需要验证安装器、NSIS hook、VC++ Runtime app-local 部署或安装后启动行为，再显式构建 Debug NSIS：
+
+```powershell
+.\build_dev_win.ps1 -BundleNsis
+```
+
+`build_dev_win.ps1` 会清理 `debug/resources` 缓存、启用 `VITE_DEBUG_MODE=true`、构建 web/Sidecar/Plugin Bridge/CLI 一次，并在 Tauri build 阶段禁用重复的 `beforeBuildCommand`；这条路径用于快速测试，不替代正式发布构建。
 
 ### build_windows.ps1
 
@@ -107,7 +131,7 @@ NSIS 安装程序会内置 Git for Windows，需要手动放置安装包：
 **构建流程**（7 步）：
 
 1. **加载环境配置** - 从 `.env` 读取签名密钥
-2. **检查依赖** - 验证 Rust、npm、bun 是否可用
+2. **检查依赖** - 验证 Rust/rustup、npm，并按 `rust-toolchain.toml` 补齐 Rust components 与 Windows target
 3. **配置生产 CSP** - 更新安全策略
 4. **TypeScript 类型检查** - 确保代码无类型错误
 5. **构建前端和服务端** - 打包服务端代码、复制 SDK 依赖、构建前端
@@ -182,9 +206,10 @@ src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/
 ```
 
 - [ ] 依赖检查正确识别已安装/未安装的组件
-- [ ] Bun 二进制下载成功
-- [ ] 前端依赖安装成功
-- [ ] Rust 依赖检查通过
+- [ ] Rust toolchain/components/Windows target 准备完成
+- [ ] bundled Node.js 运行时下载成功
+- [ ] 前端/后端依赖安装成功
+- [ ] Rust crates 下载完成
 
 ### 二、构建测试
 
@@ -318,15 +343,29 @@ error: linker `link.exe` not found
 
 解决：确保已安装 Visual Studio Build Tools 并选择了 C++ 工作负载。
 
-**Bun 找不到**
+**Node.js / npm 找不到**
 
 ```
-bun : 无法将"bun"项识别为 cmdlet...
+npm : 无法将"npm"项识别为 cmdlet...
 ```
 
 解决：
-1. 确认 Bun 已安装：https://bun.sh
+1. 确认 Node.js 已安装：https://nodejs.org
 2. 重新打开 PowerShell 以刷新 PATH
+
+**Rust target / component 缺失**
+
+```
+can't find crate for `core`
+target may not be installed
+component 'rustfmt' is unavailable/not installed
+```
+
+解决：
+
+```powershell
+.\scripts\ensure_rust_toolchain.ps1 -Targets x86_64-pc-windows-msvc
+```
 
 **前端构建 OOM**
 
@@ -354,15 +393,15 @@ Error: Invalid JSON
 
 可能原因：
 1. WebView2 未安装 - 安装 [WebView2 Runtime](https://developer.microsoft.com/en-us/microsoft-edge/webview2/)
-2. Bun 可执行文件缺失 - 检查安装目录是否包含 `bun-x86_64-pc-windows-msvc.exe`
+2. bundled Node.js 运行时缺失 - 检查安装目录 resources 下是否包含 `nodejs\node.exe`
 
 **Sidecar 启动失败**
 
 检查日志文件，或在 PowerShell 中查看进程：
 
 ```powershell
-# 检查是否有 bun 进程
-Get-Process | Where-Object { $_.ProcessName -like "*bun*" }
+# 检查是否有 Node sidecar 进程
+Get-Process | Where-Object { $_.ProcessName -eq "node" }
 
 # 检查端口占用
 netstat -ano | findstr "31415"

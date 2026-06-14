@@ -2,6 +2,7 @@
 import { join, basename } from '@tauri-apps/api/path';
 
 import type { Project } from '../types';
+import { isSystemPresetProject } from '../types';
 import { workspacePathsEqual } from '../../../shared/workspacePath';
 import {
     isBrowserDevMode,
@@ -157,11 +158,53 @@ export async function patchProject(projectId: string, updates: Partial<Omit<Proj
     });
 }
 
-export async function removeProject(projectId: string): Promise<void> {
+export interface RemoveOrHideProjectResult {
+    action: 'removed' | 'hidden';
+    project: Project;
+    projects: Project[];
+}
+
+export function applyProjectRemovalIntent(
+    projects: Project[],
+    projectId: string,
+    hiddenAtIso: string = new Date().toISOString(),
+): RemoveOrHideProjectResult | null {
+    const index = projects.findIndex((p) => p.id === projectId);
+    if (index < 0) return null;
+
+    const project = projects[index];
+    if (isSystemPresetProject(project)) {
+        const hiddenProject: Project = {
+            ...project,
+            hidden: true,
+            hiddenAt: hiddenAtIso,
+        };
+        const nextProjects = [...projects];
+        nextProjects[index] = hiddenProject;
+        return { action: 'hidden', project: hiddenProject, projects: nextProjects };
+    }
+
+    return {
+        action: 'removed',
+        project,
+        projects: projects.filter((p) => p.id !== projectId),
+    };
+}
+
+/**
+ * User-facing workspace removal.
+ *
+ * Ordinary workspaces are removed from projects.json. System preset workspaces
+ * are soft-deleted instead, preserving the registry row so startup self-healing
+ * can distinguish "user hid this preset" from "registration was corrupted".
+ */
+export async function removeOrHideProject(projectId: string): Promise<RemoveOrHideProjectResult | null> {
     return withProjectsLock(async () => {
         const projects = await loadProjects();
-        const filtered = projects.filter((p) => p.id !== projectId);
-        await saveProjects(filtered);
+        const result = applyProjectRemovalIntent(projects, projectId);
+        if (!result) return null;
+        await saveProjects(result.projects);
+        return result;
     });
 }
 

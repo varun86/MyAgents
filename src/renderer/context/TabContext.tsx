@@ -26,12 +26,19 @@ import type { ExitPlanModeRequest, EnterPlanModeRequest } from '../../shared/typ
 import type { TerminalReason } from '../../shared/terminalReason';
 import type { SessionMetadata } from '@/api/sessionClient';
 import type { ContextUsage } from '../../shared/types/context-usage';
+import type { SlashCommand } from '../../shared/slashCommands';
 
 // (issue #174) 'starting' = SDK subprocess launched, awaiting system_init.
 // Distinct from 'running' (= AI actively processing a turn) so the UI can
 // surface a "AI 启动中" hint instead of the generic thinking spinner during
 // the up-to-10-minute startup-timeout window.
 export type SessionState = 'idle' | 'starting' | 'running' | 'stopping' | 'error';
+
+export interface SystemNotice {
+    kind: 'compact';
+    level: 'success' | 'error';
+    message: string;
+}
 
 /**
  * Tab state - all the state that belongs to a single Tab
@@ -66,6 +73,13 @@ export interface TabState {
     unifiedLogs: LogEntry[];
     systemInitInfo: SystemInitInfo | null;
     /**
+     * Slash commands reported by the active builtin SDK subprocess. This is
+     * the dynamic companion to the Rust workspace scan used by SimpleChatInput:
+     * plugin skills/commands only exist after SDK plugin resolution, so they
+     * arrive over SSE instead of from disk.
+     */
+    sdkSlashCommands: SlashCommand[];
+    /**
      * Issue #194 — external-runtime self-report (auth / features / MCP / apps /
      * effective env). Populated when an external runtime emits the
      * `runtime_diagnostics` UnifiedEvent (Codex today; Claude Code / Gemini later).
@@ -75,6 +89,7 @@ export interface TabState {
     runtimeDiagnostics: RuntimeDiagnostics | null;
     agentError: string | null;
     systemStatus: string | null;  // SDK system status (e.g., 'compacting')
+    systemNotice: SystemNotice | null;
     /**
      * PRD 0.2.32 — 归一化的「当前 context 窗口用量」快照。Set on `chat:context-usage`
      * (builtin 每轮末 / Codex 亚轮流式)，cleared on session switch / reset. Null until
@@ -138,6 +153,8 @@ export interface TabContextValue extends TabState {
     // SDK terminal_reason banner dismissal
     setLastTerminalReason: Dispatch<SetStateAction<TerminalReason | null>>;
 
+    setSystemNotice: Dispatch<SetStateAction<SystemNotice | null>>;
+
     // v0.1.69 session snapshot — call after PATCH /sessions/:id to refresh derivation source
     setSessionMeta: Dispatch<SetStateAction<SessionMetadata | null>>;
 
@@ -149,7 +166,7 @@ export interface TabContextValue extends TabState {
     isConnected: boolean;
 
     // Chat actions
-    sendMessage: (text: string, images?: ImageAttachment[], permissionMode?: PermissionMode, model?: string, providerEnv?: { baseUrl?: string; apiKey?: string; authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key'; apiProtocol?: 'anthropic' | 'openai'; maxOutputTokens?: number; maxOutputTokensParamName?: 'max_tokens' | 'max_completion_tokens' | 'max_output_tokens'; upstreamFormat?: 'chat_completions' | 'responses' }, isCron?: boolean) => Promise<boolean>;
+    sendMessage: (text: string, images?: ImageAttachment[], permissionMode?: PermissionMode, model?: string, providerEnv?: { baseUrl?: string; apiKey?: string; authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key'; apiProtocol?: 'anthropic' | 'openai'; maxOutputTokens?: number; maxOutputTokensParamName?: 'max_tokens' | 'max_completion_tokens' | 'max_output_tokens'; upstreamFormat?: 'chat_completions' | 'responses' }, isCron?: boolean, reasoningEffort?: string) => Promise<boolean>;
     stopResponse: () => Promise<boolean>;
     loadSession: (sessionId: string, options?: { skipLoadingReset?: boolean }) => Promise<boolean>;
     /** Prepend the next page of older messages. Safe to call repeatedly — guarded internally. */
@@ -222,9 +239,11 @@ const defaultContextValue: TabContextValue = {
     logs: [],
     unifiedLogs: [],
     systemInitInfo: null,
+    sdkSlashCommands: [],
     runtimeDiagnostics: null,
     agentError: null,
     systemStatus: null,
+    systemNotice: null,
     contextUsage: null,
     lastTerminalReason: null,
     pendingPermission: null,
@@ -243,6 +262,7 @@ const defaultContextValue: TabContextValue = {
     setSystemInitInfo: () => { },
     setAgentError: () => { },
     setLastTerminalReason: () => { },
+    setSystemNotice: () => { },
     setSessionMeta: () => { },
     sendMessage: async () => false,
     stopResponse: async () => false,

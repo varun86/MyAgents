@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { decideInFlightActionOnResult } from './inflight-terminal';
+import {
+  decideInFlightActionOnResult,
+  decideInFlightCancelSettlement,
+  terminalEventMatchesInFlight,
+} from './inflight-terminal';
 
 describe('decideInFlightActionOnResult (issue #289 — force-send must surface, not drop)', () => {
   it('FORCE-send (the bug): interrupting + forced + has meta → surface (show the bubble)', () => {
@@ -12,20 +16,71 @@ describe('decideInFlightActionOnResult (issue #289 — force-send must surface, 
     expect(decideInFlightActionOnResult({ isInterrupting: true, forced: false, hasMeta: true })).toBe('drop');
   });
 
-  it('natural completion: not interrupting + has meta → surface (turn-end fallback)', () => {
-    expect(decideInFlightActionOnResult({ isInterrupting: false, forced: false, hasMeta: true })).toBe('surface');
+  it('natural completion: not interrupting + has meta → await replay (no false queue:started)', () => {
+    expect(decideInFlightActionOnResult({ isInterrupting: false, forced: false, hasMeta: true })).toBe('await-replay');
   });
 
   it('force but no meta (cannot build a bubble) → noop (defensive)', () => {
     expect(decideInFlightActionOnResult({ isInterrupting: true, forced: true, hasMeta: false })).toBe('noop');
   });
 
-  it('natural completion but no meta → noop', () => {
-    expect(decideInFlightActionOnResult({ isInterrupting: false, forced: false, hasMeta: false })).toBe('noop');
+  it('natural completion but no meta → await replay', () => {
+    expect(decideInFlightActionOnResult({ isInterrupting: false, forced: false, hasMeta: false })).toBe('await-replay');
   });
 
   it('forced wins over the stop drop even if both flags are set (force is the explicit intent)', () => {
     // forced=true must NOT be dropped by the `isInterrupting && !forced` stop rule.
     expect(decideInFlightActionOnResult({ isInterrupting: true, forced: true, hasMeta: true })).not.toBe('drop');
+  });
+});
+
+describe('decideInFlightCancelSettlement', () => {
+  it('SDK cancelled=true is the only path that clears local in-flight state and removes the queue pill', () => {
+    expect(decideInFlightCancelSettlement('cancelled')).toEqual({
+      cancelled: true,
+      removePendingRequest: true,
+      clearSlot: true,
+      broadcastCancelled: true,
+      promoteNext: true,
+    });
+  });
+
+  it.each(['not-cancelled', 'unavailable', 'error'] as const)(
+    'SDK %s keeps the in-flight item waiting for replay or assistant-start confirmation',
+    (result) => {
+      expect(decideInFlightCancelSettlement(result)).toEqual({
+        cancelled: false,
+        removePendingRequest: false,
+        clearSlot: false,
+        broadcastCancelled: false,
+        promoteNext: false,
+      });
+    },
+  );
+});
+
+describe('terminalEventMatchesInFlight', () => {
+  it('does not apply an interrupt terminal event to a newly promoted in-flight item', () => {
+    expect(terminalEventMatchesInFlight({
+      currentQueueId: 'queue-b',
+      isInterrupting: true,
+      interruptTargetQueueId: 'queue-a',
+    })).toBe(false);
+  });
+
+  it('applies an interrupt terminal event to the item that was in-flight when interrupt started', () => {
+    expect(terminalEventMatchesInFlight({
+      currentQueueId: 'queue-a',
+      isInterrupting: true,
+      interruptTargetQueueId: 'queue-a',
+    })).toBe(true);
+  });
+
+  it('applies non-interrupt terminal events to the current in-flight item', () => {
+    expect(terminalEventMatchesInFlight({
+      currentQueueId: 'queue-a',
+      isInterrupting: false,
+      interruptTargetQueueId: null,
+    })).toBe(true);
   });
 });

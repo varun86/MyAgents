@@ -11,6 +11,7 @@ import { useCloseLayer } from '@/hooks/useCloseLayer';
 import OverlayBackdrop from '@/components/OverlayBackdrop';
 import { apiFetch, apiGetJson, apiPostJson } from '@/api/apiFetch';
 import { useToast } from '@/components/Toast';
+import { CliToolsSection } from '@/components/CliToolsSection';
 import CustomSelect from '@/components/CustomSelect';
 import { UnifiedLogsPanel } from '@/components/UnifiedLogsPanel';
 import GlobalSkillsPanel from '@/components/GlobalSkillsPanel';
@@ -26,6 +27,7 @@ import {
     getEffectiveModelAliases,
     normalizeDisabledProviderIds,
     normalizeProviderOrder,
+    splitProviderModelInput,
     type AppConfig,
     type ModelAliases,
     type Provider,
@@ -34,7 +36,6 @@ import {
     type McpServerDefinition,
     type McpServerType,
     type McpEnableError,
-    MCP_DISCOVERY_LINKS,
     isVerifyExpired,
     SUBSCRIPTION_PROVIDER_ID,
     PROXY_DEFAULTS,
@@ -80,6 +81,11 @@ import { shouldDebounceAutoVerify } from '@/utils/apiKeyAutoVerify';
 import { DEFAULT_SUMMON_ACCELERATOR } from '../../shared/config-types';
 import { workspacePathsEqual } from '../../shared/workspacePath';
 import ProviderEnableOrderDialog from '@/components/ProviderEnableOrderDialog';
+import FloatingBallPetSettings from '@/components/FloatingBallPetSettings';
+import {
+    describeNativeFloatingBallError,
+    setNativeFloatingBallEnabled,
+} from '@/floating-ball/nativeFloatingBall';
 
 /** Parse a string as a positive integer, returning undefined for invalid/non-positive values */
 function parsePositiveInt(value: string): number | undefined {
@@ -88,7 +94,7 @@ function parsePositiveInt(value: string): number | undefined {
 }
 
 // Settings sub-sections
-type SettingsSection = 'general' | 'shortcuts' | 'providers' | 'mcp' | 'skills' | 'sub-agents' | 'plugins' | 'agent' | 'usage-stats' | 'about';
+type SettingsSection = 'general' | 'shortcuts' | 'providers' | 'mcp' | 'skills' | 'sub-agents' | 'plugins' | 'agent' | 'usage-stats' | 'desktop-pet' | 'about';
 
 import type { SubscriptionStatusWithVerify } from '@/types/subscription';
 
@@ -204,7 +210,7 @@ interface SettingsProps {
     onRestartAndUpdate?: () => void;
 }
 
-const VALID_SECTIONS: SettingsSection[] = ['general', 'shortcuts', 'providers', 'mcp', 'skills', 'sub-agents', 'plugins', 'agent', 'usage-stats', 'about'];
+const VALID_SECTIONS: SettingsSection[] = ['general', 'shortcuts', 'providers', 'mcp', 'skills', 'sub-agents', 'plugins', 'agent', 'usage-stats', 'desktop-pet', 'about'];
 
 // Memoized component for model tag list to avoid recreating presetModelIds on every render
 /** Default args for Playwright MCP: persistent profile mode (preserves login state, single-session) */
@@ -255,6 +261,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
     const [claudeTranscriptCleanupDaysDraft, setClaudeTranscriptCleanupDaysDraft] = useState(
         String(DEFAULT_CLAUDE_TRANSCRIPT_CLEANUP_PERIOD_DAYS),
     );
+    const [floatingBallGateBusy, setFloatingBallGateBusy] = useState(false);
     useEffect(() => {
         setClaudeTranscriptCleanupDaysDraft(String(claudeTranscriptCleanupPeriodDays));
     }, [claudeTranscriptCleanupPeriodDays]);
@@ -268,9 +275,32 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
         }
     }, [claudeTranscriptCleanupDaysDraft, claudeTranscriptCleanupPeriodDays, updateConfig]);
 
+    const toggleFloatingBallGate = useCallback(async () => {
+        if (floatingBallGateBusy) return;
+        const next = !config.floatingBallDevGate;
+        setFloatingBallGateBusy(true);
+        try {
+            await setNativeFloatingBallEnabled(next);
+            await updateConfig({
+                floatingBallDevGate: next,
+                // 总门控开 → 球默认随之启用；关 → 球一并收走
+                floatingBallEnabled: next,
+            });
+            track('floating_ball_toggle', { gate: true, enabled: next });
+            toast.success(next ? '已启用桌面宠物' : '已关闭桌面宠物');
+        } catch (err) {
+            toast.error(`${next ? '启用' : '关闭'}桌面宠物失败：${describeNativeFloatingBallError(err)}`);
+        } finally {
+            setFloatingBallGateBusy(false);
+        }
+    }, [config.floatingBallDevGate, floatingBallGateBusy, toast, updateConfig]);
+
     // Determine initial section: use initialSection if valid, otherwise default to 'providers'
     const getInitialSection = (): SettingsSection => {
         if (initialSection && VALID_SECTIONS.includes(initialSection as SettingsSection)) {
+            if (initialSection === 'desktop-pet' && !config.floatingBallDevGate) {
+                return 'about';
+            }
             return initialSection as SettingsSection;
         }
         return 'providers';
@@ -355,10 +385,21 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
     // Handle initial section from props (for deep linking)
     useEffect(() => {
         if (initialSection && VALID_SECTIONS.includes(initialSection as SettingsSection)) {
+            if (initialSection === 'desktop-pet' && !config.floatingBallDevGate) {
+                setActiveSection('about');
+                onSectionChangeRef.current?.();
+                return;
+            }
             setActiveSection(initialSection as SettingsSection);
             onSectionChangeRef.current?.();
         }
-    }, [initialSection]);
+    }, [config.floatingBallDevGate, initialSection]);
+
+    useEffect(() => {
+        if (activeSection === 'desktop-pet' && !config.floatingBallDevGate) {
+            setActiveSection('about');
+        }
+    }, [activeSection, config.floatingBallDevGate]);
 
     const navigateToProxySettings = useCallback(() => {
         setActiveSection('general');
@@ -517,11 +558,19 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
     const [disabledProviderDraft, setDisabledProviderDraft] = useState<string[]>([]);
     const customModelInputRef = useRef<HTMLInputElement>(null);
     const addCustomModelFromInput = () => {
-        const val = customModelInputRef.current?.value.trim();
-        if (val && !customForm.models.includes(val)) {
-            setCustomForm((p) => ({ ...p, models: [...p.models, val] }));
-            if (customModelInputRef.current) customModelInputRef.current.value = '';
-        }
+        const modelIds = splitProviderModelInput(customModelInputRef.current?.value ?? '');
+        if (modelIds.length === 0) return;
+        setCustomForm((p) => {
+            const existing = new Set(p.models);
+            const added = modelIds.filter(id => {
+                if (existing.has(id)) return false;
+                existing.add(id);
+                return true;
+            });
+            if (added.length === 0) return p;
+            return { ...p, models: [...p.models, ...added] };
+        });
+        if (customModelInputRef.current) customModelInputRef.current.value = '';
     };
     // Provider edit/manage panel state
     const [editingProvider, setEditingProvider] = useState<ProviderEditForm | null>(null);
@@ -2506,8 +2555,8 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                 ref={errorDetailPopoverRef}
                                 className="absolute right-0 top-6 z-50 w-80 max-w-[90vw] rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] p-3 shadow-lg"
                             >
-                                <p className="mb-1 text-[10px] font-medium uppercase tracking-wider text-[var(--ink-muted)]">错误详情</p>
-                                <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all font-mono text-[11px] text-[var(--ink-secondary)]">{errObj.detail}</pre>
+                                <p className="mb-1 text-xs font-medium uppercase tracking-wider text-[var(--ink-muted)]">错误详情</p>
+                                <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all font-mono text-xs text-[var(--ink-secondary)]">{errObj.detail}</pre>
                             </div>
                         )}
                     </div>
@@ -2517,7 +2566,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
     };
 
     return (
-        <div className="flex h-full bg-[var(--paper)]">
+        <div className="settings-root flex h-full bg-[var(--paper)]">
             {/* Logs Panel */}
             <UnifiedLogsPanel
                 sseLogs={sseLogs}
@@ -2533,7 +2582,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                     {config.showDevTools && (
                         <button
                             onClick={() => setShowLogs(true)}
-                            className="rounded-lg px-2.5 py-1.5 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+                            className="rounded-lg px-2.5 py-1.5 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
                             title="查看 Rust 日志"
                         >
                             Logs
@@ -2541,7 +2590,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                     )}
                 </div>
 
-                <nav className="space-y-1">
+                <nav className="settings-nav space-y-1">
                     <button
                         onClick={() => setActiveSection('providers')}
                         className={`w-full rounded-lg px-3 py-2.5 text-left text-base font-medium transition-colors ${activeSection === 'providers'
@@ -2576,7 +2625,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                             : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
                             }`}
                     >
-                        工具 MCP
+                        工具箱
                     </button>
                     <button
                         onClick={() => setActiveSection('agent')}
@@ -2587,6 +2636,17 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                     >
                         聊天机器人 Bot
                     </button>
+                    {config.floatingBallDevGate && (
+                        <button
+                            onClick={() => setActiveSection('desktop-pet')}
+                            className={`w-full rounded-lg px-3 py-2.5 text-left text-base font-medium transition-colors ${activeSection === 'desktop-pet'
+                                ? 'settings-nav-active bg-[var(--hover-bg)] text-[var(--ink)]'
+                                : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
+                                }`}
+                        >
+                            桌面宠物
+                        </button>
+                    )}
                     <button
                         onClick={() => setActiveSection('usage-stats')}
                         className={`w-full rounded-lg px-3 py-2.5 text-left text-base font-medium transition-colors ${activeSection === 'usage-stats'
@@ -2666,6 +2726,10 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                     </div>
                 )}
 
+                {activeSection === 'desktop-pet' && config.floatingBallDevGate && (
+                    <FloatingBallPetSettings />
+                )}
+
                 {/* Providers section uses wider layout */}
                 {activeSection === 'providers' && (
                     <div className="mx-auto max-w-4xl px-8 py-8">
@@ -2716,11 +2780,11 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                         <div className="min-w-0 flex-1">
                                             <div className="flex items-center gap-2">
                                                 <h3 className="truncate font-semibold text-[var(--ink)]">{provider.name}</h3>
-                                                <span className="shrink-0 rounded bg-[var(--paper-inset)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--ink-muted)]">
+                                                <span className="shrink-0 rounded bg-[var(--paper-inset)] px-1.5 py-0.5 text-xs font-medium text-[var(--ink-muted)]">
                                                     {provider.cloudProvider}
                                                 </span>
                                                 {provider.apiProtocol === 'openai' && (
-                                                    <span className="shrink-0 rounded bg-[var(--paper-inset)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--ink-muted)]">
+                                                    <span className="shrink-0 rounded bg-[var(--paper-inset)] px-1.5 py-0.5 text-xs font-medium text-[var(--ink-muted)]">
                                                         OpenAI 协议
                                                     </span>
                                                 )}
@@ -2783,7 +2847,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                                         {/* Email display first; Issue #203: info may be empty
                                                             when the user just did `claude auth login` without
                                                             ever opening the CLI REPL. */}
-                                                        <span className="text-[var(--ink-muted)] font-mono text-[10px]">
+                                                        <span className="text-[var(--ink-muted)] font-mono text-xs">
                                                             {subscriptionStatus.info?.email ?? '已检测到本地 OAuth 凭证'}
                                                         </span>
                                                         {/* Verification status after email */}
@@ -2830,7 +2894,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                                         )}
                                                         {/* Error message */}
                                                         {subscriptionStatus.verifyStatus === 'invalid' && subscriptionStatus.verifyError && (
-                                                            <span className="text-[var(--error)] text-[10px] w-full mt-1">
+                                                            <span className="text-[var(--error)] text-xs w-full mt-1">
                                                                 {subscriptionStatus.verifyError}
                                                             </span>
                                                         )}
@@ -2855,11 +2919,23 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                     </div>
                 )}
 
-                {/* MCP section uses wider layout */}
+                {/* 工具箱 section（原 MCP tab 原位改造，PRD 0.2.36：section id 保持 'mcp' 深链接零迁移）。
+                    纵向两分区：MCP（现状内容）+ CLI 工具（注册表）。视觉以
+                    specs/playgrounds/toolbox_settings_tab.html 定稿版为准。 */}
                 {activeSection === 'mcp' && (
                     <div className="mx-auto max-w-4xl px-8 py-8">
-                        <div className="mb-8 flex items-center justify-between">
-                            <h2 className="text-lg font-semibold text-[var(--ink)]">工具 MCP</h2>
+                        <h2 className="mb-7 text-lg font-semibold text-[var(--ink)]">工具箱</h2>
+
+                        {/* 分区 1：MCP */}
+                        <div className="flex items-center gap-2.5">
+                            <h3 className="flex items-center gap-2 text-lg font-semibold text-[var(--ink)]">
+                                <Globe className="h-4 w-4 text-[var(--ink-muted)]" />
+                                MCP
+                                <span className="rounded-full bg-[var(--paper-inset)] px-2 py-0.5 text-xs font-medium text-[var(--ink-muted)]">
+                                    {mcpServers.length}
+                                </span>
+                            </h3>
+                            <div className="flex-1" />
                             <button
                                 onClick={() => { resetMcpForm(); setShowMcpForm(true); }}
                                 className="flex items-center gap-1.5 rounded-lg bg-[var(--button-primary-bg)] px-3 py-1.5 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)]"
@@ -2869,8 +2945,8 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                             </button>
                         </div>
 
-                        <p className="mb-6 text-sm text-[var(--ink-muted)]">
-                            MCP (Model Context Protocol) 扩展能力让 Agent 可以使用更多工具
+                        <p className="mb-4 mt-1 text-xs text-[var(--ink-muted)]">
+                            MCP (Model Context Protocol) 标准协议工具，适合接入现成的第三方服务
                         </p>
 
                         {/* MCP Server list */}
@@ -2889,12 +2965,12 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                                     <Globe className="h-4 w-4 shrink-0 text-[var(--accent-warm)]/70" />
                                                     <h3 className="truncate font-semibold text-[var(--ink)]" title={server.name}>{server.name}</h3>
                                                     {server.isBuiltin && (
-                                                        <span className="shrink-0 rounded-full border border-[var(--info)]/20 bg-[var(--info-bg)] px-2 py-0.5 text-[10px] font-medium text-[var(--info)]">
+                                                        <span className="shrink-0 rounded-full border border-[var(--info)]/20 bg-[var(--info-bg)] px-2 py-0.5 text-xs font-medium text-[var(--info)]">
                                                             预设
                                                         </span>
                                                     )}
                                                     {server.isFree && (
-                                                        <span className="shrink-0 rounded-full border border-[var(--success)]/20 bg-[var(--success-bg)] px-2 py-0.5 text-[10px] font-medium text-[var(--success)]">
+                                                        <span className="shrink-0 rounded-full border border-[var(--success)]/20 bg-[var(--success-bg)] px-2 py-0.5 text-xs font-medium text-[var(--success)]">
                                                             免费
                                                         </span>
                                                     )}
@@ -2914,7 +2990,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                                     </p>
                                                 )}
                                                 {server.command !== '__builtin__' && server.command !== '__bundled_cuse__' && (
-                                                    <p className="mt-2 truncate font-mono text-[10px] text-[var(--ink-muted)]" title={`${server.command} ${server.args?.join(' ') ?? ''}`}>
+                                                    <p className="mt-2 truncate font-mono text-xs text-[var(--ink-muted)]" title={`${server.command} ${server.args?.join(' ') ?? ''}`}>
                                                         {server.command} {server.args?.join(' ')}
                                                     </p>
                                                 )}
@@ -2949,35 +3025,19 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                             })}
                         </div>
 
-                        {/* Discovery links */}
-                        <div className="mt-8 rounded-xl border border-dashed border-[var(--line)] bg-[var(--paper-elevated)] p-4">
-                            <p className="text-sm text-[var(--ink-muted)]">
-                                更多 MCP 可以在以下网站寻找：
-                            </p>
-                            <div className="mt-2 flex flex-wrap gap-3">
-                                {MCP_DISCOVERY_LINKS.map((link) => (
-                                    <ExternalLink
-                                        key={link.url}
-                                        href={link.url}
-                                        className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--paper-elevated)] px-3 py-1.5 text-sm font-medium text-[var(--ink)] shadow-sm transition-colors hover:bg-[var(--info-bg)] hover:text-[var(--info)]"
-                                    >
-                                        {link.name}
-                                        <ExternalLinkIcon className="h-3 w-3" />
-                                    </ExternalLink>
-                                ))}
-                            </div>
-                        </div>
+                        {/* 分区 2：CLI 工具注册表（实验室门控，默认关闭） */}
+                        {config.cliToolRegistryEnabled === true && <CliToolsSection />}
                     </div>
                 )}
 
                 {/* Other sections use narrower layout */}
-                <div className={`mx-auto max-w-xl px-8 py-8 ${['skills', 'agents', 'plugins', 'providers', 'mcp'].includes(activeSection) ? 'hidden' : ''}`}>
+                <div className={`mx-auto max-w-xl px-8 py-8 ${['skills', 'agents', 'plugins', 'providers', 'mcp', 'desktop-pet'].includes(activeSection) ? 'hidden' : ''}`}>
 
                     {activeSection === 'shortcuts' && (
                         <div className="space-y-6">
                             <div>
                                 <h2 className="text-lg font-semibold text-[var(--ink)]">快捷键</h2>
-                                <p className="mt-1 text-sm text-[var(--ink-muted)]">
+                                <p className="mt-1 text-xs text-[var(--ink-muted)]">
                                     管理消息发送与全局唤起快捷键
                                 </p>
                             </div>
@@ -3108,7 +3168,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                         <div className="space-y-6">
                             <div>
                                 <h2 className="text-lg font-semibold text-[var(--ink)]">通用设置</h2>
-                                <p className="mt-1 text-sm text-[var(--ink-muted)]">
+                                <p className="mt-1 text-xs text-[var(--ink-muted)]">
                                     配置应用程序的通用行为
                                 </p>
                             </div>
@@ -3173,6 +3233,39 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                         <span
                                             className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-[var(--toggle-thumb)] shadow transition-transform ${
                                                 config.minimizeToTray ? 'translate-x-5' : 'translate-x-0'
+                                            }`}
+                                        />
+                                    </button>
+                                </div>
+
+                                {/* 始终阻止电脑睡眠 (PRD 0.2.35).
+                                    副标题文案锁定 (D5):必须诚实告诉用户合盖照睡 + 更耗电,
+                                    用户原话「在外面 AI 始终响应」直觉对应"合盖塞包"但 mac
+                                    合盖即睡是固件强制,不说=误导。
+                                    ConfigProvider.updateConfig 特化分支会路由到
+                                    cmd_set_force_wake_lock,本组件保持和 minimizeToTray 同构。 */}
+                                <div className="mt-4 flex items-center justify-between">
+                                    <div className="flex-1 pr-4">
+                                        <p className="text-sm font-medium text-[var(--ink)]">始终阻止电脑睡眠</p>
+                                        <p className="text-xs text-[var(--ink-muted)]">
+                                            开启后即使 AI 没有在运行,电脑也不会自动睡眠。注意:合上盖子仍会睡眠,且会更快消耗电池。
+                                        </p>
+                                    </div>
+                                    <button
+                                        onClick={() => {
+                                            const next = !config.forceWakeLock;
+                                            updateConfig({ forceWakeLock: next });
+                                            toast.success(next ? '已开启常开阻睡' : '已关闭常开阻睡');
+                                        }}
+                                        className={`relative h-6 w-11 shrink-0 cursor-pointer rounded-full transition-colors ${
+                                            config.forceWakeLock
+                                                ? 'bg-[var(--accent)]'
+                                                : 'bg-[var(--line-strong)]'
+                                        }`}
+                                    >
+                                        <span
+                                            className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-[var(--toggle-thumb)] shadow transition-transform ${
+                                                config.forceWakeLock ? 'translate-x-5' : 'translate-x-0'
                                             }`}
                                         />
                                     </button>
@@ -3446,7 +3539,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                             </div>
                                         )}
 
-                                        <p className="text-[10px] text-[var(--ink-faint)]">
+                                        <p className="text-xs text-[var(--ink-faint)]">
                                             修改后会自动应用到运行中的会话
                                         </p>
                                     </div>
@@ -3594,7 +3687,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                             {/* Product Description — Developer Letter */}
                             <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] px-7 py-6">
                                 <p className="text-xs font-medium uppercase tracking-widest text-[var(--ink-muted)]/50">From the Developer</p>
-                                <div className="mt-4 space-y-5 text-[13px] leading-[1.9] text-[var(--ink-secondary)]">
+                                <div className="mt-4 space-y-5 text-sm leading-[1.9] text-[var(--ink-secondary)]">
                                     <p>
                                         <span className="font-semibold text-[var(--ink)]">MyAgents</span> 是一款住在你电脑里的 AI Agent 桌面客户端，你的个人 AI 中心。基于 Claude Agent SDK 运行，同时支持接入各家大模型与快速切换。所有操作都在本地完成，数据始终留在你的电脑里。
                                     </p>
@@ -3604,7 +3697,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                     <p>
                                         不同于每次对话都要重新自我介绍的 AI 工具，MyAgents 里的 Agent 与你的生活、工作深度同步，是一个越来越懂你的搭档。我们希望它成为每个人意图的超级放大器——
                                     </p>
-                                    <p className="text-center text-[14px] font-medium italic tracking-wide text-[var(--ink)]">
+                                    <p className="text-center text-base font-medium italic tracking-wide text-[var(--ink)]">
                                         你有一个想法，And it&apos;s done.
                                     </p>
                                 </div>
@@ -3633,25 +3726,45 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                     </button>
                                 </div>
 
-                                {/* #264 — Background-agent permission policy */}
                                 <div className="mt-4 flex items-center justify-between border-t border-[var(--line)] pt-4">
                                     <div className="flex-1 pr-4">
-                                        <p className="text-sm font-medium text-[var(--ink)]">后台 Agent 权限</p>
+                                        <p className="text-sm font-medium text-[var(--ink)]">CLI 工具注册表</p>
                                         <p className="text-xs text-[var(--ink-muted)]">
-                                            通过 <span className="font-mono">run_in_background</span> 启动的后台 Agent 没有权限弹窗。「继承已授权」只放行你已点过「始终允许」的工具，其余拒绝并提示；「全自动」允许后台 Agent 使用所有非交互工具（权限更宽，请谨慎）。
+                                            允许 AI 创建并注册命令行小工具，并在工具箱中管理；开启后新会话可自动发现已启用工具。MCP 与 myagents 内置 CLI 能力不受影响。
                                         </p>
                                     </div>
-                                    <CustomSelect
-                                        value={config.backgroundAgentPermissionMode ?? 'inherit'}
-                                        options={[
-                                            { value: 'inherit', label: '继承已授权' },
-                                            { value: 'fullAgency', label: '全自动' },
-                                        ]}
-                                        onChange={(val) => {
-                                            updateConfig({ backgroundAgentPermissionMode: val as 'inherit' | 'fullAgency' });
-                                        }}
-                                        className="w-32 shrink-0"
-                                    />
+                                    <button
+                                        onClick={() => updateConfig({ cliToolRegistryEnabled: config.cliToolRegistryEnabled !== true })}
+                                        className={`relative h-6 w-11 shrink-0 cursor-pointer rounded-full transition-colors ${config.cliToolRegistryEnabled === true ? 'bg-[var(--accent)]' : 'bg-[var(--line-strong)]'
+                                            }`}
+                                    >
+                                        <span
+                                            className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-[var(--toggle-thumb)] shadow transition-transform ${config.cliToolRegistryEnabled === true ? 'translate-x-5' : 'translate-x-0'
+                                                }`}
+                                        />
+                                    </button>
+                                </div>
+
+                                {/* Floating Ball Dev Gate (PRD 0.2.35 — 先开发不发布，D10) */}
+                                <div className="mt-4 flex items-center justify-between border-t border-[var(--line)] pt-4">
+                                    <div className="flex-1 pr-4">
+                                        <p className="text-sm font-medium text-[var(--ink)]">桌面宠物</p>
+                                        <p className="text-xs text-[var(--ink-muted)]">
+                                            Mino 的桌面宠物：屏幕边缘常驻悬浮球，hover 瞥一眼、点击即问，发完就走由球替你跑。开启后可在设置页管理桌面宠物。
+                                        </p>
+                                    </div>
+                                    <button
+                                        onClick={() => void toggleFloatingBallGate()}
+                                        disabled={floatingBallGateBusy}
+                                        aria-pressed={!!config.floatingBallDevGate}
+                                        className={`relative h-6 w-11 shrink-0 cursor-pointer rounded-full transition-colors disabled:cursor-wait disabled:opacity-70 ${config.floatingBallDevGate ? 'bg-[var(--accent)]' : 'bg-[var(--line-strong)]'
+                                            }`}
+                                    >
+                                        <span
+                                            className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-[var(--toggle-thumb)] shadow transition-transform ${config.floatingBallDevGate ? 'translate-x-5' : 'translate-x-0'
+                                                }`}
+                                        />
+                                    </button>
                                 </div>
                             </div>
 
@@ -3782,6 +3895,29 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                                             }`}
                                                     />
                                                 </button>
+                                            </div>
+                                        </div>
+
+                                        {/* #264 — Background-agent permission policy */}
+                                        <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
+                                            <div className="flex items-center justify-between">
+                                                <div className="flex-1 pr-4">
+                                                    <h3 className="text-sm font-medium text-[var(--ink)]">后台 Agent 权限</h3>
+                                                    <p className="mt-1 text-xs text-[var(--ink-muted)]">
+                                                        通过 <span className="font-mono">run_in_background</span> 启动的后台 Agent 没有权限弹窗。「继承已授权」只放行你已点过「始终允许」的工具，其余拒绝并提示；「全自动」允许后台 Agent 使用所有非交互工具（权限更宽，请谨慎）。
+                                                    </p>
+                                                </div>
+                                                <CustomSelect
+                                                    value={config.backgroundAgentPermissionMode ?? 'inherit'}
+                                                    options={[
+                                                        { value: 'inherit', label: '继承已授权' },
+                                                        { value: 'fullAgency', label: '全自动' },
+                                                    ]}
+                                                    onChange={(val) => {
+                                                        updateConfig({ backgroundAgentPermissionMode: val as 'inherit' | 'fullAgency' });
+                                                    }}
+                                                    className="w-32 shrink-0"
+                                                />
                                             </div>
                                         </div>
 
@@ -4025,7 +4161,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                 <div className="space-y-2">
                                     {Object.entries(builtinMcpSettings.env).map(([key, value]) => (
                                         <div key={key} className="flex items-center gap-2">
-                                            <span className="shrink-0 rounded bg-[var(--paper-inset)] px-2 py-1 font-mono text-[10px] text-[var(--ink)]">
+                                            <span className="shrink-0 rounded bg-[var(--paper-inset)] px-2 py-1 font-mono text-xs text-[var(--ink)]">
                                                 {key}
                                             </span>
                                             <input
@@ -4186,7 +4322,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                             }`}
                                         >
                                             <div className="font-medium">{m.label}</div>
-                                            <div className="text-[10px] opacity-70">{m.desc}</div>
+                                            <div className="text-xs opacity-70">{m.desc}</div>
                                         </button>
                                     ))}
                                 </div>
@@ -4433,7 +4569,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                         <div className={`text-xs font-medium ${playwrightSettings.mode === 'persistent' ? 'text-[var(--accent)]' : 'text-[var(--ink)]'}`}>
                                             持久化模式
                                         </div>
-                                        <div className="text-[10px] text-[var(--ink-muted)] mt-0.5 leading-tight">
+                                        <div className="text-xs text-[var(--ink-muted)] mt-0.5 leading-tight">
                                             登录态完整保留，同一时间仅一个对话可使用
                                         </div>
                                     </button>
@@ -4448,7 +4584,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                         <div className={`text-xs font-medium ${playwrightSettings.mode === 'isolated' ? 'text-[var(--accent)]' : 'text-[var(--ink)]'}`}>
                                             独立模式
                                         </div>
-                                        <div className="text-[10px] text-[var(--ink-muted)] mt-0.5 leading-tight">
+                                        <div className="text-xs text-[var(--ink-muted)] mt-0.5 leading-tight">
                                             多对话可同时使用，登录态通过快照共享
                                         </div>
                                     </button>
@@ -4499,9 +4635,9 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                                     <div className="min-w-0 flex-1">
                                                         <div className="flex items-center gap-1.5">
                                                             <span className="text-xs font-medium text-[var(--ink)] truncate">{cookie.name}</span>
-                                                            <span className="text-[10px] text-[var(--ink-muted)]">{cookie.domain}</span>
+                                                            <span className="text-xs text-[var(--ink-muted)]">{cookie.domain}</span>
                                                         </div>
-                                                        <div className="text-[10px] text-[var(--ink-muted)] truncate mt-0.5 font-mono max-w-[280px]">{cookie.value}</div>
+                                                        <div className="text-xs text-[var(--ink-muted)] truncate mt-0.5 font-mono max-w-[280px]">{cookie.value}</div>
                                                     </div>
                                                     <div className="flex items-center gap-1 shrink-0 ml-2">
                                                         <button
@@ -4531,7 +4667,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                             <div className="text-xs text-[var(--ink-muted)]">
                                                 暂无已保存的 Cookie
                                             </div>
-                                            <div className="text-[10px] text-[var(--ink-muted)] mt-0.5">
+                                            <div className="text-xs text-[var(--ink-muted)] mt-0.5">
                                                 AI 使用浏览器登录后会自动保存，也可手动添加
                                             </div>
                                         </div>
@@ -4545,7 +4681,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                             </div>
                                             <div className="grid grid-cols-2 gap-2">
                                                 <div>
-                                                    <label className="block text-[10px] text-[var(--ink-muted)] mb-0.5">域名 *</label>
+                                                    <label className="block text-xs text-[var(--ink-muted)] mb-0.5">域名 *</label>
                                                     <input
                                                         type="text"
                                                         value={cookieForm.domain}
@@ -4555,7 +4691,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                                     />
                                                 </div>
                                                 <div>
-                                                    <label className="block text-[10px] text-[var(--ink-muted)] mb-0.5">路径</label>
+                                                    <label className="block text-xs text-[var(--ink-muted)] mb-0.5">路径</label>
                                                     <input
                                                         type="text"
                                                         value={cookieForm.path}
@@ -4566,7 +4702,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                                 </div>
                                             </div>
                                             <div>
-                                                <label className="block text-[10px] text-[var(--ink-muted)] mb-0.5">名称 *</label>
+                                                <label className="block text-xs text-[var(--ink-muted)] mb-0.5">名称 *</label>
                                                 <input
                                                     type="text"
                                                     value={cookieForm.name}
@@ -4576,7 +4712,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                                 />
                                             </div>
                                             <div>
-                                                <label className="block text-[10px] text-[var(--ink-muted)] mb-0.5">值 *</label>
+                                                <label className="block text-xs text-[var(--ink-muted)] mb-0.5">值 *</label>
                                                 <input
                                                     type="text"
                                                     value={cookieForm.value}
@@ -4786,7 +4922,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                         {edgeTtsSettings.defaultRate !== 0 && (
                                             <button
                                                 onClick={() => setEdgeTtsSettings(prev => prev ? { ...prev, defaultRate: 0 } : null)}
-                                                className="text-[10px] text-[var(--ink-muted)] hover:text-[var(--accent)]"
+                                                className="text-xs text-[var(--ink-muted)] hover:text-[var(--accent)]"
                                             >
                                                 重置
                                             </button>
@@ -4802,7 +4938,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                     onChange={e => setEdgeTtsSettings(prev => prev ? { ...prev, defaultRate: parseInt(e.target.value, 10) } : null)}
                                     className={ttsSliderClass}
                                 />
-                                <div className="flex justify-between text-[10px] text-[var(--ink-muted)] opacity-50">
+                                <div className="flex justify-between text-xs text-[var(--ink-muted)] opacity-50">
                                     <span>-100%</span>
                                     <span>+200%</span>
                                 </div>
@@ -4817,7 +4953,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                         {edgeTtsSettings.defaultVolume !== 0 && (
                                             <button
                                                 onClick={() => setEdgeTtsSettings(prev => prev ? { ...prev, defaultVolume: 0 } : null)}
-                                                className="text-[10px] text-[var(--ink-muted)] hover:text-[var(--accent)]"
+                                                className="text-xs text-[var(--ink-muted)] hover:text-[var(--accent)]"
                                             >
                                                 重置
                                             </button>
@@ -4833,7 +4969,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                     onChange={e => setEdgeTtsSettings(prev => prev ? { ...prev, defaultVolume: parseInt(e.target.value, 10) } : null)}
                                     className={ttsSliderClass}
                                 />
-                                <div className="flex justify-between text-[10px] text-[var(--ink-muted)] opacity-50">
+                                <div className="flex justify-between text-xs text-[var(--ink-muted)] opacity-50">
                                     <span>-100%</span>
                                     <span>+100%</span>
                                 </div>
@@ -4848,7 +4984,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                         {edgeTtsSettings.defaultPitch !== 0 && (
                                             <button
                                                 onClick={() => setEdgeTtsSettings(prev => prev ? { ...prev, defaultPitch: 0 } : null)}
-                                                className="text-[10px] text-[var(--ink-muted)] hover:text-[var(--accent)]"
+                                                className="text-xs text-[var(--ink-muted)] hover:text-[var(--accent)]"
                                             >
                                                 重置
                                             </button>
@@ -4864,7 +5000,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                     onChange={e => setEdgeTtsSettings(prev => prev ? { ...prev, defaultPitch: parseInt(e.target.value, 10) } : null)}
                                     className={ttsSliderClass}
                                 />
-                                <div className="flex justify-between text-[10px] text-[var(--ink-muted)] opacity-50">
+                                <div className="flex justify-between text-xs text-[var(--ink-muted)] opacity-50">
                                     <span>-100Hz</span>
                                     <span>+100Hz</span>
                                 </div>
@@ -6017,7 +6153,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                     <button
                                         type="button"
                                         onClick={() => setManagingProviderId(editingProvider.provider.id)}
-                                        className="flex items-center gap-1 rounded-lg px-2 py-1 text-[13px] font-medium text-[var(--accent)] transition-colors hover:bg-[var(--accent-warm-subtle)]"
+                                        className="flex items-center gap-1 rounded-lg px-2 py-1 text-sm font-medium text-[var(--accent)] transition-colors hover:bg-[var(--accent-warm-subtle)]"
                                     >
                                         <Settings2 className="h-3.5 w-3.5" />
                                         管理可用模型

@@ -11,14 +11,12 @@ export interface QueuedMessageInfo {
   images?: QueuedImageInfo[];  // Lightweight image info for display and restore
   timestamp: number;
   /**
-   * (v0.2.12) True when this queue item has already been yielded to the
-   * SDK CLI subprocess and is waiting to be drained into AI's context.
-   * Once true, the message has crossed the process boundary into CLI's
-   * commandQueue and there is no SDK API to retract it — the X (cancel)
-   * button must not be rendered for it. The play (▷ force-execute)
-   * button stays visible: clicking it interrupts the current turn so AI
-   * processes the queued message right away instead of after the next
-   * tool break.
+   * True when this queue item has already been yielded to the SDK CLI
+   * subprocess and is waiting to be drained into AI's context. It is still
+   * conditionally cancellable: cancel uses SDK cancel_async_message and
+   * succeeds only before the SDK dequeues it. The play (▷ force-execute)
+   * button interrupts the current turn so AI processes the queued message
+   * right away instead of after the next tool break.
    */
   isInFlight?: boolean;
 }

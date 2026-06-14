@@ -76,7 +76,7 @@ MyAgents 是一款开源桌面端 AI Agent，同时具备「Claude Code」的强
 
 - macOS 13.0+ / Windows 10+ / Linux（Ubuntu 20.04+ AppImage/deb）
 - [Node.js](https://nodejs.org) (v20+) - 开发时需要；生产构建内置 Node.js v24，最终用户无需安装
-- [Rust](https://rustup.rs)
+- [Rust](https://rustup.rs)（必须通过 rustup 安装；仓库根目录 `rust-toolchain.toml` 固定实际 toolchain）
 
 ### 快速开始（开发者）
 
@@ -210,7 +210,7 @@ As of early 2026, AI capability is advancing rapidly — software developers wer
 
 - macOS 13.0+ / Windows 10+ / Linux (Ubuntu 20.04+ AppImage/deb)
 - [Node.js](https://nodejs.org) (v20+) — required at build time; Node.js v24 is bundled into production builds so end users install nothing
-- [Rust](https://rustup.rs)
+- [Rust](https://rustup.rs) (install via rustup; the repository pins the actual toolchain in `rust-toolchain.toml`)
 
 ### Quick Start (Developers)
 

@@ -185,7 +185,9 @@ impl ThoughtStore {
                 continue;
             }
             // month subdir like `2026-04`
-            let Ok(month_entries) = fs::read_dir(&path) else { continue };
+            let Ok(month_entries) = fs::read_dir(&path) else {
+                continue;
+            };
             for mentry in month_entries.flatten() {
                 let fpath = mentry.path();
                 if !fpath.is_file() {
@@ -217,11 +219,13 @@ impl ThoughtStore {
 
     fn month_dir_for(&self, ts_ms: i64) -> PathBuf {
         let dt = DateTime::<Utc>::from_timestamp_millis(ts_ms).unwrap_or_else(Utc::now);
-        self.root.join(format!("{:04}-{:02}", dt.year(), dt.month()))
+        self.root
+            .join(format!("{:04}-{:02}", dt.year(), dt.month()))
     }
 
     fn file_path_for(&self, t: &Thought) -> PathBuf {
-        self.month_dir_for(t.created_at).join(format!("{}.md", t.id))
+        self.month_dir_for(t.created_at)
+            .join(format!("{}.md", t.id))
     }
 
     fn write_atomic(&self, path: &PathBuf, content: &str) -> Result<(), String> {
@@ -469,11 +473,9 @@ impl ThoughtStore {
             .collect::<Vec<_>>()
             .join(separator);
         let merged_tags = dedup_preserving_order(snapshots.iter().flat_map(|t| t.tags.clone()));
-        let merged_images =
-            dedup_preserving_order(snapshots.iter().flat_map(|t| t.images.clone()));
-        let merged_converted = dedup_preserving_order(
-            snapshots.iter().flat_map(|t| t.converted_task_ids.clone()),
-        );
+        let merged_images = dedup_preserving_order(snapshots.iter().flat_map(|t| t.images.clone()));
+        let merged_converted =
+            dedup_preserving_order(snapshots.iter().flat_map(|t| t.converted_task_ids.clone()));
 
         // Build directly so we can override `tags` — `Thought::new` would
         // re-parse `merged_content` for `#xxx` tags, but we want the union
@@ -499,7 +501,10 @@ impl ThoughtStore {
         self.write_atomic(&new_path, &serialized)?;
         {
             let mut inner = self.inner.write().await;
-            inner.insert(new_thought.id.clone(), (new_thought.clone(), new_path.clone()));
+            inner.insert(
+                new_thought.id.clone(),
+                (new_thought.clone(), new_path.clone()),
+            );
         }
 
         // ── 4. Best-effort source delete ─────────────────────────────────
@@ -510,7 +515,9 @@ impl ThoughtStore {
             if let Err(e) = self.delete(id).await {
                 ulog_warn!(
                     "[thought] merge: source {} delete failed (merged={} kept): {}",
-                    id, new_thought.id, e
+                    id,
+                    new_thought.id,
+                    e
                 );
                 failed_source_deletes.push(MergeSourceDeleteFailure {
                     id: id.clone(),
@@ -522,7 +529,8 @@ impl ThoughtStore {
         if failed_source_deletes.is_empty() {
             ulog_info!(
                 "[thought] merged sources={:?} into new={}",
-                source_ids, new_thought.id
+                source_ids,
+                new_thought.id
             );
         } else {
             ulog_warn!(
@@ -690,8 +698,7 @@ fn encode_string_list(items: &[String]) -> String {
 
 fn parse_thought_file(raw: &str) -> Result<Thought, String> {
     // Split frontmatter
-    let (fm, body) = extract_frontmatter(raw)
-        .ok_or_else(|| "missing frontmatter".to_string())?;
+    let (fm, body) = extract_frontmatter(raw).ok_or_else(|| "missing frontmatter".to_string())?;
 
     let mut id: Option<String> = None;
     let mut created_at: Option<i64> = None;
@@ -706,7 +713,9 @@ fn parse_thought_file(raw: &str) -> Result<Thought, String> {
         if line.is_empty() {
             continue;
         }
-        let Some((k, v)) = line.split_once(':') else { continue };
+        let Some((k, v)) = line.split_once(':') else {
+            continue;
+        };
         let key = k.trim();
         let value = v.trim();
         match key {
@@ -730,10 +739,7 @@ fn parse_thought_file(raw: &str) -> Result<Thought, String> {
     // Body starts with the blank line that conventionally separates frontmatter
     // from content. Strip leading newlines (not arbitrary whitespace — indentation
     // may be semantic in Markdown).
-    let content = body
-        .trim_start_matches(['\n', '\r'])
-        .trim_end()
-        .to_string();
+    let content = body.trim_start_matches(['\n', '\r']).trim_end().to_string();
 
     Ok(Thought {
         id,
@@ -748,7 +754,9 @@ fn parse_thought_file(raw: &str) -> Result<Thought, String> {
 }
 
 fn extract_frontmatter(raw: &str) -> Option<(&str, &str)> {
-    let rest = raw.strip_prefix("---\n").or_else(|| raw.strip_prefix("---\r\n"))?;
+    let rest = raw
+        .strip_prefix("---\n")
+        .or_else(|| raw.strip_prefix("---\r\n"))?;
     // Find closing "---" on its own line.
     for end_marker in ["\n---\n", "\n---\r\n"] {
         if let Some(pos) = rest.find(end_marker) {
@@ -967,27 +975,35 @@ mod tests {
         let dir = tempdir().unwrap();
         let store = ThoughtStore::new(dir.path().to_path_buf());
 
-        let created = store.create(ThoughtCreateInput {
-            content: "note with #tag1 and #tag2".to_string(),
-            images: vec![],
-        }).await.unwrap();
+        let created = store
+            .create(ThoughtCreateInput {
+                content: "note with #tag1 and #tag2".to_string(),
+                images: vec![],
+            })
+            .await
+            .unwrap();
         assert_eq!(created.tags, vec!["tag1".to_string(), "tag2".to_string()]);
 
         let listed = store.list(ThoughtListFilter::default()).await;
         assert_eq!(listed.len(), 1);
 
-        let updated = store.update(ThoughtUpdateInput {
-            id: created.id.clone(),
-            content: Some("now has #tag3".to_string()),
-            images: None,
-            converted_task_ids: None,
-        }).await.unwrap();
+        let updated = store
+            .update(ThoughtUpdateInput {
+                id: created.id.clone(),
+                content: Some("now has #tag3".to_string()),
+                images: None,
+                converted_task_ids: None,
+            })
+            .await
+            .unwrap();
         assert_eq!(updated.tags, vec!["tag3".to_string()]);
 
-        let filtered = store.list(ThoughtListFilter {
-            tag: Some("tag3".to_string()),
-            ..Default::default()
-        }).await;
+        let filtered = store
+            .list(ThoughtListFilter {
+                tag: Some("tag3".to_string()),
+                ..Default::default()
+            })
+            .await;
         assert_eq!(filtered.len(), 1);
 
         store.link_task(&created.id, "task-1").await.unwrap();
@@ -1012,10 +1028,13 @@ mod tests {
         let store = ThoughtStore::new(dir.path().to_path_buf());
 
         for i in 0..5 {
-            store.create(ThoughtCreateInput {
-                content: format!("note {}", i),
-                images: vec![],
-            }).await.unwrap();
+            store
+                .create(ThoughtCreateInput {
+                    content: format!("note {}", i),
+                    images: vec![],
+                })
+                .await
+                .unwrap();
             // Ensure updated_at differs
             tokio::time::sleep(tokio::time::Duration::from_millis(2)).await;
         }
@@ -1025,10 +1044,12 @@ mod tests {
         // Descending by updated_at → last created first
         assert!(all[0].updated_at >= all[4].updated_at);
 
-        let limited = store.list(ThoughtListFilter {
-            limit: Some(2),
-            ..Default::default()
-        }).await;
+        let limited = store
+            .list(ThoughtListFilter {
+                limit: Some(2),
+                ..Default::default()
+            })
+            .await;
         assert_eq!(limited.len(), 2);
     }
 
@@ -1037,10 +1058,13 @@ mod tests {
         let dir = tempdir().unwrap();
         {
             let store = ThoughtStore::new(dir.path().to_path_buf());
-            store.create(ThoughtCreateInput {
-                content: "persistent #save".to_string(),
-                images: vec![],
-            }).await.unwrap();
+            store
+                .create(ThoughtCreateInput {
+                    content: "persistent #save".to_string(),
+                    images: vec![],
+                })
+                .await
+                .unwrap();
         }
         // New store reads from disk
         let store2 = ThoughtStore::new(dir.path().to_path_buf());
@@ -1055,21 +1079,30 @@ mod tests {
         let dir = tempdir().unwrap();
         let store = ThoughtStore::new(dir.path().to_path_buf());
 
-        let a = store.create(ThoughtCreateInput {
-            content: "first body #alpha".to_string(),
-            images: vec!["a.png".to_string()],
-        }).await.unwrap();
+        let a = store
+            .create(ThoughtCreateInput {
+                content: "first body #alpha".to_string(),
+                images: vec!["a.png".to_string()],
+            })
+            .await
+            .unwrap();
         // Tiny sleep so updated_at differs deterministically
         tokio::time::sleep(tokio::time::Duration::from_millis(2)).await;
-        let b = store.create(ThoughtCreateInput {
-            content: "second body #beta".to_string(),
-            images: vec!["b.png".to_string(), "a.png".to_string()],
-        }).await.unwrap();
+        let b = store
+            .create(ThoughtCreateInput {
+                content: "second body #beta".to_string(),
+                images: vec!["b.png".to_string(), "a.png".to_string()],
+            })
+            .await
+            .unwrap();
         tokio::time::sleep(tokio::time::Duration::from_millis(2)).await;
-        let c = store.create(ThoughtCreateInput {
-            content: "third body #alpha #gamma".to_string(),
-            images: vec![],
-        }).await.unwrap();
+        let c = store
+            .create(ThoughtCreateInput {
+                content: "third body #alpha #gamma".to_string(),
+                images: vec![],
+            })
+            .await
+            .unwrap();
         store.link_task(&a.id, "task-1").await.unwrap();
         store.link_task(&b.id, "task-2").await.unwrap();
         store.link_task(&c.id, "task-1").await.unwrap();
@@ -1106,10 +1139,13 @@ mod tests {
     async fn merge_rejects_lt_two_sources() {
         let dir = tempdir().unwrap();
         let store = ThoughtStore::new(dir.path().to_path_buf());
-        let a = store.create(ThoughtCreateInput {
-            content: "alone".to_string(),
-            images: vec![],
-        }).await.unwrap();
+        let a = store
+            .create(ThoughtCreateInput {
+                content: "alone".to_string(),
+                images: vec![],
+            })
+            .await
+            .unwrap();
         let err = store.merge(vec![a.id.clone()]).await.unwrap_err();
         assert!(err.contains("at least 2"));
         // Source untouched.
@@ -1216,9 +1252,15 @@ mod tests {
             archived: false,
         };
         let s = serialize_thought(&t);
-        assert!(!s.contains("archived"), "should omit archived when false: {s}");
+        assert!(
+            !s.contains("archived"),
+            "should omit archived when false: {s}"
+        );
 
-        let t2 = Thought { archived: true, ..t };
+        let t2 = Thought {
+            archived: true,
+            ..t
+        };
         let s2 = serialize_thought(&t2);
         assert!(s2.contains("archived: true"));
     }
@@ -1240,21 +1282,30 @@ mod tests {
         // and the surviving source is untouched.
         let dir = tempdir().unwrap();
         let store = ThoughtStore::new(dir.path().to_path_buf());
-        let a = store.create(ThoughtCreateInput {
-            content: "alpha".to_string(),
-            images: vec![],
-        }).await.unwrap();
-        let b = store.create(ThoughtCreateInput {
-            content: "beta".to_string(),
-            images: vec![],
-        }).await.unwrap();
+        let a = store
+            .create(ThoughtCreateInput {
+                content: "alpha".to_string(),
+                images: vec![],
+            })
+            .await
+            .unwrap();
+        let b = store
+            .create(ThoughtCreateInput {
+                content: "beta".to_string(),
+                images: vec![],
+            })
+            .await
+            .unwrap();
 
         // Simulate disk vanish for `a` — physically remove the file but
         // leave the in-memory index entry pointing at the now-gone path.
         let a_path = store.file_path_for(&a);
         std::fs::remove_file(&a_path).unwrap();
 
-        let err = store.merge(vec![a.id.clone(), b.id.clone()]).await.unwrap_err();
+        let err = store
+            .merge(vec![a.id.clone(), b.id.clone()])
+            .await
+            .unwrap_err();
         assert!(err.contains("unreachable on disk"));
         // No merged thought should have been created on disk.
         let listed = store.list(ThoughtListFilter::default()).await;

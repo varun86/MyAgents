@@ -17,7 +17,7 @@ use tokio::sync::{mpsc, Mutex};
 
 use crate::im::adapter::{AdapterResult, ImAdapter, ImStreamAdapter};
 use crate::im::types::ImMessage;
-use crate::{ulog_info, ulog_warn, ulog_error, ulog_debug};
+use crate::{ulog_debug, ulog_error, ulog_info, ulog_warn};
 // Note: ulog_* macros write to BOTH system log AND unified log (~/.myagents/logs/unified-*.log)
 // This is critical for bridge stdout/stderr — using log::info! only writes to system log.
 
@@ -68,10 +68,13 @@ fn get_registry() -> &'static Mutex<HashMap<String, BridgeSenderEntry>> {
 }
 
 pub async fn register_bridge_sender(bot_id: &str, plugin_id: &str, tx: mpsc::Sender<ImMessage>) {
-    get_registry().lock().await.insert(bot_id.to_string(), BridgeSenderEntry {
-        tx,
-        plugin_id: plugin_id.to_string(),
-    });
+    get_registry().lock().await.insert(
+        bot_id.to_string(),
+        BridgeSenderEntry {
+            tx,
+            plugin_id: plugin_id.to_string(),
+        },
+    );
 }
 
 pub async fn unregister_bridge_sender(bot_id: &str) {
@@ -79,12 +82,20 @@ pub async fn unregister_bridge_sender(bot_id: &str) {
 }
 
 pub async fn get_bridge_sender(bot_id: &str) -> Option<mpsc::Sender<ImMessage>> {
-    get_registry().lock().await.get(bot_id).map(|e| e.tx.clone())
+    get_registry()
+        .lock()
+        .await
+        .get(bot_id)
+        .map(|e| e.tx.clone())
 }
 
 /// Check if any running bot uses the given plugin_id.
 pub async fn is_plugin_in_use(plugin_id: &str) -> bool {
-    get_registry().lock().await.values().any(|e| e.plugin_id == plugin_id)
+    get_registry()
+        .lock()
+        .await
+        .values()
+        .any(|e| e.plugin_id == plugin_id)
 }
 
 /// Return all bot_ids currently using the given plugin_id.
@@ -163,7 +174,8 @@ impl BridgeAdapter {
                     }
                     // Plugin commands
                     if let Some(cmds) = caps["commands"].as_array() {
-                        self.commands = cmds.iter()
+                        self.commands = cmds
+                            .iter()
                             .filter_map(|c| {
                                 let name = c["name"].as_str()?.to_string();
                                 let desc = c["description"].as_str().unwrap_or("").to_string();
@@ -171,12 +183,20 @@ impl BridgeAdapter {
                             })
                             .collect();
                         if !self.commands.is_empty() {
-                            ulog_info!("[bridge:{}] commands: {:?}", self.plugin_id, self.commands.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>());
+                            ulog_info!(
+                                "[bridge:{}] commands: {:?}",
+                                self.plugin_id,
+                                self.commands
+                                    .iter()
+                                    .map(|(n, _)| n.as_str())
+                                    .collect::<Vec<_>>()
+                            );
                         }
                     }
                     // Tool groups
                     if let Some(groups) = caps["toolGroups"].as_array() {
-                        let parsed: Vec<String> = groups.iter()
+                        let parsed: Vec<String> = groups
+                            .iter()
                             .filter_map(|g| g.as_str().map(String::from))
                             .collect();
                         if !parsed.is_empty() {
@@ -188,7 +208,10 @@ impl BridgeAdapter {
                 }
             }
             _ => {
-                ulog_debug!("[bridge:{}] Could not fetch capabilities, using defaults", self.plugin_id);
+                ulog_debug!(
+                    "[bridge:{}] Could not fetch capabilities, using defaults",
+                    self.plugin_id
+                );
             }
         }
     }
@@ -202,7 +225,11 @@ impl BridgeAdapter {
     /// Called after sync_capabilities() to replace plugin-declared groups
     /// with the user's choices from the channel config UI.
     pub fn set_enabled_tool_groups(&mut self, groups: Vec<String>) {
-        ulog_info!("[bridge:{}] user-configured tool groups: {:?}", self.plugin_id, groups);
+        ulog_info!(
+            "[bridge:{}] user-configured tool groups: {:?}",
+            self.plugin_id,
+            groups
+        );
         self.enabled_tool_groups = groups;
     }
 
@@ -228,14 +255,21 @@ impl BridgeAdapter {
     }
 
     /// Execute a plugin command via Bridge's /execute-command endpoint.
-    pub async fn execute_command(&self, command: &str, args: &str, user_id: &str, chat_id: &str) -> AdapterResult<String> {
+    pub async fn execute_command(
+        &self,
+        command: &str,
+        args: &str,
+        user_id: &str,
+        chat_id: &str,
+    ) -> AdapterResult<String> {
         let body = serde_json::json!({
             "command": command,
             "args": args,
             "userId": user_id,
             "chatId": chat_id,
         });
-        let resp = self.client
+        let resp = self
+            .client
             .post(self.url("/execute-command"))
             .json(&body)
             .send()
@@ -245,12 +279,18 @@ impl BridgeAdapter {
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            return Err(format!("Bridge execute-command returned {}: {}", status, text));
+            return Err(format!(
+                "Bridge execute-command returned {}: {}",
+                status, text
+            ));
         }
 
         let resp_body: serde_json::Value = resp.json().await.unwrap_or_default();
         if resp_body["ok"].as_bool() != Some(true) {
-            return Err(format!("Command error: {}", resp_body["error"].as_str().unwrap_or("unknown")));
+            return Err(format!(
+                "Command error: {}",
+                resp_body["error"].as_str().unwrap_or("unknown")
+            ));
         }
         Ok(resp_body["result"].as_str().unwrap_or("OK").to_string())
     }
@@ -268,7 +308,8 @@ impl BridgeAdapter {
     /// well under the 10s ceiling. Beyond that we give up and return None;
     /// next channel restart will re-resolve.
     async fn fetch_display_name(&self) -> Option<String> {
-        let resp = match self.client
+        let resp = match self
+            .client
             .get(self.url("/identity"))
             .timeout(Duration::from_secs(10))
             .send()
@@ -276,18 +317,30 @@ impl BridgeAdapter {
         {
             Ok(r) => r,
             Err(e) => {
-                ulog_warn!("[bridge:{}] /identity request failed: {} — display name will be unset", self.plugin_id, e);
+                ulog_warn!(
+                    "[bridge:{}] /identity request failed: {} — display name will be unset",
+                    self.plugin_id,
+                    e
+                );
                 return None;
             }
         };
         if !resp.status().is_success() {
-            ulog_warn!("[bridge:{}] /identity returned HTTP {} — display name will be unset", self.plugin_id, resp.status());
+            ulog_warn!(
+                "[bridge:{}] /identity returned HTTP {} — display name will be unset",
+                self.plugin_id,
+                resp.status()
+            );
             return None;
         }
         let body: serde_json::Value = match resp.json().await {
             Ok(b) => b,
             Err(e) => {
-                ulog_warn!("[bridge:{}] /identity JSON parse failed: {}", self.plugin_id, e);
+                ulog_warn!(
+                    "[bridge:{}] /identity JSON parse failed: {}",
+                    self.plugin_id,
+                    e
+                );
                 return None;
             }
         };
@@ -300,7 +353,10 @@ impl BridgeAdapter {
             // displayName: null is the expected response for plugins without a
             // resolver (wecom / weixin) — log at debug, not warn, to avoid
             // noise on every channel start.
-            ulog_debug!("[bridge:{}] /identity returned null displayName (no resolver / resolution failed)", self.plugin_id);
+            ulog_debug!(
+                "[bridge:{}] /identity returned null displayName (no resolver / resolution failed)",
+                self.plugin_id
+            );
         }
         name
     }
@@ -332,7 +388,9 @@ impl ImAdapter for BridgeAdapter {
                 return Err(format!("Bridge returned status {}", resp.status()));
             }
 
-            let body: serde_json::Value = resp.json().await
+            let body: serde_json::Value = resp
+                .json()
+                .await
                 .map_err(|e| format!("Bridge status parse error: {}", e))?;
 
             // If there's a gateway error, fail immediately with the specific message
@@ -368,7 +426,10 @@ impl ImAdapter for BridgeAdapter {
     async fn listen_loop(&self, mut shutdown_rx: tokio::sync::watch::Receiver<bool>) {
         // Bridge pushes messages to Rust via management API.
         // We periodically health-check the bridge process to detect crashes.
-        ulog_info!("[bridge:{}] Listen loop with health watchdog started", self.plugin_id);
+        ulog_info!(
+            "[bridge:{}] Listen loop with health watchdog started",
+            self.plugin_id
+        );
         let mut consecutive_failures: u32 = 0;
         const MAX_FAILURES: u32 = 3;
 
@@ -447,27 +508,41 @@ impl ImAdapter for BridgeAdapter {
         let _ = self.client.post(self.url("/stop")).send().await;
     }
 
-
     async fn send_message(&self, chat_id: &str, text: &str) -> AdapterResult<()> {
-        ulog_info!("[bridge:{}] send_message: chatId={}, textLen={}", self.plugin_id, chat_id, text.len());
+        ulog_info!(
+            "[bridge:{}] send_message: chatId={}, textLen={}",
+            self.plugin_id,
+            chat_id,
+            text.len()
+        );
         let body = json!({
             "chatId": chat_id,
             "text": text,
         });
-        let resp = self.client
+        let resp = self
+            .client
             .post(self.url("/send-text"))
             .json(&body)
             .send()
             .await
             .map_err(|e| {
-                ulog_warn!("[bridge:{}] send_message request failed: {}", self.plugin_id, e);
+                ulog_warn!(
+                    "[bridge:{}] send_message request failed: {}",
+                    self.plugin_id,
+                    e
+                );
                 format!("Bridge send-text failed: {}", e)
             })?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            ulog_warn!("[bridge:{}] send_message returned {}: {}", self.plugin_id, status, text);
+            ulog_warn!(
+                "[bridge:{}] send_message returned {}: {}",
+                self.plugin_id,
+                status,
+                text
+            );
             return Err(format!("Bridge send-text returned {}: {}", status, text));
         }
         Ok(())
@@ -496,92 +571,141 @@ impl ImStreamAdapter for BridgeAdapter {
         chat_id: &str,
         text: &str,
     ) -> AdapterResult<Option<String>> {
-        ulog_info!("[bridge:{}] send_message_returning_id: chatId={}, textLen={}", self.plugin_id, chat_id, text.len());
+        ulog_info!(
+            "[bridge:{}] send_message_returning_id: chatId={}, textLen={}",
+            self.plugin_id,
+            chat_id,
+            text.len()
+        );
         let body = json!({
             "chatId": chat_id,
             "text": text,
         });
-        let resp = self.client
+        let resp = self
+            .client
             .post(self.url("/send-text"))
             .json(&body)
             .send()
             .await
             .map_err(|e| {
-                ulog_warn!("[bridge:{}] send_message_returning_id request failed: {}", self.plugin_id, e);
+                ulog_warn!(
+                    "[bridge:{}] send_message_returning_id request failed: {}",
+                    self.plugin_id,
+                    e
+                );
                 format!("Bridge send-text failed: {}", e)
             })?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            ulog_warn!("[bridge:{}] send_message_returning_id returned {}: {}", self.plugin_id, status, text);
+            ulog_warn!(
+                "[bridge:{}] send_message_returning_id returned {}: {}",
+                self.plugin_id,
+                status,
+                text
+            );
             return Err(format!("Bridge send-text returned {}: {}", status, text));
         }
 
         let resp_body: serde_json::Value = resp.json().await.unwrap_or_default();
         let msg_id = resp_body["messageId"].as_str().map(|s| s.to_string());
-        ulog_info!("[bridge:{}] send_message_returning_id ok: messageId={:?}", self.plugin_id, msg_id);
+        ulog_info!(
+            "[bridge:{}] send_message_returning_id ok: messageId={:?}",
+            self.plugin_id,
+            msg_id
+        );
         Ok(msg_id)
     }
 
-    async fn edit_message(
-        &self,
-        chat_id: &str,
-        message_id: &str,
-        text: &str,
-    ) -> AdapterResult<()> {
-        ulog_info!("[bridge:{}] edit_message: chatId={}, messageId={}, textLen={}", self.plugin_id, chat_id, message_id, text.len());
+    async fn edit_message(&self, chat_id: &str, message_id: &str, text: &str) -> AdapterResult<()> {
+        ulog_info!(
+            "[bridge:{}] edit_message: chatId={}, messageId={}, textLen={}",
+            self.plugin_id,
+            chat_id,
+            message_id,
+            text.len()
+        );
         let body = json!({
             "chatId": chat_id,
             "messageId": message_id,
             "text": text,
         });
-        let resp = self.client
+        let resp = self
+            .client
             .post(self.url("/edit-message"))
             .json(&body)
             .send()
             .await
             .map_err(|e| {
-                ulog_warn!("[bridge:{}] edit_message request failed: {}", self.plugin_id, e);
+                ulog_warn!(
+                    "[bridge:{}] edit_message request failed: {}",
+                    self.plugin_id,
+                    e
+                );
                 format!("Bridge edit-message failed: {}", e)
             })?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            ulog_warn!("[bridge:{}] edit_message returned {}: {}", self.plugin_id, status, text);
+            ulog_warn!(
+                "[bridge:{}] edit_message returned {}: {}",
+                self.plugin_id,
+                status,
+                text
+            );
             // Prefix with "status:<code>:" for structured matching in finalize_message.
             // This avoids fragile substring matching on the error body.
-            return Err(format!("status:{}:Bridge edit-message returned {}: {}", status.as_u16(), status, text));
+            return Err(format!(
+                "status:{}:Bridge edit-message returned {}: {}",
+                status.as_u16(),
+                status,
+                text
+            ));
         }
         Ok(())
     }
 
-    async fn delete_message(
-        &self,
-        chat_id: &str,
-        message_id: &str,
-    ) -> AdapterResult<()> {
-        ulog_info!("[bridge:{}] delete_message: chatId={}, messageId={}", self.plugin_id, chat_id, message_id);
+    async fn delete_message(&self, chat_id: &str, message_id: &str) -> AdapterResult<()> {
+        ulog_info!(
+            "[bridge:{}] delete_message: chatId={}, messageId={}",
+            self.plugin_id,
+            chat_id,
+            message_id
+        );
         let body = json!({
             "chatId": chat_id,
             "messageId": message_id,
         });
-        let resp = self.client
+        let resp = self
+            .client
             .post(self.url("/delete-message"))
             .json(&body)
             .send()
             .await
             .map_err(|e| {
-                ulog_warn!("[bridge:{}] delete_message request failed: {}", self.plugin_id, e);
+                ulog_warn!(
+                    "[bridge:{}] delete_message request failed: {}",
+                    self.plugin_id,
+                    e
+                );
                 format!("Bridge delete-message failed: {}", e)
             })?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            ulog_warn!("[bridge:{}] delete_message returned {}: {}", self.plugin_id, status, text);
-            return Err(format!("Bridge delete-message returned {}: {}", status, text));
+            ulog_warn!(
+                "[bridge:{}] delete_message returned {}: {}",
+                self.plugin_id,
+                status,
+                text
+            );
+            return Err(format!(
+                "Bridge delete-message returned {}: {}",
+                status, text
+            ));
         }
         Ok(())
     }
@@ -627,7 +751,8 @@ impl ImStreamAdapter for BridgeAdapter {
             "data": b64,
             "caption": caption,
         });
-        let resp = self.client
+        let resp = self
+            .client
             .post(self.url("/send-media"))
             .json(&body)
             .send()
@@ -661,7 +786,8 @@ impl ImStreamAdapter for BridgeAdapter {
             "data": b64,
             "caption": caption,
         });
-        let resp = self.client
+        let resp = self
+            .client
             .post(self.url("/send-media"))
             .json(&body)
             .send()
@@ -696,7 +822,10 @@ impl ImStreamAdapter for BridgeAdapter {
             Ok(()) => Ok(()),
             Err(e) if e.starts_with("status:501:") || e.starts_with("status:405:") => {
                 // Runtime 501 (capability not detected at startup) — delete fragment + send full text
-                ulog_info!("[bridge:{}] finalize: runtime edit 501, replacing fragment with full message", self.plugin_id);
+                ulog_info!(
+                    "[bridge:{}] finalize: runtime edit 501, replacing fragment with full message",
+                    self.plugin_id
+                );
                 let _ = self.delete_message(chat_id, message_id).await;
                 self.send_message(chat_id, text).await
             }
@@ -717,24 +846,25 @@ impl ImStreamAdapter for BridgeAdapter {
     }
 
     fn bridge_context(&self) -> Option<(u16, String, Vec<String>)> {
-        Some((self.bridge_port, self.plugin_id.clone(), self.enabled_tool_groups.clone()))
+        Some((
+            self.bridge_port,
+            self.plugin_id.clone(),
+            self.enabled_tool_groups.clone(),
+        ))
     }
 
     fn supports_streaming(&self) -> bool {
         self.supports_streaming
     }
 
-    async fn start_stream(
-        &self,
-        chat_id: &str,
-        initial_text: &str,
-    ) -> AdapterResult<String> {
+    async fn start_stream(&self, chat_id: &str, initial_text: &str) -> AdapterResult<String> {
         let body = json!({
             "chatId": chat_id,
             "initialContent": initial_text,
             "streamMode": if self.supports_cardkit { "cardkit" } else { "text" },
         });
-        let resp = self.client
+        let resp = self
+            .client
             .post(self.url("/start-stream"))
             .json(&body)
             .send()
@@ -766,7 +896,8 @@ impl ImStreamAdapter for BridgeAdapter {
             "sequence": sequence,
             "isThinking": is_thinking,
         });
-        let resp = self.client
+        let resp = self
+            .client
             .post(self.url("/stream-chunk"))
             .json(&body)
             .send()
@@ -792,7 +923,8 @@ impl ImStreamAdapter for BridgeAdapter {
             "streamId": stream_id,
             "finalContent": final_text,
         });
-        let resp = self.client
+        let resp = self
+            .client
             .post(self.url("/finalize-stream"))
             .json(&body)
             .send()
@@ -802,21 +934,21 @@ impl ImStreamAdapter for BridgeAdapter {
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            return Err(format!("Bridge finalize-stream returned {}: {}", status, text));
+            return Err(format!(
+                "Bridge finalize-stream returned {}: {}",
+                status, text
+            ));
         }
         Ok(())
     }
 
-    async fn abort_stream(
-        &self,
-        chat_id: &str,
-        stream_id: &str,
-    ) -> AdapterResult<()> {
+    async fn abort_stream(&self, chat_id: &str, stream_id: &str) -> AdapterResult<()> {
         let body = json!({
             "chatId": chat_id,
             "streamId": stream_id,
         });
-        let resp = self.client
+        let resp = self
+            .client
             .post(self.url("/abort-stream"))
             .json(&body)
             .send()
@@ -836,17 +968,26 @@ impl ImStreamAdapter for BridgeAdapter {
 // These call the Bridge's /qr-login-start, /qr-login-wait, /restart-gateway
 // endpoints. Used by Tauri commands during the channel wizard.
 
-pub async fn qr_login_start(bridge_port: u16, account_id: Option<&str>) -> Result<serde_json::Value, String> {
+pub async fn qr_login_start(
+    bridge_port: u16,
+    account_id: Option<&str>,
+) -> Result<serde_json::Value, String> {
     let client = crate::local_http::json_client(std::time::Duration::from_secs(30));
     let url = format!("http://127.0.0.1:{}/qr-login-start", bridge_port);
     let mut body = serde_json::json!({});
     if let Some(id) = account_id {
         body["accountId"] = serde_json::json!(id);
     }
-    let resp = client.post(&url).json(&body).send().await
+    let resp = client
+        .post(&url)
+        .json(&body)
+        .send()
+        .await
         .map_err(|e| format!("QR login start request failed: {}", e))?;
     let status = resp.status();
-    let result: serde_json::Value = resp.json().await
+    let result: serde_json::Value = resp
+        .json()
+        .await
         .map_err(|e| format!("QR login start parse failed: {}", e))?;
     if !status.is_success() {
         return Err(format!("QR login start failed ({}): {}", status, result));
@@ -854,7 +995,11 @@ pub async fn qr_login_start(bridge_port: u16, account_id: Option<&str>) -> Resul
     Ok(result)
 }
 
-pub async fn qr_login_wait(bridge_port: u16, account_id: Option<&str>, session_key: Option<&str>) -> Result<serde_json::Value, String> {
+pub async fn qr_login_wait(
+    bridge_port: u16,
+    account_id: Option<&str>,
+    session_key: Option<&str>,
+) -> Result<serde_json::Value, String> {
     // WeChat's internal long-poll is 35s per cycle. Set Rust timeout to 45s (covers one full
     // poll cycle + buffer). Also pass timeoutMs=40000 to the plugin so it exits after one
     // cycle instead of looping internally for 8 minutes.
@@ -869,10 +1014,16 @@ pub async fn qr_login_wait(bridge_port: u16, account_id: Option<&str>, session_k
     }
     // Limit plugin's internal poll to one cycle (~35s) so it returns control to our frontend loop
     body["timeoutMs"] = serde_json::json!(40000);
-    let resp = client.post(&url).json(&body).send().await
+    let resp = client
+        .post(&url)
+        .json(&body)
+        .send()
+        .await
         .map_err(|e| format!("QR login wait request failed: {}", e))?;
     let status = resp.status();
-    let result: serde_json::Value = resp.json().await
+    let result: serde_json::Value = resp
+        .json()
+        .await
         .map_err(|e| format!("QR login wait parse failed: {}", e))?;
     if !status.is_success() {
         return Err(format!("QR login wait failed ({}): {}", status, result));
@@ -880,17 +1031,26 @@ pub async fn qr_login_wait(bridge_port: u16, account_id: Option<&str>, session_k
     Ok(result)
 }
 
-pub async fn restart_gateway(bridge_port: u16, account_id: Option<&str>) -> Result<serde_json::Value, String> {
+pub async fn restart_gateway(
+    bridge_port: u16,
+    account_id: Option<&str>,
+) -> Result<serde_json::Value, String> {
     let client = crate::local_http::json_client(std::time::Duration::from_secs(15));
     let url = format!("http://127.0.0.1:{}/restart-gateway", bridge_port);
     let mut body = serde_json::json!({});
     if let Some(id) = account_id {
         body["accountId"] = serde_json::json!(id);
     }
-    let resp = client.post(&url).json(&body).send().await
+    let resp = client
+        .post(&url)
+        .json(&body)
+        .send()
+        .await
         .map_err(|e| format!("Restart gateway request failed: {}", e))?;
     let status = resp.status();
-    let result: serde_json::Value = resp.json().await
+    let result: serde_json::Value = resp
+        .json()
+        .await
         .map_err(|e| format!("Restart gateway parse failed: {}", e))?;
     if !status.is_success() {
         return Err(format!("Restart gateway failed ({}): {}", status, result));
@@ -1076,15 +1236,15 @@ pub async fn spawn_plugin_bridge<R: tauri::Runtime>(
         let _lock_guard = lock_arc.lock().await;
 
         let openclaw_pkg = plugin_dir_buf
-            .join("node_modules").join("openclaw").join("package.json");
+            .join("node_modules")
+            .join("openclaw")
+            .join("package.json");
         let needs_repair = if openclaw_pkg.exists() {
             std::fs::read_to_string(&openclaw_pkg)
                 .ok()
                 .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
                 .map(|v| {
-                    let version = v.get("version")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
+                    let version = v.get("version").and_then(|v| v.as_str()).unwrap_or("");
                     // Must be our shim AND match current compat version
                     !version.contains("-shim") || !version.starts_with(SHIM_COMPAT_VERSION)
                 })
@@ -1093,7 +1253,10 @@ pub async fn spawn_plugin_bridge<R: tauri::Runtime>(
             true // Missing entirely
         };
         if needs_repair {
-            ulog_warn!("[bridge] Shim integrity/freshness check failed for {}, re-installing", plugin_dir);
+            ulog_warn!(
+                "[bridge] Shim integrity/freshness check failed for {}, re-installing",
+                plugin_dir
+            );
             if let Err(e) = install_sdk_shim(app_handle, &plugin_dir_buf).await {
                 ulog_error!("[bridge] SDK shim re-install FAILED for {}: {} — bridge will fail to load openclaw plugins", plugin_dir, e);
             }
@@ -1103,7 +1266,11 @@ pub async fn spawn_plugin_bridge<R: tauri::Runtime>(
 
     ulog_info!(
         "[bridge] Spawning bridge: node={:?} script={:?} plugin_dir={} port={} rust_port={}",
-        node_path, bridge_script, plugin_dir, port, rust_port
+        node_path,
+        bridge_script,
+        plugin_dir,
+        port,
+        rust_port
     );
 
     let mut cmd = crate::process_cmd::new(&node_path);
@@ -1155,7 +1322,10 @@ pub async fn spawn_plugin_bridge<R: tauri::Runtime>(
         // (Dropped CLAWDBOT_STATE_DIR — removed upstream in 6b9915a106, now 0 consumers; and the bare
         //  OPENCLAW_CONFIG, which was never read — the consumed name is OPENCLAW_CONFIG_PATH.)
         .env("OPENCLAW_STATE_DIR", path_env_value(&state_env.state_dir))
-        .env("OPENCLAW_CONFIG_PATH", path_env_value(&state_env.config_path))
+        .env(
+            "OPENCLAW_CONFIG_PATH",
+            path_env_value(&state_env.config_path),
+        )
         .env("OPENCLAW_OAUTH_DIR", path_env_value(&state_env.oauth_dir));
 
     // Working directory: prefer the plugin_dir (so Node's ESM resolver
@@ -1169,10 +1339,16 @@ pub async fn spawn_plugin_bridge<R: tauri::Runtime>(
     // parent if plugin_dir doesn't exist (defensive — shouldn't happen).
     if plugin_dir_path.exists() {
         cmd.current_dir(&plugin_dir_path);
-        ulog_info!("[bridge] Working directory set to plugin_dir: {:?}", plugin_dir_path);
+        ulog_info!(
+            "[bridge] Working directory set to plugin_dir: {:?}",
+            plugin_dir_path
+        );
     } else if let Some(script_dir) = bridge_script.parent() {
         cmd.current_dir(script_dir);
-        ulog_info!("[bridge] Working directory fallback (plugin_dir missing): {:?}", script_dir);
+        ulog_info!(
+            "[bridge] Working directory fallback (plugin_dir missing): {:?}",
+            script_dir
+        );
     }
 
     // Inject proxy env vars — reuse shared helper (pit-of-success: single source of truth)
@@ -1194,8 +1370,10 @@ pub async fn spawn_plugin_bridge<R: tauri::Runtime>(
                 for line in reader.lines().flatten() {
                     // Skip high-frequency heartbeat noise (sent/ACK every ~40s per plugin).
                     // Only log heartbeat anomalies (timeout, disconnect, error).
-                    if line.contains("Heartbeat sent") || line.contains("Heartbeat ACK")
-                        || line.contains("Received op=11") {
+                    if line.contains("Heartbeat sent")
+                        || line.contains("Heartbeat ACK")
+                        || line.contains("Received op=11")
+                    {
                         continue;
                     }
                     ulog_info!("[bridge-out][{}] {}", bot_id_clone, line);
@@ -1211,12 +1389,15 @@ pub async fn spawn_plugin_bridge<R: tauri::Runtime>(
                     // shares the sdk-shim warnings, log-retention audit, etc.
                     // See `crate::sidecar::classify_sidecar_stderr`.
                     match crate::sidecar::classify_sidecar_stderr(&line) {
-                        crate::sidecar::SidecarStderrLevel::Info =>
-                            ulog_info!("[bridge-err][{}] {}", bot_id_clone, line),
-                        crate::sidecar::SidecarStderrLevel::Warn =>
-                            ulog_warn!("[bridge-err][{}] {}", bot_id_clone, line),
-                        crate::sidecar::SidecarStderrLevel::Error =>
-                            ulog_error!("[bridge-err][{}] {}", bot_id_clone, line),
+                        crate::sidecar::SidecarStderrLevel::Info => {
+                            ulog_info!("[bridge-err][{}] {}", bot_id_clone, line)
+                        }
+                        crate::sidecar::SidecarStderrLevel::Warn => {
+                            ulog_warn!("[bridge-err][{}] {}", bot_id_clone, line)
+                        }
+                        crate::sidecar::SidecarStderrLevel::Error => {
+                            ulog_error!("[bridge-err][{}] {}", bot_id_clone, line)
+                        }
                     }
                 }
             });
@@ -1232,13 +1413,19 @@ pub async fn spawn_plugin_bridge<R: tauri::Runtime>(
         tokio::time::sleep(Duration::from_millis(500)).await;
         match client.get(&health_url).send().await {
             Ok(resp) if resp.status().is_success() => {
-                ulog_info!("[bridge] Health check passed after {} attempts", attempt + 1);
+                ulog_info!(
+                    "[bridge] Health check passed after {} attempts",
+                    attempt + 1
+                );
                 healthy = true;
                 break;
             }
             _ => {
                 if attempt % 5 == 4 {
-                    ulog_debug!("[bridge] Health check attempt {} failed, retrying...", attempt + 1);
+                    ulog_debug!(
+                        "[bridge] Health check attempt {} failed, retrying...",
+                        attempt + 1
+                    );
                 }
             }
         }
@@ -1269,7 +1456,9 @@ fn apply_proxy_env(cmd: &mut std::process::Command) {
 /// - macOS dev:   src-tauri/resources/nodejs/bin/node + ../lib/node_modules/npm/bin/npm-cli.js
 /// - Windows prod: <install_dir>/nodejs/node.exe + node_modules/npm/bin/npm-cli.js
 /// - Windows dev:  src-tauri/resources/nodejs/node.exe + node_modules/npm/bin/npm-cli.js
-fn find_bundled_node_npm<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> Option<(PathBuf, PathBuf)> {
+fn find_bundled_node_npm<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+) -> Option<(PathBuf, PathBuf)> {
     use crate::sidecar::normalize_external_path;
 
     let check = |nodejs_dir: &Path| -> Option<(PathBuf, PathBuf)> {
@@ -1281,16 +1470,29 @@ fn find_bundled_node_npm<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) ->
         // Windows npm layout: nodejs/node_modules/npm/... (flat, no lib/)
         // macOS/Linux npm layout: nodejs/lib/node_modules/npm/... (standard Unix)
         #[cfg(target_os = "windows")]
-        let npm_cli = nodejs_dir.join("node_modules").join("npm").join("bin").join("npm-cli.js");
+        let npm_cli = nodejs_dir
+            .join("node_modules")
+            .join("npm")
+            .join("bin")
+            .join("npm-cli.js");
         #[cfg(not(target_os = "windows"))]
-        let npm_cli = nodejs_dir.join("lib").join("node_modules").join("npm").join("bin").join("npm-cli.js");
+        let npm_cli = nodejs_dir
+            .join("lib")
+            .join("node_modules")
+            .join("npm")
+            .join("bin")
+            .join("npm-cli.js");
 
         if node_bin.exists() && npm_cli.exists() {
             // On Windows, strip \\?\ extended-length prefix that Tauri's resource_dir() produces.
             // Node.js/npm cannot handle it (causes "EISDIR: lstat 'C:'" error).
             let node_bin = normalize_external_path(node_bin);
             let npm_cli = normalize_external_path(npm_cli);
-            ulog_info!("[bridge] Bundled Node.js found: node={:?}, npm-cli={:?}", node_bin, npm_cli);
+            ulog_info!(
+                "[bridge] Bundled Node.js found: node={:?}, npm-cli={:?}",
+                node_bin,
+                npm_cli
+            );
             Some((node_bin, npm_cli))
         } else {
             None
@@ -1337,7 +1539,8 @@ async fn ensure_package_json(base_dir: &std::path::Path, plugin_id: &str) -> Res
             "version": "1.0.0",
             "private": true,
         });
-        tokio::fs::write(&pkg_json, content.to_string()).await
+        tokio::fs::write(&pkg_json, content.to_string())
+            .await
             .map_err(|e| format!("Failed to write package.json: {}", e))?;
     }
     Ok(())
@@ -1362,8 +1565,19 @@ fn sanitize_npm_spec(raw: &str) -> String {
         let lower = t.to_ascii_lowercase();
         matches!(
             lower.as_str(),
-            "npx" | "npm" | "bun" | "bunx" | "pnpm" | "yarn"
-                | "install" | "add" | "i" | "exec" | "run" | "x" | "dlx"
+            "npx"
+                | "npm"
+                | "bun"
+                | "bunx"
+                | "pnpm"
+                | "yarn"
+                | "install"
+                | "add"
+                | "i"
+                | "exec"
+                | "run"
+                | "x"
+                | "dlx"
         )
     };
 
@@ -1408,7 +1622,10 @@ pub async fn install_openclaw_plugin<R: tauri::Runtime>(
         || trimmed.contains("https:")
         || has_unscoped_slash
     {
-        return Err(format!("Invalid npm spec '{}': only npm package names are allowed", npm_spec));
+        return Err(format!(
+            "Invalid npm spec '{}': only npm package names are allowed",
+            npm_spec
+        ));
     }
 
     // Derive plugin ID from npm spec (e.g. "@openclaw/channel-qqbot" → "channel-qqbot")
@@ -1427,7 +1644,10 @@ pub async fn install_openclaw_plugin<R: tauri::Runtime>(
         || plugin_id.contains('\\')
         || plugin_id.contains("..")
     {
-        return Err(format!("Invalid plugin ID derived from '{}': '{}'", npm_spec, plugin_id));
+        return Err(format!(
+            "Invalid plugin ID derived from '{}': '{}'",
+            npm_spec, plugin_id
+        ));
     }
 
     let base_dir = dirs::home_dir()
@@ -1451,7 +1671,11 @@ pub async fn install_openclaw_plugin<R: tauri::Runtime>(
     let _install_guard = _install_guard_arc.lock().await;
 
     if trimmed != npm_spec.trim() {
-        ulog_info!("[bridge] Sanitized npm spec: '{}' → '{}'", npm_spec.trim(), trimmed);
+        ulog_info!(
+            "[bridge] Sanitized npm spec: '{}' → '{}'",
+            npm_spec.trim(),
+            trimmed
+        );
     }
 
     // Ensure spec always resolves to latest when no version is pinned.
@@ -1471,7 +1695,12 @@ pub async fn install_openclaw_plugin<R: tauri::Runtime>(
         format!("{}@latest", trimmed) // Unscoped, no version
     };
 
-    ulog_info!("[bridge] Installing plugin {} (spec: {}) into {:?}", trimmed, install_spec, base_dir);
+    ulog_info!(
+        "[bridge] Installing plugin {} (spec: {}) into {:?}",
+        trimmed,
+        install_spec,
+        base_dir
+    );
 
     // Write package.json upfront (shared by both npm and bun paths).
     ensure_package_json(&base_dir, &plugin_id).await?;
@@ -1496,7 +1725,8 @@ pub async fn install_openclaw_plugin<R: tauri::Runtime>(
                 .env("NODE_OPTIONS", "--no-experimental-require-module");
             apply_proxy_env(&mut cmd);
             cmd.output()
-        }).await;
+        })
+        .await;
 
         match sys_result {
             Ok(Ok(output)) if output.status.success() => {
@@ -1505,7 +1735,11 @@ pub async fn install_openclaw_plugin<R: tauri::Runtime>(
             }
             Ok(Ok(output)) => {
                 let stderr = String::from_utf8_lossy(&output.stderr);
-                ulog_error!("[bridge] System npm install {} failed: {}", npm_spec, stderr.trim());
+                ulog_error!(
+                    "[bridge] System npm install {} failed: {}",
+                    npm_spec,
+                    stderr.trim()
+                );
             }
             Ok(Err(e)) => {
                 ulog_error!("[bridge] System npm spawn failed: {}", e);
@@ -1523,29 +1757,42 @@ pub async fn install_openclaw_plugin<R: tauri::Runtime>(
         if let Some((node_bin, npm_cli)) = find_bundled_node_npm(app_handle) {
             // Diagnostic: log node + npm version for troubleshooting
             let node_ver = crate::process_cmd::new(&node_bin)
-                .args(["--version"]).output()
+                .args(["--version"])
+                .output()
                 .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
                 .unwrap_or_else(|e| format!("error: {}", e));
             let npm_ver = crate::process_cmd::new(&node_bin)
-                .args([npm_cli.to_str().unwrap_or(""), "--version"]).output()
+                .args([npm_cli.to_str().unwrap_or(""), "--version"])
+                .output()
                 .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
                 .unwrap_or_else(|e| format!("error: {}", e));
-            ulog_info!("[bridge] Bundled npm install: node={}, npm={}, cli={:?}", node_ver, npm_ver, npm_cli);
+            ulog_info!(
+                "[bridge] Bundled npm install: node={}, npm={}, cli={:?}",
+                node_ver,
+                npm_ver,
+                npm_cli
+            );
 
-            let npm_cli_str = npm_cli.to_str()
+            let npm_cli_str = npm_cli
+                .to_str()
                 .ok_or_else(|| format!("npm-cli.js path contains invalid UTF-8: {:?}", npm_cli))?
                 .to_string();
 
             // Prepend node binary's directory to PATH so postinstall scripts can find `node`.
-            let node_dir_for_path = node_bin.parent()
+            let node_dir_for_path = node_bin
+                .parent()
                 .map(|d| d.to_string_lossy().to_string())
                 .unwrap_or_default();
             let augmented_path = {
                 let system_path = std::env::var("PATH").unwrap_or_default();
                 #[cfg(target_os = "windows")]
-                { format!("{};{}", node_dir_for_path, system_path) }
+                {
+                    format!("{};{}", node_dir_for_path, system_path)
+                }
                 #[cfg(not(target_os = "windows"))]
-                { format!("{}:{}", node_dir_for_path, system_path) }
+                {
+                    format!("{}:{}", node_dir_for_path, system_path)
+                }
             };
 
             let node_for_add = node_bin;
@@ -1557,13 +1804,19 @@ pub async fn install_openclaw_plugin<R: tauri::Runtime>(
                 let mut cmd = crate::process_cmd::new(&node_for_add);
                 // --omit=peer: same rationale as system npm above.
                 // --no-experimental-require-module: Node.js v24 CJS/ESM crash fix.
-                cmd.args([cli_str_add.as_str(), "install", npm_spec_owned.as_str(), "--omit=peer"])
-                    .current_dir(&base_for_add)
-                    .env("PATH", &path_for_add)
-                    .env("NODE_OPTIONS", "--no-experimental-require-module");
+                cmd.args([
+                    cli_str_add.as_str(),
+                    "install",
+                    npm_spec_owned.as_str(),
+                    "--omit=peer",
+                ])
+                .current_dir(&base_for_add)
+                .env("PATH", &path_for_add)
+                .env("NODE_OPTIONS", "--no-experimental-require-module");
                 apply_proxy_env(&mut cmd);
                 cmd.output()
-            }).await;
+            })
+            .await;
 
             match add_result {
                 Ok(Ok(output)) if output.status.success() => {
@@ -1572,13 +1825,26 @@ pub async fn install_openclaw_plugin<R: tauri::Runtime>(
                 }
                 Ok(Ok(output)) => {
                     let stderr = String::from_utf8_lossy(&output.stderr);
-                    ulog_error!("[bridge] Bundled npm install {} failed (exit {}): {}", npm_spec, output.status, stderr.trim());
+                    ulog_error!(
+                        "[bridge] Bundled npm install {} failed (exit {}): {}",
+                        npm_spec,
+                        output.status,
+                        stderr.trim()
+                    );
                 }
                 Ok(Err(e)) => {
-                    ulog_error!("[bridge] Bundled npm install {} — process spawn failed: {}", npm_spec, e);
+                    ulog_error!(
+                        "[bridge] Bundled npm install {} — process spawn failed: {}",
+                        npm_spec,
+                        e
+                    );
                 }
                 Err(e) => {
-                    ulog_error!("[bridge] Bundled npm install {} — spawn_blocking failed: {}", npm_spec, e);
+                    ulog_error!(
+                        "[bridge] Bundled npm install {} — spawn_blocking failed: {}",
+                        npm_spec,
+                        e
+                    );
                 }
             }
         } else {
@@ -1611,9 +1877,14 @@ pub async fn install_openclaw_plugin<R: tauri::Runtime>(
             let node_dir = node_path.parent().map(|p| p.to_path_buf());
             match tokio::task::spawn_blocking(move || {
                 let mut cmd = crate::process_cmd::new(&node_path);
-                cmd.args([npm_cli.to_str().unwrap_or(""), "install", "--ignore-scripts", "--omit=peer"])
-                    .current_dir(&repair_dir)
-                    .env("NODE_OPTIONS", "--no-experimental-require-module");
+                cmd.args([
+                    npm_cli.to_str().unwrap_or(""),
+                    "install",
+                    "--ignore-scripts",
+                    "--omit=peer",
+                ])
+                .current_dir(&repair_dir)
+                .env("NODE_OPTIONS", "--no-experimental-require-module");
                 if let Some(ref nd) = node_dir {
                     if let Some(path) = std::env::var_os("PATH") {
                         let mut paths = std::env::split_paths(&path).collect::<Vec<_>>();
@@ -1623,15 +1894,22 @@ pub async fn install_openclaw_plugin<R: tauri::Runtime>(
                 }
                 apply_proxy_env(&mut cmd);
                 cmd.output()
-            }).await {
+            })
+            .await
+            {
                 Ok(Ok(output)) if output.status.success() => {
                     ulog_info!("[bridge] Dependency repair succeeded");
                 }
                 Ok(Ok(output)) => {
-                    ulog_warn!("[bridge] Dependency repair failed (exit {}): {}",
-                        output.status, String::from_utf8_lossy(&output.stderr).trim());
+                    ulog_warn!(
+                        "[bridge] Dependency repair failed (exit {}): {}",
+                        output.status,
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    );
                 }
-                _ => { ulog_warn!("[bridge] Dependency repair: spawn failed"); }
+                _ => {
+                    ulog_warn!("[bridge] Dependency repair: spawn failed");
+                }
             }
         } else {
             // No bundled npm — initial plugin install above must have used system
@@ -1680,8 +1958,16 @@ pub async fn install_openclaw_plugin<R: tauri::Runtime>(
         ulog_warn!("[bridge] {}", warning);
     }
 
-    ulog_info!("[bridge] Plugin {} installed successfully (qrLogin={}, compat={})",
-        plugin_id, supports_qr_login, if compat_warning.is_some() { "warn" } else { "ok" });
+    ulog_info!(
+        "[bridge] Plugin {} installed successfully (qrLogin={}, compat={})",
+        plugin_id,
+        supports_qr_login,
+        if compat_warning.is_some() {
+            "warn"
+        } else {
+            "ok"
+        }
+    );
 
     Ok(json!({
         "pluginId": plugin_id,
@@ -1723,7 +2009,10 @@ async fn check_plugin_compat(pkg_json_path: &std::path::Path) -> Option<String> 
     }
 
     // Simple date-version comparison (YYYY.M.DD format)
-    let shim_base = SHIM_COMPAT_VERSION.split('-').next().unwrap_or(SHIM_COMPAT_VERSION);
+    let shim_base = SHIM_COMPAT_VERSION
+        .split('-')
+        .next()
+        .unwrap_or(SHIM_COMPAT_VERSION);
     let parse_ver = |s: &str| -> (u32, u32, u32) {
         let parts: Vec<u32> = s.split('.').filter_map(|p| p.parse().ok()).collect();
         (
@@ -1869,12 +2158,16 @@ async fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> Res
         .await
         .map_err(|e| format!("Failed to read dir {:?}: {}", src, e))?;
 
-    while let Some(entry) = entries.next_entry().await
+    while let Some(entry) = entries
+        .next_entry()
+        .await
         .map_err(|e| format!("Failed to read entry in {:?}: {}", src, e))?
     {
         let src_path = entry.path();
         let dst_path = dst.join(entry.file_name());
-        let file_type = entry.file_type().await
+        let file_type = entry
+            .file_type()
+            .await
             .map_err(|e| format!("Failed to get file type for {:?}: {}", src_path, e))?;
 
         if file_type.is_dir() {
@@ -1907,7 +2200,11 @@ async fn install_sdk_shim<R: tauri::Runtime>(
 
     copy_dir_recursive(&shim_src, &shim_dst).await?;
 
-    ulog_info!("[bridge] SDK shim installed from {:?} → {:?}", shim_src, shim_dst);
+    ulog_info!(
+        "[bridge] SDK shim installed from {:?} → {:?}",
+        shim_src,
+        shim_dst
+    );
 
     // Patch @larksuiteoapi/node-sdk to use a fetch-based axios adapter.
     // Originally added (pre-0.2.0) for Bun, where the default axios http
@@ -1976,7 +2273,9 @@ async fn patch_lark_sdk_use_fetch_adapter(plugin_dir: &std::path::Path) {
     if let Err(e) = tokio::fs::write(&sdk_file, patched).await {
         ulog_warn!("[bridge] Failed to patch Lark SDK for Bun: {}", e);
     } else {
-        ulog_info!("[bridge] Patched @larksuiteoapi/node-sdk with fetch adapter for Bun compatibility");
+        ulog_info!(
+            "[bridge] Patched @larksuiteoapi/node-sdk with fetch adapter for Bun compatibility"
+        );
     }
 }
 
@@ -2001,10 +2300,7 @@ fn resolve_npm_pkg_name(npm_spec: &str) -> String {
 }
 
 /// Try to read plugin manifest from node_modules
-async fn read_plugin_manifest(
-    plugin_dir: &std::path::Path,
-    npm_spec: &str,
-) -> serde_json::Value {
+async fn read_plugin_manifest(plugin_dir: &std::path::Path, npm_spec: &str) -> serde_json::Value {
     let pkg_name = resolve_npm_pkg_name(npm_spec);
 
     // Try reading openclaw.plugin.json

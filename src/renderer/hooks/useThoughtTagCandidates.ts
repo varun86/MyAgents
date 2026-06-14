@@ -36,7 +36,7 @@
 
 import { useMemo } from 'react';
 import type { Thought } from '@/../shared/types/thought';
-import type { Project } from '@/config/types';
+import { isProjectVisibleToUser, type Project } from '@/config/types';
 import { sanitizeForTag } from '@/utils/parseThoughtTags';
 
 /**
@@ -44,9 +44,9 @@ import { sanitizeForTag } from '@/utils/parseThoughtTags';
  *
  * Pass `projects` as `null`/`undefined` when you only want history tags
  * (e.g. a consumer that doesn't have workspace context). Internal
- * workspaces (`project.internal === true`) are skipped to stay aligned
- * with the Launcher's own visibility filter — users should never see a
- * tag for a workspace that's hidden from their own workspace panel.
+ * workspaces hidden by the Launcher's own visibility filter are skipped —
+ * users should never see a tag for a workspace that's hidden from their own
+ * workspace panel.
  */
 export function useThoughtTagCandidates(
   thoughts: readonly Thought[] | null | undefined,
@@ -57,12 +57,12 @@ export function useThoughtTagCandidates(
   // `loadAppConfig()` fires on IM Bot / Cron / CLI SSE events and hands
   // us a fresh `projects` array each time even when names haven't
   // changed; without this layer the outer useMemo would re-sort and
-  // re-allocate on every such event. We also drop `internal` here so
-  // the inner merge code stays trivial.
+  // re-allocate on every such event. We also drop non-visible projects here
+  // so the inner merge code stays trivial.
   const workspaceNames = useMemo(() => {
     if (!projects) return '';
     return projects
-      .filter((p) => !p.internal)
+      .filter(isProjectVisibleToUser)
       .map((p) => (p.displayName?.trim() || p.name?.trim() || '').trim())
       .filter(Boolean)
       .sort()

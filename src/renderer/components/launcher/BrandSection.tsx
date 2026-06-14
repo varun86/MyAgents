@@ -54,6 +54,9 @@ interface BrandSectionProps {
     selectedModel?: string;
     onProviderChange?: (id: string, targetModel?: string) => void;
     onModelChange?: (id: string) => void;
+    /** #324 — 推理强度 (pass-through to SimpleChatInput) */
+    reasoningEffort?: string;
+    onReasoningEffortChange?: (effort: string) => void;
     permissionMode?: PermissionMode;
     onPermissionModeChange?: (mode: PermissionMode) => void;
     apiKeys?: Record<string, string>;
@@ -99,6 +102,8 @@ export default memo(function BrandSection({
     selectedModel,
     onProviderChange,
     onModelChange,
+    reasoningEffort,
+    onReasoningEffortChange,
     permissionMode,
     onPermissionModeChange,
     apiKeys,
@@ -417,6 +422,9 @@ export default memo(function BrandSection({
                 <h1 className="brand-title mb-2 text-[2.5rem] text-[var(--ink)] md:text-[3.5rem]">
                     MyAgents
                 </h1>
+                {/* eslint-disable-next-line no-restricted-syntax -- 品牌 slogan
+                    15px/17px 是 DESIGN.md §15.2 立档的展示型字号（display 用途），
+                    不属于正文 Type Scale；这是全仓唯一豁免点（PRD 0.2.34）。 */}
                 <p className="brand-slogan text-center text-[15px] text-[var(--ink-muted)] md:text-[17px]">
                     每个人都应享受智能的推背感，欢迎来到言出法随的世界
                 </p>
@@ -475,6 +483,8 @@ export default memo(function BrandSection({
                                 selectedModel={selectedModel}
                                 onProviderChange={onProviderChange}
                                 onModelChange={onModelChange}
+                                reasoningEffort={reasoningEffort}
+                                onReasoningEffortChange={onReasoningEffortChange}
                                 permissionMode={permissionMode}
                                 onPermissionModeChange={onPermissionModeChange}
                                 /* PRD 0.2.7: workspace_files invokes need a path; selectedProject
@@ -551,7 +561,7 @@ export default memo(function BrandSection({
                     )}
                 </div>
                 {!hasAnyProvider && (
-                    <p className="mt-6 text-center text-[13px] text-[var(--ink-muted)]">
+                    <p className="mt-6 text-center text-sm text-[var(--ink-muted)]">
                         ✨ 只需一步，即刻开启 AI 之旅 —
                         <button
                             type="button"

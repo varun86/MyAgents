@@ -5,6 +5,7 @@ import {
     sortSessionsByLastActive,
     computeCronBotInfoMap,
     computeSessionTagsMap,
+    resolveFloatingBallBoundSession,
     getSnapshot,
     __resetTaskCenterStoreForTest,
 } from './taskCenterStore';
@@ -56,19 +57,62 @@ describe('computeSessionTagsMap', () => {
             { status: 'running', sessionId: 's-at', schedule: { kind: 'at' } },
             { status: 'idle', sessionId: 's-none', schedule: { kind: 'every' } },
         ] as unknown as CronTask[];
-        const m = computeSessionTagsMap(sessions, crons, [], noStatuses);
+        const m = computeSessionTagsMap(sessions, crons, [], noStatuses, null);
         expect(m.get('s-cron')).toEqual([{ type: 'cron' }]);
         expect(m.get('s-at')).toEqual([{ type: 'background' }]);
         expect(m.has('s-none')).toBe(false);
     });
     it('tags explicit background session ids', () => {
-        const m = computeSessionTagsMap([sess('bg', 'x')], [], ['bg'], noStatuses);
+        const m = computeSessionTagsMap([sess('bg', 'x')], [], ['bg'], noStatuses, null);
         expect(m.get('bg')).toEqual([{ type: 'background' }]);
     });
     it('prefers internalSessionId over sessionId for cron mapping', () => {
         const crons = [{ status: 'running', sessionId: 'outer', internalSessionId: 'internal', schedule: { kind: 'every' } }] as unknown as CronTask[];
-        const m = computeSessionTagsMap([sess('internal', 'x')], crons, [], noStatuses);
+        const m = computeSessionTagsMap([sess('internal', 'x')], crons, [], noStatuses, null);
         expect(m.get('internal')).toEqual([{ type: 'cron' }]);
+    });
+    it('悬浮球当前绑定的 session → floatingBall 标签（与其它标签可叠加）', () => {
+        const m = computeSessionTagsMap(
+            [sess('fb-sid', 'x'), sess('other', 'y')],
+            [{ status: 'running', sessionId: 'fb-sid', schedule: { kind: 'every' } }] as unknown as CronTask[],
+            [],
+            noStatuses,
+            'fb-sid',
+        );
+        expect(m.get('fb-sid')).toEqual([{ type: 'floatingBall' }, { type: 'cron' }]);
+        expect(m.has('other')).toBe(false);
+    });
+});
+
+describe('resolveFloatingBallBoundSession', () => {
+    it('双门控（devGate + enabled）都开才视为渠道在线、返回绑定 sid', () => {
+        expect(
+            resolveFloatingBallBoundSession({
+                floatingBallDevGate: true,
+                floatingBallEnabled: true,
+                floatingBallSessionId: 'sid-1',
+            }),
+        ).toBe('sid-1');
+    });
+    it('任一门控关闭 / 无绑定 / 无配置 → null（IM channel offline 同语义，不打标）', () => {
+        expect(
+            resolveFloatingBallBoundSession({
+                floatingBallDevGate: false,
+                floatingBallEnabled: true,
+                floatingBallSessionId: 'sid-1',
+            }),
+        ).toBeNull();
+        expect(
+            resolveFloatingBallBoundSession({
+                floatingBallDevGate: true,
+                floatingBallEnabled: false,
+                floatingBallSessionId: 'sid-1',
+            }),
+        ).toBeNull();
+        expect(
+            resolveFloatingBallBoundSession({ floatingBallDevGate: true, floatingBallEnabled: true }),
+        ).toBeNull();
+        expect(resolveFloatingBallBoundSession(null)).toBeNull();
     });
 });
 

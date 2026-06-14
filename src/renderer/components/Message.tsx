@@ -11,6 +11,7 @@ import { parseWidgetTags, hasWidgetTags } from '@/components/tools/widgetTagPars
 import Tip from '@/components/Tip';
 import ToolAttachmentGallery from '@/components/tools/ToolAttachmentGallery';
 import { buildReplyMarkdown, downloadMarkdown, localDateStr } from '@/utils/markdownExport';
+import { groupContentBlocksForDisplay } from '@/utils/contentBlockDisplay';
 import { useImagePreview } from '@/context/ImagePreviewContext';
 import type { ContentBlock, Message as MessageType } from '@/types/chat';
 import { SOURCE_LABELS, type MessageSource } from '../../shared/types/im';
@@ -226,7 +227,7 @@ function renderWidgetSegments(text: string, isLoading: boolean): ReactNode {
     if (seg.type === 'text') {
       return (
         <div key={`t-${si}`} className="flex justify-start w-full px-1 py-1 select-none">
-          <div className="w-full max-w-none text-[var(--ink)] select-text">
+          <div className="ai-message-content w-full max-w-none text-[var(--ink)] select-text">
             <Markdown>{seg.content}</Markdown>
           </div>
         </div>
@@ -336,7 +337,7 @@ const Message = memo(function Message({ message, isLoading = false, onRewind, on
       const displayText = taskNotif.description || taskNotif.summary || taskNotif.taskId || '后台任务';
       return (
         <div className="flex justify-start w-full px-4 py-1.5 select-none">
-          <div className="flex items-center gap-2 rounded-lg px-3 py-2 text-[12px] text-[var(--ink-muted)]">
+          <div className="flex items-center gap-2 rounded-lg px-3 py-2 text-xs text-[var(--ink-muted)]">
             <StatusIcon className="h-3.5 w-3.5 flex-shrink-0" style={{ color: statusColor }} />
             <span>后台任务</span>
             <span className="font-medium text-[var(--ink-secondary)]">&ldquo;{displayText}&rdquo;</span>
@@ -379,16 +380,18 @@ const Message = memo(function Message({ message, isLoading = false, onRewind, on
         <div className="flex w-full flex-col items-end">
           {/* IM source indicator */}
           {isImMessage && (
-            <div className="mr-2 mb-1 flex items-center gap-1 text-[11px] text-[var(--ink-muted)]">
+            <div className="mr-2 mb-1 flex items-center gap-1 text-xs text-[var(--ink-muted)]">
               {imSource?.includes('group') && <span>👥</span>}
               <span>via {SOURCE_LABELS[imSource as MessageSource] ?? imSource}</span>
             </div>
           )}
-          <article className="relative w-fit max-w-[85%] rounded-2xl border border-[var(--line)] bg-[var(--paper-elevated)] p-4 text-base leading-relaxed text-[var(--ink)] shadow-md select-text">
+          {/* text-base 自带 1.7 行高（@theme 配对），与 .ai-message-content 一致 —— 用户气泡
+              与 AI 正文同为 prose 档，行高不再分叉（PRD 0.2.34 P2-5） */}
+          <article className="relative w-fit max-w-[85%] rounded-2xl border border-[var(--line)] bg-[var(--paper-elevated)] p-4 text-base text-[var(--ink)] shadow-md select-text">
             {/* System injection tag badge */}
             {systemTag && (
               <div className="mb-2 -mt-0.5">
-                <span className="inline-block rounded-md bg-[var(--accent-warm-subtle)] px-1.5 py-0.5 text-[11px] font-medium text-[var(--accent-warm)]">
+                <span className="inline-block rounded-md bg-[var(--accent-warm-subtle)] px-1.5 py-0.5 text-xs font-medium text-[var(--accent-warm)]">
                   {systemTag}
                 </span>
               </div>
@@ -421,7 +424,7 @@ const Message = memo(function Message({ message, isLoading = false, onRewind, on
                 <button
                   type="button"
                   onClick={() => setUserExpanded(true)}
-                  className="flex w-full items-center justify-center gap-1 rounded-b-2xl bg-[var(--paper-elevated)] py-1.5 text-[12px] font-medium text-[var(--ink-muted)] transition-colors hover:text-[var(--ink)]"
+                  className="flex w-full items-center justify-center gap-1 rounded-b-2xl bg-[var(--paper-elevated)] py-1.5 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:text-[var(--ink)]"
                 >
                   <ChevronDown className="size-3.5" />
                   展开
@@ -431,7 +434,7 @@ const Message = memo(function Message({ message, isLoading = false, onRewind, on
           </article>
           {/* 操作栏：时间 + 图标按钮，hover 淡入 */}
           <div className={`mr-2 mt-1 flex items-center gap-2 transition-opacity ${userHovered ? 'opacity-100' : 'opacity-0'}`}>
-            <span className="text-[11px] text-[var(--ink-muted)] mr-1">{formatTimestamp(message.timestamp)}</span>
+            <span className="text-xs text-[var(--ink-muted)] mr-1">{formatTimestamp(message.timestamp)}</span>
             {onRewind && (
               <span data-rewind-btn>
                 <Tip label="时间回溯">
@@ -474,7 +477,12 @@ const Message = memo(function Message({ message, isLoading = false, onRewind, on
               {renderWidgetSegments(message.content, isLoading)}
             </div>
           ) : (
-            <div className="text-[var(--ink)] select-text">
+            /* ai-message-content：聊天 AI 正文的 prose 上下文（16px/1.7/0.01em）。
+               v2.4 之前该 CSS 类是死代码（定义了却从未接线），聊天正文实际靠 UA 默认
+               16px + 段落 leading-relaxed——DESIGN.md 宣称的 1.7 从未上屏。三个
+               assistant 分支（string/blocks/widget-segment）+ 5 个预览面板现在共享
+               同一容器类（PRD 0.2.34 Part 2）。 */
+            <div className="ai-message-content text-[var(--ink)] select-text">
               {/* Tail-fade only while text is the actively-streaming edge — `streamingTextActive`
                   clears on the text block's content-block-stop, so it doesn't linger during a
                   slow gap before the next block (string-content path). */}
@@ -487,37 +495,7 @@ const Message = memo(function Message({ message, isLoading = false, onRewind, on
     );
   }
 
-  // Group consecutive thinking/tool blocks together, merge adjacent text blocks
-  const groupedBlocks: (ContentBlock | ContentBlock[])[] = [];
-  let currentGroup: ContentBlock[] = [];
-
-  for (const block of message.content) {
-    if (block.type === 'text') {
-      // If we have a group, add it before the text block
-      if (currentGroup.length > 0) {
-        groupedBlocks.push([...currentGroup]);
-        currentGroup = [];
-      }
-      // Merge consecutive text blocks into one (defensive: prevents split rendering)
-      const prev = groupedBlocks[groupedBlocks.length - 1];
-      if (prev && !Array.isArray(prev) && prev.type === 'text') {
-        groupedBlocks[groupedBlocks.length - 1] = {
-          ...prev,
-          text: (prev.text || '') + '\n\n' + (block.text || '')
-        };
-      } else {
-        groupedBlocks.push(block);
-      }
-    } else if (block.type === 'thinking' || block.type === 'tool_use' || block.type === 'server_tool_use') {
-      // Add to current group (server_tool_use is treated like tool_use for display)
-      currentGroup.push(block);
-    }
-  }
-
-  // Add any remaining group
-  if (currentGroup.length > 0) {
-    groupedBlocks.push(currentGroup);
-  }
+  const groupedBlocks = groupContentBlocksForDisplay(message.content);
 
   // Determine which BlockGroup is the latest active section
   // Find the last BlockGroup index
@@ -579,7 +557,7 @@ const Message = memo(function Message({ message, isLoading = false, onRewind, on
                       key={index}
                       className="flex justify-start w-full px-1 py-1 select-none"
                     >
-                      <div className="w-full max-w-none text-[var(--ink)] select-text">
+                      <div className="ai-message-content w-full max-w-none text-[var(--ink)] select-text">
                         <Markdown streaming={isLoading && index === groupedBlocks.length - 1 && !!message.streamingTextActive}>{item.text}</Markdown>
                       </div>
                     </div>

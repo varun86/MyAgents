@@ -69,6 +69,18 @@ export interface ModelEntity {
   source?: 'preset' | 'discovered' | 'manual';
 }
 
+const PROVIDER_MODEL_LIST_SEPARATOR_RE = /[,，]/;
+
+export function splitProviderModelInput(value: string): string[] {
+  const trimmed = value.trim();
+  if (!trimmed) return [];
+  if (!PROVIDER_MODEL_LIST_SEPARATOR_RE.test(trimmed)) return [trimmed];
+  return trimmed
+    .split(PROVIDER_MODEL_LIST_SEPARATOR_RE)
+    .map(part => part.trim())
+    .filter(Boolean);
+}
+
 /**
  * Model type for model selection (API code)
  */
@@ -272,6 +284,9 @@ export interface Provider {
 /**
  * Project/workspace configuration
  */
+export type WorkspaceType = 'user' | 'system-preset';
+export type SystemPresetWorkspaceId = 'mino';
+
 export interface Project {
   id: string;
   name: string;
@@ -306,7 +321,17 @@ export interface Project {
   templateId?: string;
   /** Template source. Built-in templates can carry product-level Agent defaults. */
   templateSource?: WorkspaceTemplateSource;
+  /** Lifecycle owner. Missing means ordinary user workspace for backward compatibility. */
+  workspaceType?: WorkspaceType;
+  /** Stable ID for a system-preset workspace instance. Current preset set: mino. */
+  systemPresetId?: SystemPresetWorkspaceId;
+  /** Soft-delete flag. Hidden projects remain persisted but are excluded from user-facing lists. */
+  hidden?: boolean;
+  /** ISO timestamp for soft deletion. Diagnostic/future restore metadata only. */
+  hiddenAt?: string;
 }
+
+export type ProjectPatch = Partial<Omit<Project, 'id'>>;
 
 // ===== Workspace Template Types =====
 
@@ -336,6 +361,52 @@ export interface WorkspaceTemplate {
 }
 
 export const DEFAULT_BUNDLED_WORKSPACE_TEMPLATE_ID = 'mino';
+export const DEFAULT_SYSTEM_PRESET_WORKSPACE_ID: SystemPresetWorkspaceId = 'mino';
+
+export function isSystemPresetProject(
+  project: Pick<Project, 'workspaceType' | 'systemPresetId'> | null | undefined,
+): boolean {
+  return project?.workspaceType === 'system-preset' && !!project.systemPresetId;
+}
+
+export function isProjectVisibleToUser(
+  project: Pick<Project, 'internal' | 'hidden'> | null | undefined,
+): boolean {
+  return !!project && project.internal !== true && project.hidden !== true;
+}
+
+export function getSystemPresetProjectMetadata(
+  presetId: SystemPresetWorkspaceId,
+): ProjectPatch {
+  switch (presetId) {
+    case 'mino':
+      return {
+        workspaceType: 'system-preset',
+        systemPresetId: 'mino',
+        icon: 'lightning',
+        displayName: 'Mino',
+        templateId: DEFAULT_BUNDLED_WORKSPACE_TEMPLATE_ID,
+        templateSource: 'builtin',
+      };
+  }
+}
+
+export function getSystemPresetProjectMetadataPatch(
+  project: Project,
+  presetId: SystemPresetWorkspaceId,
+): ProjectPatch {
+  const metadata = getSystemPresetProjectMetadata(presetId);
+  const patch: ProjectPatch = {};
+
+  if (metadata.workspaceType && project.workspaceType !== metadata.workspaceType) patch.workspaceType = metadata.workspaceType;
+  if (metadata.systemPresetId && project.systemPresetId !== metadata.systemPresetId) patch.systemPresetId = metadata.systemPresetId;
+  if (metadata.templateId && project.templateId !== metadata.templateId) patch.templateId = metadata.templateId;
+  if (metadata.templateSource && project.templateSource !== metadata.templateSource) patch.templateSource = metadata.templateSource;
+  if (!project.icon && metadata.icon) patch.icon = metadata.icon;
+  if (!project.displayName && metadata.displayName) patch.displayName = metadata.displayName;
+
+  return patch;
+}
 
 /**
  * Preset workspace templates bundled with the app
@@ -462,6 +533,14 @@ export interface AppConfig {
   // UI preferences
   theme: 'light' | 'dark' | 'system';
   minimizeToTray: boolean;
+  /** 全局「始终阻止电脑睡眠」开关（PRD 0.2.35）。
+   *  默认 `false` ⇒ 沿用「智能模式」：AI 跑中由 sidecar.rs / cron_task.rs 各自持锁。
+   *  `true` ⇒ 进程启动起就持一把常开 wake-lock，直到关闭开关 / 进程结束。
+   *  写盘 + acquire/drop OS 锁 + emit + 托盘 set_checked 由 Rust 的
+   *  `cmd_set_force_wake_lock` 原子完成；ConfigProvider.updateConfig 识别到该
+   *  字段时**特化分支**，不走默认 atomicModifyConfig（避免 disk/锁中间态打架，
+   *  PRD §3.3 / D2）。 */
+  forceWakeLock?: boolean;
   /** 对话输入框发送键偏好。缺省视同 'enter'（Enter 发送，Shift+Enter 换行）。
    *  'modEnter' 则 ⌘/Ctrl+Enter 发送、Enter 换行。统一作用于全部"和 AI 对话"的
    *  输入：主对话框 / AI 小助理 / 问题反馈（见 utils/chatSendKey.ts）。 */
@@ -469,6 +548,34 @@ export interface AppConfig {
   showDevTools: boolean; // 显示开发者工具 (Logs/System Info)
   multiAgentRuntime?: boolean; // 多 Agent Runtime 模式（开发者，默认关闭）
   experimentalSplitView?: boolean; // 实验性：文件预览在右侧分屏而非弹窗
+  /** 实验室：用户注册 CLI 工具注册表（PRD 0.2.36）。默认关。
+   *  只控制工具箱里的 CLI 工具注册/管理/AI 自动发现；不影响 myagents CLI
+   *  本身以及 cron / task / widget / thought 等已发布 CLI 能力。 */
+  cliToolRegistryEnabled?: boolean;
+  /** 开发者总门控：桌面悬浮球（PRD 0.2.35，先开发不发布）。默认关。
+   *  关闭时设置页入口与悬浮球本体均不存在（D10）。 */
+  floatingBallDevGate?: boolean;
+  /** 悬浮球本体显隐开关（总门控开启后才有意义）。 */
+  floatingBallEnabled?: boolean;
+  /** 悬浮球本体外观。缺省视同 'pet'（PRD 0.2.34 floating_ball_pet_mode Phase 1）。 */
+  floatingBallAppearance?: 'pet' | 'orb';
+  /** 当前选中的桌宠资源包。缺省视同内置 Mino。 */
+  floatingBallPetId?: string;
+  /** 桌面渠道持久 session id（伴侣窗自铸 UUID v4；轮换见下两个字段，PRD §6.2）。 */
+  floatingBallSessionId?: string;
+  /** 上述 session 的铸造日期（本地 YYYY-MM-DD）。与今天不同时轮换新 session。 */
+  floatingBallSessionDate?: string;
+  /** 上述 session 绑定的工作区路径。session 身份是 (id, workspace, date) 三元组——
+   *  SDK 的对话树按工作区落盘，跨工作区 resume 必然 "No conversation found"；
+   *  默认工作区变更时必须轮换新 session（验收实战教训）。 */
+  floatingBallSessionWorkspace?: string;
+  /** 悬浮球工作区绑定覆盖（PRD 0.2.34 §14 D17）。null / 缺省 = 跟随主端默认
+   *  工作区（config.defaultWorkspacePath）；设为具体工作区路径 = 钉死在该工作区
+   *  （不再跟随默认）。切换它触发 session 轮换（铸新 owned session）。 */
+  floatingBallWorkspaceOverride?: string | null;
+  /** 鼠标悬停悬浮球时自动展开半透明伴侣窗。缺省视同 true；关闭后点击
+   *  悬浮球仍会打开 pin 态窗口。 */
+  floatingBallHoverPeekEnabled?: boolean;
   /** 开发者：定期从 LiteLLM (GitHub) 拉取 model_prices_and_context_window.json，
    *  作为模型 contextLength/maxOutputTokens 的最低优先级兜底数据源。缺省视同 true。
    *  抓取在 Rust 侧（启动条件检查 + 24h interval，ETag/If-None-Match 增量）。 */
@@ -535,6 +642,13 @@ export interface AppConfig {
   // Extra args for MCP servers (appended to preset args)
   // undefined = never customized, [] = user explicitly cleared
   mcpServerArgs?: Record<string, string[]>;
+
+  // ===== CLI Tool Registry (PRD 0.2.36) =====
+  // Per-tool environment variables (API keys etc.) for registered CLI tools
+  // (~/.myagents/tools/). Same shape as mcpServerEnv. The ~/.myagents/bin
+  // launcher shims read this at runtime, so env changes apply on next launch
+  // without re-registration.
+  cliToolEnv?: Record<string, Record<string, string>>;
 
   // ===== Network Proxy (General) =====
   // HTTP/SOCKS5 proxy settings for external network requests
@@ -765,10 +879,12 @@ export const PRESET_PROVIDERS: Provider[] = [
       timeout: 600000,
       disableNonessential: true,
     },
-    modelAliases: { sonnet: 'glm-5.1', opus: 'glm-5.1', haiku: 'glm-5.1' },
+    modelAliases: { sonnet: 'glm-5.1', opus: 'glm-5.2', haiku: 'glm-5.1' },
     models: [
+      // GLM-5.2 Coding Plan 官方接入文档公布 1M 上下文 / 131072 max tokens；
       // GLM-5.1 / 5-Turbo 官方公布 200K 上下文（docs.bigmodel.cn / z.ai），其余系列以 LiteLLM 数据为准
       // GLM-5.x / 4.x chat 端点为纯文本；视觉能力在独立的 GLM-4V / GLM-5V 模型族
+      { model: 'glm-5.2', modelName: 'GLM 5.2', modelSeries: 'zhipu', contextLength: 1_000_000, maxOutputTokens: 131_072, inputModalities: ['text'] },
       { model: 'glm-5.1', modelName: 'GLM 5.1', modelSeries: 'zhipu', contextLength: 204_800, maxOutputTokens: 131_072, inputModalities: ['text'] },
       { model: 'glm-5-turbo', modelName: 'GLM 5 Turbo', modelSeries: 'zhipu', contextLength: 202_752, maxOutputTokens: 131_072, inputModalities: ['text'] },
       { model: 'glm-4.7', modelName: 'GLM 4.7', modelSeries: 'zhipu', contextLength: 200_000, maxOutputTokens: 128_000, inputModalities: ['text'] },
@@ -797,10 +913,12 @@ export const PRESET_PROVIDERS: Provider[] = [
       baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
       timeout: 600000,
     },
-    modelAliases: { sonnet: 'glm-5.1', opus: 'glm-5.1', haiku: 'glm-5.1' },
+    modelAliases: { sonnet: 'glm-5.1', opus: 'glm-5.2', haiku: 'glm-5.1' },
     models: [
+      // GLM-5.2 Coding Plan 官方接入文档公布 1M 上下文 / 131072 max tokens；
       // GLM-5.1 / 5-Turbo 官方公布 200K 上下文（docs.bigmodel.cn / z.ai），其余系列以 LiteLLM 数据为准
       // GLM-5.x / 4.x chat 端点为纯文本；视觉能力在独立的 GLM-4V / GLM-5V 模型族
+      { model: 'glm-5.2', modelName: 'GLM 5.2', modelSeries: 'zhipu', contextLength: 1_000_000, maxOutputTokens: 131_072, inputModalities: ['text'] },
       { model: 'glm-5.1', modelName: 'GLM 5.1', modelSeries: 'zhipu', contextLength: 204_800, maxOutputTokens: 131_072, inputModalities: ['text'] },
       { model: 'glm-5-turbo', modelName: 'GLM 5 Turbo', modelSeries: 'zhipu', contextLength: 202_752, maxOutputTokens: 131_072, inputModalities: ['text'] },
       { model: 'glm-4.7', modelName: 'GLM 4.7', modelSeries: 'zhipu', contextLength: 200_000, maxOutputTokens: 128_000, inputModalities: ['text'] },
@@ -1290,7 +1408,10 @@ export const DEFAULT_CONFIG: AppConfig = {
   backgroundAgentPermissionMode: 'inherit', // background agents inherit granted perms; nothing wider (#264)
   theme: 'system',
   minimizeToTray: true,   // 默认开启最小化到托盘
+  forceWakeLock: false,   // 默认关闭常开阻睡（智能模式仍在跑，覆盖 AI 工作期间）
   showDevTools: false,
+  cliToolRegistryEnabled: false, // 默认关闭用户注册 CLI 工具注册表（实验室）
+  floatingBallHoverPeekEnabled: true,
   liteLLMModelDataRefresh: true, // 默认开启 LiteLLM 模型数据兜底刷新（开发者可关）
   claudeTranscriptCleanupPeriodDays: DEFAULT_CLAUDE_TRANSCRIPT_CLEANUP_PERIOD_DAYS,
   autoStart: false,       // 默认不开启开机启动

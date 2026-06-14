@@ -1,6 +1,6 @@
 [package]
 name = "myagents"
-version = "0.2.33"
+version = "0.2.34"
 description = "MyAgents - Desktop Claude Code for everyone"
 authors = ["MyAgents Team <myagents.io@gmail.com>"]
 license = "Apache-2.0"
@@ -28,7 +28,10 @@ tauri-build = { version = "2.5.3", features = [] }
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
-tauri = { version = "2.9.6", features = ["tray-icon", "devtools", "image-png", "unstable", "webview-data-url"] }
+# `macos-private-api` is required for transparent webview windows on macOS —
+# the floating ball / companion panels (PRD 0.2.35) are transparent NSPanels.
+# Main window is unaffected (it never sets transparent(true)).
+tauri = { version = "2.9.6", features = ["tray-icon", "devtools", "image-png", "unstable", "webview-data-url", "macos-private-api", "protocol-asset"] }
 tauri-plugin-log = "2"
 tauri-plugin-fs = "2.4.5"
 tauri-plugin-dialog = "2.6.0"
@@ -66,6 +69,8 @@ tantivy-jieba = "0.11"
 notify-debouncer-full = "0.6"
 sysinfo = { version = "0.33", default-features = false, features = ["system"] }
 trash = "5.2.3"
+image = { version = "0.25.10", default-features = false, features = ["png", "webp"] }
+zip = { version = "2.4.2", default-features = false, features = ["deflate-zlib"] }
 
 # Pattern 5: stale-lock recovery needs `kill(pid, 0)` for liveness probing on Unix.
 # The `signal` feature pulls in just `nix::sys::signal::kill` + `nix::unistd::Pid`,
@@ -79,6 +84,20 @@ nix = { version = "0.29", default-features = false, features = ["signal"] }
 # U+F74F from the DOM value when the leak happens.
 # See tauri-apps/tauri#5685, tauri-apps/wry#769, tauri-apps/tauri#10194.
 [target.'cfg(target_os = "macos")'.dependencies]
+# Floating ball (PRD 0.2.35): NSPanel windows that never activate the app.
+# Git branch dependency (not on crates.io) — pinned to a commit per PRD §10.
+tauri-nspanel = { git = "https://github.com/ahkohd/tauri-nspanel", rev = "a3122e894383aa068ec5365a42994e3ac94ba1b6" }
+# Frontmost app / window title probe (zero-permission context, PRD §5.1).
+active-win-pos-rs = "0.11"
+# CGDisplay 枚举（线程安全，不碰 NSScreen/MainThreadMarker）：📷 截"前台
+# 窗口所在的那块显示器"用——与 active-win-pos-rs 的 kCGWindowBounds 同
+# CG 坐标空间。版本对齐 lock 里既有传递依赖（0.22），零新增编译单元。
+core-graphics = "0.22"
+# Selected-text capture: AX API first, clipboard round-trip fallback. Only
+# ever invoked on explicit summon (PRD D3 red line), never on hover.
+get-selected-text = "0.1"
+# AXIsProcessTrusted probe + one-shot system prompt for the permission flow.
+macos-accessibility-client = "0.0.1"
 objc2 = "0.6"
 objc2-foundation = { version = "0.3.2", features = ["NSString"] }
 objc2-web-kit = { version = "0.3.2", features = ["WKWebView", "block2"] }
@@ -90,13 +109,16 @@ objc2-web-kit = { version = "0.3.2", features = ["WKWebView", "block2"] }
 # can import the AppKit types.
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSWindow", "NSView", "NSResponder", "NSButton", "NSControl", "std"] }
 
-# Pattern 5: Windows pid-liveness + start-time probe via OpenProcess +
-# GetProcessTimes (PROCESS_QUERY_LIMITED_INFORMATION). Minimal feature set —
-# version 0.59 is already pulled transitively, so no new lock entry.
+# Windows platform APIs:
+# - pid-liveness/start-time probes via PROCESS_QUERY_LIMITED_INFORMATION
+# - floating-ball tool-window styles, no-activate behavior, focus restoration
+# - wake-lock power requests below
+# Minimal feature set — version 0.59 is already pulled transitively, so no new lock entry.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
     # `wake_lock::windows::PlatformImpl` calls `PowerCreateRequest` +
     # `PowerSetRequest` (PowerRequestSystemRequired | PowerRequestAwayModeRequired)
     # to keep the OS from idle-sleeping during long-running cron tasks.

@@ -5,7 +5,7 @@ use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 
 use super::types::{BufferedMessage, ImMessage, MessageBufferData};
-use crate::{ulog_info, ulog_warn, ulog_debug};
+use crate::{ulog_debug, ulog_info, ulog_warn};
 
 /// Max buffered messages before oldest are dropped
 const MAX_BUFFER_SIZE: usize = 100;
@@ -27,21 +27,19 @@ impl MessageBuffer {
     pub fn load_from_disk(path: &Path) -> Self {
         let queue = if path.exists() {
             match std::fs::read_to_string(path) {
-                Ok(content) => {
-                    match serde_json::from_str::<MessageBufferData>(&content) {
-                        Ok(data) => {
-                            ulog_info!(
-                                "[im-buffer] Loaded {} buffered messages from disk",
-                                data.messages.len()
-                            );
-                            data.messages
-                        }
-                        Err(e) => {
-                            ulog_warn!("[im-buffer] Failed to parse buffer file: {}", e);
-                            VecDeque::new()
-                        }
+                Ok(content) => match serde_json::from_str::<MessageBufferData>(&content) {
+                    Ok(data) => {
+                        ulog_info!(
+                            "[im-buffer] Loaded {} buffered messages from disk",
+                            data.messages.len()
+                        );
+                        data.messages
                     }
-                }
+                    Err(e) => {
+                        ulog_warn!("[im-buffer] Failed to parse buffer file: {}", e);
+                        VecDeque::new()
+                    }
+                },
                 Err(e) => {
                     ulog_warn!("[im-buffer] Failed to read buffer file: {}", e);
                     VecDeque::new()
@@ -91,10 +89,7 @@ impl MessageBuffer {
     /// Pop the first buffered message matching a session key (for same-peer replay).
     /// Returns None if no matching message is found.
     pub fn pop_for_session(&mut self, session_key: &str) -> Option<BufferedMessage> {
-        let idx = self
-            .queue
-            .iter()
-            .position(|m| m.session_key == session_key);
+        let idx = self.queue.iter().position(|m| m.session_key == session_key);
         idx.and_then(|i| self.queue.remove(i))
     }
 
@@ -102,7 +97,10 @@ impl MessageBuffer {
     /// for Pattern E's per-session drain loop (snapshot of queue length so a
     /// replay-then-buffer cycle can't loop infinitely).
     pub fn len_for_session(&self, session_key: &str) -> usize {
-        self.queue.iter().filter(|m| m.session_key == session_key).count()
+        self.queue
+            .iter()
+            .filter(|m| m.session_key == session_key)
+            .count()
     }
 
     /// Persist buffer to disk

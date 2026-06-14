@@ -32,7 +32,11 @@ pub(super) fn mime_to_ext(mime: &str) -> &str {
 
 /// Map file extension to MIME type (reverse of mime_to_ext).
 pub(super) fn ext_to_mime(filename: &str) -> &str {
-    let ext = filename.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    let ext = filename
+        .rsplit('.')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
     match ext.as_str() {
         "jpg" | "jpeg" => "image/jpeg",
         "png" => "image/png",
@@ -56,10 +60,7 @@ pub(super) fn sanitize_filename(name: &str) -> String {
     // Take only the last path component (strip any directory traversal)
     let base = name.rsplit(['/', '\\']).next().unwrap_or("file");
     // Remove null bytes and leading dots (prevent hidden files / `.` / `..`)
-    let cleaned: String = base
-        .chars()
-        .filter(|c| *c != '\0')
-        .collect();
+    let cleaned: String = base.chars().filter(|c| *c != '\0').collect();
     let cleaned = cleaned.trim_start_matches('.');
     if cleaned.is_empty() {
         "file".to_string()

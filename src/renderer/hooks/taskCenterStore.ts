@@ -46,7 +46,8 @@ import type { AgentStatusMap } from '@/hooks/useAgentStatuses';
 export type SessionTag =
     | { type: 'im'; platform: string }
     | { type: 'cron' }
-    | { type: 'background' };
+    | { type: 'background' }
+    | { type: 'floatingBall' };
 
 export interface TaskCenterData {
     sessions: SessionMetadata[];
@@ -93,12 +94,27 @@ export function filterTombstoned(data: SessionMetadata[], deleted: ReadonlySet<s
     return data.filter((s) => !deleted.has(s.id));
 }
 
-/** Compute session→tags map (im / cron / background). Pure. */
+/** 悬浮球渠道当前绑定的主 session（gate-aware）。与 IM 标签同语义：标的
+ *  是"此刻被渠道绑定的主 session"（live join），不是持久出身——功能关闭
+ *  时渠道视为离线、不打标（IM channel offline 同款行为）。Pure. */
+export function resolveFloatingBallBoundSession(
+    cfg: {
+        floatingBallDevGate?: boolean;
+        floatingBallEnabled?: boolean;
+        floatingBallSessionId?: string;
+    } | null,
+): string | null {
+    if (!cfg?.floatingBallDevGate || !cfg.floatingBallEnabled) return null;
+    return cfg.floatingBallSessionId ?? null;
+}
+
+/** Compute session→tags map (im / cron / background / floatingBall). Pure. */
 export function computeSessionTagsMap(
     sessions: SessionMetadata[],
     cronTasks: CronTask[],
     backgroundSessionIds: string[],
     agentStatuses: AgentStatusMap,
+    floatingBallSessionId: string | null,
 ): Map<string, SessionTag[]> {
     const map = new Map<string, SessionTag[]>();
     const imSessionPlatformMap = new Map<string, string>();
@@ -122,6 +138,9 @@ export function computeSessionTagsMap(
         const tags: SessionTag[] = [];
         const imPlatform = imSessionPlatformMap.get(session.id);
         if (imPlatform) tags.push({ type: 'im', platform: imPlatform });
+        if (floatingBallSessionId && session.id === floatingBallSessionId) {
+            tags.push({ type: 'floatingBall' });
+        }
         if (cronSessionIds.has(session.id)) tags.push({ type: 'cron' });
         if (bgSessionIds.has(session.id)) tags.push({ type: 'background' });
         if (tags.length > 0) map.set(session.id, tags);
@@ -155,6 +174,8 @@ interface StoreState {
     backgroundSessionIds: string[];
     agentStatuses: AgentStatusMap;
     agents: AgentConfig[];
+    /** 悬浮球渠道当前绑定的 session（gate-aware，见 resolveFloatingBallBoundSession）。 */
+    floatingBallSessionId: string | null;
     isLoading: boolean;
     error: string | null;
 }
@@ -166,6 +187,7 @@ let state: StoreState = {
     backgroundSessionIds: [],
     agentStatuses: {},
     agents: [],
+    floatingBallSessionId: null,
     isLoading: true,
     error: null,
 };
@@ -205,6 +227,7 @@ let mapsCache: {
     backgroundSessionIds: string[];
     agentStatuses: AgentStatusMap;
     agents: AgentConfig[];
+    floatingBallSessionId: string | null;
     sessionTagsMap: Map<string, SessionTag[]>;
     cronBotInfoMap: Map<string, { name: string; platform: string }>;
 } | null = null;
@@ -218,7 +241,8 @@ function buildSnapshot(): TaskCenterData {
         mapsCache.cronTasks !== state.cronTasks ||
         mapsCache.backgroundSessionIds !== state.backgroundSessionIds ||
         mapsCache.agentStatuses !== state.agentStatuses ||
-        mapsCache.agents !== state.agents
+        mapsCache.agents !== state.agents ||
+        mapsCache.floatingBallSessionId !== state.floatingBallSessionId
     ) {
         mapsCache = {
             sessions: state.sessions,
@@ -226,7 +250,14 @@ function buildSnapshot(): TaskCenterData {
             backgroundSessionIds: state.backgroundSessionIds,
             agentStatuses: state.agentStatuses,
             agents: state.agents,
-            sessionTagsMap: computeSessionTagsMap(state.sessions, state.cronTasks, state.backgroundSessionIds, state.agentStatuses),
+            floatingBallSessionId: state.floatingBallSessionId,
+            sessionTagsMap: computeSessionTagsMap(
+                state.sessions,
+                state.cronTasks,
+                state.backgroundSessionIds,
+                state.agentStatuses,
+                state.floatingBallSessionId,
+            ),
             cronBotInfoMap: computeCronBotInfoMap(state.agents),
         };
     }
@@ -296,7 +327,10 @@ async function fetchData(retryCount = 0, silent = false): Promise<void> {
         if (ok.tasks && isLatest('tasks', requestSeq)) patch.tasks = newTasks;
         if (ok.bg && isLatest('backgroundSessions', requestSeq)) patch.backgroundSessionIds = bgSessions;
         if (ok.status && isLatest('agentStatuses', requestSeq)) patch.agentStatuses = agentStatusResult;
-        if (ok.agents) patch.agents = appConfig?.agents ?? [];
+        if (ok.agents) {
+            patch.agents = appConfig?.agents ?? [];
+            patch.floatingBallSessionId = resolveFloatingBallBoundSession(appConfig);
+        }
         patch.isLoading = false;
         if (!silent) patch.error = null;
         setState(patch);
@@ -464,7 +498,7 @@ export function getSnapshot(): TaskCenterData {
 
 /** Test-only: reset all module state between cases. */
 export function __resetTaskCenterStoreForTest(): void {
-    state = { sessions: [], cronTasks: [], tasks: [], backgroundSessionIds: [], agentStatuses: {}, agents: [], isLoading: true, error: null };
+    state = { sessions: [], cronTasks: [], tasks: [], backgroundSessionIds: [], agentStatuses: {}, agents: [], floatingBallSessionId: null, isLoading: true, error: null };
     listeners.clear();
     deletedSessionIds.clear();
     mapsCache = null;

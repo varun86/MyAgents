@@ -31,6 +31,7 @@ import { useTabState, useTabActive } from '@/context/TabContext';
 import { useVirtuosoScroll } from '@/hooks/useVirtuosoScroll';
 import { useAgentStatuses } from '@/hooks/useAgentStatuses';
 import { useSessionSurfaces } from '@/hooks/useSessionSurfaces';
+import { resolveFloatingBallBoundSession } from '@/hooks/taskCenterStore';
 import { useConfig } from '@/hooks/useConfig';
 import { useFileDropZone } from '@/hooks/useFileDropZone';
 import { useTauriFileDrop } from '@/hooks/useTauriFileDrop';
@@ -59,16 +60,17 @@ import { BrowserPanelContext } from '@/context/BrowserPanelContext';
 import { BROWSER_BLANK_URL } from '@/components/browserConstants';
 import { CUSTOM_EVENTS, isPendingSessionId } from '../../shared/constants';
 import { workspacePathsEqual } from '../../shared/workspacePath';
+import { reasoningEffortChoices } from '../../shared/reasoningEffort';
 import type { CapabilityInitialSelect } from '../../shared/skillsTypes';
 import { CC_MODELS, CC_PERMISSION_MODES, CODEX_PERMISSION_MODES, GEMINI_PERMISSION_MODES, getDefaultRuntimePermissionMode, getRuntimePermissionModes, buildRuntimeChangePatch } from '../../shared/types/runtime';
 import type { RuntimeType, RuntimeDetections, RuntimeConfig } from '../../shared/types/runtime';
-import type { InitialMessage, SidecarConfigDisposition } from '@/types/tab';
+import type { FilePreviewIntent, InitialMessage, SidecarConfigDisposition } from '@/types/tab';
 import type { FilePreviewFocusTarget } from '@/types/filePreview';
 import { shouldAutoSendInitialMessage } from '@/utils/initialMessageAutoSend';
 import { resolveBuiltinPermissionMode, isPinnedProviderUnavailable, shouldResetModelOnProviderChange, shouldSkipSnapshotWrite } from '@/utils/optionResolve';
 // CronTaskConfig type is used via useCronTask hook
 
-import type { RichDocKind } from '../../shared/fileTypes';
+import { getRichDocKind, isPreviewable, type RichDocKind } from '../../shared/fileTypes';
 
 type SplitPreviewFile = {
   name: string;
@@ -196,6 +198,9 @@ interface ChatProps {
   onRenameSession?: (newTitle: string) => void;
   /** Called when user forks session at a specific assistant message — App creates new tab */
   onForkSession?: (newSessionId: string, agentDir: string, title: string, initialMessage?: string) => void;
+  /** Runtime-only request from App/floating-ball to open a file preview once. */
+  pendingFilePreview?: FilePreviewIntent;
+  onFilePreviewIntentConsumed?: (intentId: string) => void;
 }
 
 /** Preset for the `/loop` slash command: opens the cron modal in infinite-loop
@@ -211,7 +216,7 @@ const LOOP_SLASH_PRESET: CronInitialConfig = {
   executionTarget: 'current_session',
 };
 
-export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSessionInNewTab, initialMessage, onInitialMessageConsumed, sidecarConfigDisposition, onSidecarConfigAdopted, sessionTitle, onRenameSession, onForkSession }: ChatProps) {
+export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSessionInNewTab, initialMessage, onInitialMessageConsumed, sidecarConfigDisposition, onSidecarConfigAdopted, sessionTitle, onRenameSession, onForkSession, pendingFilePreview, onFilePreviewIntentConsumed }: ChatProps) {
   // Get state from TabContext (required - Chat must be inside TabProvider)
   const {
     tabId,
@@ -231,9 +236,11 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     setSessionMeta,
     unifiedLogs,
     systemInitInfo: _systemInitInfo,
+    sdkSlashCommands,
     runtimeDiagnostics,
     agentError,
     systemStatus,
+    systemNotice,
     lastTerminalReason,
     pendingPermission,
     pendingAskUserQuestion,
@@ -245,6 +252,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     setIsLoading,
     setAgentError,
     setLastTerminalReason,
+    setSystemNotice,
     sendMessage,
     stopResponse,
     loadSession,
@@ -490,6 +498,77 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     // Keep workspace open — user can dismiss it manually
   }, [isSplitViewEnabled, agentDir, startBrowserSplitTransitionIfNeeded]);
 
+  useEffect(() => {
+    if (!pendingFilePreview) return;
+    let cancelled = false;
+    const intent = pendingFilePreview;
+
+    const consume = () => {
+      onFilePreviewIntentConsumed?.(intent.id);
+    };
+
+    const openIntentPreview = async () => {
+      try {
+        if (!fileService.isAvailable) {
+          toastRef.current.error('无法打开预览：工作区文件服务不可用');
+          return;
+        }
+        const fileName = intent.path.split(/[/\\]/).pop() ?? intent.path;
+        const richDocKind = getRichDocKind(fileName);
+        let file: SplitPreviewFile | null = null;
+
+        if (richDocKind) {
+          file = {
+            name: fileName,
+            content: '',
+            size: 0,
+            path: intent.path,
+            richDocKind,
+            initialLineNumber: intent.initialLineNumber,
+          };
+        } else if (isPreviewable(fileName)) {
+          const resp = await fileService.readPreview({ path: intent.path });
+          file = {
+            name: resp.name,
+            content: resp.content,
+            size: resp.size,
+            path: intent.path,
+            initialLineNumber: intent.initialLineNumber,
+          };
+        } else {
+          toastRef.current.info('这个文件类型暂不支持 MyAgents 预览');
+          return;
+        }
+
+        if (cancelled || !file) return;
+        if (isSplitViewEnabled && !isNarrowLayout) {
+          handleSplitFilePreview(file);
+        } else {
+          setFullscreenPreviewFile(file);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          console.error('[Chat] Failed to open pending file preview:', err);
+          toastRef.current.error('打开文件预览失败');
+        }
+      } finally {
+        if (!cancelled) consume();
+      }
+    };
+
+    void openIntentPreview();
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    pendingFilePreview,
+    fileService,
+    handleSplitFilePreview,
+    isSplitViewEnabled,
+    isNarrowLayout,
+    onFilePreviewIntentConsumed,
+  ]);
+
   // Open terminal in split panel (called from DirectoryPanel header button)
   const handleOpenTerminal = useCallback(() => {
     setTerminalPinned(true);
@@ -663,6 +742,17 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   const [selectedModel, setSelectedModel] = useState<string | undefined>(
     currentAgent?.model ?? currentProject?.model ?? currentProvider?.primaryModel
   );
+  // #324 — 推理强度 setting ('default' | level). ONE state for both runtimes
+  // (the storage location splits on isExternalRuntime at persist time, like
+  // model). Lifecycle mirrors selectedModel: seeded from agent, restored from
+  // session snapshot, live-pushed to the sidecar via /api/reasoning-effort/set.
+  const [reasoningEffort, setReasoningEffort] = useState<string>(() => {
+    const rc = currentAgent?.runtimeConfig as { reasoningEffort?: string } | undefined;
+    const fromAgent = currentAgent?.runtime && currentAgent.runtime !== 'builtin'
+      ? rc?.reasoningEffort
+      : currentAgent?.reasoningEffort;
+    return fromAgent ?? 'default';
+  });
   // Cron task state
   const [showCronSettings, setShowCronSettings] = useState(false);
   const [cronPrompt, setCronPrompt] = useState('');
@@ -832,6 +922,10 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   // spawned with its frozen runtime and the backend routes by sessionId.
   const currentRuntime: RuntimeType = (sessionRuntime as RuntimeType | null) ?? agentRuntime;
   const isExternalRuntime = currentRuntime !== 'builtin';
+  const visibleSdkSlashCommands = useMemo(
+    () => isExternalRuntime ? [] : sdkSlashCommands,
+    [isExternalRuntime, sdkSlashCommands],
+  );
 
   // Detect installed runtimes once on mount
   useEffect(() => {
@@ -876,6 +970,10 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       : (getDefaultRuntimePermissionMode(currentRuntime) || 'default');
     setRuntimePermissionMode(effective);
     setRuntimeModel(cfg?.model);
+    // #324 — re-seed effort on runtime transition. RUNTIME_CONFIG_PER_RUNTIME_FIELDS
+    // scrubs reasoningEffort on agent runtime change, so a leftover value from a
+    // different runtime can't be read here; absent = 'default'.
+    setReasoningEffort((cfg as { reasoningEffort?: string } | undefined)?.reasoningEffort ?? 'default');
     // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional: only re-sync on runtime transitions, not on every currentAgent.runtimeConfig edit
   }, [currentRuntime, isExternalRuntime]);
 
@@ -1175,6 +1273,18 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
           setSelectedModel(builtinSel.model);
           providerInitRef.current = true; // suppress deferred provider-change effect
         }
+        // #324 — launcher hand-carry (don't rely on the async agent-config
+        // write having landed before this tab seeded from currentAgent).
+        // Set BEFORE the sends below so the builtin send payload carries it;
+        // for external runtimes push it explicitly (no payload channel).
+        if (launchMessage.reasoningEffort) {
+          setReasoningEffort(launchMessage.reasoningEffort);
+          if (configDispositionRef.current === 'pending') {
+            deferredEffortPushRef.current = launchMessage.reasoningEffort;
+          } else {
+            pushReasoningEffort(launchMessage.reasoningEffort);
+          }
+        }
 
         // 5. Send message (fire-and-forget — resolves before backend turn actually starts)
         setIsLoading(true);
@@ -1219,7 +1329,12 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
             launchMessage.images,
             effectivePermission,
             effectiveModel,
-            isExternalRuntime ? undefined : providerEnv
+            isExternalRuntime ? undefined : providerEnv,
+            undefined,
+            // launch value directly — the setReasoningEffort above isn't
+            // visible in this closure (same-render state), and the first
+            // message must already carry the launcher's choice.
+            isExternalRuntime ? undefined : (launchMessage.reasoningEffort ?? reasoningEffort)
           );
         }
 
@@ -1337,7 +1452,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       // (e.g., injecting cron context into system prompt)
       const providerEnv = buildProviderEnv(currentProvider);
       // Use effective model/permission (runtime-aware) — not the builtin values
-      await sendMessage(prompt, undefined, effectivePermissionMode, effectiveModel, isExternalRuntime ? undefined : providerEnv, true /* isCron */);
+      await sendMessage(prompt, undefined, effectivePermissionMode, effectiveModel, isExternalRuntime ? undefined : providerEnv, true /* isCron */,
+        isExternalRuntime ? undefined : reasoningEffort);
     },
     onComplete: (task, reason) => {
       console.log('[Chat] Cron task completed:', task.id, reason);
@@ -1819,6 +1935,10 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     /** External runtime model. Routed to `agent.runtimeConfig.model`. */
     runtimeModel?: string | null;
     permissionMode?: PermissionMode;
+    /** #324 — 推理强度 setting ('default' | level). The helper routes it to
+     *  `agent.reasoningEffort` (builtin) / `agent.runtimeConfig.reasoningEffort`
+     *  (external) + the session snapshot. */
+    reasoningEffort?: string;
     mcpEnabledServers?: string[];
     enabledPluginIds?: string[];
   }) => {
@@ -1833,6 +1953,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
         builtinModel: patch.model,
         runtimeModel: patch.runtimeModel,
         permissionMode: patch.permissionMode,
+        reasoningEffort: patch.reasoningEffort,
         mcpEnabledServers: patch.mcpEnabledServers,
         enabledPluginIds: patch.enabledPluginIds,
       },
@@ -1972,6 +2093,11 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     if (effectiveModel && configDispositionRef.current === 'push') {
       setSelectedModel(effectiveModel);
     }
+    // #324 — same gating as model: builtin effort seeds from the agent default.
+    // (External runtime seeding lives in the runtime-transition effect above.)
+    if (!isExternalRuntime && configDispositionRef.current === 'push') {
+      setReasoningEffort(currentAgent?.reasoningEffort ?? 'default');
+    }
   // eslint-disable-next-line react-hooks/exhaustive-deps -- one-time sync when project first loads
   }, [currentProject?.id, configPending]);
 
@@ -2000,6 +2126,15 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       : (currentAgent?.permissionMode as string | undefined));
     const providerId = sessionMeta.providerId ?? currentAgent?.providerId;
     const mcp = sessionMeta.mcpEnabledServers ?? currentAgent?.mcpEnabledServers;
+    // #324 — snapshot effort wins over agent default; a persisted 'default'
+    // is meaningful (session explicitly reverted) and flows through as-is.
+    // UNCONDITIONAL set (`?? 'default'`, unlike model's `if (model)`): effort's
+    // undefined has a defined meaning (= default), so a session without the
+    // field must reset the picker — keeping the previous session's value here
+    // is a cross-session leak (cross-review Critical).
+    const snapEffort = sessionMeta.reasoningEffort ?? (snapshotIsExternal
+      ? (currentAgent?.runtimeConfig as RuntimeConfig | undefined)?.reasoningEffort
+      : currentAgent?.reasoningEffort);
     if (model) {
       if (snapshotIsExternal) {
         setRuntimeModel(model);
@@ -2007,6 +2142,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
         setSelectedModel(model);
       }
     }
+    setReasoningEffort(snapEffort ?? 'default');
     if (mode) {
       if (snapshotIsExternal) {
         setRuntimePermissionMode(mode);
@@ -2121,6 +2257,18 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   }, [isConnected, sessionRuntime, currentAgent, isExternalRuntime,
       runtimeModel, selectedModel, sessionId, apiPost, configPending]);
 
+  // #324 — NO mount-time effort-push effect, deliberately diverging from the
+  // model-push effect above. The sidecar self-resolves effort at boot from the
+  // same `snapshot ?? agent` chain the UI seeds from (initializeAgent /
+  // switchToSession / external restore), so a mount push is redundant — and
+  // actively harmful for Anthropic-protocol effort, where every value change
+  // costs a subprocess respawn: the mount push fires with the agent-default
+  // state BEFORE the snapshot sync lands, stomping the sidecar's correctly
+  // restored value and then paying a second respawn to put it back
+  // (cross-review: double-respawn churn + cross-session push amplification).
+  // The explicit push lives in handleReasoningEffortChange (user intent only);
+  // the chat-send payload remains the builtin safety net.
+
   // Adopt sidecar config when joining an existing sidecar (e.g. IM Bot session).
   // Reads the sidecar's current model and applies it to React state so the Tab
   // reflects the session's actual config instead of overwriting it with its own.
@@ -2143,6 +2291,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
           model?: string | null;
           mcpServerIds?: string[] | null;
           permissionMode?: string | null;
+          reasoningEffort?: string | null;
         }>('/api/session/config');
         if (config.success) {
           if (!isCurrentAdoption()) return;
@@ -2168,6 +2317,10 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
           }
           if (Array.isArray(config.mcpServerIds)) {
             setWorkspaceMcpEnabled(config.mcpServerIds);
+          }
+          // #324 — server returns 'default' when unset, so truthiness works.
+          if (config.reasoningEffort) {
+            setReasoningEffort(config.reasoningEffort);
           }
           if (adoptingSessionId) {
             adoptedSessionRef.current = adoptingSessionId;
@@ -2422,6 +2575,61 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     void persistTabConfigChange({ runtimeModel: model });
   }, [runtimeModel, persistTabConfigChange]);
 
+  // #324 — reasoning effort change. Same dual-write policy as handleModelChange
+  // (snapshot + agent; live sidecar apply rides the effort-push effect, and the
+  // send payload is the safety net). One handler for both runtimes — the
+  // persist helper routes the storage location on isExternalRuntime.
+  // #324 — explicit change made while disposition is 'pending' is REMEMBERED
+  // and flushed once the disposition resolves (effect below). Builtin has the
+  // send-payload safety net, but external runtimes apply effort only via the
+  // push endpoint — dropping the pending-window push would silently lose the
+  // user's choice for the live external process (cross-review Critical).
+  const deferredEffortPushRef = useRef<string | null>(null);
+  const pushReasoningEffort = useCallback((effort: string) => {
+    apiPost('/api/reasoning-effort/set', { effort }).catch(err => {
+      console.error('[Chat] push reasoning effort failed (send payload will correct at next message):', err);
+    });
+  }, [apiPost]);
+  useEffect(() => {
+    if (configPending) return;
+    const deferred = deferredEffortPushRef.current;
+    if (deferred === null) return;
+    deferredEffortPushRef.current = null;
+    pushReasoningEffort(deferred);
+  }, [configPending, pushReasoningEffort]);
+
+  const handleReasoningEffortChange = useCallback((effort: string) => {
+    if (reasoningEffort === effort) return;
+    track('reasoning_effort_switch', { effort });
+    setReasoningEffort(effort);
+    void persistTabConfigChange({ reasoningEffort: effort });
+    // Live push on explicit user intent only (see the no-mount-push note by
+    // the model-push effect). defer-while-pending: while the sidecar
+    // disposition is unresolved we queue the push (flushed by the effect
+    // above); push/adopt both push immediately — user intent.
+    if (configDispositionRef.current === 'pending') {
+      deferredEffortPushRef.current = effort;
+    } else {
+      pushReasoningEffort(effort);
+    }
+  }, [reasoningEffort, persistTabConfigChange, pushReasoningEffort]);
+
+  // #324 — clamp effort on provider-protocol change. An OpenAI-only level
+  // (e.g. 'minimal') left selected after switching to an Anthropic-protocol
+  // provider would keep DISPLAYING as active while the wire silently sends
+  // the SDK default 'high' (the query-time isSdkEffortLevel gate). Reset to
+  // 'default' (persisted + pushed via the handler) so UI and wire agree.
+  useEffect(() => {
+    if (isExternalRuntime || !currentProvider) return;
+    if (configDispositionRef.current !== 'push') return;
+    if (reasoningEffort === 'default') return;
+    const choices = reasoningEffortChoices('builtin', currentProvider.apiProtocol);
+    if (choices && !choices.includes(reasoningEffort)) {
+      handleReasoningEffortChange('default');
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed to protocol-relevant provider fields
+  }, [isExternalRuntime, currentProvider?.id, currentProvider?.apiProtocol, reasoningEffort, handleReasoningEffortChange]);
+
   // Handle permission mode change — same dual-write policy as handleModelChange.
   const handlePermissionModeChange = useCallback((mode: PermissionMode) => {
     // Lock in the user's explicit choice: mark the project as synced so
@@ -2570,7 +2778,9 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       // sendMessage is fire-and-forget (returns true immediately for optimistic UI).
       // Error handling is done inside sendMessage's .then()/.catch() in TabProvider.
       // Use effective model/permission (runtime-aware) — not the builtin values
-      await sendMessage(text, images, effectivePermissionMode, effectiveModel, isExternalRuntime ? undefined : providerEnv);
+      await sendMessage(text, images, effectivePermissionMode, effectiveModel, isExternalRuntime ? undefined : providerEnv, undefined,
+        // #324 — builtin only: external runtimes apply effort via /api/reasoning-effort/set
+        isExternalRuntime ? undefined : reasoningEffort);
     } catch (error) {
       const errorMessage = {
         id: `error-${crypto.randomUUID()}`,
@@ -2586,7 +2796,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps -- toastRef/currentProviderRef/apiKeysRef/cronStateRef are refs (stable); scrollToBottom/setMessages/setIsLoading/setSessionState are stable
-  }, [sessionState, isLoading, queuedMessages.length, startCronTask, sendMessage, effectivePermissionMode, effectiveModel, isExternalRuntime, isCrossRuntimeSession, scrollToBottom, pinnedProviderUnavailable, selectedProviderId]);
+  }, [sessionState, isLoading, queuedMessages.length, startCronTask, sendMessage, effectivePermissionMode, effectiveModel, reasoningEffort, isExternalRuntime, isCrossRuntimeSession, scrollToBottom, pinnedProviderUnavailable, selectedProviderId]);
 
   // Ref-stabilize handleSendMessage for handleRetry (avoids frequent re-creation)
   const handleSendMessageRef = useRef(handleSendMessage);
@@ -2944,8 +3154,9 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   // model/permission/providerEnv 发送 `/compact`（实测可触发内置压缩），避免误切 provider。
   const handleCompactContext = useCallback(() => {
     const providerEnv = buildProviderEnv(currentProviderRef.current);
-    void sendMessage('/compact', undefined, effectivePermissionMode, effectiveModel, isExternalRuntime ? undefined : providerEnv);
-  }, [sendMessage, effectivePermissionMode, effectiveModel, isExternalRuntime, buildProviderEnv]);
+    void sendMessage('/compact', undefined, effectivePermissionMode, effectiveModel, isExternalRuntime ? undefined : providerEnv, undefined,
+      isExternalRuntime ? undefined : reasoningEffort);
+  }, [sendMessage, effectivePermissionMode, effectiveModel, reasoningEffort, isExternalRuntime, buildProviderEnv]);
 
   // PRD 0.2.32 — context 用量指示器 slot。自取数（内部 useTabState 订阅 contextUsage），
   // 数据不经 SimpleChatInput props；useMemo 让 slot identity 在流式期间稳定，不打穿
@@ -2994,6 +3205,10 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     const ok = await respondExitPlanMode(false, feedback);
     if (!ok) toastRef.current.error('提交失败，请重试');
   }, [respondExitPlanMode]);
+
+  const handleDismissSystemNotice = useCallback(() => {
+    setSystemNotice(null);
+  }, [setSystemNotice]);
 
   // React to plan mode changes: auto-approved by SDK, or user-approved via card
   // Single source of truth for permission mode switch during plan mode
@@ -3407,8 +3622,12 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
                 />
               </>
             )}
-            {/* Surface tags (channel/cron pill) — display-only since the menu owns actions */}
-            <SessionSurfaceTags channel={surfaces.channel} cron={surfaces.cron} />
+            {/* Surface tags (channel/cron/floating-ball pill) — display-only since the menu owns actions */}
+            <SessionSurfaceTags
+              channel={surfaces.channel}
+              cron={surfaces.cron}
+              floatingBall={!!sessionId && resolveFloatingBallBoundSession(config) === sessionId}
+            />
             {/* Session ⋯ menu — rename/favorite/export/stats/bot binding/delete */}
             {sessionId && agentDir && (
               <SessionMenuButton
@@ -3439,7 +3658,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
             <button
               type="button"
               onClick={handleNewSession}
-              className="flex items-center gap-1.5 whitespace-nowrap rounded-lg px-2 py-1.5 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
+              className="flex items-center gap-1.5 whitespace-nowrap rounded-lg px-2 py-1.5 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
               title="新建对话"
             >
               <Plus className="h-3.5 w-3.5 flex-shrink-0" />
@@ -3451,7 +3670,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
               type="button"
               onMouseDown={(e) => e.stopPropagation()}
               onClick={() => setShowHistory((prev) => !prev)}
-              className={`flex items-center gap-1.5 whitespace-nowrap rounded-lg px-2 py-1.5 text-[13px] font-medium transition-colors ${showHistory
+              className={`flex items-center gap-1.5 whitespace-nowrap rounded-lg px-2 py-1.5 text-sm font-medium transition-colors ${showHistory
                 ? 'bg-[var(--paper-inset)] text-[var(--ink)]'
                 : 'text-[var(--ink-muted)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]'
                 }`}
@@ -3475,7 +3694,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
                 <button
                   type="button"
                   onClick={() => setShowLogs((prev) => !prev)}
-                  className={`rounded-lg px-2.5 py-1 text-[13px] font-medium transition-colors ${showLogs
+                  className={`rounded-lg px-2.5 py-1 text-sm font-medium transition-colors ${showLogs
                     ? 'bg-[var(--paper-inset)] text-[var(--ink)]'
                     : 'text-[var(--ink-muted)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]'
                     }`}
@@ -3550,7 +3769,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
             }
             const canRetry = !!lastUserMsg && !isLoading;
             return (
-            <div className="relative z-10 flex-shrink-0 border-b border-[var(--line)] bg-[var(--paper-inset)] px-4 py-2 text-[11px] text-[var(--ink)]">
+            <div className="relative z-10 flex-shrink-0 border-b border-[var(--line)] bg-[var(--paper-inset)] px-4 py-2 text-xs text-[var(--ink)]">
               <div className="mx-auto flex max-w-3xl items-start gap-2">
                 <AlertTriangle className="mt-0.5 h-4 w-4 flex-shrink-0 text-[var(--accent)]" />
                 <div className="flex-1">
@@ -3577,7 +3796,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
                     <button
                       type="button"
                       onClick={handleRetryLastUserMessage}
-                      className="flex items-center gap-1 rounded-md px-2 py-0.5 text-[10px] font-medium text-[var(--accent)] transition-colors hover:bg-[var(--accent-warm-subtle)]"
+                      className="flex items-center gap-1 rounded-md px-2 py-0.5 text-sm font-medium text-[var(--accent)] transition-colors hover:bg-[var(--accent-warm-subtle)]"
                     >
                       <RotateCcw className="h-3 w-3" />
                       重新发送
@@ -3662,6 +3881,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
               onExitPlanModeApprove={handleExitPlanModeApprove}
               onExitPlanModeReject={handleExitPlanModeReject}
               systemStatus={rewindStatus || systemStatus}
+              systemNotice={systemNotice}
+              onDismissSystemNotice={handleDismissSystemNotice}
               isStreaming={isLoading || sessionState === 'running' || sessionState === 'starting'}
               sessionState={sessionState}
               onRewind={isExternalRuntime ? undefined : handleRewind}
@@ -3717,11 +3938,14 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
             systemStatus={systemStatus}
             agentDir={agentDir}
             workspacePath={agentDir}
+            sdkSlashCommands={visibleSdkSlashCommands}
             provider={currentProvider}
             providers={providers}
             onProviderChange={handleProviderChange}
             selectedModel={isExternalRuntime ? runtimeModel : selectedModel}
             onModelChange={isExternalRuntime ? handleRuntimeModelChange : handleModelChange}
+            reasoningEffort={reasoningEffort}
+            onReasoningEffortChange={handleReasoningEffortChange}
             sessionUnlocked={isSessionUnlocked}
             contextIndicator={contextIndicatorSlot}
             permissionMode={effectivePermissionMode}
@@ -3845,7 +4069,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
                   <button
                     type="button"
                     onClick={() => setSplitActiveView('file')}
-                    className={`group relative flex items-center gap-1 rounded-md px-2.5 py-1 text-[12px] font-medium transition-colors ${
+                    className={`group relative flex items-center gap-1 rounded-md px-2.5 py-1 text-sm font-medium transition-colors ${
                       splitActiveView === 'file'
                         ? 'text-[var(--ink)]'
                         : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
@@ -3863,7 +4087,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
                       className="ml-0.5 flex h-5 w-5 items-center justify-center rounded opacity-0 transition-opacity hover:bg-[var(--paper-inset)] group-hover:opacity-100"
                       title="关闭文件"
                     >
-                      <span className="text-[13px] leading-none text-[var(--ink-muted)]">×</span>
+                      <span className="text-sm leading-none text-[var(--ink-muted)]">×</span>
                     </span>
                     {splitActiveView === 'file' && (
                       <div className="absolute inset-x-1 -bottom-[5px] h-[2px] rounded-full bg-[var(--accent-warm)]" />
@@ -3875,7 +4099,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
                   <button
                     type="button"
                     onClick={() => setSplitActiveView('terminal')}
-                    className={`group relative flex items-center gap-1 rounded-md px-2.5 py-1 text-[12px] font-medium transition-colors ${
+                    className={`group relative flex items-center gap-1 rounded-md px-2.5 py-1 text-sm font-medium transition-colors ${
                       splitActiveView === 'terminal'
                         ? 'text-[var(--ink)]'
                         : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
@@ -3894,7 +4118,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
                       className="ml-0.5 flex h-5 w-5 items-center justify-center rounded opacity-0 transition-opacity hover:bg-[var(--paper-inset)] group-hover:opacity-100"
                       title="隐藏终端"
                     >
-                      <span className="text-[13px] leading-none text-[var(--ink-muted)]">×</span>
+                      <span className="text-sm leading-none text-[var(--ink-muted)]">×</span>
                     </span>
                     {splitActiveView === 'terminal' && (
                       <div className="absolute inset-x-1 -bottom-[5px] h-[2px] rounded-full bg-[var(--accent-warm)]" />
@@ -3906,7 +4130,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
                   <button
                     type="button"
                     onClick={() => setSplitActiveView('browser')}
-                    className={`group relative flex items-center gap-1 rounded-md px-2.5 py-1 text-[12px] font-medium transition-colors ${
+                    className={`group relative flex items-center gap-1 rounded-md px-2.5 py-1 text-sm font-medium transition-colors ${
                       splitActiveView === 'browser'
                         ? 'text-[var(--ink)]'
                         : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
@@ -3942,7 +4166,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
                       className="ml-0.5 flex h-5 w-5 items-center justify-center rounded opacity-0 transition-opacity hover:bg-[var(--paper-inset)] group-hover:opacity-100"
                       title="关闭浏览器"
                     >
-                      <span className="text-[13px] leading-none text-[var(--ink-muted)]">×</span>
+                      <span className="text-sm leading-none text-[var(--ink-muted)]">×</span>
                     </span>
                     {splitActiveView === 'browser' && (
                       <div className="absolute inset-x-1 -bottom-[5px] h-[2px] rounded-full bg-[var(--accent-warm)]" />
@@ -4005,8 +4229,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
                   <div className="flex h-9 flex-shrink-0 items-center justify-between bg-[var(--paper)] px-3">
                     <div className="flex items-center gap-1.5">
                       <TerminalSquare className="h-3.5 w-3.5 text-[var(--ink)]" />
-                      <span className="text-[12px] font-medium text-[var(--ink)]">终端</span>
-                      <span className="text-[11px] text-[var(--ink-muted)]">
+                      <span className="text-sm font-medium text-[var(--ink)]">终端</span>
+                      <span className="text-xs text-[var(--ink-muted)]">
                         {agentDir ? `~/${agentDir.split(/[/\\]/).pop()}` : ''}
                       </span>
                     </div>
@@ -4064,7 +4288,6 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
                     browserAlive={browserAlive}
                     sourceFile={browserSourceFile}
                     workspace={agentDir}
-                    layoutSignature={`${showWorkspace ? 1 : 0}:${shouldUseWorkspaceOverlay ? 1 : 0}`}
                     onBrowserCreated={handleBrowserCreated}
                     onCreateFailed={handleBrowserCreateFailed}
                     onClose={handleBrowserClose}

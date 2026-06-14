@@ -69,6 +69,12 @@ export interface AdminAppConfig {
   mcpEnabledServers?: string[];
   mcpServerEnv?: Record<string, Record<string, string>>;
   mcpServerArgs?: Record<string, string[]>;
+  // CLI tool registry (PRD 0.2.36): per-tool env (API keys etc.), same shape as
+  // mcpServerEnv. Read at launch by the ~/.myagents/bin shims — env changes
+  // need no shim rewrite.
+  cliToolEnv?: Record<string, Record<string, string>>;
+  // Experimental gate for user-registered CLI tools. Omitted means disabled.
+  cliToolRegistryEnabled?: boolean;
   // Provider
   defaultProviderId?: string;
   providerApiKeys?: Record<string, string>;
@@ -147,6 +153,10 @@ export function loadConfig(): AdminAppConfig {
     console.error('[admin-config] config.json and .bak both unreadable, returning empty config');
     return {};
   }
+}
+
+export function isCliToolRegistryEnabled(config: AdminAppConfig = loadConfig()): boolean {
+  return config.cliToolRegistryEnabled === true;
 }
 
 /**
@@ -631,6 +641,9 @@ export interface WorkspaceResolvedConfig {
   providerEnv: ResolvedProviderEnv | undefined;
   model: string | undefined;
   permissionMode: string;
+  /** #324 — reasoning effort setting ('default' | level | undefined). Raw chain
+   *  value (NOT normalized); callers run normalizeReasoningEffort() themselves. */
+  reasoningEffort: string | undefined;
 }
 
 const BUILTIN_PERMISSION_MODES = new Set(['auto', 'plan', 'fullAgency', 'custom']);
@@ -746,6 +759,19 @@ export function resolveWorkspaceConfig(
     }
   }
 
+  // --- Resolve Reasoning Effort (#324) ---
+  // Priority: session.reasoningEffort → agent.reasoningEffort (builtin) /
+  // agent.runtimeConfig.reasoningEffort (external runtime). The snapshot may
+  // hold the literal 'default' — that is a meaningful value ("session reverted
+  // to default") and must win over a non-default agent value, which the ??
+  // chain handles naturally.
+  const agentRuntimeConfig = agent?.runtimeConfig as { reasoningEffort?: string } | undefined;
+  const agentRuntime = (agent?.runtime as string | undefined) ?? 'builtin';
+  const reasoningEffort = sessionMeta?.reasoningEffort
+    ?? (agentRuntime === 'builtin'
+      ? (agent?.reasoningEffort as string | undefined)
+      : agentRuntimeConfig?.reasoningEffort);
+
   // --- Resolve Permission Mode ---
   // Same precedence as renderer Chat/Launcher builtin mode resolution:
   // session snapshot → Agent → Project → global default. Pre-warm uses this
@@ -776,5 +802,5 @@ export function resolveWorkspaceConfig(
     );
   }
 
-  return { mcpServers, providerEnv, model, permissionMode };
+  return { mcpServers, providerEnv, model, permissionMode, reasoningEffort };
 }

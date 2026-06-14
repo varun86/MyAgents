@@ -43,11 +43,12 @@ pub struct ReadClaudeMdResult {
 }
 
 #[tauri::command]
-pub async fn cmd_workspace_read_claude_md(
-    workspace: String,
-) -> Result<ReadClaudeMdResult, String> {
+pub async fn cmd_workspace_read_claude_md(workspace: String) -> Result<ReadClaudeMdResult, String> {
     let workspace_root = validate_workspace_root(&workspace)?;
-    let path_str = workspace_root.join(CLAUDE_MD_FILENAME).to_string_lossy().to_string();
+    let path_str = workspace_root
+        .join(CLAUDE_MD_FILENAME)
+        .to_string_lossy()
+        .to_string();
 
     // resolve_existing_inside_workspace canonicalizes the path AND verifies
     // it's inside the canonical workspace root. Three outcomes:
@@ -86,8 +87,8 @@ pub async fn cmd_workspace_read_claude_md(
     if bytes.len() as u64 > MAX_CONTENT_BYTES {
         return Err("CLAUDE.md too large to read".to_string());
     }
-    let content = String::from_utf8(bytes)
-        .map_err(|e| format!("CLAUDE.md is not valid UTF-8: {}", e))?;
+    let content =
+        String::from_utf8(bytes).map_err(|e| format!("CLAUDE.md is not valid UTF-8: {}", e))?;
 
     Ok(ReadClaudeMdResult {
         exists: true,
@@ -167,17 +168,11 @@ mod tests {
     #[tokio::test]
     async fn write_creates_when_missing() {
         let ws = make_test_workspace("claude_md_write_create");
-        cmd_workspace_write_claude_md(
-            ws.to_string_lossy().to_string(),
-            "# new\n".to_string(),
-        )
-        .await
-        .unwrap();
+        cmd_workspace_write_claude_md(ws.to_string_lossy().to_string(), "# new\n".to_string())
+            .await
+            .unwrap();
         assert!(ws.join("CLAUDE.md").is_file());
-        assert_eq!(
-            fs::read_to_string(ws.join("CLAUDE.md")).unwrap(),
-            "# new\n"
-        );
+        assert_eq!(fs::read_to_string(ws.join("CLAUDE.md")).unwrap(), "# new\n");
         let _ = fs::remove_dir_all(&ws);
     }
 
@@ -185,12 +180,9 @@ mod tests {
     async fn write_overwrites_existing() {
         let ws = make_test_workspace("claude_md_write_overwrite");
         fs::write(ws.join("CLAUDE.md"), "old").unwrap();
-        cmd_workspace_write_claude_md(
-            ws.to_string_lossy().to_string(),
-            "new".to_string(),
-        )
-        .await
-        .unwrap();
+        cmd_workspace_write_claude_md(ws.to_string_lossy().to_string(), "new".to_string())
+            .await
+            .unwrap();
         assert_eq!(fs::read_to_string(ws.join("CLAUDE.md")).unwrap(), "new");
         let _ = fs::remove_dir_all(&ws);
     }
@@ -199,8 +191,7 @@ mod tests {
     async fn write_rejects_oversize() {
         let ws = make_test_workspace("claude_md_write_oversize");
         let big = "a".repeat((MAX_CONTENT_BYTES + 1) as usize);
-        let res =
-            cmd_workspace_write_claude_md(ws.to_string_lossy().to_string(), big).await;
+        let res = cmd_workspace_write_claude_md(ws.to_string_lossy().to_string(), big).await;
         assert!(res.is_err());
         let _ = fs::remove_dir_all(&ws);
     }
@@ -211,10 +202,8 @@ mod tests {
     async fn rejects_symlink_escape_on_read() {
         use std::os::unix::fs::symlink;
         let ws = make_test_workspace("claude_md_symlink_read");
-        let outside = std::env::temp_dir().join(format!(
-            "claude_md_outside_{}",
-            std::process::id()
-        ));
+        let outside =
+            std::env::temp_dir().join(format!("claude_md_outside_{}", std::process::id()));
         fs::create_dir_all(&outside).unwrap();
         let secret = outside.join("secret.md");
         fs::write(&secret, "TOP-SECRET").unwrap();
@@ -232,10 +221,8 @@ mod tests {
     async fn rejects_symlink_escape_on_write() {
         use std::os::unix::fs::symlink;
         let ws = make_test_workspace("claude_md_symlink_write");
-        let outside = std::env::temp_dir().join(format!(
-            "claude_md_outside_w_{}",
-            std::process::id()
-        ));
+        let outside =
+            std::env::temp_dir().join(format!("claude_md_outside_w_{}", std::process::id()));
         fs::create_dir_all(&outside).unwrap();
         let secret = outside.join("secret.md");
         fs::write(&secret, "OUTSIDE").unwrap();

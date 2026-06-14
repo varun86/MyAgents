@@ -10,9 +10,9 @@
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
+use std::path::{Path, PathBuf};
 
 use crate::utils::bom::strip_bom;
 use crate::utils::file_lock::{with_file_lock_blocking, FileLockError, FileLockOptions};
@@ -148,9 +148,8 @@ where
             // replace-on-existing across all platforms; the previous
             // `atomic_replace` shim that called MoveFileExW directly is no
             // longer needed.
-            fs::rename(&tmp_path, &config_path_owned).map_err(|e| {
-                to_io_err(format!("[config-io] Cannot rename tmp config: {}", e))
-            })?;
+            fs::rename(&tmp_path, &config_path_owned)
+                .map_err(|e| to_io_err(format!("[config-io] Cannot rename tmp config: {}", e)))?;
             fsync_parent_dir(&config_path_owned).map_err(to_io_err)?;
 
             Ok(config)
@@ -227,9 +226,8 @@ pub async fn cmd_fsync_path(path: String, directory: bool) -> Result<(), String>
                             }
                         }
                     }
-                    Err(last.unwrap_or_else(|| {
-                        std::io::Error::other("fsync open: exhausted retries")
-                    }))
+                    Err(last
+                        .unwrap_or_else(|| std::io::Error::other("fsync open: exhausted retries")))
                 }
                 #[cfg(not(windows))]
                 {

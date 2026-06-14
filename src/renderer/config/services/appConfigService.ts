@@ -6,7 +6,8 @@ import {
     DEFAULT_CONFIG,
     type Project,
     type Provider,
-    DEFAULT_BUNDLED_WORKSPACE_TEMPLATE_ID,
+    DEFAULT_SYSTEM_PRESET_WORKSPACE_ID,
+    getSystemPresetProjectMetadataPatch,
     normalizeClaudeTranscriptCleanupPeriodDays,
 } from '../types';
 import {
@@ -334,21 +335,33 @@ export async function ensureBundledWorkspace(): Promise<boolean> {
 
         const { invoke } = await import('@tauri-apps/api/core');
         const result = await invoke<{ path: string; is_new: boolean }>('cmd_initialize_bundled_workspace');
+        const projects = await loadProjects();
+        const found = projects.find(p => workspacePathsEqual(p.path, result.path));
 
-        if (result.is_new) {
-            const project = await addProject(result.path);
-            // Set Mino icon and display name for the bundled workspace
-            const { patchProject } = await import('./projectService');
-            try {
-                await patchProject(project.id, {
-                    icon: 'lightning',
-                    displayName: 'Mino',
-                    templateId: DEFAULT_BUNDLED_WORKSPACE_TEMPLATE_ID,
-                    templateSource: 'builtin',
-                });
-            } catch (e) {
-                console.warn('[configService] Failed to set bundled workspace icon:', e);
+        if (found) {
+            const metadataPatch = getSystemPresetProjectMetadataPatch(found, DEFAULT_SYSTEM_PRESET_WORKSPACE_ID);
+            if (Object.keys(metadataPatch).length > 0) {
+                const { patchProject } = await import('./projectService');
+                try {
+                    await patchProject(found.id, metadataPatch);
+                } catch (e) {
+                    console.warn('[configService] Failed to repair bundled workspace metadata:', e);
+                }
             }
+            return result.is_new;
+        }
+
+        const project = await addProject(result.path);
+        // Set Mino icon and display name for the bundled workspace
+        const { patchProject } = await import('./projectService');
+        try {
+            const metadataPatch = getSystemPresetProjectMetadataPatch(project, DEFAULT_SYSTEM_PRESET_WORKSPACE_ID);
+            await patchProject(project.id, metadataPatch);
+        } catch (e) {
+            console.warn('[configService] Failed to set bundled workspace icon:', e);
+        }
+
+        if (result.is_new && !project.hidden) {
             await withConfigLock(async () => {
                 const config = await loadAppConfig();
                 if (!config.defaultWorkspacePath) {
@@ -356,29 +369,13 @@ export async function ensureBundledWorkspace(): Promise<boolean> {
                 }
             });
             console.log('[configService] Bundled workspace initialized:', result.path);
-            return true;
+            return result.is_new;
         }
 
-        const projects = await loadProjects();
-        const found = projects.some(p => workspacePathsEqual(p.path, result.path));
-        if (!found) {
-            const project = await addProject(result.path);
-            const { patchProject } = await import('./projectService');
-            try {
-                await patchProject(project.id, {
-                    icon: 'lightning',
-                    displayName: 'Mino',
-                    templateId: DEFAULT_BUNDLED_WORKSPACE_TEMPLATE_ID,
-                    templateSource: 'builtin',
-                });
-            } catch (e) {
-                console.warn('[configService] Failed to set recovered workspace icon:', e);
-            }
-            console.log('[configService] Bundled workspace recovered into projects:', result.path);
-            return true;
-        }
-
-        return false;
+        console.log(result.is_new
+            ? '[configService] Bundled workspace initialized without default selection:'
+            : '[configService] Bundled workspace recovered into projects:', result.path);
+        return true;
     } catch (err) {
         console.warn('[configService] ensureBundledWorkspace failed:', err);
         return false;

@@ -27,23 +27,23 @@ pub mod claude_md;
 pub mod crud;
 pub mod delete;
 pub mod download;
-pub mod platform_blocks;
-pub mod save_file;
-pub mod skill_sync;
-pub mod skills_config;
 pub mod files_b64;
 pub mod git_branch;
 pub mod gitignore;
 pub mod path_safety;
+pub mod platform_blocks;
 pub mod read_preview;
+pub mod save_file;
 pub mod search;
+pub mod skill_sync;
+pub mod skills_config;
 pub mod slash;
 pub mod system_open;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub mod transfer;
 pub mod tree;
 pub mod watcher;
-#[cfg(test)]
-pub(crate) mod test_support;
 
 // `lib.rs` registers each command with the FULL submodule path
 // (e.g. `workspace_files::files_b64::cmd_workspace_import_files_b64`) because

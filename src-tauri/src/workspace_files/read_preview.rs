@@ -87,8 +87,8 @@ pub async fn cmd_workspace_read_preview(
             MAX_PREVIEW_BYTES / 1024 / 1024
         ));
     }
-    let content = String::from_utf8(bytes)
-        .map_err(|e| format!("File is not valid UTF-8: {}", e))?;
+    let content =
+        String::from_utf8(bytes).map_err(|e| format!("File is not valid UTF-8: {}", e))?;
     Ok(PreviewResult {
         content,
         name,
@@ -122,9 +122,8 @@ fn is_previewable(name: &str) -> bool {
 /// Keep in sync with `src/shared/fileTypes.ts::BINARY_EXTENSIONS`.
 const BINARY_EXTENSIONS: &[&str] = &[
     // Images (superset of IMAGE_EXTENSIONS — includes raw/vector formats)
-    "png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "ico", "tiff", "tif",
-    "psd", "ai", "eps", "raw", "cr2", "nef", "heic", "heif", "avif", "jxl",
-    // Video
+    "png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "ico", "tiff", "tif", "psd", "ai", "eps",
+    "raw", "cr2", "nef", "heic", "heif", "avif", "jxl", // Video
     "mp4", "avi", "mov", "mkv", "wmv", "flv", "webm", "m4v", "mpg", "mpeg", "3gp",
     // Audio
     "mp3", "wav", "aac", "ogg", "flac", "wma", "m4a", "opus", "aiff",
@@ -133,14 +132,11 @@ const BINARY_EXTENSIONS: &[&str] = &[
     // Executables / Libraries
     "exe", "dll", "so", "dylib", "bin", "app", "msi", "deb", "rpm", "apk", "ipa",
     // Compiled / Object
-    "o", "obj", "class", "pyc", "pyo", "wasm", "elc",
-    // Fonts
-    "ttf", "otf", "woff", "woff2", "eot",
-    // Documents (binary formats)
+    "o", "obj", "class", "pyc", "pyo", "wasm", "elc", // Fonts
+    "ttf", "otf", "woff", "woff2", "eot", // Documents (binary formats)
     "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp", "rtf",
     // Databases
-    "db", "sqlite", "sqlite3", "mdb",
-    // Other binary
+    "db", "sqlite", "sqlite3", "mdb", // Other binary
     "dat", "ds_store", "swp", "swo",
 ];
 
@@ -153,12 +149,10 @@ mod tests {
     async fn reads_text_file() {
         let ws = make_test_workspace("preview_text");
         fs::write(ws.join("hello.md"), "hi there").unwrap();
-        let res = cmd_workspace_read_preview(
-            ws.to_string_lossy().to_string(),
-            "hello.md".to_string(),
-        )
-        .await
-        .unwrap();
+        let res =
+            cmd_workspace_read_preview(ws.to_string_lossy().to_string(), "hello.md".to_string())
+                .await
+                .unwrap();
         assert_eq!(res.content, "hi there");
         assert_eq!(res.name, "hello.md");
         assert_eq!(res.size, 8);
@@ -168,11 +162,9 @@ mod tests {
     #[tokio::test]
     async fn rejects_missing() {
         let ws = make_test_workspace("preview_missing");
-        let res = cmd_workspace_read_preview(
-            ws.to_string_lossy().to_string(),
-            "nope.md".to_string(),
-        )
-        .await;
+        let res =
+            cmd_workspace_read_preview(ws.to_string_lossy().to_string(), "nope.md".to_string())
+                .await;
         assert!(res.is_err());
         let _ = fs::remove_dir_all(&ws);
     }
@@ -181,11 +173,9 @@ mod tests {
     async fn rejects_non_previewable() {
         let ws = make_test_workspace("preview_binary");
         fs::write(ws.join("blob.bin"), b"\x00\x01\x02").unwrap();
-        let res = cmd_workspace_read_preview(
-            ws.to_string_lossy().to_string(),
-            "blob.bin".to_string(),
-        )
-        .await;
+        let res =
+            cmd_workspace_read_preview(ws.to_string_lossy().to_string(), "blob.bin".to_string())
+                .await;
         assert!(res.is_err());
         let _ = fs::remove_dir_all(&ws);
     }
@@ -195,11 +185,9 @@ mod tests {
         let ws = make_test_workspace("preview_oversize");
         let big = "a".repeat((MAX_PREVIEW_BYTES + 1) as usize);
         fs::write(ws.join("big.md"), &big).unwrap();
-        let res = cmd_workspace_read_preview(
-            ws.to_string_lossy().to_string(),
-            "big.md".to_string(),
-        )
-        .await;
+        let res =
+            cmd_workspace_read_preview(ws.to_string_lossy().to_string(), "big.md".to_string())
+                .await;
         assert!(res.is_err());
         let _ = fs::remove_dir_all(&ws);
     }
@@ -225,11 +213,9 @@ mod tests {
         let ws = make_test_workspace("preview_extless");
         for name in ["Makefile", "LICENSE", "Dockerfile", "Caddyfile"] {
             fs::write(ws.join(name), "content").unwrap();
-            let res = cmd_workspace_read_preview(
-                ws.to_string_lossy().to_string(),
-                name.to_string(),
-            )
-            .await;
+            let res =
+                cmd_workspace_read_preview(ws.to_string_lossy().to_string(), name.to_string())
+                    .await;
             assert!(res.is_ok(), "{} should be previewable", name);
         }
         let _ = fs::remove_dir_all(&ws);
@@ -240,11 +226,9 @@ mod tests {
         let ws = make_test_workspace("preview_dotfiles");
         for name in [".zshrc", ".gitconfig", ".npmrc", ".tool-versions"] {
             fs::write(ws.join(name), "content").unwrap();
-            let res = cmd_workspace_read_preview(
-                ws.to_string_lossy().to_string(),
-                name.to_string(),
-            )
-            .await;
+            let res =
+                cmd_workspace_read_preview(ws.to_string_lossy().to_string(), name.to_string())
+                    .await;
             assert!(res.is_ok(), "{} should be previewable", name);
         }
         let _ = fs::remove_dir_all(&ws);
@@ -259,7 +243,10 @@ mod tests {
             "data.weirdext".to_string(),
         )
         .await;
-        assert!(res.is_ok(), "unknown extension should default to previewable");
+        assert!(
+            res.is_ok(),
+            "unknown extension should default to previewable"
+        );
         let _ = fs::remove_dir_all(&ws);
     }
 
@@ -273,10 +260,7 @@ mod tests {
     async fn rejects_symlink_escape() {
         use std::os::unix::fs::symlink;
         let ws = make_test_workspace("preview_symlink_escape");
-        let outside = std::env::temp_dir().join(format!(
-            "preview_outside_{}",
-            std::process::id()
-        ));
+        let outside = std::env::temp_dir().join(format!("preview_outside_{}", std::process::id()));
         fs::create_dir_all(&outside).unwrap();
         let secret = outside.join("secret.txt");
         fs::write(&secret, "TOP SECRET").unwrap();
@@ -300,11 +284,9 @@ mod tests {
         let ws = make_test_workspace("preview_binary_ext");
         for name in ["app.exe", "vid.mp4", "music.mp3", "lib.so", "doc.docx"] {
             fs::write(ws.join(name), "fake").unwrap();
-            let res = cmd_workspace_read_preview(
-                ws.to_string_lossy().to_string(),
-                name.to_string(),
-            )
-            .await;
+            let res =
+                cmd_workspace_read_preview(ws.to_string_lossy().to_string(), name.to_string())
+                    .await;
             assert!(res.is_err(), "{} should be rejected as binary", name);
         }
         let _ = fs::remove_dir_all(&ws);

@@ -10,15 +10,11 @@ pub type AdapterResult<T> = Result<T, String>;
 pub trait ImAdapter: Send + Sync + 'static {
     /// Verify the bot connection and return a human-readable identifier
     /// (e.g. Telegram bot username, Discord bot tag).
-    fn verify_connection(
-        &self,
-    ) -> impl std::future::Future<Output = AdapterResult<String>> + Send;
+    fn verify_connection(&self) -> impl std::future::Future<Output = AdapterResult<String>> + Send;
 
     /// Register platform-specific commands (e.g. Telegram BotFather menu).
     /// No-op for platforms that don't support command registration.
-    fn register_commands(
-        &self,
-    ) -> impl std::future::Future<Output = AdapterResult<()>> + Send;
+    fn register_commands(&self) -> impl std::future::Future<Output = AdapterResult<()>> + Send;
 
     /// Start the message receive loop (long-polling, WebSocket, etc.).
     /// Blocks until `shutdown_rx` signals `true`.
@@ -56,10 +52,7 @@ pub trait ImAdapter: Send + Sync + 'static {
     ) -> impl std::future::Future<Output = ()> + Send;
 
     /// Send a "typing" / "processing" indicator to the chat.
-    fn send_typing(
-        &self,
-        chat_id: &str,
-    ) -> impl std::future::Future<Output = ()> + Send;
+    fn send_typing(&self, chat_id: &str) -> impl std::future::Future<Output = ()> + Send;
 }
 
 /// Extended adapter trait for platforms that support streaming draft messages.
@@ -140,21 +133,29 @@ pub trait ImStreamAdapter: ImAdapter {
 
     /// Whether this adapter uses draft streaming (affects finalize behavior).
     /// When true, finalize_block will delete draft + send_message instead of edit_message.
-    fn use_draft_streaming(&self) -> bool { false }
+    fn use_draft_streaming(&self) -> bool {
+        false
+    }
 
     /// Whether this adapter supports edit_message (progressive updates during streaming).
     /// When false, the streaming loop skips draft creation and edit calls entirely,
     /// accumulating text and sending once at block-end via finalize_block.
     /// Default: true. Bridge adapter returns false when the plugin lacks edit capability.
-    fn supports_edit(&self) -> bool { true }
+    fn supports_edit(&self) -> bool {
+        true
+    }
 
     /// Preferred throttle interval in ms for draft edits. Default 1000ms.
-    fn preferred_throttle_ms(&self) -> u64 { 1000 }
+    fn preferred_throttle_ms(&self) -> u64 {
+        1000
+    }
 
     /// Bridge context for OpenClaw plugin adapters.
     /// Returns (bridge_port, plugin_id, enabled_tool_groups) if this is a Bridge adapter.
     /// Default: None (not a Bridge adapter).
-    fn bridge_context(&self) -> Option<(u16, String, Vec<String>)> { None }
+    fn bridge_context(&self) -> Option<(u16, String, Vec<String>)> {
+        None
+    }
 
     // ===== CardKit Streaming Protocol =====
     // These methods enable adapters to use a dedicated streaming protocol
@@ -168,7 +169,9 @@ pub trait ImStreamAdapter: ImAdapter {
     /// Whether this adapter supports the streaming protocol.
     /// When true, `stream_to_im` will use `start_stream` / `stream_chunk` /
     /// `finalize_stream` / `abort_stream` instead of the edit-based flow.
-    fn supports_streaming(&self) -> bool { false }
+    fn supports_streaming(&self) -> bool {
+        false
+    }
 
     /// Start a streaming session. Returns a stream_id for subsequent chunks.
     /// Default: returns empty string (never called when `supports_streaming` is false).
@@ -217,10 +220,7 @@ pub trait ImStreamAdapter: ImAdapter {
     /// Hook called after a turn's events have been fully dispatched (terminal
     /// 'complete' / 'error'). DingTalk overrides this to finalize AI Card
     /// state. Default: no-op.
-    fn post_stream_cleanup(
-        &self,
-        _chat_id: &str,
-    ) -> impl std::future::Future<Output = ()> + Send {
+    fn post_stream_cleanup(&self, _chat_id: &str) -> impl std::future::Future<Output = ()> + Send {
         async { /* default no-op */ }
     }
 }
@@ -303,7 +303,11 @@ pub fn split_message(text: &str, max_len: usize) -> Vec<String> {
             .or_else(|| search_range.rfind(' ')) // Word
             .unwrap_or(safe_end); // Hard cut at char boundary
 
-        let break_at = if break_point == 0 { safe_end } else { break_point };
+        let break_at = if break_point == 0 {
+            safe_end
+        } else {
+            break_point
+        };
 
         chunks.push(remaining[..break_at].to_string());
         remaining = remaining[break_at..].trim_start();

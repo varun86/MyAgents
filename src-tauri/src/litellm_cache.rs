@@ -105,7 +105,10 @@ fn parse_meta(content: &str) -> Option<CacheMeta> {
 }
 
 fn read_meta(meta_path: &Path) -> Option<CacheMeta> {
-    fs::read_to_string(meta_path).ok().as_deref().and_then(parse_meta)
+    fs::read_to_string(meta_path)
+        .ok()
+        .as_deref()
+        .and_then(parse_meta)
 }
 
 /// Decide whether to hit the network. PURE — testable.
@@ -115,7 +118,9 @@ fn read_meta(meta_path: &Path) -> Option<CacheMeta> {
 /// every launch because "no data → always fetch". Missing/zeroed meta → fetch.
 fn should_fetch(meta: Option<&CacheMeta>, now: u64, min_recheck_secs: u64) -> bool {
     match meta {
-        Some(m) if m.fetched_at_secs > 0 => now.saturating_sub(m.fetched_at_secs) >= min_recheck_secs,
+        Some(m) if m.fetched_at_secs > 0 => {
+            now.saturating_sub(m.fetched_at_secs) >= min_recheck_secs
+        }
         _ => true,
     }
 }
@@ -170,7 +175,13 @@ async fn refresh_once() -> Result<RefreshOutcome, String> {
         // Record the ATTEMPT so the throttle covers failures too — otherwise a
         // blocked/offline GitHub (common without a proxy) gets re-hit on every
         // launch. Preserve the prior etag so a later success can still 304.
-        let _ = write_meta(&meta_path, &CacheMeta { etag: prev_etag, fetched_at_secs: now });
+        let _ = write_meta(
+            &meta_path,
+            &CacheMeta {
+                etag: prev_etag,
+                fetched_at_secs: now,
+            },
+        );
     }
     result
 }
@@ -193,13 +204,22 @@ async fn fetch_and_store(
         }
     }
 
-    let mut resp = req.send().await.map_err(|e| format!("request failed: {e}"))?;
+    let mut resp = req
+        .send()
+        .await
+        .map_err(|e| format!("request failed: {e}"))?;
     let status = resp.status();
 
     if status == reqwest::StatusCode::NOT_MODIFIED {
         // Unchanged — keep the body, just record that we checked (so the 24h /
         // restart throttle advances). Preserve the existing etag.
-        write_meta(meta_path, &CacheMeta { etag: prev_etag, fetched_at_secs: now })?;
+        write_meta(
+            meta_path,
+            &CacheMeta {
+                etag: prev_etag,
+                fetched_at_secs: now,
+            },
+        )?;
         return Ok(RefreshOutcome::NotModified);
     }
     if !status.is_success() {
@@ -221,7 +241,11 @@ async fn fetch_and_store(
     // Content-Length (captive portal / hostile proxy) can't OOM us before the
     // check. Abort as soon as the accumulator would exceed the cap.
     let mut body: Vec<u8> = Vec::new();
-    while let Some(chunk) = resp.chunk().await.map_err(|e| format!("read body failed: {e}"))? {
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .map_err(|e| format!("read body failed: {e}"))?
+    {
         if body.len() as u64 + chunk.len() as u64 > MAX_BYTES {
             return Err(format!("oversize body: exceeds {MAX_BYTES} bytes"));
         }
@@ -233,7 +257,13 @@ async fn fetch_and_store(
         .map_err(|e| format!("upstream returned non-JSON: {e}"))?;
 
     write_atomic(data_path, &body)?;
-    write_meta(meta_path, &CacheMeta { etag: new_etag, fetched_at_secs: now })?;
+    write_meta(
+        meta_path,
+        &CacheMeta {
+            etag: new_etag,
+            fetched_at_secs: now,
+        },
+    )?;
     ulog_info!("[litellm] cache updated ({} bytes)", body.len());
     Ok(RefreshOutcome::Updated)
 }
@@ -257,12 +287,21 @@ mod tests {
 
     #[test]
     fn parse_enabled_flag_reads_the_toggle() {
-        assert_eq!(parse_enabled_flag(r#"{"liteLLMModelDataRefresh": false}"#), Some(false));
-        assert_eq!(parse_enabled_flag(r#"{"liteLLMModelDataRefresh": true}"#), Some(true));
+        assert_eq!(
+            parse_enabled_flag(r#"{"liteLLMModelDataRefresh": false}"#),
+            Some(false)
+        );
+        assert_eq!(
+            parse_enabled_flag(r#"{"liteLLMModelDataRefresh": true}"#),
+            Some(true)
+        );
         // absent key → None (caller defaults to enabled)
         assert_eq!(parse_enabled_flag(r#"{"theme":"dark"}"#), None);
         // BOM-prefixed config still parses
-        assert_eq!(parse_enabled_flag("\u{feff}{\"liteLLMModelDataRefresh\": false}"), Some(false));
+        assert_eq!(
+            parse_enabled_flag("\u{feff}{\"liteLLMModelDataRefresh\": false}"),
+            Some(false)
+        );
         // garbage → None
         assert_eq!(parse_enabled_flag("not json"), None);
     }
@@ -280,20 +319,37 @@ mod tests {
         // A recent ATTEMPT (success OR failure writes meta) throttles regardless
         // of whether data exists — so offline/blocked GitHub isn't re-hit every
         // launch. This is the #277-review fix (Codex finding #4).
-        let recent = CacheMeta { etag: Some("x".into()), fetched_at_secs: 1_000_000 };
-        assert!(!should_fetch(Some(&recent), 1_000_000 + 10, MIN_RECHECK_SECS));
+        let recent = CacheMeta {
+            etag: Some("x".into()),
+            fetched_at_secs: 1_000_000,
+        };
+        assert!(!should_fetch(
+            Some(&recent),
+            1_000_000 + 10,
+            MIN_RECHECK_SECS
+        ));
         // zeroed/garbage timestamp → fetch
-        let zero = CacheMeta { etag: None, fetched_at_secs: 0 };
+        let zero = CacheMeta {
+            etag: None,
+            fetched_at_secs: 0,
+        };
         assert!(should_fetch(Some(&zero), 1_000_000, MIN_RECHECK_SECS));
     }
 
     #[test]
     fn should_fetch_respects_recheck_floor() {
-        let meta = CacheMeta { etag: Some("x".into()), fetched_at_secs: 1_000_000 };
+        let meta = CacheMeta {
+            etag: Some("x".into()),
+            fetched_at_secs: 1_000_000,
+        };
         // within the floor → skip
         assert!(!should_fetch(Some(&meta), 1_000_000 + 10, MIN_RECHECK_SECS));
         // past the floor → fetch
-        assert!(should_fetch(Some(&meta), 1_000_000 + MIN_RECHECK_SECS, MIN_RECHECK_SECS));
+        assert!(should_fetch(
+            Some(&meta),
+            1_000_000 + MIN_RECHECK_SECS,
+            MIN_RECHECK_SECS
+        ));
         // never attempted → fetch
         assert!(should_fetch(None, 1_000_000, MIN_RECHECK_SECS));
     }

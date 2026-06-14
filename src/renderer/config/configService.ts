@@ -57,7 +57,7 @@ export {
     addProject,
     updateProject,
     patchProject,
-    removeProject,
+    removeOrHideProject,
     touchProject,
 } from './services/projectService';
 

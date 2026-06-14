@@ -28,6 +28,7 @@ const originalConsole = {
 
 // Track initialization state
 let initialized = false;
+let rendererLogLabel: string | null = null;
 
 // Custom event name for React logs (kept for back-compat with code that still
 // listens via window event; the global store is the canonical source going
@@ -192,6 +193,7 @@ export function setLogServerUrl(url: string): void {
   serverUrl = url;
   consecutiveFailures = 0;
   circuitBrokenUntil = 0;
+  void flushLogs();
 }
 
 /**
@@ -264,6 +266,12 @@ async function sendToServer(entries: LogEntry[]): Promise<void> {
  */
 async function flushLogs(): Promise<void> {
   if (logBuffer.length === 0) return;
+  if (!serverUrl) {
+    if (logBuffer.length > MAX_BUFFER_SIZE * 2) {
+      logBuffer.splice(0, logBuffer.length - MAX_BUFFER_SIZE * 2);
+    }
+    return;
+  }
 
   // Take all logs from buffer
   const entries = logBuffer.splice(0, logBuffer.length);
@@ -297,7 +305,8 @@ function scheduleFlush(): void {
  * Create a log entry, dispatch event, and queue for persistence
  */
 function createAndDispatch(level: LogLevel, args: unknown[]): void {
-  const message = formatArgs(args);
+  const rawMessage = formatArgs(args);
+  const message = rendererLogLabel ? `[${rendererLogLabel}] ${rawMessage}` : rawMessage;
 
   // Skip empty messages
   if (!message.trim()) return;
@@ -368,6 +377,10 @@ export function initFrontendLogger(): void {
 
   initialized = true;
   originalConsole.log('[FrontendLogger] React console logging initialized');
+}
+
+export function setRendererLogLabel(label: string | null | undefined): void {
+  rendererLogLabel = label || null;
 }
 
 /**

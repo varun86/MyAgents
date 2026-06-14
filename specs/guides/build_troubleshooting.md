@@ -4,8 +4,9 @@
 
 1. [Windows 构建脚本常见问题](#windows-构建脚本常见问题)
 2. [CSP 配置错误](#csp-配置错误)
-3. [Resources 缓存问题](#resources-缓存问题)
-4. [代理配置问题](#代理配置问题)
+3. [Rust toolchain / rustfmt 漂移](#rust-toolchain--rustfmt-漂移)
+4. [Resources 缓存问题](#resources-缓存问题)
+5. [代理配置问题](#代理配置问题)
 
 ---
 
@@ -115,6 +116,46 @@ foreach ($part in $requiredParts) {
 
 ---
 
+## Rust toolchain / rustfmt 漂移
+
+**症状**：
+- 未改 Rust 逻辑，却出现几十个 `src-tauri/src/**/*.rs` 文件的 diff
+- diff 主要是 import 排序、宏参数换行、`let Some(...) else` 展开、trailing comma 等格式变化
+
+**根本原因**：
+
+Rust 格式化结果由 `rustfmt` 版本决定。仓库根目录的 `rust-toolchain.toml` 固定实际开发/CI toolchain；如果本机没有通过 rustup 进入仓库、或 IDE 使用了系统 Rust，就可能跑出不同格式。
+
+`setup.sh` / `setup_windows.ps1` 和各平台 build 脚本都会调用 `scripts/ensure_rust_toolchain.*`：
+- 从 `rust-toolchain.toml` 读取 channel 和 components（当前为 `1.92.0` + `rustfmt` / `clippy`）
+- 显式安装对应 component
+- 平台 build 额外安装目标 target（Windows 为 `x86_64-pc-windows-msvc`）
+- Windows setup 会刷新当前 PowerShell 的 PATH；如果 winget 只报告 Rustup 包已安装但 `rustup.exe` 仍不可用，会兜底下载官方 `rustup-init.exe`，验证/补齐 `~/.cargo/bin/rustup.exe`
+
+如果 Windows 上 setup 后 build 仍报 `can't find crate for core`、`target may not be installed`、`component 'rustfmt' is unavailable/not installed` 等 Rust 缺失类错误，先手动运行：
+
+```powershell
+.\scripts\ensure_rust_toolchain.ps1 -Targets x86_64-pc-windows-msvc
+```
+
+macOS / Linux：
+
+```bash
+./scripts/ensure_rust_toolchain.sh
+```
+
+**验证方法**：
+
+```bash
+rustup show active-toolchain
+rustfmt --version
+cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+```
+
+`rustup show active-toolchain` 应显示被仓库 `rust-toolchain.toml` override。升级 Rust 时必须同时改 `rust-toolchain.toml` 和 CI toolchain，并把 `cargo fmt` 产生的机械 diff 单独提交。
+
+---
+
 ## Resources 缓存问题
 
 ### 问题：配置更新后构建仍使用旧配置
@@ -137,7 +178,8 @@ Remove-Item src-tauri/target/x86_64-pc-windows-msvc/release/resources -Recurse -
 或使用构建脚本（已自动处理）：
 ```powershell
 .\build_windows.ps1  # 自动清理 release/resources
-.\build_dev_win.ps1  # 自动清理 debug/resources
+.\build_dev_win.ps1  # 默认快速 Debug exe，自动清理 debug/resources
+.\build_dev_win.ps1 -BundleNsis  # 需要验证安装器时，额外清理 debug/bundle 并打 Debug NSIS
 ```
 
 ---
@@ -174,10 +216,11 @@ let client = reqwest::Client::builder()
 ### 构建前检查清单
 
 - [ ] 版本号已同步（`package.json`, `tauri.conf.json`, `Cargo.toml`）
-- [ ] TypeScript 类型检查通过（`bun run typecheck`）
+- [ ] Rust toolchain/components/target 已由 `scripts/ensure_rust_toolchain.*` 准备
+- [ ] TypeScript 类型检查通过（`npm run typecheck`）
 - [ ] CSP 配置完整（`connect-src` 包含 `http://ipc.localhost`）
 - [ ] 清理旧的 resources 缓存
-- [ ] 杀死残留进程（bun, MyAgents）
+- [ ] 杀死残留进程（node sidecar, MyAgents）
 
 ### 构建后验证
 

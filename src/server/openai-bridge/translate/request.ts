@@ -6,6 +6,7 @@ import type { BridgeConfig } from '../types/bridge';
 import { translateMessages } from './messages';
 import { translateToolDefinitions, translateToolChoice } from './tools';
 import type { ToolImageSaver } from './multimodal';
+import { stripModelSuffix } from '../../../shared/contextUsage';
 
 
 export interface TranslateRequestOptions {
@@ -14,6 +15,9 @@ export interface TranslateRequestOptions {
   modelOverride?: string;
   /** Callback to save tool result images to disk (returns relative path) */
   imageSaver?: ToolImageSaver;
+  /** #324 — user-selected reasoning effort (NORMALIZED level). Injected as
+   *  top-level `reasoning_effort`; absent = field omitted entirely. */
+  reasoningEffort?: string;
 }
 
 /** Translate Anthropic Messages API request → OpenAI Chat Completions request */
@@ -33,6 +37,13 @@ export function translateRequest(
       model = mapping[req.model] ?? req.model;
     }
   }
+  // SDK-ingress-only: the `[1m]` / ` 1m` capability decoration MUST NOT reach
+  // the upstream wire (#338). `req.model` arrives already-normalized (the SDK
+  // strips `[1m]` via normalizeModelStringForAPI), but `modelOverride` /
+  // `modelMapping` come straight from config — a stored `claude-X[1m]` or
+  // hand-typed `claude-X 1m` would otherwise be forwarded verbatim to the
+  // OpenAI-compatible API, which knows only the bare id.
+  model = stripModelSuffix(model) ?? model;
 
   // 2. Messages (system extraction + role mapping + tool_result splitting)
   const thinkingEnabled = req.thinking?.type === 'enabled';
@@ -67,9 +78,15 @@ export function translateRequest(
     openaiReq.stream_options = { include_usage: true };
   }
 
-  // 6. Thinking → reasoning_effort: intentionally omitted.
-  // Many OpenAI-compatible providers don't support reasoning_effort,
-  // and custom providers would return 400 "Unrecognized request argument".
+  // 6. Reasoning effort (#324): forwarded ONLY when the user explicitly
+  // selected a non-default effort in the 推理强度 picker. The default omits
+  // the field entirely — many OpenAI-compatible providers reject unknown
+  // args with 400 "Unrecognized request argument", so unsolicited injection
+  // is never safe. The SDK's own `thinking` field is NOT mapped (an
+  // Anthropic-side knob with no portable OpenAI equivalent).
+  if (options?.reasoningEffort) {
+    openaiReq.reasoning_effort = options.reasoningEffort;
+  }
 
   return openaiReq;
 }

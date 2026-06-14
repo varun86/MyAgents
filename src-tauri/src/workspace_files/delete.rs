@@ -57,8 +57,7 @@ pub async fn cmd_workspace_delete(
     // the one deterministic cross-platform semantic. Cost: a deleted VALID
     // symlink isn't restorable from the trash (only the link itself is lost).
     if metadata.is_symlink() {
-        fs::remove_file(&target)
-            .map_err(|e| format!("Failed to delete {}: {}", path, e))?;
+        fs::remove_file(&target).map_err(|e| format!("Failed to delete {}: {}", path, e))?;
         return Ok(DeleteResult {
             success: true,
             deleted: true,
@@ -77,8 +76,7 @@ pub async fn cmd_workspace_delete(
         };
         res.map_err(|e| format!("Failed to delete {}: {}", path, e))?;
     } else {
-        trash::delete(&target)
-            .map_err(|e| format!("Failed to move {} to trash: {}", path, e))?;
+        trash::delete(&target).map_err(|e| format!("Failed to move {} to trash: {}", path, e))?;
     }
 
     Ok(DeleteResult {
@@ -101,9 +99,13 @@ mod tests {
     async fn deletes_file() {
         let ws = make_tmp_workspace();
         fs::write(ws.join("a.txt"), "x").unwrap();
-        let res = cmd_workspace_delete(ws.to_string_lossy().to_string(), "a.txt".to_string(), Some(true))
-            .await
-            .unwrap();
+        let res = cmd_workspace_delete(
+            ws.to_string_lossy().to_string(),
+            "a.txt".to_string(),
+            Some(true),
+        )
+        .await
+        .unwrap();
         assert!(res.deleted);
         assert!(!ws.join("a.txt").exists());
         let _ = fs::remove_dir_all(&ws);
@@ -115,9 +117,13 @@ mod tests {
         let sub = ws.join("dir");
         fs::create_dir_all(sub.join("nested")).unwrap();
         fs::write(sub.join("a.txt"), "x").unwrap();
-        let res = cmd_workspace_delete(ws.to_string_lossy().to_string(), "dir".to_string(), Some(true))
-            .await
-            .unwrap();
+        let res = cmd_workspace_delete(
+            ws.to_string_lossy().to_string(),
+            "dir".to_string(),
+            Some(true),
+        )
+        .await
+        .unwrap();
         assert!(res.deleted);
         assert!(!sub.exists());
         let _ = fs::remove_dir_all(&ws);
@@ -141,7 +147,8 @@ mod tests {
     async fn rejects_workspace_root_itself() {
         let ws = make_tmp_workspace();
         let res =
-            cmd_workspace_delete(ws.to_string_lossy().to_string(), "".to_string(), Some(true)).await;
+            cmd_workspace_delete(ws.to_string_lossy().to_string(), "".to_string(), Some(true))
+                .await;
         assert!(res.is_err());
         let _ = fs::remove_dir_all(&ws);
     }

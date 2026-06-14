@@ -16,7 +16,7 @@ import type {
   RuntimeProxyPolicy, RuntimeDiagnosticIssue,
 } from '../../shared/types/runtime';
 import { CODEX_PERMISSION_MODES } from '../../shared/types/runtime';
-import type { AgentRuntime, RuntimeProcess, SessionStartOptions, UnifiedEvent, UnifiedEventCallback, ImagePayload, SubAgentScope } from './types';
+import type { AgentRuntime, RuntimeConfigCapabilities, RuntimeProcess, SessionStartOptions, UnifiedEvent, UnifiedEventCallback, ImagePayload, SubAgentScope } from './types';
 import { StaleRuntimeSessionError } from './types';
 import { mapCodexTokenUsage, type CodexThreadTokenUsage } from './codex-token-usage';
 import { augmentedProcessEnv, resolveCommand, stripAnsi } from './env-utils';
@@ -210,6 +210,10 @@ export function buildCodexTurnStartParams(args: {
   approvalPolicy: CodexApprovalPolicy;
   sandbox: CodexSandboxMode;
   model?: string | null;
+  /** #324 — reasoning effort level; falsy = omit (Codex default applies).
+   *  Schema: TurnStartParams.effort "Override the reasoning effort for this
+   *  turn and subsequent turns" (codex app-server v2). */
+  reasoningEffort?: string | null;
 }): Record<string, unknown> {
   return {
     threadId: args.threadId,
@@ -219,6 +223,9 @@ export function buildCodexTurnStartParams(args: {
     sandboxPolicy: buildCodexSandboxPolicy(args.sandbox, args.cwd),
     model: args.model || null,
     summary: 'concise',
+    // Omit when default — an explicit null is "no override" per schema, but
+    // omitting is the conservative shape older codex builds also accept.
+    ...(args.reasoningEffort ? { effort: args.reasoningEffort } : {}),
   };
 }
 
@@ -1038,6 +1045,11 @@ class CodexProcess implements RuntimeProcess {
   approvalPolicy: CodexApprovalPolicy = 'on-request';
   sandbox: CodexSandboxMode = 'workspace-write';
   permissionMode = '';
+  defaultPermissionMode = 'full-auto';
+  /** #324 — NORMALIZED effort level ('' = Codex default). Carried on every
+   *  turn/start (its `effort` overrides "this turn and subsequent turns"),
+   *  which is also what makes setReasoningEffort an in-place update. */
+  reasoningEffort = '';
 
   /** MyAgents sessionId (from SessionStartOptions). Used as the attachment scope key
    *  so refPath /api/attachment/tool/<sessionId>/<turnId>/<file> stays consistent
@@ -1154,6 +1166,22 @@ function classifyAndForwardCodexStderr(text: string, onEvent: UnifiedEventCallba
       break; // first match wins per line
     }
   }
+}
+
+export function mapCodexTurnCompletedNotification(
+  turnValue: unknown,
+): Extract<UnifiedEvent, { kind: 'turn_complete' }> {
+  const turn = objectValue(turnValue);
+  const status = stringValue(turn.status) ?? 'completed';
+  const error = objectValue(turn.error);
+  const errorMessage = stringValue(error.message);
+
+  return {
+    kind: 'turn_complete',
+    status,
+    ...(errorMessage ? { error: errorMessage, result: errorMessage } : {}),
+    ...(status !== 'completed' && !errorMessage ? { result: `Turn ended with status ${status}` } : {}),
+  };
 }
 
 // ─── Diagnostic helpers (issue #194) ───
@@ -1636,6 +1664,14 @@ export class CodexRuntime implements AgentRuntime {
     return CODEX_PERMISSION_MODES;
   }
 
+  getConfigCapabilities(): RuntimeConfigCapabilities {
+    return {
+      model: 'next_turn_state',
+      permissionMode: 'next_turn_state',
+      reasoningEffort: 'next_turn_state',
+    };
+  }
+
   /**
    * Standalone diagnostic run (issue #194 — used by `myagents diagnose runtime
    * codex`). Spawns a short-lived `codex app-server`, runs initialize, fans
@@ -1901,12 +1937,15 @@ export class CodexRuntime implements AgentRuntime {
 
       // 2. Determine permission mode
       const isImOrCron = options.scenario.type === 'im' || options.scenario.type === 'agent-channel' || options.scenario.type === 'cron';
-      const permMode = options.permissionMode || (isImOrCron ? 'no-restrictions' : 'full-auto');
+      const defaultPermissionMode = isImOrCron ? 'no-restrictions' : 'full-auto';
+      const permMode = options.permissionMode || defaultPermissionMode;
       const { approval, sandbox } = mapPermissionMode(permMode);
+      codexProc.defaultPermissionMode = defaultPermissionMode;
       codexProc.permissionMode = permMode;
       codexProc.approvalPolicy = approval;
       codexProc.sandbox = sandbox;
       codexProc.model = options.model || '';
+      codexProc.reasoningEffort = options.reasoningEffort || '';
 
       // 3. Start or resume thread
       if (options.resumeSessionId) {
@@ -1965,6 +2004,7 @@ export class CodexRuntime implements AgentRuntime {
           approvalPolicy: approval,
           sandbox,
           model: options.model || null,
+          reasoningEffort: codexProc.reasoningEffort || null,
         }), 15_000) as { turn: { id: string } };
         codexProc.currentTurnId = turnResult.turn.id;
       }
@@ -2033,8 +2073,46 @@ export class CodexRuntime implements AgentRuntime {
       approvalPolicy: codexProc.approvalPolicy,
       sandbox: codexProc.sandbox,
       model: codexProc.model || null,
+      reasoningEffort: codexProc.reasoningEffort || null,
     }), 15_000) as { turn: { id: string } };
     codexProc.currentTurnId = turnResult.turn.id;
+  }
+
+  /**
+   * Codex carries model on every turn/start. Updating process state at the
+   * session layer's turn boundary is enough; the active turn has already
+   * received its turn/start payload and is not affected.
+   */
+  async setModel(process: RuntimeProcess, model: string | undefined): Promise<void> {
+    const codexProc = process as CodexProcess;
+    if (codexProc.exited) throw new Error('Codex process has exited');
+    codexProc.model = model ?? '';
+  }
+
+  /**
+   * Codex permission mode is also a turn/start payload. Keep the original
+   * human-readable mode for diagnostics and update the derived approval/sandbox
+   * pair used by the next sendMessage().
+   */
+  async setPermissionMode(process: RuntimeProcess, mode: string | undefined): Promise<void> {
+    const codexProc = process as CodexProcess;
+    if (codexProc.exited) throw new Error('Codex process has exited');
+    const nextMode = mode || codexProc.defaultPermissionMode;
+    const { approval, sandbox } = mapPermissionMode(nextMode);
+    codexProc.permissionMode = nextMode;
+    codexProc.approvalPolicy = approval;
+    codexProc.sandbox = sandbox;
+  }
+
+  /**
+   * #324 — in-place reasoning-effort switch. turn/start.effort overrides
+   * "this turn and subsequent turns", so recording the value on process
+   * state is sufficient: the next sendMessage carries it. No RPC needed.
+   */
+  async setReasoningEffort(process: RuntimeProcess, effort: string | undefined): Promise<void> {
+    const codexProc = process as CodexProcess;
+    if (codexProc.exited) throw new Error('Codex process has exited');
+    codexProc.reasoningEffort = effort ?? '';
   }
 
   /**
@@ -2218,7 +2296,7 @@ export class CodexRuntime implements AgentRuntime {
         return { kind: 'status_change', state: 'running' };
 
       case 'turn/completed': {
-        const turn = p.turn as { status: string; error?: { message: string } } | undefined;
+        const turn = p.turn;
         // PRD 0.2.27 — sub-agent threads live within a turn; clear correlation
         // maps at turn end so a stale child threadId can't re-parent next turn's
         // tools and the maps don't grow unbounded across a long session.
@@ -2226,14 +2304,7 @@ export class CodexRuntime implements AgentRuntime {
         codexProc.subThreadToParent.clear();
         codexProc.subThreadMeta.clear();
         codexProc.collabControlToolParents.clear();
-        if (turn?.status === 'failed') {
-          return {
-            kind: 'session_complete',
-            result: turn.error?.message || 'Turn failed',
-            subtype: 'error',
-          };
-        }
-        return { kind: 'turn_complete' };
+        return mapCodexTurnCompletedNotification(turn);
       }
 
       // ── Text streaming ──

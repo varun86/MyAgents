@@ -72,3 +72,25 @@ export function browserBoundsEqual(a: BrowserBounds, b: BrowserBounds): boolean 
     Math.abs(a.height - b.height) <= BROWSER_BOUNDS_EPSILON_PX
   );
 }
+
+/**
+ * Per-frame decision for the geometry reconciler (issue #339): sync when we
+ * have a usable rect, no resize invoke is already in flight (serializing
+ * invokes keeps native bounds updates ordered), and the rect differs from the
+ * last bounds handed to Rust.
+ *
+ * Pure so the load-bearing invariant is unit-testable: a rect change after
+ * ANY previously-applied sample must trigger another sync — there is no
+ * "layout has settled" state in which the reconciler stops looking. The
+ * pre-reconciler design stopped after heuristic settle detection, and motion
+ * sources it didn't model (workspace overlay flip, %-width re-resolution,
+ * window resize) left the native webview parked on a mid-flight rect.
+ */
+export function shouldSyncBrowserBounds(
+  lastSynced: BrowserBounds | null,
+  next: BrowserBounds | null,
+  inFlight: boolean,
+): next is BrowserBounds {
+  if (!next || inFlight) return false;
+  return !lastSynced || !browserBoundsEqual(lastSynced, next);
+}

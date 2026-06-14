@@ -21,20 +21,22 @@ use std::process::{Command, Stdio};
 /// was ignored" to a terminal user — the exact failure mode this whole CLI was
 /// designed to avoid for AI callers.
 const CLI_COMMANDS: &[&str] = &[
-    "mcp", "model", "agent", "runtime", "config", "status", "reload", "version",
-    "cron", "plugin", "skill", "task", "thought", "im", "widget",
+    "mcp", "model", "agent", "runtime", "config", "status", "reload", "version", "cron", "plugin",
+    "skill", "task", "thought", "im", "widget",
     // Issue #194 — `myagents diagnose runtime <type>` sugar. Without this, the
     // packaged Tauri binary launches the GUI when invoked with just `diagnose ...`.
     // `runtime diagnose <type>` still works via the "runtime" entry above.
     "diagnose",
+    // PRD 0.2.36 — CLI tool registry. Without this, `myagents tool list` via the
+    // packaged binary silently launches the GUI instead of CLI mode.
+    "tool",
 ];
 
 /// Check if the given args indicate CLI mode.
 /// Returns true if any argument is a known CLI subcommand or --help/-h.
 pub fn is_cli_mode(args: &[String]) -> bool {
-    args.iter().any(|a| {
-        CLI_COMMANDS.contains(&a.as_str()) || a == "--help" || a == "-h"
-    })
+    args.iter()
+        .any(|a| CLI_COMMANDS.contains(&a.as_str()) || a == "--help" || a == "-h")
 }
 
 /// Run the CLI by forwarding args to the Bun CLI script.
@@ -123,7 +125,12 @@ fn find_node_binary() -> Option<PathBuf> {
         let macos_node = dir
             .parent()
             .map(|p| p.join("Resources").join("nodejs").join("bin").join("node"))
-            .unwrap_or_else(|| dir.join("Resources").join("nodejs").join("bin").join("node"));
+            .unwrap_or_else(|| {
+                dir.join("Resources")
+                    .join("nodejs")
+                    .join("bin")
+                    .join("node")
+            });
         if macos_node.exists() {
             return Some(macos_node);
         }
@@ -146,7 +153,11 @@ fn find_node_binary() -> Option<PathBuf> {
     // returns early on success; those platforms don't have this layout).
     #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
     {
-        let linux_node = dir.join("resources").join("nodejs").join("bin").join("node");
+        let linux_node = dir
+            .join("resources")
+            .join("nodejs")
+            .join("bin")
+            .join("node");
         if linux_node.exists() {
             return Some(linux_node);
         }

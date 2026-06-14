@@ -89,9 +89,7 @@ pub struct ExpandDirectoryResult {
 }
 
 #[tauri::command]
-pub async fn cmd_workspace_dir_tree(
-    workspace: String,
-) -> Result<DirectoryTreeResult, String> {
+pub async fn cmd_workspace_dir_tree(workspace: String) -> Result<DirectoryTreeResult, String> {
     let workspace_root = validate_workspace_root(&workspace)?;
     let ws = workspace_root.clone();
     tokio::task::spawn_blocking(move || build_tree(&ws))
@@ -407,12 +405,9 @@ mod tests {
         let ws = make_test_workspace("tree_expand");
         fs::create_dir_all(ws.join("a/b")).unwrap();
         fs::write(ws.join("a/inner.txt"), "").unwrap();
-        let res = cmd_workspace_dir_expand(
-            ws.to_string_lossy().to_string(),
-            "a".to_string(),
-        )
-        .await
-        .unwrap();
+        let res = cmd_workspace_dir_expand(ws.to_string_lossy().to_string(), "a".to_string())
+            .await
+            .unwrap();
         assert!(res.children.iter().any(|c| c.name == "b"));
         assert!(res.children.iter().any(|c| c.name == "inner.txt"));
         let _ = fs::remove_dir_all(&ws);
@@ -422,11 +417,8 @@ mod tests {
     async fn expand_rejects_traversal() {
         let ws = make_test_workspace("tree_expand_traversal");
         fs::create_dir_all(ws.join("a")).unwrap();
-        let res = cmd_workspace_dir_expand(
-            ws.to_string_lossy().to_string(),
-            "../etc".to_string(),
-        )
-        .await;
+        let res =
+            cmd_workspace_dir_expand(ws.to_string_lossy().to_string(), "../etc".to_string()).await;
         assert!(res.is_err());
         let _ = fs::remove_dir_all(&ws);
     }

@@ -92,7 +92,7 @@ export function ExitPlanModePrompt({ request, onApprove, onReject }: ExitPlanMod
         <div className="animate-in fade-in slide-in-from-bottom-2 duration-300">
             <div className={`rounded-xl border p-4 shadow-sm ${
                 isResolved && !isApproved
-                    ? 'border-[var(--line)] bg-[var(--paper-inset)]/80'
+                    ? 'border-[var(--line)] bg-[var(--paper-elevated)]'
                     : 'border-[var(--success)]/30 bg-[var(--success-bg)]/80'
             }`}>
                 {/* Header */}
@@ -104,14 +104,14 @@ export function ExitPlanModePrompt({ request, onApprove, onReject }: ExitPlanMod
                     }`}>
                         <FileCheck className={`h-4.5 w-4.5 ${
                             isResolved && !isApproved
-                                ? 'text-[var(--ink-muted)]'
+                                ? 'text-[var(--ink-subtle)]'
                                 : 'text-[var(--success)]'
                         }`} />
                     </div>
                     <div className="flex-1">
                         <h3 className={`text-sm font-semibold ${
                             isResolved && !isApproved
-                                ? 'text-[var(--ink)]'
+                                ? 'text-[var(--ink-secondary)]'
                                 : 'text-[var(--success)]'
                         }`}>方案审核</h3>
                         <p className={`text-xs ${
@@ -139,7 +139,7 @@ export function ExitPlanModePrompt({ request, onApprove, onReject }: ExitPlanMod
                 {request.plan && (
                     <div className={`mt-3 max-h-[26rem] overflow-y-auto rounded-lg border p-3 text-sm ${
                         isResolved && !isApproved
-                            ? 'border-[var(--line)] bg-[var(--paper-inset)]/60'
+                            ? 'border-[var(--line)] bg-[var(--paper)]'
                             : 'border-[var(--success)]/30 bg-[var(--paper-elevated)]/80'
                     }`}>
                         <Markdown>{request.plan}</Markdown>

@@ -6,15 +6,14 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::Mutex;
 use tauri::{
-    AppHandle, Emitter, Manager,
     webview::{PageLoadEvent, WebviewBuilder},
-    LogicalPosition, LogicalSize, Url,
+    AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Url,
 };
+use tokio::sync::Mutex;
 
+use crate::{ulog_info, ulog_warn};
 use std::path::Path;
-use crate::ulog_info;
 
 /// User-Agent for the embedded browser webview.
 ///
@@ -112,7 +111,9 @@ pub(crate) fn spawn_external_open(url: &str) {
     #[cfg(target_os = "macos")]
     let res = crate::process_cmd::new("open").arg(url).spawn();
     #[cfg(target_os = "windows")]
-    let res = crate::process_cmd::new("cmd").args(["/C", "start", "", url]).spawn();
+    let res = crate::process_cmd::new("cmd")
+        .args(["/C", "start", "", url])
+        .spawn();
     #[cfg(target_os = "linux")]
     let res = crate::process_cmd::new("xdg-open").arg(url).spawn();
 
@@ -190,7 +191,12 @@ pub async fn cmd_browser_create(
 
     ulog_info!(
         "[browser] cmd_browser_create: tab={} url={} pos=({},{}) size={}x{}",
-        tab_id, url, x, y, width, height
+        tab_id,
+        url,
+        x,
+        y,
+        width,
+        height
     );
 
     // Clamp degenerate bounds up to a 1px floor so the OS webview is never born
@@ -238,7 +244,11 @@ pub async fn cmd_browser_create(
             // file: is allowed — used for local HTML preview; the webview is
             // already sandboxed (browser.json zero Tauri permissions).
             if scheme == "javascript" {
-                ulog_info!("[browser] on_navigation BLOCKED: {} (scheme: {})", nav_url, scheme);
+                ulog_info!(
+                    "[browser] on_navigation BLOCKED: {} (scheme: {})",
+                    nav_url,
+                    scheme
+                );
                 return false;
             }
             // Internal signaling channel: BROWSER_INIT_SCRIPT triggers an
@@ -253,10 +263,16 @@ pub async fn cmd_browser_create(
                 if let Some(target_str) = target_str {
                     if let Ok(target) = Url::parse(&target_str) {
                         if matches!(target.scheme(), "http" | "https" | "mailto") {
-                            ulog_info!("[browser] open-external (Cmd/Ctrl/middle-click): {}", target);
+                            ulog_info!(
+                                "[browser] open-external (Cmd/Ctrl/middle-click): {}",
+                                target
+                            );
                             spawn_external_open(target.as_str());
                         } else {
-                            ulog_info!("[browser] open-external rejected non-allowlisted scheme: {}", target.scheme());
+                            ulog_info!(
+                                "[browser] open-external rejected non-allowlisted scheme: {}",
+                                target.scheme()
+                            );
                         }
                     }
                 }
@@ -270,7 +286,11 @@ pub async fn cmd_browser_create(
                     nav_url.to_string(),
                 );
             } else {
-                ulog_info!("[browser] on_navigation ALLOW (internal): {} (scheme: {})", nav_url, scheme);
+                ulog_info!(
+                    "[browser] on_navigation ALLOW (internal): {} (scheme: {})",
+                    nav_url,
+                    scheme
+                );
             }
             true
         })
@@ -297,7 +317,10 @@ pub async fn cmd_browser_create(
             }
         })
         .on_new_window(move |url, _features| {
-            ulog_info!("[browser] on_new_window: {} — redirecting to current webview", url);
+            ulog_info!(
+                "[browser] on_new_window: {} — redirecting to current webview",
+                url
+            );
             // Redirect target="_blank" / window.open() into the current webview
             let app = app_new_win.clone();
             let lbl = label_new_win.clone();
@@ -318,13 +341,15 @@ pub async fn cmd_browser_create(
     let position = LogicalPosition::new(x, y);
     let size = LogicalSize::new(width, height);
 
-    ulog_info!("[browser] Calling window.add_child for label='{}' url={}", label, parsed_url);
-    window
-        .add_child(builder, position, size)
-        .map_err(|e| {
-            ulog_info!("[browser] add_child FAILED: {}", e);
-            format!("Failed to create browser webview: {e}")
-        })?;
+    ulog_info!(
+        "[browser] Calling window.add_child for label='{}' url={}",
+        label,
+        parsed_url
+    );
+    window.add_child(builder, position, size).map_err(|e| {
+        ulog_info!("[browser] add_child FAILED: {}", e);
+        format!("Failed to create browser webview: {e}")
+    })?;
 
     ulog_info!("[browser] add_child SUCCESS for label='{}'", label);
 
@@ -350,7 +375,11 @@ pub async fn cmd_browser_create(
         },
     );
 
-    ulog_info!("[browser] Created webview '{}' for tab {} — session stored", label, tab_id);
+    ulog_info!(
+        "[browser] Created webview '{}' for tab {} — session stored",
+        label,
+        tab_id
+    );
     Ok(())
 }
 
@@ -436,9 +465,7 @@ pub async fn cmd_browser_reload(
         .get_webview(&session.webview_label)
         .ok_or_else(|| "Webview not found".to_string())?;
 
-    webview
-        .reload()
-        .map_err(|e| format!("Reload failed: {e}"))
+    webview.reload().map_err(|e| format!("Reload failed: {e}"))
 }
 
 /// Update webview position and size.
@@ -482,8 +509,37 @@ pub async fn cmd_browser_resize(
         .get_webview(&session.webview_label)
         .ok_or_else(|| "Webview not found".to_string())?;
 
-    let _ = webview.set_position(LogicalPosition::new(x, y));
-    let _ = webview.set_size(LogicalSize::new(width, height));
+    // Propagate (don't swallow) native geometry failures: the renderer's
+    // reconciler marks bounds as synced when this command resolves, so a
+    // silently-dropped set_position/set_size would park the OS webview at
+    // stale bounds with no retry scheduled and zero diagnostic trail (issue
+    // #339 post-mortem). Returning Err makes the renderer clear its synced
+    // marker and retry on the next frame. Errors are exceptional (webview
+    // teardown races), so the log cannot spam.
+    webview
+        .set_position(LogicalPosition::new(x, y))
+        .map_err(|e| {
+            ulog_warn!(
+                "[browser] set_position({}, {}) failed for tab {}: {}",
+                x,
+                y,
+                tab_id,
+                e
+            );
+            format!("set_position failed: {e}")
+        })?;
+    webview
+        .set_size(LogicalSize::new(width, height))
+        .map_err(|e| {
+            ulog_warn!(
+                "[browser] set_size({}x{}) failed for tab {}: {}",
+                width,
+                height,
+                tab_id,
+                e
+            );
+            format!("set_size failed: {e}")
+        })?;
     Ok(())
 }
 
@@ -508,11 +564,26 @@ pub async fn cmd_browser_show(
         .ok_or_else(|| "Webview not found".to_string())?;
 
     // Restore position and show
-    let _ = webview.set_position(LogicalPosition::new(session.last_x, session.last_y));
-    let _ = webview.set_size(LogicalSize::new(session.last_width, session.last_height));
+    if let Err(e) = webview.set_position(LogicalPosition::new(session.last_x, session.last_y)) {
+        ulog_warn!(
+            "[browser] SHOW set_position failed for tab {}: {}",
+            tab_id,
+            e
+        );
+    }
+    if let Err(e) = webview.set_size(LogicalSize::new(session.last_width, session.last_height)) {
+        ulog_warn!("[browser] SHOW set_size failed for tab {}: {}", tab_id, e);
+    }
     let _ = webview.show();
     session.visible = true;
-    ulog_info!("[browser] SHOW webview '{}' at ({},{}) {}x{}", session.webview_label, session.last_x, session.last_y, session.last_width, session.last_height);
+    ulog_info!(
+        "[browser] SHOW webview '{}' at ({},{}) {}x{}",
+        session.webview_label,
+        session.last_x,
+        session.last_y,
+        session.last_width,
+        session.last_height
+    );
     Ok(())
 }
 

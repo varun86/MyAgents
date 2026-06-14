@@ -103,17 +103,17 @@ fn save_pending_update_to_disk(version: &str, bytes: &[u8]) -> Result<(), String
     let meta_path = dir.join("pending_update.json");
 
     // Write binary atomically: tmp → rename
-    std::fs::write(&bin_tmp, bytes)
-        .map_err(|e| format!("Failed to write update binary: {}", e))?;
+    std::fs::write(&bin_tmp, bytes).map_err(|e| format!("Failed to write update binary: {}", e))?;
     std::fs::rename(&bin_tmp, &bin_path)
         .map_err(|e| format!("Failed to rename update binary: {}", e))?;
 
     // Write metadata
-    let meta = PendingUpdateMeta { version: version.to_string() };
-    let json = serde_json::to_string(&meta)
-        .map_err(|e| format!("Failed to serialize metadata: {}", e))?;
-    std::fs::write(&meta_path, json)
-        .map_err(|e| format!("Failed to write metadata: {}", e))?;
+    let meta = PendingUpdateMeta {
+        version: version.to_string(),
+    };
+    let json =
+        serde_json::to_string(&meta).map_err(|e| format!("Failed to serialize metadata: {}", e))?;
+    std::fs::write(&meta_path, json).map_err(|e| format!("Failed to write metadata: {}", e))?;
 
     Ok(())
 }
@@ -166,8 +166,12 @@ fn is_version_greater(remote: &str, current: &str) -> bool {
     for i in 0..r.len().max(c.len()) {
         let rv = r.get(i).copied().unwrap_or(0);
         let cv = c.get(i).copied().unwrap_or(0);
-        if rv > cv { return true; }
-        if rv < cv { return false; }
+        if rv > cv {
+            return true;
+        }
+        if rv < cv {
+            return false;
+        }
     }
     false // equal
 }
@@ -227,13 +231,21 @@ fn is_semver_like(version: &str) -> bool {
     }
 
     let mut parts = core.split('.');
-    let Some(major) = parts.next() else { return false };
-    let Some(minor) = parts.next() else { return false };
-    let Some(patch) = parts.next() else { return false };
+    let Some(major) = parts.next() else {
+        return false;
+    };
+    let Some(minor) = parts.next() else {
+        return false;
+    };
+    let Some(patch) = parts.next() else {
+        return false;
+    };
     if parts.next().is_some() {
         return false;
     }
-    [major, minor, patch].iter().all(|part| is_numeric_identifier(part))
+    [major, minor, patch]
+        .iter()
+        .all(|part| is_numeric_identifier(part))
 }
 
 #[cfg(any(target_os = "windows", test))]
@@ -410,7 +422,8 @@ fn build_updater_with_proxy(app: &AppHandle) -> Result<tauri_plugin_updater::Upd
     // 15s per-request timeout. Without this, a blackholed connection (TCP SYN
     // with no response) leaves the install retry loop hung — defeats the
     // entire point of the 3-attempt fallback in `resolve_update_with_retries`.
-    let mut builder = app.updater_builder()
+    let mut builder = app
+        .updater_builder()
         .target(target.to_string())
         .timeout(std::time::Duration::from_secs(15));
 
@@ -426,7 +439,9 @@ fn build_updater_with_proxy(app: &AppHandle) -> Result<tauri_plugin_updater::Upd
         // (Clash TUN, global proxy, etc.) just like other normal applications.
     }
 
-    builder.build().map_err(|e| format!("Failed to build updater: {}", e))
+    builder
+        .build()
+        .map_err(|e| format!("Failed to build updater: {}", e))
 }
 
 /// Check for updates on startup and silently download if available
@@ -447,16 +462,25 @@ pub async fn check_update_on_startup(app: AppHandle) {
         Ok(Some(version)) => {
             logger::info(
                 &app,
-                format!("[Updater] Update v{} downloaded and ready to install", version),
+                format!(
+                    "[Updater] Update v{} downloaded and ready to install",
+                    version
+                ),
             );
             // Only notify frontend when download is complete
             let info = UpdateReadyInfo {
                 version: version.clone(),
             };
-            logger::info(&app, "[Updater] Emitting 'updater:ready-to-restart' event to frontend...");
+            logger::info(
+                &app,
+                "[Updater] Emitting 'updater:ready-to-restart' event to frontend...",
+            );
             match app.emit("updater:ready-to-restart", info) {
                 Ok(_) => {
-                    logger::info(&app, format!("[Updater] Event emitted successfully for v{}", version));
+                    logger::info(
+                        &app,
+                        format!("[Updater] Event emitted successfully for v{}", version),
+                    );
                 }
                 Err(e) => {
                     logger::error(&app, format!("[Updater] Failed to emit ready event: {}", e));
@@ -464,7 +488,10 @@ pub async fn check_update_on_startup(app: AppHandle) {
             }
         }
         Ok(None) => {
-            logger::info(&app, "[Updater] No update available, already on latest version");
+            logger::info(
+                &app,
+                "[Updater] No update available, already on latest version",
+            );
         }
         Err(e) => {
             logger::error(&app, format!("[Updater] Background update failed: {}", e));
@@ -502,7 +529,10 @@ async fn check_and_download_silently(app: &AppHandle) -> Result<Option<String>, 
     let update = match updater.check().await {
         Ok(Some(update)) => update,
         Ok(None) => {
-            logger::info(app, "[Updater] Server returned no update (current version is latest or newer)");
+            logger::info(
+                app,
+                "[Updater] Server returned no update (current version is latest or newer)",
+            );
             return Ok(None);
         }
         Err(e) => {
@@ -555,7 +585,10 @@ async fn check_and_download_silently(app: &AppHandle) -> Result<Option<String>, 
             if dv == &version {
                 logger::info(
                     app,
-                    format!("[Updater] v{} already downloaded, skipping re-download", version),
+                    format!(
+                        "[Updater] v{} already downloaded, skipping re-download",
+                        version
+                    ),
                 );
                 // DOWNLOADED_VERSION is set only after save_pending_update_to_disk
                 // succeeds (line 440), so disk == version here. Cache aligned.
@@ -565,7 +598,10 @@ async fn check_and_download_silently(app: &AppHandle) -> Result<Option<String>, 
             if !is_version_greater(&version, dv) {
                 logger::info(
                     app,
-                    format!("[Updater] v{} not newer than already downloaded v{}, skipping", version, dv),
+                    format!(
+                        "[Updater] v{} not newer than already downloaded v{}, skipping",
+                        version, dv
+                    ),
                 );
                 // Disk holds `dv`, server returned `version` (older/equal). The
                 // Update object we have describes `version`, NOT `dv` — caching
@@ -575,14 +611,20 @@ async fn check_and_download_silently(app: &AppHandle) -> Result<Option<String>, 
             }
             logger::info(
                 app,
-                format!("[Updater] Newer v{} available (replacing downloaded v{})", version, dv),
+                format!(
+                    "[Updater] Newer v{} available (replacing downloaded v{})",
+                    version, dv
+                ),
             );
         }
     }
 
     logger::info(
         app,
-        format!("[Updater] Found update v{}, starting silent download...", version),
+        format!(
+            "[Updater] Found update v{}, starting silent download...",
+            version
+        ),
     );
 
     // Download with progress events to frontend
@@ -593,10 +635,9 @@ async fn check_and_download_silently(app: &AppHandle) -> Result<Option<String>, 
     let last_emitted_clone = last_emitted_percent.clone();
 
     let on_chunk = move |chunk_length: usize, content_length: Option<u64>| {
-        let new_downloaded = downloaded_clone.fetch_add(
-            chunk_length as u64,
-            std::sync::atomic::Ordering::SeqCst,
-        ) + chunk_length as u64;
+        let new_downloaded = downloaded_clone
+            .fetch_add(chunk_length as u64, std::sync::atomic::Ordering::SeqCst)
+            + chunk_length as u64;
 
         if let Some(total) = content_length.filter(|&t| t > 0) {
             let percent = ((new_downloaded as f64 / total as f64 * 100.0) as u32).min(100);
@@ -606,11 +647,14 @@ async fn check_and_download_silently(app: &AppHandle) -> Result<Option<String>, 
             if percent >= last + 2 || (percent == 100 && last != 100) {
                 last_emitted_clone.store(percent, std::sync::atomic::Ordering::SeqCst);
 
-                let _ = app_clone.emit("updater:download-progress", DownloadProgress {
-                    downloaded: new_downloaded,
-                    total: Some(total),
-                    percent: Some(percent),
-                });
+                let _ = app_clone.emit(
+                    "updater:download-progress",
+                    DownloadProgress {
+                        downloaded: new_downloaded,
+                        total: Some(total),
+                        percent: Some(percent),
+                    },
+                );
 
                 // Log at 25% intervals (less verbose)
                 if percent / 25 > last / 25 {
@@ -625,11 +669,14 @@ async fn check_and_download_silently(app: &AppHandle) -> Result<Option<String>, 
             let mb = new_downloaded / (5 * 1024 * 1024);
             let prev_mb = (new_downloaded - chunk_length as u64) / (5 * 1024 * 1024);
             if mb > prev_mb {
-                let _ = app_clone.emit("updater:download-progress", DownloadProgress {
-                    downloaded: new_downloaded,
-                    total: None,
-                    percent: None,
-                });
+                let _ = app_clone.emit(
+                    "updater:download-progress",
+                    DownloadProgress {
+                        downloaded: new_downloaded,
+                        total: None,
+                        percent: None,
+                    },
+                );
             }
         }
     };
@@ -643,7 +690,10 @@ async fn check_and_download_silently(app: &AppHandle) -> Result<Option<String>, 
             if cached_version == version {
                 logger::info(
                     app,
-                    format!("[Updater] Windows: v{} already cached on disk, skipping re-download", version),
+                    format!(
+                        "[Updater] Windows: v{} already cached on disk, skipping re-download",
+                        version
+                    ),
                 );
                 // Disk == version; safe to align cache.
                 cache_update(update.clone());
@@ -658,25 +708,47 @@ async fn check_and_download_silently(app: &AppHandle) -> Result<Option<String>, 
         // cache/disk state — better to hide. The button reappears on
         // `updater:ready-to-restart` (new bytes committed) or
         // `updater:download-failed` (kept old bytes, no replacement).
-        let _ = app.emit("updater:download-started", UpdateReadyInfo { version: version.clone() });
+        let _ = app.emit(
+            "updater:download-started",
+            UpdateReadyInfo {
+                version: version.clone(),
+            },
+        );
 
         let bytes = match update.download(on_chunk, || {}).await {
             Ok(b) => b,
             Err(e) => {
-                let _ = app.emit("updater:download-failed", UpdateReadyInfo { version: version.clone() });
+                let _ = app.emit(
+                    "updater:download-failed",
+                    UpdateReadyInfo {
+                        version: version.clone(),
+                    },
+                );
                 return Err(format!("Silent download failed: {}", e));
             }
         };
 
         logger::info(
             app,
-            format!("[Updater] Windows: Downloaded {} bytes for v{}, saving to disk...", bytes.len(), version),
+            format!(
+                "[Updater] Windows: Downloaded {} bytes for v{}, saving to disk...",
+                bytes.len(),
+                version
+            ),
         );
 
         // Save to disk — install_pending_update will read from here
         if let Err(e) = save_pending_update_to_disk(&version, &bytes) {
-            logger::error(app, format!("[Updater] Failed to save update to disk: {}", e));
-            let _ = app.emit("updater:download-failed", UpdateReadyInfo { version: version.clone() });
+            logger::error(
+                app,
+                format!("[Updater] Failed to save update to disk: {}", e),
+            );
+            let _ = app.emit(
+                "updater:download-failed",
+                UpdateReadyInfo {
+                    version: version.clone(),
+                },
+            );
             return Err(format!("Failed to persist update: {}", e));
         }
 
@@ -695,10 +767,20 @@ async fn check_and_download_silently(app: &AppHandle) -> Result<Option<String>, 
         // Same UI mutex applies on macOS — relaunch path uses bytes installed
         // by `download_and_install`, but during this window the .app on disk
         // is being swapped, so a click that triggers `relaunch()` could race.
-        let _ = app.emit("updater:download-started", UpdateReadyInfo { version: version.clone() });
+        let _ = app.emit(
+            "updater:download-started",
+            UpdateReadyInfo {
+                version: version.clone(),
+            },
+        );
 
         if let Err(e) = update.download_and_install(on_chunk, || {}).await {
-            let _ = app.emit("updater:download-failed", UpdateReadyInfo { version: version.clone() });
+            let _ = app.emit(
+                "updater:download-failed",
+                UpdateReadyInfo {
+                    version: version.clone(),
+                },
+            );
             return Err(format!("Silent download failed: {}", e));
         }
     }
@@ -765,7 +847,13 @@ pub fn check_pending_update(app: AppHandle) -> Option<String> {
                 // Reject stale pending updates (e.g., user manually upgraded past the cached version)
                 let current = app.package_info().version.to_string();
                 if !is_version_greater(&version, &current) {
-                    logger::info(&app, format!("[Updater] Clearing stale pending update v{} (current v{})", version, current));
+                    logger::info(
+                        &app,
+                        format!(
+                            "[Updater] Clearing stale pending update v{} (current v{})",
+                            version, current
+                        ),
+                    );
                     clear_pending_update_from_disk();
                     return None;
                 }
@@ -777,9 +865,12 @@ pub fn check_pending_update(app: AppHandle) -> Option<String> {
                 let app_for_warmup = app.clone();
                 tauri::async_runtime::spawn(async move {
                     if LATEST_UPDATE.lock().map(|g| g.is_some()).unwrap_or(false) {
-                        return;  // already warm
+                        return; // already warm
                     }
-                    logger::info(&app_for_warmup, "[Updater] Warming LATEST_UPDATE cache for pending install");
+                    logger::info(
+                        &app_for_warmup,
+                        "[Updater] Warming LATEST_UPDATE cache for pending install",
+                    );
                     let _ = check_and_download_silently(&app_for_warmup).await;
                 });
                 Some(version)
@@ -840,7 +931,11 @@ pub async fn install_pending_update(
 
         logger::info(
             &app,
-            format!("[Updater] Read {} bytes for v{} from disk", bytes.len(), pending_version),
+            format!(
+                "[Updater] Read {} bytes for v{} from disk",
+                bytes.len(),
+                pending_version
+            ),
         );
 
         // Step 2: Resolve the Update object. Cache hit → zero network.
@@ -849,13 +944,19 @@ pub async fn install_pending_update(
         let update = if let Some(cached) = cached_update_for(&pending_version) {
             logger::info(
                 &app,
-                format!("[Updater] Using cached Update for v{} (no network needed)", pending_version),
+                format!(
+                    "[Updater] Using cached Update for v{} (no network needed)",
+                    pending_version
+                ),
             );
             cached
         } else {
             logger::info(
                 &app,
-                format!("[Updater] No cached Update for v{}, falling back to network check", pending_version),
+                format!(
+                    "[Updater] No cached Update for v{}, falling back to network check",
+                    pending_version
+                ),
             );
             resolve_update_with_retries(&app, &pending_version, 3).await?
         };
@@ -878,11 +979,20 @@ pub async fn install_pending_update(
         // the renderer BEFORE step 2, which meant a network failure would kill
         // the user's session for nothing. Doing it here keeps the user's state
         // intact on every failure path above.
-        logger::info(&app, "[Updater] Shutting down sidecars before NSIS install...");
+        logger::info(
+            &app,
+            "[Updater] Shutting down sidecars before NSIS install...",
+        );
         if let Err(e) = crate::sidecar::shutdown_for_update(&state) {
             // Don't bail — NSIS will retry the file overwrite a few times,
             // and most of the time taskkill /T /F gets there. Log loudly.
-            logger::error(&app, format!("[Updater] Sidecar shutdown returned error: {} (continuing with install)", e));
+            logger::error(
+                &app,
+                format!(
+                    "[Updater] Sidecar shutdown returned error: {} (continuing with install)",
+                    e
+                ),
+            );
         }
 
         // Step 5: Install — spawns NSIS installer and calls exit(0).
@@ -894,7 +1004,10 @@ pub async fn install_pending_update(
         // so the user can retry without re-downloading. On the success path
         // the new app version replaces the old one and the next startup's
         // `check_pending_update` clears stale-by-version entries automatically.
-        logger::info(&app, format!("[Updater] Installing v{}...", pending_version));
+        logger::info(
+            &app,
+            format!("[Updater] Installing v{}...", pending_version),
+        );
         update
             .install(bytes)
             .map_err(|e| format!("Installation failed: {}", e))?;
@@ -926,7 +1039,10 @@ async fn resolve_update_with_retries(
                 cache_update(update.clone());
                 logger::info(
                     app,
-                    format!("[Updater] Network check succeeded on attempt {}/{} (server v{})", attempt, attempts, update.version),
+                    format!(
+                        "[Updater] Network check succeeded on attempt {}/{} (server v{})",
+                        attempt, attempts, update.version
+                    ),
                 );
                 return Ok(update);
             }
@@ -982,20 +1098,30 @@ struct UpdateJsonFormat {
 /// Supports macOS (ARM/Intel) and Windows (x64/ARM)
 fn get_update_target() -> &'static str {
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    { "darwin-aarch64" }
+    {
+        "darwin-aarch64"
+    }
     #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-    { "darwin-x86_64" }
+    {
+        "darwin-x86_64"
+    }
     #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
-    { "windows-x86_64" }
+    {
+        "windows-x86_64"
+    }
     #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
-    { "windows-aarch64" }
+    {
+        "windows-aarch64"
+    }
     #[cfg(not(any(
         all(target_os = "macos", target_arch = "aarch64"),
         all(target_os = "macos", target_arch = "x86_64"),
         all(target_os = "windows", target_arch = "x86_64"),
         all(target_os = "windows", target_arch = "aarch64"),
     )))]
-    { "unknown" }
+    {
+        "unknown"
+    }
 }
 
 /// Command: Test HTTP connectivity to update server (diagnostic)
@@ -1006,7 +1132,10 @@ pub async fn test_update_connectivity(app: AppHandle) -> Result<String, String> 
     let target = get_update_target();
 
     let url = format!("https://download.myagents.io/update/{}.json", target);
-    logger::info(&app, format!("[Updater] Testing HTTP connectivity to: {}", url));
+    logger::info(
+        &app,
+        format!("[Updater] Testing HTTP connectivity to: {}", url),
+    );
 
     // Build a reqwest client with user's proxy configuration. Updater talks
     // to R2 — external host, system proxy wanted.
@@ -1020,21 +1149,17 @@ pub async fn test_update_connectivity(app: AppHandle) -> Result<String, String> 
         .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
 
     // Make the request
-    let response = client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| {
-            let error_msg = format!(
-                "HTTP request failed: {} (is_connect: {}, is_timeout: {}, is_request: {})",
-                e,
-                e.is_connect(),
-                e.is_timeout(),
-                e.is_request()
-            );
-            logger::error(&app, format!("[Updater] {}", error_msg));
-            error_msg
-        })?;
+    let response = client.get(&url).send().await.map_err(|e| {
+        let error_msg = format!(
+            "HTTP request failed: {} (is_connect: {}, is_timeout: {}, is_request: {})",
+            e,
+            e.is_connect(),
+            e.is_timeout(),
+            e.is_request()
+        );
+        logger::error(&app, format!("[Updater] {}", error_msg));
+        error_msg
+    })?;
 
     let status = response.status();
     let headers = response.headers().clone();
@@ -1079,7 +1204,11 @@ pub async fn test_update_connectivity(app: AppHandle) -> Result<String, String> 
         headers.get("content-type"),
         body.len(),
         json_parse_result,
-        if body.len() > 800 { &body[..800] } else { &body }
+        if body.len() > 800 {
+            &body[..800]
+        } else {
+            &body
+        }
     );
 
     logger::info(&app, format!("[Updater] Test result:\n{}", result));
