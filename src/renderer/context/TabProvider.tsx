@@ -29,6 +29,7 @@ import type { ExitPlanModeRequest, EnterPlanModeRequest, ExitPlanModeAllowedProm
 import { CUSTOM_EVENTS, isPendingSessionId } from '../../shared/constants';
 import { TabContext, TabApiContext, TabActiveContext, type SessionState, type SystemNotice, type TabContextValue, type TabApiContextValue } from './TabContext';
 import { shouldSkipHistoryReplay, shouldClearHistoryOnInit } from './sessionRestoreGuards';
+import { shouldAcceptSessionScopedSseSnapshot } from './sessionScopedEventGuards';
 import { isSubagentContainerTool } from '@/components/tools/toolBadgeConfig';
 import type { Message, ContentBlock, ToolUseSimple, ToolInput, TaskStats, SubagentToolCall } from '@/types/chat';
 import type { ToolUse } from '@/types/stream';
@@ -36,6 +37,7 @@ import type { SystemInitInfo } from '../../shared/types/system';
 import type { RuntimeDiagnostics } from '../../shared/types/runtime';
 import type { ContextUsage } from '../../shared/types/context-usage';
 import type { TerminalReason } from '../../shared/terminalReason';
+import type { SlashCommand } from '../../shared/slashCommands';
 import type { LogEntry } from '@/types/log';
 import { parsePartialJson } from '@/utils/parsePartialJson';
 import { subscribeFrontendLogs, setCurrentTabId } from '@/utils/frontendLogger';
@@ -424,6 +426,7 @@ export default function TabProvider({
     const [logs, setLogs] = useState<string[]>([]);
     const [unifiedLogs, setUnifiedLogs] = useState<LogEntry[]>([]);
     const [systemInitInfo, setSystemInitInfo] = useState<SystemInitInfo | null>(null);
+    const [sdkSlashCommands, setSdkSlashCommands] = useState<SlashCommand[]>([]);
     // Issue #194 — runtime diagnostics snapshot for external runtimes (Codex
     // today; Claude Code / Gemini later). Replaces the previously-hardcoded
     // `systemInitInfo.tools: []` signal with a real diagnostic surface.
@@ -460,6 +463,7 @@ export default function TabProvider({
         // (review: stale-source transient). loadSession then re-seeds from the persisted
         // lastContextUsage; new-session paths (reset/adopt) also clear explicitly for immediacy.
         setContextUsage(null);
+        setSdkSlashCommands([]);
     }, [sessionId]);
 
     // Store callbacks in refs to avoid triggering effects on every render
@@ -601,6 +605,7 @@ export default function TabProvider({
         resetPaginationState();
         setStreamingMessage(null);
         setContextUsage(null);  // PRD 0.2.32 — 新会话无持久占用；仅清展示态（不碰后端持久数据）
+        setSdkSlashCommands([]);
         seenIdsRef.current.clear();
         restoredSessionIdRef.current = null;  // new session: no REST-restored history → replay normally
         isNewSessionRef.current = true;
@@ -713,6 +718,7 @@ export default function TabProvider({
         resetPaginationState();
         setStreamingMessage(null);
         setContextUsage(null);  // PRD 0.2.32 — 新会话无持久占用；仅清展示态（不碰后端持久数据）
+        setSdkSlashCommands([]);
         seenIdsRef.current.clear();
         restoredSessionIdRef.current = null;  // new session: no REST-restored history → replay normally
         clearSessionActive();
@@ -2154,6 +2160,9 @@ export default function TabProvider({
                     // bottom-bar display consistent with how messages route.
                     if (payload.runtime) {
                         setSessionRuntime(payload.runtime);
+                        if (payload.runtime !== 'builtin') {
+                            setSdkSlashCommands([]);
+                        }
                     }
 
                     // Mark session as active (prevents loadSession from interrupting) and loading.
@@ -2238,6 +2247,23 @@ export default function TabProvider({
                         trackSessionNewForBirth(newSessionId, 'new_chat_button');
                     }
                 }
+                break;
+            }
+
+            case 'chat:slash-commands': {
+                const payload = data as { commands?: SlashCommand[]; sessionId?: string; runtime?: string } | null;
+                const payloadSessionId = payload?.sessionId;
+                const currentId = currentSessionIdRef.current;
+                if (!shouldAcceptSessionScopedSseSnapshot({
+                    connectedSessionId: connectedSseSessionIdRef.current,
+                    currentSessionId: currentId,
+                    payloadSessionId,
+                    isCurrentSessionPending: currentId ? isPendingSessionId(currentId) : false,
+                })) {
+                    console.log(`[TabProvider ${tabId}] Ignoring slash commands for stale session ${payloadSessionId}`);
+                    break;
+                }
+                setSdkSlashCommands(Array.isArray(payload?.commands) ? payload.commands : []);
                 break;
             }
 
@@ -3518,6 +3544,7 @@ export default function TabProvider({
             const persistedUsage = response.session.lastContextUsage ?? null;
             const seedRuntime = response.session.runtime || 'builtin';
             setContextUsage(persistedUsage && persistedUsage.source === seedRuntime ? persistedUsage : null);
+            setSdkSlashCommands([]);
             // Only reset loading state if not explicitly skipped
             // (caller may be managing loading state for an in-progress operation like cron task)
             if (!options?.skipLoadingReset) {
@@ -4067,6 +4094,7 @@ export default function TabProvider({
         logs,
         unifiedLogs,
         systemInitInfo,
+        sdkSlashCommands,
         runtimeDiagnostics,
         agentError,
         systemStatus,
@@ -4111,7 +4139,7 @@ export default function TabProvider({
         onCronTaskExitRequested: onCronTaskExitRequestedRef,
     }), [
         tabId, agentDir, currentSessionId, messages, historyMessages, streamingMessage, firstItemIndex, hasMoreBefore, isLoading, isSessionLoading, sessionState, sessionRuntime, sessionMeta,
-        logs, unifiedLogs, systemInitInfo, runtimeDiagnostics, agentError, systemStatus, systemNotice, contextUsage, lastTerminalReason, pendingPermission, pendingAskUserQuestion, pendingExitPlanMode, pendingEnterPlanMode, toolCompleteCount, queuedMessages, isConnected,
+        logs, unifiedLogs, systemInitInfo, sdkSlashCommands, runtimeDiagnostics, agentError, systemStatus, systemNotice, contextUsage, lastTerminalReason, pendingPermission, pendingAskUserQuestion, pendingExitPlanMode, pendingEnterPlanMode, toolCompleteCount, queuedMessages, isConnected,
         setMessages, appendLog, appendUnifiedLog, clearUnifiedLogs, sendMessage, stopResponse, loadSession, loadOlderMessages, resetSession, adoptMigratedSession,
         apiGetJson, postJson, apiPutJson, apiDeleteJson, respondPermission, respondAskUserQuestion, respondExitPlanMode, cancelQueuedMessage, forceExecuteQueuedMessage
     ]);

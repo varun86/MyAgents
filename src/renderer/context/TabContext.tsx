@@ -26,6 +26,7 @@ import type { ExitPlanModeRequest, EnterPlanModeRequest } from '../../shared/typ
 import type { TerminalReason } from '../../shared/terminalReason';
 import type { SessionMetadata } from '@/api/sessionClient';
 import type { ContextUsage } from '../../shared/types/context-usage';
+import type { SlashCommand } from '../../shared/slashCommands';
 
 // (issue #174) 'starting' = SDK subprocess launched, awaiting system_init.
 // Distinct from 'running' (= AI actively processing a turn) so the UI can
@@ -71,6 +72,13 @@ export interface TabState {
     logs: string[];
     unifiedLogs: LogEntry[];
     systemInitInfo: SystemInitInfo | null;
+    /**
+     * Slash commands reported by the active builtin SDK subprocess. This is
+     * the dynamic companion to the Rust workspace scan used by SimpleChatInput:
+     * plugin skills/commands only exist after SDK plugin resolution, so they
+     * arrive over SSE instead of from disk.
+     */
+    sdkSlashCommands: SlashCommand[];
     /**
      * Issue #194 — external-runtime self-report (auth / features / MCP / apps /
      * effective env). Populated when an external runtime emits the
@@ -231,6 +239,7 @@ const defaultContextValue: TabContextValue = {
     logs: [],
     unifiedLogs: [],
     systemInitInfo: null,
+    sdkSlashCommands: [],
     runtimeDiagnostics: null,
     agentError: null,
     systemStatus: null,

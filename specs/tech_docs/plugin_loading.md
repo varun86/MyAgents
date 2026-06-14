@@ -124,6 +124,15 @@ per-Tab override 设置：renderer 在 chat 输入框「插件」子菜单勾选
 
 外部 Runtime（Claude Code CLI / Codex / Gemini）路径不走这里——它们各自管自己的 plugin 体系。
 
+### Slash 菜单发现（plugin skills / commands）
+
+Chat 输入框的 `/` 菜单有两类数据源：
+
+1. **本地静态源**：`cmd_list_slash_commands` 通过 Rust 扫描工作区 / 用户的 commands 与 skills，用于 Launcher 和 Chat 的基础菜单。
+2. **SDK 动态源**：builtin SDK 初始化后返回 `initializationResult().commands`，运行中还可能发 `commands_changed.commands`。Sidecar 将这份 snapshot 通过 `chat:slash-commands` SSE 发给 Tab，前端只在 Chat/builtin runtime 下把它作为补充项合并进菜单。
+
+这条动态源是 plugin skills 可被手动 `/plugin:skill` 触发的唯一正确来源：MyAgents 不扫描 `~/.myagents/plugins/<id>/skills` 来重建 SDK 语义，也不解析 plugin 内组件。合并规则是本地静态源优先，SDK 只追加本地没有的命令，避免覆盖 `/loop` 这类 renderer client-action 或本地自定义命令。外部 Runtime 不消费 `chat:slash-commands`。
+
 ---
 
 ## 磁盘布局

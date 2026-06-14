@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import type { SlashCommand } from '../../shared/slashCommands';
-import { filterAndSortCommands } from './SlashCommandMenu';
+import { filterAndSortCommands, mergeSlashCommands } from './SlashCommandMenu';
 
 const cmd = (name: string, source: SlashCommand['source']): SlashCommand => ({
   name,
@@ -57,5 +57,32 @@ describe('filterAndSortCommands', () => {
     input[0] = { name: 'skill-x', description: 'has xyzmatch token', source: 'skill' };
     const out = filterAndSortCommands(input, 'xyzmatch');
     expect(out.map((c) => c.name)).toEqual(['review', 'skill-x']);
+  });
+});
+
+describe('mergeSlashCommands', () => {
+  it('appends SDK-only plugin commands after workspace commands', () => {
+    const workspace = [cmd('compact', 'builtin')];
+    const sdk = [cmd('my-plugin:deploy', 'sdk')];
+    const out = mergeSlashCommands(workspace, sdk);
+
+    expect(out.map((c) => c.name)).toEqual(['compact', 'my-plugin:deploy']);
+    expect(out[1].source).toBe('sdk');
+  });
+
+  it('keeps the workspace command on name collisions', () => {
+    const workspace = [cmd('compact', 'builtin')];
+    const sdk = [{ ...cmd('/compact', 'sdk'), description: 'SDK compact' }];
+    const out = mergeSlashCommands(workspace, sdk);
+
+    expect(out).toBe(workspace);
+    expect(out).toHaveLength(1);
+    expect(out[0].description).toBe('compact description');
+  });
+
+  it('normalizes leading slashes from SDK command names', () => {
+    const out = mergeSlashCommands([], [cmd('/plugin:skill', 'sdk')]);
+
+    expect(out.map((c) => c.name)).toEqual(['plugin:skill']);
   });
 });

@@ -11,7 +11,7 @@ import { useWorkspaceFileService } from '@/hooks/useWorkspaceFileService';
 import { type PermissionMode, PERMISSION_MODES, type Provider, type ProviderVerifyStatus, getModelDisplayName } from '@/config/types';
 import { useConfigData } from '@/config/useConfigData';
 import { resolveEnterKeyAction, sendHintLabel } from '@/utils/chatSendKey';
-import SlashCommandMenu, { type SlashCommand, filterAndSortCommands } from './SlashCommandMenu';
+import SlashCommandMenu, { type SlashCommand, filterAndSortCommands, mergeSlashCommands } from './SlashCommandMenu';
 import { isClientActionCommand, withClientActionCommands } from '@/utils/slashActions';
 import QueuedMessagesPanel from './QueuedMessageBubble';
 import CronTaskStatusBar from './cron/CronTaskStatusBar';
@@ -178,6 +178,8 @@ interface SimpleChatInputProps {
    *  panel) by name. When provided, client-action commands are injected into
    *  the slash menu; when omitted they don't appear. See `@/utils/slashActions`. */
   onSlashAction?: (name: string) => void;
+  /** SDK live command snapshot for this chat session, including plugin skills. */
+  sdkSlashCommands?: SlashCommand[];
   /** Display mode: 'chat' (default) or 'launcher' (hides @/slash/cron features) */
   mode?: 'chat' | 'launcher';
   /** Optional ReactNode rendered at the start of the toolbar (e.g., workspace selector in launcher) */
@@ -334,6 +336,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   onCronCancel,
   onCronStop,
   onSlashAction,
+  sdkSlashCommands = [],
   mode = 'chat',
   toolbarPrefix,
   contextIndicator,
@@ -557,10 +560,19 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   const [selectedSlashIndex, setSelectedSlashIndex] = useState(0);
   const [slashPosition, setSlashPosition] = useState<number | null>(null);
 
+  const clientActionsEnabled = !!onSlashAction;
+  const mergedSlashCommands = useMemo(
+    () => withClientActionCommands(
+      mergeSlashCommands(slashCommands, sdkSlashCommands),
+      clientActionsEnabled,
+    ),
+    [slashCommands, sdkSlashCommands, clientActionsEnabled],
+  );
+
   // Compute filtered slash commands once per render (used in both handleKeyDown and JSX)
   const filteredSlashCommands = useMemo(
-    () => filterAndSortCommands(slashCommands, slashSearchQuery),
-    [slashCommands, slashSearchQuery]
+    () => filterAndSortCommands(mergedSlashCommands, slashSearchQuery),
+    [mergedSlashCommands, slashSearchQuery]
   );
 
   // Guard against double-fire of handleSend (e.g. rapid Enter + click)
@@ -655,14 +667,9 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   // frontmatter parse), not the sidecar /api/commands. Launcher gets the
   // exact same menu as chat-tab — no more "ah, the launcher has no apiGet"
   // empty-menu bug.
-  // Client-action commands (e.g. /loop) are injected only when a handler is
-  // wired to service them — see `withClientActionCommands`. The `!!` boolean is
-  // value-stable across renders so it's safe in the deps array (unlike the raw
-  // callback, which could be a fresh identity each render).
-  const clientActionsEnabled = !!onSlashAction;
   const fetchCommands = useCallback(async () => {
     const apply = (list: SlashCommand[]) =>
-      setSlashCommands(withClientActionCommands(list, clientActionsEnabled));
+      setSlashCommands(list);
     if (!fileService.isAvailable) {
       // Fall back to builtins so the menu isn't empty in browser dev mode.
       apply(BUILTIN_FALLBACK_SLASH_COMMANDS);
@@ -680,7 +687,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
       console.error('Failed to fetch slash commands, using fallback:', err);
       apply(BUILTIN_FALLBACK_SLASH_COMMANDS);
     }
-  }, [fileService, clientActionsEnabled]);
+  }, [fileService]);
 
   // Fetch slash commands on mount or when workspacePath changes (so launcher
   // workspace switching reloads project-level skills).

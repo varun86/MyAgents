@@ -2,7 +2,7 @@ import { randomUUID } from 'crypto';
 import { existsSync, readdirSync, symlinkSync, lstatSync, readFileSync, readlinkSync, rmSync } from 'fs';
 import { dirname, join, resolve, sep } from 'path';
 import { createRequire } from 'module';
-import { query, getSessionMessages as sdkGetSessionMessages, forkSession as sdkForkSession, deleteSession as sdkDeleteSession, type Query, type SDKUserMessage, type AgentDefinition, type HookInput, type HookJSONOutput, type PreToolUseHookInput, type PostToolUseHookInput, type PermissionRequestHookInput } from '@anthropic-ai/claude-agent-sdk';
+import { query, getSessionMessages as sdkGetSessionMessages, forkSession as sdkForkSession, deleteSession as sdkDeleteSession, type Query, type SDKUserMessage, type AgentDefinition, type HookInput, type HookJSONOutput, type PreToolUseHookInput, type PostToolUseHookInput, type PermissionRequestHookInput, type SlashCommand as SdkSlashCommand } from '@anthropic-ai/claude-agent-sdk';
 import {
   decideBackgroundAgentPermission,
   isBackgroundAgentToolRequest,
@@ -62,9 +62,10 @@ import { normalizeReasoningEffort, isSdkEffortLevel } from '../shared/reasoningE
 import { computeContextUsage } from '../shared/contextUsage';
 import { resolveContextOccupancyFromSdkBreakdown, resolveContextOccupancyTokens } from './utils/context-occupancy';
 import type { SystemInitInfo } from '../shared/types/system';
+import type { SlashCommand as UiSlashCommand } from '../shared/slashCommands';
 import { saveSessionMetadata, updateSessionTitleFromMessage, saveSessionMessages, saveAttachment, updateSessionMetadata, getSessionMetadata, getSessionData } from './SessionStore';
 import { firePostTurnTitleHook } from './turn-hooks';
-import { createSessionMetadata, type SessionMessage, type MessageAttachment, type MessageUsage, type SessionSource } from './types/session';
+import { createSessionMetadata, type SessionMessage, type MessageAttachment, type MessageUsage, type SessionSource, type TurnAnalyticsSource } from './types/session';
 import {
   createMaterializedSessionMetadata,
   isLiveFollowScenario,
@@ -813,6 +814,9 @@ type InFlightMetadata = {
    *  queued-message surface paths can decide whether this user message should
    *  mirror to a bound IM channel. Only `'desktop'` triggers mirror. */
   source?: SessionSource;
+  /** Per-turn analytics attribution. Separate from `source` because source
+   *  also drives desktop→IM mirror semantics. */
+  analyticsSource?: TurnAnalyticsSource;
   /** PRD 0.2.14 — base64 image payloads forwarded for mirror purposes.
    *  Lives alongside `attachments` (which is on-disk paths) because the
    *  Sidecar→management-API mirror call needs raw bytes inline. PNG/JPG
@@ -1177,6 +1181,8 @@ type MessageQueueItem = {
   // at the IM edge (Rust mod.rs spawn entry → /api/im/chat payload).
   // Empty string for desktop / cron / heartbeat paths (no IM identity).
   requestId?: string;
+  /** Per-turn analytics attribution; defaults to currentScenario.type. */
+  analyticsSource?: TurnAnalyticsSource;
   // PRD 0.2.18 Session Inbox — per-turn binding for reply pushback.
   // Bound on dequeue (generator yield), read at result handler. When present
   // and replyBack=true, turn-end pushes <inbox-reply> back to caller session.
@@ -1605,6 +1611,7 @@ function promoteNextFromPending(): void {
     messageText: promotedText,
     attachments: pending.userMessage.attachments,
     requestId: pending.sourceItem.requestId,
+    analyticsSource: pending.sourceItem.analyticsSource,
   };
   console.log(`[agent] Promoting next pending mid-turn message: queueId=${pending.queueId} (pending remaining=${pendingMidTurnQueue.length})`);
   // Re-emit queue:added with isInFlight=true. Frontend's queue:added handler
@@ -1797,6 +1804,7 @@ let currentTurnHasOutput = false;
 // SDK result later succeeds. Keep it turn-local until the authoritative result.
 let currentTurnHadAssistantMessageError = false;
 let currentTurnLastAssistantMessageError: string | null = null;
+let currentTurnAnalyticsSource: TurnAnalyticsSource | null = null;
 let currentTurnCompactResult: 'success' | 'failed' | null = null;
 let currentTurnSawCompactBoundary = false;
 // Whether the current turn observed any non-init SDK frame (assistant /
@@ -1898,6 +1906,7 @@ function resetTurnUsage(): void {
   currentTurnHasOutput = false;
   currentTurnHadAssistantMessageError = false;
   currentTurnLastAssistantMessageError = null;
+  currentTurnAnalyticsSource = null;
   currentTurnCompactResult = null;
   currentTurnSawCompactBoundary = false;
   turnHadSubstantiveActivity = false;
@@ -5100,6 +5109,73 @@ function parseSystemInitInfo(message: unknown): SystemInitInfo | null {
   };
 }
 
+function normalizeSdkSlashCommand(command: unknown): UiSlashCommand | null {
+  if (!command || typeof command !== 'object') {
+    return null;
+  }
+  const record = command as Partial<SdkSlashCommand> & Record<string, unknown>;
+  const rawName = typeof record.name === 'string' ? record.name.trim() : '';
+  const name = rawName.replace(/^\/+/, '');
+  if (!name) {
+    return null;
+  }
+
+  const aliases = Array.isArray(record.aliases)
+    ? record.aliases
+        .filter((alias): alias is string => typeof alias === 'string' && alias.trim().length > 0)
+        .map((alias) => alias.trim().replace(/^\/+/, ''))
+    : undefined;
+  const argumentHint = typeof record.argumentHint === 'string' && record.argumentHint.trim().length > 0
+    ? record.argumentHint.trim()
+    : undefined;
+
+  return {
+    name,
+    description: typeof record.description === 'string' ? record.description : '',
+    source: 'sdk',
+    ...(argumentHint ? { argumentHint } : {}),
+    ...(aliases && aliases.length > 0 ? { aliases } : {}),
+  };
+}
+
+function normalizeSdkSlashCommands(commands: unknown): UiSlashCommand[] | null {
+  if (!Array.isArray(commands)) {
+    return null;
+  }
+
+  const normalized: UiSlashCommand[] = [];
+  const seen = new Set<string>();
+  for (const command of commands) {
+    const item = normalizeSdkSlashCommand(command);
+    if (!item) continue;
+    const key = item.name.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    normalized.push(item);
+  }
+  return normalized;
+}
+
+function parseSdkCommandsChanged(message: unknown): UiSlashCommand[] | null {
+  if (!message || typeof message !== 'object') {
+    return null;
+  }
+  const record = message as Record<string, unknown>;
+  if (record.type !== 'system' || record.subtype !== 'commands_changed') {
+    return null;
+  }
+  return normalizeSdkSlashCommands(record.commands);
+}
+
+function broadcastSdkSlashCommands(commands: UiSlashCommand[], source: 'initialize' | 'commands_changed'): void {
+  broadcast('chat:slash-commands', {
+    commands,
+    sessionId,
+    runtime: 'builtin',
+    source,
+  });
+}
+
 /**
  * Parse SDK status message (e.g., compacting)
  * Returns { isStatusMessage, status } to distinguish between:
@@ -7404,6 +7480,7 @@ export async function enqueueUserMessage(
   // `myagents session send`). Carries reply-back instruction + caller identity;
   // bound per-turn at generator yield, read at result handler for reply pushback.
   inboxMeta?: import('./inbox/types').InboxTurnMeta,
+  analyticsSource?: TurnAnalyticsSource,
 ): Promise<EnqueueResult> {
   // 等待进行中的 resetSession/switchToSession 完成，防止消息投递到已死的 generator
   // 这些函数是异步的（await sessionTerminationPromise 需要数秒），
@@ -7941,6 +8018,7 @@ export async function enqueueUserMessage(
       resolve: () => {},  // No-op: no one is awaiting
       attachments: savedAttachments.length > 0 ? savedAttachments : undefined,
       requestId,
+      analyticsSource: analyticsSource ?? currentScenario.type,
       inboxMeta,
     };
 
@@ -7966,6 +8044,7 @@ export async function enqueueUserMessage(
         attachments: savedAttachments.length > 0 ? savedAttachments : undefined,
         requestId,
         source: metadata?.source,
+        analyticsSource: analyticsSource ?? currentScenario.type,
         mirrorImages: toMirrorImages(images),
       };
       wakeGenerator(queueItem);
@@ -8050,6 +8129,7 @@ export async function enqueueUserMessage(
     wasQueued: false,
     resolve: () => {},  // No-op: no one is awaiting
     requestId,
+    analyticsSource: analyticsSource ?? currentScenario.type,
     inboxMeta,
   };
 
@@ -10017,13 +10097,17 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     if (querySession) {
       const localQuery = querySession;
       const initStartT = Date.now();
-      void localQuery.initializationResult().then(() => {
+      void localQuery.initializationResult().then((initResult) => {
         if (querySession !== localQuery) {
           // Stale: a session swap happened while initialize was in flight.
           // The new pre-warm will fire its own initializationResult().
           return;
         }
         sdkControlReady = true;
+        const slashCommands = normalizeSdkSlashCommands(initResult?.commands);
+        if (slashCommands) {
+          broadcastSdkSlashCommands(slashCommands, 'initialize');
+        }
         console.log(`[agent] SDK control plane ready in ${Date.now() - initStartT}ms (preWarm=${preWarm})`);
         // For non-pre-warm cold starts (user sent the very first message with
         // no prior pre-warm), enqueueUserMessage already set sessionState to
@@ -10358,6 +10442,11 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           }
         }
 
+      }
+
+      const changedSlashCommands = parseSdkCommandsChanged(sdkMessage);
+      if (changedSlashCommands) {
+        broadcastSdkSlashCommands(changedSlashCommands, 'commands_changed');
       }
 
       // Handle system status (e.g., compacting, plan mode changes)
@@ -11575,8 +11664,9 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           // PRD 0.2.19 — `session_id` lets analytics join this back to the renderer's
           // `session_new` event to reconstruct full per-session funnels (entry surface
           // → first message → token cost → tool usage → outcome).
+          const turnAnalyticsSource = currentTurnAnalyticsSource ?? currentScenario.type;
           trackServer('ai_turn_complete', {
-            source: currentScenario.type,
+            source: turnAnalyticsSource,
             session_id: sessionId,
             platform: currentScenario.type === 'im' ? currentScenario.platform : null,
             runtime: 'builtin',
@@ -12204,6 +12294,7 @@ async function* messageGenerator(): AsyncGenerator<SDKUserMessage> {
         messageText: item.messageText,
         attachments: item.attachments,
         requestId: item.requestId,
+        analyticsSource: item.analyticsSource,
       };
       // Re-emit queue:added with isInFlight=true so the frontend pill's
       // UI marks it as handed to SDK; cancellation now goes through
@@ -12216,6 +12307,7 @@ async function* messageGenerator(): AsyncGenerator<SDKUserMessage> {
       console.log(`[messageGenerator] Recovery path: wasQueued item ${item.id} adopted as in-flight (rescue or messageQueue push)`);
     }
     beginBuiltinTurnTrace(traceSource, traceTurnId, item.requestId);
+    currentTurnAnalyticsSource = item.analyticsSource ?? currentScenario.type;
 
     isStreamingMessage = true;
     // Pattern B+G: push this user message's requestId onto the FIFO queue.

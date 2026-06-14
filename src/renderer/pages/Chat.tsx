@@ -236,6 +236,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     setSessionMeta,
     unifiedLogs,
     systemInitInfo: _systemInitInfo,
+    sdkSlashCommands,
     runtimeDiagnostics,
     agentError,
     systemStatus,
@@ -921,6 +922,10 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   // spawned with its frozen runtime and the backend routes by sessionId.
   const currentRuntime: RuntimeType = (sessionRuntime as RuntimeType | null) ?? agentRuntime;
   const isExternalRuntime = currentRuntime !== 'builtin';
+  const visibleSdkSlashCommands = useMemo(
+    () => isExternalRuntime ? [] : sdkSlashCommands,
+    [isExternalRuntime, sdkSlashCommands],
+  );
 
   // Detect installed runtimes once on mount
   useEffect(() => {
@@ -3933,6 +3938,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
             systemStatus={systemStatus}
             agentDir={agentDir}
             workspacePath={agentDir}
+            sdkSlashCommands={visibleSdkSlashCommands}
             provider={currentProvider}
             providers={providers}
             onProviderChange={handleProviderChange}
