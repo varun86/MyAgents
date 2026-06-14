@@ -11,10 +11,13 @@ use serde_json::{json, Value};
 use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio::time::{sleep, Instant};
 
-use super::types::{ImAttachment, ImAttachmentType, ImConfig, ImMessage, ImPlatform, ImSourceType, TelegramError, GroupEvent};
+use super::types::{
+    GroupEvent, ImAttachment, ImAttachmentType, ImConfig, ImMessage, ImPlatform, ImSourceType,
+    TelegramError,
+};
 use super::util::{mime_to_ext, sanitize_filename};
 use super::ApprovalCallback;
-use crate::{proxy_config, ulog_info, ulog_warn, ulog_error, ulog_debug};
+use crate::{proxy_config, ulog_debug, ulog_error, ulog_info, ulog_warn};
 
 /// Telegram long-poll timeout (seconds)
 const LONG_POLL_TIMEOUT: u64 = 30;
@@ -237,17 +240,18 @@ impl TelegramAdapter {
         // External host (api.telegram.org) — system proxy wanted, not the
         // localhost guard.
         #[allow(clippy::disallowed_methods)]
-        let client_builder = Client::builder()
-            .timeout(Duration::from_secs(LONG_POLL_TIMEOUT + 10));
-        let client = proxy_config::build_client_with_proxy(client_builder)
-            .unwrap_or_else(|e| {
-                ulog_warn!("[telegram] Failed to build client with proxy: {}, falling back to direct", e);
-                #[allow(clippy::disallowed_methods)]
-                Client::builder()
-                    .timeout(Duration::from_secs(LONG_POLL_TIMEOUT + 10))
-                    .build()
-                    .expect("Failed to create HTTP client")
-            });
+        let client_builder = Client::builder().timeout(Duration::from_secs(LONG_POLL_TIMEOUT + 10));
+        let client = proxy_config::build_client_with_proxy(client_builder).unwrap_or_else(|e| {
+            ulog_warn!(
+                "[telegram] Failed to build client with proxy: {}, falling back to direct",
+                e
+            );
+            #[allow(clippy::disallowed_methods)]
+            Client::builder()
+                .timeout(Duration::from_secs(LONG_POLL_TIMEOUT + 10))
+                .build()
+                .expect("Failed to create HTTP client")
+        });
 
         Self {
             bot_token: config.bot_token.clone(),
@@ -340,12 +344,20 @@ impl TelegramAdapter {
                 400 if description.contains("TEXTDRAFT_PEER_INVALID") => {
                     return Err(TelegramError::DraftPeerInvalid);
                 }
-                400 if description.contains("REACTION_INVALID") || description.contains("REACTION_EMPTY") => {
+                400 if description.contains("REACTION_INVALID")
+                    || description.contains("REACTION_EMPTY") =>
+                {
                     // Permanent error: emoji not available as reaction in this chat
-                    ulog_debug!("[telegram] Reaction not available on {} (non-retryable): {}", method, description);
+                    ulog_debug!(
+                        "[telegram] Reaction not available on {} (non-retryable): {}",
+                        method,
+                        description
+                    );
                     return Err(TelegramError::Other(description.to_string()));
                 }
-                403 if description.contains("was kicked") || description.contains("was blocked") => {
+                403 if description.contains("was kicked")
+                    || description.contains("was blocked") =>
+                {
                     return Err(TelegramError::BotKicked);
                 }
                 401 => {
@@ -399,7 +411,11 @@ impl TelegramAdapter {
                 .ok()
                 .and_then(|v| v["parameters"]["retry_after"].as_u64())
                 .unwrap_or(5);
-            ulog_warn!("[telegram] Rate limited on {}, retry after {}s", method, retry_after);
+            ulog_warn!(
+                "[telegram] Rate limited on {}, retry after {}s",
+                method,
+                retry_after
+            );
             sleep(Duration::from_secs(retry_after)).await;
             // Retry not possible (Form consumed), return error
             return Err(TelegramError::Other(format!("Rate limited on {}", method)));
@@ -413,7 +429,10 @@ impl TelegramAdapter {
         }
 
         let description = json["description"].as_str().unwrap_or("Unknown error");
-        Err(TelegramError::Other(format!("API error on {}: {}", method, description)))
+        Err(TelegramError::Other(format!(
+            "API error on {}: {}",
+            method, description
+        )))
     }
 
     /// Send a photo to a chat. Returns the sent message ID.
@@ -509,7 +528,11 @@ impl TelegramAdapter {
     }
 
     /// Send message with Markdown, auto-split if needed
-    pub async fn send_message(&self, chat_id: &str, text: &str) -> Result<Option<i64>, TelegramError> {
+    pub async fn send_message(
+        &self,
+        chat_id: &str,
+        text: &str,
+    ) -> Result<Option<i64>, TelegramError> {
         let chunks = super::adapter::split_message(text, 4096);
         let total = chunks.len();
         let mut last_message_id = None;
@@ -604,7 +627,11 @@ impl TelegramAdapter {
     }
 
     /// Delete a message (for draft stream final split)
-    pub async fn delete_message(&self, chat_id: &str, message_id: i64) -> Result<(), TelegramError> {
+    pub async fn delete_message(
+        &self,
+        chat_id: &str,
+        message_id: i64,
+    ) -> Result<(), TelegramError> {
         self.api_call(
             "deleteMessage",
             &json!({
@@ -618,17 +645,28 @@ impl TelegramAdapter {
 
     /// Use sendMessageDraft to send/update a typing draft.
     /// On DraftPeerInvalid, sets draft_fallback = true for this adapter instance.
-    async fn send_draft_update(&self, chat_id: &str, text: &str, draft_id: i64) -> Result<(), TelegramError> {
+    async fn send_draft_update(
+        &self,
+        chat_id: &str,
+        text: &str,
+        draft_id: i64,
+    ) -> Result<(), TelegramError> {
         use std::sync::atomic::Ordering;
         if self.draft_fallback.load(Ordering::Relaxed) {
             return Err(TelegramError::DraftPeerInvalid);
         }
-        match self.api_call("sendMessageDraft", &json!({
-            "chat_id": chat_id,
-            "text": text,
-            "draft_id": draft_id,
-            "parse_mode": "Markdown"
-        })).await {
+        match self
+            .api_call(
+                "sendMessageDraft",
+                &json!({
+                    "chat_id": chat_id,
+                    "text": text,
+                    "draft_id": draft_id,
+                    "parse_mode": "Markdown"
+                }),
+            )
+            .await
+        {
             Ok(_) => Ok(()),
             Err(TelegramError::DraftPeerInvalid) => {
                 self.draft_fallback.store(true, Ordering::Relaxed);
@@ -636,11 +674,17 @@ impl TelegramAdapter {
             }
             Err(TelegramError::MarkdownParseError) => {
                 // Retry without Markdown parse_mode
-                match self.api_call("sendMessageDraft", &json!({
-                    "chat_id": chat_id,
-                    "text": text,
-                    "draft_id": draft_id
-                })).await {
+                match self
+                    .api_call(
+                        "sendMessageDraft",
+                        &json!({
+                            "chat_id": chat_id,
+                            "text": text,
+                            "draft_id": draft_id
+                        }),
+                    )
+                    .await
+                {
                     Ok(_) => Ok(()),
                     Err(TelegramError::DraftPeerInvalid) => {
                         self.draft_fallback.store(true, Ordering::Relaxed);
@@ -724,7 +768,11 @@ impl TelegramAdapter {
 
     /// Resolve a short ID back to the full request_id.
     async fn resolve_short_id(&self, short: &str) -> Option<String> {
-        self.short_id_map.lock().await.remove(short).map(|(id, _)| id)
+        self.short_id_map
+            .lock()
+            .await
+            .remove(short)
+            .map(|(id, _)| id)
     }
 
     /// Send an approval message with inline keyboard buttons.
@@ -737,7 +785,11 @@ impl TelegramAdapter {
     ) -> Result<Option<String>, TelegramError> {
         // Truncate input for display (char-boundary safe)
         let display_input = if tool_input.chars().count() > 200 {
-            let end: usize = tool_input.char_indices().nth(200).map(|(i, _)| i).unwrap_or(tool_input.len());
+            let end: usize = tool_input
+                .char_indices()
+                .nth(200)
+                .map(|(i, _)| i)
+                .unwrap_or(tool_input.len());
             format!("{}...", &tool_input[..end])
         } else {
             tool_input.to_string()
@@ -806,11 +858,16 @@ impl TelegramAdapter {
         };
 
         let mid = message_id.parse::<i64>().unwrap_or(0);
-        let _ = self.api_call("editMessageText", &json!({
-            "chat_id": chat_id,
-            "message_id": mid,
-            "text": format!("🔒 工具使用请求 — {} {}", emoji, label),
-        })).await;
+        let _ = self
+            .api_call(
+                "editMessageText",
+                &json!({
+                    "chat_id": chat_id,
+                    "message_id": mid,
+                    "text": format!("🔒 工具使用请求 — {} {}", emoji, label),
+                }),
+            )
+            .await;
         Ok(())
     }
 
@@ -832,19 +889,37 @@ impl TelegramAdapter {
             "aa" => "always_allow",
             "d" => "deny",
             _ => return None,
-        }.to_string();
+        }
+        .to_string();
 
         // MUST answer callback query (otherwise button shows spinner)
-        let answer_text = if decision == "deny" { "已拒绝" } else { "已允许" };
-        let _ = self.api_call("answerCallbackQuery", &json!({
-            "callback_query_id": cq_id,
-            "text": answer_text,
-        })).await;
+        let answer_text = if decision == "deny" {
+            "已拒绝"
+        } else {
+            "已允许"
+        };
+        let _ = self
+            .api_call(
+                "answerCallbackQuery",
+                &json!({
+                    "callback_query_id": cq_id,
+                    "text": answer_text,
+                }),
+            )
+            .await;
 
         let user_id = cq["from"]["id"].as_i64().unwrap_or(0).to_string();
 
-        ulog_info!("[telegram] Callback query: decision={}, rid={}", decision, &request_id[..request_id.len().min(16)]);
-        Some(ApprovalCallback { request_id, decision, user_id })
+        ulog_info!(
+            "[telegram] Callback query: decision={}, rid={}",
+            decision,
+            &request_id[..request_id.len().min(16)]
+        );
+        Some(ApprovalCallback {
+            request_id,
+            decision,
+            user_id,
+        })
     }
 
     // ===== Long-polling loop =====
@@ -980,7 +1055,9 @@ impl TelegramAdapter {
         /// Maximum file download size (20 MB). Telegram Bot API limit is also 20 MB.
         const MAX_FILE_DOWNLOAD_SIZE: usize = 20 * 1024 * 1024;
 
-        let result = self.api_call("getFile", &json!({ "file_id": file_id })).await?;
+        let result = self
+            .api_call("getFile", &json!({ "file_id": file_id }))
+            .await?;
         let file_path = result["file_path"]
             .as_str()
             .ok_or_else(|| TelegramError::Other("No file_path in getFile response".into()))?;
@@ -1020,13 +1097,12 @@ impl TelegramAdapter {
         if bytes.len() > MAX_FILE_DOWNLOAD_SIZE {
             return Err(TelegramError::Other(format!(
                 "Downloaded file too large: {} bytes (max {} bytes)",
-                bytes.len(), MAX_FILE_DOWNLOAD_SIZE
+                bytes.len(),
+                MAX_FILE_DOWNLOAD_SIZE
             )));
         }
 
-        let name_hint = sanitize_filename(
-            file_path.rsplit('/').next().unwrap_or("file"),
-        );
+        let name_hint = sanitize_filename(file_path.rsplit('/').next().unwrap_or("file"));
         Ok((bytes.to_vec(), name_hint))
     }
 
@@ -1165,7 +1241,9 @@ impl TelegramAdapter {
         // 5. Document
         if let Some(doc) = message.get("document") {
             if let Some(file_id) = doc["file_id"].as_str() {
-                let mime = doc["mime_type"].as_str().unwrap_or("application/octet-stream");
+                let mime = doc["mime_type"]
+                    .as_str()
+                    .unwrap_or("application/octet-stream");
                 match self.download_file(file_id).await {
                     Ok((data, name)) => {
                         let file_name = doc["file_name"]
@@ -1325,18 +1403,29 @@ impl TelegramAdapter {
         }
 
         let chat_id = chat["id"].as_i64()?.to_string();
-        let chat_title = chat["title"].as_str().unwrap_or("Unknown Group").to_string();
+        let chat_title = chat["title"]
+            .as_str()
+            .unwrap_or("Unknown Group")
+            .to_string();
         let new_status = member_update["new_chat_member"]["status"].as_str()?;
         let added_by_name = {
             let first = member_update["from"]["first_name"].as_str().unwrap_or("");
             let last = member_update["from"]["last_name"].as_str().unwrap_or("");
             let full = format!("{} {}", first, last).trim().to_string();
-            if full.is_empty() { None } else { Some(full) }
+            if full.is_empty() {
+                None
+            } else {
+                Some(full)
+            }
         };
 
         match new_status {
             "member" | "administrator" => {
-                ulog_info!("[telegram] Bot added to group: {} ({})", chat_title, chat_id);
+                ulog_info!(
+                    "[telegram] Bot added to group: {} ({})",
+                    chat_title,
+                    chat_id
+                );
                 Some(GroupEvent::BotAdded {
                     chat_id,
                     chat_title,
@@ -1407,7 +1496,11 @@ pub fn split_message(text: &str, max_len: usize) -> Vec<String> {
             .or_else(|| search_range.rfind(' ')) // Word
             .unwrap_or(safe_end); // Hard cut at char boundary
 
-        let break_at = if break_point == 0 { safe_end } else { break_point };
+        let break_at = if break_point == 0 {
+            safe_end
+        } else {
+            break_point
+        };
 
         chunks.push(remaining[..break_at].to_string());
         remaining = remaining[break_at..].trim_start();
@@ -1452,10 +1545,7 @@ fn clean_message_text(text: &str, bot_username: &Option<String>) -> String {
 impl super::adapter::ImAdapter for TelegramAdapter {
     async fn verify_connection(&self) -> super::adapter::AdapterResult<String> {
         let result = self.get_me().await.map_err(|e| e.to_string())?;
-        let username = result["username"]
-            .as_str()
-            .unwrap_or("unknown")
-            .to_string();
+        let username = result["username"].as_str().unwrap_or("unknown").to_string();
         Ok(format!("@{}", username))
     }
 
@@ -1512,16 +1602,18 @@ impl super::adapter::ImStreamAdapter for TelegramAdapter {
             // is self-contained — no shared mutable state across concurrent chats.
             let draft_id = {
                 use std::time::{SystemTime, UNIX_EPOCH};
-                let t = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+                let t = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default();
                 (t.as_millis() as i64).max(1)
             };
             match self.send_draft_update(chat_id, text, draft_id).await {
-                Ok(()) => {
-                    Ok(Some(format!("draft:{}", draft_id)))
-                }
+                Ok(()) => Ok(Some(format!("draft:{}", draft_id))),
                 Err(TelegramError::DraftPeerInvalid) => {
                     // Fallback to standard mode
-                    ulog_warn!("[telegram] sendMessageDraft not supported, falling back to standard mode");
+                    ulog_warn!(
+                        "[telegram] sendMessageDraft not supported, falling back to standard mode"
+                    );
                     self.send_message(chat_id, text)
                         .await
                         .map(|opt| opt.map(|id| id.to_string()))
@@ -1547,9 +1639,11 @@ impl super::adapter::ImStreamAdapter for TelegramAdapter {
         // Parse draft_id directly from the virtual "draft:xxx" ID string.
         // This keeps draft routing stream-local — no shared state across concurrent chats.
         if let Some(id_str) = message_id.strip_prefix("draft:") {
-            let draft_id = id_str.parse::<i64>()
+            let draft_id = id_str
+                .parse::<i64>()
                 .map_err(|e| format!("Invalid draft ID: {}", e))?;
-            return self.send_draft_update(chat_id, text, draft_id)
+            return self
+                .send_draft_update(chat_id, text, draft_id)
                 .await
                 .map_err(|e| e.to_string());
         }
@@ -1640,15 +1734,23 @@ impl super::adapter::ImStreamAdapter for TelegramAdapter {
         message_id: &str,
         text: &str,
     ) -> super::adapter::AdapterResult<()> {
-        <Self as super::adapter::ImStreamAdapter>::edit_message(self, chat_id, message_id, text).await
+        <Self as super::adapter::ImStreamAdapter>::edit_message(self, chat_id, message_id, text)
+            .await
     }
 
     fn use_draft_streaming(&self) -> bool {
-        self.use_message_draft && !self.draft_fallback.load(std::sync::atomic::Ordering::Relaxed)
+        self.use_message_draft
+            && !self
+                .draft_fallback
+                .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     fn preferred_throttle_ms(&self) -> u64 {
-        if self.use_draft_streaming() { 300 } else { 1000 }
+        if self.use_draft_streaming() {
+            300
+        } else {
+            1000
+        }
     }
 }
 
@@ -1685,11 +1787,11 @@ mod tests {
     fn test_clean_message_text() {
         let bot = Some("mybot".to_string());
         assert_eq!(clean_message_text("@mybot hello", &bot), "hello");
-        assert_eq!(clean_message_text("/ask what is this", &bot), "what is this");
         assert_eq!(
-            clean_message_text("@mybot /ask combined", &bot),
-            "combined"
+            clean_message_text("/ask what is this", &bot),
+            "what is this"
         );
+        assert_eq!(clean_message_text("@mybot /ask combined", &bot), "combined");
     }
 
     fn make_test_msg(chat_id: &str, msg_id: i64, text: &str) -> ImMessage {

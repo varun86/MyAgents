@@ -200,9 +200,7 @@ pub async fn upgrade_legacy_cron(
     // survives a schedule-shape edit without losing the user's interval /
     // cron expression / dispatch time.
     let (interval_minutes, cron_expression, cron_timezone, dispatch_at) = match &cron.schedule {
-        Some(cron_task::CronSchedule::Every { minutes, .. }) => {
-            (Some(*minutes), None, None, None)
-        }
+        Some(cron_task::CronSchedule::Every { minutes, .. }) => (Some(*minutes), None, None, None),
         Some(cron_task::CronSchedule::Cron { expr, tz }) => {
             (None, Some(expr.clone()), tz.clone(), None)
         }
@@ -304,11 +302,5 @@ pub async fn cmd_task_upgrade_legacy_cron(
     cron_task_id: String,
     workspace_id: String,
 ) -> Result<UpgradeResult, String> {
-    upgrade_legacy_cron(
-        &task_state,
-        &thought_state,
-        &cron_task_id,
-        &workspace_id,
-    )
-    .await
+    upgrade_legacy_cron(&task_state, &thought_state, &cron_task_id, &workspace_id).await
 }

@@ -2,7 +2,7 @@ import { randomUUID } from 'crypto';
 import { existsSync, readdirSync, symlinkSync, lstatSync, readFileSync, readlinkSync, rmSync } from 'fs';
 import { dirname, join, resolve, sep } from 'path';
 import { createRequire } from 'module';
-import { query, getSessionMessages as sdkGetSessionMessages, forkSession as sdkForkSession, deleteSession as sdkDeleteSession, type Query, type SDKUserMessage, type AgentDefinition, type HookInput, type HookJSONOutput, type PreToolUseHookInput, type PostToolUseHookInput, type PermissionRequestHookInput } from '@anthropic-ai/claude-agent-sdk';
+import { query, getSessionMessages as sdkGetSessionMessages, forkSession as sdkForkSession, deleteSession as sdkDeleteSession, type Query, type SDKUserMessage, type AgentDefinition, type HookInput, type HookJSONOutput, type PreToolUseHookInput, type PostToolUseHookInput, type PermissionRequestHookInput, type SlashCommand as SdkSlashCommand } from '@anthropic-ai/claude-agent-sdk';
 import {
   decideBackgroundAgentPermission,
   isBackgroundAgentToolRequest,
@@ -19,9 +19,15 @@ import { applyContextWindowSuffix, lookupModelContextLength, modelSupportsModali
 import { modelAliasEnvChangesForModel, resolveSessionModelAliases, type ModelAliases } from './utils/model-aliases';
 import { deriveReloadResumeAnchor, resolveEffectiveResumeAt } from './utils/rewind-anchor';
 import { buildForkUuidRemap, remapStoredSdkUuids } from './utils/fork-remap';
-import { decideInFlightActionOnResult } from './utils/inflight-terminal';
+import {
+  decideInFlightActionOnResult,
+  decideInFlightCancelSettlement,
+  terminalEventMatchesInFlight,
+  type InFlightAsyncCancelResult,
+} from './utils/inflight-terminal';
 import { shouldBlockToolInPlanMode, planModeDenyMessage, isPlanModeInEffect, PLAN_MODE_READONLY_TOOLS, PLAN_MODE_HOST_INTERACTION_TOOLS, applyPermissionModeSelection, computePlanExitState, computeRestoredPlanState } from './utils/plan-mode-gate';
-import { isEmptySuccessfulSdkResult, isRecoveredAssistantMessageError, findTurnUsageStampIndex } from './utils/sdk-turn-outcome';
+import { isEmptySuccessfulSdkResult, isRecoveredAssistantMessageError, findTurnUsageStampIndex, extractTurnUsageFromSdkResult, isSuccessfulCompactControlTurn } from './utils/sdk-turn-outcome';
+import { planRetraction } from './utils/message-retraction';
 import { diagnoseSdkSubprocessFailure } from './utils/sdk-subprocess-diagnostics';
 import { InactivityWatchdog } from './utils/inactivity-watchdog';
 import { WATCHDOG_RESUME_REMINDER, planWatchdogAutoResume, shouldAdoptPendingContinueIntoScheduledAutoResume, shouldConsumePendingContinueAfterAbort, shouldDeferPendingContinueToScheduledAutoResume, shouldPrependWatchdogAutoResume } from './utils/watchdog-auto-resume';
@@ -51,18 +57,21 @@ import { resolveAuthHeaders, onTokenChange, startTokenRefreshScheduler } from '.
 import type { ToolInput } from '../renderer/types/chat';
 import { parsePartialJson } from '../shared/parsePartialJson';
 import { deriveSessionTitle } from '../shared/sessionTitle';
+import { workspacePathsEqual } from '../shared/workspacePath';
+import { normalizeReasoningEffort, isSdkEffortLevel } from '../shared/reasoningEffort';
 import { computeContextUsage } from '../shared/contextUsage';
-import { resolveContextOccupancyTokens } from './utils/context-occupancy';
+import { resolveContextOccupancyFromSdkBreakdown, resolveContextOccupancyTokens } from './utils/context-occupancy';
 import type { SystemInitInfo } from '../shared/types/system';
+import type { SlashCommand as UiSlashCommand } from '../shared/slashCommands';
 import { saveSessionMetadata, updateSessionTitleFromMessage, saveSessionMessages, saveAttachment, updateSessionMetadata, getSessionMetadata, getSessionData } from './SessionStore';
 import { firePostTurnTitleHook } from './turn-hooks';
-import { createSessionMetadata, type SessionMessage, type MessageAttachment, type MessageUsage, type SessionSource } from './types/session';
+import { createSessionMetadata, type SessionMessage, type MessageAttachment, type MessageUsage, type SessionSource, type TurnAnalyticsSource } from './types/session';
 import {
   createMaterializedSessionMetadata,
   isLiveFollowScenario,
   type SessionMaterializationScenario,
 } from './utils/session-materialization';
-import { findAgentByWorkspacePath, loadConfig as loadAdminConfig } from './utils/admin-config';
+import { findAgentByWorkspacePath, isCliToolRegistryEnabled, loadConfig as loadAdminConfig } from './utils/admin-config';
 import type { AgentConfig } from '../shared/types/agent';
 import { broadcast } from './sse';
 import {
@@ -79,6 +88,7 @@ import { isAbortedTerminalReason, shouldTitleCompletedTurn } from '../shared/ter
 import { trackServer } from './analytics';
 import { getCurrentRuntimeType, isExternalRuntime } from './runtimes/factory';
 import { resolveLastRealUserMessagePreview } from './utils/session-message-preview';
+import { decideBuiltinSessionResume } from './utils/builtin-session-resume';
 import { elapsedMs, emitPerfTrace, nowMs } from './utils/perf-trace';
 import type { ImagePayload } from './runtimes/types';
 import { buildBuiltinMediaAttachments, saveExtractedToolResultAttachments } from './runtimes/builtin-media-attachments';
@@ -262,7 +272,10 @@ export function getMyAgentsUserDir(): string {
  *
  * Called at session startup (startStreamingSession) and after skill/command CRUD operations.
  */
-export function syncProjectUserConfig(projectDir: string): void {
+export function syncProjectUserConfig(
+  projectDir: string,
+  options: { cliToolRegistryEnabled?: boolean } = {},
+): void {
   const myagentsDir = getMyAgentsUserDir();
   const isWin = process.platform === 'win32';
 
@@ -284,6 +297,7 @@ export function syncProjectUserConfig(projectDir: string): void {
     } catch {
       // Ignore read errors — treat all skills as enabled
     }
+    const cliToolRegistryEnabled = options.cliToolRegistryEnabled ?? isCliToolRegistryEnabled(loadAdminConfig());
 
     // Track which skill names we manage (enabled or disabled) so we can detect dangling symlinks
     const managedSkillNames = new Set<string>();
@@ -307,7 +321,7 @@ export function syncProjectUserConfig(projectDir: string): void {
       managedSkillNames.add(entry.name);
       const linkPath = join(projectSkillsDir, entry.name);
 
-      if (disabled.includes(entry.name)) {
+      if (disabled.includes(entry.name) || (!cliToolRegistryEnabled && entry.name === 'tool-creator')) {
         // Disabled: remove symlink if we created one (never remove real dirs)
         try {
           if (existsSync(linkPath) && lstatSync(linkPath).isSymbolicLink()) {
@@ -400,6 +414,40 @@ export function syncProjectUserConfig(projectDir: string): void {
       }
     } catch { /* ignore */ }
   }
+
+  // The symlinks above just changed what's on disk, but the live SDK session
+  // only scans skills at startup — without a reload, a skill installed
+  // mid-session is visible in the UI (Rust scans disk) yet unusable by the AI
+  // until the next session restart. Putting the reload HERE (not at each CRUD
+  // call site) makes every present and future "refresh project config" path
+  // pick it up automatically, with the order guaranteed correct: symlinks
+  // first, SDK rescan second. No-ops when no SDK session is alive (session
+  // startup path) or when the synced dir isn't this session's workspace.
+  reloadSessionSkillsAfterSync(projectDir);
+}
+
+/**
+ * Fire-and-forget mid-session skill rescan (SDK 0.3.169+ reloadSkills control
+ * request). Failure degrades to the pre-0.2.34 behavior — skills refresh on
+ * the next session — so it never blocks the CRUD response that triggered the
+ * sync. External runtimes (Claude Code / Codex / Gemini CLI) have no such
+ * control channel; they rescan on their next session naturally.
+ */
+function reloadSessionSkillsAfterSync(syncedDir: string): void {
+  if (!querySession) return;
+  // External runtimes never populate querySession, so this guard is
+  // belt-and-suspenders — kept explicit per the external-routing red line.
+  if (isExternalRuntime(getCurrentRuntimeType())) return;
+  // Another workspace's dir was synced — this session's skill view is unaffected.
+  if (!agentDir || !workspacePathsEqual(syncedDir, agentDir)) return;
+  querySession.reloadSkills()
+    .then(res => {
+      console.log(`[agent] skills reloaded mid-session (${res.skills.length} skill commands)`);
+    })
+    .catch(err => {
+      console.warn('[agent] reloadSkills failed — skills will refresh on next session:',
+        err instanceof Error ? err.message : err);
+    });
 }
 
 // (issue #174) `starting` separates "subprocess launched, awaiting system_init"
@@ -572,7 +620,8 @@ type RestartReason =
   | 'oauth'        // MCP OAuth token acquired/refreshed
   | 'model-window'  // setSessionModel — contextLength crossed a boundary, need to reinject CLAUDE_CODE_AUTO_COMPACT_WINDOW
   | 'model-aliases' // setSessionModel — collapsed provider aliases now target a different active model
-  | 'plugins';     // PRD 0.2.17 — Claude plugin install / uninstall / toggle
+  | 'plugins'      // PRD 0.2.17 — Claude plugin install / uninstall / toggle
+  | 'reasoning-effort'; // #324 — Anthropic-protocol effort is a query()-spawn option, needs respawn
 
 // Deferred config restart: config changes during an active turn / pre-warm
 // stage set a reason in this set instead of aborting immediately. Two consumers
@@ -673,6 +722,28 @@ async function awaitSessionTermination(timeoutMs = 10_000, label = ''): Promise<
 
 let isInterruptingResponse = false;
 let isStreamingMessage = false;
+// Every `system` subtype defined in SDK 0.3.173 (sdk.d.ts) — handled here or
+// deliberately untouched. A subtype outside this set means a NEWER SDK started
+// emitting a message kind we have never seen; the loop logs it once per
+// process instead of letting it vanish silently. Update this set when bumping
+// the SDK (grep sdk.d.ts for `type: 'system'` blocks).
+const KNOWN_SYSTEM_SUBTYPES = new Set([
+  'api_retry', 'commands_changed', 'compact_boundary', 'elicitation_complete',
+  'files_persisted', 'hook_progress', 'hook_response', 'hook_started', 'init',
+  'local_command_output', 'memory_recall', 'mirror_error',
+  'model_refusal_fallback', 'notification', 'permission_denied',
+  'plugin_install', 'session_state_changed', 'status', 'task_notification',
+  'task_progress', 'task_started', 'task_updated', 'thinking_tokens',
+]);
+const warnedUnknownSystemSubtypes = new Set<string>();
+// Top-level half of the same sentinel: every `type` value an SDKMessage union
+// member carries in 0.3.173. Verified 1:1 against sdk.d.ts at upgrade time
+// (the system-typed members are covered by KNOWN_SYSTEM_SUBTYPES above).
+const KNOWN_MESSAGE_TYPES = new Set([
+  'assistant', 'user', 'result', 'system', 'stream_event', 'rate_limit_event',
+  'auth_status', 'tool_progress', 'tool_use_summary', 'prompt_suggestion',
+]);
+const warnedUnknownMessageTypes = new Set<string>();
 // Post-interrupt turn-completion signal: resolves when for-await loop receives a `result` message.
 // Used by interruptCurrentResponse() to verify the SDK subprocess actually stopped after interrupt().
 let postInterruptTurnEndResolve: (() => void) | null = null;
@@ -698,19 +769,20 @@ let inFlightToolCount = 0;
 // without this, isSessionBusy returns false in the gap and a fresh
 // enqueue would take the direct-send path, opening a new ordering bug.
 let promotedItemInFlight = false;
-// (v0.2.12 mid-turn injection restore) UUID of the queue item currently
+// (v0.2.34 / v0.2.12 mid-turn injection restore) UUID of the queue item currently
 // yielded to the SDK CLI subprocess but not yet drained by AI. Set when
 // generator yields a queued mid-turn message; cleared when CLI emits
 // SDKUserMessageReplay (isReplay=true) confirming AI's next API call
-// will include the queued_command attachment, OR at turn-end as fallback
-// for turns that never hit a tool break (no replay opportunity).
+// will include the queued_command attachment, when a later assistant-turn
+// signal proves the boundary drain happened without replay, or when SDK
+// cancel_async_message successfully retracts it before dequeue.
 //
 // While inFlightToCliId !== null, additional mid-turn enqueues buffer
-// in pendingMidTurnQueue (still cancellable). Frontend hides the X
-// button on the in-flight item — its uuid has crossed the process
-// boundary into the CLI's commandQueue and there is no SDK API to
-// retract it. The "lockstep yield" pattern (one in-flight at a time)
-// keeps subsequent queue items cancellable until they are promoted.
+// in pendingMidTurnQueue. The in-flight item is conditionally cancellable:
+// once it has crossed into CLI's commandQueue, cancellation must go through
+// SDK cancel_async_message and succeeds only while the item is still pending.
+// The "lockstep yield" pattern (one in-flight at a time) keeps subsequent
+// queue items local until they are promoted.
 let inFlightToCliId: string | null = null;
 // Issue #289 — when set to the in-flight queueId, a force-send ("立即发送") is in progress
 // for that item: it interrupts the current turn precisely so the SDK drains + processes the
@@ -718,6 +790,16 @@ let inFlightToCliId: string | null = null;
 // instead of dropping it (queue:cancelled). Distinct from `isInterruptingResponse` (which is
 // also true for a plain stop). Cleared whenever the in-flight slot is cleared.
 let forceSurfaceInFlightId: string | null = null;
+// Natural `result` is not a consumption ack. When it leaves an in-flight
+// queue item waiting, only the next assistant-start for that exact queueId may
+// confirm the SDK boundary drain. This prevents unrelated replacement
+// assistant messages (e.g. refusal fallback rewrites) from falsely ACKing it.
+let awaitingAssistantStartAckQueueId: string | null = null;
+// Captured when interruptCurrentResponse starts. If the current in-flight
+// queue item changes before the interrupt result/stop handler runs (for
+// example replay(A) promotes B), the terminal event belongs to A and must not
+// drop or surface B.
+let interruptingInFlightQueueId: string | null = null;
 // (v0.2.12) Metadata for the currently in-flight queue item. We stash
 // messageText / attachments / requestId at yield time because the
 // MessageQueueItem closes over the generator and we no longer have
@@ -728,11 +810,13 @@ type InFlightMetadata = {
   messageText: string;
   attachments?: MessageWire['attachments'];
   requestId?: string;
-  /** PRD 0.2.14 — propagated from `enqueueUserMessage(metadata)` so the
-   *  delayed-resolve push sites (queued_command replay / queue:started
-   *  fallback) can decide whether this user message should mirror to a
-   *  bound IM channel. Only `'desktop'` triggers mirror. */
+  /** PRD 0.2.14 — propagated from `enqueueUserMessage(metadata)` so confirmed
+   *  queued-message surface paths can decide whether this user message should
+   *  mirror to a bound IM channel. Only `'desktop'` triggers mirror. */
   source?: SessionSource;
+  /** Per-turn analytics attribution. Separate from `source` because source
+   *  also drives desktop→IM mirror semantics. */
+  analyticsSource?: TurnAnalyticsSource;
   /** PRD 0.2.14 — base64 image payloads forwarded for mirror purposes.
    *  Lives alongside `attachments` (which is on-disk paths) because the
    *  Sidecar→management-API mirror call needs raw bytes inline. PNG/JPG
@@ -751,6 +835,39 @@ function clearInFlightSlot(): void {
   inFlightToCliId = null;
   inFlightMetadata = null;
   forceSurfaceInFlightId = null;
+  awaitingAssistantStartAckQueueId = null;
+}
+
+type QueryWithAsyncMessageCancel = Query & {
+  cancelAsyncMessage?: (messageUuid: string) => Promise<boolean>;
+};
+
+const SDK_ASYNC_MESSAGE_CANCEL_TIMEOUT_MS = 5000;
+
+async function cancelSdkAsyncMessage(queueId: string): Promise<InFlightAsyncCancelResult> {
+  const session = querySession as QueryWithAsyncMessageCancel | null;
+  if (!session || typeof session.cancelAsyncMessage !== 'function') {
+    console.warn(`[agent] Queue item ${queueId} SDK async cancel unavailable — no live cancelAsyncMessage()`);
+    return 'unavailable';
+  }
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const cancelled = await Promise.race([
+      session.cancelAsyncMessage(queueId),
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(
+          () => reject(new Error(`cancelAsyncMessage timeout after ${SDK_ASYNC_MESSAGE_CANCEL_TIMEOUT_MS}ms`)),
+          SDK_ASYNC_MESSAGE_CANCEL_TIMEOUT_MS,
+        );
+      }),
+    ]);
+    return cancelled ? 'cancelled' : 'not-cancelled';
+  } catch (error) {
+    console.warn(`[agent] Queue item ${queueId} SDK async cancel failed:`, error);
+    return 'error';
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
 }
 
 // ===== Desktop → IM mirror state (PRD 0.2.14 Phase C) =====
@@ -794,6 +911,103 @@ function fireDesktopUserMirror(content: string, images: MirrorImage[] | undefine
     text: content,
     images,
   });
+}
+
+type SurfaceInFlightOptions = {
+  sdkUuid?: string;
+  midTurnBreak?: boolean;
+  reason: string;
+  /** Replay can await durability before SSE; synchronous assistant-start cannot. */
+  awaitPersist?: boolean;
+  /** Persist only the user row added by this helper without blocking stream assembly. */
+  schedulePersist?: boolean;
+};
+
+async function surfaceInFlightQueueItem(
+  queueId: string,
+  meta: InFlightMetadata | null,
+  options: SurfaceInFlightOptions,
+): Promise<void> {
+  const userMessage: MessageWire = {
+    id: String(messageSequence++),
+    role: 'user',
+    content: meta?.messageText ?? '',
+    timestamp: new Date().toISOString(),
+    attachments: meta?.attachments,
+    sdkUuid: options.sdkUuid,
+    metadata: meta?.source ? { source: meta.source } : undefined,
+  };
+  messages.push(userMessage);
+  if (options.sdkUuid) {
+    currentSessionUuids.add(options.sdkUuid);
+    liveSessionUuids.add(options.sdkUuid);
+  }
+
+  if (options.awaitPersist) {
+    await persistMessagesToStorage();
+  } else if (options.schedulePersist) {
+    void persistMessagesToStorage().catch(err => console.error('[agent] persistMessagesToStorage failed:', err));
+  }
+
+  // PRD 0.2.14 — desktop → IM mirror (queued replay / confirmed boundary path).
+  if (meta?.source === 'desktop') {
+    fireDesktopUserMirror(userMessage.content as string, meta.mirrorImages);
+  }
+
+  console.log(`[agent] In-flight queue item ${queueId} surfaced via queue:started (${options.reason})`);
+  broadcast('queue:started', {
+    queueId,
+    ...(options.midTurnBreak ? { midTurnBreak: true } : {}),
+    userMessage: {
+      id: userMessage.id,
+      role: userMessage.role,
+      content: userMessage.content,
+      timestamp: userMessage.timestamp,
+      attachments: userMessage.attachments,
+    },
+  });
+
+  clearInFlightSlot();
+  promoteNextFromPending();
+}
+
+function terminalEventAppliesToCurrentInFlight(): boolean {
+  return terminalEventMatchesInFlight({
+    currentQueueId: inFlightToCliId,
+    isInterrupting: isInterruptingResponse,
+    interruptTargetQueueId: interruptingInFlightQueueId,
+  });
+}
+
+function dropInFlightQueueItem(
+  reason: string,
+  imTerminal: 'cancelled' | 'failed' = 'cancelled',
+): string | null {
+  const queueId = inFlightToCliId;
+  if (!queueId) return null;
+  const requestId = inFlightMetadata?.requestId;
+  if (requestId) {
+    removePendingRequest(requestId);
+    if (imTerminal === 'failed') {
+      imEventBus.emit(requestId, 'error', reason);
+      imRequestRegistry.setStatus(requestId, 'failed');
+    } else {
+      imEventBus.emit(requestId, 'cancelled', reason);
+      imRequestRegistry.setStatus(requestId, 'cancelled');
+    }
+    imRequestRegistry.unregister(requestId);
+  }
+  clearInFlightSlot();
+  broadcast('queue:cancelled', { queueId });
+  console.log(`[agent] In-flight queue item ${queueId} dropped (${reason}) — broadcast queue:cancelled`);
+  return queueId;
+}
+
+function preserveInFlightAfterTerminalBoundary(reason: string): void {
+  const queueId = inFlightToCliId;
+  if (!queueId) return;
+  awaitingAssistantStartAckQueueId = queueId;
+  console.log(`[agent] In-flight queue item ${queueId} preserved after terminal boundary — awaiting SDK replay or assistant-start confirmation (${reason})`);
 }
 
 /** Fire-and-forget assistant text-block mirror. Called from content_block_stop.
@@ -894,6 +1108,15 @@ function popPendingRequest(): string | null {
   return pendingRequestIds.shift() ?? null;
 }
 
+/** Remove a request that was yielded to SDK but later cancelled before SDK result. */
+function removePendingRequest(requestId: string | null | undefined): boolean {
+  if (!requestId) return false;
+  const idx = pendingRequestIds.indexOf(requestId);
+  if (idx === -1) return false;
+  pendingRequestIds.splice(idx, 1);
+  return true;
+}
+
 /** Clear the entire queue — called from abortPersistentSession /
  *  clearMessageState (whole-session abort or reset). Returns drained ids. */
 function clearPendingRequests(): string[] {
@@ -958,6 +1181,8 @@ type MessageQueueItem = {
   // at the IM edge (Rust mod.rs spawn entry → /api/im/chat payload).
   // Empty string for desktop / cron / heartbeat paths (no IM identity).
   requestId?: string;
+  /** Per-turn analytics attribution; defaults to currentScenario.type. */
+  analyticsSource?: TurnAnalyticsSource;
   // PRD 0.2.18 Session Inbox — per-turn binding for reply pushback.
   // Bound on dequeue (generator yield), read at result handler. When present
   // and replyBack=true, turn-end pushes <inbox-reply> back to caller session.
@@ -972,6 +1197,12 @@ let currentPermissionMode: PermissionMode = 'auto';
 let prePlanPermissionMode: PermissionMode | null = null;
 // Current model for the session (updates on each user message if changed)
 let currentModel: string | undefined = undefined;
+// #324 — current reasoning effort, NORMALIZED: undefined = default (pre-#324
+// behavior: SDK effort 'high', bridge omits reasoning fields). Set via
+// setSessionReasoningEffort (desktop push), enqueue payload, or
+// switchToSession restore. Read live by resolveActiveSessionUpstreamConfig
+// (OpenAI bridge) and at query() spawn (Anthropic-protocol effort option).
+let currentReasoningEffort: string | undefined = undefined;
 // Provider environment config (baseUrl, apiKey, authType) for third-party providers
 export type ProviderEnv = {
   baseUrl?: string;
@@ -1079,6 +1310,9 @@ function resolveActiveSessionUpstreamConfig(): UpstreamBridgeConfig {
     maxOutputTokens: currentProviderEnv?.maxOutputTokens,
     maxOutputTokensParamName: currentProviderEnv?.maxOutputTokensParamName,
     upstreamFormat: currentProviderEnv?.upstreamFormat,
+    // #324 — read live so a mid-session effort change applies to the very
+    // next upstream request without any subprocess restart.
+    reasoningEffort: currentReasoningEffort,
   };
 }
 
@@ -1256,11 +1490,10 @@ export function getStreamingAssistantId(): string | null {
 //
 // Earlier design ("yield-and-ready") yielded immediately and used this queue
 // as a UI-side buffer for delayed `messages[]` push and `queue:started`
-// broadcast at content block boundaries. That left cancel as a no-op
-// against SDK — the JSON line had already been written to subprocess stdin
-// and there is no SDK API to "ignore" a queued user message. The 2026-05-07
-// log evidence: yield happened within 1ms of enqueue, far less than any
-// user could click ×.
+// broadcast at content block boundaries. That made local splice cancellation
+// ineffective once the JSON line had already been written to subprocess stdin.
+// v0.2.34 restores a real in-flight cancel boundary through SDK
+// cancel_async_message, while keeping later items local here until promotion.
 const pendingMidTurnQueue: Array<{
   queueId: string;
   userMessage: Pick<MessageWire, 'id' | 'role' | 'content' | 'timestamp' | 'attachments'>;
@@ -1286,7 +1519,10 @@ const pendingMidTurnQueue: Array<{
  *     subprocess transitioning)
  *   - `isStreamingMessage` (defensive — assistant text/tool stream live)
  *   - `messageQueue.length > 0` (user direct-send waiting to start a turn)
+ *   - `inFlightToCliId !== null` (mid-turn item yielded to SDK, awaiting replay/cancel)
  *   - `pendingMidTurnQueue.length > 0` (mid-turn item buffered for replay)
+ *   - `promotedItemInFlight` (item has left the local queue and the generator
+ *      is transitioning it into the SDK yield)
  *
  * Pre-warm exception: `isPreWarming=true` is **not** treated as busy.
  * Pre-warm sessions are cold/idle (sessionState stays 'idle' for the
@@ -1307,7 +1543,9 @@ export function isSessionBusy(): boolean {
   return sessionState !== 'idle'
     || isStreamingMessage
     || messageQueue.length > 0
-    || pendingMidTurnQueue.length > 0;
+    || inFlightToCliId !== null
+    || pendingMidTurnQueue.length > 0
+    || promotedItemInFlight;
 }
 
 /**
@@ -1327,11 +1565,9 @@ export function isSessionBusy(): boolean {
 // (v0.2.12) The cancelledInflightIds checkpoint set used by the deferred-yield
 // design (ce747cd2) is gone. With lockstep mid-turn injection, items are
 // either in messageQueue / pendingMidTurnQueue (cancellable by splice) or
-// already in CLI's commandQueue (uncancellable — frontend hides the X).
-// The "promoted but not yet yielded" race window the checkpoint guarded
-// against doesn't exist any more — promote and yield happen back-to-back
-// inside the same micro-task and there is no externally visible
-// cancellation surface in between.
+// in CLI's commandQueue (cancellable only through SDK cancel_async_message
+// while still pending). The old "promoted but not yet yielded" race window
+// still has no separate UI surface.
 
 function rescuePendingToQueue(): void {
   if (pendingMidTurnQueue.length === 0) return;
@@ -1348,10 +1584,8 @@ function rescuePendingToQueue(): void {
  * CLI's commandQueue. Called from:
  *   - handleQueuedCommandReplay (CLI confirmed AI saw the in-flight item
  *     mid-turn): the in-flight slot just opened, hand the next over.
- *   - handleMessageComplete/Stopped/Error (turn-end fallback for cases
- *     where CLI drained queued commands at the do-while turn boundary
- *     instead of mid-turn — no replay event fires there, but the
- *     in-flight slot is freed and we still need to promote our pending).
+ *   - successful SDK cancel of the in-flight item or a confirmed assistant
+ *     boundary, which frees the slot and lets the next item be handed to SDK.
  *
  * Idempotent: bails when inFlightToCliId !== null (the slot is occupied)
  * or pendingMidTurnQueue is empty.
@@ -1372,10 +1606,12 @@ function promoteNextFromPending(): void {
     ? pending.userMessage.content
     : '';
   inFlightToCliId = pending.queueId;
+  awaitingAssistantStartAckQueueId = null;
   inFlightMetadata = {
     messageText: promotedText,
     attachments: pending.userMessage.attachments,
     requestId: pending.sourceItem.requestId,
+    analyticsSource: pending.sourceItem.analyticsSource,
   };
   console.log(`[agent] Promoting next pending mid-turn message: queueId=${pending.queueId} (pending remaining=${pendingMidTurnQueue.length})`);
   // Re-emit queue:added with isInFlight=true. Frontend's queue:added handler
@@ -1401,7 +1637,7 @@ function promoteNextFromPending(): void {
  *
  * Receiving this means AI's NEXT API call will include the queued_command
  * as a user-role attachment in its context — i.e. the message has crossed
- * the "uncancellable" boundary. Time to:
+ * the confirmed-consumption boundary. Time to:
  *   1. Push it into messages[] (now visible in chat history)
  *   2. Persist + broadcast queue:started so frontend renders the bubble
  *      inline with the streaming assistant content (midTurnBreak split)
@@ -1417,43 +1653,29 @@ async function handleQueuedCommandReplay(
   if (!meta) {
     console.warn(`[agent] queued_command replay arrived but inFlightMetadata is null, queueId=${queueId}`);
   }
-
-  const userMessage: MessageWire = {
-    id: String(messageSequence++),
-    role: 'user',
-    content: meta?.messageText ?? '',
-    timestamp: new Date().toISOString(),
-    attachments: meta?.attachments,
-    sdkUuid: sdkMessage.uuid,
-    metadata: meta?.source ? { source: meta.source } : undefined,
-  };
-  messages.push(userMessage);
-  if (sdkMessage.uuid) {
-    currentSessionUuids.add(sdkMessage.uuid);
-    liveSessionUuids.add(sdkMessage.uuid);
-  }
-  await persistMessagesToStorage();
-
-  // PRD 0.2.14 — desktop → IM mirror (queued mid-turn replay path).
-  if (meta?.source === 'desktop') {
-    fireDesktopUserMirror(userMessage.content as string, meta.mirrorImages);
-  }
-
   console.log(`[agent] queued_command replay consumed by AI: queueId=${queueId}`);
-  broadcast('queue:started', {
-    queueId,
+  await surfaceInFlightQueueItem(queueId, meta, {
+    sdkUuid: sdkMessage.uuid,
     midTurnBreak: true,
-    userMessage: {
-      id: userMessage.id,
-      role: userMessage.role,
-      content: userMessage.content,
-      timestamp: userMessage.timestamp,
-      attachments: userMessage.attachments,
-    },
+    reason: 'SDKUserMessageReplay consumed by AI',
+    awaitPersist: true,
   });
+}
 
-  clearInFlightSlot();
-  promoteNextFromPending();
+function maybeSurfaceInFlightAtAssistantTurnStart(reason: string): void {
+  if (isStreamingMessage) return;
+  const queueId = inFlightToCliId;
+  if (!queueId) return;
+  if (awaitingAssistantStartAckQueueId !== queueId) return;
+  const meta = inFlightMetadata;
+  void surfaceInFlightQueueItem(queueId, meta, {
+    sdkUuid: queueId,
+    reason,
+    awaitPersist: false,
+    schedulePersist: true,
+  }).catch((error) => {
+    console.error(`[agent] Failed to surface in-flight queue item ${queueId} at assistant turn start:`, error);
+  });
 }
 
 /** 中止持久 session：唤醒所有被阻塞的 Promise */
@@ -1470,9 +1692,11 @@ function abortPersistentSession(): void {
   // so other code can't bypass this teardown by setting the flag directly.
   // eslint-disable-next-line no-restricted-syntax
   shouldAbortSession = true;
-  // (v0.2.12) Clear in-flight CLI tracking — recovery session starts clean
-  // and any rescued pending items will be re-yielded by the new generator.
-  clearInFlightSlot();
+  // Unconfirmed in-flight items belong to the SDK subprocess that is about
+  // to die. Do not silently clear them (leaves UI pills behind) and do not
+  // requeue them (could duplicate a message the SDK already consumed but
+  // never replayed before abort). Terminate the UI honestly.
+  dropInFlightQueueItem('session aborted before SDK consumption confirmation', 'failed');
   promotedItemInFlight = false;
   // Subprocess is about to die — rescue pending items so the recovery session
   // re-delivers them instead of losing them with the dead stdin buffer.
@@ -1580,6 +1804,9 @@ let currentTurnHasOutput = false;
 // SDK result later succeeds. Keep it turn-local until the authoritative result.
 let currentTurnHadAssistantMessageError = false;
 let currentTurnLastAssistantMessageError: string | null = null;
+let currentTurnAnalyticsSource: TurnAnalyticsSource | null = null;
+let currentTurnCompactResult: 'success' | 'failed' | null = null;
+let currentTurnSawCompactBoundary = false;
 // Whether the current turn observed any non-init SDK frame (assistant /
 // user / tool_result / stream_event / result / rate_limit_event etc.).
 // Cheaper signal than currentTurnHasOutput — flips on the FIRST substantive
@@ -1679,6 +1906,9 @@ function resetTurnUsage(): void {
   currentTurnHasOutput = false;
   currentTurnHadAssistantMessageError = false;
   currentTurnLastAssistantMessageError = null;
+  currentTurnAnalyticsSource = null;
+  currentTurnCompactResult = null;
+  currentTurnSawCompactBoundary = false;
   turnHadSubstantiveActivity = false;
   currentTurnTextBlocks.length = 0;
   // Note: currentTurnInboxMeta is NOT reset here — it's bound on dequeue
@@ -1688,35 +1918,63 @@ function resetTurnUsage(): void {
 /**
  * PRD 0.2.32 — broadcast 归一化的 context 用量快照（builtin runtime）。
  *
- * 占用 = 最近一条**主轮** assistant message 的 `input + cacheRead + cacheCreation`
- * （Anthropic 系，input 不含 cache）。**不**用 currentTurnUsage（那是整 turn 多次调用的
- * 聚合，会把重发的上下文求和、严重高估）。窗口优先用 SDK 运行时填充的
- * `ModelUsage.contextWindow`，缺省回落 `lookupModelContextLength ?? 200K`（= auto-compact 有效窗口）。
+ * 两条占用源（按代价递增）：
+ *  1. 快路径：最近一条**主轮** assistant message 的 per-call `usage.input + cacheRead + cacheCreation`。
+ *     Anthropic 直连和大部分填 `BetaMessage.usage` 的兼容供应商命中此路，零额外 SDK 往返。
+ *  2. 回落（#343）：当 #1 缺失（火山方舟 MiniMax M3 等 Anthropic-compat 第三方供应商只回
+ *     `result.modelUsage` 聚合、不填 streamed assistant frame 的 `message.usage`，且 `/compact`
+ *     控制轮无主轮 assistant message），改向 SDK 控制面 `querySession.getContextUsage()` 取数——
+ *     这是 `/context` 斜杠命令同源，**SDK 自身追踪的当前窗口占用** (`totalTokens`)，与提供商
+ *     wire 是否回传 per-message usage 无关。
+ *
+ * 为什么 SDK 源能同时安然处理 #323 `/compact` 场景：`totalTokens` 是 SDK 当前窗口占用估算
+ * （categories + apiUsage），不是 turn 聚合 cache-read 求和。`/compact` 落地后这个数等于压缩
+ * **后**的新（小）窗口——正是圆环该显示的值。#323 的 4.55M / 20.40M 灾难只来自盲目用
+ * `currentTurnUsage.cacheReadTokens`（N 次工具调用求和），此源无该坑。
+ *
+ * 窗口：优先 `lookupModelContextLength`（与注入的 `CLAUDE_CODE_AUTO_COMPACT_WINDOW` 同源），
+ * 缺省 SDK 200K。**不**用 SDK `ModelUsage.contextWindow`（对 bridge 的第三方 builtin 模型只回
+ * 200K 默认，与 auto-compact 实际窗口失配）。
  */
-function broadcastBuiltinContextUsage(): void {
-  // 占用只取「最近一条主轮 assistant message」的 per-call usage；没有就**跳过**广播。
-  // #323 — 绝不回落到 currentTurnUsage 聚合：那是整 turn 多次调用的 cache-read 之和，
-  // `/compact` 这种控制轮（有成功 result + 大 modelUsage、却没有携带 usage 的主轮 assistant
-  // message）会把 20M+ 的求和当成当前占用 → computeContextUsage 把 % 封顶 100、却照样显示
-  // 不可能的 token 数（4.55M / 20.40M over 1M window）。跳过则保留上一可信值，下一条真实
-  // 消息（其 input ≈ 压缩后大小）自愈。与外部 runtime「缺 contextOccupiedTokens 就不发」同纪律。
-  const occupied = resolveContextOccupancyTokens(latestMainAssistantUsage);
-  if (occupied === null) return; // 无 per-call 快照（如 /compact 控制轮）— 不广播假占用
-  // 窗口刻意用 `lookupModelContextLength ?? 200K`（computeContextUsage 内部回落），**不**用 SDK
-  // `ModelUsage.contextWindow`：后者是 SDK `getContextWindowForModel()` 的值，对经 bridge 的第三方
-  // builtin 模型（DeepSeek-128K 等）只会回落 200K 默认，与我们注入的 `CLAUDE_CODE_AUTO_COMPACT_WINDOW`
-  // （= lookupModelContextLength）不一致。圆环要对应 auto-compact，所以分母必须用同一来源（registry ?? 200K）。
+async function broadcastBuiltinContextUsage(): Promise<void> {
+  // **同步捕获** turn-末 state，再进入可能 await 的回落分支。`broadcastBuiltinContextUsage()`
+  // 现在以 `void` 形式从 result 处理器 fire-and-forget；如果不抓快照，await 期间下一轮的
+  // `resetTurnUsage()` 可能把 `currentTurnUsage.model`/`sessionId` 改掉，给本轮的 broadcast/
+  // 持久化盖错头。`latestMainAssistantUsage` 在函数入口同步读，已经天然是快照。
+  const occupiedFromPerCall = resolveContextOccupancyTokens(latestMainAssistantUsage);
+  const snapshotModel = currentTurnUsage.model;
+  const snapshotSessionId = sessionId;
+  const snapshotQuerySession = querySession;
+
+  let occupied = occupiedFromPerCall;
+
+  // 快路径 miss → 问 SDK 自己的 context-usage 源（`/context` 命令同源）。这条修复了：
+  //   (a) #343：火山方舟等兼容供应商不填 per-message usage 时圆环一直空（`chat:context-usage`
+  //       永不广播），即便 `/context` 命令在终端能正常显示 122.8k/512k；
+  //   (b) #323 的善后：`/compact` 后改为显示真实的压缩**后**占用，而不是「跳过、等下条消息自愈」。
+  // SDK 控制请求 reject 的话静默回落到老的「跳过」语义；不引入新失败模式。
+  if (occupied === null && snapshotQuerySession) {
+    try {
+      const ctx = await snapshotQuerySession.getContextUsage();
+      occupied = resolveContextOccupancyFromSdkBreakdown(ctx);
+    } catch (err) {
+      console.debug('[agent] getContextUsage fallback failed (will skip context-usage broadcast):', err);
+    }
+  }
+
+  if (occupied === null) return; // 两源都拿不到 — 不广播假占用，前端保留上次可信值
+
   const usage = computeContextUsage({
     occupiedTokens: occupied,
     runtimeWindow: null,
     source: 'builtin',
-    model: currentTurnUsage.model,
+    model: snapshotModel,
     lookupWindow: lookupModelContextLength,
   });
   broadcast('chat:context-usage', usage);
   // PRD 0.2.32 — 持久化**同一个**快照到 session 记录（单一数据源）。每轮末一次写盘，
   // 重开会话时前端从 session metadata seed → 环立即显示且与会话期间一致。fire-and-forget。
-  void updateSessionMetadata(sessionId, { lastContextUsage: usage }).catch((err) =>
+  void updateSessionMetadata(snapshotSessionId, { lastContextUsage: usage }).catch((err) =>
     console.warn('[agent] persist lastContextUsage failed:', err),
   );
 }
@@ -2538,6 +2796,54 @@ export function setSessionModel(model: string, opts?: { imConfigSync?: boolean }
       schedulePreWarm();
     }
   }
+}
+
+/**
+ * #324 — set the session's reasoning effort. `value` is the UI/persisted
+ * setting ('default' | level); stored normalized (undefined = default).
+ *
+ * Application strategy mirrors setSessionModel's env-baked branch:
+ *  - OpenAI-protocol provider: nothing to do beyond the state write — the
+ *    bridge resolver (resolveActiveSessionUpstreamConfig) reads
+ *    `currentReasoningEffort` live per upstream request.
+ *  - Anthropic protocol (official + third-party): `effort` is a query()-spawn
+ *    option with no live SDK setter (sdk.d.ts has setModel/setMaxThinkingTokens
+ *    only), so a live subprocess needs a respawn. Mid-turn → deferred restart
+ *    (drains at turn end); idle/pre-warm → abort + re-warm now so the user's
+ *    next message doesn't pay the restart latency.
+ *
+ * Desktop-picker only (no IM router caller), so no #327 imConfigSync guard —
+ * the desktop push is authoritative and updates the snapshot itself, same as
+ * the model picker.
+ */
+export function setSessionReasoningEffort(value: string | null | undefined): void {
+  const normalized = normalizeReasoningEffort(value);
+  if (normalized === currentReasoningEffort) return;
+
+  const old = currentReasoningEffort;
+  currentReasoningEffort = normalized;
+  console.log(`[agent] session reasoning effort set: ${old ?? 'default'} -> ${normalized ?? 'default'}`);
+
+  if (currentProviderEnv?.apiProtocol === 'openai') {
+    // Live bridge resolver picks it up on the next request — no respawn.
+    return;
+  }
+
+  if (querySession) {
+    if (isTurnInFlight()) {
+      console.log('[agent] reasoning effort changed during active turn -> schedule deferred restart to reapply query() effort');
+      scheduleDeferredRestart('reasoning-effort');
+    } else {
+      console.log('[agent] reasoning effort changed while idle/pre-warming -> aborting session to reapply query() effort');
+      abortPersistentSession();
+      schedulePreWarm();
+    }
+  }
+}
+
+/** #324 — current normalized reasoning effort (undefined = default). */
+export function getSessionReasoningEffort(): string | undefined {
+  return currentReasoningEffort;
 }
 
 /** Get current provider env (used by heartbeat/memory-update to preserve provider across internal calls). */
@@ -3949,7 +4255,7 @@ const persistedSessionMessageCache: SessionMessage[] = [];
 // or fresh-session swap doesn't replay onto the wrong key).
 const persistChainBySession = new Map<string, Promise<void>>();
 
-function schedulePersist(): Promise<void> {
+function schedulePersist(targetMessageCount = messages.length): Promise<void> {
   const key = sessionId;
   const prev = persistChainBySession.get(key) ?? Promise.resolve();
   const next = prev.then(() => {
@@ -3964,7 +4270,7 @@ function schedulePersist(): Promise<void> {
       console.warn(`[agent-session] skipping stale queued persist: scheduled for ${key}, current session is ${sessionId}`);
       return;
     }
-    return doPersistMessagesToStorage();
+    return doPersistMessagesToStorage(targetMessageCount);
   }).catch(err => {
     console.warn('[agent-session] persist failed:', err);
   });
@@ -3979,13 +4285,13 @@ function schedulePersist(): Promise<void> {
   return next;
 }
 
-async function persistMessagesToStorage(): Promise<void> {
+async function persistMessagesToStorage(targetMessageCount = messages.length): Promise<void> {
   // Top-level entry — go through the per-session serializer so concurrent
   // callers don't interleave their cursor writes.
-  return schedulePersist();
+  return schedulePersist(targetMessageCount);
 }
 
-async function doPersistMessagesToStorage(): Promise<void> {
+async function doPersistMessagesToStorage(targetMessageCount: number): Promise<void> {
   // Defensive: if the cursor is somehow > messages.length on entry (rewind
   // race, fork side-effect), log a warning and reset rather than silently
   // skipping the rest of the work.
@@ -3999,7 +4305,12 @@ async function doPersistMessagesToStorage(): Promise<void> {
     persistedSessionMessageCache.length = messages.length;
   }
 
-  const tail = messages.slice(lastPersistedIndex);
+  const boundedTargetCount = Math.min(targetMessageCount, messages.length);
+  if (lastPersistedIndex >= boundedTargetCount) {
+    return;
+  }
+
+  const tail = messages.slice(lastPersistedIndex, boundedTargetCount);
   const tailMapped: SessionMessage[] = tail.map((msg) => {
     const contentForDisk = typeof msg.content === 'string'
       ? msg.content
@@ -4040,7 +4351,7 @@ async function doPersistMessagesToStorage(): Promise<void> {
   for (const m of tailMapped) {
     persistedSessionMessageCache.push(m);
   }
-  lastPersistedIndex = messages.length;
+  lastPersistedIndex = boundedTargetCount;
   const { found: foundRealUserMessage, preview: lastMessagePreview } =
     resolveLastRealUserMessagePreview(sessionMessages);
   // Only update lastActiveAt if a real user message exists (not just system injections).
@@ -4798,6 +5109,73 @@ function parseSystemInitInfo(message: unknown): SystemInitInfo | null {
   };
 }
 
+function normalizeSdkSlashCommand(command: unknown): UiSlashCommand | null {
+  if (!command || typeof command !== 'object') {
+    return null;
+  }
+  const record = command as Partial<SdkSlashCommand> & Record<string, unknown>;
+  const rawName = typeof record.name === 'string' ? record.name.trim() : '';
+  const name = rawName.replace(/^\/+/, '');
+  if (!name) {
+    return null;
+  }
+
+  const aliases = Array.isArray(record.aliases)
+    ? record.aliases
+        .filter((alias): alias is string => typeof alias === 'string' && alias.trim().length > 0)
+        .map((alias) => alias.trim().replace(/^\/+/, ''))
+    : undefined;
+  const argumentHint = typeof record.argumentHint === 'string' && record.argumentHint.trim().length > 0
+    ? record.argumentHint.trim()
+    : undefined;
+
+  return {
+    name,
+    description: typeof record.description === 'string' ? record.description : '',
+    source: 'sdk',
+    ...(argumentHint ? { argumentHint } : {}),
+    ...(aliases && aliases.length > 0 ? { aliases } : {}),
+  };
+}
+
+function normalizeSdkSlashCommands(commands: unknown): UiSlashCommand[] | null {
+  if (!Array.isArray(commands)) {
+    return null;
+  }
+
+  const normalized: UiSlashCommand[] = [];
+  const seen = new Set<string>();
+  for (const command of commands) {
+    const item = normalizeSdkSlashCommand(command);
+    if (!item) continue;
+    const key = item.name.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    normalized.push(item);
+  }
+  return normalized;
+}
+
+function parseSdkCommandsChanged(message: unknown): UiSlashCommand[] | null {
+  if (!message || typeof message !== 'object') {
+    return null;
+  }
+  const record = message as Record<string, unknown>;
+  if (record.type !== 'system' || record.subtype !== 'commands_changed') {
+    return null;
+  }
+  return normalizeSdkSlashCommands(record.commands);
+}
+
+function broadcastSdkSlashCommands(commands: UiSlashCommand[], source: 'initialize' | 'commands_changed'): void {
+  broadcast('chat:slash-commands', {
+    commands,
+    sessionId,
+    runtime: 'builtin',
+    source,
+  });
+}
+
 /**
  * Parse SDK status message (e.g., compacting)
  * Returns { isStatusMessage, status } to distinguish between:
@@ -4805,26 +5183,38 @@ function parseSystemInitInfo(message: unknown): SystemInitInfo | null {
  * - A status message with status: null (clearing the status)
  * - A status message with status: 'compacting' etc.
  */
-function parseSystemStatus(message: unknown): { isStatusMessage: boolean; status: string | null; permissionMode: string | null } {
+function parseSystemStatus(message: unknown): {
+  isStatusMessage: boolean;
+  status: string | null;
+  permissionMode: string | null;
+  compactResult: 'success' | 'failed' | null;
+  compactError: string | null;
+} {
   if (!message || typeof message !== 'object') {
-    return { isStatusMessage: false, status: null, permissionMode: null };
+    return { isStatusMessage: false, status: null, permissionMode: null, compactResult: null, compactError: null };
   }
   const record = message as Record<string, unknown>;
   if (record.type !== 'system' || record.subtype !== 'status') {
-    return { isStatusMessage: false, status: null, permissionMode: null };
+    return { isStatusMessage: false, status: null, permissionMode: null, compactResult: null, compactError: null };
   }
   // SDK 0.2.108+: emits status:'requesting' before every API request when includePartialMessages is on.
   // Treat as transient/no-op — we already surface thinking/streaming via partial message events,
   // and propagating it would flash the send button into a disabled state on every tool-call round trip.
   const statusValue = typeof record.status === 'string' ? record.status : null;
   if (statusValue === 'requesting') {
-    return { isStatusMessage: false, status: null, permissionMode: null };
+    return { isStatusMessage: false, status: null, permissionMode: null, compactResult: null, compactError: null };
   }
+  const compactResult =
+    record.compact_result === 'success' || record.compact_result === 'failed'
+      ? record.compact_result
+      : null;
   // This IS a status message, status can be 'compacting' or null, permissionMode can be 'plan'/'acceptEdits'/etc.
   return {
     isStatusMessage: true,
     status: statusValue,
     permissionMode: typeof record.permissionMode === 'string' ? record.permissionMode : null,
+    compactResult,
+    compactError: typeof record.compact_error === 'string' ? record.compact_error : null,
   };
 }
 
@@ -4837,6 +5227,11 @@ function setSessionState(nextState: SessionState): void {
 }
 
 function ensureAssistantMessage(): MessageWire {
+  // If SDK drains a queued async message at a turn boundary without emitting
+  // SDKUserMessageReplay, the first assistant content of the new turn is the
+  // next reliable boundary signal. Surface the user bubble before creating
+  // that assistant so UI ordering stays honest.
+  maybeSurfaceInFlightAtAssistantTurnStart('assistant turn started after SDK boundary drain');
   const lastMessage = messages[messages.length - 1];
   if (lastMessage && lastMessage.role === 'assistant' && isStreamingMessage) {
     return lastMessage;
@@ -4856,6 +5251,75 @@ function ensureAssistantMessage(): MessageWire {
   messages.push(assistant);
   isStreamingMessage = true;
   return assistant;
+}
+
+/**
+ * Apply an SDK retraction (refusal-fallback protocol, SDK 0.3.162+) to the
+ * in-memory session state and notify the frontend. Idempotent — both
+ * channels (`model_refusal_fallback.retracted_message_uuids` and the
+ * replacement assistant's `supersedes`) may name the same uuids.
+ *
+ * Must run BEFORE the replacement leg's content is appended: when the refused
+ * streaming bubble is evicted, isStreamingMessage resets so the retry starts a
+ * fresh bubble instead of concatenating refused + replacement content.
+ */
+function applyMessageRetraction(retractedUuids: readonly string[] | undefined, source: string): void {
+  if (!retractedUuids || retractedUuids.length === 0) return;
+  // fallbackToStreamingTail: a refusal cuts the stream possibly BEFORE any
+  // final assistant frame — the refused bubble then has no (or a stale)
+  // sdkUuid and uuid matching alone misses it. The open stream at retraction
+  // time IS the refused leg by protocol, so evict the tail too. Passing the
+  // live flag also keeps the double-channel replay idempotent: the first
+  // channel resets isStreamingMessage, so the second sees fallback=false and
+  // already-evicted uuids → empty plan → no second broadcast.
+  const plan = planRetraction(messages, retractedUuids, { fallbackToStreamingTail: isStreamingMessage });
+  if (plan.removedMessageIds.length > 0) {
+    const removed = new Set(plan.removedMessageIds);
+    if (plan.removedStreamingTail) {
+      isStreamingMessage = false;
+    }
+    // Persistence-cursor invariant (same surgery discipline as rewind/fork):
+    // doPersistMessagesToStorage() is cursor-based — persistedSessionMessageCache
+    // mirrors messages[0, lastPersistedIndex). Mid-turn persists (queued-command
+    // echo, local-command output) can move the cursor past a refused bubble, so
+    // splicing without re-aligning would leave the cache holding the refused
+    // message forever AND drop a legitimate message into the dead zone below
+    // the cursor where it never persists. Splice both arrays in lockstep and
+    // pull the cursor back by the number of removed entries below it.
+    let removedBelowCursor = 0;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (!removed.has(messages[i].id)) continue;
+      if (i < lastPersistedIndex) removedBelowCursor++;
+      if (i < persistedSessionMessageCache.length) persistedSessionMessageCache.splice(i, 1);
+      messages.splice(i, 1);
+    }
+    lastPersistedIndex -= removedBelowCursor;
+    // Live frontend streaming bubbles use client-generated ids that never
+    // match server messageSequence ids mid-turn (see the message-complete
+    // assistant_message_id piggyback) — the id list below only evicts
+    // RESTORED-history bubbles. The live refused bubble is evicted via
+    // retractedStreamingTail, which the renderer honors unconditionally.
+    broadcast('chat:messages-retracted', {
+      messageIds: plan.removedMessageIds,
+      retractedStreamingTail: plan.removedStreamingTail,
+    });
+    if (removedBelowCursor > 0) {
+      // Refused content already reached disk via a mid-turn persist — converge
+      // now (shrink-rewrite path) instead of leaving it until the next persist.
+      void persistMessagesToStorage();
+    }
+  } else if (retractedUuids.length > 0 && source === 'model_refusal_fallback') {
+    // Retraction named uuids but nothing matched and no stream was open —
+    // surface it: this is the observable signal for a protocol/mapping gap.
+    console.warn(`[agent] ${source}: retraction matched nothing (${retractedUuids.length} uuid(s) named)`);
+  }
+  // Retracted uuids no longer exist in the SDK transcript — drop them from the
+  // rewind/fork anchor sets so resumeSessionAt/fork never target a dead uuid.
+  for (const uuid of retractedUuids) {
+    currentSessionUuids.delete(uuid);
+    liveSessionUuids.delete(uuid);
+  }
+  console.log(`[agent] ${source}: retracted ${plan.removedMessageIds.length} message(s) / ${retractedUuids.length} uuid(s)`);
 }
 
 function ensureContentArray(message: MessageWire): ContentBlock[] {
@@ -5227,15 +5691,15 @@ let lastTurnEndPersist: Promise<unknown> = Promise.resolve();
 
 function handleMessageComplete(): void {
   isStreamingMessage = false;
-  // Capture before fallback potentially re-arms it, so the post-teardown
-  // re-arm at the end of this function knows whether to do so.
-  let queuedFallbackKeepStreaming = false;
-  // (v0.2.12) Turn-end fallback for the lockstep yield.
+  // Capture before a confirmed force-send handoff potentially re-arms it, so
+  // the post-teardown re-arm at the end of this function knows whether to do so.
+  let confirmedQueueTurnKeepStreaming = false;
+  // (v0.2.34) Result handling for the lockstep-yield in-flight queued item.
   //
   // Two regimes the same `result` event covers:
-  //   (a) Natural completion: queue:started fallback so a UI pill that
-  //       was waiting on a never-fired mid-turn replay gets surfaced as
-  //       "AI saw it" right at turn boundary.
+  //   (a) Natural completion: NOT a consumption acknowledgement. Keep the
+  //       queue pill waiting for SDKUserMessageReplay or the first assistant
+  //       event of the boundary-drained next turn.
   //   (b) Graceful interrupt (user pressed stop): the SDK fires `result`
   //       with terminal_reason='aborted_streaming' which still routes
   //       through handleMessageComplete. In this regime AI may not have
@@ -5246,59 +5710,47 @@ function handleMessageComplete(): void {
   if (inFlightToCliId !== null) {
     const stale = inFlightToCliId;
     const meta = inFlightMetadata;
-    // Issue #289 — a force-send ("立即发送") of THIS item must SURFACE it (the SDK drains +
-    // processes it post-abort), unlike a plain stop which drops it. Capture before clearing.
-    const forced = forceSurfaceInFlightId === stale;
-    clearInFlightSlot();
-    const inFlightAction = decideInFlightActionOnResult({
-      isInterrupting: isInterruptingResponse,
-      forced,
-      hasMeta: !!meta,
-    });
-    if (inFlightAction === 'drop') {
-      broadcast('queue:cancelled', { queueId: stale });
-      console.log(`[agent] In-flight queue item ${stale} dropped at graceful interrupt result — broadcast queue:cancelled`);
-    } else if (inFlightAction === 'surface' && meta) {
-      // Issue #289 — a FORCE surface means the SDK is draining this item into a NEW turn;
-      // tell interruptCurrentResponse() to skip its redundant trailing handleMessageStopped()
-      // (which would undo the streaming re-arm below + double-pop the IM request → idle gap).
-      // The natural turn-end fallback does NOT go through interruptCurrentResponse, so only
-      // set it for the forced case.
-      if (forced) forceDrainTurnStarting = true;
-      const userMessage: MessageWire = {
-        id: String(messageSequence++),
-        role: 'user',
-        content: meta.messageText,
-        timestamp: new Date().toISOString(),
-        attachments: meta.attachments,
-        metadata: meta.source ? { source: meta.source } : undefined,
-      };
-      messages.push(userMessage);
-      // PRD 0.2.14 — desktop → IM mirror (queue:started fallback path).
-      if (meta.source === 'desktop') {
-        fireDesktopUserMirror(meta.messageText, meta.mirrorImages);
-      }
-      console.log(`[agent] In-flight queue item ${stale} surfaced via queue:started (${forced ? 'force-send #289' : 'turn-end fallback, no mid-turn replay'})`);
-      broadcast('queue:started', {
-        queueId: stale,
-        userMessage: {
-          id: userMessage.id,
-          role: userMessage.role,
-          content: userMessage.content,
-          timestamp: userMessage.timestamp,
-          attachments: userMessage.attachments,
-        },
+    const interruptTargetMismatch = isInterruptingResponse && interruptingInFlightQueueId !== stale;
+    if (interruptTargetMismatch) {
+      preserveInFlightAfterTerminalBoundary(`interrupt result targets ${interruptingInFlightQueueId ?? 'none'}`);
+    } else {
+      // Issue #289 — a force-send ("立即发送") of THIS item must SURFACE it (the SDK drains +
+      // processes it post-abort), unlike a plain stop which drops it.
+      const forced = forceSurfaceInFlightId === stale;
+      const inFlightAction = decideInFlightActionOnResult({
+        isInterrupting: isInterruptingResponse,
+        forced,
+        hasMeta: !!meta,
       });
-      // (v0.2.12 Codex review fix v3 #2) The fallback represents a brand-
-      // new SDK turn starting inside CLI via drainCommandQueue. Mark
-      // for a post-teardown re-arm of isStreamingMessage so isSessionBusy()
-      // still gates new direct-sends through the queue path during the
-      // gap before the new turn's first event reaches MyAgents.
-      queuedFallbackKeepStreaming = true;
-      // pendingRequestIds: queued item's requestId was pushed at yield
-      // time and remains in the FIFO behind msg1's; popPendingRequest()
-      // below pops msg1, leaving msg2 as new head — popped on its own
-      // result. No push needed.
+      if (inFlightAction === 'drop') {
+        dropInFlightQueueItem('graceful interrupt result before SDK consumption confirmation', 'cancelled');
+      } else if (inFlightAction === 'surface' && meta) {
+        // Issue #289 — a FORCE surface means the SDK is draining this item into a NEW turn;
+        // tell interruptCurrentResponse() to skip its redundant trailing handleMessageStopped()
+        // (which would undo the streaming re-arm below + double-pop the IM request → idle gap).
+        // Natural completion no longer surfaces without confirmation, so only
+        // force-send reaches this re-arm path.
+        if (forced) forceDrainTurnStarting = true;
+        void surfaceInFlightQueueItem(stale, meta, {
+          sdkUuid: stale,
+          reason: forced ? 'force-send #289' : 'confirmed result handoff',
+          awaitPersist: false,
+        }).catch((error) => {
+          console.error(`[agent] Failed to surface in-flight queue item ${stale} at result boundary:`, error);
+        });
+        // (v0.2.12 Codex review fix v3 #2) Force-send represents a brand-
+        // new SDK turn starting inside CLI via drainCommandQueue. Mark
+        // for a post-teardown re-arm of isStreamingMessage so isSessionBusy()
+        // still gates new direct-sends through the queue path during the
+        // gap before the new turn's first event reaches MyAgents.
+        confirmedQueueTurnKeepStreaming = true;
+        // pendingRequestIds: queued item's requestId was pushed at yield
+        // time and remains in the FIFO behind msg1's; popPendingRequest()
+        // below pops msg1, leaving msg2 as new head — popped on its own
+        // result. No push needed.
+      } else if (inFlightAction === 'await-replay') {
+        preserveInFlightAfterTerminalBoundary('natural result');
+      }
     }
   }
   // (v0.2.12 Codex review fix v2 #1) DEFER promote to next macrotask.
@@ -5381,7 +5833,7 @@ function handleMessageComplete(): void {
   // (v0.2.11 cross-bugfix #142 review-fix #4) Also gate on pendingMidTurnQueue.length
   // so waitForSessionIdle() doesn't claim idle while a deferred mid-turn message is
   // about to be promoted into the next turn.
-  if (messageQueue.length === 0 && pendingMidTurnQueue.length === 0) {
+  if (messageQueue.length === 0 && pendingMidTurnQueue.length === 0 && inFlightToCliId === null) {
     setSessionState('idle');
   }
 
@@ -5392,8 +5844,8 @@ function handleMessageComplete(): void {
   // while currentTurnUsage is still this turn's. Persistence then serializes usage
   // from the message itself (see doPersistMessagesToStorage) instead of guessing
   // "the last array element". `findTurnUsageStampIndex` targets the trailing
-  // assistant in the not-yet-persisted range, so a user message surfaced just above
-  // (queue:started fallback) or the next turn's messages can't steal/drop the usage.
+  // assistant in the not-yet-persisted range, so a confirmed queued user message
+  // surfaced just above or the next turn's messages can't steal/drop the usage.
   // (Does not retroactively fix turns whose assistant line was already appended
   // usage-less by a mid-turn persist — queue replay / local-command echo — because
   // the JSONL writer is append-only. KNOWN RESIDUAL, see the #331 commit message
@@ -5450,11 +5902,11 @@ function handleMessageComplete(): void {
     });
 
   // (v0.2.12 Codex review fix v3 #2 follow-up) Re-arm streaming flag for
-  // the queued fallback case AFTER all teardown has run, so endTurnAbort
+  // the confirmed queued handoff AFTER all teardown has run, so endTurnAbort
   // / clearAmbientLogContextField don't undo what we set up. The new
   // turn driven by CLI's drainCommandQueue will re-emit a `result` of
   // its own; isStreamingMessage will flip back to false there.
-  if (queuedFallbackKeepStreaming) {
+  if (confirmedQueueTurnKeepStreaming) {
     isStreamingMessage = true;
   }
 }
@@ -5471,10 +5923,11 @@ function handleMessageStopped(): void {
   // clear the pill. See handleMessageComplete for the matching
   // graceful-interrupt branch.
   if (inFlightToCliId !== null) {
-    const droppedQueueId = inFlightToCliId;
-    clearInFlightSlot();
-    broadcast('queue:cancelled', { queueId: droppedQueueId });
-    console.log(`[agent] In-flight queue item ${droppedQueueId} dropped on stop — broadcast queue:cancelled`);
+    if (terminalEventAppliesToCurrentInFlight()) {
+      dropInFlightQueueItem('message stopped before SDK consumption confirmation', 'cancelled');
+    } else {
+      preserveInFlightAfterTerminalBoundary(`stop targets ${interruptingInFlightQueueId ?? 'none'}`);
+    }
   }
   // Defer promote to next macrotask — abortPersistentSession may follow.
   setTimeout(() => promoteNextFromPending(), 0);
@@ -5505,7 +5958,7 @@ function handleMessageStopped(): void {
 
   // Only transition to idle if no queued messages waiting (same logic as handleMessageComplete).
   // (v0.2.11 cross-bugfix #142 review-fix #4) Includes pendingMidTurnQueue.
-  if (messageQueue.length === 0 && pendingMidTurnQueue.length === 0) {
+  if (messageQueue.length === 0 && pendingMidTurnQueue.length === 0 && inFlightToCliId === null) {
     setSessionState('idle');
   }
   const lastMessage = messages[messages.length - 1];
@@ -5541,10 +5994,11 @@ function handleMessageError(error: string, localizedError?: string): void {
   // (v0.2.12 Codex review fix #2) Drop the in-flight item on error and
   // surface queue:cancelled — see handleMessageStopped for rationale.
   if (inFlightToCliId !== null) {
-    const droppedQueueId = inFlightToCliId;
-    clearInFlightSlot();
-    broadcast('queue:cancelled', { queueId: droppedQueueId });
-    console.log(`[agent] In-flight queue item ${droppedQueueId} dropped on error — broadcast queue:cancelled`);
+    if (terminalEventAppliesToCurrentInFlight()) {
+      dropInFlightQueueItem('message error before SDK consumption confirmation', 'failed');
+    } else {
+      preserveInFlightAfterTerminalBoundary(`error targets ${interruptingInFlightQueueId ?? 'none'}`);
+    }
   }
   // Defer promote to next macrotask — abortPersistentSession may follow.
   setTimeout(() => promoteNextFromPending(), 0);
@@ -5564,7 +6018,9 @@ function handleMessageError(error: string, localizedError?: string): void {
   }
   // PRD 0.2.14 — desktop turn errored out; release mirror state.
   clearMirrorState();
-  setSessionState('idle');
+  if (messageQueue.length === 0 && pendingMidTurnQueue.length === 0 && inFlightToCliId === null) {
+    setSessionState('idle');
+  }
 
   // Don't persist expected termination signals as errors
   // These occur during normal session switching or app shutdown
@@ -6355,24 +6811,35 @@ export async function initializeAgent(
     // Use caller-specified session_id (IM / Tab opening existing session / CronTask)
     sessionId = initialSessionId as typeof sessionId;
 
-    // Check if this session has any prior metadata → decide resume vs create.
-    // We check for metadata existence (not just sdkSessionId) because sdkSessionId
-    // is only written after system_init succeeds. If the previous Bun process crashed
-    // before system_init, metadata exists (with unifiedSession:true) but sdkSessionId
-    // is absent — yet the SDK session directory already exists on disk.
+    // Metadata alone is not enough to resume the Claude Agent SDK. POST /sessions
+    // creates MyAgents metadata before the SDK has ever persisted a transcript,
+    // so `query({ resume })` would fail with "No conversation found". If
+    // sdkSessionId is missing, only recover the rare crash-before-metadata-update
+    // case when the SDK transcript probe finds real persisted messages.
     const meta = initMeta;
     if (meta) {
-      // Cross-runtime guard: if session was created by a DIFFERENT runtime than the current one,
-      // attempting to resume would fail (SDK: "No conversation found", CC/Codex: unknown session ID).
-      // Covers all mismatch combinations: builtin↔CC, builtin↔Codex, CC↔Codex.
       const currentRuntimeType = getCurrentRuntimeType();
-      const isCrossRuntime = meta.runtime && meta.runtime !== currentRuntimeType;
-      if (isCrossRuntime) {
-        sessionRegistered = false;
-        console.log(`[agent] initializeAgent: cross-runtime session ${initialSessionId} (created by ${meta.runtime}, current=${currentRuntimeType}), will NOT resume`);
-      } else {
+      const resumeDecision = await decideBuiltinSessionResume({
+        meta,
+        currentRuntime: currentRuntimeType,
+        agentDir: nextAgentDir,
+        probeSdkTranscript: sdkGetSessionMessages,
+      });
+      if (resumeDecision.shouldResume) {
         sessionRegistered = true;
-        console.log(`[agent] initializeAgent: will resume session ${initialSessionId} (sdkSessionId=${meta.sdkSessionId ?? 'unknown'})`);
+        console.log(`[agent] initializeAgent: will resume session ${resumeDecision.resumeSessionId} (reason=${resumeDecision.reason}, sdkSessionId=${meta.sdkSessionId ?? 'unknown'})`);
+      } else {
+        sessionRegistered = false;
+        if (resumeDecision.reason === 'runtime-mismatch') {
+          console.log(`[agent] initializeAgent: cross-runtime session ${initialSessionId} (created by ${meta.runtime}, current=${currentRuntimeType}), will NOT resume`);
+        } else if (resumeDecision.reason === 'external-runtime') {
+          console.log(`[agent] initializeAgent: external runtime ${currentRuntimeType}, builtin SDK resume disabled for ${initialSessionId}`);
+        } else if (resumeDecision.reason === 'probe-error') {
+          const msg = resumeDecision.error instanceof Error ? resumeDecision.error.message : String(resumeDecision.error);
+          console.warn(`[agent] initializeAgent: SDK transcript probe failed for ${initialSessionId}, will create fresh session: ${msg}`);
+        } else {
+          console.log(`[agent] initializeAgent: will create fresh SDK session ${initialSessionId} (resume skipped: ${resumeDecision.reason})`);
+        }
       }
     } else {
       sessionRegistered = false;
@@ -6466,6 +6933,16 @@ export async function initializeAgent(
         currentModel = resolved.model;
         console.log(`[agent] self-resolved model: ${resolved.model}`);
       }
+      // #324 — same builtin-only gate as model: headless builtin sessions
+      // (IM bot / cron new-session / crash-restarted sidecar) have no desktop
+      // push effect, so this self-resolve is their ONLY effort source. External
+      // runtimes resolve effort from runtimeConfig in their own start paths.
+      if (!currentReasoningEffort && resolved.reasoningEffort && !isExternalRuntime(getCurrentRuntimeType())) {
+        currentReasoningEffort = normalizeReasoningEffort(resolved.reasoningEffort);
+        if (currentReasoningEffort) {
+          console.log(`[agent] self-resolved reasoning effort: ${currentReasoningEffort}`);
+        }
+      }
       if (resolved.permissionMode && !isExternalRuntime(getCurrentRuntimeType())) {
         if (resolved.permissionMode !== currentPermissionMode) {
           console.log(`[agent] self-resolved permissionMode: ${resolved.permissionMode}`);
@@ -6505,8 +6982,8 @@ export async function initializeAgent(
  * 
  * Key behavior:
  * - Preserves target sessionId so messages are saved to the same session
- * - Sets sessionRegistered if sdkSessionId exists so SDK continues conversation context
- * - If no sdkSessionId exists (old session), starts fresh but keeps same session ID
+ * - Sets sessionRegistered only when the SDK can resume the target transcript
+ * - Metadata-only sessions start fresh but keep the same session ID
  */
 export async function switchToSession(targetSessionId: string): Promise<boolean> {
   console.log(`[agent] switchToSession: ${targetSessionId}`);
@@ -6581,19 +7058,30 @@ export async function switchToSession(targetSessionId: string): Promise<boolean>
     console.log(`[agent] switchToSession: loaded ${sessionData.messages.length} existing messages`);
   }
 
-  // Set sessionRegistered based on whether SDK has this session
-  if (sessionMeta.sdkSessionId) {
-    // SDK 已注册此 session，后续 query 必须用 resume
+  // Set sessionRegistered based on whether the SDK can actually resume this
+  // session. Metadata-only sessions must start fresh with the same sessionId.
+  const targetAgentDir = sessionMeta.agentDir || agentDir;
+  const resumeDecision = await decideBuiltinSessionResume({
+    meta: sessionMeta,
+    currentRuntime: getCurrentRuntimeType(),
+    agentDir: targetAgentDir,
+    probeSdkTranscript: sdkGetSessionMessages,
+  });
+  if (resumeDecision.shouldResume) {
     sessionRegistered = true;
-    console.log(`[agent] switchToSession: will resume session ${sessionId}`);
-  } else if (isExternalRuntime(getCurrentRuntimeType())) {
-    // External runtimes (codex/gemini/CC) don't use sdkSessionId — resume is
-    // driven by runtimeSessionId in external-session.ts. Not a problem.
+    console.log(`[agent] switchToSession: will resume session ${resumeDecision.resumeSessionId} (reason=${resumeDecision.reason})`);
+  } else if (resumeDecision.reason === 'external-runtime') {
+    // External runtimes (codex/gemini/CC) don't use builtin SDK resume state.
+    // Their resume is driven by runtimeSessionId in external-session.ts.
     sessionRegistered = false;
+  } else if (resumeDecision.reason === 'probe-error') {
+    sessionRegistered = false;
+    const msg = resumeDecision.error instanceof Error ? resumeDecision.error.message : String(resumeDecision.error);
+    console.warn(`[agent] switchToSession: SDK transcript probe failed, will start fresh: ${msg}`);
   } else {
     // 从未 query 过的 session，用 sessionId 创建
     sessionRegistered = false;
-    console.warn(`[agent] switchToSession: no SDK session_id, will start fresh`);
+    console.warn(`[agent] switchToSession: will start fresh (resume skipped: ${resumeDecision.reason})`);
   }
 
   // Update agentDir from session
@@ -6629,7 +7117,11 @@ export async function switchToSession(targetSessionId: string): Promise<boolean>
       // window and any non-renderer caller.
       currentModel = resolved.model;
       currentProviderEnv = resolved.providerEnv;
-      console.log(`[agent] switchToSession: restored model=${resolved.model ?? 'default'}, provider=${resolved.providerEnv?.baseUrl ?? 'subscription/none'}`);
+      // #324: restore reasoning effort with the same unconditional-replace
+      // rationale as model/env — otherwise the prior session's effort leaks
+      // into this session's next query() spawn.
+      currentReasoningEffort = normalizeReasoningEffort(resolved.reasoningEffort);
+      console.log(`[agent] switchToSession: restored model=${resolved.model ?? 'default'}, provider=${resolved.providerEnv?.baseUrl ?? 'subscription/none'}, effort=${currentReasoningEffort ?? 'default'}`);
     } catch (error) {
       console.warn('[agent] switchToSession: config self-resolution failed:', error);
     }
@@ -6655,7 +7147,7 @@ export async function switchToSession(targetSessionId: string): Promise<boolean>
  * Apply runtime configuration changes to the active session.
  * Calls SDK setModel/setPermissionMode if config has changed.
  */
-async function applySessionConfig(newModel?: string, newPermissionMode?: PermissionMode): Promise<void> {
+async function applySessionConfig(newModel?: string, newPermissionMode?: PermissionMode, newReasoningEffort?: string): Promise<void> {
   if (!querySession) {
     return;
   }
@@ -6697,6 +7189,38 @@ async function applySessionConfig(newModel?: string, newPermissionMode?: Permiss
     }
   }
 
+  // #324 — apply reasoning-effort change from the send payload (the desktop
+  // /api/reasoning-effort/set push normally lands first; this is the
+  // send-time safety net, mirroring the model parameter below). `undefined`
+  // means "not provided" (cron/IM callers) → leave the current value alone.
+  // OpenAI-protocol: state write only, the bridge resolver reads it live.
+  // Anthropic protocol: query()-spawn option → restart with resume (same
+  // shape as the aliasEnvChanged branch below; sessionRegistered makes the
+  // next spawn resume, so no context loss).
+  if (newReasoningEffort !== undefined) {
+    const normalizedEffort = normalizeReasoningEffort(newReasoningEffort);
+    if (normalizedEffort !== currentReasoningEffort) {
+      currentReasoningEffort = normalizedEffort;
+      if (currentProviderEnv?.apiProtocol !== 'openai') {
+        // Carry a simultaneous model change along — the restarted subprocess
+        // spawns from currentModel, so updating it here covers both knobs in
+        // one respawn.
+        if (newModel && newModel !== currentModel) {
+          currentModel = newModel;
+        }
+        console.log(`[agent] reasoning effort changed at send (${normalizedEffort ?? 'default'}) -> restarting session to reapply query() effort`);
+        abortPersistentSession();
+        await awaitSessionTermination(10_000, 'applySessionConfig/reasoningEffortChange');
+        querySession = null;
+        isProcessing = false;
+        setSessionState('idle');
+        resetAbortFlag();
+        return;
+      }
+      console.log(`[agent] reasoning effort changed at send (${normalizedEffort ?? 'default'}) -> live bridge update (openai protocol)`);
+    }
+  }
+
   // Apply model change if different. Same wrap rationale as setSessionModel():
   // setModel() on the live SDK subprocess updates the model fed into
   // getContextWindowForModel() on subsequent turns, so 1M-window models need
@@ -6735,8 +7259,8 @@ export type EnqueueResult = {
    * in-flight one (yielded immediately to CLI subprocess) or stayed in
    * pendingMidTurnQueue (still cancellable). Frontend uses this to set
    * the initial `isInFlight` flag on the optimistic queue pill so the
-   * X cancel button visibility matches the real backend state from the
-   * very first paint, before the SSE `queue:added` round-trip completes.
+   * UI can label it as already handed to SDK from the very first paint,
+   * before the SSE `queue:added` round-trip completes.
    */
   isInFlight?: boolean;
   error?: string;    // present when queue is full or other rejection
@@ -6801,6 +7325,7 @@ async function consumePendingContinueAfterAbort(
   permissionMode: PermissionMode | undefined,
   model: string | undefined,
   providerEnv: ProviderEnv | 'subscription' | undefined,
+  reasoningEffort: string | undefined,
   trigger: 'next-enqueue' | 'watchdog-auto',
   allowMissingPendingFlag = false,
 ): Promise<boolean> {
@@ -6854,6 +7379,7 @@ async function consumePendingContinueAfterAbort(
           permissionMode,   // inherit caller/current permission mode
           model,            // inherit caller/current model
           providerEnv,      // inherit caller/current provider env
+          reasoningEffort,  // inherit caller/current reasoning effort
           undefined,        // metadata - synthetic, no source attribution
           undefined,        // requestId - synthetic, no IM trace
           undefined,        // inboxMeta - synthetic, no inbox pushback
@@ -6921,6 +7447,7 @@ function scheduleWatchdogAutoResumeAfterAbort(
         currentPermissionMode,
         currentModel,
         undefined, // undefined means "keep current provider env"
+        undefined, // undefined means "keep current reasoning effort"
         'watchdog-auto',
         opts.allowMissingPendingFlag === true,
       );
@@ -6941,6 +7468,9 @@ export async function enqueueUserMessage(
   permissionMode?: PermissionMode,
   model?: string,
   providerEnv?: ProviderEnv | 'subscription',
+  // #324 — reasoning effort setting ('default' | level). undefined = caller
+  // doesn't manage effort (cron/IM/heartbeat) → current session value stays.
+  reasoningEffort?: string,
   metadata?: { source: SessionSource; sourceId?: string; senderName?: string },
   // Pattern A — IM trace ID. Forwarded from /api/im/chat (Rust generates at edge).
   // Desktop / cron / heartbeat callers omit this — those paths get no IM identity.
@@ -6950,6 +7480,7 @@ export async function enqueueUserMessage(
   // `myagents session send`). Carries reply-back instruction + caller identity;
   // bound per-turn at generator yield, read at result handler for reply pushback.
   inboxMeta?: import('./inbox/types').InboxTurnMeta,
+  analyticsSource?: TurnAnalyticsSource,
 ): Promise<EnqueueResult> {
   // 等待进行中的 resetSession/switchToSession 完成，防止消息投递到已死的 generator
   // 这些函数是异步的（await sessionTerminationPromise 需要数秒），
@@ -7012,6 +7543,7 @@ export async function enqueueUserMessage(
     permissionMode,
     model,
     providerEnv,
+    reasoningEffort,
     'next-enqueue',
   );
   const holdForWatchdogRecovery = scheduledWatchdogAutoResumeSessions.has(sessionIdSnapshot)
@@ -7040,6 +7572,7 @@ export async function enqueueUserMessage(
     || shouldAbortSession
     || isInterruptingResponse
     || messageQueue.length > 0
+    || inFlightToCliId !== null
     || pendingMidTurnQueue.length > 0
     || promotedItemInFlight;
   emitPerfTrace({
@@ -7158,7 +7691,7 @@ export async function enqueueUserMessage(
   // Apply runtime config changes if session is active (model/permission changes don't require restart)
   // Skip for queued messages — config is locked to the current session while streaming
   if (!isSessionBusy) {
-    await applySessionConfig(model, permissionMode);
+    await applySessionConfig(model, permissionMode, reasoningEffort);
 
     // Update local tracking even if SDK call is skipped (e.g., first message before pre-warm).
     // Same shared transition as applySessionConfig so a first-message payload of
@@ -7172,6 +7705,13 @@ export async function enqueueUserMessage(
     if (model && model !== currentModel) {
       currentModel = model;
       if (isDebugMode) console.log(`[agent] model set to: ${model}`);
+    }
+    if (reasoningEffort !== undefined) {
+      const normalizedEffort = normalizeReasoningEffort(reasoningEffort);
+      if (normalizedEffort !== currentReasoningEffort) {
+        currentReasoningEffort = normalizedEffort;
+        if (isDebugMode) console.log(`[agent] reasoning effort set to: ${normalizedEffort ?? 'default'}`);
+      }
     }
   } else if (shouldAbortSession) {
     // Session is being restarted (abort for MCP/agents config change). Stage permission/model
@@ -7189,6 +7729,13 @@ export async function enqueueUserMessage(
     if (model && model !== currentModel) {
       currentModel = model;
       if (isDebugMode) console.log(`[agent] model staged for restart: ${model}`);
+    }
+    if (reasoningEffort !== undefined) {
+      const normalizedEffort = normalizeReasoningEffort(reasoningEffort);
+      if (normalizedEffort !== currentReasoningEffort) {
+        currentReasoningEffort = normalizedEffort;
+        if (isDebugMode) console.log(`[agent] reasoning effort staged for restart: ${normalizedEffort ?? 'default'}`);
+      }
     }
   }
 
@@ -7471,6 +8018,7 @@ export async function enqueueUserMessage(
       resolve: () => {},  // No-op: no one is awaiting
       attachments: savedAttachments.length > 0 ? savedAttachments : undefined,
       requestId,
+      analyticsSource: analyticsSource ?? currentScenario.type,
       inboxMeta,
     };
 
@@ -7490,11 +8038,13 @@ export async function enqueueUserMessage(
       // concurrent enqueue arriving in the same micro-task takes the
       // buffer path.
       inFlightToCliId = queueId;
+      awaitingAssistantStartAckQueueId = null;
       inFlightMetadata = {
         messageText: trimmed,
         attachments: savedAttachments.length > 0 ? savedAttachments : undefined,
         requestId,
         source: metadata?.source,
+        analyticsSource: analyticsSource ?? currentScenario.type,
         mirrorImages: toMirrorImages(images),
       };
       wakeGenerator(queueItem);
@@ -7503,7 +8053,8 @@ export async function enqueueUserMessage(
     } else {
       // Another item is in-flight to CLI. Buffer this one. It stays
       // fully cancellable (splice from pendingMidTurnQueue) until promoted
-      // by handleQueuedCommandReplay or a turn-end fallback.
+      // by handleQueuedCommandReplay, SDK cancel of the in-flight slot, or
+      // a confirmed assistant-start boundary.
       const userMessage: MessageWire = {
         id: String(messageSequence++),
         role: 'user',
@@ -7578,6 +8129,7 @@ export async function enqueueUserMessage(
     wasQueued: false,
     resolve: () => {},  // No-op: no one is awaiting
     requestId,
+    analyticsSource: analyticsSource ?? currentScenario.type,
     inboxMeta,
   };
 
@@ -7734,6 +8286,7 @@ export async function interruptCurrentResponse(reason: CancelReason = 'user'): P
     return true;
   }
 
+  interruptingInFlightQueueId = inFlightToCliId;
   isInterruptingResponse = true;
   try {
     // Step 1: Try graceful interrupt (5 seconds).
@@ -7823,6 +8376,7 @@ export async function interruptCurrentResponse(reason: CancelReason = 'user'): P
     return true;
   } finally {
     isInterruptingResponse = false;
+    interruptingInFlightQueueId = null;
     forceDrainTurnStarting = false; // defensive: never leak into a later interrupt
   }
 }
@@ -7867,29 +8421,54 @@ export async function cancelImRequest(
     await interruptCurrentResponse(reason);
     return { aborted: true, mode: 'running' };
   }
-  // (v0.2.12) Either the requestId is in-flight to CLI (uncancellable —
-  // its content already crossed into CLI's commandQueue), or the request
-  // doesn't exist on this side. Both surface as 'unknown' so the IM
-  // client can show "cancel failed" honestly rather than a false success.
+  // (v0.2.34) In-flight to CLI is conditionally cancellable through SDK
+  // cancel_async_message while it is still pending in commandQueue.
+  if (inFlightMetadata?.requestId === requestId && inFlightToCliId !== null) {
+    const queueId = inFlightToCliId;
+    const cancelResult = await cancelSdkAsyncMessage(queueId);
+    const settlement = decideInFlightCancelSettlement(cancelResult);
+    if (settlement.cancelled) {
+      if (settlement.removePendingRequest) removePendingRequest(requestId);
+      if (settlement.clearSlot) clearInFlightSlot();
+      if (settlement.broadcastCancelled) broadcast('queue:cancelled', { queueId });
+      console.log(`[agent] cancelImRequest requestId=${requestId} mode=in-flight-sdk-queue`);
+      if (settlement.promoteNext) promoteNextFromPending();
+      if (
+        messageQueue.length === 0
+        && pendingMidTurnQueue.length === 0
+        && inFlightToCliId === null
+        && !isTurnInFlight()
+      ) {
+        setSessionState('idle');
+      }
+      return { aborted: true, mode: 'queued' };
+    }
+    console.log(`[agent] cancelImRequest requestId=${requestId} in-flight SDK cancel rejected result=${cancelResult}`);
+  }
+  // Either the requestId was already consumed by SDK or it doesn't exist on
+  // this side. Surface as 'unknown' so the IM client can show "cancel failed"
+  // honestly rather than a false success.
   return { aborted: false, mode: 'unknown' };
 }
 
+export type QueueCancelResult =
+  | { status: 'cancelled'; cancelledText: string }
+  | { status: 'not_found' | 'not_cancelled' | 'unavailable' | 'error' };
+
 /**
  * Cancel a queued message by its queueId.
- * Returns the original message text (for restoring to input box) or null if not found.
+ * Returns the original message text on success (for restoring to input box)
+ * or a structured failure reason when cancellation is no longer possible.
  *
- * (v0.2.12) Three queue locations to check:
+ * (v0.2.34) Three queue locations to check:
  *   - messageQueue: not yet consumed by generator (no active turn). Splice → done.
  *   - pendingMidTurnQueue: buffered while another item is in-flight to CLI.
  *     Splice → done. Still cancellable because it never crossed the process
  *     boundary into CLI's commandQueue.
- *   - inFlightToCliId match: the item is already in CLI's commandQueue and
- *     potentially already drained into AI's context. SDK exposes no API to
- *     retract a queued_command. Frontend hides the X button on the in-flight
- *     pill so this branch is rarely reached; we return null to signal "no
- *     cancel". UI invariant: if the X is visible, cancellation succeeds.
+ *   - inFlightToCliId match: the item is in SDK's commandQueue. Try
+ *     cancel_async_message; it succeeds only before SDK dequeues execution.
  */
-export function cancelQueueItem(queueId: string): string | null {
+export async function cancelQueueItem(queueId: string): Promise<QueueCancelResult> {
   // 1. messageQueue (no active turn — generator about to pull)
   const mqIdx = messageQueue.findIndex(item => item.id === queueId);
   if (mqIdx >= 0) {
@@ -7897,7 +8476,7 @@ export function cancelQueueItem(queueId: string): string | null {
     item.resolve();
     broadcast('queue:cancelled', { queueId });
     console.log(`[agent] Queue item ${queueId} cancelled from messageQueue (wasQueued=${item.wasQueued})`);
-    return item.messageText;
+    return { status: 'cancelled', cancelledText: item.messageText };
   }
 
   // 2. pendingMidTurnQueue (buffered, in-flight slot occupied by another item)
@@ -7915,19 +8494,41 @@ export function cancelQueueItem(queueId: string): string | null {
     ) {
       setSessionState('idle');
     }
-    return typeof removed.userMessage.content === 'string' ? removed.userMessage.content : '';
+    return {
+      status: 'cancelled',
+      cancelledText: typeof removed.userMessage.content === 'string' ? removed.userMessage.content : '',
+    };
   }
 
-  // 3. In-flight to CLI — cannot cancel. Frontend should not have offered
-  //    the X button for this item, but if it raced and asked anyway, we
-  //    refuse the cancel honestly rather than fake a success.
+  // 3. In-flight to CLI — conditionally cancellable via SDK control plane.
   if (inFlightToCliId === queueId) {
-    console.log(`[agent] Queue item ${queueId} cancel rejected — already in-flight to CLI (uncancellable)`);
-    return null;
+    const meta = inFlightMetadata;
+    const cancelResult = await cancelSdkAsyncMessage(queueId);
+    const settlement = decideInFlightCancelSettlement(cancelResult);
+    if (settlement.cancelled) {
+      const cancelledText = meta?.messageText ?? '';
+      if (settlement.removePendingRequest) removePendingRequest(meta?.requestId);
+      if (settlement.clearSlot) clearInFlightSlot();
+      if (settlement.broadcastCancelled) broadcast('queue:cancelled', { queueId });
+      console.log(`[agent] Queue item ${queueId} cancelled from SDK commandQueue via cancel_async_message`);
+      if (settlement.promoteNext) promoteNextFromPending();
+      if (
+        messageQueue.length === 0
+        && pendingMidTurnQueue.length === 0
+        && inFlightToCliId === null
+        && !isTurnInFlight()
+      ) {
+        setSessionState('idle');
+      }
+      return { status: 'cancelled', cancelledText };
+    }
+    console.log(`[agent] Queue item ${queueId} cancel rejected — SDK async cancel result=${cancelResult}`);
+    if (cancelResult === 'not-cancelled') return { status: 'not_cancelled' };
+    return { status: cancelResult === 'unavailable' ? 'unavailable' : 'error' };
   }
 
   console.log(`[agent] Queue item ${queueId} not found — already consumed or never existed`);
-  return null;
+  return { status: 'not_found' };
 }
 
 /**
@@ -8502,7 +9103,9 @@ async function startStreamingSession(preWarm = false): Promise<void> {
   isPreWarming = preWarm;
   // Sync enabled user-level skills as symlinks into project's .claude/skills/
   // Must happen before buildClaudeSessionEnv() so SDK sees them via settingSources: ['project']
-  syncProjectUserConfig(agentDir);
+  const adminConfigForSession = loadAdminConfig();
+  const cliToolRegistryEnabled = isCliToolRegistryEnabled(adminConfigForSession);
+  syncProjectUserConfig(agentDir, { cliToolRegistryEnabled });
   // PRD #124: register a FRESH bridge token for this SDK subprocess.
   // `freshToken: true` retires the previous token (if any) so any late
   // requests from the dying old subprocess get rejected with a 400
@@ -8795,16 +9398,38 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     frozenSdkMcpFingerprint = mcpKeyFingerprint(sdkMcpServersInitial);
 
     // Build common query options (shared between normal start and "already in use" fallback)
+    // #324 — user-selected reasoning effort. Anthropic protocol only: the SDK
+    // EffortLevel union excludes OpenAI-side values like 'minimal', and for
+    // OpenAI-protocol providers the effort is injected at the bridge per
+    // request (resolveActiveSessionUpstreamConfig) — the SDK-side option
+    // stays at the historical 'high' there. 'high' === omitting the param
+    // per Anthropic docs, so 'default' keeps pre-#324 wire behavior exactly.
+    const sdkEffort = currentProviderEnv?.apiProtocol !== 'openai' && isSdkEffortLevel(currentReasoningEffort)
+      ? currentReasoningEffort
+      : ('high' as const);
+
     const commonQueryOptions = {
       enableFileCheckpointing: true,
       thinking: thinkingConfig,
-      effort: 'high' as const,
+      effort: sdkEffort,
       // Load settings from project scope only (.claude/)
       // User-level skills are synced as symlinks into <cwd>/.claude/skills/ by syncProjectUserConfig()
       // CLAUDE_CONFIG_DIR is NOT set — preserves Anthropic subscription Keychain lookup
       settingSources: buildSettingSources(),
       settings: {
         cleanupPeriodDays: claudeTranscriptCleanupPeriodDays,
+        // The Artifact tool (SDK 0.3.16x+) publishes HTML/MD to claude.ai —
+        // an outward data flow MyAgents has not product-decided to expose.
+        // Keep the tool surface frozen; revisit as its own feature if wanted.
+        disableArtifact: true,
+        // CC's own bundled skills duplicate the skill set MyAgents ships and
+        // seeds itself (bundled-skills/ → ~/.myagents/skills → <cwd>/.claude/skills
+        // symlinks): docx/pdf/pptx/xlsx/skill-creator all collide. Disabling
+        // removes the duplicate listings + their per-turn context cost; our
+        // seeded copies load via .claude/skills/ which this flag does NOT
+        // touch. Built-in slash commands stay typable (programmatic /compact
+        // unaffected) — they are only hidden from the model.
+        disableBundledSkills: true,
       },
       // Permission mode mapping (uses mapToSdkPermissionMode):
       // - auto → acceptEdits (auto-accept edits, check others via canUseTool)
@@ -8854,6 +9479,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           // those got dropped in favour of `myagents` CLI calls so builtin needs the
           // same prompt now. Single CLI, single source of truth across all runtimes.
           cliToolsEnabled: true,
+          userCliToolsEnabled: cliToolRegistryEnabled,
         }),
       },
       cwd: agentDir,
@@ -8894,8 +9520,23 @@ async function startStreamingSession(preWarm = false): Promise<void> {
       // promote the next pending item. Without this flag the CLI silently
       // consumes queued commands and we have no mid-turn promote signal.
       extraArgs: { 'replay-user-messages': null } as Record<string, string | null>,
+      // Grep/Glob MUST be referenced here: since SDK 0.3.162 native builds default
+      // to embedded Bash find/grep search and do NOT register the dedicated
+      // Grep/Glob tools unless they are named in `tools` or `allowedTools`.
+      // Without them the model searches via Bash, which (a) the plan-mode
+      // PreToolUse gate denies (PLAN_MODE_READONLY_TOOLS has Grep/Glob, not
+      // Bash) — plan mode loses search entirely — and (b) triggers permission
+      // prompts for plain searches in default mode. Both are read-only tools,
+      // so auto-approving matches the existing getPermissionRules() semantics.
+      // 'Task' is appended when sub-agents are injected so the model can delegate.
+      allowedTools: [
+        'Grep',
+        'Glob',
+        ...(currentAgentDefinitions && Object.keys(currentAgentDefinitions).length > 0
+          ? ['Task']
+          : []),
+      ],
       // Sub-agents: inject custom agent definitions if configured
-      // When agents are injected, ensure 'Task' tool is in allowedTools so the model can delegate
       // Each sub-agent's `model` runs through applyContextWindowSuffix so a sub-agent
       // pinned to a 1M model gets the [1m] tag independently of the main session's
       // model (the parent could be on a 200K model, the sub-agent on a 1M one,
@@ -8909,7 +9550,6 @@ async function startStreamingSession(preWarm = false): Promise<void> {
                 a.model ? { ...a, model: applyContextWindowSuffix(a.model) } : a,
               ])
             ),
-            allowedTools: ['Task'],
           }
         : {}),
       // disallowedTools: group chat deny list + IM-incompatible UI-interaction tools
@@ -9457,13 +10097,17 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     if (querySession) {
       const localQuery = querySession;
       const initStartT = Date.now();
-      void localQuery.initializationResult().then(() => {
+      void localQuery.initializationResult().then((initResult) => {
         if (querySession !== localQuery) {
           // Stale: a session swap happened while initialize was in flight.
           // The new pre-warm will fire its own initializationResult().
           return;
         }
         sdkControlReady = true;
+        const slashCommands = normalizeSdkSlashCommands(initResult?.commands);
+        if (slashCommands) {
+          broadcastSdkSlashCommands(slashCommands, 'initialize');
+        }
         console.log(`[agent] SDK control plane ready in ${Date.now() - initStartT}ms (preWarm=${preWarm})`);
         // For non-pre-warm cold starts (user sent the very first message with
         // no prior pre-warm), enqueueUserMessage already set sessionState to
@@ -9800,11 +10444,27 @@ async function startStreamingSession(preWarm = false): Promise<void> {
 
       }
 
+      const changedSlashCommands = parseSdkCommandsChanged(sdkMessage);
+      if (changedSlashCommands) {
+        broadcastSdkSlashCommands(changedSlashCommands, 'commands_changed');
+      }
+
       // Handle system status (e.g., compacting, plan mode changes)
       const statusResult = parseSystemStatus(sdkMessage);
       if (statusResult.isStatusMessage) {
-        console.log(`[agent] System status: ${statusResult.status}`);
-        broadcast('chat:system-status', { status: statusResult.status });
+        if (statusResult.status === 'compacting') {
+          currentTurnCompactResult = null;
+        }
+        if (statusResult.compactResult) {
+          currentTurnCompactResult = statusResult.compactResult;
+        }
+        console.log(`[agent] System status: ${statusResult.status}` +
+          (statusResult.compactResult ? ` compact_result=${statusResult.compactResult}` : ''));
+        broadcast('chat:system-status', {
+          status: statusResult.status,
+          compactResult: statusResult.compactResult ?? undefined,
+          compactError: statusResult.compactError ?? undefined,
+        });
 
         // Detect SDK-initiated plan mode changes (EnterPlanMode is auto-allowed by SDK).
         // Both branches go through the shared transition so the prePlanPermissionMode
@@ -9825,6 +10485,13 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           prePlanPermissionMode = next.prePlanPermissionMode;
           broadcast('chat:permission-mode-changed', { permissionMode: currentPermissionMode });
           console.log(`[agent] SDK exited plan mode, restored currentPermissionMode=${currentPermissionMode}`);
+        }
+      }
+
+      if (sdkMessage.type === 'system' && (sdkMessage as { subtype?: string }).subtype === 'compact_boundary') {
+        currentTurnSawCompactBoundary = true;
+        if (!currentTurnCompactResult) {
+          currentTurnCompactResult = 'success';
         }
       }
 
@@ -9977,6 +10644,40 @@ async function startStreamingSession(preWarm = false): Promise<void> {
             maxRetries: retryMsg.max_retries,
             delayMs: retryMsg.retry_delay_ms,
           });
+        }
+
+        // Refusal-fallback retraction (SDK 0.3.162+): the primary model ended
+        // the stream with stop_reason "refusal"; the SDK retries the turn once
+        // on a fallback model and names the refused leg's messages for
+        // eviction. Without this, the refused partial stays painted AND the
+        // retry's content concatenates onto the same streaming bubble.
+        // retracted_message_uuids is the complete audit record; the
+        // replacement assistant's `supersedes` (handled in the assistant
+        // branch) overlaps it — both paths are idempotent by design.
+        if (retryMsg.subtype === 'model_refusal_fallback') {
+          const rf = sdkMessage as {
+            original_model?: string;
+            fallback_model?: string;
+            api_refusal_category?: string | null;
+            retracted_message_uuids?: string[];
+          };
+          console.warn(`[agent] model refusal fallback: ${rf.original_model} → ${rf.fallback_model}` +
+            (rf.api_refusal_category ? ` (category=${rf.api_refusal_category})` : ''));
+          applyMessageRetraction(rf.retracted_message_uuids, 'model_refusal_fallback');
+        }
+
+        // Sentinel for system message kinds added by FUTURE SDK versions.
+        // The set below enumerates every system subtype in SDK 0.3.173
+        // (handled or deliberately untouched) — a subtype outside it means the
+        // SDK started emitting something we have never seen. Without this log
+        // line, new message kinds vanish silently (the pre-0.3.173 default,
+        // which is how commands_changed/model_refusal_fallback would have been
+        // missed). Warn once per subtype per process to stay grep-able without
+        // spamming every turn.
+        const sysSubtype = retryMsg.subtype;
+        if (sysSubtype && !KNOWN_SYSTEM_SUBTYPES.has(sysSubtype) && !warnedUnknownSystemSubtypes.has(sysSubtype)) {
+          warnedUnknownSystemSubtypes.add(sysSubtype);
+          console.warn(`[agent][sdk] unknown system message subtype '${sysSubtype}' (new SDK message kind?) — ignored. Check sdk.d.ts for its contract.`);
         }
       }
 
@@ -10476,6 +11177,17 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           }
         }
       } else if (sdkMessage.type === 'assistant') {
+        // Refusal-fallback supersede (SDK 0.3.162+): this assistant message is
+        // the canonical replacement for previously-delivered messages of a
+        // refused leg. Evict them BEFORE ensureAssistantMessage() — eviction
+        // resets isStreamingMessage when it removes the refused streaming
+        // bubble, so the replacement starts a fresh bubble instead of
+        // concatenating onto refused content. Idempotent with the
+        // model_refusal_fallback notice that usually precedes this message.
+        const supersedes = (sdkMessage as { supersedes?: string[] }).supersedes;
+        if (supersedes && supersedes.length > 0) {
+          applyMessageRetraction(supersedes, 'assistant.supersedes');
+        }
         // Track SDK assistant UUID for resumeSessionAt / rewindFiles
         const currentAssistant = ensureAssistantMessage();
         // 始终更新为最新的 UUID — SDK 一个回合可能输出多条 assistant 消息
@@ -10750,67 +11462,58 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           }
         }
 
-        // Prefer modelUsage (per-model breakdown), fallback to aggregate usage
-        if (resultMessage.modelUsage) {
-          let totalInput = 0;
-          let totalOutput = 0;
-          let totalCacheRead = 0;
-          let totalCacheCreation = 0;
-          let primaryModel: string | undefined;
-          let maxModelTokens = 0;
-          const modelUsageMap: Record<string, ModelUsageEntry> = {};
-
-          for (const [model, stats] of Object.entries(resultMessage.modelUsage)) {
-            const modelInput = stats.inputTokens ?? 0;
-            const modelOutput = stats.outputTokens ?? 0;
-            const modelCacheRead = stats.cacheReadInputTokens ?? 0;
-            const modelCacheCreation = stats.cacheCreationInputTokens ?? 0;
-
-            totalInput += modelInput;
-            totalOutput += modelOutput;
-            totalCacheRead += modelCacheRead;
-            totalCacheCreation += modelCacheCreation;
-
-            // Save per-model breakdown
-            modelUsageMap[model] = {
-              inputTokens: modelInput,
-              outputTokens: modelOutput,
-              cacheReadTokens: modelCacheRead || undefined,
-              cacheCreationTokens: modelCacheCreation || undefined,
-            };
-
-            // Track primary model (highest token usage)
-            const modelTotal = modelInput + modelOutput;
-            if (modelTotal > maxModelTokens) {
-              maxModelTokens = modelTotal;
-              primaryModel = model;
-            }
+        // Prefer modelUsage (per-model breakdown), fallback to aggregate usage.
+        // Pure extraction lives in sdk-turn-outcome.ts so the shape contract is
+        // unit-tested (#358 regression).
+        const turnUsage = extractTurnUsageFromSdkResult(resultMessage);
+        currentTurnUsage.inputTokens = turnUsage.inputTokens;
+        currentTurnUsage.outputTokens = turnUsage.outputTokens;
+        currentTurnUsage.cacheReadTokens = turnUsage.cacheReadTokens;
+        currentTurnUsage.cacheCreationTokens = turnUsage.cacheCreationTokens;
+        currentTurnUsage.model = turnUsage.model;
+        currentTurnUsage.modelUsage = turnUsage.modelUsage;
+        if (isDebugMode) {
+          if (turnUsage.modelUsage) {
+            console.log(`[agent] Token usage from result.modelUsage: input=${turnUsage.inputTokens}, output=${turnUsage.outputTokens}, models=${Object.keys(turnUsage.modelUsage).join(', ')}`);
+          } else if (resultMessage.usage) {
+            console.log(`[agent] Token usage from result.usage: input=${turnUsage.inputTokens}, output=${turnUsage.outputTokens}`);
           }
-
-          currentTurnUsage.inputTokens = totalInput;
-          currentTurnUsage.outputTokens = totalOutput;
-          currentTurnUsage.cacheReadTokens = totalCacheRead;
-          currentTurnUsage.cacheCreationTokens = totalCacheCreation;
-          currentTurnUsage.model = primaryModel;
-          currentTurnUsage.modelUsage = modelUsageMap;
-
-          if (isDebugMode) {
-            console.log(`[agent] Token usage from result.modelUsage: input=${totalInput}, output=${totalOutput}, models=${Object.keys(modelUsageMap).join(', ')}`);
-          }
-        } else if (resultMessage.usage) {
-          currentTurnUsage.inputTokens = resultMessage.usage.input_tokens ?? 0;
-          currentTurnUsage.outputTokens = resultMessage.usage.output_tokens ?? 0;
-          currentTurnUsage.cacheReadTokens = resultMessage.usage.cache_read_input_tokens ?? 0;
-          currentTurnUsage.cacheCreationTokens = resultMessage.usage.cache_creation_input_tokens ?? 0;
-          if (isDebugMode) {
-            console.log(`[agent] Token usage from result.usage: input=${currentTurnUsage.inputTokens}, output=${currentTurnUsage.outputTokens}`);
-          }
-        } else {
+        }
+        if (!resultMessage.modelUsage && !resultMessage.usage) {
           console.warn('[agent] Result message has no usage data, token statistics may be incomplete');
         }
 
         // Calculate duration for analytics
         const durationMs = currentTurnStartTime ? Date.now() - currentTurnStartTime : 0;
+
+        // #358 — stamp turn usage onto the trailing assistant message NOW, before
+        // the empty-success / error / success branching decides whether
+        // handleMessageComplete runs. Stats persistence used to live inside
+        // handleMessageComplete, which is only reached on the success branch
+        // (else of emptySuccessfulResult). Any path that finalized the turn
+        // through chat:message-error / chat:agent-error — empty success, silent
+        // sub-agent intermediate result, third-party Anthropic-compat upstream
+        // shape that race-zeroed the result handler's downstream view — left
+        // the assistant on disk usage-less and `/sessions/:id/stats` summed 0
+        // forever (the JSONL writer is append-only). Stamping here, immediately
+        // after the SDK-authoritative usage is extracted, makes stats correct
+        // even when the broadcast path short-circuits later. handleMessageComplete
+        // still calls findTurnUsageStampIndex on its own branch — that becomes
+        // an idempotent no-op (`usage === undefined` returns -1).
+        const earlyStampIndex = findTurnUsageStampIndex(messages, lastPersistedIndex);
+        if (earlyStampIndex >= 0) {
+          const stampedAssistant = messages[earlyStampIndex];
+          stampedAssistant.usage = {
+            inputTokens: currentTurnUsage.inputTokens,
+            outputTokens: currentTurnUsage.outputTokens,
+            cacheReadTokens: currentTurnUsage.cacheReadTokens || undefined,
+            cacheCreationTokens: currentTurnUsage.cacheCreationTokens || undefined,
+            model: currentTurnUsage.model,
+            modelUsage: currentTurnUsage.modelUsage,
+          };
+          stampedAssistant.toolCount = currentTurnToolCount;
+          stampedAssistant.durationMs = durationMs || undefined;
+        }
 
         // Surface SDK-level errors that produced no assistant output (e.g. "Unknown skill: xxx").
         // These results have non-empty result text but no visible assistant text was streamed.
@@ -10863,24 +11566,30 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           toolCount: currentTurnToolCount,
           outputTokens: currentTurnUsage.outputTokens,
         });
+        const successfulCompactControlTurn = isSuccessfulCompactControlTurn({
+          emptySuccessfulResult,
+          compactResult: currentTurnCompactResult,
+          sawCompactBoundary: currentTurnSawCompactBoundary,
+        });
         const recoveredAssistantMessageError = isRecoveredAssistantMessageError({
           hadAssistantMessageError: currentTurnHadAssistantMessageError,
           isError: resultMessage.is_error,
           terminalReason: resultMessage.terminal_reason,
-          emptySuccessfulResult,
+          emptySuccessfulResult: emptySuccessfulResult && !successfulCompactControlTurn,
         });
 
         if (recoveredAssistantMessageError && currentTurnLastAssistantMessageError) {
           console.log('[agent] SDK assistant message error recovered by successful result:', currentTurnLastAssistantMessageError);
         }
         emitBuiltinTurnTrace('final', {
-          status: resultMessage.is_error || emptySuccessfulResult ? 'error' : 'ok',
+          status: resultMessage.is_error || (emptySuccessfulResult && !successfulCompactControlTurn) ? 'error' : 'ok',
           durationMs,
           count: currentTurnToolCount,
           detail: {
             terminalReason: resultMessage.terminal_reason ?? 'completed',
             hasOutput: currentTurnHasOutput,
             emptySuccessfulResult,
+            successfulCompactControlTurn,
           },
         });
 
@@ -10901,7 +11610,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           console.log(`[agent][terminal_reason] ${resultMessage.terminal_reason} scenario=${currentScenario.type} model=${currentTurnUsage.model ?? 'unknown'} duration_ms=${durationMs} tool_count=${currentTurnToolCount}`);
         }
 
-        if (emptySuccessfulResult) {
+        if (emptySuccessfulResult && !successfulCompactControlTurn) {
           const emptyResultError = 'AI 未返回任何内容，但 SDK 将本轮标记为完成。请在当前会话重试；如果使用第三方兼容供应商，建议切换模型、减少上下文或压缩后重试。';
           console.warn(`[agent][empty_result] model=${currentTurnUsage.model ?? 'unknown'} terminal_reason=${resultMessage.terminal_reason ?? 'none'} input=${currentTurnUsage.inputTokens} output=${currentTurnUsage.outputTokens} duration_ms=${durationMs} provisional_error=${currentTurnLastAssistantMessageError ?? 'none'}`);
           lastAgentError = emptyResultError;
@@ -10942,19 +11651,22 @@ async function startStreamingSession(preWarm = false): Promise<void> {
             // Frontend streaming messages use Date.now() IDs that don't match backend messageSequence IDs.
             assistant_sdk_uuid: lastAssistant?.sdkUuid,
             assistant_message_id: lastAssistant?.id,
+            compact_result: successfulCompactControlTurn ? 'success' : undefined,
           });
 
-          // PRD 0.2.32 — 并发 context 用量快照。占用取「最近一条主轮 message」（非聚合
-          // currentTurnUsage），窗口用 lookupModelContextLength ?? 200K（对齐 auto-compact，
-          // **不**用 SDK contextWindow，理由见 broadcastBuiltinContextUsage）。
-          broadcastBuiltinContextUsage();
+          // PRD 0.2.32 — 并发 context 用量快照。快路径取「最近一条主轮 message」per-call usage；
+          // 缺失时回落 SDK `getContextUsage()`（/context 命令同源），覆盖 #343 / #323-善后两类。
+          // 窗口用 lookupModelContextLength ?? 200K（对齐 auto-compact，**不**用 SDK contextWindow，
+          // 理由见 broadcastBuiltinContextUsage）。fire-and-forget — 持久化在内部已经异步。
+          void broadcastBuiltinContextUsage();
 
           // Server-side unified analytics: covers all sources (desktop/cron/im).
           // PRD 0.2.19 — `session_id` lets analytics join this back to the renderer's
           // `session_new` event to reconstruct full per-session funnels (entry surface
           // → first message → token cost → tool usage → outcome).
+          const turnAnalyticsSource = currentTurnAnalyticsSource ?? currentScenario.type;
           trackServer('ai_turn_complete', {
-            source: currentScenario.type,
+            source: turnAnalyticsSource,
             session_id: sessionId,
             platform: currentScenario.type === 'im' ? currentScenario.platform : null,
             runtime: 'builtin',
@@ -11118,6 +11830,13 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           abortPersistentSession();
           schedulePreWarm();
         }
+      } else if (!KNOWN_MESSAGE_TYPES.has(sdkMessage.type) && !warnedUnknownMessageTypes.has(sdkMessage.type)) {
+        // Top-level half of the unknown-message sentinel (the system-subtype
+        // half lives in the system block above): a type outside the 0.3.173
+        // union means a NEWER SDK started emitting a message kind this loop
+        // has never seen — log once instead of letting it vanish silently.
+        warnedUnknownMessageTypes.add(sdkMessage.type);
+        console.warn(`[agent][sdk] unknown SDK message type '${sdkMessage.type}' (new SDK message kind?) — ignored. Check sdk.d.ts for its contract.`);
       }
     }
   } catch (error) {
@@ -11343,13 +12062,14 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     // delivered. abortPersistentSession's rescue covers the explicit-abort
     // path; this finally-block rescue is the catch-all for every other
     // exit shape (catch block didn't run abortPersistentSession, for-await
-    // throws on transport error, etc.). Also clear in-flight CLI tracking —
-    // the CLI subprocess is gone, those uuids are dead.
+    // throws on transport error, etc.). Also terminate any unconfirmed
+    // in-flight CLI tracking honestly — the CLI subprocess is gone, those
+    // uuids can no longer produce replay/assistant-start confirmation.
     if (pendingMidTurnQueue.length > 0) {
       console.log(`[agent] finally: rescuing ${pendingMidTurnQueue.length} pending mid-turn item(s) into messageQueue`);
       rescuePendingToQueue();
     }
-    clearInFlightSlot();
+    dropInFlightQueueItem('session exited before SDK consumption confirmation', 'failed');
 
     // Queue lifecycle invariant: messageQueue survives session restarts by default.
     // Any drain decision belongs to the caller that triggered the exit, not here:
@@ -11488,14 +12208,11 @@ async function* messageGenerator(): AsyncGenerator<SDKUserMessage> {
   // as queued_command attachments to the model's next API call. AI sees
   // mid-turn user input and can change direction.
   //
-  // Cancel safety is handled at the enqueue layer, NOT by deferring the
-  // yield. While inFlightToCliId !== null, fresh queue items are buffered
-  // in pendingMidTurnQueue (cancellable, never crossed the process
-  // boundary) and only yielded after the current in-flight item gets a
-  // SDKUserMessageReplay (isReplay=true) confirming CLI consumption.
-  // Frontend hides the X button on the in-flight item — its uuid has
-  // already entered CLI's commandQueue and there is no SDK API to
-  // retract it.
+  // Cancel safety is handled with two layers: local pending items are
+  // spliced from pendingMidTurnQueue, while the single in-flight item uses
+  // SDK cancel_async_message and succeeds only before SDK dequeues it.
+  // Fresh queue items stay buffered while inFlightToCliId !== null and are
+  // yielded after replay, confirmed assistant-start, or successful cancel.
   //
   // Each yielded SDKUserMessage carries `uuid: item.id`, which CLI
   // surfaces as `attachment.source_uuid` in the replay event so we can
@@ -11547,9 +12264,8 @@ async function* messageGenerator(): AsyncGenerator<SDKUserMessage> {
     //
     // wasQueued=true items take a different path: their messages[] push +
     // queue:started broadcast happens later in handleQueuedCommandReplay()
-    // (or the turn-end fallback in handleMessageComplete) when the CLI
-    // confirms AI saw the message. Until then they live as an "in-flight"
-    // pill in the frontend queue panel.
+    // or when the next assistant turn starts, proving a boundary drain. Until
+    // then they live as an "in-flight" pill in the frontend queue panel.
     let traceTurnId = item.id;
     const traceSource = item.wasQueued ? 'queued' : 'direct';
     if (!item.wasQueued) {
@@ -11570,17 +12286,19 @@ async function* messageGenerator(): AsyncGenerator<SDKUserMessage> {
       //     no current call site does this, but the type allows it).
       // Either way we must register this item as in-flight so the
       // SDKUserMessageReplay handler can match it back, and the UI can
-      // be eventually resolved via either replay or turn-end fallback.
+      // be eventually resolved via replay, assistant-start confirmation, or
+      // SDK async-message cancellation.
       inFlightToCliId = item.id;
+      awaitingAssistantStartAckQueueId = null;
       inFlightMetadata = {
         messageText: item.messageText,
         attachments: item.attachments,
         requestId: item.requestId,
+        analyticsSource: item.analyticsSource,
       };
       // Re-emit queue:added with isInFlight=true so the frontend pill's
-      // X cancel button hides — recovery items are uncancellable just
-      // like the normal in-flight ones (the new yield below crosses the
-      // process boundary into CLI's commandQueue immediately).
+      // UI marks it as handed to SDK; cancellation now goes through
+      // cancel_async_message while it remains pending in SDK commandQueue.
       broadcast('queue:added', {
         queueId: item.id,
         messageText: item.messageText.slice(0, 100),
@@ -11589,6 +12307,7 @@ async function* messageGenerator(): AsyncGenerator<SDKUserMessage> {
       console.log(`[messageGenerator] Recovery path: wasQueued item ${item.id} adopted as in-flight (rescue or messageQueue push)`);
     }
     beginBuiltinTurnTrace(traceSource, traceTurnId, item.requestId);
+    currentTurnAnalyticsSource = item.analyticsSource ?? currentScenario.type;
 
     isStreamingMessage = true;
     // Pattern B+G: push this user message's requestId onto the FIFO queue.

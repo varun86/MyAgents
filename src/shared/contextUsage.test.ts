@@ -10,6 +10,23 @@ describe('stripModelSuffix', () => {
   it('leaves un-suffixed ids untouched', () => {
     expect(stripModelSuffix('claude-opus-4-8')).toBe('claude-opus-4-8');
   });
+  // #338 — users copy the `mimo-v2.5-pro[1m]` doc pattern but type a space
+  // ("claude-sonnet-4-6 1m"). That malformed form must strip to the bare id too,
+  // or the registry lookup misses and the window collapses to 200K (and the
+  // space would leak to the upstream wire).
+  it('strips the malformed space form " 1m" (case-insensitive)', () => {
+    expect(stripModelSuffix('claude-sonnet-4-6 1m')).toBe('claude-sonnet-4-6');
+    expect(stripModelSuffix('claude-opus-4-6 1M')).toBe('claude-opus-4-6');
+  });
+  it('trims trailing whitespace, incl. combined suffix + whitespace', () => {
+    expect(stripModelSuffix('claude-sonnet-4-6 ')).toBe('claude-sonnet-4-6');
+    expect(stripModelSuffix('claude-opus-4-6[1m] ')).toBe('claude-opus-4-6');
+  });
+  // The ` 1m` rule requires whitespace before `1m`, so a hyphenated id whose
+  // real name ends in "-1m" must be preserved (no false strip).
+  it('does NOT strip a hyphenated "-1m" that is part of the real id', () => {
+    expect(stripModelSuffix('some-model-1m')).toBe('some-model-1m');
+  });
   it('returns undefined for empty input', () => {
     expect(stripModelSuffix(undefined)).toBeUndefined();
     expect(stripModelSuffix(null)).toBeUndefined();

@@ -149,13 +149,13 @@ export function TaskDocBlock({
 
   return (
     <section className="mt-4">
-      {/* Title — 14px semibold ink, matches the edit panel's section
+      {/* Title — text-sm(14px) semibold ink, matches the edit panel's section
           headers so the preview ↔ edit mental model is identical. */}
-      <h3 className="text-[14px] font-semibold text-[var(--ink)]">{title}</h3>
+      <h3 className="text-sm font-semibold text-[var(--ink)]">{title}</h3>
       {/* Path + 打开文件夹 on a dedicated row below the title. */}
       <div className="mb-2 mt-1 flex items-center gap-2">
         <span
-          className="min-w-0 flex-1 truncate font-mono text-[11px] text-[var(--ink-muted)]/70"
+          className="min-w-0 flex-1 truncate font-mono text-xs text-[var(--ink-muted)]/70"
           title={path}
         >
           {path}
@@ -164,7 +164,7 @@ export function TaskDocBlock({
           type="button"
           onClick={handleOpenFolder}
           title="在文件管理器中打开该任务的文档目录"
-          className="inline-flex shrink-0 items-center gap-1 rounded-[var(--radius-md)] px-2 py-0.5 text-[11px] text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+          className="inline-flex shrink-0 items-center gap-1 rounded-[var(--radius-md)] px-2 py-0.5 text-xs text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
         >
           <FolderOpen className="h-3 w-3" />
           打开文件夹
@@ -172,7 +172,7 @@ export function TaskDocBlock({
       </div>
 
       {!loaded ? (
-        <div className="rounded-[var(--radius-lg)] border border-[var(--line-subtle)] bg-[var(--paper)] p-3 text-[12px] text-[var(--ink-muted)]">
+        <div className="rounded-[var(--radius-lg)] border border-[var(--line-subtle)] bg-[var(--paper)] p-3 text-xs text-[var(--ink-muted)]">
           加载中…
         </div>
       ) : content ? (
@@ -190,9 +190,8 @@ export function TaskDocBlock({
           >
             <div ref={contentRef} className="p-4">
               {/* `compact` drops Markdown's body from text-base (16px)
-                  to text-sm (14px), bringing it in line with the
-                  edit-mode textareas (13px font-mono). The 1px delta is
-                  fine — both are in the "dense content" band, so
+                  to text-sm (14px), matching the
+                  edit-mode textareas (同为 text-sm=14px font-mono).
                   preview → edit feels continuous rather than a
                   font-size jump. */}
               <Markdown compact>{content}</Markdown>
@@ -209,7 +208,7 @@ export function TaskDocBlock({
               <button
                 type="button"
                 onClick={() => setExpanded((v) => !v)}
-                className="inline-flex items-center gap-1 px-3 py-1.5 text-[12px] font-medium text-[var(--ink-muted)] transition-colors hover:text-[var(--ink)]"
+                className="inline-flex items-center gap-1 px-3 py-1.5 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:text-[var(--ink)]"
               >
                 {expanded ? (
                   <>
@@ -227,7 +226,7 @@ export function TaskDocBlock({
           )}
         </div>
       ) : (
-        <div className="rounded-[var(--radius-lg)] border border-dashed border-[var(--line)] bg-[var(--paper)] p-3 text-[12px] text-[var(--ink-muted)]">
+        <div className="rounded-[var(--radius-lg)] border border-dashed border-[var(--line)] bg-[var(--paper)] p-3 text-xs text-[var(--ink-muted)]">
           {emptyHint}
         </div>
       )}

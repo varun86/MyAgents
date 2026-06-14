@@ -20,6 +20,7 @@ describe('isClientActionCommand', () => {
   it('is false for a non-builtin source with the same name (no hijack of a user skill)', () => {
     expect(isClientActionCommand(cmd('loop', 'skill'))).toBe(false);
     expect(isClientActionCommand(cmd('loop', 'custom'))).toBe(false);
+    expect(isClientActionCommand(cmd('loop', 'sdk'))).toBe(false);
   });
 
   it('is false for ordinary builtins like /compact', () => {

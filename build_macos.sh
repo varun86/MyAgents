@@ -147,6 +147,7 @@ check_dependency() {
 
 echo -e "${BLUE}[2/7] 检查依赖...${NC}"
 check_dependency "rustc" "请安装 Rust: https://rustup.rs"
+check_dependency "rustup" "请通过 rustup 安装 Rust: https://rustup.rs"
 check_dependency "npm" "请安装 Node.js: https://nodejs.org"
 check_dependency "codesign" "需要 Xcode Command Line Tools"
 
@@ -157,15 +158,8 @@ if [ ! -d "${PROJECT_DIR}/mino" ] || [ ! -f "${PROJECT_DIR}/mino/CLAUDE.md" ]; t
 fi
 echo -e "${GREEN}  ✓ mino 默认工作区已就绪${NC}"
 
-# 检查并安装 Rust 交叉编译目标
-for TARGET in "${BUILD_TARGETS[@]}"; do
-    if ! rustup target list --installed | grep -q "$TARGET"; then
-        echo -e "${YELLOW}  安装 Rust 目标: $TARGET${NC}"
-        rustup target add "$TARGET"
-    else
-        echo -e "${GREEN}  ✓ Rust 目标已安装: $TARGET${NC}"
-    fi
-done
+# Rust toolchain/components/target 必须与 rust-toolchain.toml 和 CI 对齐。
+"${PROJECT_DIR}/scripts/ensure_rust_toolchain.sh" "${BUILD_TARGETS[@]}"
 
 echo -e "${GREEN}✓ 依赖检查通过${NC}"
 echo ""

@@ -45,12 +45,18 @@ check_install "Node.js" "node --version" "https://nodejs.org (≥ v20)" || MISSI
 check_install "npm" "npm --version" "随 Node.js 安装" || MISSING=1
 check_install "Rust" "rustc --version" "https://rustup.rs" || MISSING=1
 check_install "Cargo" "cargo --version" "随 Rust 安装" || MISSING=1
+check_install "rustup" "rustup --version" "https://rustup.rs" || MISSING=1
 
 echo ""
 if [ $MISSING -eq 1 ]; then
     echo -e "${RED}请先安装上述缺失的依赖，然后重新运行此脚本${NC}"
     exit 1
 fi
+
+# 固定 Rust toolchain/components，避免 rustfmt/clippy 或 IDE 使用系统 Rust 漂移。
+echo -e "${BLUE}[1.5/6] 准备 Rust toolchain / components${NC}"
+"${PROJECT_DIR}/scripts/ensure_rust_toolchain.sh"
+echo ""
 
 # 下载 Node.js 二进制（Sidecar + MCP Server + 社区工具 统一 runtime）
 echo ""

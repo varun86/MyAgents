@@ -65,6 +65,7 @@ export default function CustomTitleBar({
     const [isFullscreen, setIsFullscreen] = useState(false);
     const [isMaximized, setIsMaximized] = useState(false);
     const [showFeedback, setShowFeedback] = useState(false);
+
     const feedbackBtnRef = useRef<HTMLDivElement>(null);
 
     const handleOpenBugReport = useCallback(() => {
@@ -211,7 +212,7 @@ export default function CustomTitleBar({
                             <RotateCcw className="h-3.5 w-3.5 text-[var(--accent-warm)]" />
                             <span>恢复上次对话</span>
                             {restoreCount > 1 && (
-                                <span className="flex h-4 min-w-4 items-center justify-center rounded-full bg-[var(--accent-warm-muted)] px-1 text-[10px] font-semibold text-[var(--accent-warm)]">
+                                <span className="flex h-4 min-w-4 items-center justify-center rounded-full bg-[var(--accent-warm-muted)] px-1 text-xs font-semibold text-[var(--accent-warm)]">
                                     {restoreCount}
                                 </span>
                             )}
@@ -268,7 +269,7 @@ export default function CustomTitleBar({
                         title="小助理"
                     >
                         <Bot className="h-4 w-4" />
-                        <span className="text-[13px] font-medium">小助理</span>
+                        <span className="text-sm font-medium">小助理</span>
                     </button>
                     <FeedbackPopover
                         open={showFeedback}
@@ -285,7 +286,7 @@ export default function CustomTitleBar({
                         title={`任务中心 (${navigator.platform.toLowerCase().includes('mac') ? '⌘Y' : 'Ctrl+Y'})`}
                     >
                         <CheckSquare className="h-4 w-4" />
-                        <span className="text-[13px] font-medium">任务</span>
+                        <span className="text-sm font-medium">任务</span>
                     </button>
                 )}
 
@@ -295,7 +296,7 @@ export default function CustomTitleBar({
                     title={`设置 (${navigator.platform.toLowerCase().includes('mac') ? '⌘U' : 'Ctrl+U'})`}
                 >
                     <Settings className="h-4 w-4" />
-                    <span className="text-[13px] font-medium">设置</span>
+                    <span className="text-sm font-medium">设置</span>
                 </button>
             </div>
 

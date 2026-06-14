@@ -3,61 +3,74 @@
 
 pub mod app_dirs;
 pub mod attachment_protocol;
+pub mod browser;
 pub mod cli;
-pub mod config_io;
 mod commands;
+pub mod config_io;
 pub mod cron_task;
+pub mod floating_ball;
+pub mod floating_ball_pets;
 mod global_shortcut;
 pub mod im;
 pub mod inbox;
-pub mod notification;
-pub mod local_http;
-mod litellm_cache;
-pub mod logger;
 pub mod legacy_upgrade;
+mod litellm_cache;
+pub mod local_http;
+pub mod logger;
 #[cfg(target_os = "macos")]
 mod macos_arrow_filter;
 #[cfg(target_os = "macos")]
 mod macos_traffic_light;
 pub mod management_api;
+pub mod notification;
 pub mod perf_trace;
 pub mod process_cleanup;
 pub mod process_cmd;
 mod proxy_config;
-pub mod system_binary;
+pub mod search;
 mod sidecar;
 mod sse_proxy;
+pub mod system_binary;
 pub mod task;
 pub mod terminal;
-pub mod browser;
-pub mod search;
 pub mod thought;
-pub mod workspace_files;
 mod tray;
 mod updater;
 pub mod utils;
 pub mod wake_lock;
+pub mod workspace_files;
 
 use sidecar::{
-    cleanup_stale_sidecars, cleanup_stale_sidecars_preamble, init_startup_cleanup_barrier,
-    create_sidecar_state, stop_all_sidecars,
-    // Session activation commands (for Session singleton tracking)
-    cmd_get_session_activation, cmd_activate_session, cmd_deactivate_session,
-    cmd_update_session_tab,
+    cleanup_stale_sidecars,
+    cleanup_stale_sidecars_preamble,
+    cmd_activate_session,
+    cmd_can_restore_session,
+    cmd_cancel_background_completion,
+    cmd_deactivate_session,
+    // Session-centric Sidecar API (v0.1.11)
+    cmd_ensure_session_sidecar,
     // Cron task execution command
     cmd_execute_cron_task,
-    // Session-centric Sidecar API (v0.1.11)
-    cmd_ensure_session_sidecar, cmd_release_session_sidecar, cmd_get_session_port,
-    cmd_has_session_sidecar, cmd_get_session_generation,
-    cmd_upgrade_session_id, cmd_session_has_persistent_owners, cmd_can_restore_session,
-    // Background session completion
-    cmd_start_background_completion, cmd_cancel_background_completion,
     cmd_get_background_sessions,
+    // Session activation commands (for Session singleton tracking)
+    cmd_get_session_activation,
+    cmd_get_session_generation,
+    cmd_get_session_port,
+    cmd_has_session_sidecar,
     // Proxy hot-reload
     cmd_propagate_proxy,
+    cmd_release_session_sidecar,
+    cmd_session_has_persistent_owners,
+    // Background session completion
+    cmd_start_background_completion,
+    cmd_update_session_tab,
+    cmd_upgrade_session_id,
+    create_sidecar_state,
+    init_startup_cleanup_barrier,
+    stop_all_sidecars,
 };
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 use tauri::{Emitter, Listener, Manager, Url, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_autostart::MacosLauncher;
 
@@ -233,8 +246,7 @@ pub fn run() {
     let data_dir = app_dirs::myagents_data_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
     let thought_state: thought::ManagedThoughtStore =
         Arc::new(thought::ThoughtStore::new(data_dir.join("thoughts")));
-    let task_state: task::ManagedTaskStore =
-        Arc::new(task::TaskStore::new(data_dir.clone()));
+    let task_state: task::ManagedTaskStore = Arc::new(task::TaskStore::new(data_dir.clone()));
     // Expose the same Arcs via OnceLock singletons so the Rust Management API
     // (used by Bun CLI bridge → /api/admin/task/*) can read/write tasks without
     // access to Tauri `State`. They point at the same inner store.
@@ -246,7 +258,7 @@ pub fn run() {
 
     // Build the app first, then run with event handler
     // This allows us to handle RunEvent::ExitRequested for Cmd+Q and Dock quit
-    let app = tauri::Builder::default()
+    let builder = tauri::Builder::default()
         // Builder-level menu event handler (canonical Tauri 2 pattern).
         // Routes Window > Close Tab (Cmd+W accelerator + mouse click) to the
         // frontend, which walks its own overlay/tab close hierarchy.
@@ -277,8 +289,17 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_notification::init())
-        .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, Some(vec!["--minimized"])))
-        .plugin(global_shortcut::build_plugin())
+        .plugin(tauri_plugin_autostart::init(
+            MacosLauncher::LaunchAgent,
+            Some(vec!["--minimized"]),
+        ))
+        .plugin(global_shortcut::build_plugin());
+
+    // Floating ball panels need the NSPanel plugin (macOS only).
+    #[cfg(target_os = "macos")]
+    let builder = builder.plugin(tauri_nspanel::init());
+
+    let app = builder
         .manage(sidecar_state)
         .manage(sse_proxy_state)
         .manage(im_bot_state)
@@ -287,6 +308,10 @@ pub fn run() {
         .manage(browser_state)
         .manage(thought_state)
         .manage(task_state)
+        // PRD 0.2.35 — global force-wake-lock holder. `setup_tray` later registers
+        // `TrayMenuHandles` for the matching CheckMenuItem; the boot hydrate
+        // runs after both so they start coherent.
+        .manage(wake_lock::ForceWakeLockState::default())
         // PRD 0.2.7 Phase D: per-process registry of active workspace
         // filesystem watchers (one debouncer per workspace, ref-counted).
         .manage(std::sync::Arc::new(workspace_files::watcher::WorkspaceWatchers::default()))
@@ -390,6 +415,35 @@ pub fn run() {
             // Global shortcut (summon-or-toggle, PRD 0.2.16)
             global_shortcut::cmd_get_global_summon_shortcut,
             global_shortcut::cmd_set_global_summon_shortcut,
+            // Floating ball desktop companion (PRD 0.2.35)
+            floating_ball::cmd_fb_enable,
+            floating_ball::cmd_fb_disable,
+            floating_ball::cmd_fb_capabilities,
+            floating_ball_pets::cmd_fb_pet_list_installed,
+            floating_ball_pets::cmd_fb_pet_delete_installed,
+            floating_ball_pets::cmd_fb_pet_import_path,
+            floating_ball_pets::cmd_fb_pet_import_codex,
+            floating_ball_pets::cmd_fb_pet_import_petdex,
+            floating_ball::cmd_fb_show_companion,
+            floating_ball::cmd_fb_pin_companion,
+            floating_ball::cmd_fb_hide_companion,
+            floating_ball::cmd_fb_drag_ball_start,
+            floating_ball::cmd_fb_drag_ball_move,
+            floating_ball::cmd_fb_drag_ball_end,
+            floating_ball::cmd_fb_drag_ball_cancel,
+            floating_ball::cmd_fb_drag_companion_start,
+            floating_ball::cmd_fb_drag_companion_move,
+            floating_ball::cmd_fb_drag_companion_end,
+            floating_ball::cmd_fb_move_ball_to,
+            floating_ball::cmd_fb_snap_ball,
+            floating_ball::cmd_fb_move_companion_to,
+            floating_ball::cmd_fb_set_companion_size,
+            floating_ball::cmd_fb_capture_context,
+            floating_ball::cmd_fb_ax_status,
+            floating_ball::cmd_fb_screenshot,
+            floating_ball::cmd_fb_relay,
+            floating_ball::cmd_fb_open_main_with_session,
+            floating_ball::cmd_fb_open_desktop_pet_settings,
             // OS notification + click-to-foreground deep-link (v0.2.14)
             notification::cmd_show_notification,
             notification::cmd_consume_notification_click,
@@ -523,6 +577,8 @@ pub fn run() {
             task::cmd_task_open_docs_dir,
             task::cmd_task_get_run_stats,
             legacy_upgrade::cmd_task_upgrade_legacy_cron,
+            // PRD 0.2.35 — global "always-on" wake-lock toggle
+            wake_lock::cmd_set_force_wake_lock,
         ])
         .setup(|app| {
             // Initialize logging before acquire_lock() and cleanup_stale_sidecars()
@@ -782,10 +838,19 @@ pub fn run() {
                 ulog_info!("[boot] v={} build={} os={}-{} provider={} mcp={} agents={} channels={} cron={} proxy={} dir={}", version, build_mode, os, arch, provider, mcp, agents, channels, cron, proxy, dir_str);
             }
 
-            // Setup system tray
+            // Setup system tray. setup_tray() ALSO registers `TrayMenuHandles` as
+            // app state — `wake_lock::init_from_disk` below depends on it being
+            // present so the initial tray check matches the OS lock.
             if let Err(e) = tray::setup_tray(app) {
                 ulog_error!("[App] Failed to setup system tray: {}", e);
             }
+
+            // PRD 0.2.35 — boot-time hydrate the user's force wake-lock intent
+            // from disk. If `forceWakeLock: true`, acquire the OS assertion now.
+            // Disk → OS lock; the tray's initial `checked` was set inside
+            // setup_tray() reading the same field. Crash / kill releases the
+            // assertion automatically (process-bound API).
+            wake_lock::init_from_disk(app.handle());
 
             // Register global summon shortcut from config (PRD 0.2.16).
             // Failures are non-fatal — they surface in the Settings panel.
@@ -842,6 +907,27 @@ pub fn run() {
                     .quit()
                     .build()?;
 
+                // NOTE: deliberately NO `.select_all()` here. The predefined
+                // Select All item registers ⌘A as a menu key-equivalent, which
+                // macOS dispatches as the native `selectAll:` selector in
+                // `performKeyEquivalent:` — BEFORE the WebView ever delivers a
+                // JS `keydown`. Unlike `copy:`/`cut:`/`paste:`/`undo:` (which
+                // WebKit translates into DOM clipboard / `beforeinput` events
+                // that Monaco listens to), `selectAll:` has no DOM-event
+                // equivalent, so Monaco's own ⌘A keybinding never fires and the
+                // workspace tree's keyboard ⌘A is pre-empted too. Net effect:
+                // ⌘A silently does nothing in every custom WebView editor while
+                // "working" by accident only in plain <textarea>/<input> (where
+                // WKWebView routes `selectAll:` to the native field).
+                //
+                // The fix is to leave ⌘A OUT of the native menu so the keydown
+                // reaches the WebView — the correct owner — exactly like ⌘T/⌘Y
+                // /⌘U/⌘1-9 already do. There Monaco's built-in selectAll, the
+                // tree's resolveTreeKeyAction, and WebKit's textarea default all
+                // pick it up. Keep cut/copy/paste/undo/redo: those map to DOM
+                // events Monaco honours, so removing them would gain nothing and
+                // risk the clipboard paths. (Long-standing since the custom menu
+                // landed in 11a35a25 / Tauri's default menu before that.)
                 let edit_menu = SubmenuBuilder::new(app_handle, "Edit")
                     .undo()
                     .redo()
@@ -849,7 +935,6 @@ pub fn run() {
                     .cut()
                     .copy()
                     .paste()
-                    .select_all()
                     .build()?;
 
                 // Use `WINDOW_SUBMENU_ID` (the magic Tauri 2 constant) so
@@ -953,6 +1038,10 @@ pub fn run() {
             // Auto-start Agent channels (4s delay, after IM bots)
             im::schedule_agent_auto_start(app.handle().clone());
             ulog_info!("[App] Agent auto-start scheduled");
+
+            // Floating ball (PRD 0.2.35): bring the ball up at launch when the
+            // developer gate + ball toggle are both enabled in config.
+            floating_ball::setup_on_startup(app.handle());
 
             // Start Global Sidecar health monitor
             // Periodically checks if the Global Sidecar is alive and auto-restarts it
@@ -1067,7 +1156,9 @@ pub fn run() {
                 // Only cleanup once (Relaxed is sufficient for simple flag)
                 use std::sync::atomic::Ordering::Relaxed;
                 if !cleanup_done_for_exit.swap(true, Relaxed) {
-                    ulog_info!("[App] Exit requested (Cmd+Q or Dock quit), cleaning up sidecars...");
+                    ulog_info!(
+                        "[App] Exit requested (Cmd+Q or Dock quit), cleaning up sidecars..."
+                    );
                     // Record a deliberate-quit marker so the next boot starts
                     // fresh instead of restoring the session (Issue #309), UNLESS
                     // this is an update-restart. Both update paths — plugin
@@ -1153,7 +1244,10 @@ mod nav_guard_tests {
 
     #[test]
     fn routes_external_urls_to_os_browser() {
-        assert_eq!(decide("https://evil.example.com/"), NavDecision::OpenExternally);
+        assert_eq!(
+            decide("https://evil.example.com/"),
+            NavDecision::OpenExternally
+        );
         assert_eq!(decide("mailto:a@b.com"), NavDecision::OpenExternally);
         assert_eq!(decide("tel:+123"), NavDecision::OpenExternally);
     }

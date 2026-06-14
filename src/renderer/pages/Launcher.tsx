@@ -24,7 +24,7 @@ import { AddWorkspaceMenu, BrandSection, RecentTasks, TemplateLibraryDialog, Wor
 const WorkspaceConfigPanel = lazy(() => import('@/components/WorkspaceConfigPanel'));
 import { useConfig } from '@/hooks/useConfig';
 import { useTaskCenterData } from '@/hooks/useTaskCenterData';
-import { type Project, type PermissionMode, type McpServerDefinition, type WorkspaceTemplate, isProviderEnabled } from '@/config/types';
+import { type Project, type PermissionMode, type McpServerDefinition, type WorkspaceTemplate, isProviderEnabled, isProjectVisibleToUser, isSystemPresetProject } from '@/config/types';
 import { CUSTOM_EVENTS } from '../../shared/constants';
 import { normalizeWorkspacePathIdentity, workspacePathsEqual } from '../../shared/workspacePath';
 import {
@@ -73,7 +73,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
     } = useConfig();
 
     // Filter out internal projects (e.g. ~/.myagents diagnostic workspace)
-    const visibleProjects = useMemo(() => projects.filter(p => !p.internal), [projects]);
+    const visibleProjects = useMemo(() => projects.filter(isProjectVisibleToUser), [projects]);
 
     // Poll agent statuses only when any project has proactive mode
     const hasAnyAgent = useMemo(() => visibleProjects.some(p => p.isAgent), [visibleProjects]);
@@ -167,6 +167,9 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
     const [launcherPermissionMode, setLauncherPermissionMode] = useState<PermissionMode>(config.defaultPermissionMode);
     const [launcherProviderId, setLauncherProviderId] = useState<string | undefined>();
     const [launcherSelectedModel, setLauncherSelectedModel] = useState<string | undefined>();
+    // #324 — 推理强度 setting ('default' | level). Seeded from the agent in the
+    // workspace-sync effect below; persisted via persistInputOptionChange.
+    const [launcherReasoningEffort, setLauncherReasoningEffort] = useState<string>('default');
 
     // Runtime state — adapts model/permission selectors when workspace uses external runtime
     const multiAgentRuntimeEnabled = !!config.multiAgentRuntime;
@@ -355,6 +358,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
     // Extract runtimeConfig primitives for stable useEffect deps (avoid object reference)
     const agentRuntimeModel = (selectedAgent?.runtimeConfig as { model?: string } | undefined)?.model;
     const agentRuntimePermMode = (selectedAgent?.runtimeConfig as { permissionMode?: string } | undefined)?.permissionMode;
+    const agentRuntimeReasoningEffort = (selectedAgent?.runtimeConfig as { reasoningEffort?: string } | undefined)?.reasoningEffort;
 
     // Sync launcher settings from selected workspace's per-project config.
     // Declared AFTER launcherLastUsed effect so project settings take priority on initial load.
@@ -373,14 +377,16 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
         if (isExternalRuntime) {
             setLauncherSelectedModel(agentRuntimeModel ?? undefined);
             setLauncherPermissionMode((agentRuntimePermMode as PermissionMode | undefined) ?? config.defaultPermissionMode);
+            setLauncherReasoningEffort(agentRuntimeReasoningEffort ?? 'default');
         } else {
             setLauncherPermissionMode((selectedAgent?.permissionMode as PermissionMode | undefined) ?? selectedWorkspace.permissionMode ?? config.defaultPermissionMode);
             setLauncherSelectedModel(selectedAgent?.model ?? selectedWorkspace.model ?? undefined);
+            setLauncherReasoningEffort(selectedAgent?.reasoningEffort ?? 'default');
         }
         setLauncherProviderId(selectedAgent?.providerId ?? selectedWorkspace.providerId ?? undefined);
         setLauncherWorkspaceMcpEnabled(selectedAgent?.mcpEnabledServers ?? selectedWorkspace.mcpEnabledServers ?? []);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- depend on specific agent/project fields, not object ref
-    }, [isLoading, selectedWorkspace?.id, selectedAgent?.permissionMode, selectedAgent?.model, selectedAgent?.providerId, selectedAgent?.mcpEnabledServers, selectedAgent?.runtime, agentRuntimeModel, agentRuntimePermMode, selectedWorkspace?.permissionMode, selectedWorkspace?.model, selectedWorkspace?.providerId, selectedWorkspace?.mcpEnabledServers, config.defaultPermissionMode, multiAgentRuntimeEnabled, isExternalRuntime]);
+    }, [isLoading, selectedWorkspace?.id, selectedAgent?.permissionMode, selectedAgent?.model, selectedAgent?.providerId, selectedAgent?.mcpEnabledServers, selectedAgent?.runtime, selectedAgent?.reasoningEffort, agentRuntimeModel, agentRuntimePermMode, agentRuntimeReasoningEffort, selectedWorkspace?.permissionMode, selectedWorkspace?.model, selectedWorkspace?.providerId, selectedWorkspace?.mcpEnabledServers, config.defaultPermissionMode, multiAgentRuntimeEnabled, isExternalRuntime]);
 
     // Write-back handlers: persist Launcher setting changes to the selected project
 
@@ -411,6 +417,25 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
                 fields: isExternalRuntime
                     ? { runtimeModel: model ?? null }
                     : { builtinModel: model ?? null },
+                patchProject,
+                patchAgentConfig,
+            });
+        }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed deps; runtimeConfigRef is a ref
+    }, [selectedWorkspace?.id, patchProject, isExternalRuntime]);
+
+    // #324 — 推理强度 write-back. Same dual-write shape as model/permission;
+    // no live sidecar in launcher, so disk persistence is the whole job (the
+    // handed-off Chat tab seeds from the agent and pushes on connect).
+    const handleLauncherReasoningEffortChange = useCallback((effort: string) => {
+        setLauncherReasoningEffort(effort);
+        if (selectedWorkspace) {
+            void persistInputOptionChange({
+                workspaceId: selectedWorkspace.id,
+                agentId: selectedWorkspace.agentId ?? null,
+                isExternalRuntime,
+                currentRuntimeConfig: runtimeConfigRef.current,
+                fields: { reasoningEffort: effort },
                 patchProject,
                 patchAgentConfig,
             });
@@ -529,6 +554,9 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
             ...(carriedEnabledPlugins.length > 0 ? { enabledPluginIds: carriedEnabledPlugins } : {}),
             ...(builtinSelection ? { builtinSelection } : {}),
             ...(runtimeModel ? { runtimeModel } : {}),
+            // #324 — hand-carry: don't bet the async agent-config write wins
+            // the race against the new tab's mount/seed.
+            ...(launcherReasoningEffort !== 'default' ? { reasoningEffort: launcherReasoningEffort } : {}),
             ...(cron ? { cron } : {}),
         };
 
@@ -630,7 +658,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
 
         onLaunchProject(selectedWorkspace, undefined, initialMessage);
     }, [selectedWorkspace, launcherProvider, launcherPermissionMode,
-        launcherSelectedModel, launcherWorkspaceMcpEnabled, launcherGlobalMcpEnabled,
+        launcherSelectedModel, launcherReasoningEffort, launcherWorkspaceMcpEnabled, launcherGlobalMcpEnabled,
         launcherEnabledPlugins, config.plugins, config.enabledPlugins,
         isExternalRuntime, launcherRuntime,
         touchProject, onLaunchProject, updateConfig]);
@@ -819,9 +847,11 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
             {/* Remove Workspace Confirm Dialog */}
             {projectToRemove && (
                 <ConfirmDialog
-                    title="移除工作区"
-                    message={`确定要从列表中移除「${projectToRemove.name}」吗？此操作不会删除项目文件。`}
-                    confirmText="移除"
+                    title={isSystemPresetProject(projectToRemove) ? '隐藏默认工作区' : '移除工作区'}
+                    message={isSystemPresetProject(projectToRemove)
+                        ? `确定要隐藏「${projectToRemove.displayName || projectToRemove.name}」吗？此操作不会删除本地文件，后续可通过恢复入口重新显示。`
+                        : `确定要从列表中移除「${projectToRemove.name}」吗？此操作不会删除项目文件。`}
+                    confirmText={isSystemPresetProject(projectToRemove) ? '隐藏' : '移除'}
                     cancelText="取消"
                     confirmVariant="danger"
                     onConfirm={confirmRemoveProject}
@@ -847,6 +877,8 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
                         selectedModel={launcherSelectedModel}
                         onProviderChange={handleLauncherProviderChange}
                         onModelChange={handleLauncherModelChange}
+                        reasoningEffort={launcherReasoningEffort}
+                        onReasoningEffortChange={handleLauncherReasoningEffortChange}
                         permissionMode={launcherPermissionMode}
                         onPermissionModeChange={handleLauncherPermissionModeChange}
                         apiKeys={apiKeys}
@@ -893,14 +925,14 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
                     {/* Workspaces Header */}
                     <div className="mx-6 border-t border-[var(--line)]" />
                     <div className="flex flex-shrink-0 items-center justify-between px-6 py-4">
-                        <h2 className="text-[13px] font-semibold tracking-[0.04em] text-[var(--ink-muted)]">
+                        <h2 className="text-sm font-semibold tracking-[0.04em] text-[var(--ink-muted)]">
                             Agent 工作区
                         </h2>
                         <div className="flex items-center gap-3">
                             {config.showDevTools && (
                                 <button
                                     onClick={() => setShowLogs(true)}
-                                    className="rounded-lg px-2.5 py-1.5 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
+                                    className="rounded-lg px-2.5 py-1.5 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
                                     title="查看 Rust 日志"
                                 >
                                     Logs
@@ -920,27 +952,27 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
                         {isLoading ? (
                             <div className="flex flex-col items-center justify-center py-16">
                                 <Loader2 className="h-5 w-5 animate-spin text-[var(--ink-muted)]/50" />
-                                <p className="mt-4 text-[13px] text-[var(--ink-muted)]/70">加载中...</p>
+                                <p className="mt-4 text-sm text-[var(--ink-muted)]/70">加载中...</p>
                             </div>
                         ) : visibleProjects.length === 0 ? (
                             <div className="flex flex-col items-center justify-center py-16 text-center">
-                                <h3 className="mb-1.5 text-[14px] font-medium text-[var(--ink)]">
+                                <h3 className="mb-1.5 text-lg font-medium text-[var(--ink)]">
                                     还没有工作区
                                 </h3>
-                                <p className="mb-6 max-w-[220px] text-[13px] leading-relaxed text-[var(--ink-muted)]/60">
+                                <p className="mb-6 max-w-[220px] text-sm leading-relaxed text-[var(--ink-muted)]/60">
                                     添加本地项目文件夹，或从模板快速创建
                                 </p>
                                 <div className="flex items-center gap-3">
                                     <button
                                         onClick={handleAddProject}
-                                        className="flex items-center gap-1.5 rounded-full bg-[var(--button-secondary-bg)] px-4 py-2.5 text-[13px] font-medium text-[var(--button-secondary-text)] transition-all hover:bg-[var(--button-secondary-bg-hover)] hover:shadow-sm"
+                                        className="flex items-center gap-1.5 rounded-full bg-[var(--button-secondary-bg)] px-4 py-2.5 text-sm font-medium text-[var(--button-secondary-text)] transition-all hover:bg-[var(--button-secondary-bg-hover)] hover:shadow-sm"
                                     >
                                         <FolderPlus className="h-3.5 w-3.5" />
                                         添加文件夹
                                     </button>
                                     <button
                                         onClick={handleOpenTemplateDialog}
-                                        className="flex items-center gap-1.5 rounded-full bg-[var(--button-primary-bg)] px-4 py-2.5 text-[13px] font-medium text-[var(--button-primary-text)] transition-all hover:bg-[var(--button-primary-bg-hover)] hover:shadow-sm"
+                                        className="flex items-center gap-1.5 rounded-full bg-[var(--button-primary-bg)] px-4 py-2.5 text-sm font-medium text-[var(--button-primary-text)] transition-all hover:bg-[var(--button-primary-bg-hover)] hover:shadow-sm"
                                     >
                                         <LayoutTemplate className="h-3.5 w-3.5" />
                                         从模板创建

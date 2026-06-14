@@ -50,9 +50,10 @@ const TaskCenter = lazy(() => import('@/pages/TaskCenter'));
  *  as the deferred-mount placeholder, so a chunk-load is never a jarring blank. */
 const PAGE_FALLBACK = <div className="h-full w-full bg-[var(--paper)]" />;
 import {
+  isProjectVisibleToUser,
   type Project,
 } from '@/config/types';
-import { type Tab, type InitialMessage, type SidecarConfigDisposition, createNewTab, getFolderName, buildChatFlipPatch, MAX_TABS } from '@/types/tab';
+import { type Tab, type InitialMessage, type SidecarConfigDisposition, type FilePreviewIntent, createNewTab, getFolderName, buildChatFlipPatch, MAX_TABS } from '@/types/tab';
 import { buildRestoredTabs, saveOpenTabs, hydratePersistedState, pickDurableOverride, shouldOfferRestore, planRestoreTabs } from '@/utils/tabPersistence';
 import { persistOpenTabsDurable, loadAndClearOpenTabsDurable, clearOpenTabsDurable } from '@/utils/tabPersistenceDurable';
 import { consumeCleanExitMarker } from '@/utils/lastExitMarker';
@@ -68,10 +69,13 @@ import { apiGetJson } from '@/api/apiFetch';
 import { updateSession } from '@/api/sessionClient';
 import { dismissTopmost } from '@/utils/closeLayer';
 import { dispatchAppShortcut } from '@/utils/appShortcuts';
+import { handleSelectAllKeydown } from '@/utils/selectAllRouter';
 import { forceFlushLogs, setLogServerUrl, clearLogServerUrl } from '@/utils/frontendLogger';
 import { normalizeRuntime, resolveEffectiveRuntime, planSessionOpen } from '@/utils/sessionOpenPlan';
+import { resolveNotificationClickRoute } from '@/utils/notificationClickRoute';
 import { applyTerminalSessionToTabs } from '@/utils/sessionTermination';
 import { listenWithCleanup } from '@/utils/tauriListen';
+import { migrateFloatingBallSessionBinding } from '@/floating-ball/sessionBinding';
 import { CUSTOM_EVENTS, createPendingSessionId, isPendingSessionId } from '../shared/constants';
 import { workspacePathsEqual } from '../shared/workspacePath';
 import type { CapabilityInitialSelect } from '../shared/skillsTypes';
@@ -155,6 +159,7 @@ interface TabContentProps {
   onUpdateSessionId: (tabId: string, newSessionId: string) => Promise<void>;
   onClearInitialMessage: (tabId: string) => void;
   onSidecarConfigAdopted: (tabId: string) => void;
+  onFilePreviewIntentConsumed?: (tabId: string, intentId: string) => void;
   // Settings callbacks
   onSettingsSectionChange: () => void;
   updateReady: boolean;
@@ -177,7 +182,7 @@ export const MemoizedTabContent = memo(function TabContent({
   tab, isActive, isLoading, error, isDeferredMount,
   onLaunchProject, onBack, onSwitchSession, onOpenSessionInNewTab, onNewSession,
   onUpdateGenerating, onUpdateTitle, onUpdateUnread, onRenameSession, onForkSession, onUpdateSessionId, onClearInitialMessage,
-  onSidecarConfigAdopted,
+  onSidecarConfigAdopted, onFilePreviewIntentConsumed,
   settingsInitialSection, settingsInitialMcpId, settingsInitialSelect, onSettingsSectionChange,
   updateReady, updateVersion, updateChecking, updateDownloading, updateInstalling, updatePreparing,
   onCheckForUpdate, onRestartAndUpdate,
@@ -252,6 +257,8 @@ export const MemoizedTabContent = memo(function TabContent({
               onInitialMessageConsumed={() => onClearInitialMessage(tab.id)}
               sidecarConfigDisposition={tab.sidecarConfigDisposition}
               onSidecarConfigAdopted={() => onSidecarConfigAdopted(tab.id)}
+              pendingFilePreview={tab.pendingFilePreview}
+              onFilePreviewIntentConsumed={(intentId) => onFilePreviewIntentConsumed?.(tab.id, intentId)}
               sessionTitle={tab.title}
               onRenameSession={(newTitle: string) => onRenameSession(tab.id, newTitle)}
               onForkSession={(newSessionId: string, agentDir: string, title: string, initialMessage?: string) => onForkSession(tab.id, newSessionId, agentDir, title, initialMessage)}
@@ -504,6 +511,27 @@ export default function App() {
     });
   }, []);
 
+  // Helper-overlay launches must hand `handleLaunchProject` a real, committed
+  // active launcher tab. Mutating activeTabIdRef before React has committed the
+  // tab produces `view=undefined` and can let the new Chat auto-send while hidden.
+  const openLaunchTabNow = useCallback((newTab: Tab) => {
+    flushSync(() => {
+      setTabs((prev) => [...prev, newTab]);
+      setActiveTabId(newTab.id);
+    });
+    activeTabIdRef.current = newTab.id;
+  }, []);
+
+  const removeUnusedPrecreatedLaunchTab = useCallback((tabId: string) => {
+    setTabs((prev) => {
+      const created = prev.find(t => t.id === tabId);
+      if (created && !created.sessionId && !created.agentDir) {
+        return prev.filter(t => t.id !== tabId);
+      }
+      return prev;
+    });
+  }, []);
+
   // Analytics Active Context — propagate active tab's sessionId/tabId so that
   // downstream track() calls auto-inject these into params (see analytics/tracker.ts).
   // Pending session ids (createPendingSessionId placeholders) are filtered out:
@@ -736,6 +764,42 @@ export default function App() {
         listenerAc.signal,
       );
 
+      // Floating ball "展开 ↗" (PRD 0.2.35): Rust raises the main window and
+      // emits this; re-dispatch onto the existing OPEN_SESSION_IN_NEW_TAB
+      // DOM-event path so the companion's session opens via the same
+      // cron-aware plan→spawn flow as the task center.
+      void listenWithCleanup<{
+        sessionId: string;
+        workspacePath: string;
+        preview?: { path?: string; initialLineNumber?: number };
+      }>(
+        'fb:open-session',
+        (event) => {
+          if (!mountedRef.current) return;
+          const { sessionId, workspacePath, preview } = event.payload ?? {};
+          if (!sessionId || !workspacePath) return;
+          window.dispatchEvent(
+            new CustomEvent(CUSTOM_EVENTS.OPEN_SESSION_IN_NEW_TAB, {
+              detail: { sessionId, workspacePath, preview },
+            }),
+          );
+        },
+        listenerAc.signal,
+      );
+
+      void listenWithCleanup(
+        'fb:open-desktop-pet-settings',
+        () => {
+          if (!mountedRef.current) return;
+          window.dispatchEvent(
+            new CustomEvent(CUSTOM_EVENTS.OPEN_SETTINGS, {
+              detail: { section: 'desktop-pet' },
+            }),
+          );
+        },
+        listenerAc.signal,
+      );
+
       // Listen for individual task recovered events
       void listenWithCleanup<CronTaskRecoveredPayload>(
         CRON_EVENTS.TASK_RECOVERED,
@@ -953,6 +1017,12 @@ export default function App() {
     if (oldSessionId && oldSessionId !== newSessionId) {
       const upgraded = await upgradeSessionId(oldSessionId, newSessionId);
       console.log(`[App] Rust HashMap upgrade: ${oldSessionId} -> ${newSessionId}, success=${upgraded}`);
+      if (upgraded) {
+        const fbResult = await migrateFloatingBallSessionBinding(oldSessionId, newSessionId);
+        if (fbResult.migrated) {
+          console.log(`[App] Floating ball session binding migrated: ${oldSessionId} -> ${newSessionId}, notified=${fbResult.notified}`);
+        }
+      }
     }
 
     // Update UI state
@@ -1105,7 +1175,7 @@ export default function App() {
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       const isMac = navigator.platform.toLowerCase().includes('mac');
-      dispatchAppShortcut(e, isMac, {
+      if (dispatchAppShortcut(e, isMac, {
         tabs: tabsRef.current,
         activeTabId: activeTabIdRef.current,
         setActiveTabId,
@@ -1115,7 +1185,14 @@ export default function App() {
         hasBlockingBackdrop: () => !!document.querySelector('.fixed.inset-0[class*="backdrop-blur"]'),
         openTaskCenter: () => window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.OPEN_TASK_CENTER)),
         openSettings: () => window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.OPEN_SETTINGS)),
-      });
+      })) return;
+      // ⌘/Ctrl+A for plain <input>/<textarea> (chat input, rename fields). The native
+      // macOS "Select All" menu item was removed so ⌘A reaches the WebView (see
+      // src-tauri/src/lib.rs); Monaco and the workspace tree own it via their own
+      // keydown handlers, but a plain text control has no JS owner — handle it here
+      // deterministically rather than depend on an undocumented WKWebView default.
+      // Returns false (no-op) for Monaco/tree/everything else, so those still own ⌘A.
+      handleSelectAllKeydown(e, isMac);
     };
 
     // Capture phase: application-level shortcuts (Cmd+W/T/Tab, etc.) MUST fire before
@@ -1578,6 +1655,14 @@ export default function App() {
     ));
   }, []);
 
+  const handleFilePreviewIntentConsumed = useCallback((tabId: string, intentId: string) => {
+    setTabs(prev => prev.map(t =>
+      t.id === tabId && t.pendingFilePreview?.id === intentId
+        ? { ...t, pendingFilePreview: undefined }
+        : t
+    ));
+  }, []);
+
   // Rename session: update tab title + persist to backend + notify listeners
   const handleRenameSession = useCallback((tabId: string, newTitle: string) => {
     updateTabTitle(tabId, newTitle);
@@ -1647,7 +1732,7 @@ export default function App() {
     sessionId: string,
     sessionAgentDir: string,
     title: string,
-    opts?: { preserveCronActivation?: boolean },
+    opts?: { preserveCronActivation?: boolean; pendingFilePreview?: FilePreviewIntent },
   ): Promise<boolean> => {
     if (tabsRef.current.length >= MAX_TABS) {
       toastRef.current.error('标签页已达上限，请关闭一个后重试');
@@ -1659,6 +1744,7 @@ export default function App() {
       sessionId,
       view: 'chat',
       title,
+      ...(opts?.pendingFilePreview ? { pendingFilePreview: opts.pendingFilePreview } : {}),
       // Existing session pre-mounted before ensure → 'pending'; the post-ensure
       // step below resolves push|adopt from result.isNew (no stomp on a join).
       sidecarConfigDisposition: 'pending',
@@ -2201,6 +2287,10 @@ export default function App() {
             : t
         )
       );
+      const fbResult = await migrateFloatingBallSessionBinding(oldSessionId, pendingSessionId);
+      if (fbResult.migrated) {
+        console.log(`[App] Floating ball session binding migrated to pending session: ${oldSessionId} -> ${pendingSessionId}, notified=${fbResult.notified}`);
+      }
       console.log(`[App] handleNewSession: Created new Sidecar for pending session ${pendingSessionId} on port ${result.port}`);
       return true;
     } catch (error) {
@@ -2595,7 +2685,7 @@ export default function App() {
           return;
         }
 
-        const projects = configProjectsRef.current.filter((p) => !p.internal);
+        const projects = configProjectsRef.current.filter(isProjectVisibleToUser);
         if (projects.length === 0) {
           toastRef.current?.error('还没有工作区，无法开始 AI 讨论');
           return;
@@ -2752,16 +2842,26 @@ export default function App() {
       const event = raw as CustomEvent<{
         sessionId: string;
         workspacePath: string;
+        preview?: { path?: string; initialLineNumber?: number };
       }>;
-      const { sessionId, workspacePath } = event.detail ?? {};
+      const { sessionId, workspacePath, preview } = event.detail ?? {};
       if (!sessionId || !workspacePath) return;
+      const pendingFilePreview: FilePreviewIntent | undefined = preview?.path
+        ? {
+          id: `fp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          path: preview.path,
+          ...(preview.initialLineNumber ? { initialLineNumber: preview.initialLineNumber } : {}),
+        }
+        : undefined;
 
       const workspace = configProjectsRef.current.find(
         (p) => workspacePathsEqual(p.path, workspacePath),
       );
       if (!workspace) {
-        toastRef.current?.error('找不到对应的工作区，可能已被删除');
-        return;
+        console.warn(
+          '[App] OPEN_SESSION_IN_NEW_TAB workspace not in projects; opening by path:',
+          workspacePath,
+        );
       }
 
       // Dedup + cron-aware routing — mirror handleOpenSessionInNewTab (the in-tab
@@ -2782,14 +2882,22 @@ export default function App() {
       });
       if (plan.type === 'jump-to-tab') {
         // Already open → switch to it (don't duplicate, don't block on MAX_TABS).
+        if (pendingFilePreview) {
+          setTabs((prev) => prev.map((t) =>
+            t.id === plan.tabId ? { ...t, pendingFilePreview } : t,
+          ));
+        }
         setActiveTabId(plan.tabId);
         return;
       }
       await spawnTabForExistingSession(
         sessionId,
-        workspace.path,
-        workspace.displayName || getFolderName(workspace.path),
-        { preserveCronActivation: plan.type === 'attach-existing-sidecar' },
+        workspace?.path ?? workspacePath,
+        workspace?.displayName || getFolderName(workspace?.path ?? workspacePath),
+        {
+          preserveCronActivation: plan.type === 'attach-existing-sidecar',
+          pendingFilePreview,
+        },
       );
     };
     window.addEventListener(CUSTOM_EVENTS.OPEN_SESSION_IN_NEW_TAB, handler);
@@ -2866,19 +2974,11 @@ export default function App() {
           // own Tab internally for that branch and our pre-created one is
           // left empty).
           const newTab = createNewTab();
-          setTabs((prev) => [...prev, newTab]);
-          setActiveTabId(newTab.id);
-          activeTabIdRef.current = newTab.id;
+          openLaunchTabNow(newTab);
           try {
             await handleLaunchProject(project, resumeSessionId, undefined);
           } finally {
-            setTabs((prev) => {
-              const created = prev.find(t => t.id === newTab.id);
-              if (created && !created.sessionId && !created.agentDir) {
-                return prev.filter(t => t.id !== newTab.id);
-              }
-              return prev;
-            });
+            removeUnusedPrecreatedLaunchTab(newTab.id);
           }
           return;
         }
@@ -2946,18 +3046,20 @@ export default function App() {
         };
 
         const newTab = createNewTab();
-        setTabs((prev) => [...prev, newTab]);
-        setActiveTabId(newTab.id);
-        activeTabIdRef.current = newTab.id;
+        openLaunchTabNow(newTab);
 
-        await handleLaunchProject(project, undefined, initialMessage);
+        try {
+          await handleLaunchProject(project, undefined, initialMessage);
 
-        // Override tab title
-        setTabs((prev) =>
-          prev.map((t) =>
-            t.id === newTab.id ? { ...t, title: '问题诊断' } : t
-          )
-        );
+          // Override tab title
+          setTabs((prev) =>
+            prev.map((t) =>
+              t.id === newTab.id ? { ...t, title: '问题诊断' } : t
+            )
+          );
+        } finally {
+          removeUnusedPrecreatedLaunchTab(newTab.id);
+        }
       } catch (err) {
         console.error('[App] Failed to launch bug report:', err);
       }
@@ -3018,22 +3120,41 @@ export default function App() {
   // - Windows: directly from the WinRT toast `Activated` callback
   // - macOS / Linux: when the front-end calls `cmd_consume_notification_click`
   //   on focus-regain (handled inside `useTrayEvents`)
-  // Both converge here so tab routing has one entry point.
+  // Both converge here so routing has one entry point. Chat completion toasts
+  // usually carry a tabId and can jump directly; cron/background toasts carry
+  // sessionId + workspacePath so they can open a session even when no Tab exists.
   useEffect(() => {
     if (!isTauriEnvironment()) return;
     const ac = new AbortController();
-    void listenWithCleanup<{ tabId: string }>(
+    void listenWithCleanup<{ tabId?: string; sessionId?: string; workspacePath?: string }>(
       'notification:click',
       (event) => {
-        const { tabId } = event.payload;
-        if (!tabId) return;
-        const exists = tabsRef.current.some((t) => t.id === tabId);
-        if (exists) {
-          console.log('[App] notification:click → handleSelectTab', tabId);
-          handleSelectTab(tabId);
-        } else {
-          console.warn('[App] notification:click for missing tab:', tabId);
+        const route = resolveNotificationClickRoute(event.payload, (tabId) =>
+          tabsRef.current.some((t) => t.id === tabId),
+        );
+        if (route.type === 'select-tab') {
+          console.log('[App] notification:click → handleSelectTab', route.tabId);
+          handleSelectTab(route.tabId);
+          return;
         }
+
+        if (route.type === 'open-session') {
+          console.log('[App] notification:click → open session', route.sessionId);
+          window.dispatchEvent(
+            new CustomEvent(CUSTOM_EVENTS.OPEN_SESSION_IN_NEW_TAB, {
+              detail: {
+                sessionId: route.sessionId,
+                workspacePath: route.workspacePath,
+              },
+            }),
+          );
+          return;
+        }
+
+        console.warn(
+          '[App] notification:click without routable target:',
+          event.payload,
+        );
       },
       ac.signal,
     );
@@ -3089,6 +3210,7 @@ export default function App() {
             onUpdateSessionId={updateTabSessionId}
             onClearInitialMessage={clearInitialMessage}
             onSidecarConfigAdopted={markSidecarConfigAdopted}
+            onFilePreviewIntentConsumed={handleFilePreviewIntentConsumed}
             settingsInitialSection={tab.view === 'settings' ? settingsInitialSection : undefined}
             settingsInitialMcpId={tab.view === 'settings' ? settingsInitialMcpId : undefined}
             settingsInitialSelect={tab.view === 'settings' ? settingsInitialSelect : undefined}

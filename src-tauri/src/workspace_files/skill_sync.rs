@@ -32,8 +32,8 @@ use std::path::Path;
 
 use crate::{ulog_debug, ulog_warn};
 
-use super::skills_config::read_disabled_list;
 use super::platform_blocks::is_skill_blocked_on_platform;
+use super::skills_config::{read_cli_tool_registry_enabled, read_disabled_list};
 
 /// Idempotent: symlink user-level skills + commands into `<workspace>/.claude/`.
 ///
@@ -77,6 +77,7 @@ fn sync_skills_subtree(workspace: &Path, myagents_root: &Path) {
     }
 
     let disabled = read_disabled_list(myagents_root);
+    let cli_tool_registry_enabled = read_cli_tool_registry_enabled(myagents_root);
     let mut managed: HashSet<String> = HashSet::new();
 
     let entries = match fs::read_dir(&user_skills) {
@@ -113,7 +114,9 @@ fn sync_skills_subtree(workspace: &Path, myagents_root: &Path) {
         managed.insert(folder_name.clone());
         let link_path = project_skills.join(&folder_name);
 
-        if disabled.contains(&folder_name) {
+        if disabled.contains(&folder_name)
+            || (!cli_tool_registry_enabled && folder_name == "tool-creator")
+        {
             // Disabled: remove our symlink if present; never remove real dirs.
             if let Ok(meta) = fs::symlink_metadata(&link_path) {
                 if meta.is_symlink() {
@@ -262,11 +265,7 @@ fn sync_commands_subtree(workspace: &Path, myagents_root: &Path) {
 /// so the canonicalize approach silently skipped every dangling link → they
 /// accumulated forever. Use lexical `read_link` + `path.parent().join(target)`
 /// so broken links resolve to a path we can prefix-check.
-fn cleanup_dangling_symlinks(
-    project_dir: &Path,
-    user_dir: &Path,
-    keep: &HashSet<String>,
-) {
+fn cleanup_dangling_symlinks(project_dir: &Path, user_dir: &Path, keep: &HashSet<String>) {
     let entries = match fs::read_dir(project_dir) {
         Ok(e) => e,
         Err(_) => return,
@@ -481,6 +480,62 @@ mod tests {
         assert!(
             !workspace.join(".claude/skills/foo").exists(),
             "disabled skill was symlinked"
+        );
+        let _ = fs::remove_dir_all(&workspace);
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn gates_tool_creator_skill_off_by_default() {
+        let home = user_root_with_skill("tool-creator");
+        let workspace = make_test_workspace("ws_tool_creator_default_off");
+
+        sync_workspace_skills_with_home(&workspace, &home).unwrap();
+
+        assert!(
+            !workspace.join(".claude/skills/tool-creator").exists(),
+            "tool-creator should not be symlinked while the CLI tool registry lab gate is off"
+        );
+        let _ = fs::remove_dir_all(&workspace);
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn syncs_tool_creator_skill_when_cli_tool_registry_gate_is_enabled() {
+        let home = user_root_with_skill("tool-creator");
+        fs::write(
+            home.join(".myagents/config.json"),
+            r#"{"cliToolRegistryEnabled":true}"#,
+        )
+        .unwrap();
+        let workspace = make_test_workspace("ws_tool_creator_enabled");
+
+        sync_workspace_skills_with_home(&workspace, &home).unwrap();
+
+        assert!(
+            workspace.join(".claude/skills/tool-creator").exists(),
+            "tool-creator should be symlinked when the CLI tool registry lab gate is on"
+        );
+        let _ = fs::remove_dir_all(&workspace);
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn removes_tool_creator_symlink_when_cli_tool_registry_gate_turns_off() {
+        let home = user_root_with_skill("tool-creator");
+        let config_path = home.join(".myagents/config.json");
+        fs::write(&config_path, r#"{"cliToolRegistryEnabled":true}"#).unwrap();
+        let workspace = make_test_workspace("ws_tool_creator_gate_flip");
+
+        sync_workspace_skills_with_home(&workspace, &home).unwrap();
+        assert!(workspace.join(".claude/skills/tool-creator").exists());
+
+        fs::write(&config_path, r#"{"cliToolRegistryEnabled":false}"#).unwrap();
+        sync_workspace_skills_with_home(&workspace, &home).unwrap();
+
+        assert!(
+            !workspace.join(".claude/skills/tool-creator").exists(),
+            "tool-creator symlink should be removed after the lab gate turns off"
         );
         let _ = fs::remove_dir_all(&workspace);
         let _ = fs::remove_dir_all(&home);

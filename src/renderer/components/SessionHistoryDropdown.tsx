@@ -12,7 +12,8 @@ import { formatTokens } from '@/utils/formatTokens';
 import { isTauriEnvironment } from '@/utils/browserMock';
 import { listenWithCleanup } from '@/utils/tauriListen';
 import type { AgentStatusMap } from '@/hooks/useAgentStatuses';
-import { extractPlatformDisplay } from '@/utils/taskCenterUtils';
+import { computeSessionTagsMap, resolveFloatingBallBoundSession } from '@/hooks/taskCenterStore';
+import { loadAppConfig } from '@/config/configService';
 import { getSessionDisplayText } from '@/utils/sessionDisplay';
 import type { SessionTag } from '@/hooks/useTaskCenterData';
 
@@ -86,43 +87,16 @@ export default function SessionHistoryDropdown({
     // Agent statuses for active session tagging
     const [agentStatuses, setAgentStatuses] = useState<AgentStatusMap>({});
     const [backgroundSessionIds, setBackgroundSessionIds] = useState<string[]>([]);
+    // 悬浮球渠道当前绑定的 session（gate-aware）——历史列表给它打「悬浮球」标
+    const [fbSessionId, setFbSessionId] = useState<string | null>(null);
 
-    // Compute session tags map (same logic as useTaskCenterData)
+    // Session tags：复用 taskCenterStore 的纯核心（此前这里手抄了一份同构
+    // 实现，悬浮球标签加入时顺手归一——两处漂移正是"加一种标签漏一处"的
+    // 温床）。
     const sessionTagsMap = useMemo(() => {
-        const map = new Map<string, SessionTag[]>();
-        if (!sessions) return map;
-
-        // Build IM session map from agent channel statuses
-        const imSessionPlatformMap = new Map<string, string>();
-        for (const agentStatus of Object.values(agentStatuses)) {
-            for (const channel of agentStatus.channels) {
-                if (channel.status !== 'online' && channel.status !== 'connecting') continue;
-                for (const activeSession of (channel.activeSessions as { sessionKey: string; sessionId: string }[])) {
-                    imSessionPlatformMap.set(activeSession.sessionId, extractPlatformDisplay(activeSession.sessionKey));
-                }
-            }
-        }
-
-        // Build running cron task session set (use internalSessionId when available)
-        const cronSessionIds = new Set(
-            (cronTasks ?? []).filter(t => t.status === 'running').map(t => t.internalSessionId || t.sessionId)
-        );
-
-        // Build background session set
-        const bgSessionIds = new Set(backgroundSessionIds);
-
-        // Assign tags to each session
-        for (const session of sessions) {
-            const tags: SessionTag[] = [];
-            const imPlatform = imSessionPlatformMap.get(session.id);
-            if (imPlatform) tags.push({ type: 'im', platform: imPlatform });
-            if (cronSessionIds.has(session.id)) tags.push({ type: 'cron' });
-            if (bgSessionIds.has(session.id)) tags.push({ type: 'background' });
-            if (tags.length > 0) map.set(session.id, tags);
-        }
-
-        return map;
-    }, [sessions, cronTasks, backgroundSessionIds, agentStatuses]);
+        if (!sessions) return new Map<string, SessionTag[]>();
+        return computeSessionTagsMap(sessions, cronTasks ?? [], backgroundSessionIds, agentStatuses, fbSessionId);
+    }, [sessions, cronTasks, backgroundSessionIds, agentStatuses, fbSessionId]);
 
     // Sorted sessions: tagged first, then by lastActiveAt descending within each group
     const sortedSessions = useMemo(() => {
@@ -155,11 +129,12 @@ export default function SessionHistoryDropdown({
                     .catch(() => ({} as AgentStatusMap))
                 : Promise.resolve({} as AgentStatusMap);
 
-            const [sessionsResult, cronTasksResult, agentStatusResult, bgSessionsResult] = await Promise.allSettled([
+            const [sessionsResult, cronTasksResult, agentStatusResult, bgSessionsResult, configResult] = await Promise.allSettled([
                 getSessions(agentDir),
                 getWorkspaceCronTasks(agentDir),
                 agentStatusPromise,
                 getBackgroundSessions().catch(() => [] as string[]),
+                loadAppConfig(),
             ]);
 
             if (cancelled) return;
@@ -189,6 +164,11 @@ export default function SessionHistoryDropdown({
             if (bgSessionsResult.status === 'fulfilled') {
                 setBackgroundSessionIds(bgSessionsResult.value);
             }
+
+            // Floating ball binding（失败 = 不打标，可选增强）
+            if (configResult.status === 'fulfilled') {
+                setFbSessionId(resolveFloatingBallBoundSession(configResult.value));
+            }
         })();
 
         return () => {
@@ -198,6 +178,7 @@ export default function SessionHistoryDropdown({
             setCronTasks(null);
             setAgentStatuses({});
             setBackgroundSessionIds([]);
+            setFbSessionId(null);
             setStatsSession(null);
             setPendingDelete(null);
             setDeleteError(null);
@@ -472,7 +453,7 @@ export default function SessionHistoryDropdown({
                                         <div className="min-w-0 flex-1">
                                             <div className="flex items-center gap-2">
                                                 {isCurrent && (
-                                                    <span className="flex-shrink-0 rounded bg-[var(--accent)]/20 px-1.5 py-0.5 text-[10px] font-medium text-[var(--accent)]">
+                                                    <span className="flex-shrink-0 rounded bg-[var(--accent)]/20 px-1.5 py-0.5 text-xs font-medium text-[var(--accent)]">
                                                         当前
                                                     </span>
                                                 )}

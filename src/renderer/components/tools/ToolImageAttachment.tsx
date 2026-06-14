@@ -11,7 +11,7 @@
  * to the current session before mapping it to the desktop attachment protocol.
  */
 
-import { useState } from 'react';
+import { useCallback, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 
 import { useTabStateOptional } from '@/context/TabContext';
@@ -27,6 +27,35 @@ export default function ToolImageAttachment({ attachment }: Props) {
   const sessionId = tab?.sessionId ?? null;
   const urlState = useAttachmentUrl(attachment, sessionId);
   const [zoomed, setZoomed] = useState(false);
+  const mediaRef = useRef<HTMLButtonElement>(null);
+  const [captionWidth, setCaptionWidth] = useState<number | null>(null);
+
+  const updateCaptionWidth = useCallback(() => {
+    const media = mediaRef.current;
+    if (!media) return;
+    const nextWidth = Math.ceil(media.getBoundingClientRect().width);
+    if (nextWidth <= 0) return;
+    setCaptionWidth((prev) => (prev === nextWidth ? prev : nextWidth));
+  }, []);
+
+  useLayoutEffect(() => {
+    if (urlState.state !== 'ready') {
+      return;
+    }
+
+    updateCaptionWidth();
+    const media = mediaRef.current;
+    if (!media) return;
+
+    if (typeof ResizeObserver === 'undefined') {
+      window.addEventListener('resize', updateCaptionWidth);
+      return () => window.removeEventListener('resize', updateCaptionWidth);
+    }
+
+    const observer = new ResizeObserver(updateCaptionWidth);
+    observer.observe(media);
+    return () => observer.disconnect();
+  }, [urlState.state, updateCaptionWidth]);
 
   if (urlState.state === 'pending') {
     return (
@@ -53,21 +82,28 @@ export default function ToolImageAttachment({ attachment }: Props) {
   // Ready
   return (
     <>
-      <div className="flex flex-col gap-1">
+      <div className="flex max-w-full flex-col items-start gap-1">
         <button
+          ref={mediaRef}
           type="button"
           onClick={() => setZoomed(true)}
-          className="group block max-w-sm overflow-hidden rounded-md border border-[var(--line)] bg-[var(--paper-inset)]/30 transition-transform hover:scale-[1.01]"
+          className="group inline-flex max-w-full overflow-hidden rounded-md border border-[var(--line)] bg-[var(--paper-inset)]/30 transition-transform hover:scale-[1.01]"
         >
           <img
             src={urlState.url}
             alt={attachment.caption || 'Generated image'}
             loading="lazy"
-            className="block max-h-80 w-auto object-contain"
+            onLoad={updateCaptionWidth}
+            className="block h-auto max-h-80 max-w-full object-contain"
           />
         </button>
         {attachment.caption ? (
-          <div className="line-clamp-2 max-w-sm text-xs text-[var(--ink-muted)]">{attachment.caption}</div>
+          <div
+            className="line-clamp-2 max-w-full text-xs text-[var(--ink-muted)]"
+            style={captionWidth ? { width: captionWidth } : undefined}
+          >
+            {attachment.caption}
+          </div>
         ) : null}
       </div>
       {zoomed

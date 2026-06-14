@@ -63,11 +63,7 @@ use tauri::{Runtime, WebviewWindow};
 /// the standard window buttons aren't yet present (e.g. fired before
 /// window chrome is constructed). Callers treat any error as non-fatal —
 /// the window just keeps macOS default button positions.
-pub fn apply_inset<R: Runtime>(
-    window: &WebviewWindow<R>,
-    x: f64,
-    y: f64,
-) -> Result<(), String> {
+pub fn apply_inset<R: Runtime>(window: &WebviewWindow<R>, x: f64, y: f64) -> Result<(), String> {
     let ns_window_ptr = window.ns_window().map_err(|e| e.to_string())?;
     if ns_window_ptr.is_null() {
         return Err("ns_window() returned null".to_string());
@@ -96,11 +92,7 @@ pub fn apply_inset<R: Runtime>(
 ///
 /// Call once during `setup`, after `apply_inset`. The listener is owned by
 /// Tauri and runs until the window is destroyed.
-pub fn install_inset_persistence<R: Runtime>(
-    window: &WebviewWindow<R>,
-    x: f64,
-    y: f64,
-) {
+pub fn install_inset_persistence<R: Runtime>(window: &WebviewWindow<R>, x: f64, y: f64) {
     let weak = window.clone();
     window.on_window_event(move |event| {
         use tauri::WindowEvent;
@@ -132,8 +124,12 @@ unsafe fn inset_traffic_lights(window: &NSWindow, x: f64, y: f64) {
     // Walk up two levels: NSStandardWindowButton → NSTitlebarView → NSTitlebarContainerView.
     // Same path wry/tao use; if AppKit ever changes this hierarchy these
     // unwraps would surface as a panic on first window display.
-    let Some(parent) = close.superview() else { return; };
-    let Some(title_bar_container_view) = parent.superview() else { return; };
+    let Some(parent) = close.superview() else {
+        return;
+    };
+    let Some(title_bar_container_view) = parent.superview() else {
+        return;
+    };
 
     let close_rect = NSView::frame(&close);
     let title_bar_frame_height = close_rect.size.height + y;

@@ -27,8 +27,12 @@ import type { PermissionRequest } from '@/components/PermissionPrompt';
 import type { AskUserQuestionRequest, AskUserQuestion } from '../../shared/types/askUserQuestion';
 import type { ExitPlanModeRequest, EnterPlanModeRequest, ExitPlanModeAllowedPrompt } from '../../shared/types/planMode';
 import { CUSTOM_EVENTS, isPendingSessionId } from '../../shared/constants';
-import { TabContext, TabApiContext, TabActiveContext, type SessionState, type TabContextValue, type TabApiContextValue } from './TabContext';
+import { TabContext, TabApiContext, TabActiveContext, type SessionState, type SystemNotice, type TabContextValue, type TabApiContextValue } from './TabContext';
 import { shouldSkipHistoryReplay, shouldClearHistoryOnInit } from './sessionRestoreGuards';
+import {
+    shouldAcceptSessionScopedSseSnapshot,
+    shouldPreserveSnapshotOnPendingBirthPropSync,
+} from './sessionScopedEventGuards';
 import { isSubagentContainerTool } from '@/components/tools/toolBadgeConfig';
 import type { Message, ContentBlock, ToolUseSimple, ToolInput, TaskStats, SubagentToolCall } from '@/types/chat';
 import type { ToolUse } from '@/types/stream';
@@ -36,6 +40,7 @@ import type { SystemInitInfo } from '../../shared/types/system';
 import type { RuntimeDiagnostics } from '../../shared/types/runtime';
 import type { ContextUsage } from '../../shared/types/context-usage';
 import type { TerminalReason } from '../../shared/terminalReason';
+import type { SlashCommand } from '../../shared/slashCommands';
 import type { LogEntry } from '@/types/log';
 import { parsePartialJson } from '@/utils/parsePartialJson';
 import { subscribeFrontendLogs, setCurrentTabId } from '@/utils/frontendLogger';
@@ -132,7 +137,7 @@ interface TabProviderProps {
     /** Callback when generating state changes (for close confirmation) */
     onGeneratingChange?: (isGenerating: boolean) => void;
     /** Callback when sessionId changes (e.g., backend creates real session from pending-xxx) */
-    onSessionIdChange?: (newSessionId: string) => void;
+    onSessionIdChange?: (newSessionId: string) => void | Promise<void>;
     /** Callback when session title changes (auto-generated or renamed) */
     onTitleChange?: (title: string) => void;
     /** Callback when unread state changes (message completed on non-active tab) */
@@ -424,12 +429,14 @@ export default function TabProvider({
     const [logs, setLogs] = useState<string[]>([]);
     const [unifiedLogs, setUnifiedLogs] = useState<LogEntry[]>([]);
     const [systemInitInfo, setSystemInitInfo] = useState<SystemInitInfo | null>(null);
+    const [sdkSlashCommands, setSdkSlashCommands] = useState<SlashCommand[]>([]);
     // Issue #194 — runtime diagnostics snapshot for external runtimes (Codex
     // today; Claude Code / Gemini later). Replaces the previously-hardcoded
     // `systemInitInfo.tools: []` signal with a real diagnostic surface.
     const [runtimeDiagnostics, setRuntimeDiagnostics] = useState<RuntimeDiagnostics | null>(null);
     const [agentError, setAgentError] = useState<string | null>(null);
     const [systemStatus, setSystemStatus] = useState<string | null>(null);  // e.g., 'compacting'
+    const [systemNotice, setSystemNotice] = useState<SystemNotice | null>(null);
     // PRD 0.2.32 — 归一化 context 用量快照（tab-scoped）。Set on chat:context-usage,
     // cleared on session switch / reset. 见 ContextUsageIndicator。
     const [contextUsage, setContextUsage] = useState<ContextUsage | null>(null);
@@ -446,9 +453,21 @@ export default function TabProvider({
 
     // Track started queueIds to prevent sendMessage .then() from re-adding them
     const startedQueueIdsRef = useRef(new Set<string>());
+    const previousSessionPropRef = useRef<string | null>(sessionId);
 
     // Sync currentSessionId when prop changes (e.g., from parent re-initializing)
     useEffect(() => {
+        const previousSessionId = previousSessionPropRef.current;
+        const currentSessionIdBeforePropSync = currentSessionIdRef.current;
+        previousSessionPropRef.current = sessionId;
+        const shouldPreserveSdkSlashCommands = shouldPreserveSnapshotOnPendingBirthPropSync({
+            previousSessionId,
+            nextSessionId: sessionId,
+            currentSessionIdBeforeSync: currentSessionIdBeforePropSync,
+            wasPreviousSessionPending: previousSessionId ? isPendingSessionId(previousSessionId) : false,
+            isNextSessionPending: sessionId ? isPendingSessionId(sessionId) : false,
+        });
+
         currentSessionIdRef.current = sessionId;
         setCurrentSessionId(sessionId);
         // PRD 0.2.32 — clear the context 用量 ring synchronously the moment the session
@@ -459,6 +478,9 @@ export default function TabProvider({
         // (review: stale-source transient). loadSession then re-seeds from the persisted
         // lastContextUsage; new-session paths (reset/adopt) also clear explicitly for immediacy.
         setContextUsage(null);
+        if (!shouldPreserveSdkSlashCommands) {
+            setSdkSlashCommands([]);
+        }
     }, [sessionId]);
 
     // Store callbacks in refs to avoid triggering effects on every render
@@ -600,6 +622,7 @@ export default function TabProvider({
         resetPaginationState();
         setStreamingMessage(null);
         setContextUsage(null);  // PRD 0.2.32 — 新会话无持久占用；仅清展示态（不碰后端持久数据）
+        setSdkSlashCommands([]);
         seenIdsRef.current.clear();
         restoredSessionIdRef.current = null;  // new session: no REST-restored history → replay normally
         isNewSessionRef.current = true;
@@ -626,6 +649,7 @@ export default function TabProvider({
         setIsLoading(false);
         setSessionState('idle');  // Reset session state for new conversation
         setSystemStatus(null);
+        setSystemNotice(null);
         setAgentError(null);
         setLastTerminalReason(null);
         setUnifiedLogs([]);
@@ -637,22 +661,28 @@ export default function TabProvider({
         setRuntimeDiagnostics(null);
         clearInteractiveState();
         // NOTE: Do NOT clear currentSessionId here. The old session ID is the only way
-        // to find the ready sidecar port via getSessionPort(). Setting it to null
-        // causes all subsequent API calls to fail ("No running sidecar for tab") because
-        // getBaseUrl skips session-centric lookup when sessionId is null, and the tab-based
-        // fallback also fails. The history dropdown naturally shows no selection when the
-        // old session is deleted from the list, so no UI impact.
-        // The session ID will be upgraded to the new value when chat:system-init arrives.
+        // to find the ready sidecar port for the /chat/reset call. Once the backend
+        // returns its freshly-minted sessionId we adopt it immediately; chat:system-init
+        // remains the fallback confirmation path.
 
         // Reset tab title so SortableTabItem falls back to folder name
         onTitleChangeRef.current?.('New Chat');
 
         // 2. Tell backend to reset (this will also broadcast chat:init)
         try {
-            const response = await postJson<{ success: boolean; error?: string }>('/chat/reset');
+            const response = await postJson<{ success: boolean; sessionId?: string; error?: string }>('/chat/reset');
             if (!response.success) {
                 console.error(`[TabProvider ${tabId}] resetSession failed:`, response.error);
                 return false;
+            }
+            if (response.sessionId) {
+                resetBirthSessionIdRef.current = response.sessionId;
+                if (currentSessionIdRef.current !== response.sessionId) {
+                    console.log(`[TabProvider ${tabId}] resetSession adopting backend sessionId: ${currentSessionIdRef.current ?? 'none'} -> ${response.sessionId}`);
+                    currentSessionIdRef.current = response.sessionId;
+                    setCurrentSessionId(response.sessionId);
+                    await onSessionIdChangeRef.current?.(response.sessionId);
+                }
             }
             console.log(`[TabProvider ${tabId}] resetSession complete`);
 
@@ -705,6 +735,7 @@ export default function TabProvider({
         resetPaginationState();
         setStreamingMessage(null);
         setContextUsage(null);  // PRD 0.2.32 — 新会话无持久占用；仅清展示态（不碰后端持久数据）
+        setSdkSlashCommands([]);
         seenIdsRef.current.clear();
         restoredSessionIdRef.current = null;  // new session: no REST-restored history → replay normally
         clearSessionActive();
@@ -726,6 +757,7 @@ export default function TabProvider({
         setIsLoading(false);
         setSessionState('idle');
         setSystemStatus(null);
+        setSystemNotice(null);
         setAgentError(null);
         setLastTerminalReason(null);
         setUnifiedLogs([]);
@@ -741,8 +773,21 @@ export default function TabProvider({
         // will detect the prop change on next render and reconnect.
         currentSessionIdRef.current = newSessionId;
         setCurrentSessionId(newSessionId);
-        onSessionIdChangeRef.current?.(newSessionId);
+        void onSessionIdChangeRef.current?.(newSessionId);
     }, [tabId, setStreamingMessage, clearInteractiveState, clearSessionActive, resetPaginationState]);
+
+    const trackSessionNewForBirth = useCallback((newSessionId: string, fallback: Surface) => {
+        const surface = consumePendingSurface(tabId, fallback);
+        const meta = analyticsMetaRef.current;
+        track('session_new', {
+            session_id: newSessionId,
+            tab_id: tabId,
+            triggered_by: surface,
+            runtime: meta.runtime,
+            has_initial_message: surface !== 'new_chat_button',
+            agent_hash: meta.agentHash,
+        });
+    }, [tabId]);
 
     // Append log
     const appendLog = useCallback((line: string) => {
@@ -1214,6 +1259,7 @@ export default function TabProvider({
             setIsLoading(false);
             setSessionState('idle');
             setSystemStatus(null);
+            setSystemNotice(null);
         });
     }, [moveStreamingToHistory, clearSessionActive]);
 
@@ -1263,6 +1309,7 @@ export default function TabProvider({
                     adoptedStreamRef.current = false;
                     setAgentError(null);
                     setLastTerminalReason(null);
+                    setSystemNotice(null);
                     clearInteractiveState();
                 }
 
@@ -1297,10 +1344,17 @@ export default function TabProvider({
                 // ALWAYS render, else a new user message vanishes after a restore (#0608
                 // Codex review).
                 const isColdHistoryReplay = payload.replayKind === 'cold-history';
+                const isResetBirthReplayPending =
+                    resetBirthPendingRef.current &&
+                    (
+                        resetBirthSessionIdRef.current === null ||
+                        resetBirthSessionIdRef.current === currentSessionIdRef.current
+                    );
                 if (shouldSkipHistoryReplay({
                     isNewSession: isNewSessionRef.current,
                     isLoadingSession: isLoadingSessionRef.current,
                     isColdHistoryReplay,
+                    isResetBirthPending: isResetBirthReplayPending,
                     restoredSessionId: restoredSessionIdRef.current,
                     currentSessionId: currentSessionIdRef.current,
                 })) {
@@ -1359,6 +1413,38 @@ export default function TabProvider({
                 break;
             }
 
+            case 'chat:messages-retracted': {
+                // SDK refusal-fallback retraction (0.3.162+). Two id spaces:
+                // RESTORED-history bubbles carry server messageSequence ids →
+                // evicted via the id list. LIVE bubbles carry client Date.now()
+                // ids that never match server ids mid-turn (same reason
+                // message-complete piggybacks assistant_message_id), so the
+                // refused streaming bubble is evicted via the server-computed
+                // retractedStreamingTail flag instead. Idempotent — unknown
+                // ids no-op, and the no-op path preserves array identity so
+                // Virtuoso doesn't reconcile an identical list.
+                const payload = data as { messageIds?: string[]; retractedStreamingTail?: boolean } | null;
+                const ids = payload?.messageIds;
+                if (ids && ids.length > 0) {
+                    const idSet = new Set(ids);
+                    setHistoryMessages(prev =>
+                        prev.some(m => idSet.has(m.id)) ? prev.filter(m => !idSet.has(m.id)) : prev
+                    );
+                }
+                if (payload?.retractedStreamingTail) {
+                    setStreamingMessage(null);
+                    isStreamingRef.current = false;
+                    // Un-revealed refused text must not leak into the
+                    // replacement bubble (mirrors the reset-callback reveal
+                    // cleanup; loop-stop inlined for the same TDZ reason).
+                    pendingTextRef.current = '';
+                    if (revealRafRef.current != null) { cancelAnimationFrame(revealRafRef.current); revealRafRef.current = null; }
+                    revealAccRef.current = 0;
+                    revealLastRef.current = 0;
+                }
+                break;
+            }
+
             case 'chat:status': {
                 const payload = data as { sessionState: SessionState } | null;
                 if (payload?.sessionState) {
@@ -1391,8 +1477,27 @@ export default function TabProvider({
 
             case 'chat:system-status': {
                 // System status from SDK (e.g., 'compacting' for context compression)
-                const payload = data as { status: string | null } | null;
+                const payload = data as {
+                    status: string | null;
+                    compactResult?: 'success' | 'failed';
+                    compactError?: string;
+                } | null;
                 setSystemStatus(payload?.status ?? null);
+                if (payload?.compactResult === 'success') {
+                    setSystemNotice({
+                        kind: 'compact',
+                        level: 'success',
+                        message: '上下文已压缩',
+                    });
+                } else if (payload?.compactResult === 'failed') {
+                    const message = payload.compactError?.trim() || '上下文压缩失败';
+                    setSystemNotice({
+                        kind: 'compact',
+                        level: 'error',
+                        message,
+                    });
+                    setAgentError(message);
+                }
                 break;
             }
 
@@ -1919,6 +2024,7 @@ export default function TabProvider({
                     terminal_reason?: TerminalReason;
                     assistant_sdk_uuid?: string;
                     assistant_message_id?: string;
+                    compact_result?: 'success';
                 } | null;
 
                 // SDK 0.2.91+: map terminal_reason to UI banner. Only SET when reason is
@@ -1933,6 +2039,14 @@ export default function TabProvider({
                     if (reason && reason !== 'completed') {
                         setLastTerminalReason(reason);
                     }
+                }
+
+                if (completePayload?.compact_result === 'success') {
+                    setSystemNotice({
+                        kind: 'compact',
+                        level: 'success',
+                        message: '上下文已压缩',
+                    });
                 }
 
                 // Apply backend's real message ID + sdkUuid to the just-moved history message.
@@ -2063,6 +2177,9 @@ export default function TabProvider({
                     // bottom-bar display consistent with how messages route.
                     if (payload.runtime) {
                         setSessionRuntime(payload.runtime);
+                        if (payload.runtime !== 'builtin') {
+                            setSdkSlashCommands([]);
+                        }
                     }
 
                     // Mark session as active (prevents loadSession from interrupting) and loading.
@@ -2122,7 +2239,7 @@ export default function TabProvider({
                         setCurrentSessionId(newSessionId);
                         // Notify parent (App.tsx) to update Tab.sessionId for Session singleton constraint
                         // This ensures history dropdown can detect if this session is already open
-                        onSessionIdChangeRef.current?.(newSessionId);
+                        void onSessionIdChangeRef.current?.(newSessionId);
 
                         if (isSessionBirth) {
                             // Fallback policy:
@@ -2132,27 +2249,40 @@ export default function TabProvider({
                             //   - otherwise → organic mint via launcher input (most common
                             //     case where caller didn't setPendingSurface)
                             const fallback: Surface = isNewSessionRef.current ? 'new_chat_button' : 'launcher_input';
-                            const surface = consumePendingSurface(tabId, fallback);
-                            const meta = analyticsMetaRef.current;
-                            // has_initial_message: 'new_chat_button' creates an empty session
-                            // (user must type after); the other surfaces all carry a first
-                            // message (either typed in launcher or piggybacked on agent_card).
-                            const hasInitialMessage = surface !== 'new_chat_button';
-                            // Explicit tab_id — this track call is inside an SSE handler
-                            // that may fire on a backgrounded tab; without an explicit value
-                            // it would inherit the foreground tab's tab_id from Active Context.
-                            // (cross-review fix matching trackTabEvent's behavior.)
-                            track('session_new', {
-                                session_id: newSessionId,
-                                tab_id: tabId,
-                                triggered_by: surface,
-                                runtime: meta.runtime,
-                                has_initial_message: hasInitialMessage,
-                                agent_hash: meta.agentHash,
-                            });
+                            trackSessionNewForBirth(newSessionId, fallback);
                         }
+                    } else if (
+                        newSessionId &&
+                        resetBirthPendingRef.current &&
+                        resetBirthSessionIdRef.current === newSessionId
+                    ) {
+                        // /chat/reset already synchronized the renderer/Rust identity.
+                        // The later system-init confirms the same id and completes the
+                        // reset-birth analytics/guard lifecycle without waiting for an
+                        // artificial id change.
+                        resetBirthPendingRef.current = false;
+                        trackSessionNewForBirth(newSessionId, 'new_chat_button');
                     }
                 }
+                break;
+            }
+
+            case 'chat:slash-commands': {
+                const payload = data as { commands?: SlashCommand[]; sessionId?: string; runtime?: string } | null;
+                const payloadSessionId = payload?.sessionId;
+                const currentId = currentSessionIdRef.current;
+                const connectedId = connectedSseSessionIdRef.current;
+                if (!shouldAcceptSessionScopedSseSnapshot({
+                    connectedSessionId: connectedId,
+                    currentSessionId: currentId,
+                    payloadSessionId,
+                    isConnectedSessionPending: connectedId ? isPendingSessionId(connectedId) : false,
+                    isCurrentSessionPending: currentId ? isPendingSessionId(currentId) : false,
+                })) {
+                    console.log(`[TabProvider ${tabId}] Ignoring slash commands for stale session ${payloadSessionId}`);
+                    break;
+                }
+                setSdkSlashCommands(Array.isArray(payload?.commands) ? payload.commands : []);
                 break;
             }
 
@@ -2502,9 +2632,9 @@ export default function TabProvider({
                 // A message was queued — add to frontend queue state for UI rendering.
                 // Deduplication: sendMessage's .then() may also add the same queueId,
                 // and optimistic entries (opt-*) may already exist from sendMessage.
-                // (v0.2.12) `isInFlight` indicates the backend has already yielded
-                // this item to the SDK CLI — it is in CLI's commandQueue and the
-                // X cancel button must be hidden (see QueuedMessageBubble).
+                // `isInFlight` indicates the backend has already yielded this item
+                // to the SDK CLI. It remains conditionally cancellable via the
+                // SDK control plane until replay/dequeue confirmation arrives.
                 const payload = data as { queueId: string; messageText: string; isInFlight?: boolean } | null;
                 if (payload?.queueId) {
                     console.log(`[TabProvider] queue:added queueId=${payload.queueId} isInFlight=${!!payload.isInFlight}`);
@@ -2719,7 +2849,7 @@ export default function TabProvider({
                 }
             }
         }
-    }, [appendLog, appendUnifiedLog, tabId, moveStreamingToHistory, beginFreshStreamIfNeeded, setStreamingMessage, postJson, clearInteractiveState, flushPendingTextNow, startRevealLoop, flushAllPendingToolDeltas, flushPendingToolInputDelta, flushPendingToolResultDelta, flushPendingSubagentToolInputDelta, flushPendingSubagentToolResultDelta, clearSessionActive, resetPaginationState, trackTabEvent]);
+    }, [appendLog, appendUnifiedLog, tabId, moveStreamingToHistory, beginFreshStreamIfNeeded, setStreamingMessage, postJson, clearInteractiveState, flushPendingTextNow, startRevealLoop, flushAllPendingToolDeltas, flushPendingToolInputDelta, flushPendingToolResultDelta, flushPendingSubagentToolInputDelta, flushPendingSubagentToolResultDelta, clearSessionActive, resetPaginationState, trackTabEvent, trackSessionNewForBirth]);
 
     // Recovery guard — prevents concurrent recovery from both SSE failed + session-sidecar:restarted
     const recoveryInFlightRef = useRef(false);
@@ -2998,7 +3128,10 @@ export default function TabProvider({
         permissionMode?: PermissionMode,
         model?: string,
         providerEnv?: { baseUrl?: string; apiKey?: string; authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key'; apiProtocol?: 'anthropic' | 'openai'; maxOutputTokens?: number; maxOutputTokensParamName?: 'max_tokens' | 'max_completion_tokens' | 'max_output_tokens'; upstreamFormat?: 'chat_completions' | 'responses'; modelAliases?: { sonnet?: string; opus?: string; haiku?: string } },
-        isCron?: boolean
+        isCron?: boolean,
+        // #324 — reasoning effort setting ('default' | level); send-time safety
+        // net mirroring `model` (the /api/reasoning-effort/set push is primary).
+        reasoningEffort?: string,
     ): Promise<boolean> => {
         const trimmed = text.trim();
         if (!trimmed && (!images || images.length === 0)) return false;
@@ -3016,6 +3149,7 @@ export default function TabProvider({
         // while the new stream renders (and chat:message-complete no longer wipes it
         // since that caused the external-runtime bug).
         setLastTerminalReason(null);
+        setSystemNotice(null);
 
         // Store attachments for merging with SSE replay
         if (hasImages) {
@@ -3067,6 +3201,7 @@ export default function TabProvider({
             // takes effect immediately in already-mounted tabs.
             backgroundAgentPermissionMode: appConfigRef.current?.backgroundAgentPermissionMode ?? 'inherit',
             model,
+            reasoningEffort,
             providerEnv: providerEnv ?? 'subscription',
         }).then((response) => {
             if (response.success) {
@@ -3428,6 +3563,7 @@ export default function TabProvider({
             const persistedUsage = response.session.lastContextUsage ?? null;
             const seedRuntime = response.session.runtime || 'builtin';
             setContextUsage(persistedUsage && persistedUsage.source === seedRuntime ? persistedUsage : null);
+            setSdkSlashCommands([]);
             // Only reset loading state if not explicitly skipped
             // (caller may be managing loading state for an in-progress operation like cron task)
             if (!options?.skipLoadingReset) {
@@ -3436,6 +3572,7 @@ export default function TabProvider({
                 setSessionState(isLiveRunning ? 'running' : 'idle');  // Preserve live external session state when reopening mid-turn
             }
             setSystemStatus(null);
+            setSystemNotice(null);
             setAgentError(null);
             setLastTerminalReason(null);
             // Issue #194 — clear runtime diagnostics when loading a different
@@ -3826,7 +3963,7 @@ export default function TabProvider({
         // Exception 1: if resetSession was just called (isNewSessionRef=true), the session
         // upgrade (old→new) arrives via system:init. Messages are already streaming via SSE,
         // so calling loadSession would flash isLoading=false. Skip and let SSE handle it.
-        if (isNewSessionRef.current && resetSessionBirth) {
+        if (resetSessionBirth) {
             console.log(`[TabProvider ${tabId}] SessionId upgraded to ${sessionId} after resetSession, skipping loadSession (messages arriving via SSE)`);
             initialSessionLoadedRef.current = true;
             return;
@@ -3976,9 +4113,11 @@ export default function TabProvider({
         logs,
         unifiedLogs,
         systemInitInfo,
+        sdkSlashCommands,
         runtimeDiagnostics,
         agentError,
         systemStatus,
+        systemNotice,
         contextUsage,
         lastTerminalReason,
         pendingPermission,
@@ -3997,6 +4136,7 @@ export default function TabProvider({
         setSystemInitInfo,
         setAgentError,
         setLastTerminalReason,
+        setSystemNotice,
         setSessionMeta,
         sendMessage,
         stopResponse,
@@ -4018,7 +4158,7 @@ export default function TabProvider({
         onCronTaskExitRequested: onCronTaskExitRequestedRef,
     }), [
         tabId, agentDir, currentSessionId, messages, historyMessages, streamingMessage, firstItemIndex, hasMoreBefore, isLoading, isSessionLoading, sessionState, sessionRuntime, sessionMeta,
-        logs, unifiedLogs, systemInitInfo, runtimeDiagnostics, agentError, systemStatus, contextUsage, lastTerminalReason, pendingPermission, pendingAskUserQuestion, pendingExitPlanMode, pendingEnterPlanMode, toolCompleteCount, queuedMessages, isConnected,
+        logs, unifiedLogs, systemInitInfo, sdkSlashCommands, runtimeDiagnostics, agentError, systemStatus, systemNotice, contextUsage, lastTerminalReason, pendingPermission, pendingAskUserQuestion, pendingExitPlanMode, pendingEnterPlanMode, toolCompleteCount, queuedMessages, isConnected,
         setMessages, appendLog, appendUnifiedLog, clearUnifiedLogs, sendMessage, stopResponse, loadSession, loadOlderMessages, resetSession, adoptMigratedSession,
         apiGetJson, postJson, apiPutJson, apiDeleteJson, respondPermission, respondAskUserQuestion, respondExitPlanMode, cancelQueuedMessage, forceExecuteQueuedMessage
     ]);

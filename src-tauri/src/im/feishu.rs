@@ -18,10 +18,12 @@ use prost::Message as ProstMessage;
 
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 
-use super::types::{ImAttachment, ImAttachmentType, ImConfig, ImMessage, ImPlatform, ImSourceType, GroupEvent};
+use super::types::{
+    GroupEvent, ImAttachment, ImAttachmentType, ImConfig, ImMessage, ImPlatform, ImSourceType,
+};
 use super::util::{mime_to_ext, sanitize_filename};
 use super::ApprovalCallback;
-use crate::{proxy_config, ulog_info, ulog_warn, ulog_error, ulog_debug};
+use crate::{proxy_config, ulog_debug, ulog_error, ulog_info, ulog_warn};
 
 // ── Feishu WebSocket Protobuf Frame ──────────────────────────
 // Matches the official larksuite/oapi-sdk-go Frame definition (pbbp2.pb.go).
@@ -265,12 +267,10 @@ fn markdown_to_feishu_post(md: &str) -> Value {
             Event::End(TagEnd::BlockQuote(_)) => {
                 in_blockquote = false;
             }
-            Event::Start(Tag::List(start)) => {
-                match start {
-                    Some(n) => list_stack.push(ListKind::Ordered(n)),
-                    None => list_stack.push(ListKind::Unordered),
-                }
-            }
+            Event::Start(Tag::List(start)) => match start {
+                Some(n) => list_stack.push(ListKind::Ordered(n)),
+                None => list_stack.push(ListKind::Unordered),
+            },
             Event::End(TagEnd::List(_)) => {
                 list_stack.pop();
             }
@@ -336,11 +336,12 @@ fn markdown_to_feishu_post(md: &str) -> Value {
                 let text_str = text.to_string();
 
                 // Handle blockquote prefix
-                let display_text = if in_blockquote && current_line.is_empty() && item_prefix.is_none() {
-                    format!("│ {}", text_str)
-                } else {
-                    text_str
-                };
+                let display_text =
+                    if in_blockquote && current_line.is_empty() && item_prefix.is_none() {
+                        format!("│ {}", text_str)
+                    } else {
+                        text_str
+                    };
 
                 // Prepend item prefix if any
                 let final_text = if let Some(prefix) = item_prefix.take() {
@@ -502,7 +503,10 @@ fn feishu_post_to_text(content: &Value) -> String {
                             if let Some(t) = elem["text"].as_str().or(elem["code"].as_str()) {
                                 line_parts.push(format!("```\n{}\n```", t));
                             } else {
-                                ulog_debug!("[feishu] code_block element has no text/code: {}", elem);
+                                ulog_debug!(
+                                    "[feishu] code_block element has no text/code: {}",
+                                    elem
+                                );
                             }
                         }
                         "emotion" => {
@@ -511,7 +515,11 @@ fn feishu_post_to_text(content: &Value) -> String {
                         }
                         other => {
                             // Unknown tag — best effort: extract text field if present
-                            ulog_debug!("[feishu] Unknown post element tag: '{}', elem: {}", other, elem);
+                            ulog_debug!(
+                                "[feishu] Unknown post element tag: '{}', elem: {}",
+                                other,
+                                elem
+                            );
                             if let Some(t) = elem["text"].as_str() {
                                 line_parts.push(t.to_string());
                             }
@@ -607,17 +615,18 @@ impl FeishuAdapter {
     ) -> Self {
         // External host (open.feishu.cn / open.larksuite.com) — system proxy wanted.
         #[allow(clippy::disallowed_methods)]
-        let client_builder = Client::builder()
-            .timeout(Duration::from_secs(30));
-        let client = proxy_config::build_client_with_proxy(client_builder)
-            .unwrap_or_else(|e| {
-                ulog_warn!("[feishu] Failed to build client with proxy: {}, falling back to direct", e);
-                #[allow(clippy::disallowed_methods)]
-                Client::builder()
-                    .timeout(Duration::from_secs(30))
-                    .build()
-                    .expect("Failed to create HTTP client")
-            });
+        let client_builder = Client::builder().timeout(Duration::from_secs(30));
+        let client = proxy_config::build_client_with_proxy(client_builder).unwrap_or_else(|e| {
+            ulog_warn!(
+                "[feishu] Failed to build client with proxy: {}, falling back to direct",
+                e
+            );
+            #[allow(clippy::disallowed_methods)]
+            Client::builder()
+                .timeout(Duration::from_secs(30))
+                .build()
+                .expect("Failed to create HTTP client")
+        });
 
         // Load dedup cache from disk (survives app restart)
         let dedup_cache = Self::load_dedup_cache(dedup_path.as_deref());
@@ -657,28 +666,26 @@ impl FeishuAdapter {
             _ => return HashMap::new(),
         };
         match std::fs::read_to_string(path) {
-            Ok(content) => {
-                match serde_json::from_str::<HashMap<String, u64>>(&content) {
-                    Ok(mut cache) => {
-                        let now = SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs();
-                        let before = cache.len();
-                        cache.retain(|_, ts| now.saturating_sub(*ts) < DEDUP_TTL_SECS);
-                        ulog_info!(
-                            "[feishu] Loaded dedup cache from disk: {} entries ({} expired)",
-                            cache.len(),
-                            before - cache.len()
-                        );
-                        cache
-                    }
-                    Err(e) => {
-                        ulog_warn!("[feishu] Failed to parse dedup cache file: {}", e);
-                        HashMap::new()
-                    }
+            Ok(content) => match serde_json::from_str::<HashMap<String, u64>>(&content) {
+                Ok(mut cache) => {
+                    let now = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    let before = cache.len();
+                    cache.retain(|_, ts| now.saturating_sub(*ts) < DEDUP_TTL_SECS);
+                    ulog_info!(
+                        "[feishu] Loaded dedup cache from disk: {} entries ({} expired)",
+                        cache.len(),
+                        before - cache.len()
+                    );
+                    cache
                 }
-            }
+                Err(e) => {
+                    ulog_warn!("[feishu] Failed to parse dedup cache file: {}", e);
+                    HashMap::new()
+                }
+            },
             Err(e) => {
                 ulog_warn!("[feishu] Failed to read dedup cache file: {}", e);
                 HashMap::new()
@@ -691,7 +698,10 @@ impl FeishuAdapter {
         if let Some(path) = &self.dedup_persist_path {
             let snapshot = self.dedup_cache.lock().await.clone();
             save_dedup_cache_to_disk(path, &snapshot);
-            ulog_info!("[feishu] Dedup cache flushed to disk ({} entries)", snapshot.len());
+            ulog_info!(
+                "[feishu] Dedup cache flushed to disk ({} entries)",
+                snapshot.len()
+            );
         }
     }
 
@@ -734,7 +744,8 @@ impl FeishuAdapter {
             "app_secret": self.app_secret,
         });
 
-        let resp = self.client
+        let resp = self
+            .client
             .post(&url)
             .json(&body)
             .send()
@@ -766,7 +777,8 @@ impl FeishuAdapter {
             .to_string();
 
         let expire = json["expire"].as_u64().unwrap_or(TOKEN_VALIDITY_SECS);
-        let expires_at = Instant::now() + Duration::from_secs(expire.saturating_sub(TOKEN_REFRESH_MARGIN_SECS));
+        let expires_at =
+            Instant::now() + Duration::from_secs(expire.saturating_sub(TOKEN_REFRESH_MARGIN_SECS));
 
         // Update cache
         {
@@ -782,7 +794,12 @@ impl FeishuAdapter {
     }
 
     /// Make an authenticated API call, auto-retrying on 401 (token expired).
-    async fn api_call(&self, method: &str, url: &str, body: Option<&Value>) -> Result<Value, String> {
+    async fn api_call(
+        &self,
+        method: &str,
+        url: &str,
+        body: Option<&Value>,
+    ) -> Result<Value, String> {
         let mut retries = 0;
 
         loop {
@@ -802,7 +819,9 @@ impl FeishuAdapter {
                 req = req.json(b);
             }
 
-            let resp = req.send().await
+            let resp = req
+                .send()
+                .await
                 .map_err(|e| format!("Feishu API error: {}", e))?;
 
             let status = resp.status();
@@ -869,7 +888,8 @@ impl FeishuAdapter {
         let mut retries = 0;
         loop {
             let token = self.get_token().await?;
-            let resp = self.client
+            let resp = self
+                .client
                 .get(&url)
                 .header("Authorization", format!("Bearer {}", token))
                 .send()
@@ -890,13 +910,15 @@ impl FeishuAdapter {
             if !resp.status().is_success() {
                 return Err(format!(
                     "Resource download HTTP {} for {}",
-                    resp.status(), file_key
+                    resp.status(),
+                    file_key
                 ));
             }
 
             // Strip parameters from content-type (e.g. "image/jpeg; charset=utf-8" → "image/jpeg")
             // Claude API's media_type expects a clean MIME type without parameters.
-            let content_type = resp.headers()
+            let content_type = resp
+                .headers()
                 .get("content-type")
                 .and_then(|v| v.to_str().ok())
                 .unwrap_or("application/octet-stream")
@@ -906,19 +928,24 @@ impl FeishuAdapter {
                 .trim()
                 .to_string();
 
-            let bytes = resp.bytes().await
+            let bytes = resp
+                .bytes()
+                .await
                 .map_err(|e| format!("Resource read error: {}", e))?;
 
             if bytes.len() > MAX_DOWNLOAD_SIZE {
                 return Err(format!(
                     "Resource too large: {} bytes (max {})",
-                    bytes.len(), MAX_DOWNLOAD_SIZE
+                    bytes.len(),
+                    MAX_DOWNLOAD_SIZE
                 ));
             }
 
             ulog_info!(
                 "[feishu] Downloaded resource: {} ({} bytes, {})",
-                file_key, bytes.len(), content_type
+                file_key,
+                bytes.len(),
+                content_type
             );
             return Ok((bytes.to_vec(), content_type));
         }
@@ -947,7 +974,11 @@ impl FeishuAdapter {
     /// Send a rich-text (post) message and return the message_id.
     /// Automatically converts Markdown to Feishu Post format.
     /// Always uses Post format — for streaming drafts and explicit Post-only paths.
-    pub async fn send_post_message(&self, chat_id: &str, text: &str) -> Result<Option<String>, String> {
+    pub async fn send_post_message(
+        &self,
+        chat_id: &str,
+        text: &str,
+    ) -> Result<Option<String>, String> {
         let url = format!("{}/im/v1/messages?receive_id_type=chat_id", FEISHU_API_BASE);
         let post_content = markdown_to_feishu_post(text);
         let content = serde_json::to_string(&post_content).unwrap_or_default();
@@ -964,7 +995,11 @@ impl FeishuAdapter {
 
     /// Auto-detecting send: Card Kit v2.0 for table/code content, Post for plain text.
     /// Automatically splits messages that exceed the safe size limit into multiple sends.
-    pub async fn send_text_message(&self, chat_id: &str, text: &str) -> Result<Option<String>, String> {
+    pub async fn send_text_message(
+        &self,
+        chat_id: &str,
+        text: &str,
+    ) -> Result<Option<String>, String> {
         if text.len() <= FEISHU_SPLIT_THRESHOLD {
             // Single message — use auto-detect (Card or Post)
             return if should_use_card(text) {
@@ -1043,7 +1078,8 @@ impl FeishuAdapter {
                 .text("image_type", "message")
                 .part("image", image_part);
 
-            let resp = self.client
+            let resp = self
+                .client
                 .post(&url)
                 .header("Authorization", format!("Bearer {}", token))
                 .multipart(form)
@@ -1057,7 +1093,10 @@ impl FeishuAdapter {
             // Handle 401 — refresh token and retry once
             if status.as_u16() == 401 && retries == 0 {
                 ulog_warn!("[feishu] Got 401 on image upload, refreshing token");
-                { let mut cache = self.token_cache.write().await; *cache = None; }
+                {
+                    let mut cache = self.token_cache.write().await;
+                    *cache = None;
+                }
                 retries += 1;
                 continue;
             }
@@ -1067,7 +1106,11 @@ impl FeishuAdapter {
 
             let code = json["code"].as_i64().unwrap_or(-1);
             if code != 0 {
-                return Err(format!("Image upload error {}: {}", code, json["msg"].as_str().unwrap_or("unknown")));
+                return Err(format!(
+                    "Image upload error {}: {}",
+                    code,
+                    json["msg"].as_str().unwrap_or("unknown")
+                ));
             }
 
             let image_key = json["data"]["image_key"]
@@ -1081,7 +1124,12 @@ impl FeishuAdapter {
     }
 
     /// Upload a file to Feishu and return the file_key.
-    async fn upload_file(&self, data: Vec<u8>, filename: &str, file_type: &str) -> Result<String, String> {
+    async fn upload_file(
+        &self,
+        data: Vec<u8>,
+        filename: &str,
+        file_type: &str,
+    ) -> Result<String, String> {
         let url = format!("{}/im/v1/files", FEISHU_API_BASE);
         let mut retries = 0;
 
@@ -1098,7 +1146,8 @@ impl FeishuAdapter {
                 .text("file_name", filename.to_string())
                 .part("file", file_part);
 
-            let resp = self.client
+            let resp = self
+                .client
                 .post(&url)
                 .header("Authorization", format!("Bearer {}", token))
                 .multipart(form)
@@ -1111,7 +1160,10 @@ impl FeishuAdapter {
 
             if status.as_u16() == 401 && retries == 0 {
                 ulog_warn!("[feishu] Got 401 on file upload, refreshing token");
-                { let mut cache = self.token_cache.write().await; *cache = None; }
+                {
+                    let mut cache = self.token_cache.write().await;
+                    *cache = None;
+                }
                 retries += 1;
                 continue;
             }
@@ -1121,7 +1173,11 @@ impl FeishuAdapter {
 
             let code = json["code"].as_i64().unwrap_or(-1);
             if code != 0 {
-                return Err(format!("File upload error {}: {}", code, json["msg"].as_str().unwrap_or("unknown")));
+                return Err(format!(
+                    "File upload error {}: {}",
+                    code,
+                    json["msg"].as_str().unwrap_or("unknown")
+                ));
             }
 
             let file_key = json["data"]["file_key"]
@@ -1135,7 +1191,11 @@ impl FeishuAdapter {
     }
 
     /// Send an image message using a previously uploaded image_key.
-    async fn send_image_message(&self, chat_id: &str, image_key: &str) -> Result<Option<String>, String> {
+    async fn send_image_message(
+        &self,
+        chat_id: &str,
+        image_key: &str,
+    ) -> Result<Option<String>, String> {
         let url = format!("{}/im/v1/messages?receive_id_type=chat_id", FEISHU_API_BASE);
         let content = serde_json::to_string(&json!({ "image_key": image_key })).unwrap_or_default();
         let body = json!({
@@ -1148,7 +1208,11 @@ impl FeishuAdapter {
     }
 
     /// Send a file message using a previously uploaded file_key.
-    async fn send_file_message(&self, chat_id: &str, file_key: &str) -> Result<Option<String>, String> {
+    async fn send_file_message(
+        &self,
+        chat_id: &str,
+        file_key: &str,
+    ) -> Result<Option<String>, String> {
         let url = format!("{}/im/v1/messages?receive_id_type=chat_id", FEISHU_API_BASE);
         let content = serde_json::to_string(&json!({ "file_key": file_key })).unwrap_or_default();
         let body = json!({
@@ -1211,7 +1275,8 @@ impl FeishuAdapter {
             "AppSecret": self.app_secret,
         });
 
-        let resp = self.client
+        let resp = self
+            .client
             .post(url)
             .header("locale", "zh")
             .json(&body)
@@ -1236,13 +1301,15 @@ impl FeishuAdapter {
         }
 
         // The response contains a URL field with the WSS endpoint
-        let ws_url = json["data"]["URL"].as_str()
+        let ws_url = json["data"]["URL"]
+            .as_str()
             .or_else(|| json["data"]["url"].as_str())
             .ok_or_else(|| format!("No WebSocket URL in response: {}", json))?
             .to_string();
 
         // Append client_config query params
-        let client_config = json["data"]["ClientConfig"].as_object()
+        let client_config = json["data"]["ClientConfig"]
+            .as_object()
             .or_else(|| json["data"]["client_config"].as_object());
 
         let final_url = if let Some(config) = client_config {
@@ -1288,9 +1355,7 @@ impl FeishuAdapter {
         let mut text_parts: Vec<String> = Vec::new();
 
         let text = match msg_type {
-            "text" => {
-                content["text"].as_str().unwrap_or("").to_string()
-            }
+            "text" => content["text"].as_str().unwrap_or("").to_string(),
             "post" => {
                 let post_text = feishu_post_to_text(&content);
                 // Also extract and download images embedded in post content
@@ -1306,7 +1371,9 @@ impl FeishuAdapter {
                                 attachment_type: ImAttachmentType::Image,
                             });
                         }
-                        Err(e) => ulog_warn!("[feishu] Failed to download post image {}: {}", key, e),
+                        Err(e) => {
+                            ulog_warn!("[feishu] Failed to download post image {}: {}", key, e)
+                        }
                     }
                 }
                 post_text
@@ -1314,7 +1381,10 @@ impl FeishuAdapter {
             "image" => {
                 // Image message: {"image_key": "img_v3_xxx"}
                 if let Some(image_key) = content["image_key"].as_str() {
-                    match self.download_resource(&message_id, image_key, "image").await {
+                    match self
+                        .download_resource(&message_id, image_key, "image")
+                        .await
+                    {
                         Ok((data, content_type)) => {
                             let ext = mime_to_ext(&content_type);
                             attachments.push(ImAttachment {
@@ -1375,9 +1445,8 @@ impl FeishuAdapter {
                     match self.download_resource(&message_id, file_key, "file").await {
                         Ok((data, content_type)) => {
                             let ext = mime_to_ext(&content_type);
-                            let file_name = orig_name
-                                .map(|n| sanitize_filename(n))
-                                .unwrap_or_else(|| {
+                            let file_name =
+                                orig_name.map(|n| sanitize_filename(n)).unwrap_or_else(|| {
                                     let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S");
                                     format!("video_{}.{}", ts, ext)
                                 });
@@ -1437,14 +1506,16 @@ impl FeishuAdapter {
 
         // @Bot mention detection: check mentions array for bot's open_id
         let bot_oid = self.bot_open_id.read().await;
-        let is_at_mention = bot_oid.is_some() && message.get("mentions")
-            .and_then(|m| m.as_array())
-            .map(|mentions| {
-                mentions.iter().any(|m| {
-                    m["id"]["open_id"].as_str() == bot_oid.as_deref()
+        let is_at_mention = bot_oid.is_some()
+            && message
+                .get("mentions")
+                .and_then(|m| m.as_array())
+                .map(|mentions| {
+                    mentions
+                        .iter()
+                        .any(|m| m["id"]["open_id"].as_str() == bot_oid.as_deref())
                 })
-            })
-            .unwrap_or(false);
+                .unwrap_or(false);
         drop(bot_oid);
 
         // Reply-to-bot detection: Feishu doesn't include parent message sender info in events.
@@ -1490,7 +1561,9 @@ impl FeishuAdapter {
 
     /// Get a header value from a protobuf frame by key.
     fn get_frame_header<'a>(frame: &'a WsFrame, key: &str) -> Option<&'a str> {
-        frame.headers.iter()
+        frame
+            .headers
+            .iter()
             .find(|h| h.key == key)
             .map(|h| h.value.as_str())
     }
@@ -1502,9 +1575,10 @@ impl FeishuAdapter {
             log_id: ping_frame.log_id,
             service: ping_frame.service,
             method: FRAME_METHOD_CONTROL,
-            headers: vec![
-                WsHeader { key: "type".to_string(), value: "pong".to_string() },
-            ],
+            headers: vec![WsHeader {
+                key: "type".to_string(),
+                value: "pong".to_string(),
+            }],
             payload_encoding: None,
             payload_type: None,
             payload: None,
@@ -1584,7 +1658,10 @@ impl FeishuAdapter {
                 }
             };
 
-            ulog_info!("[feishu] Connecting to WebSocket: {}...", &ws_url[..ws_url.len().min(80)]);
+            ulog_info!(
+                "[feishu] Connecting to WebSocket: {}...",
+                &ws_url[..ws_url.len().min(80)]
+            );
 
             // Connect
             let ws_stream = match tokio_tungstenite::connect_async(&ws_url).await {
@@ -1614,12 +1691,14 @@ impl FeishuAdapter {
             // Client-side ping to keep NAT/firewall mappings alive.
             // Without this, idle TCP connections get silently dropped by middleboxes,
             // and the server's protobuf pings never reach us.
-            let mut ping_interval = tokio::time::interval(std::time::Duration::from_secs(WS_PING_INTERVAL_SECS));
+            let mut ping_interval =
+                tokio::time::interval(std::time::Duration::from_secs(WS_PING_INTERVAL_SECS));
             ping_interval.tick().await; // skip immediate tick
 
             // Read messages — Feishu uses ONLY binary protobuf frames
             loop {
-                let timeout_at = last_activity + std::time::Duration::from_secs(WS_READ_TIMEOUT_SECS);
+                let timeout_at =
+                    last_activity + std::time::Duration::from_secs(WS_READ_TIMEOUT_SECS);
                 // biased: prioritize read over timeout to avoid false "dead connection"
                 // when data arrives at the same instant the timeout fires.
                 tokio::select! {
@@ -1745,10 +1824,7 @@ impl FeishuAdapter {
             }
 
             // Disconnected — reconnect with backoff
-            ulog_info!(
-                "[feishu] Reconnecting in {}s...",
-                backoff_secs
-            );
+            ulog_info!("[feishu] Reconnecting in {}s...", backoff_secs);
             tokio::select! {
                 _ = sleep(Duration::from_secs(backoff_secs)) => {}
                 _ = shutdown_rx.changed() => {
@@ -1776,7 +1852,11 @@ impl FeishuAdapter {
 
         // Truncate input for display (char-boundary safe)
         let display_input = if tool_input.chars().count() > 200 {
-            let end: usize = tool_input.char_indices().nth(200).map(|(i, _)| i).unwrap_or(tool_input.len());
+            let end: usize = tool_input
+                .char_indices()
+                .nth(200)
+                .map(|(i, _)| i)
+                .unwrap_or(tool_input.len());
             format!("{}...", &tool_input[..end])
         } else {
             tool_input.to_string()
@@ -1878,7 +1958,10 @@ impl FeishuAdapter {
             "im.chat.member.bot.added_v1" => {
                 let event_data = event.get("event")?;
                 let chat_id = event_data["chat_id"].as_str()?.to_string();
-                let operator_id = event_data["operator_id"]["open_id"].as_str().unwrap_or("").to_string();
+                let operator_id = event_data["operator_id"]["open_id"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string();
 
                 // Fetch group name via API
                 let chat_title = match self.get_chat_info(&chat_id).await {
@@ -1948,7 +2031,8 @@ impl FeishuAdapter {
         match self.api_call("GET", &url, None).await {
             Ok(resp) => {
                 let user = &resp["data"]["user"];
-                let name = user["nickname"].as_str()
+                let name = user["nickname"]
+                    .as_str()
                     .or_else(|| user["en_name"].as_str())
                     .or_else(|| user["name"].as_str())
                     .map(|s| s.to_string());
@@ -1956,7 +2040,8 @@ impl FeishuAdapter {
                     let mut cache = self.user_name_cache.lock().await;
                     // Evict oldest entry if at capacity
                     if cache.len() >= MAX_CACHE_SIZE && !cache.contains_key(open_id) {
-                        if let Some(oldest_key) = cache.iter()
+                        if let Some(oldest_key) = cache
+                            .iter()
                             .min_by_key(|(_, (_, t))| *t)
                             .map(|(k, _)| k.clone())
                         {
@@ -1990,7 +2075,11 @@ impl FeishuAdapter {
             .unwrap_or("")
             .to_string();
 
-        Some(ApprovalCallback { request_id, decision, user_id })
+        Some(ApprovalCallback {
+            request_id,
+            decision,
+            user_id,
+        })
     }
 
     /// Handle event payload extracted from a protobuf data frame.
@@ -2050,7 +2139,11 @@ impl FeishuAdapter {
 
         // Handle card.action.trigger (approval button clicks)
         if let Some(cb) = self.parse_card_action(&event) {
-            ulog_info!("[feishu] Card action: decision={}, rid={}", cb.decision, &cb.request_id[..cb.request_id.len().min(16)]);
+            ulog_info!(
+                "[feishu] Card action: decision={}, rid={}",
+                cb.decision,
+                &cb.request_id[..cb.request_id.len().min(16)]
+            );
             if self.approval_tx.send(cb).await.is_err() {
                 ulog_error!("[feishu] Approval channel closed");
             }
@@ -2071,7 +2164,10 @@ impl FeishuAdapter {
                 }
                 if let Some(prev) = cache.get(&msg.message_id) {
                     if now.saturating_sub(*prev) < DEDUP_TTL_SECS {
-                        ulog_debug!("[feishu] Dedup: skipping duplicate message {}", msg.message_id);
+                        ulog_debug!(
+                            "[feishu] Dedup: skipping duplicate message {}",
+                            msg.message_id
+                        );
                         return;
                     }
                 }
@@ -2094,7 +2190,9 @@ impl FeishuAdapter {
             }; // Mutex released here — IO happens outside the lock
 
             // Persist to disk via blocking thread pool (non-blocking for async runtime)
-            if let (Some(snapshot), Some(path)) = (persist_snapshot, self.dedup_persist_path.clone()) {
+            if let (Some(snapshot), Some(path)) =
+                (persist_snapshot, self.dedup_persist_path.clone())
+            {
                 tokio::task::spawn_blocking(move || {
                     save_dedup_cache_to_disk(&path, &snapshot);
                 });
@@ -2136,11 +2234,14 @@ impl FeishuAdapter {
             }
 
             // Check bind code (plain text BIND_xxx in private chat)
-            let is_bind_request = msg.text.starts_with("BIND_")
-                && msg.source_type == ImSourceType::Private;
+            let is_bind_request =
+                msg.text.starts_with("BIND_") && msg.source_type == ImSourceType::Private;
 
             if !is_bind_request && !self.is_allowed(&msg.sender_id).await {
-                ulog_debug!("[feishu] Rejected message from non-whitelisted user: {}", msg.sender_id);
+                ulog_debug!(
+                    "[feishu] Rejected message from non-whitelisted user: {}",
+                    msg.sender_id
+                );
                 return;
             }
 
@@ -2247,7 +2348,10 @@ impl super::adapter::ImStreamAdapter for FeishuAdapter {
                     Ok(())
                 }
                 Err(e) => {
-                    ulog_warn!("[feishu] Card send failed, falling back to Post edit: {}", e);
+                    ulog_warn!(
+                        "[feishu] Card send failed, falling back to Post edit: {}",
+                        e
+                    );
                     self.edit_text_message(message_id, text).await
                 }
             }
@@ -2263,7 +2367,8 @@ impl super::adapter::ImStreamAdapter for FeishuAdapter {
         tool_name: &str,
         tool_input: &str,
     ) -> super::adapter::AdapterResult<Option<String>> {
-        self.send_approval_card(chat_id, request_id, tool_name, tool_input).await
+        self.send_approval_card(chat_id, request_id, tool_name, tool_input)
+            .await
     }
 
     async fn update_approval_status(

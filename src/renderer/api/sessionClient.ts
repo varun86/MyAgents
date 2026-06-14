@@ -58,6 +58,8 @@ export interface SessionMetadata {
     // Desktop/Cron sessions capture these on first write; IM sessions stay undefined
     // (live-follow AgentConfig). `configSnapshotAt` presence marks "locked".
     model?: string;
+    /** #324 — reasoning effort snapshot ('default' | level) */
+    reasoningEffort?: string;
     permissionMode?: string;
     mcpEnabledServers?: string[];
     providerId?: string;
@@ -77,6 +79,13 @@ export interface SessionMessage {
     role: 'user' | 'assistant';
     content: string;
     timestamp: string;
+    attachments?: Array<{
+        id: string;
+        name: string;
+        mimeType: string;
+        path: string;
+        previewUrl?: string;
+    }>;
     usage?: MessageUsage;
     toolCount?: number;
     durationMs?: number;
@@ -121,10 +130,20 @@ export async function getSessions(agentDir?: string): Promise<SessionMetadata[]>
 /**
  * Create a new session
  */
-export async function createSession(agentDir: string, runtime?: string): Promise<SessionMetadata> {
+export async function createSession(
+    agentDir: string,
+    runtime?: string,
+    opts?: { seedMaxPermission?: boolean },
+): Promise<SessionMetadata> {
     const result = await apiPostJson<{ success: boolean; session: SessionMetadata }>(
         '/sessions',
-        { agentDir, ...(runtime ? { runtime } : {}) }
+        {
+            agentDir,
+            ...(runtime ? { runtime } : {}),
+            // PRD 0.2.34 §14 D14：桌面渠道创建时由服务端原子地种「最宽松权限 per
+            // runtime」（getMaxPermissionForRuntime），避免创建后再 PATCH 的吞错窗口。
+            ...(opts?.seedMaxPermission ? { seedMaxPermission: true } : {}),
+        },
     );
     return result.session;
 }
@@ -171,6 +190,8 @@ export async function updateSession(
         // Server auto-stamps configSnapshotAt when any snapshot field is touched
         // and redacts providerEnvJson to '[redacted]' in the response (zero-trust).
         model?: string | null;
+        /** #324 — reasoning effort snapshot ('default' | level); null clears. */
+        reasoningEffort?: string | null;
         permissionMode?: string | null;
         mcpEnabledServers?: string[] | null;
         providerId?: string | null;

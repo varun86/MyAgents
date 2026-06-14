@@ -19,11 +19,11 @@ use std::io::{Read, Write};
 use std::sync::Arc;
 
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+use tauri::async_runtime::JoinHandle;
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::Mutex;
-use tauri::async_runtime::JoinHandle;
 
-use crate::{ulog_info, ulog_error};
+use crate::{ulog_error, ulog_info};
 
 /// A single terminal session with its PTY pair and reader task.
 struct TerminalSession {
@@ -145,7 +145,9 @@ pub async fn cmd_terminal_create(
 
     ulog_info!(
         "[terminal] Created terminal {} (shell={}, cwd={})",
-        id, shell, workspace_path
+        id,
+        shell,
+        workspace_path
     );
 
     Ok(id)
@@ -285,7 +287,9 @@ fn terminal_read_loop(
     // This prevents leaked sessions when the frontend misses the exit event.
     // Use try_current() — Handle::current() panics if runtime is shutting down (app exit).
     let id = terminal_id.to_string();
-    let Some(handle) = tokio::runtime::Handle::try_current().ok() else { return };
+    let Some(handle) = tokio::runtime::Handle::try_current().ok() else {
+        return;
+    };
     handle.spawn(async move {
         let mut map = manager.sessions.lock().await;
         if let Some(session) = map.remove(&id) {

@@ -1,4 +1,4 @@
-import { AlertCircle, ChevronUp, Loader, Paperclip, Plus, Send, Square, X, FileText, AtSign, Wrench, Timer, Settings2, Unlock } from 'lucide-react';
+import { AlertCircle, ChevronRight, ChevronUp, Gauge, Loader, Paperclip, Plus, Send, Square, X, FileText, AtSign, Wrench, Timer, Settings2, Unlock } from 'lucide-react';
 import { memo, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState, forwardRef } from 'react';
 
 import Tip from '@/components/Tip';
@@ -11,7 +11,7 @@ import { useWorkspaceFileService } from '@/hooks/useWorkspaceFileService';
 import { type PermissionMode, PERMISSION_MODES, type Provider, type ProviderVerifyStatus, getModelDisplayName } from '@/config/types';
 import { useConfigData } from '@/config/useConfigData';
 import { resolveEnterKeyAction, sendHintLabel } from '@/utils/chatSendKey';
-import SlashCommandMenu, { type SlashCommand, filterAndSortCommands } from './SlashCommandMenu';
+import SlashCommandMenu, { type SlashCommand, filterAndSortCommands, mergeSlashCommands } from './SlashCommandMenu';
 import { isClientActionCommand, withClientActionCommands } from '@/utils/slashActions';
 import QueuedMessagesPanel from './QueuedMessageBubble';
 import CronTaskStatusBar from './cron/CronTaskStatusBar';
@@ -20,6 +20,7 @@ import { useUndoStack } from '@/hooks/useUndoStack';
 import { isImageFile, isImageMimeType, ALLOWED_IMAGE_MIME_TYPES } from '../../shared/fileTypes';
 import type { QueuedMessageInfo } from '@/types/queue';
 import { CUSTOM_EVENTS } from '../../shared/constants';
+import { reasoningEffortChoices, REASONING_EFFORT_DESCRIPTIONS, REASONING_EFFORT_DEFAULT } from '../../shared/reasoningEffort';
 import { isDebugMode } from '@/utils/debug';
 import { retainFocusOnMouseDown } from '@/utils/focusRetention';
 import { renameIfBareClipboardImage } from '@/utils/clipboardImage';
@@ -102,6 +103,11 @@ interface SimpleChatInputProps {
   onProviderChange?: (providerId: string, targetModel?: string) => void; // Called when provider is changed (with optional model to set atomically)
   selectedModel?: string; // Current selected model ID
   onModelChange?: (modelId: string) => void; // Called when model is changed
+  /** #324 — 推理强度 setting ('default' | level). Renders as the fixed bottom
+   *  row of the model menu. Choices derive from runtime + provider.apiProtocol
+   *  (shared/reasoningEffort.ts); row hidden when the surface has no knob (Gemini). */
+  reasoningEffort?: string;
+  onReasoningEffortChange?: (effort: string) => void;
   /**
    * v0.1.69: true when session exists but has no snapshot (legacy pre-v0.1.69 session).
    * Renders an "unlocked" indicator next to the model button so the user knows changes
@@ -172,6 +178,8 @@ interface SimpleChatInputProps {
    *  panel) by name. When provided, client-action commands are injected into
    *  the slash menu; when omitted they don't appear. See `@/utils/slashActions`. */
   onSlashAction?: (name: string) => void;
+  /** SDK live command snapshot for this chat session, including plugin skills. */
+  sdkSlashCommands?: SlashCommand[];
   /** Display mode: 'chat' (default) or 'launcher' (hides @/slash/cron features) */
   mode?: 'chat' | 'launcher';
   /** Optional ReactNode rendered at the start of the toolbar (e.g., workspace selector in launcher) */
@@ -302,6 +310,8 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   onProviderChange,
   selectedModel,
   onModelChange,
+  reasoningEffort = 'default',
+  onReasoningEffortChange,
   sessionUnlocked = false,
   permissionMode = 'auto',
   onPermissionModeChange,
@@ -326,6 +336,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   onCronCancel,
   onCronStop,
   onSlashAction,
+  sdkSlashCommands = [],
   mode = 'chat',
   toolbarPrefix,
   contextIndicator,
@@ -476,6 +487,41 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   const [showModelMenu, setShowModelMenu] = useState(false);
   const [showToolMenu, setShowToolMenu] = useState(false);
 
+  // #324 — 推理强度 submenu (fixed bottom row of the model menu). Opens on
+  // hover/click of the row; 120ms close delay + an invisible hover bridge
+  // prevent flicker when the pointer crosses the 6px gap to the flyout.
+  const [showEffortSubmenu, setShowEffortSubmenu] = useState(false);
+  // Flyout direction — flips to the left when the popover sits too close to
+  // the window's right edge for the 224px submenu to fit.
+  const [effortFlipLeft, setEffortFlipLeft] = useState(false);
+  const effortRowWrapRef = useRef<HTMLDivElement | null>(null);
+  const effortCloseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // null = this surface has no reasoning-effort knob (Gemini / unknown) → row hidden.
+  const effortChoices = onReasoningEffortChange
+    ? reasoningEffortChoices(isExternalRuntime ? (runtime ?? 'builtin') : 'builtin', provider?.apiProtocol)
+    : null;
+  const openEffortSubmenu = useCallback(() => {
+    if (effortCloseTimerRef.current) {
+      clearTimeout(effortCloseTimerRef.current);
+      effortCloseTimerRef.current = null;
+    }
+    const rect = effortRowWrapRef.current?.getBoundingClientRect();
+    // 224px submenu + 6px gap + 8px margin of comfort
+    setEffortFlipLeft(!!rect && rect.right + 238 > window.innerWidth);
+    setShowEffortSubmenu(true);
+  }, []);
+  const scheduleCloseEffortSubmenu = useCallback(() => {
+    if (effortCloseTimerRef.current) clearTimeout(effortCloseTimerRef.current);
+    effortCloseTimerRef.current = setTimeout(() => setShowEffortSubmenu(false), 120);
+  }, []);
+  // Reset submenu state whenever the model menu closes (incl. outside-click).
+  useEffect(() => {
+    if (!showModelMenu) setShowEffortSubmenu(false);
+  }, [showModelMenu]);
+  useEffect(() => () => {
+    if (effortCloseTimerRef.current) clearTimeout(effortCloseTimerRef.current);
+  }, []);
+
   // Derive current model ID from prop or provider default — no hardcoded fallback
   const currentModelId = selectedModel ?? provider?.primaryModel;
   // Get display name for current model (runtime-aware)
@@ -514,10 +560,19 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   const [selectedSlashIndex, setSelectedSlashIndex] = useState(0);
   const [slashPosition, setSlashPosition] = useState<number | null>(null);
 
+  const clientActionsEnabled = !!onSlashAction;
+  const mergedSlashCommands = useMemo(
+    () => withClientActionCommands(
+      mergeSlashCommands(slashCommands, sdkSlashCommands),
+      clientActionsEnabled,
+    ),
+    [slashCommands, sdkSlashCommands, clientActionsEnabled],
+  );
+
   // Compute filtered slash commands once per render (used in both handleKeyDown and JSX)
   const filteredSlashCommands = useMemo(
-    () => filterAndSortCommands(slashCommands, slashSearchQuery),
-    [slashCommands, slashSearchQuery]
+    () => filterAndSortCommands(mergedSlashCommands, slashSearchQuery),
+    [mergedSlashCommands, slashSearchQuery]
   );
 
   // Guard against double-fire of handleSend (e.g. rapid Enter + click)
@@ -612,14 +667,9 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   // frontmatter parse), not the sidecar /api/commands. Launcher gets the
   // exact same menu as chat-tab — no more "ah, the launcher has no apiGet"
   // empty-menu bug.
-  // Client-action commands (e.g. /loop) are injected only when a handler is
-  // wired to service them — see `withClientActionCommands`. The `!!` boolean is
-  // value-stable across renders so it's safe in the deps array (unlike the raw
-  // callback, which could be a fresh identity each render).
-  const clientActionsEnabled = !!onSlashAction;
   const fetchCommands = useCallback(async () => {
     const apply = (list: SlashCommand[]) =>
-      setSlashCommands(withClientActionCommands(list, clientActionsEnabled));
+      setSlashCommands(list);
     if (!fileService.isAvailable) {
       // Fall back to builtins so the menu isn't empty in browser dev mode.
       apply(BUILTIN_FALLBACK_SLASH_COMMANDS);
@@ -637,7 +687,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
       console.error('Failed to fetch slash commands, using fallback:', err);
       apply(BUILTIN_FALLBACK_SLASH_COMMANDS);
     }
-  }, [fileService, clientActionsEnabled]);
+  }, [fileService]);
 
   // Fetch slash commands on mount or when workspacePath changes (so launcher
   // workspace switching reloads project-level skills).
@@ -1842,7 +1892,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                     setSelectedFileIndex(0);
                   }}
                 />
-                <span className="ml-auto pr-2 text-[10px] text-[var(--ink-muted)]/60">
+                <span className="ml-auto pr-2 text-xs text-[var(--ink-muted)]/60">
                   ⌘/Ctrl + ←/→ 切换
                 </span>
               </div>
@@ -1921,7 +1971,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                     </div>
                   ) : (
                     <>
-                      <div className="px-3 pt-2 pb-1 text-[10px] font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60">
+                      <div className="px-3 pt-2 pb-1 text-xs font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60">
                         {fileSearchQuery.length === 0
                           ? `最近 ${Math.min(thoughtResults.length, THOUGHT_RECENT_LIMIT)} 条想法`
                           : `匹配 "${fileSearchQuery}" 的想法 · ${thoughtResults.length} 条`}
@@ -1947,7 +1997,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                       ))}
                       {fileSearchQuery.length > 0
                         && thoughtResults.length >= THOUGHT_SOFT_CAP && (
-                          <div className="border-t border-[var(--line-subtle)] px-3 py-2 text-[11px] text-[var(--ink-muted)]/70">
+                          <div className="border-t border-[var(--line-subtle)] px-3 py-2 text-xs text-[var(--ink-muted)]/70">
                             已显示前 {THOUGHT_SOFT_CAP} 条匹配，请输入更精确的关键词
                           </div>
                         )}
@@ -2122,7 +2172,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                   setShowPlusMenu(false);
                   setShowToolMenu(false);
                 }}
-                className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
+                className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
                 title="切换执行模式"
               >
                 <span>{currentModeDisplay?.icon}</span>
@@ -2201,13 +2251,13 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                   setShowModelMenu(false);
                   setShowPlusMenu(false);
                 }}
-                className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
+                className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
                 title="使用工具"
               >
                 <Wrench className="h-3.5 w-3.5" />
                 <span className="toolbar-label">工具</span>
                 {effectiveMcpCount > 0 && (
-                  <span className="text-[11px] text-[var(--ink-muted)]">
+                  <span className="text-xs text-[var(--ink-muted)]">
                     {effectiveMcpCount}
                   </span>
                 )}
@@ -2331,7 +2381,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                               )}
                               {plugin.mcpServerNames && plugin.mcpServerNames.length > 0 && (
                                 <div
-                                  className="mt-0.5 text-[11px] text-[var(--ink-muted)] truncate"
+                                  className="mt-0.5 text-xs text-[var(--ink-muted)] truncate"
                                   title={`启用此插件会自动加载这些 MCP server：${plugin.mcpServerNames.join(', ')}`}
                                 >
                                   🔌 {plugin.mcpServerNames.length} 个 MCP：{plugin.mcpServerNames.join(', ')}
@@ -2398,7 +2448,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                     e.stopPropagation();
                     onCronButtonClick();
                   }}
-                  className={`flex items-center gap-1 rounded-lg px-2 py-1.5 text-[13px] font-medium transition-colors ${
+                  className={`flex items-center gap-1 rounded-lg px-2 py-1.5 text-sm font-medium transition-colors ${
                     cronModeEnabled
                       ? 'bg-[var(--heartbeat-bg)] text-[var(--heartbeat)] hover:bg-[var(--heartbeat)]/20'
                       : 'text-[var(--ink-muted)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]'
@@ -2440,22 +2490,29 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                     onRefreshProviders();
                   }
                 }}
-                className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
+                className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
                 title="切换模型"
               >
                 <span className="max-w-[140px] truncate">{currentModelName}</span>
                 <ChevronUp className="h-3 w-3 shrink-0" />
               </button>
+              {/* #324 — unstyled + hand-rolled chrome (= Popover DEFAULT_CHROME minus
+                  `overflow-hidden`): the 推理强度 flyout is positioned OUTSIDE the
+                  popover bounds and would be clipped by overflow-hidden. The model
+                  list keeps its own scroll container below; the effort row stays
+                  fixed at the bottom, outside the scroll area. */}
               <Popover
                 open={showModelMenu}
                 onClose={() => setShowModelMenu(false)}
                 anchorRef={modelBtnRef}
                 placement="top-end"
-                className="w-64 max-h-[300px] overflow-y-auto py-1"
+                unstyled
+                className="w-64 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] shadow-xl"
               >
+                <div className="max-h-[260px] overflow-y-auto py-1">
                 {isExternalRuntime && runtimeModels ? (
                   <>
-                    <div className="px-3 pb-0.5 pt-1.5 text-[10px] font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60">
+                    <div className="px-3 pb-0.5 pt-1.5 text-xs font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60">
                       {runtime === 'claude-code' ? 'CLAUDE CODE' : runtime === 'gemini' ? 'GEMINI CLI' : runtime?.toUpperCase()} 模型
                     </div>
                     {runtimeModels.map(model => {
@@ -2469,7 +2526,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                             onModelChange?.(model.value);
                             setShowModelMenu(false);
                           }}
-                          className={`w-full rounded-md px-3 py-1.5 text-left text-[13px] transition-colors ${
+                          className={`w-full rounded-md px-3 py-1.5 text-left text-sm transition-colors ${
                             isSelected
                               ? 'bg-[var(--accent)]/10 font-medium text-[var(--accent)]'
                               : 'text-[var(--ink)] hover:bg-[var(--hover-bg)]'
@@ -2493,7 +2550,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                             detail: { section: 'providers' }
                           }));
                         }}
-                        className="w-full px-3 py-2.5 text-left text-[13px] text-[var(--accent)] transition-colors hover:bg-[var(--hover-bg)]"
+                        className="w-full px-3 py-2.5 text-left text-sm text-[var(--accent)] transition-colors hover:bg-[var(--hover-bg)]"
                       >
                         请先设置模型服务 →
                       </button>
@@ -2502,7 +2559,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                   return availableProviders.map((p, idx) => (
                     <div key={p.id}>
                       {idx > 0 && <div className="mx-2 my-1 border-t border-[var(--line)]" />}
-                      <div className="group/provider relative flex items-center gap-1 px-3 pb-0.5 pt-1.5 text-[10px] font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60">
+                      <div className="group/provider relative flex items-center gap-1 px-3 pb-0.5 pt-1.5 text-xs font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60">
                         {p.name}{p.type === 'subscription' ? ' (订阅)' : ''}
                         {isProviderWarning(p, apiKeys, providerVerifyStatus) && (
                           <Tip label="验证未通过，部分模型可能不可用" position="bottom">
@@ -2525,7 +2582,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                               }
                               setShowModelMenu(false);
                             }}
-                            className={`flex w-full items-center rounded-md px-3 py-1.5 text-left text-[13px] transition-colors ${
+                            className={`flex w-full items-center rounded-md px-3 py-1.5 text-left text-sm transition-colors ${
                               isSelected
                                 ? 'bg-[var(--accent)]/10 font-medium text-[var(--accent)]'
                                 : 'text-[var(--ink)] hover:bg-[var(--hover-bg)]'
@@ -2539,6 +2596,86 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                     </div>
                   ));
                 })()}
+                </div>
+
+                {/* #324 — fixed bottom row: 推理强度. Hidden when the surface has
+                    no effort knob (Gemini / unknown runtime). Hover or click
+                    opens the flyout; selection closes the whole menu. */}
+                {effortChoices && (
+                  <div
+                    ref={effortRowWrapRef}
+                    className="relative border-t border-[var(--line)] p-1"
+                    onMouseEnter={openEffortSubmenu}
+                    onMouseLeave={scheduleCloseEffortSubmenu}
+                  >
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (showEffortSubmenu) {
+                          setShowEffortSubmenu(false);
+                        } else {
+                          openEffortSubmenu();
+                        }
+                      }}
+                      className={`flex w-full items-center gap-1.5 rounded-md px-3 py-1.5 text-left text-sm text-[var(--ink)] transition-colors ${
+                        showEffortSubmenu ? 'bg-[var(--hover-bg)]' : 'hover:bg-[var(--hover-bg)]'
+                      }`}
+                    >
+                      <Gauge className="h-3.5 w-3.5 shrink-0 text-[var(--ink-muted)]" />
+                      <span className="flex-1">推理强度</span>
+                      <span className={`text-xs ${
+                        reasoningEffort !== REASONING_EFFORT_DEFAULT
+                          ? 'font-medium text-[var(--accent)]'
+                          : 'text-[var(--ink-muted)]'
+                      }`}>
+                        {reasoningEffort === REASONING_EFFORT_DEFAULT ? '默认' : reasoningEffort}
+                      </span>
+                      <ChevronRight className="h-3 w-3 shrink-0 text-[var(--ink-muted)]" />
+                    </button>
+
+                    {showEffortSubmenu && (
+                      <>
+                        {/* invisible hover bridge across the 6px gap */}
+                        <div className={`absolute top-0 h-full w-2 ${effortFlipLeft ? 'right-full' : 'left-full'}`} />
+                        <div
+                          className={`absolute bottom-0 z-10 w-56 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] p-1 shadow-xl ${
+                            effortFlipLeft ? 'right-[calc(100%+6px)]' : 'left-[calc(100%+6px)]'
+                          }`}
+                        >
+                          {[REASONING_EFFORT_DEFAULT, ...effortChoices].map(level => {
+                            const isSelected = reasoningEffort === level;
+                            return (
+                              <button
+                                key={level}
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  onReasoningEffortChange?.(level);
+                                  setShowEffortSubmenu(false);
+                                  setShowModelMenu(false);
+                                }}
+                                className={`flex w-full items-center justify-between rounded-md px-3 py-1.5 text-left text-sm transition-colors ${
+                                  isSelected
+                                    ? 'bg-[var(--accent)]/10 font-medium text-[var(--accent)]'
+                                    : 'text-[var(--ink)] hover:bg-[var(--hover-bg)]'
+                                }`}
+                              >
+                                <span>{level === REASONING_EFFORT_DEFAULT ? '默认' : level}</span>
+                                <span className={`text-xs font-normal ${isSelected ? 'text-[var(--accent)]/70' : 'text-[var(--ink-muted)]'}`}>
+                                  {REASONING_EFFORT_DESCRIPTIONS[level] ?? ''}
+                                </span>
+                              </button>
+                            );
+                          })}
+                          <div className="mt-1 whitespace-nowrap border-t border-[var(--line)] px-3 pb-1 pt-1.5 text-xs text-[var(--ink-muted)]/60">
+                            需服务商支持该参数，以实际生效为准
+                          </div>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                )}
               </Popover>
 
               {/* Button states:
@@ -2648,7 +2785,7 @@ function MentionTabButton({
     <button
       type="button"
       onClick={onClick}
-      className={`rounded-full px-3 py-1 text-[12px] transition-colors ${
+      className={`rounded-full px-3 py-1 text-xs transition-colors ${
         active
           ? 'bg-[var(--paper-elevated)] text-[var(--ink)] shadow-sm'
           : 'text-[var(--ink-muted)] hover:bg-[var(--hover-bg)]'
@@ -2690,14 +2827,14 @@ function ThoughtPickerRow({
           : 'hover:bg-[var(--hover-bg)]'
       }`}
     >
-      <div className="mb-1 flex items-center gap-2 text-[11px] text-[var(--ink-muted)]">
+      <div className="mb-1 flex items-center gap-2 text-xs text-[var(--ink-muted)]">
         <span>{formatThoughtTime(thought.updatedAt)}</span>
         {tags.length > 0 && (
           <div className="flex items-center gap-1">
             {tags.map((t) => (
               <span
                 key={t}
-                className="rounded-[var(--radius-sm)] bg-[var(--accent-warm-subtle)] px-1.5 py-px text-[10px] text-[var(--accent-warm)]"
+                className="rounded-[var(--radius-sm)] bg-[var(--accent-warm-subtle)] px-1.5 py-px text-xs text-[var(--accent-warm)]"
               >
                 #{t}
               </span>
@@ -2706,7 +2843,7 @@ function ThoughtPickerRow({
         )}
       </div>
       <div
-        className="text-[13px] leading-snug text-[var(--ink-secondary)]"
+        className="text-sm leading-snug text-[var(--ink-secondary)]"
         style={{
           display: '-webkit-box',
           WebkitLineClamp: 2,

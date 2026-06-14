@@ -63,8 +63,13 @@ export default function SlashCommandMenu({
                 >
                     <span className="font-medium text-[var(--ink)] whitespace-nowrap">/{cmd.name}</span>
                     {cmd.source === 'skill' && (
-                        <span className="text-[10px] text-[var(--ink-muted)]/60 bg-[var(--paper-inset)] px-1.5 py-0.5 rounded shrink-0">
+                        <span className="text-xs text-[var(--ink-muted)]/60 bg-[var(--paper-inset)] px-1.5 py-0.5 rounded shrink-0">
                             skill
+                        </span>
+                    )}
+                    {cmd.source === 'sdk' && (
+                        <span className="text-xs text-[var(--ink-muted)]/60 bg-[var(--paper-inset)] px-1.5 py-0.5 rounded shrink-0">
+                            plugin
                         </span>
                     )}
                     <span
@@ -116,4 +121,42 @@ export function filterAndSortCommands(commands: SlashCommand[], query: string): 
             // Then sort alphabetically
             return aName.localeCompare(bName);
         });
+}
+
+function commandIdentity(command: SlashCommand): string {
+    return command.name.trim().replace(/^\/+/, '').toLowerCase();
+}
+
+/**
+ * Merge the workspace scan with the SDK's live command snapshot.
+ *
+ * Workspace commands win on name collisions because they are the local source
+ * of truth for builtins, renderer client actions, and disk-backed commands.
+ * SDK commands are still valuable for plugin skills/commands that only exist
+ * after the SDK resolves enabled plugins.
+ */
+export function mergeSlashCommands(
+    workspaceCommands: SlashCommand[],
+    sdkCommands: SlashCommand[],
+): SlashCommand[] {
+    if (sdkCommands.length === 0) return workspaceCommands;
+
+    const seen = new Set(workspaceCommands.map(commandIdentity));
+    let merged = workspaceCommands;
+
+    for (const command of sdkCommands) {
+        const name = command.name.trim().replace(/^\/+/, '');
+        if (!name) continue;
+
+        const key = name.toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+
+        if (merged === workspaceCommands) {
+            merged = [...workspaceCommands];
+        }
+        merged.push({ ...command, name, source: 'sdk' });
+    }
+
+    return merged;
 }

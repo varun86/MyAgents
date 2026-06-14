@@ -169,6 +169,9 @@ impl Drop for PlatformImpl {
                 );
             }
         }
-        ulog_debug!("[wake-lock] Windows assertion released handle={:?}", self.handle);
+        ulog_debug!(
+            "[wake-lock] Windows assertion released handle={:?}",
+            self.handle
+        );
     }
 }

@@ -1,6 +1,8 @@
 @import 'tailwindcss';
 
-@plugin '@tailwindcss/typography';
+/* @tailwindcss/typography 已于 v2.4 移除：其 prose 字阶（h1=2em/700 等）与产品
+   Type Scale 冲突，5 个 markdown 预览面板已统一改用 .ai-message-content + 自家
+   <Markdown> 组件（PRD 0.2.34 Part 2 F4）。 */
 
 /* Class-based dark mode: `.dark` class on <html> activates dark: utilities.
    ThemeProvider manages the class based on user preference (light/dark/system). */
@@ -35,6 +37,30 @@
   /* Tailwind v4 utility aliases — `font-sans` / `font-mono` read these */
   --font-sans: var(--font-body);
   --font-mono: var(--font-code);
+
+  /* Type Scale — 单一真相源（PRD 0.2.34 Part 1-3，唯一档位表见 DESIGN.md §2.2）。
+     v2.5 终局七档（等距 2px 步进至 18）：12/14/16/18/20/22/28。
+     Part 3 双合并：11(micro)+12(caption)→12；13(ui)+14(dense)→14——
+     text-xs/text-sm 自此回归 Tailwind 官方值，同名异值仅剩两条：text-2xl=22(官方24)、text-3xl=28(官方30)。
+     已删除档位：--text-2xs(10)、--text-2sm(12)、--text-md(14)——类名已死，
+     写了等于没样式（eslint 封禁防静默腐坏）。
+     新场景先归档位，禁止 text-[Npx] 任意字面量（eslint 强制）。 */
+  --text-xs: 12px; /* micro/caption: 时间戳、badge、描述行、hint、分类头(uppercase) */
+  --text-xs--line-height: 1.45;
+  --text-sm: 14px; /* ui/dense: 按钮、菜单、树节点、tab、工具卡、控制台、Markdown 表格 */
+  --text-sm--line-height: 1.5;
+  --text-base: 16px; /* prose: AI 正文、用户气泡、输入框、widget body */
+  --text-base--line-height: 1.7;
+  --text-lg: 18px; /* Markdown H3、弹窗标题 */
+  --text-lg--line-height: 1.5;
+  --text-xl: 20px; /* Markdown H2 */
+  --text-xl--line-height: 1.4;
+  --text-2xl: 22px; /* Markdown H1 */
+  --text-2xl--line-height: 1.3;
+  --text-3xl: 28px; /* stat: 数据大数字（占用率百分比等）、页面大标题 */
+  --text-3xl--line-height: 1.2;
+  --text-brand: 56px; /* 品牌展示（Launcher） */
+  --text-brand--line-height: 1.1;
 }
 
 /* Custom titlebar styles for frameless window */
@@ -146,17 +172,8 @@
      with Chinese fallback). Public tokens: --font-body, --font-display,
      --font-code. */
 
-  /* ========== Typography: Size ========== */
-  /* 基于 16px 正文的字号体系 */
-  --text-2xs: 10px;   /* 时间戳、极小辅助文字 */
-  --text-xs: 11px;    /* 工具调用详情、badge */
-  --text-sm: 13px;    /* 按钮、标签、次要内容 */
-  --text-base: 16px;  /* 正文主体 - AI 回答内容 */
-  --text-lg: 18px;    /* H3 标题 */
-  --text-xl: 20px;    /* H2 标题 */
-  --text-2xl: 22px;   /* H1 标题 */
-  --text-3xl: 28px;   /* 页面大标题 */
-  --text-brand: 56px; /* 品牌展示 */
+  /* Typography Size token 已迁入文件顶部 @theme 块（单一真相源，
+     同时驱动 text-xs/sm/base/lg/... utility）。 */
 
   /* ========== Colors: Ink (Text) ========== */
   --ink: #1c1612;
@@ -216,6 +233,34 @@
   --button-secondary-bg: #e8dccf;
   --button-secondary-bg-hover: #ddd0c2;
   --button-secondary-text: #1c1612;
+
+  /* ========== Colors: Floating Ball ========== */
+  --fb-surface-peek: rgb(253 250 244 / 0.15);
+  --fb-surface-glass: rgb(253 250 244 / 0.55);
+  --fb-surface-pin: rgb(253 250 244 / 0.96);
+  --fb-surface-pin-a0: rgb(253 250 244 / 0);
+  --fb-surface-pin-72: rgb(253 250 244 / 0.72);
+  --fb-surface-pin-95: rgb(253 250 244 / 0.95);
+  --fb-glass-border: rgb(255 255 255 / 0.62);
+  --fb-glass-border-soft: rgb(255 255 255 / 0.50);
+  --fb-highlight: rgb(255 255 255 / 0.92);
+  --fb-highlight-mid: rgb(255 255 255 / 0.30);
+  --fb-highlight-faint: rgb(255 255 255 / 0.14);
+  --fb-highlight-strong: rgb(255 255 255 / 0.95);
+  --fb-highlight-a0: rgb(255 255 255 / 0);
+  --fb-highlight-line: rgb(255 255 255 / 0.85);
+  --fb-mask-opaque: #000000;
+  --fb-shadow-strong: rgb(20 16 12 / 0.28);
+  --fb-shadow-soft: rgb(20 16 12 / 0.12);
+  --fb-shadow-panel: rgb(0 0 0 / 0.18);
+  --fb-shadow-preview: rgb(20 16 12 / 0.45);
+  --fb-core-shadow: rgb(28 22 18 / 0.25);
+  --fb-inset-shadow: rgb(28 22 18 / 0.08);
+  --fb-control-hover: rgb(28 22 18 / 0.06);
+  --fb-line-input: rgb(28 22 18 / 0.07);
+  --fb-line-thumb: rgb(28 22 18 / 0.12);
+  --fb-drag-handle: rgb(28 22 18 / 0.18);
+  --fb-scroll-thumb: rgb(166 154 144 / 0.50);
 
   /* ========== Colors: Border ========== */
   --line: rgb(28 22 18 / 0.10);
@@ -333,6 +378,34 @@
   --button-secondary-bg-hover: #3a342c;
   --button-secondary-text: #e4dcd4;
 
+  /* ========== Colors: Floating Ball ========== */
+  --fb-surface-peek: rgb(26 22 20 / 0.22);
+  --fb-surface-glass: rgb(36 32 24 / 0.58);
+  --fb-surface-pin: rgb(36 32 24 / 0.96);
+  --fb-surface-pin-a0: rgb(36 32 24 / 0);
+  --fb-surface-pin-72: rgb(36 32 24 / 0.72);
+  --fb-surface-pin-95: rgb(36 32 24 / 0.95);
+  --fb-glass-border: rgb(255 255 255 / 0.16);
+  --fb-glass-border-soft: rgb(255 255 255 / 0.12);
+  --fb-highlight: rgb(255 255 255 / 0.24);
+  --fb-highlight-mid: rgb(255 255 255 / 0.10);
+  --fb-highlight-faint: rgb(255 255 255 / 0.06);
+  --fb-highlight-strong: rgb(255 255 255 / 0.22);
+  --fb-highlight-a0: rgb(255 255 255 / 0);
+  --fb-highlight-line: rgb(255 255 255 / 0.20);
+  --fb-mask-opaque: #000000;
+  --fb-shadow-strong: rgb(0 0 0 / 0.38);
+  --fb-shadow-soft: rgb(0 0 0 / 0.22);
+  --fb-shadow-panel: rgb(0 0 0 / 0.42);
+  --fb-shadow-preview: rgb(0 0 0 / 0.55);
+  --fb-core-shadow: rgb(0 0 0 / 0.32);
+  --fb-inset-shadow: rgb(0 0 0 / 0.16);
+  --fb-control-hover: rgb(255 255 255 / 0.08);
+  --fb-line-input: rgb(228 220 212 / 0.08);
+  --fb-line-thumb: rgb(228 220 212 / 0.16);
+  --fb-drag-handle: rgb(228 220 212 / 0.20);
+  --fb-scroll-thumb: rgb(150 138 126 / 0.55);
+
   /* ========== Colors: Border ========== */
   --line: rgb(228 220 212 / 0.10);
   --line-strong: rgb(228 220 212 / 0.18);
@@ -436,50 +509,6 @@ body::before {
 }
 
 .ink-muted {
-  color: var(--ink-muted);
-}
-
-.tree-item {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  padding: 0.35rem 0.5rem;
-  border-radius: 0.8rem;
-  color: var(--ink-muted);
-  font-size: 13px;
-  cursor: pointer;
-  user-select: none;
-  transition:
-    background 0.2s ease,
-    color 0.2s ease,
-    box-shadow 0.2s ease;
-}
-
-.tree-item:hover {
-  background: var(--paper-elevated);
-  color: var(--ink);
-}
-
-.tree-item.selected {
-  background: var(--paper-elevated);
-  color: var(--ink);
-  box-shadow: inset 0 0 0 1px var(--line);
-}
-
-.tree-item-label {
-  flex: 1;
-  min-width: 0;
-  font-weight: 500;
-  color: inherit;
-}
-
-.tree-item-meta {
-  border: 1px solid var(--line);
-  background: var(--paper-inset);
-  border-radius: 999px;
-  padding: 0.1rem 0.35rem;
-  font-size: 10px;
-  letter-spacing: 0.08em;
   color: var(--ink-muted);
 }
 
@@ -645,7 +674,7 @@ button:disabled {
 /* Terminal-like monospace typography for tool calls */
 .tool-input {
   font-family: var(--font-code);
-  font-size: 13px;
+  font-size: var(--text-sm);
   line-height: 1.6;
   letter-spacing: -0.01em;
   font-feature-settings:
@@ -658,7 +687,7 @@ button:disabled {
 /* Clean code block styling */
 pre code {
   font-family: var(--font-code);
-  font-size: 13px;
+  font-size: var(--text-sm);
   line-height: 1.6;
   letter-spacing: -0.01em;
 }
@@ -864,24 +893,80 @@ pre code {
   background: var(--accent);
 }
 
+@media (max-width: 640px) {
+  .settings-root {
+    flex-direction: column;
+  }
+
+  .settings-sidebar {
+    width: 100%;
+    flex-shrink: 0;
+    padding: 16px;
+  }
+
+  .settings-sidebar::after {
+    left: 16px;
+    right: 16px;
+    top: auto;
+    bottom: 0;
+    width: auto;
+    height: 1px;
+  }
+
+  .settings-nav {
+    display: flex;
+    gap: 8px;
+    margin: 0 -4px;
+    overflow-x: auto;
+    padding: 0 4px 4px;
+    scrollbar-width: none;
+  }
+
+  .settings-nav::-webkit-scrollbar {
+    display: none;
+  }
+
+  .settings-nav > button {
+    width: auto;
+    flex: 0 0 auto;
+    white-space: nowrap;
+  }
+
+  .settings-nav > :not([hidden]) ~ :not([hidden]) {
+    margin-top: 0;
+  }
+
+  .settings-nav-active::before {
+    left: 8px;
+    right: 8px;
+    top: auto;
+    bottom: 0;
+    width: auto;
+    height: 3px;
+  }
+}
+
 /* ============================================
    AI Content Styles
    ============================================ */
 
 /* AI message content - optimized for reading */
+/* 产品级 prose 上下文（语义已宽于其名）：凡渲染 markdown 长文的容器都用它——
+   聊天 AI 正文（Message.tsx 三个 assistant 分支）+ Skill/Command/Agent 详情、
+   系统提示词、文件预览等 5 个预览面板。不要因名生义为预览面板另起新类
+   （v2.4 之前本类是死代码、typography plugin 的 .prose 在各面板各自为政，
+   字阶分叉正是那段历史的产物）。 */
 .ai-message-content {
   font-size: var(--text-base);
   line-height: 1.7;
   letter-spacing: 0.01em;
 }
 
-.ai-message-content p + p {
-  margin-top: var(--space-4);
-}
-
-.ai-message-content li + li {
-  margin-top: var(--space-2);
-}
+/* 间距规则已删（v2.4 cross-review）：本类沉睡期间遗留的 `p + p` / `li + li`
+   descendant 规则与 Markdown 组件的间距 utility（my-4 / space-y-2.5）构成双
+   owner——unlayered 作者样式恒胜 @layer utilities，接线后会无声压缩列表间距
+   （10px→8px）。间距的唯一 owner = Markdown 组件；本类只管 font-size /
+   line-height / letter-spacing 三件套。 */
 
 /* User message bubble */
 .user-message {
@@ -967,9 +1052,11 @@ code {
   user-select: text;
 }
 
-/* Markdown rendered content is selectable */
-.prose,
-.prose * {
+/* Markdown rendered content is selectable.
+   (.ai-message-content 取代了 typography plugin 的 .prose——v2.4 预览面板迁移后
+   .prose 不复存在，可选中规则随容器类同步，否则详情/预览面板文本无法复制) */
+.ai-message-content,
+.ai-message-content * {
   user-select: text;
 }
 
@@ -1008,15 +1095,19 @@ code {
 /* Everything here should feel lighter than real AI messages — backdrop,    */
 /* not content. Real messages use --ink; this layer stays at --ink-muted    */
 /* and below so the hierarchy is unambiguous once the user starts chatting. */
+/* De-emphasis is carried by the muted PALETTE, not by font-size: body uses */
+/* the same prose tier (16px) as real AI replies — a second prose base      */
+/* (formerly 14px) read as "字号大小不一" across the welcome→chat transition  */
+/* (PRD 0.2.34 P0-2). */
 .introduction-content {
-  font-size: 14px;
-  line-height: 1.75;
+  font-size: var(--text-base);
+  line-height: 1.7;
   color: var(--ink-muted);
 }
 
-/* H1 acts as a "nameplate", not a document title — lighter and smaller */
+/* H1 acts as a "nameplate", not a document title — lighter weight on purpose */
 .introduction-content h1 {
-  font-size: 22px;
+  font-size: var(--text-2xl);
   font-weight: 500;
   letter-spacing: -0.01em;
   color: var(--ink-muted);
@@ -1024,9 +1115,11 @@ code {
   text-align: center;
 }
 
-/* H2/H3 match H1 color — all guide-layer titles stay at --ink-muted */
+/* H2/H3 match H1 color — all guide-layer titles stay at --ink-muted.        */
+/* Sizes follow the Markdown heading ladder (18/16) so the guide layer and   */
+/* real replies share one scale; h3 sits at body size, weight carries it.    */
 .introduction-content h2 {
-  font-size: 16px;
+  font-size: var(--text-lg);
   font-weight: 600;
   color: var(--ink-muted);
   margin-top: 28px;
@@ -1034,8 +1127,8 @@ code {
 }
 
 .introduction-content h3 {
-  font-size: 15px;
-  font-weight: 500;
+  font-size: var(--text-base);
+  font-weight: 600;
   color: var(--ink-muted);
   margin-top: 16px;
   margin-bottom: 6px;
@@ -1100,4 +1193,30 @@ code {
 
 .monaco-editor-host .myagents-monaco-search-focus-line {
   background-color: var(--accent-warm-subtle) !important;
+}
+
+/* Monaco's find widget creates its own hover popovers for the Aa/ab/.* controls.
+ * Those popovers can sit directly over the button and intercept clicks. The editor
+ * wrapper renders a scoped MyAgents tooltip instead, so the built-in one is hidden
+ * only for Monaco instances mounted through this host.
+ */
+.monaco-editor-host .monaco-hover {
+  display: none !important;
+}
+
+.myagents-monaco-find-tooltip {
+  pointer-events: none;
+  position: fixed;
+  z-index: 330;
+  max-width: min(260px, calc(100vw - 16px));
+  transform: translateX(-50%);
+  padding: 6px 10px;
+  border: 1px solid color-mix(in srgb, var(--button-dark-bg) 72%, var(--line-strong));
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--button-dark-bg) 94%, transparent);
+  color: var(--button-primary-text);
+  box-shadow: var(--shadow-lg);
+  font-size: var(--text-xs);
+  line-height: 1.35;
+  white-space: normal;
 }

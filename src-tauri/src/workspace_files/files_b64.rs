@@ -81,10 +81,8 @@ pub async fn cmd_workspace_import_files_b64(
     }
 
     let workspace_root = validate_workspace_root(&workspace)?;
-    let target_root = resolve_inside_workspace(
-        &workspace_root,
-        target_dir.as_deref().unwrap_or(""),
-    )?;
+    let target_root =
+        resolve_inside_workspace(&workspace_root, target_dir.as_deref().unwrap_or(""))?;
 
     tokio::fs::create_dir_all(&target_root)
         .await
@@ -219,11 +217,7 @@ async fn read_one_image_as_b64(raw_path: &str) -> ReadAsBase64Item {
     };
     let mut bytes = Vec::with_capacity(symlink_meta.len() as usize);
     use tokio::io::AsyncReadExt;
-    if let Err(e) = (&mut file)
-        .take(read_cap)
-        .read_to_end(&mut bytes)
-        .await
-    {
+    if let Err(e) = (&mut file).take(read_cap).read_to_end(&mut bytes).await {
         return make_err(format!("Read failed: {}", e));
     }
     if bytes.len() as u64 > MAX_IMAGE_SIZE_BYTES {
@@ -283,11 +277,7 @@ fn write_unique_file(
 
         // O_CREAT | O_EXCL — atomic create-only, no overwrite. EEXIST is the
         // race-safe "another writer just took this name" signal.
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&full)
-        {
+        match OpenOptions::new().write(true).create_new(true).open(&full) {
             Ok(mut f) => {
                 f.write_all(bytes)
                     .map_err(|e| format!("Failed to write {}: {}", candidate_name, e))?;
@@ -301,17 +291,11 @@ fn write_unique_file(
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                 counter += 1;
                 if counter > MAX_COLLISION_SUFFIX {
-                    return Err(format!(
-                        "Too many filename collisions for {}",
-                        safe_name
-                    ));
+                    return Err(format!("Too many filename collisions for {}", safe_name));
                 }
             }
             Err(e) => {
-                return Err(format!(
-                    "Failed to create {}: {}",
-                    candidate_name, e
-                ));
+                return Err(format!("Failed to create {}: {}", candidate_name, e));
             }
         }
     }
@@ -396,12 +380,8 @@ mod tests {
             name: "bad.bin".to_string(),
             content: "not_valid_base64!!!".to_string(),
         }];
-        let res = cmd_workspace_import_files_b64(
-            ws.to_string_lossy().to_string(),
-            payload,
-            None,
-        )
-        .await;
+        let res =
+            cmd_workspace_import_files_b64(ws.to_string_lossy().to_string(), payload, None).await;
         assert!(res.is_err());
         let _ = fs::remove_dir_all(&ws);
     }

@@ -16,8 +16,8 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use super::path_safety::{
-    resolve_existing_inside_workspace, resolve_inside_workspace,
-    validate_external_read_path, validate_workspace_root,
+    resolve_existing_inside_workspace, resolve_inside_workspace, validate_external_read_path,
+    validate_workspace_root,
 };
 
 const MAX_COLLISION_SUFFIX: u32 = 9999;
@@ -169,8 +169,7 @@ fn copy_internal_one(
     // check while `fs::copy` follows the link — exfiltrating bytes from
     // outside the workspace INTO an AI-readable workspace file.
     let resolved = resolve_existing_inside_workspace(workspace_root, src_rel)?;
-    let metadata =
-        fs::symlink_metadata(&resolved).map_err(|e| format!("stat failed: {}", e))?;
+    let metadata = fs::symlink_metadata(&resolved).map_err(|e| format!("stat failed: {}", e))?;
 
     // Copying a directory into itself / its own subtree would make
     // `copy_dir_recursive` walk the growing destination — refuse up front.
@@ -229,16 +228,15 @@ fn copy_one_path(
     auto_rename: bool,
 ) -> Result<CopiedFile, String> {
     let validated_source = validate_external_read_path(source)?;
-    let metadata = fs::symlink_metadata(&validated_source)
-        .map_err(|e| format!("stat failed: {}", e))?;
+    let metadata =
+        fs::symlink_metadata(&validated_source).map_err(|e| format!("stat failed: {}", e))?;
 
     let source_name = Path::new(source)
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
         .ok_or_else(|| "source has no filename".to_string())?;
 
-    let (final_name, renamed) =
-        unique_target_name(target_root, &source_name, auto_rename)?;
+    let (final_name, renamed) = unique_target_name(target_root, &source_name, auto_rename)?;
     let dest = target_root.join(&final_name);
 
     if metadata.is_dir() {
@@ -300,12 +298,10 @@ fn unique_target_name(
 
 fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
     fs::create_dir_all(dst).map_err(|e| format!("mkdir failed: {}", e))?;
-    let entries =
-        fs::read_dir(src).map_err(|e| format!("read_dir({}): {}", src.display(), e))?;
+    let entries = fs::read_dir(src).map_err(|e| format!("read_dir({}): {}", src.display(), e))?;
     for entry_result in entries {
         let entry = entry_result.map_err(|e| format!("read_dir entry: {}", e))?;
-        let metadata = fs::symlink_metadata(entry.path())
-            .map_err(|e| format!("stat: {}", e))?;
+        let metadata = fs::symlink_metadata(entry.path()).map_err(|e| format!("stat: {}", e))?;
         let dest_path = dst.join(entry.file_name());
         if metadata.is_symlink() {
             // Skip symlinks to avoid escaping the source tree. Mirrors the

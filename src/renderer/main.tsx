@@ -1,12 +1,12 @@
 import React from 'react';
 import { createRoot } from 'react-dom/client';
+import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 
-import App from './App';
 import AppErrorBoundary from './components/AppErrorBoundary';
 import { ConfigProvider } from './config/ConfigProvider';
 import { ToastProvider } from './components/Toast';
 import { ImagePreviewProvider } from './context/ImagePreviewContext';
-import { initFrontendLogger } from './utils/frontendLogger';
+import { initFrontendLogger, setLogServerUrl, setRendererLogLabel } from './utils/frontendLogger';
 import { installMacFunctionKeyGuard } from './utils/macFunctionKeyGuard';
 
 import './index.css';
@@ -18,6 +18,16 @@ initFrontendLogger();
 // see utils/macFunctionKeyGuard.ts. Must run before React mounts so the
 // document-level capture handler is attached when the first input fires.
 installMacFunctionKeyGuard();
+
+function installPlatformClass(): void {
+  const platformText = `${navigator.platform || ''} ${navigator.userAgent || ''}`.toLowerCase();
+  const html = document.documentElement;
+  html.classList.toggle('platform-windows', platformText.includes('win'));
+  html.classList.toggle('platform-macos', platformText.includes('mac'));
+  html.classList.toggle('platform-linux', platformText.includes('linux') || platformText.includes('x11'));
+}
+
+installPlatformClass();
 
 // Block native "Reload / Inspect Element" context menu in production.
 // Keep native menu for: input fields, text selection, contenteditable, links, images, media.
@@ -33,16 +43,91 @@ if (!import.meta.env.DEV) {
 }
 
 const root = createRoot(document.getElementById('root')!);
-// Note: React.StrictMode removed to prevent double-rendering of SSE effects in development
-// StrictMode causes useEffect to run twice, which duplicates SSE events and thinking blocks
-root.render(
-  <AppErrorBoundary>
-    <ConfigProvider>
+
+function bootstrapFloatingWindowLogSink(label: string): void {
+  console.info(`[${label}] window boot`);
+  void import('./api/tauriClient')
+    .then(async ({ getGlobalServerUrlWithWait, updateGlobalServerUrl }) => {
+      void import('./utils/tauriListen')
+        .then(({ listenWithCleanup }) => {
+          const ac = new AbortController();
+          void listenWithCleanup<string>('global-sidecar:restarted', (event) => {
+            const url = event.payload;
+            if (!url) return;
+            updateGlobalServerUrl(url);
+            setLogServerUrl(url);
+            console.info(`[${label}] unified log sink rebound after global restart: ${url}`);
+          }, ac.signal);
+        })
+        .catch((err) => {
+          console.warn(`[${label}] global sidecar restart listener unavailable:`, err);
+        });
+      const url = await getGlobalServerUrlWithWait();
+      if (!url) return;
+      setLogServerUrl(url);
+      console.info(`[${label}] unified log sink ready: ${url}`);
+    })
+    .catch((err) => {
+      console.warn(`[${label}] unified log sink unavailable:`, err);
+    });
+}
+
+// Floating ball windows (PRD 0.2.35): the ball + companion are separate Tauri
+// WebviewWindows loading this same bundle. Route by window label — they mount
+// their own minimal trees (no App / ConfigProvider; they read config via the
+// service layer directly). App itself is lazy so the two tiny fb windows never
+// parse/execute the multi-MB main-app chunk (and the main window pays only a
+// microtask + local chunk fetch).
+let tauriWindowLabel: string | undefined;
+try {
+  tauriWindowLabel = getCurrentWebviewWindow().label;
+} catch {
+  tauriWindowLabel = undefined; // browser dev mode — no Tauri runtime
+}
+
+if (tauriWindowLabel === 'fb-ball') {
+  setRendererLogLabel('fb-ball');
+  bootstrapFloatingWindowLogSink('fb-ball');
+  const BallWindow = React.lazy(() => import('./floating-ball/BallWindow'));
+  document.documentElement.classList.add('fb-transparent');
+  root.render(
+    <AppErrorBoundary>
+      <React.Suspense fallback={null}>
+        <BallWindow />
+      </React.Suspense>
+    </AppErrorBoundary>
+  );
+} else if (tauriWindowLabel === 'fb-companion') {
+  setRendererLogLabel('fb-companion');
+  bootstrapFloatingWindowLogSink('fb-companion');
+  const CompanionWindow = React.lazy(() => import('./floating-ball/CompanionWindow'));
+  document.documentElement.classList.add('fb-transparent');
+  root.render(
+    <AppErrorBoundary>
       <ToastProvider>
         <ImagePreviewProvider>
-          <App />
+          <React.Suspense fallback={null}>
+            <CompanionWindow />
+          </React.Suspense>
         </ImagePreviewProvider>
       </ToastProvider>
-    </ConfigProvider>
-  </AppErrorBoundary>
-);
+    </AppErrorBoundary>
+  );
+} else {
+  const App = React.lazy(() => import('./App'));
+  // Note: React.StrictMode removed to prevent double-rendering of SSE effects in development
+  // StrictMode causes useEffect to run twice, which duplicates SSE events and thinking blocks
+  root.render(
+    <AppErrorBoundary>
+      <ConfigProvider>
+        <ToastProvider>
+          <ImagePreviewProvider>
+            <React.Suspense fallback={null}>
+              <App />
+            </React.Suspense>
+          </ImagePreviewProvider>
+        </ToastProvider>
+      </ConfigProvider>
+    </AppErrorBoundary>
+  );
+}

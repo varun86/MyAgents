@@ -7,7 +7,7 @@
 // Hierarchy (intentional, not arbitrary):
 //   PanelHeader  — 18px semibold              ← modal / panel root
 //   FormSection  — 14px semibold              ← section grouping inside body
-//   field label  — 13px medium                ← single field
+//   field label  — 14px (text-sm) medium                ← single field
 //
 // Spacing constants are exported so callers compose with `${SECTION_GAP}`
 // instead of pasting `space-y-7` and slowly drifting apart again.
@@ -63,12 +63,12 @@ export function PanelHeader({
         <div className="flex items-center gap-2">
           {Icon && <Icon className="h-[18px] w-[18px] shrink-0 text-[var(--accent)]" />}
           {leading}
-          <h2 className="min-w-0 truncate text-[18px] font-semibold leading-snug text-[var(--ink)]">
+          <h2 className="min-w-0 truncate text-lg font-semibold leading-snug text-[var(--ink)]">
             {title}
           </h2>
         </div>
         {subtitle && (
-          <div className="mt-1 text-[12px] text-[var(--ink-muted)]">{subtitle}</div>
+          <div className="mt-1 text-xs text-[var(--ink-muted)]">{subtitle}</div>
         )}
       </div>
       {trailing}
@@ -114,9 +114,9 @@ export function FormSection({
     <section className={className}>
       <div className="mb-3 flex items-center gap-2">
         {Icon && <Icon className="h-4 w-4 shrink-0 text-[var(--ink-muted)]" />}
-        <h3 className="text-[14px] font-semibold text-[var(--ink)]">{title}</h3>
+        <h3 className="text-sm font-semibold text-[var(--ink)]">{title}</h3>
         {hint && (
-          <span className="text-[12px] font-normal text-[var(--ink-muted)]/80">
+          <span className="text-xs font-normal text-[var(--ink-muted)]/80">
             {hint}
           </span>
         )}
@@ -161,7 +161,7 @@ export function PanelFooter({
   return (
     <div className="flex shrink-0 items-center justify-between border-t border-[var(--line)] px-6 py-4">
       {error ? (
-        <p className="min-w-0 truncate pr-3 text-[12px] text-[var(--error)]" title={error}>
+        <p className="min-w-0 truncate pr-3 text-xs text-[var(--error)]" title={error}>
           {error}
         </p>
       ) : (

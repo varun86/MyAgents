@@ -35,7 +35,8 @@ const DEFAULT_PROXY_PORT: u16 = 7890;
 /// Public so that `terminal.rs` can reuse the same constant (portable-pty uses
 /// `CommandBuilder` instead of `std::process::Command`, so `apply_to_subprocess`
 /// can't be called directly).
-pub const LOCALHOST_NO_PROXY: &str = "localhost,localhost.localdomain,127.0.0.1,127.0.0.0/8,::1,[::1]";
+pub const LOCALHOST_NO_PROXY: &str =
+    "localhost,localhost.localdomain,127.0.0.1,127.0.0.0/8,::1,[::1]";
 
 /// Proxy settings from `~/.myagents/config.json`
 ///
@@ -88,7 +89,8 @@ pub fn read_proxy_settings() -> Option<ProxySettings> {
             ulog_warn!(
                 "[proxy_config] Failed to read config file {:?}: {}. \
                  Check file permissions.",
-                config_path, e
+                config_path,
+                e
             );
             return None;
         }
@@ -105,7 +107,8 @@ pub fn read_proxy_settings() -> Option<ProxySettings> {
             ulog_error!(
                 "[proxy_config] Invalid JSON in {:?}: {}. \
                  Please check the configuration file format.",
-                config_path, e
+                config_path,
+                e
             );
             return None;
         }
@@ -118,7 +121,10 @@ pub fn read_proxy_settings() -> Option<ProxySettings> {
 /// Returns Result to ensure configuration is valid
 pub fn get_proxy_url(settings: &ProxySettings) -> Result<String, String> {
     // Validate protocol
-    let protocol = settings.protocol.as_deref().unwrap_or(DEFAULT_PROXY_PROTOCOL);
+    let protocol = settings
+        .protocol
+        .as_deref()
+        .unwrap_or(DEFAULT_PROXY_PROTOCOL);
     if !["http", "https", "socks5"].contains(&protocol) {
         return Err(format!(
             "Invalid proxy protocol '{}'. Supported: http, https, socks5",
@@ -156,7 +162,10 @@ pub fn apply_to_subprocess(cmd: &mut Command) -> bool {
     if let Some(proxy_settings) = read_proxy_settings() {
         match get_proxy_url(&proxy_settings) {
             Ok(proxy_url) => {
-                ulog_info!("[proxy_config] Injecting proxy for subprocess: {}", proxy_url);
+                ulog_info!(
+                    "[proxy_config] Injecting proxy for subprocess: {}",
+                    proxy_url
+                );
                 cmd.env("HTTP_PROXY", &proxy_url);
                 cmd.env("HTTPS_PROXY", &proxy_url);
                 cmd.env("http_proxy", &proxy_url);
@@ -183,8 +192,14 @@ pub fn apply_to_subprocess(cmd: &mut Command) -> bool {
                     e
                 );
                 for var in &[
-                    "HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy",
-                    "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy",
+                    "HTTP_PROXY",
+                    "HTTPS_PROXY",
+                    "http_proxy",
+                    "https_proxy",
+                    "ALL_PROXY",
+                    "all_proxy",
+                    "NO_PROXY",
+                    "no_proxy",
                 ] {
                     cmd.env_remove(var);
                 }
@@ -207,12 +222,13 @@ pub fn apply_to_subprocess(cmd: &mut Command) -> bool {
 /// - If no proxy configured, inherit system network behavior (reqwest default proxy detection)
 /// NOTE: This function is for OUTGOING requests only (CDN, IM APIs). Localhost
 /// communication MUST use `local_http` module which unconditionally bypasses proxy.
-pub fn build_client_with_proxy(
-    builder: reqwest::ClientBuilder
-) -> Result<reqwest::Client, String> {
+pub fn build_client_with_proxy(builder: reqwest::ClientBuilder) -> Result<reqwest::Client, String> {
     let final_builder = if let Some(proxy_settings) = read_proxy_settings() {
         let proxy_url = get_proxy_url(&proxy_settings)?;
-        ulog_info!("[proxy_config] Using proxy for external requests: {}", proxy_url);
+        ulog_info!(
+            "[proxy_config] Using proxy for external requests: {}",
+            proxy_url
+        );
 
         // Configure proxy but exclude localhost and all loopback addresses
         // Comprehensive NO_PROXY list for maximum compatibility:
@@ -233,7 +249,8 @@ pub fn build_client_with_proxy(
         builder
     };
 
-    final_builder.build()
+    final_builder
+        .build()
         .map_err(|e| format!("[proxy_config] Failed to build HTTP client: {}", e))
 }
 

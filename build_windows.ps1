@@ -9,6 +9,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$PSNativeCommandUseErrorActionPreference = $false
 $BuildSuccess = $false
 
 try {
@@ -148,31 +149,70 @@ try {
     # ========================================
     Write-Host "[2/7] 检查依赖..." -ForegroundColor Blue
 
+    function Get-CargoBinPath {
+        if ($env:CARGO_HOME) {
+            return (Join-Path $env:CARGO_HOME "bin")
+        }
+        return (Join-Path $env:USERPROFILE ".cargo\bin")
+    }
+
+    function Refresh-ProcessPath {
+        $cargoBin = Get-CargoBinPath
+        $pathValues = @(
+            [Environment]::GetEnvironmentVariable("Path", "Process"),
+            [Environment]::GetEnvironmentVariable("Path", "Machine"),
+            [Environment]::GetEnvironmentVariable("Path", "User"),
+            $cargoBin
+        )
+
+        $seen = @{}
+        $segments = @()
+        foreach ($pathValue in $pathValues) {
+            if ([string]::IsNullOrWhiteSpace($pathValue)) { continue }
+            foreach ($part in ($pathValue -split ';')) {
+                $trimmed = $part.Trim()
+                if ([string]::IsNullOrWhiteSpace($trimmed)) { continue }
+                $key = $trimmed.TrimEnd('\').ToLowerInvariant()
+                if (-not $seen.ContainsKey($key)) {
+                    $seen[$key] = $true
+                    $segments += $trimmed
+                }
+            }
+        }
+
+        $env:Path = ($segments -join ';')
+    }
+
     function Test-Command {
         param([string]$Command, [string]$HelpUrl)
-        try {
-            $null = Invoke-Expression $Command 2>&1
+        Refresh-ProcessPath
+        & cmd.exe /d /s /c "$Command >NUL 2>NUL"
+        if ($LASTEXITCODE -eq 0) {
             return $true
         }
-        catch {
-            Write-Host "  X - $Command 未安装" -ForegroundColor Red
-            Write-Host "      请安装: $HelpUrl" -ForegroundColor Yellow
-            return $false
+        Write-Host "  X - $Command 未安装" -ForegroundColor Red
+        Write-Host "      请安装: $HelpUrl" -ForegroundColor Yellow
+        return $false
+    }
+
+    Refresh-ProcessPath
+    $depOk = $true
+    if (-not (Test-Command "rustup --version" "https://rustup.rs")) { $depOk = $false }
+    if (-not (Test-Command "npm --version" "https://nodejs.org")) { $depOk = $false }
+
+    # Rust toolchain/components/target 必须与 rust-toolchain.toml 和 CI 对齐。
+    if ($depOk) {
+        try {
+            & "$ProjectDir\scripts\ensure_rust_toolchain.ps1" -Targets @("x86_64-pc-windows-msvc")
+        } catch {
+            Write-Host "  Rust toolchain 准备失败: $_" -ForegroundColor Red
+            $depOk = $false
         }
     }
 
-    $depOk = $true
-    if (-not (Test-Command "rustc --version" "https://rustup.rs")) { $depOk = $false }
-    if (-not (Test-Command "npm --version" "https://nodejs.org")) { $depOk = $false }
-
-    # 检查 Rust Windows 目标
-    $installedTargets = & rustup target list --installed 2>$null
-    if ($installedTargets -notcontains "x86_64-pc-windows-msvc") {
-        Write-Host "  安装 Rust 目标: x86_64-pc-windows-msvc" -ForegroundColor Yellow
-        & rustup target add x86_64-pc-windows-msvc
-    }
-    else {
-        Write-Host "  OK - Rust 目标已安装: x86_64-pc-windows-msvc" -ForegroundColor Green
+    if ($depOk) {
+        if (-not (Test-Command "rustc --version" "https://rustup.rs")) { $depOk = $false }
+        if (-not (Test-Command "cargo --version" "https://rustup.rs")) { $depOk = $false }
     }
 
     if (-not $depOk) {
@@ -777,3 +817,6 @@ if ($BuildSuccess) {
     Write-Host "按回车键退出..." -ForegroundColor Yellow
 }
 Read-Host
+if (-not $BuildSuccess) {
+    exit 1
+}

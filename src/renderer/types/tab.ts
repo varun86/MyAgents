@@ -67,6 +67,10 @@ export interface InitialMessage {
     builtinSelection?: { providerId: string; model: string };
     /** External runtime 的 model — 没有 provider 概念 */
     runtimeModel?: string;
+    /** #324 — 推理强度 setting ('default' | level)。手递（hand-carry）进新 Tab：
+     *  launcher 的 agent-config 写盘是异步的，handoff 不能赌它赢过 sidecar 启动
+     *  自解析；与 builtinSelection/runtimeModel 同理。 */
+    reasoningEffort?: string;
     /** Optional cron task configuration drafted in launcher (PRD 0.2.7). */
     cron?: InitialMessageCron;
 }
@@ -93,6 +97,13 @@ export interface InitialMessage {
  */
 export type SidecarConfigDisposition = 'pending' | 'push' | 'adopt';
 
+/** Runtime-only request for Chat to open a workspace file once after mount/activation. */
+export interface FilePreviewIntent {
+    id: string;
+    path: string;
+    initialLineNumber?: number;
+}
+
 export interface Tab {
     id: string;
     agentDir: string | null;  // null = showing Launcher
@@ -113,6 +124,9 @@ export interface Tab {
      *  initial active-tab activation) opens it. Cleared by
      *  App.activateRestoredTab once its sidecar is ensured. See PRD 0.2.25. */
     restoreState?: 'cold';
+    /** Runtime-only (never persisted). Set by floating-ball path actions to
+     *  ask the target Chat tab to open a workspace file in its preview surface. */
+    pendingFilePreview?: FilePreviewIntent;
 }
 
 export interface TabState {

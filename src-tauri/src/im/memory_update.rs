@@ -12,10 +12,10 @@ use serde::Deserialize;
 use tauri::{AppHandle, Emitter, Runtime};
 use tokio::sync::RwLock;
 
-use crate::sidecar::{self, ManagedSidecarManager, SidecarOwner};
-use crate::{ulog_info, ulog_warn, ulog_error, ulog_debug};
 use crate::config_io::with_config_lock;
+use crate::sidecar::{self, ManagedSidecarManager, SidecarOwner};
 use crate::utils::bom::strip_bom;
+use crate::{ulog_debug, ulog_error, ulog_info, ulog_warn};
 
 use super::types::MemoryAutoUpdateConfig;
 
@@ -109,14 +109,21 @@ pub async fn check_and_spawn<R: Runtime>(
         if let Ok(last_dt) = last_batch.parse::<DateTime<Utc>>() {
             let hours_since = (Utc::now() - last_dt).num_hours();
             if hours_since < mau_config.interval_hours as i64 {
-                ulog_debug!("[memory-update] Skipped: only {}h since last batch (need {}h)", hours_since, mau_config.interval_hours);
+                ulog_debug!(
+                    "[memory-update] Skipped: only {}h since last batch (need {}h)",
+                    hours_since,
+                    mau_config.interval_hours
+                );
                 return;
             }
         }
     }
 
     // Gate 5: Not already running (atomic CAS)
-    if is_running.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+    if is_running
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
         ulog_debug!("[memory-update] Skipped: batch already running");
         return;
     }
@@ -154,13 +161,15 @@ pub async fn check_and_spawn<R: Runtime>(
 
     ulog_info!(
         "[memory-update] Starting batch for agent {} — {} qualifying session(s)",
-        agent_id, qualifying.len()
+        agent_id,
+        qualifying.len()
     );
 
     // Record lastBatchAt NOW (before spawning)
     update_config_field(app_handle, agent_id, |c| {
         c.last_batch_at = Some(Utc::now().to_rfc3339());
-    }).await;
+    })
+    .await;
 
     // Spawn independent batch task
     let is_running_clone = Arc::clone(is_running);
@@ -182,17 +191,21 @@ pub async fn check_and_spawn<R: Runtime>(
             &model,
             &provider_env,
             &mcp_json,
-        ).await;
+        )
+        .await;
 
         // Update lastBatchSessionCount
         update_config_field(&ah, &agent_id_owned, move |c| {
             c.last_batch_session_count = Some(count);
-        }).await;
+        })
+        .await;
 
         is_running_clone.store(false, Ordering::SeqCst);
         ulog_info!(
             "[memory-update] Batch complete for agent {} — {}/{} sessions updated",
-            agent_id_owned, count, qualifying.len()
+            agent_id_owned,
+            count,
+            qualifying.len()
         );
     });
 }
@@ -226,7 +239,9 @@ async fn run_batch<R: Runtime>(
                 let ago = (Utc::now() - *last_active).num_minutes();
                 ulog_info!(
                     "[memory-update] Session {} active {}min ago (cooldown {}min), deferring",
-                    session_id, ago, ACTIVE_SESSION_COOLDOWN_MINUTES
+                    session_id,
+                    ago,
+                    ACTIVE_SESSION_COOLDOWN_MINUTES
                 );
                 deferred.push(session_id.clone());
                 continue;
@@ -234,12 +249,24 @@ async fn run_batch<R: Runtime>(
         }
 
         match update_single_session(
-            session_id, agent_id, workspace_path, sidecar_manager,
-            app_handle, &http_client, current_model, current_provider_env, mcp_servers_json,
-        ).await {
+            session_id,
+            agent_id,
+            workspace_path,
+            sidecar_manager,
+            app_handle,
+            &http_client,
+            current_model,
+            current_provider_env,
+            mcp_servers_json,
+        )
+        .await
+        {
             SessionUpdateOutcome::Updated => {
                 updated += 1;
-                ulog_info!("[memory-update] Session {} updated successfully", session_id);
+                ulog_info!(
+                    "[memory-update] Session {} updated successfully",
+                    session_id
+                );
             }
             SessionUpdateOutcome::Deferred => {
                 // Sidecar bound but still booting — expected transient, retry next phase.
@@ -259,9 +286,13 @@ async fn run_batch<R: Runtime>(
     if !deferred.is_empty() {
         ulog_info!(
             "[memory-update] {} session(s) deferred, retrying in {}min",
-            deferred.len(), ACTIVE_SESSION_COOLDOWN_MINUTES
+            deferred.len(),
+            ACTIVE_SESSION_COOLDOWN_MINUTES
         );
-        tokio::time::sleep(Duration::from_secs(ACTIVE_SESSION_COOLDOWN_MINUTES as u64 * 60)).await;
+        tokio::time::sleep(Duration::from_secs(
+            ACTIVE_SESSION_COOLDOWN_MINUTES as u64 * 60,
+        ))
+        .await;
 
         // Re-read fresh timestamps
         let fresh_map = read_session_last_active_map();
@@ -270,18 +301,33 @@ async fn run_batch<R: Runtime>(
         for session_id in &deferred {
             if let Some(last_active) = fresh_map.get(session_id.as_str()) {
                 if *last_active > fresh_cutoff {
-                    ulog_info!("[memory-update] Session {} still active after wait, skipping", session_id);
+                    ulog_info!(
+                        "[memory-update] Session {} still active after wait, skipping",
+                        session_id
+                    );
                     continue;
                 }
             }
 
             match update_single_session(
-                session_id, agent_id, workspace_path, sidecar_manager,
-                app_handle, &http_client, current_model, current_provider_env, mcp_servers_json,
-            ).await {
+                session_id,
+                agent_id,
+                workspace_path,
+                sidecar_manager,
+                app_handle,
+                &http_client,
+                current_model,
+                current_provider_env,
+                mcp_servers_json,
+            )
+            .await
+            {
                 SessionUpdateOutcome::Updated => {
                     updated += 1;
-                    ulog_info!("[memory-update] Session {} updated successfully (deferred)", session_id);
+                    ulog_info!(
+                        "[memory-update] Session {} updated successfully (deferred)",
+                        session_id
+                    );
                 }
                 SessionUpdateOutcome::Deferred => {
                     // Already waited the cooldown; no further retry phase. Still
@@ -292,7 +338,11 @@ async fn run_batch<R: Runtime>(
                     );
                 }
                 SessionUpdateOutcome::Failed(e) => {
-                    ulog_error!("[memory-update] Session {} failed (deferred): {}", session_id, e);
+                    ulog_error!(
+                        "[memory-update] Session {} failed (deferred): {}",
+                        session_id,
+                        e
+                    );
                 }
             }
         }
@@ -358,7 +408,13 @@ async fn update_single_session<R: Runtime>(
 
                 // Sync AI config only for a sidecar this memory-update turn created.
                 if result.is_new {
-                    sync_ai_config_to_port(result.port, current_model, current_provider_env, mcp_servers_json).await;
+                    sync_ai_config_to_port(
+                        result.port,
+                        current_model,
+                        current_provider_env,
+                        mcp_servers_json,
+                    )
+                    .await;
                 }
                 Ok((result.port, true))
             }
@@ -380,13 +436,18 @@ async fn update_single_session<R: Runtime>(
             .await
             .map_err(|e| format!("HTTP request failed: {}", e))?;
 
-        let resp: MemoryUpdateResponse = result.json().await
+        let resp: MemoryUpdateResponse = result
+            .json()
+            .await
             .map_err(|e| format!("Failed to parse response: {}", e))?;
 
         match resp.status.as_str() {
             "completed" => Ok(()),
             "timeout" => {
-                ulog_warn!("[memory-update] Session {} timed out (AI took too long)", session_id);
+                ulog_warn!(
+                    "[memory-update] Session {} timed out (AI took too long)",
+                    session_id
+                );
                 Ok(()) // Still count as attempted — don't retry immediately
             }
             "skipped" => Err(format!("Skipped: {:?}", resp.reason)),
@@ -397,7 +458,8 @@ async fn update_single_session<R: Runtime>(
             "error" => Err(format!("Turn failed: {:?}", resp.reason)),
             _ => Err(format!("Unexpected status: {}", resp.status)),
         }
-    }.await;
+    }
+    .await;
 
     // Always release temp sidecar, regardless of success/failure
     if was_temp {
@@ -435,7 +497,8 @@ async fn sync_ai_config_to_port(
     }
 
     if !payload.is_empty() {
-        let _ = client.post(&url)
+        let _ = client
+            .post(&url)
             .json(&serde_json::Value::Object(payload))
             .send()
             .await;
@@ -454,7 +517,10 @@ fn read_session_last_active_map() -> std::collections::HashMap<String, DateTime<
     let content = match std::fs::read_to_string(&sessions_path) {
         Ok(c) => c,
         Err(e) => {
-            ulog_warn!("[memory-update] Failed to read sessions.json for activity check: {}", e);
+            ulog_warn!(
+                "[memory-update] Failed to read sessions.json for activity check: {}",
+                e
+            );
             return Default::default();
         }
     };
@@ -462,7 +528,10 @@ fn read_session_last_active_map() -> std::collections::HashMap<String, DateTime<
     let sessions: Vec<SessionMeta> = match serde_json::from_str(strip_bom(&content)) {
         Ok(s) => s,
         Err(e) => {
-            ulog_warn!("[memory-update] Failed to parse sessions.json for activity check: {}", e);
+            ulog_warn!(
+                "[memory-update] Failed to parse sessions.json for activity check: {}",
+                e
+            );
             return Default::default();
         }
     };
@@ -479,7 +548,10 @@ fn read_session_last_active_map() -> std::collections::HashMap<String, DateTime<
 }
 
 /// Collect session IDs that qualify for memory update
-fn collect_qualifying_sessions(workspace_path: &str, config: &MemoryAutoUpdateConfig) -> Vec<String> {
+fn collect_qualifying_sessions(
+    workspace_path: &str,
+    config: &MemoryAutoUpdateConfig,
+) -> Vec<String> {
     let myagents_dir = match dirs::home_dir() {
         Some(home) => home.join(".myagents"),
         None => return vec![],
@@ -540,7 +612,9 @@ fn collect_qualifying_sessions(workspace_path: &str, config: &MemoryAutoUpdateCo
 
 /// Count user queries since the last <MEMORY_UPDATE> marker in a session's JSONL
 fn count_queries_since_last_update(myagents_dir: &Path, session_id: &str) -> u32 {
-    let jsonl_path = myagents_dir.join("sessions").join(format!("{}.jsonl", session_id));
+    let jsonl_path = myagents_dir
+        .join("sessions")
+        .join(format!("{}.jsonl", session_id));
     let content = match std::fs::read_to_string(&jsonl_path) {
         Ok(c) => c,
         Err(_) => return 0,
@@ -595,11 +669,17 @@ fn count_queries_since_last_update(myagents_dir: &Path, session_id: &str) -> u32
 
 /// Check if current time is within the update window
 fn is_in_update_window(config: &MemoryAutoUpdateConfig) -> bool {
-    let tz_name = config.update_window_timezone.as_deref().unwrap_or("Asia/Shanghai");
+    let tz_name = config
+        .update_window_timezone
+        .as_deref()
+        .unwrap_or("Asia/Shanghai");
     let tz: chrono_tz::Tz = match tz_name.parse() {
         Ok(tz) => tz,
         Err(_) => {
-            ulog_warn!("[memory-update] Invalid timezone '{}', assuming in-window", tz_name);
+            ulog_warn!(
+                "[memory-update] Invalid timezone '{}', assuming in-window",
+                tz_name
+            );
             return true;
         }
     };
@@ -622,7 +702,9 @@ fn is_in_update_window(config: &MemoryAutoUpdateConfig) -> bool {
 /// Parse "HH:MM" to minutes since midnight
 fn parse_hhmm(s: &str) -> Option<u32> {
     let parts: Vec<&str> = s.split(':').collect();
-    if parts.len() != 2 { return None; }
+    if parts.len() != 2 {
+        return None;
+    }
     let h: u32 = parts[0].parse().ok()?;
     let m: u32 = parts[1].parse().ok()?;
     Some(h * 60 + m)
@@ -666,8 +748,8 @@ async fn update_config_field<R: Runtime>(
                             .unwrap_or_default();
                         let mut mau = mau;
                         f(&mut mau);
-                        agent["memoryAutoUpdate"] = serde_json::to_value(&mau)
-                            .unwrap_or(serde_json::Value::Null);
+                        agent["memoryAutoUpdate"] =
+                            serde_json::to_value(&mau).unwrap_or(serde_json::Value::Null);
                         break;
                     }
                 }
@@ -676,7 +758,8 @@ async fn update_config_field<R: Runtime>(
         })?;
 
         Ok(())
-    }).await;
+    })
+    .await;
 
     match result {
         Ok(Ok(())) => {}

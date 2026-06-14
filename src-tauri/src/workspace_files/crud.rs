@@ -8,9 +8,7 @@ use std::path::Path;
 
 use serde::Serialize;
 
-use super::path_safety::{
-    resolve_inside_workspace, validate_item_name, validate_workspace_root,
-};
+use super::path_safety::{resolve_inside_workspace, validate_item_name, validate_workspace_root};
 
 /// Symlink-aware existence probe. `Path::exists()` follows symlinks, which
 /// returns `false` for a broken symlink — see CLAUDE.md v0.2.5 red-line. For
@@ -125,8 +123,7 @@ pub async fn cmd_workspace_rename(
     if slot_occupied(&new_resolved) {
         return Err("Target name already exists".to_string());
     }
-    fs::rename(&old_resolved, &new_resolved)
-        .map_err(|e| format!("Rename failed: {}", e))?;
+    fs::rename(&old_resolved, &new_resolved).map_err(|e| format!("Rename failed: {}", e))?;
     let rel = new_resolved
         .strip_prefix(&workspace_root)
         .map_err(|_| "Path escaped workspace".to_string())?

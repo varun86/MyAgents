@@ -45,7 +45,9 @@ const LAST_EXIT_FILE: &str = "last-exit.json";
 /// write only costs a dismissable restore pill on the next launch — the safe
 /// failure direction.
 pub fn record_clean_exit(is_restart: bool) {
-    let Some(dir) = myagents_data_dir() else { return };
+    let Some(dir) = myagents_data_dir() else {
+        return;
+    };
     match write_clean_exit_marker(&dir, is_restart) {
         Ok(true) => ulog_info!("[app-lock] Clean-exit marker recorded"),
         Ok(false) => {} // update-restart: intentionally no marker
@@ -184,7 +186,9 @@ pub fn acquire_lock() -> LockAcquireResult {
 /// Only removes if the file still contains OUR PID (another instance may have
 /// overwritten it if we're being replaced).
 pub fn release_lock() {
-    let Some(lock_path) = lock_file_path() else { return };
+    let Some(lock_path) = lock_file_path() else {
+        return;
+    };
     let current_pid = std::process::id().to_string();
 
     match fs::read_to_string(&lock_path) {

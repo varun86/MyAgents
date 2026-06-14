@@ -4112,9 +4112,7 @@ fn im_config_has_start_credentials(config: &ImConfig) -> bool {
     }
 }
 
-fn missing_configured_channel_status(
-    persisted_status: &types::ImStatus,
-) -> types::ImStatus {
+fn missing_configured_channel_status(persisted_status: &types::ImStatus) -> types::ImStatus {
     if matches!(persisted_status, types::ImStatus::Error) {
         return types::ImStatus::Error;
     }
@@ -4394,8 +4392,7 @@ mod agent_monitor_tests {
             Some(0)
         );
         assert_eq!(
-            salvage_agents_from_value(&serde_json::json!({ "agents": [] }), &keys)
-                .map(|v| v.len()),
+            salvage_agents_from_value(&serde_json::json!({ "agents": [] }), &keys).map(|v| v.len()),
             Some(0)
         );
 
@@ -4427,7 +4424,8 @@ mod agent_monitor_tests {
                 "enabled": enabled,
                 "openclawPluginId": "openclaw-weixin"
             }]
-        }])).unwrap()
+        }]))
+        .unwrap()
     }
 
     #[test]
@@ -4443,10 +4441,8 @@ mod agent_monitor_tests {
     #[test]
     fn monitor_reconcile_skips_running_or_disabled_channels() {
         let agents = agent_config_with_weixin_channel(true);
-        let running = std::collections::HashSet::from([(
-            "agent-1".to_string(),
-            "weixin".to_string(),
-        )]);
+        let running =
+            std::collections::HashSet::from([("agent-1".to_string(), "weixin".to_string())]);
 
         assert!(find_missing_startable_agent_channels(&agents, &running, &[]).is_empty());
 
@@ -4455,7 +4451,8 @@ mod agent_monitor_tests {
             &disabled_agents,
             &std::collections::HashSet::new(),
             &[],
-        ).is_empty());
+        )
+        .is_empty());
     }
 
     #[test]
@@ -4617,20 +4614,19 @@ fn read_im_configs_from_disk() -> Vec<(String, ImConfig)> {
         // before the strict parse — PartialAppConfig also deserializes
         // `agents: Vec<AgentConfigRust>`, so an object `providerEnvJson` on any
         // agent would otherwise fail this whole parse too.
-        let app_config: PartialAppConfig = match serde_json::from_str::<serde_json::Value>(
-            strip_bom(&content),
-        )
-        .map_err(|e| e.to_string())
-        .and_then(|mut value| {
-            normalize_stringified_json_value(&mut value);
-            serde_json::from_value::<PartialAppConfig>(value).map_err(|e| e.to_string())
-        }) {
-            Ok(c) => c,
-            Err(e) => {
-                ulog_warn!("[im] Config {} file corrupted, trying next: {}", label, e);
-                continue;
-            }
-        };
+        let app_config: PartialAppConfig =
+            match serde_json::from_str::<serde_json::Value>(strip_bom(&content))
+                .map_err(|e| e.to_string())
+                .and_then(|mut value| {
+                    normalize_stringified_json_value(&mut value);
+                    serde_json::from_value::<PartialAppConfig>(value).map_err(|e| e.to_string())
+                }) {
+                Ok(c) => c,
+                Err(e) => {
+                    ulog_warn!("[im] Config {} file corrupted, trying next: {}", label, e);
+                    continue;
+                }
+            };
 
         if i > 0 {
             ulog_warn!("[im] Recovered config from {} file", label);
@@ -5068,8 +5064,7 @@ fn persist_agent_config_read_heal(config_path: &Path, reason: &str) {
             .get("providerApiKeys")
             .and_then(|v| serde_json::from_value(v.clone()).ok())
             .unwrap_or_default();
-        let migrated_provider_env =
-            migrate_agent_provider_env_value(&mut healed, &api_keys, false);
+        let migrated_provider_env = migrate_agent_provider_env_value(&mut healed, &api_keys, false);
         if !(normalized || migrated_provider_env) {
             return Ok(());
         }
@@ -5142,14 +5137,15 @@ fn read_agent_configs_from_disk() -> Vec<AgentConfigRust> {
             .get("providerApiKeys")
             .and_then(|v| serde_json::from_value(v.clone()).ok())
             .unwrap_or_default();
-        let migrated_provider_env =
-            migrate_agent_provider_env_value(&mut value, &api_keys, true);
+        let migrated_provider_env = migrate_agent_provider_env_value(&mut value, &api_keys, true);
 
         match salvage_agents_from_value(&value, &api_keys) {
             Some(agents) => {
                 if i == 0 && (normalized || migrated_provider_env) {
                     let reason = match (normalized, migrated_provider_env) {
-                        (true, true) => "stringified JSON normalization + providerEnvJson migration",
+                        (true, true) => {
+                            "stringified JSON normalization + providerEnvJson migration"
+                        }
                         (true, false) => "stringified JSON normalization",
                         (false, true) => "providerEnvJson migration",
                         (false, false) => unreachable!(),
@@ -5828,10 +5824,7 @@ async fn ensure_agent_level_runners_started<R: Runtime>(
                 let agent = match agents_guard.get(&agent_id) {
                     Some(a) => a,
                     None => {
-                        ulog_debug!(
-                            "[agent-heartbeat] Agent {} not found, stopping",
-                            agent_id
-                        );
+                        ulog_debug!("[agent-heartbeat] Agent {} not found, stopping", agent_id);
                         break;
                     }
                 };
@@ -5978,7 +5971,8 @@ pub async fn monitor_agent_channels(
     let mut next_retry: HashMap<(String, String), tokio::time::Instant> = HashMap::new();
     // Orphaned channels: (agent_id, channel_id) for channels removed from agent_state
     // during a failed restart. Merged into dead_channels on each cycle so they get retried.
-    let mut orphaned: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+    let mut orphaned: std::collections::HashSet<(String, String)> =
+        std::collections::HashSet::new();
 
     loop {
         tokio::time::sleep(Duration::from_secs(CHECK_INTERVAL_SECS)).await;
@@ -6008,11 +6002,10 @@ pub async fn monitor_agent_channels(
             refs
             // lock dropped here
         };
-        let running_channel_keys: std::collections::HashSet<(String, String)> =
-            channel_health_refs
-                .iter()
-                .map(|(agent_id, channel_id, _)| (agent_id.clone(), channel_id.clone()))
-                .collect();
+        let running_channel_keys: std::collections::HashSet<(String, String)> = channel_health_refs
+            .iter()
+            .map(|(agent_id, channel_id, _)| (agent_id.clone(), channel_id.clone()))
+            .collect();
 
         let mut dead_channels: Vec<(String, String)> = Vec::new();
         for (agent_id, channel_id, health) in &channel_health_refs {
@@ -6035,7 +6028,10 @@ pub async fn monitor_agent_channels(
 
         // Merge orphaned channels (failed restart last cycle, no longer in agent_state)
         for (agent_id, channel_id) in &orphaned {
-            if !dead_channels.iter().any(|(aid, cid)| aid == agent_id && cid == channel_id) {
+            if !dead_channels
+                .iter()
+                .any(|(aid, cid)| aid == agent_id && cid == channel_id)
+            {
                 dead_channels.push((agent_id.clone(), channel_id.clone()));
             }
         }
@@ -6141,40 +6137,41 @@ pub async fn monitor_agent_channels(
                     // completely, create the AgentInstance from disk config so
                     // future monitor cycles can see it.
                     let mut agents_guard = agent_state.lock().await;
-                    let agent = agents_guard
-                        .entry(agent_id.clone())
-                        .or_insert_with(|| AgentInstance {
-                            agent_id: agent_id.clone(),
-                            config: agent_cfg.clone(),
-                            channels: HashMap::new(),
-                            last_active_channel: Arc::new(RwLock::new(
-                                agent_cfg.last_active_channel.clone(),
-                            )),
-                            heartbeat_handle: None,
-                            heartbeat_wake_tx: None,
-                            heartbeat_config: None,
-                            current_model: Arc::new(RwLock::new(agent_cfg.model.clone())),
-                            current_provider_env: Arc::new(RwLock::new(
-                                agent_cfg
-                                    .provider_env_json
-                                    .as_ref()
-                                    .and_then(|s| serde_json::from_str(s).ok()),
-                            )),
-                            permission_mode: Arc::new(RwLock::new(
-                                agent_cfg.permission_mode.clone(),
-                            )),
-                            mcp_servers_json: Arc::new(RwLock::new(
-                                agent_cfg.mcp_servers_json.clone(),
-                            )),
-                            runtime: Arc::new(RwLock::new(normalize_runtime_type(
-                                agent_cfg.runtime.as_deref(),
-                            ))),
-                            runtime_config: Arc::new(RwLock::new(
-                                agent_cfg.runtime_config.clone(),
-                            )),
-                            memory_update_config: None,
-                            memory_update_running: None,
-                        });
+                    let agent =
+                        agents_guard
+                            .entry(agent_id.clone())
+                            .or_insert_with(|| AgentInstance {
+                                agent_id: agent_id.clone(),
+                                config: agent_cfg.clone(),
+                                channels: HashMap::new(),
+                                last_active_channel: Arc::new(RwLock::new(
+                                    agent_cfg.last_active_channel.clone(),
+                                )),
+                                heartbeat_handle: None,
+                                heartbeat_wake_tx: None,
+                                heartbeat_config: None,
+                                current_model: Arc::new(RwLock::new(agent_cfg.model.clone())),
+                                current_provider_env: Arc::new(RwLock::new(
+                                    agent_cfg
+                                        .provider_env_json
+                                        .as_ref()
+                                        .and_then(|s| serde_json::from_str(s).ok()),
+                                )),
+                                permission_mode: Arc::new(RwLock::new(
+                                    agent_cfg.permission_mode.clone(),
+                                )),
+                                mcp_servers_json: Arc::new(RwLock::new(
+                                    agent_cfg.mcp_servers_json.clone(),
+                                )),
+                                runtime: Arc::new(RwLock::new(normalize_runtime_type(
+                                    agent_cfg.runtime.as_deref(),
+                                ))),
+                                runtime_config: Arc::new(RwLock::new(
+                                    agent_cfg.runtime_config.clone(),
+                                )),
+                                memory_update_config: None,
+                                memory_update_running: None,
+                            });
                     let link = AgentChannelLink {
                         channel_id: channel_id.clone(),
                         agent_id: agent_id.clone(),

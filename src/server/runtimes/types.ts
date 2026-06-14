@@ -27,6 +27,9 @@ export interface SessionStartOptions {
   systemPromptAppend?: string;
   model?: string;
   permissionMode?: string;
+  /** #324 — NORMALIZED reasoning effort level (never 'default'); absent =
+   *  runtime default. CC maps to `--effort`, Codex to `turn/start.effort`. */
+  reasoningEffort?: string;
   maxTurns?: number;
   resumeSessionId?: string;
   disallowedTools?: string[];
@@ -54,6 +57,31 @@ export interface RuntimeProcess {
   exited: boolean;
   /** Wait for the process to exit */
   waitForExit(): Promise<number>;
+}
+
+export type RuntimeConfigApplyMode =
+  | 'next_turn_state'
+  | 'live_session_rpc'
+  | 'restart_when_idle'
+  | 'unsupported';
+
+export interface RuntimeConfigCapabilities {
+  model: RuntimeConfigApplyMode;
+  permissionMode: RuntimeConfigApplyMode;
+  reasoningEffort: RuntimeConfigApplyMode;
+}
+
+export interface ExternalRuntimeConfigPatch {
+  model?: string | undefined;
+  permissionMode?: string | undefined;
+  /** NORMALIZED level for the session layer: undefined = untouched, '' = runtime default. */
+  reasoningEffort?: string | undefined;
+}
+
+export interface ExternalRuntimeConfigSnapshot {
+  model?: string;
+  permissionMode?: string;
+  reasoningEffort?: string;
 }
 
 /**
@@ -156,7 +184,7 @@ export type UnifiedEvent =
   // === Session lifecycle ===
   | { kind: 'session_init'; sessionId: string; model: string; tools: string[] }
   | { kind: 'status_change'; state: 'idle' | 'running' | 'waiting_permission' | 'error' }
-  | { kind: 'turn_complete'; result?: string }
+  | { kind: 'turn_complete'; result?: string; status?: string; error?: string }
   | {
     kind: 'session_complete';
     result: string;
@@ -211,6 +239,9 @@ export type UnifiedEventCallback = (event: UnifiedEvent) => void;
  */
 export interface AgentRuntime {
   readonly type: RuntimeType;
+
+  /** How this runtime applies turn-scoped config changes at a safe boundary. */
+  getConfigCapabilities?(): RuntimeConfigCapabilities;
 
   /** Check if the CLI is installed and get version info */
   detect(): Promise<RuntimeDetection>;
@@ -268,13 +299,23 @@ export interface AgentRuntime {
   interruptTurn?(process: RuntimeProcess): Promise<void>;
 
   /**
-   * Switch the session's active model in-place without restarting the process.
-   * Optional — only runtimes whose protocol exposes mid-session model switching
-   * implement this (currently Gemini via ACP `session/set_model`). When absent
-   * or the call fails, the session layer falls back to stopExternalSession()
-   * so the next message resumes with the new model.
+   * Apply a model update at the session layer's chosen turn boundary. The
+   * actual meaning is declared by getConfigCapabilities(): Codex records
+   * next-turn state, Gemini performs ACP session/set_model, and per-turn
+   * runtimes may omit this because the next spawn reads SessionStartOptions.
    */
-  setModel?(process: RuntimeProcess, model: string): Promise<void>;
+  setModel?(process: RuntimeProcess, model: string | undefined): Promise<void>;
+
+  /** Switch the session permission mode according to this runtime's capabilities. */
+  setPermissionMode?(process: RuntimeProcess, mode: string | undefined): Promise<void>;
+
+  /**
+   * #324 — apply reasoning effort at the session layer's chosen turn boundary.
+   * `effort` is a NORMALIZED level (never 'default'); undefined = runtime
+   * default. Codex records next-turn process state; Claude Code omits this and
+   * rereads SessionStartOptions.reasoningEffort on the next per-turn spawn.
+   */
+  setReasoningEffort?(process: RuntimeProcess, effort: string | undefined): Promise<void>;
 }
 
 /**

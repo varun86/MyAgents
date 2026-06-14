@@ -25,7 +25,7 @@
 
 ## 1. 怎么在 Windows 上验证（准备）
 
-1. 拉本分支，按 `guides/windows_build_guide.md` 出一个 **debug build**（`build_dev_win.ps1`，带 DevTools + `VITE_DEBUG_MODE=true`），或生产 `build_windows.ps1`。debug build 可开 DevTools 看 console（关键）。
+1. 拉本分支，按 `guides/windows_build_guide.md` 出一个 **debug build**（`build_dev_win.ps1` 默认生成可直接运行的 debug exe，带 DevTools + `VITE_DEBUG_MODE=true`），或生产 `build_windows.ps1`。只有需要验证安装器时才跑 `build_dev_win.ps1 -BundleNsis`。debug build 可开 DevTools 看 console（关键）。
 2. **打开 DevTools console**（debug build）。CSP 违例会以红字 `Refused to load … because it violates the following Content Security Policy directive: …` 出现 —— 这是 W1/W2 最直接的证据。
 3. 按下面每项的「验证步骤」逐条走。把 console 报错 + 截图记下来，回填到本文或 PRD。
 4. **最小烟测优先**：W1/W3/W4 三项只需各做一个动作即可证实/排除，先把这三项跑了。
@@ -52,7 +52,7 @@
   2. 触发一次工具产图（让 AI 调 Codex `image_generation` 或 gemini-image）。
   3. 看工具卡是否显示图 + console 是否有 `img-src` 拒绝。
   4. 对照：同一操作在 macOS 上能显示（确认是跨端差异而非全坏）。
-- **确认后的修法（第零原则，Δcomplexity 负）**：把工具产物的 URL **从 `http://127.0.0.1:PORT` 改走已存在的 `myagents://attachment/<rel>` 自定义协议**（`src-tauri/src/attachment_protocol.rs`；两端 `img-src`/`media-src` 都已列 `myagents:` + `http://myagents.localhost`，Rust handler 对两种 URL 形式都有测试），与用户上传路径（`attachmentUrl.ts`）同源。顺带删掉 per-session 端口查找（`getSessionPort`）。
+- **确认后的修法（第零原则，Δcomplexity 负）**：把工具产物的 URL **从 `http://127.0.0.1:PORT` 改走已存在的 app-owned attachment protocol**（`src-tauri/src/attachment_protocol.rs`）：macOS/Linux 输出 `myagents://tool-attachment/<rel>`，Windows/WebView2 输出 Tauri 2 custom-protocol 的实际子资源形态 `http://myagents.localhost/tool-attachment/<rel>`；两端 `img-src`/`media-src` 都已列 `myagents:` + `http://myagents.localhost`，Rust handler 对两种 URL 形式都有测试。与用户上传路径（`attachmentUrl.ts`）同源。顺带删掉 per-session 端口查找（`getSessionPort`）。
 - **D 不变量**：Mac 工具图逐像素不变；attachment-aware 权限/路径安全不被绕过；pending/error sentinel 行为不变。
 
 ---
@@ -92,6 +92,7 @@
   3. 对照 Mac（应平滑）。
 - **确认后的修法（复用既有隐藏机制）**：代码已在 `isDraggingSplit` 时隐藏 webview（`BrowserPanel.tsx:262`）。把同一 `shouldShow=false` 门控扩展到"开栏过渡进行中"（监听 chat-area 的 `transitionrun`/`transitionend` 或复用 300ms 窗口），过渡中显示 paper 占位、`transitionend` 时**一次**权威 `cmd_browser_resize`。若 Mac 上隐藏导致观感变差，则按平台门控（仅 Windows 启用隐藏）。
 - **D 不变量**：Mac 开栏观感不回退；拖拽分栏（`isDraggingSplit`）现有行为不变；最终 bounds 精确。
+- **⚠️ #339 后注（v0.2.34）**：上面"`transitionend` 时一次权威 resize"的方向已被否决——#339 证明任何"等布局稳定后采样一次"的一次性机制都会被未建模的运动源（工作区 overlay 翻转的纯位移、`%` 宽度对窗口尺寸的重解析）漏掉，把 webview 永久停在中间帧。现行实现是 `BrowserPanel.tsx` 的**常驻逐帧 geometry reconciler**（webview 存活+可见期间每帧对账 rect ↔ 上次送达值，变了才 invoke、in-flight 串行化）。W4 的撕裂缓解如需做，只能做"过渡中隐藏"侧（suspension 已有），**不要**回到 transitionend 单次采样。
 
 ---
 
@@ -109,7 +110,7 @@
 - PdfViewer DPR（`PdfViewer.tsx`/`pdfMetrics.ts` 正确读 `devicePixelRatio` + clamp + `deviceCanvasSize`，1.5× 不糊）；OS 浏览器 bounds（`browser.rs` 用 `LogicalPosition/LogicalSize`，分数 DPR 安全）。
 - 键盘快捷键（`appShortcuts.ts` 用 `modHeld(e,isMac)`、`isMac` 取自 `navigator.platform`）；close-layer（按平台 close-tab 触发）；发送键 + IME（W3C composition 三重守卫，Windows 拼音/微软 IME 一致）。
 - 字体栈（`index.css` 含 `Segoe UI` / `Cascadia Code`/`Consolas` / `Microsoft YaHei`，Windows 有正确 fallback、无 tofu）。
-- 媒体：音频走 `blob:`（`media-src` 含）；用户上传走 `myagents://`（两端 img-src/media-src 覆盖）；`/refs/:id` 走 `connect-src` + `Access-Control-Allow-Origin:*`；pdf worker 同源 `script-src 'self'`。无 `convertFileSrc`/`asset://`/`tauri://` 硬编码。
+- 媒体：音频走 `blob:`（`media-src` 含）；用户上传走 app-owned attachment protocol（macOS/Linux `myagents://attachment/...`，Windows/WebView2 `http://myagents.localhost/attachment/...`；两端 img-src/media-src 覆盖）；`/refs/:id` 走 `connect-src` + `Access-Control-Allow-Origin:*`；pdf worker 同源 `script-src 'self'`。无 `convertFileSrc`/`asset://`/`tauri://` 硬编码。
 
 ## 4. 环境性 / 预存（不修，仅记录）
 

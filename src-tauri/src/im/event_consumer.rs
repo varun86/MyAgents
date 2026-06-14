@@ -19,12 +19,12 @@ use std::time::Duration;
 use futures::StreamExt;
 use reqwest::Client;
 use serde_json::Value;
-use tokio::sync::Mutex;
 use tauri::async_runtime::JoinHandle;
+use tokio::sync::Mutex;
 
-use crate::{ulog_info, ulog_warn};
 use super::adapter::ImStreamAdapter;
 use super::reply_router::{ReplyRouter, TerminalOutcome};
+use crate::{ulog_info, ulog_warn};
 
 const RECONNECT_INITIAL_MS: u64 = 200;
 const RECONNECT_MAX_MS: u64 = 5_000;
@@ -92,7 +92,8 @@ where
                 Ok(resp) => {
                     ulog_warn!(
                         "[event-consumer] /api/im/events returned {} (port={})",
-                        resp.status(), sidecar_port,
+                        resp.status(),
+                        sidecar_port,
                     );
                     sleep_with_cancel(&cancel, backoff_ms).await;
                     backoff_ms = (backoff_ms * 2).min(RECONNECT_MAX_MS);
@@ -101,7 +102,9 @@ where
                 Err(e) => {
                     ulog_warn!(
                         "[event-consumer] connect failed: {} (port={}) — retry in {}ms",
-                        e, sidecar_port, backoff_ms,
+                        e,
+                        sidecar_port,
+                        backoff_ms,
                     );
                     sleep_with_cancel(&cancel, backoff_ms).await;
                     backoff_ms = (backoff_ms * 2).min(RECONNECT_MAX_MS);

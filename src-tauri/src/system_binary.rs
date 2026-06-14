@@ -27,9 +27,9 @@ use std::path::PathBuf;
 /// These entries are appended (not prepended) to preserve existing PATH priority.
 #[cfg(not(target_os = "windows"))]
 const EXTRA_SEARCH_DIRS: &[&str] = &[
-    "/opt/homebrew/bin",   // macOS Apple Silicon homebrew
+    "/opt/homebrew/bin", // macOS Apple Silicon homebrew
     "/opt/homebrew/sbin",
-    "/usr/local/bin",      // macOS Intel homebrew / Linux manual installs
+    "/usr/local/bin", // macOS Intel homebrew / Linux manual installs
     "/usr/local/sbin",
     "/usr/bin",
     "/bin",
@@ -39,8 +39,8 @@ const EXTRA_SEARCH_DIRS: &[&str] = &[
 /// e.g., `~/.local/bin` is where `claude` (Claude Code CLI) is installed globally.
 #[cfg(not(target_os = "windows"))]
 const USER_RELATIVE_DIRS: &[&str] = &[
-    ".local/bin",          // Claude Code CLI global install (`claude`)
-    ".bun/bin",            // Bun global installs
+    ".local/bin", // Claude Code CLI global install (`claude`)
+    ".bun/bin",   // Bun global installs
 ];
 
 /// Find a system binary by name, searching both the process PATH and common
@@ -51,8 +51,7 @@ pub fn find(binary_name: &str) -> Option<PathBuf> {
     // Build augmented search path: process PATH + platform-specific extras
     let search_path = augmented_path();
 
-    which::which_in(binary_name, Some(&search_path), ".")
-        .ok()
+    which::which_in(binary_name, Some(&search_path), ".").ok()
 }
 
 /// Build an augmented PATH string that includes common system binary directories.
@@ -115,62 +114,64 @@ fn detect_shell_path() -> Option<String> {
     use std::sync::OnceLock;
     static CACHED: OnceLock<Option<String>> = OnceLock::new();
 
-    CACHED.get_or_init(|| {
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-        let marker = format!("__MYAGENTS_PATH_{}__", std::process::id());
-        // NOTE: ${PATH} (braced) is required — unbraced $PATH__MARKER__ would be
-        // parsed as a single variable name because underscores are valid identifiers.
-        let script = format!("echo \"{marker}${{PATH}}{marker}\"");
+    CACHED
+        .get_or_init(|| {
+            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+            let marker = format!("__MYAGENTS_PATH_{}__", std::process::id());
+            // NOTE: ${PATH} (braced) is required — unbraced $PATH__MARKER__ would be
+            // parsed as a single variable name because underscores are valid identifiers.
+            let script = format!("echo \"{marker}${{PATH}}{marker}\"");
 
-        // Spawn with timeout to guard against .zshrc that launches tmux/screen.
-        let mut child = match crate::process_cmd::new(&shell)
-            .args(["-i", "-l", "-c", &script])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-        {
-            Ok(c) => c,
-            Err(_) => return None,
-        };
+            // Spawn with timeout to guard against .zshrc that launches tmux/screen.
+            let mut child = match crate::process_cmd::new(&shell)
+                .args(["-i", "-l", "-c", &script])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+            {
+                Ok(c) => c,
+                Err(_) => return None,
+            };
 
-        // 3-second timeout (matches TypeScript getShellPath)
-        let output = {
-            use std::time::{Duration, Instant};
-            let deadline = Instant::now() + Duration::from_secs(3);
-            loop {
-                match child.try_wait() {
-                    Ok(Some(_)) => break child.wait_with_output(),
-                    Ok(None) if Instant::now() < deadline => {
-                        std::thread::sleep(Duration::from_millis(50));
-                    }
-                    _ => {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        return None;
-                    }
-                }
-            }
-        };
-
-        match output {
-            Ok(out) if out.status.success() => {
-                let stdout = String::from_utf8_lossy(&out.stdout);
-                // Extract PATH from between markers (immune to noisy shell output)
-                let start_tag = &marker;
-                let end_tag = &marker;
-                if let Some(start) = stdout.find(start_tag) {
-                    let after_start = start + start_tag.len();
-                    if let Some(end) = stdout[after_start..].find(end_tag) {
-                        let path = &stdout[after_start..after_start + end];
-                        if path.len() > 10 {
-                            return Some(path.to_string());
+            // 3-second timeout (matches TypeScript getShellPath)
+            let output = {
+                use std::time::{Duration, Instant};
+                let deadline = Instant::now() + Duration::from_secs(3);
+                loop {
+                    match child.try_wait() {
+                        Ok(Some(_)) => break child.wait_with_output(),
+                        Ok(None) if Instant::now() < deadline => {
+                            std::thread::sleep(Duration::from_millis(50));
+                        }
+                        _ => {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            return None;
                         }
                     }
                 }
-                None
+            };
+
+            match output {
+                Ok(out) if out.status.success() => {
+                    let stdout = String::from_utf8_lossy(&out.stdout);
+                    // Extract PATH from between markers (immune to noisy shell output)
+                    let start_tag = &marker;
+                    let end_tag = &marker;
+                    if let Some(start) = stdout.find(start_tag) {
+                        let after_start = start + start_tag.len();
+                        if let Some(end) = stdout[after_start..].find(end_tag) {
+                            let path = &stdout[after_start..after_start + end];
+                            if path.len() > 10 {
+                                return Some(path.to_string());
+                            }
+                        }
+                    }
+                    None
+                }
+                _ => None,
             }
-            _ => None,
-        }
-    }).clone()
+        })
+        .clone()
 }

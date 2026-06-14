@@ -9,19 +9,30 @@ use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager, Runtime, State};
 
-use crate::sidecar::{
-    // Legacy exports
-    get_sidecar_status, start_sidecar, stop_sidecar, restart_sidecar,
-    ensure_sidecar_running, check_process_alive,
-    ManagedSidecar, LegacySidecarConfig, SidecarStatus,
-    // New multi-instance exports
-    start_tab_sidecar, stop_tab_sidecar, get_tab_server_url, get_tab_sidecar_status,
-    start_global_sidecar, stop_all_sidecars, GLOBAL_SIDECAR_ID,
-    // Update shutdown
-    shutdown_for_update,
-};
 use crate::logger;
 use crate::perf_trace::{elapsed_ms, emit_perf_trace, trace_start, PerfTrace, PerfTraceName};
+use crate::sidecar::{
+    check_process_alive,
+    ensure_sidecar_running,
+    // Legacy exports
+    get_sidecar_status,
+    get_tab_server_url,
+    get_tab_sidecar_status,
+    restart_sidecar,
+    // Update shutdown
+    shutdown_for_update,
+    start_global_sidecar,
+    start_sidecar,
+    // New multi-instance exports
+    start_tab_sidecar,
+    stop_all_sidecars,
+    stop_sidecar,
+    stop_tab_sidecar,
+    LegacySidecarConfig,
+    ManagedSidecar,
+    SidecarStatus,
+    GLOBAL_SIDECAR_ID,
+};
 use crate::{ulog_error, ulog_info, ulog_warn};
 
 const NETWORK_PROBE_USER_AGENT: &str = "MyAgents-Network-Probe/1.0";
@@ -37,7 +48,10 @@ pub async fn cmd_start_sidecar<R: Runtime>(
     agent_dir: String,
     initial_prompt: Option<String>,
 ) -> Result<SidecarStatus, String> {
-    logger::info(&app_handle, format!("[sidecar] Starting for project: {}", agent_dir));
+    logger::info(
+        &app_handle,
+        format!("[sidecar] Starting for project: {}", agent_dir),
+    );
 
     let config = LegacySidecarConfig {
         port: find_available_port().unwrap_or(31415),
@@ -48,7 +62,10 @@ pub async fn cmd_start_sidecar<R: Runtime>(
     match start_sidecar(&app_handle, &state, config) {
         Ok(_) => {
             let status = get_sidecar_status(&state)?;
-            logger::info(&app_handle, format!("[sidecar] Started on port {}", status.port));
+            logger::info(
+                &app_handle,
+                format!("[sidecar] Started on port {}", status.port),
+            );
             Ok(status)
         }
         Err(e) => {
@@ -113,11 +130,17 @@ pub async fn cmd_ensure_sidecar_running<R: Runtime>(
     match ensure_sidecar_running(&app_handle, &state) {
         Ok(port) => {
             let status = get_sidecar_status(&state)?;
-            logger::debug(&app_handle, format!("[sidecar] Ensured running on port {}", port));
+            logger::debug(
+                &app_handle,
+                format!("[sidecar] Ensured running on port {}", port),
+            );
             Ok(status)
         }
         Err(e) => {
-            logger::error(&app_handle, format!("[sidecar] Ensure running failed: {}", e));
+            logger::error(
+                &app_handle,
+                format!("[sidecar] Ensure running failed: {}", e),
+            );
             Err(e)
         }
     }
@@ -125,9 +148,7 @@ pub async fn cmd_ensure_sidecar_running<R: Runtime>(
 
 /// Command: Check if sidecar process is alive (legacy)
 #[tauri::command]
-pub async fn cmd_check_sidecar_alive(
-    state: State<'_, ManagedSidecar>,
-) -> Result<bool, String> {
+pub async fn cmd_check_sidecar_alive(state: State<'_, ManagedSidecar>) -> Result<bool, String> {
     check_process_alive(&state)
 }
 
@@ -143,7 +164,10 @@ pub async fn cmd_start_tab_sidecar<R: Runtime>(
 ) -> Result<SidecarStatus, String> {
     logger::info(
         &app_handle,
-        format!("[sidecar] Starting for tab {}, agent_dir: {:?}", tab_id, agent_dir),
+        format!(
+            "[sidecar] Starting for tab {}, agent_dir: {:?}",
+            tab_id, agent_dir
+        ),
     );
 
     let agent_path = agent_dir.map(PathBuf::from);
@@ -151,11 +175,17 @@ pub async fn cmd_start_tab_sidecar<R: Runtime>(
     match start_tab_sidecar(&app_handle, &state, &tab_id, agent_path) {
         Ok(port) => {
             let status = get_tab_sidecar_status(&state, &tab_id)?;
-            logger::info(&app_handle, format!("[sidecar] Tab {} started on port {}", tab_id, port));
+            logger::info(
+                &app_handle,
+                format!("[sidecar] Tab {} started on port {}", tab_id, port),
+            );
             Ok(status)
         }
         Err(e) => {
-            logger::error(&app_handle, format!("[sidecar] Tab {} failed to start: {}", tab_id, e));
+            logger::error(
+                &app_handle,
+                format!("[sidecar] Tab {} failed to start: {}", tab_id, e),
+            );
             Err(e)
         }
     }
@@ -201,11 +231,17 @@ pub async fn cmd_start_global_sidecar<R: Runtime>(
     match start_global_sidecar(&app_handle, &state) {
         Ok(port) => {
             let status = get_tab_sidecar_status(&state, GLOBAL_SIDECAR_ID)?;
-            logger::info(&app_handle, format!("[sidecar] Global sidecar started on port {}", port));
+            logger::info(
+                &app_handle,
+                format!("[sidecar] Global sidecar started on port {}", port),
+            );
             Ok(status)
         }
         Err(e) => {
-            logger::error(&app_handle, format!("[sidecar] Global sidecar failed: {}", e));
+            logger::error(
+                &app_handle,
+                format!("[sidecar] Global sidecar failed: {}", e),
+            );
             Err(e)
         }
     }
@@ -213,9 +249,7 @@ pub async fn cmd_start_global_sidecar<R: Runtime>(
 
 /// Command: Get global sidecar server URL
 #[tauri::command]
-pub async fn cmd_get_global_server_url(
-    state: State<'_, ManagedSidecar>,
-) -> Result<String, String> {
+pub async fn cmd_get_global_server_url(state: State<'_, ManagedSidecar>) -> Result<String, String> {
     get_tab_server_url(&state, GLOBAL_SIDECAR_ID)
 }
 
@@ -236,7 +270,10 @@ pub async fn cmd_shutdown_for_update(
     app_handle: AppHandle,
     state: State<'_, ManagedSidecar>,
 ) -> Result<(), String> {
-    logger::info(&app_handle, "[sidecar] Shutdown for update requested".to_string());
+    logger::info(
+        &app_handle,
+        "[sidecar] Shutdown for update requested".to_string(),
+    );
     shutdown_for_update(&state)
 }
 
@@ -306,8 +343,7 @@ pub fn cmd_get_device_id() -> Result<String, String> {
     use uuid::Uuid;
 
     // Get home directory
-    let home_dir = dirs::home_dir()
-        .ok_or_else(|| "Failed to get home directory".to_string())?;
+    let home_dir = dirs::home_dir().ok_or_else(|| "Failed to get home directory".to_string())?;
 
     // ~/.myagents/ directory
     let myagents_dir = home_dir.join(".myagents");
@@ -389,7 +425,10 @@ pub fn cmd_initialize_bundled_workspace<R: Runtime>(
         ));
     }
 
-    ulog_info!("[workspace] Initializing bundled workspace from {:?}", mino_src);
+    ulog_info!(
+        "[workspace] Initializing bundled workspace from {:?}",
+        mino_src
+    );
     copy_dir_recursive(&mino_src, &mino_dest)
         .map_err(|e| format!("Failed to copy mino workspace: {}", e))?;
 
@@ -434,7 +473,11 @@ pub fn cmd_create_bot_workspace<R: Runtime>(
     let mino_src = resource_dir.join("mino");
 
     if mino_src.exists() && mino_src.join("CLAUDE.md").exists() {
-        ulog_info!("[workspace] Copying bundled mino from {:?} to {:?}", mino_src, dest);
+        ulog_info!(
+            "[workspace] Copying bundled mino from {:?} to {:?}",
+            mino_src,
+            dest
+        );
         copy_dir_recursive(&mino_src, &dest)
             .map_err(|e| format!("Failed to copy workspace template: {}", e))?;
     }
@@ -444,7 +487,10 @@ pub fn cmd_create_bot_workspace<R: Runtime>(
         // Fallback: copy from the local mino created on first launch
         let local_mino = projects_dir.join("mino");
         if local_mino.exists() && local_mino.join("CLAUDE.md").exists() {
-            ulog_warn!("[workspace] Bundled mino incomplete, falling back to local {:?}", local_mino);
+            ulog_warn!(
+                "[workspace] Bundled mino incomplete, falling back to local {:?}",
+                local_mino
+            );
             // Clean up the potentially empty dest before fallback copy
             let _ = fs::remove_dir_all(&dest);
             copy_dir_recursive(&local_mino, &dest)
@@ -452,7 +498,10 @@ pub fn cmd_create_bot_workspace<R: Runtime>(
         } else {
             // Clean up the empty dest
             let _ = fs::remove_dir_all(&dest);
-            return Err("Mino template not found: bundled resources incomplete and no local copy available".to_string());
+            return Err(
+                "Mino template not found: bundled resources incomplete and no local copy available"
+                    .to_string(),
+            );
         }
     }
 
@@ -472,9 +521,11 @@ pub fn cmd_remove_bot_workspace(workspace_path: String) -> Result<(), String> {
 
     let target = PathBuf::from(&workspace_path);
     // Canonicalize both paths to prevent traversal attacks
-    let canon_projects = projects_dir.canonicalize()
+    let canon_projects = projects_dir
+        .canonicalize()
         .map_err(|e| format!("Failed to resolve projects dir: {}", e))?;
-    let canon_target = target.canonicalize()
+    let canon_target = target
+        .canonicalize()
         .map_err(|e| format!("Failed to resolve workspace path: {}", e))?;
 
     if !canon_target.starts_with(&canon_projects) || canon_target == canon_projects {
@@ -506,9 +557,11 @@ pub fn cmd_remove_template_folder(template_path: String) -> Result<(), String> {
         return Ok(());
     }
 
-    let canon_templates = templates_dir.canonicalize()
+    let canon_templates = templates_dir
+        .canonicalize()
         .map_err(|e| format!("Failed to resolve templates dir: {}", e))?;
-    let canon_target = target.canonicalize()
+    let canon_target = target
+        .canonicalize()
         .map_err(|e| format!("Failed to resolve template path: {}", e))?;
 
     if !canon_target.starts_with(&canon_templates) || canon_target == canon_templates {
@@ -571,7 +624,15 @@ fn find_available_workspace_path(projects_dir: &Path, base_name: &str) -> PathBu
         }
     }
     // Extremely unlikely fallback
-    projects_dir.join(format!("{}-{}", base_name, uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("x")))
+    projects_dir.join(format!(
+        "{}-{}",
+        base_name,
+        uuid::Uuid::new_v4()
+            .to_string()
+            .split('-')
+            .next()
+            .unwrap_or("x")
+    ))
 }
 
 fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
@@ -620,9 +681,11 @@ pub fn cmd_create_workspace_from_template(
     let home_dir = dirs::home_dir().ok_or("Failed to get home dir")?;
     let templates_dir = home_dir.join(".myagents").join("templates");
     if templates_dir.exists() {
-        let canon_templates = templates_dir.canonicalize()
+        let canon_templates = templates_dir
+            .canonicalize()
             .map_err(|e| format!("Failed to resolve templates dir: {}", e))?;
-        let canon_src = src.canonicalize()
+        let canon_src = src
+            .canonicalize()
             .map_err(|e| format!("Failed to resolve source path: {}", e))?;
         if !canon_src.starts_with(&canon_templates) {
             return Err("Source path must be inside ~/.myagents/templates/".to_string());
@@ -636,13 +699,11 @@ pub fn cmd_create_workspace_from_template(
     }
     // Ensure parent directory exists
     if let Some(parent) = dst.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("Failed to create parent dir: {}", e))?;
+        fs::create_dir_all(parent).map_err(|e| format!("Failed to create parent dir: {}", e))?;
     }
 
     ulog_info!("[template] Copying template from {:?} to {:?}", src, dst);
-    copy_dir_recursive(&src, &dst)
-        .map_err(|e| format!("Failed to copy template: {}", e))?;
+    copy_dir_recursive(&src, &dst).map_err(|e| format!("Failed to copy template: {}", e))?;
 
     Ok(())
 }
@@ -665,8 +726,7 @@ pub fn cmd_create_workspace_from_bundled_template<R: Runtime>(
         return Err(format!("Destination already exists: {}", dest_path));
     }
     if let Some(parent) = dst.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("Failed to create parent dir: {}", e))?;
+        fs::create_dir_all(parent).map_err(|e| format!("Failed to create parent dir: {}", e))?;
     }
 
     // Primary: copy from bundled resources
@@ -677,7 +737,12 @@ pub fn cmd_create_workspace_from_bundled_template<R: Runtime>(
     let template_src = resource_dir.join(&template_id);
 
     if template_src.exists() && template_src.join("CLAUDE.md").exists() {
-        ulog_info!("[template] Copying bundled template '{}' from {:?} to {:?}", template_id, template_src, dst);
+        ulog_info!(
+            "[template] Copying bundled template '{}' from {:?} to {:?}",
+            template_id,
+            template_src,
+            dst
+        );
         copy_dir_recursive(&template_src, &dst)
             .map_err(|e| format!("Failed to copy bundled template: {}", e))?;
         return Ok(());
@@ -685,25 +750,31 @@ pub fn cmd_create_workspace_from_bundled_template<R: Runtime>(
 
     // Fallback: copy from local projects/<template_id>
     let home_dir = dirs::home_dir().ok_or("Failed to get home dir")?;
-    let local_src = home_dir.join(".myagents").join("projects").join(&template_id);
+    let local_src = home_dir
+        .join(".myagents")
+        .join("projects")
+        .join(&template_id);
     if local_src.exists() && local_src.join("CLAUDE.md").exists() {
-        ulog_warn!("[template] Bundled template '{}' incomplete, falling back to local {:?}", template_id, local_src);
+        ulog_warn!(
+            "[template] Bundled template '{}' incomplete, falling back to local {:?}",
+            template_id,
+            local_src
+        );
         copy_dir_recursive(&local_src, &dst)
             .map_err(|e| format!("Failed to copy from local template: {}", e))?;
         return Ok(());
     }
 
-    Err(format!("Template '{}' not found in bundled resources or local copies", template_id))
+    Err(format!(
+        "Template '{}' not found in bundled resources or local copies",
+        template_id
+    ))
 }
 
 /// Validate a bundled template_id — rejects path separators, traversal, and empty IDs.
 /// Single source of truth so all template-using commands inherit the same rules.
 fn validate_template_id(id: &str) -> Result<(), String> {
-    if id.is_empty()
-        || id.contains('/')
-        || id.contains('\\')
-        || id.contains("..")
-    {
+    if id.is_empty() || id.contains('/') || id.contains('\\') || id.contains("..") {
         return Err("Invalid template ID".to_string());
     }
     Ok(())
@@ -743,13 +814,15 @@ fn resolve_template_source<R: Runtime>(
         let bundled = resource_dir.join(id);
         if bundled.exists() && bundled.join("CLAUDE.md").exists() {
             // Canonicalize so subsequent reads can't be redirected via symlink swap.
-            return bundled.canonicalize()
+            return bundled
+                .canonicalize()
                 .map_err(|e| format!("Failed to resolve bundled template path: {}", e));
         }
         let home_dir = dirs::home_dir().ok_or("Failed to get home dir")?;
         let local = home_dir.join(".myagents").join("projects").join(id);
         if local.exists() && local.join("CLAUDE.md").exists() {
-            return local.canonicalize()
+            return local
+                .canonicalize()
                 .map_err(|e| format!("Failed to resolve local template path: {}", e));
         }
         return Err(format!("Bundled template '{}' not found", id));
@@ -829,8 +902,8 @@ pub fn cmd_template_apply_preview<R: Runtime>(
     // template apply at e.g. `~/.ssh` or `/etc`.
     let dst = validate_workspace_dest(&dest_path)?;
     let src = resolve_template_source(&app_handle, template_id, source_path)?;
-    let files = list_template_files_rel(&src)
-        .map_err(|e| format!("Failed to walk template: {}", e))?;
+    let files =
+        list_template_files_rel(&src).map_err(|e| format!("Failed to walk template: {}", e))?;
     let mut overwrite = Vec::new();
     let mut add = Vec::new();
     for rel in files {
@@ -859,9 +932,12 @@ pub fn cmd_apply_template_to_workspace<R: Runtime>(
 ) -> Result<(), String> {
     let dst = validate_workspace_dest(&dest_path)?;
     let src = resolve_template_source(&app_handle, template_id, source_path)?;
-    ulog_info!("[template] Merging template from {:?} into existing workspace {:?}", src, dst);
-    merge_dir_recursive(&src, &dst)
-        .map_err(|e| format!("Failed to apply template: {}", e))?;
+    ulog_info!(
+        "[template] Merging template from {:?} into existing workspace {:?}",
+        src,
+        dst
+    );
+    merge_dir_recursive(&src, &dst).map_err(|e| format!("Failed to apply template: {}", e))?;
     Ok(())
 }
 
@@ -890,15 +966,21 @@ pub fn cmd_copy_folder_to_templates(
     let dest = find_available_workspace_path(&templates_dir, &sanitized);
 
     // Prevent overlapping source/destination (would cause infinite recursion)
-    let canon_src = src.canonicalize()
+    let canon_src = src
+        .canonicalize()
         .map_err(|e| format!("Failed to resolve source: {}", e))?;
-    let canon_templates = templates_dir.canonicalize()
+    let canon_templates = templates_dir
+        .canonicalize()
         .map_err(|e| format!("Failed to resolve templates dir: {}", e))?;
     if canon_src.starts_with(&canon_templates) {
         return Err("Source folder is already inside the templates directory".to_string());
     }
 
-    ulog_info!("[template] Copying folder {:?} to template library {:?}", src, dest);
+    ulog_info!(
+        "[template] Copying folder {:?} to template library {:?}",
+        src,
+        dest
+    );
     copy_dir_recursive(&src, &dest)
         .map_err(|e| format!("Failed to copy to template library: {}", e))?;
 
@@ -907,7 +989,7 @@ pub fn cmd_copy_folder_to_templates(
 
 // ============= Admin Agent Sync =============
 
-const ADMIN_AGENT_VERSION: &str = "19";
+const ADMIN_AGENT_VERSION: &str = "21";
 
 /// Helper-bundled paths (relative to `~/.myagents/`) that previous versions
 /// shipped but that have since been retired.
@@ -929,9 +1011,7 @@ const RETIRED_ADMIN_PATHS: &[&str] = &[
 /// Merge bundled admin agent files into ~/.myagents/
 /// Version-gated: only runs when ADMIN_AGENT_VERSION changes.
 #[tauri::command]
-pub fn cmd_sync_admin_agent<R: Runtime>(
-    app_handle: AppHandle<R>,
-) -> Result<bool, String> {
+pub fn cmd_sync_admin_agent<R: Runtime>(app_handle: AppHandle<R>) -> Result<bool, String> {
     let home = dirs::home_dir().ok_or("Home dir not found")?;
     let dest = home.join(".myagents");
 
@@ -945,7 +1025,9 @@ pub fn cmd_sync_admin_agent<R: Runtime>(
     }
 
     // Source: app resources
-    let res = app_handle.path().resource_dir()
+    let res = app_handle
+        .path()
+        .resource_dir()
         .map_err(|e| format!("Resource dir: {}", e))?;
     let src = res.join("bundled-agents").join("myagents_helper");
     if !src.exists() {
@@ -988,8 +1070,7 @@ pub fn cmd_sync_admin_agent<R: Runtime>(
     }
 
     // Merge into ~/.myagents/
-    merge_dir_recursive(&src, &dest)
-        .map_err(|e| format!("Merge failed: {}", e))?;
+    merge_dir_recursive(&src, &dest).map_err(|e| format!("Merge failed: {}", e))?;
 
     fs::write(&ver_file, ADMIN_AGENT_VERSION)
         .map_err(|e| format!("Version write failed: {}", e))?;
@@ -1000,16 +1081,14 @@ pub fn cmd_sync_admin_agent<R: Runtime>(
 
 // ============= CLI Sync =============
 
-const CLI_VERSION: &str = "19";
+const CLI_VERSION: &str = "21";
 
 /// Sync the CLI script from bundled resources to ~/.myagents/bin/.
 /// Version-gated: only runs when CLI_VERSION changes.
 /// Sources `resources/cli/myagents.js` (esbuild bundle, shebang `#!/usr/bin/env node`)
 /// and copies it to `~/.myagents/bin/myagents` with 0755 on Unix.
 #[tauri::command]
-pub fn cmd_sync_cli<R: Runtime>(
-    app_handle: AppHandle<R>,
-) -> Result<bool, String> {
+pub fn cmd_sync_cli<R: Runtime>(app_handle: AppHandle<R>) -> Result<bool, String> {
     let home = dirs::home_dir().ok_or("Home dir not found")?;
     let bin_dir = home.join(".myagents").join("bin");
 
@@ -1023,7 +1102,9 @@ pub fn cmd_sync_cli<R: Runtime>(
     }
 
     // Source: app resources/cli/ (esbuild output from `npm run build:cli`)
-    let res = app_handle.path().resource_dir()
+    let res = app_handle
+        .path()
+        .resource_dir()
         .map_err(|e| format!("Resource dir: {}", e))?;
     let cli_src = res.join("cli");
     if !cli_src.exists() {
@@ -1031,15 +1112,17 @@ pub fn cmd_sync_cli<R: Runtime>(
     }
 
     // Ensure ~/.myagents/bin/ exists
-    fs::create_dir_all(&bin_dir)
-        .map_err(|e| format!("Failed to create bin dir: {}", e))?;
+    fs::create_dir_all(&bin_dir).map_err(|e| format!("Failed to create bin dir: {}", e))?;
 
     // Copy myagents.js → myagents (strip extension, shebang handles node invocation on Unix;
     // Windows uses myagents.cmd wrapper below).
     let src_script = cli_src.join("myagents.js");
     let dst_script = bin_dir.join("myagents");
     if !src_script.exists() {
-        return Err(format!("CLI script not found: {:?} (run `npm run build:cli`?)", src_script));
+        return Err(format!(
+            "CLI script not found: {:?} (run `npm run build:cli`?)",
+            src_script
+        ));
     }
     // Atomic-replace via tmp + rename, so a `myagents` process currently
     // executing the old binary doesn't block the upgrade. On Windows
@@ -1133,8 +1216,7 @@ pub fn cmd_sync_cli<R: Runtime>(
     }
 
     // Write version gate
-    fs::write(&ver_file, CLI_VERSION)
-        .map_err(|e| format!("CLI version write failed: {}", e))?;
+    fs::write(&ver_file, CLI_VERSION).map_err(|e| format!("CLI version write failed: {}", e))?;
 
     ulog_info!("[cli] Synced CLI v{}", CLI_VERSION);
     Ok(true)
@@ -1161,7 +1243,7 @@ pub fn cmd_sync_cli<R: Runtime>(
 // matching exclusion list in src/server/index.ts::seedBundledSkills
 // MUST be kept in sync (comment there points back here).
 
-const SYSTEM_SKILLS_VERSION: &str = "17";
+const SYSTEM_SKILLS_VERSION: &str = "19";
 
 /// Skills that ship with the app and MUST stay at the bundled version —
 /// the app's flows depend on them, users are not meant to customise.
@@ -1189,6 +1271,13 @@ const SYSTEM_SKILLS: &[&str] = &[
     // skills, widgets) through the CLI. SKILL.md changes track CLI surface
     // changes, so it must force-overwrite on version bumps.
     "myagents-cli",
+    // v18: tool-creator — meta-skill for the CLI tool registry (PRD 0.2.36
+    // cli_first_tool_registry). Teaches AI to author standards-compliant
+    // Agent-CLI tools (tool.json + entry + readme/--help contract) and
+    // register them via `myagents tool add`. System skill because its
+    // contract must track the registry's server-side validation (800-char
+    // description cap, reserved names) in lockstep.
+    "tool-creator",
 ];
 
 /// Skills unavailable on certain platforms due to upstream bugs.
@@ -1219,9 +1308,7 @@ fn is_skill_blocked_on_platform(skill_folder: &str) -> bool {
 /// (version stamp + per-skill SKILL.md stat) is also disk I/O, so the entire
 /// body moves off-thread, not just the copy loop.
 #[tauri::command]
-pub async fn cmd_sync_system_skills<R: Runtime>(
-    app_handle: AppHandle<R>,
-) -> Result<bool, String> {
+pub async fn cmd_sync_system_skills<R: Runtime>(app_handle: AppHandle<R>) -> Result<bool, String> {
     tauri::async_runtime::spawn_blocking(move || sync_system_skills_blocking(app_handle))
         .await
         .map_err(|e| format!("system-skills sync task failed: {}", e))?
@@ -1245,8 +1332,7 @@ fn sync_system_skills_blocking<R: Runtime>(app_handle: AppHandle<R>) -> Result<b
     let ver_file = myagents_dir.join(".system-skills-version");
     if ver_file.exists() {
         let ver = fs::read_to_string(&ver_file).unwrap_or_default();
-        if ver.trim() == SYSTEM_SKILLS_VERSION
-            && all_installed_system_skills_complete(&skills_dir)
+        if ver.trim() == SYSTEM_SKILLS_VERSION && all_installed_system_skills_complete(&skills_dir)
         {
             return Ok(false);
         }
@@ -1259,11 +1345,13 @@ fn sync_system_skills_blocking<R: Runtime>(app_handle: AppHandle<R>) -> Result<b
         .map_err(|e| format!("Resource dir: {}", e))?;
     let bundled_skills_dir = res.join("bundled-skills");
     if !bundled_skills_dir.exists() {
-        return Err(format!("bundled-skills not found: {:?}", bundled_skills_dir));
+        return Err(format!(
+            "bundled-skills not found: {:?}",
+            bundled_skills_dir
+        ));
     }
 
-    fs::create_dir_all(&skills_dir)
-        .map_err(|e| format!("Failed to create skills dir: {}", e))?;
+    fs::create_dir_all(&skills_dir).map_err(|e| format!("Failed to create skills dir: {}", e))?;
 
     let mut synced = Vec::new();
     let mut missing = Vec::new();
@@ -1282,7 +1370,9 @@ fn sync_system_skills_blocking<R: Runtime>(app_handle: AppHandle<R>) -> Result<b
         }
         let src = bundled_skills_dir.join(skill_name);
         let dst = skills_dir.join(skill_name);
-        match sync_one_system_skill(&src, &dst).map_err(|e| format!("sync {}: {}", skill_name, e))? {
+        match sync_one_system_skill(&src, &dst)
+            .map_err(|e| format!("sync {}: {}", skill_name, e))?
+        {
             SystemSkillSync::Synced => synced.push(*skill_name),
             SystemSkillSync::SkippedMissingSource => {
                 // Packaging miss — skill listed in SYSTEM_SKILLS but absent
@@ -1421,9 +1511,13 @@ fn merge_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
     for entry in fs::read_dir(src)? {
         let entry = entry?;
         let name = entry.file_name();
-        if name == ".git" || name == "node_modules" { continue; }
+        if name == ".git" || name == "node_modules" {
+            continue;
+        }
         let ft = entry.file_type()?;
-        if ft.is_symlink() { continue; }
+        if ft.is_symlink() {
+            continue;
+        }
         let d = dst.join(&name);
         if ft.is_dir() {
             merge_dir_recursive(&entry.path(), &d)?;
@@ -1537,7 +1631,10 @@ mod system_skills_tests {
         let outcome = sync_one_system_skill(&src, &dst).unwrap();
         assert!(matches!(outcome, SystemSkillSync::Synced));
         assert_eq!(fs::read_to_string(dst.join("SKILL.md")).unwrap(), "new");
-        assert!(!dst.join("stale.txt").exists(), "wholesale replace drops stale files");
+        assert!(
+            !dst.join("stale.txt").exists(),
+            "wholesale replace drops stale files"
+        );
     }
 }
 
@@ -1547,8 +1644,12 @@ mod system_skills_tests {
 // src/shared/path-safety-blacklist.json — see path_safety_crosscheck_tests.
 #[cfg(windows)]
 const FORBIDDEN_SYSTEM_DIRS: &[&str] = &[
-    "C:\\Windows", "C:\\Program Files", "C:\\Program Files (x86)",
-    "C:\\ProgramData", "C:\\Recovery", "C:\\$Recycle.Bin",
+    "C:\\Windows",
+    "C:\\Program Files",
+    "C:\\Program Files (x86)",
+    "C:\\ProgramData",
+    "C:\\Recovery",
+    "C:\\$Recycle.Bin",
 ];
 #[cfg(all(not(windows), not(target_os = "macos")))]
 const FORBIDDEN_SYSTEM_DIRS: &[&str] = &[
@@ -1558,13 +1659,28 @@ const FORBIDDEN_SYSTEM_DIRS: &[&str] = &[
 // /private targets too so a literal /private/etc path can't slip the lexical check.
 #[cfg(target_os = "macos")]
 const FORBIDDEN_SYSTEM_DIRS: &[&str] = &[
-    "/etc", "/var", "/usr", "/bin", "/sbin", "/boot", "/root", "/sys", "/proc", "/dev",
-    "/private/etc", "/private/var",
+    "/etc",
+    "/var",
+    "/usr",
+    "/bin",
+    "/sbin",
+    "/boot",
+    "/root",
+    "/sys",
+    "/proc",
+    "/dev",
+    "/private/etc",
+    "/private/var",
 ];
 const CREDENTIAL_SUBDIRS: &[&str] = &[".ssh", ".gnupg", ".aws", ".kube", ".docker", ".config/op"];
 #[cfg(target_os = "macos")]
-const MAC_SENSITIVE_SUBDIRS: &[&str] =
-    &["Library/Keychains", "Library/Cookies", "Library/Mail", "Library/Messages", "Library/Safari"];
+const MAC_SENSITIVE_SUBDIRS: &[&str] = &[
+    "Library/Keychains",
+    "Library/Cookies",
+    "Library/Mail",
+    "Library/Messages",
+    "Library/Safari",
+];
 #[cfg(windows)]
 const WIN_SENSITIVE_SUBDIRS: &[&str] = &["AppData/Local/Microsoft"];
 
@@ -1584,8 +1700,10 @@ pub(crate) fn validate_file_path(raw_path: &str) -> Result<PathBuf, String> {
     let mut resolved = PathBuf::new();
     for component in path.components() {
         match component {
-            std::path::Component::ParentDir => { resolved.pop(); },
-            std::path::Component::CurDir => {},
+            std::path::Component::ParentDir => {
+                resolved.pop();
+            }
+            std::path::Component::CurDir => {}
             _ => resolved.push(component),
         }
     }
@@ -1667,21 +1785,30 @@ mod path_safety_crosscheck_tests {
             v.extend(arr(&f, "systemDirsMacosExtra"));
             v
         };
-        let owned: Vec<String> = FORBIDDEN_SYSTEM_DIRS.iter().map(|s| s.to_string()).collect();
+        let owned: Vec<String> = FORBIDDEN_SYSTEM_DIRS
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         assert_eq!(owned, expected);
     }
 
     #[cfg(target_os = "macos")]
     #[test]
     fn mac_sensitive_subdirs_match_fixture() {
-        let owned: Vec<String> = super::MAC_SENSITIVE_SUBDIRS.iter().map(|s| s.to_string()).collect();
+        let owned: Vec<String> = super::MAC_SENSITIVE_SUBDIRS
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         assert_eq!(owned, arr(&fixture(), "macSensitiveSubdirs"));
     }
 
     #[cfg(windows)]
     #[test]
     fn win_sensitive_subdirs_match_fixture() {
-        let owned: Vec<String> = super::WIN_SENSITIVE_SUBDIRS.iter().map(|s| s.to_string()).collect();
+        let owned: Vec<String> = super::WIN_SENSITIVE_SUBDIRS
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         assert_eq!(owned, arr(&fixture(), "winSensitiveSubdirs"));
     }
 }
@@ -1704,10 +1831,12 @@ pub async fn cmd_read_workspace_file(path: String) -> Result<Option<String>, Str
 pub async fn cmd_write_workspace_file(path: String, content: String) -> Result<(), String> {
     let resolved = validate_file_path(&path)?;
     if let Some(parent) = resolved.parent() {
-        tokio::fs::create_dir_all(parent).await
+        tokio::fs::create_dir_all(parent)
+            .await
             .map_err(|e| format!("Failed to create directory: {}", e))?;
     }
-    tokio::fs::write(&resolved, content).await
+    tokio::fs::write(&resolved, content)
+        .await
         .map_err(|e| format!("Failed to write {}: {}", path, e))
 }
 
@@ -1727,9 +1856,11 @@ pub async fn cmd_delete_workspace_file(path: String) -> Result<bool, String> {
 /// Used by the audio player to create blob URLs without asset protocol scope issues.
 #[tauri::command]
 pub async fn cmd_read_file_base64(path: String) -> Result<String, String> {
-    use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
     let resolved = validate_file_path(&path)?;
-    let bytes = tokio::fs::read(&resolved).await.map_err(|e| format!("Failed to read {}: {}", path, e))?;
+    let bytes = tokio::fs::read(&resolved)
+        .await
+        .map_err(|e| format!("Failed to read {}: {}", path, e))?;
     Ok(BASE64.encode(&bytes))
 }
 
@@ -1787,9 +1918,13 @@ pub struct WecomQrGenerateResult {
 /// Returns scode (for polling) and auth_url (to render as QR image).
 #[tauri::command]
 pub async fn cmd_wecom_qr_generate() -> Result<WecomQrGenerateResult, String> {
-    let plat = if cfg!(target_os = "macos") { 1 }
-               else if cfg!(target_os = "windows") { 2 }
-               else { 3 };
+    let plat = if cfg!(target_os = "macos") {
+        1
+    } else if cfg!(target_os = "windows") {
+        2
+    } else {
+        3
+    };
     let url = format!(
         "https://work.weixin.qq.com/ai/qc/generate?source=myagents&plat={}",
         plat
@@ -1797,8 +1932,7 @@ pub async fn cmd_wecom_qr_generate() -> Result<WecomQrGenerateResult, String> {
 
     // External host (work.weixin.qq.com) — system proxy is wanted here.
     #[allow(clippy::disallowed_methods)]
-    let builder = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15));
+    let builder = reqwest::Client::builder().timeout(std::time::Duration::from_secs(15));
     let client = crate::proxy_config::build_client_with_proxy(builder)?;
 
     let resp: serde_json::Value = client
@@ -1814,7 +1948,10 @@ pub async fn cmd_wecom_qr_generate() -> Result<WecomQrGenerateResult, String> {
     let errcode = resp["errcode"].as_i64().unwrap_or(0);
     if errcode != 0 {
         let errmsg = resp["errmsg"].as_str().unwrap_or("unknown error");
-        return Err(format!("WeCom QR generate API error {}: {}", errcode, errmsg));
+        return Err(format!(
+            "WeCom QR generate API error {}: {}",
+            errcode, errmsg
+        ));
     }
 
     let data = resp.get("data").ok_or("WeCom QR response missing 'data'")?;
@@ -1843,7 +1980,10 @@ pub struct WecomQrPollResult {
 /// Poll the WeCom QR scan result. Call repeatedly until status is "success".
 /// `poll_index` is used for periodic logging (log every 10th poll to reduce noise).
 #[tauri::command]
-pub async fn cmd_wecom_qr_poll(scode: String, poll_index: Option<u32>) -> Result<WecomQrPollResult, String> {
+pub async fn cmd_wecom_qr_poll(
+    scode: String,
+    poll_index: Option<u32>,
+) -> Result<WecomQrPollResult, String> {
     // Sanitize scode: only allow alphanumeric (defense-in-depth against URL injection)
     let safe_scode: String = scode.chars().filter(|c| c.is_alphanumeric()).collect();
     let url = format!(
@@ -1853,8 +1993,7 @@ pub async fn cmd_wecom_qr_poll(scode: String, poll_index: Option<u32>) -> Result
 
     // External host — system proxy wanted.
     #[allow(clippy::disallowed_methods)]
-    let builder = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10));
+    let builder = reqwest::Client::builder().timeout(std::time::Duration::from_secs(10));
     let client = crate::proxy_config::build_client_with_proxy(builder)?;
 
     let resp: serde_json::Value = client
@@ -1884,24 +2023,45 @@ pub async fn cmd_wecom_qr_poll(scode: String, poll_index: Option<u32>) -> Result
             let secret = bot_info["secret"].as_str().map(String::from);
             if bot_id.is_some() && secret.is_some() {
                 ulog_info!("[wecom-qr] QR scan success, bot created (poll #{})", idx);
-                Ok(WecomQrPollResult { status: "success".into(), bot_id, secret })
+                Ok(WecomQrPollResult {
+                    status: "success".into(),
+                    bot_id,
+                    secret,
+                })
             } else {
                 // Log raw response for debugging unexpected format
-                ulog_error!("[wecom-qr] Poll #{} status=success but bot_info incomplete: {}", idx, resp);
+                ulog_error!(
+                    "[wecom-qr] Poll #{} status=success but bot_info incomplete: {}",
+                    idx,
+                    resp
+                );
                 Err("WeCom QR scan succeeded but bot_info is incomplete".into())
             }
         }
         "expired" | "cancelled" | "denied" => {
             ulog_info!("[wecom-qr] Poll #{} terminal status: {}", idx, status_str);
-            Ok(WecomQrPollResult { status: status_str.into(), bot_id: None, secret: None })
+            Ok(WecomQrPollResult {
+                status: status_str.into(),
+                bot_id: None,
+                secret: None,
+            })
         }
         _ => {
             // Periodic logging: first poll, then every 10th
             if idx == 0 || idx % 10 == 0 {
                 let scode_preview: String = safe_scode.chars().take(8).collect();
-                ulog_info!("[wecom-qr] Poll #{} scode={} status={}", idx, scode_preview, status_str);
+                ulog_info!(
+                    "[wecom-qr] Poll #{} scode={} status={}",
+                    idx,
+                    scode_preview,
+                    status_str
+                );
             }
-            Ok(WecomQrPollResult { status: "waiting".into(), bot_id: None, secret: None })
+            Ok(WecomQrPollResult {
+                status: "waiting".into(),
+                bot_id: None,
+                secret: None,
+            })
         }
     }
 }
@@ -1975,7 +2135,9 @@ mod network_probe_tests {
         assert!(is_loopback_http_url(&parsed("http://localhost:11434/v1")));
         assert!(is_loopback_http_url(&parsed("https://127.0.0.1:8443/v1")));
         assert!(is_loopback_http_url(&parsed("http://[::1]:8080/v1")));
-        assert!(is_loopback_http_url(&parsed("http://lmstudio.localhost:1234")));
+        assert!(is_loopback_http_url(&parsed(
+            "http://lmstudio.localhost:1234"
+        )));
     }
 
     #[test]
@@ -2285,12 +2447,12 @@ pub async fn cmd_fetch_provider_models(
     } else {
         // External host branch — system proxy wanted.
         #[allow(clippy::disallowed_methods)]
-        let builder = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(15));
+        let builder = reqwest::Client::builder().timeout(std::time::Duration::from_secs(15));
         crate::proxy_config::build_client_with_proxy(builder)?
     };
 
-    let mut request = client.get(&url)
+    let mut request = client
+        .get(&url)
         .header(&auth_header_name, &auth_header_value);
 
     if let Some(headers) = extra_headers {
@@ -2299,11 +2461,10 @@ pub async fn cmd_fetch_provider_models(
         }
     }
 
-    let response = request.send().await
-        .map_err(|e| {
-            ulog_error!("[model-discovery] Network error for {}: {}", url, e);
-            format!("Network error: {}", e)
-        })?;
+    let response = request.send().await.map_err(|e| {
+        ulog_error!("[model-discovery] Network error for {}: {}", url, e);
+        format!("Network error: {}", e)
+    })?;
 
     let status = response.status();
     if !status.is_success() {
@@ -2317,11 +2478,10 @@ pub async fn cmd_fetch_provider_models(
         return Err(format!("HTTP {}: {}", status.as_u16(), truncated));
     }
 
-    let result = response.json::<serde_json::Value>().await
-        .map_err(|e| {
-            ulog_error!("[model-discovery] Invalid JSON from {}: {}", url, e);
-            format!("Invalid JSON response: {}", e)
-        })?;
+    let result = response.json::<serde_json::Value>().await.map_err(|e| {
+        ulog_error!("[model-discovery] Invalid JSON from {}: {}", url, e);
+        format!("Invalid JSON response: {}", e)
+    })?;
 
     ulog_info!("[model-discovery] Success from {}", url);
     Ok(result)
@@ -2396,7 +2556,9 @@ fn runtime_detection_gate_decision(
 
     if let Some(cache) = state.cache.as_ref() {
         if should_use_runtime_detection_cache(now, cache.detected_at, ttl) {
-            return RuntimeDetectionGateDecision::CacheHit(clone_runtime_detection_cache_results(cache));
+            return RuntimeDetectionGateDecision::CacheHit(clone_runtime_detection_cache_results(
+                cache,
+            ));
         }
     }
 
@@ -2451,11 +2613,14 @@ fn run_runtime_detection() -> HashMap<String, RuntimeDetectionResult> {
     let mut results = HashMap::new();
 
     // Builtin is always available
-    results.insert("builtin".to_string(), RuntimeDetectionResult {
-        installed: true,
-        version: Some(env!("CARGO_PKG_VERSION").to_string()),
-        path: None,
-    });
+    results.insert(
+        "builtin".to_string(),
+        RuntimeDetectionResult {
+            installed: true,
+            version: Some(env!("CARGO_PKG_VERSION").to_string()),
+            path: None,
+        },
+    );
 
     // Claude Code CLI
     results.insert("claude-code".to_string(), detect_cli("claude"));
@@ -2566,7 +2731,9 @@ fn detect_cli_version(path: &Path) -> Option<String> {
             Ok(Some(status)) => {
                 let output = child.wait_with_output().ok()?;
                 if status.success() {
-                    return String::from_utf8(output.stdout).ok().map(|s| s.trim().to_string());
+                    return String::from_utf8(output.stdout)
+                        .ok()
+                        .map(|s| s.trim().to_string());
                 }
                 return None;
             }

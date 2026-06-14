@@ -55,15 +55,20 @@ pub async fn cmd_workspace_search_files_fuzzy(
         .map_err(|e| format!("search task failed: {}", e))?
 }
 
-fn walk_and_match(
-    workspace_root: &PathBuf,
-    query: &str,
-) -> Result<Vec<FileSearchResult>, String> {
+fn walk_and_match(workspace_root: &PathBuf, query: &str) -> Result<Vec<FileSearchResult>, String> {
     let matcher = SkimMatcherV2::default().smart_case();
     let mut hits: Vec<(i64, FileSearchResult)> = Vec::new();
     let mut visited_nodes = 0usize;
 
-    walk(workspace_root, workspace_root, 0, &matcher, query, &mut hits, &mut visited_nodes);
+    walk(
+        workspace_root,
+        workspace_root,
+        0,
+        &matcher,
+        query,
+        &mut hits,
+        &mut visited_nodes,
+    );
 
     // Sort by match score descending, then by path length (shorter = closer
     // surface) ascending.
@@ -150,12 +155,10 @@ mod tests {
         let ws = make_tmp_workspace();
         fs::write(ws.join("README.md"), "").unwrap();
         fs::write(ws.join("notes.md"), "").unwrap();
-        let res = cmd_workspace_search_files_fuzzy(
-            ws.to_string_lossy().to_string(),
-            "rd".to_string(),
-        )
-        .await
-        .unwrap();
+        let res =
+            cmd_workspace_search_files_fuzzy(ws.to_string_lossy().to_string(), "rd".to_string())
+                .await
+                .unwrap();
         assert!(res.iter().any(|r| r.name == "README.md"));
         let _ = fs::remove_dir_all(&ws);
     }
@@ -164,12 +167,10 @@ mod tests {
     async fn empty_query_returns_empty() {
         let ws = make_tmp_workspace();
         fs::write(ws.join("a.txt"), "").unwrap();
-        let res = cmd_workspace_search_files_fuzzy(
-            ws.to_string_lossy().to_string(),
-            "  ".to_string(),
-        )
-        .await
-        .unwrap();
+        let res =
+            cmd_workspace_search_files_fuzzy(ws.to_string_lossy().to_string(), "  ".to_string())
+                .await
+                .unwrap();
         assert!(res.is_empty());
         let _ = fs::remove_dir_all(&ws);
     }
@@ -181,12 +182,10 @@ mod tests {
         fs::write(ws.join("node_modules").join("hidden.md"), "").unwrap();
         fs::write(ws.join(".env"), "").unwrap();
         fs::write(ws.join("visible.md"), "").unwrap();
-        let res = cmd_workspace_search_files_fuzzy(
-            ws.to_string_lossy().to_string(),
-            "md".to_string(),
-        )
-        .await
-        .unwrap();
+        let res =
+            cmd_workspace_search_files_fuzzy(ws.to_string_lossy().to_string(), "md".to_string())
+                .await
+                .unwrap();
         assert!(res.iter().any(|r| r.name == "visible.md"));
         assert!(!res.iter().any(|r| r.name == "hidden.md"));
         let _ = fs::remove_dir_all(&ws);
@@ -197,12 +196,10 @@ mod tests {
         let ws = make_tmp_workspace();
         fs::create_dir_all(ws.join("src").join("renderer")).unwrap();
         fs::write(ws.join("src").join("renderer").join("App.tsx"), "").unwrap();
-        let res = cmd_workspace_search_files_fuzzy(
-            ws.to_string_lossy().to_string(),
-            "App".to_string(),
-        )
-        .await
-        .unwrap();
+        let res =
+            cmd_workspace_search_files_fuzzy(ws.to_string_lossy().to_string(), "App".to_string())
+                .await
+                .unwrap();
         let hit = res.iter().find(|r| r.name == "App.tsx").unwrap();
         assert_eq!(hit.path, "src/renderer/App.tsx");
         let _ = fs::remove_dir_all(&ws);

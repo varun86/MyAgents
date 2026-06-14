@@ -4,8 +4,10 @@ import {
   buildCodexInitializeParams,
   buildCodexSandboxPolicy,
   buildCodexTurnStartParams,
+  CodexRuntime,
   initializeCodexRpc,
   KNOWN_CODEX_SERVER_REQUEST_METHODS,
+  mapCodexTurnCompletedNotification,
   serializeCodexPermissionResponse,
   type PendingCodexRequest,
 } from '../runtimes/codex';
@@ -61,6 +63,89 @@ describe('Codex app-server protocol helpers', () => {
       sandboxPolicy: { type: 'dangerFullAccess' },
       model: 'gpt-5.2-codex',
       summary: 'concise',
+    });
+  });
+
+  // #324 — turn/start.effort: included only when the user picked a non-default
+  // level; default/null OMITS the key (conservative shape older codex builds
+  // also accept — an explicit null is "no override" per schema but adds noise).
+  it('includes effort in turn/start only when set', () => {
+    const base = {
+      threadId: 'thread-1',
+      input: [],
+      cwd: '/tmp/ws',
+      approvalPolicy: 'never' as const,
+      sandbox: 'danger-full-access' as const,
+      model: null,
+    };
+    expect(buildCodexTurnStartParams({ ...base, reasoningEffort: 'xhigh' }).effort).toBe('xhigh');
+    expect('effort' in buildCodexTurnStartParams({ ...base, reasoningEffort: null })).toBe(false);
+    expect('effort' in buildCodexTurnStartParams(base)).toBe(false);
+  });
+
+  it('records Codex config changes as next-turn process state', async () => {
+    const runtime = new CodexRuntime();
+    const proc = {
+      exited: false,
+      model: 'gpt-5.1-codex',
+      permissionMode: 'full-auto',
+      approvalPolicy: 'never',
+      sandbox: 'workspace-write',
+      reasoningEffort: '',
+      defaultPermissionMode: 'full-auto',
+    } as unknown as import('../runtimes/types').RuntimeProcess;
+
+    await runtime.setModel(proc, 'gpt-5.2-codex');
+    await runtime.setPermissionMode(proc, 'no-restrictions');
+    await runtime.setReasoningEffort(proc, 'xhigh');
+
+    const state = proc as unknown as {
+      model: string;
+      permissionMode: string;
+      approvalPolicy: 'never';
+      sandbox: 'danger-full-access';
+      reasoningEffort: string;
+    };
+    expect(state.model).toBe('gpt-5.2-codex');
+    expect(state.permissionMode).toBe('no-restrictions');
+    expect(state.approvalPolicy).toBe('never');
+    expect(state.sandbox).toBe('danger-full-access');
+    expect(buildCodexTurnStartParams({
+      threadId: 'thread-1',
+      input: [],
+      cwd: '/tmp/ws',
+      approvalPolicy: state.approvalPolicy,
+      sandbox: state.sandbox,
+      model: state.model,
+      reasoningEffort: state.reasoningEffort,
+    })).toMatchObject({
+      model: 'gpt-5.2-codex',
+      approvalPolicy: 'never',
+      sandboxPolicy: { type: 'dangerFullAccess' },
+      effort: 'xhigh',
+    });
+  });
+
+  it('preserves Codex turn/completed status instead of treating interrupts as success', () => {
+    expect(mapCodexTurnCompletedNotification({ status: 'completed' })).toEqual({
+      kind: 'turn_complete',
+      status: 'completed',
+    });
+
+    expect(mapCodexTurnCompletedNotification({ status: 'interrupted' })).toEqual({
+      kind: 'turn_complete',
+      status: 'interrupted',
+      result: 'Turn ended with status interrupted',
+    });
+
+    expect(mapCodexTurnCompletedNotification({
+      status: 'failed',
+      error: { message: 'websocket failed' },
+    })).toEqual({
+      kind: 'turn_complete',
+      status: 'failed',
+      error: 'websocket failed',
+      result: 'websocket failed',
     });
   });
 

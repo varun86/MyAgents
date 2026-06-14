@@ -7,11 +7,13 @@ import { load as yamlLoad } from 'js-yaml';
 export interface SlashCommand {
     name: string;           // Command name without slash, e.g., "review"
     description: string;    // Human readable description
-    source: 'builtin' | 'custom' | 'skill';  // Source type: builtin, custom command, or skill
+    source: 'builtin' | 'custom' | 'skill' | 'sdk';  // Source type: builtin, custom command, local skill, or SDK-provided command
     scope?: 'user' | 'project';  // Where the item is defined
     path?: string;          // File path for custom commands or skills
     folderName?: string;    // Folder name for skills (may differ from display name after rename)
     fileName?: string;      // File name without .md for custom commands (may differ from display name when frontmatter overrides)
+    argumentHint?: string;  // SDK-provided argument hint, when available
+    aliases?: string[];     // SDK-provided aliases, when available
 }
 
 /**

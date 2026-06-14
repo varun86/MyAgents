@@ -231,6 +231,9 @@ const TableRowComponent: Components['tr'] = ({ children }) => (
   </tr>
 );
 
+// 表格 = text-sm(14px)：嵌在 16px 正文里的密集内容比正文低一档（13px 会造成
+// 肉眼可见跳变，PRD 0.2.34 P0-1 定为 14）。v2.5 起 ui 档本身就是 14px，原 dense
+// 专用档（text-md）与其 lint 白名单机制已随 Part 3 合并删除。
 const TableCellComponent: Components['td'] = ({ children }) => (
   <td className="px-4 py-2.5 text-sm">{children}</td>
 );
@@ -250,37 +253,37 @@ const BlockquoteComponent: Components['blockquote'] = ({ children }) => (
 
 // Custom heading components - H1:22px H2:20px H3:18px H4-H6:16px
 const H1Component: Components['h1'] = ({ children }) => (
-  <h1 className="mb-4 mt-6 text-[22px] leading-[1.3] font-bold text-[var(--ink)]">
+  <h1 className="mb-4 mt-6 text-2xl leading-[1.3] font-bold text-[var(--ink)]">
     {children}
   </h1>
 );
 
 const H2Component: Components['h2'] = ({ children }) => (
-  <h2 className="mb-3 mt-5 text-[20px] leading-[1.4] font-semibold text-[var(--ink)]">
+  <h2 className="mb-3 mt-5 text-xl leading-[1.4] font-semibold text-[var(--ink)]">
     {children}
   </h2>
 );
 
 const H3Component: Components['h3'] = ({ children }) => (
-  <h3 className="mb-2 mt-4 text-[18px] leading-[1.5] font-semibold text-[var(--ink)]">
+  <h3 className="mb-2 mt-4 text-lg leading-[1.5] font-semibold text-[var(--ink)]">
     {children}
   </h3>
 );
 
 const H4Component: Components['h4'] = ({ children }) => (
-  <h4 className="mb-2 mt-3 text-[16px] leading-[1.5] font-semibold text-[var(--ink-secondary)]">
+  <h4 className="mb-2 mt-3 text-base leading-[1.5] font-semibold text-[var(--ink-secondary)]">
     {children}
   </h4>
 );
 
 const H5Component: Components['h5'] = ({ children }) => (
-  <h5 className="mb-2 mt-3 text-[16px] leading-[1.5] font-medium text-[var(--ink-secondary)]">
+  <h5 className="mb-2 mt-3 text-base leading-[1.5] font-medium text-[var(--ink-secondary)]">
     {children}
   </h5>
 );
 
 const H6Component: Components['h6'] = ({ children }) => (
-  <h6 className="mb-2 mt-3 text-[16px] leading-[1.5] font-medium text-[var(--ink-muted)]">
+  <h6 className="mb-2 mt-3 text-base leading-[1.5] font-medium text-[var(--ink-muted)]">
     {children}
   </h6>
 );
@@ -302,9 +305,12 @@ const LiComponent: Components['li'] = ({ children }) => (
   <li className="pl-1 [&>p]:my-0" style={{ display: 'list-item' }}>{children}</li>
 );
 
-// Paragraph component
+// Paragraph component — 1.7 对齐 prose 档配对行高（--text-base--line-height）。
+// 不用继承（~20 个 Markdown 调用点的容器行高不齐，继承会让无显式行高的容器
+// 退到 UA normal），也不用 leading-relaxed（1.625 与 prose 档 1.7 分叉，
+// PRD 0.2.34 Part 2 实测该分叉正是"宣称 1.7 从未上屏"的根源）。
 const ParagraphComponent: Components['p'] = ({ children }) => (
-  <p className="my-4 leading-relaxed">{children}</p>
+  <p className="my-4 leading-[1.7]">{children}</p>
 );
 
 // Horizontal rule

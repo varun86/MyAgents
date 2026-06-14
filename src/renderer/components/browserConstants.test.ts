@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { browserBoundsEqual, hasUsableBrowserBounds, toUsableBrowserBounds } from './browserConstants';
+import {
+  browserBoundsEqual,
+  hasUsableBrowserBounds,
+  shouldSyncBrowserBounds,
+  toUsableBrowserBounds,
+} from './browserConstants';
 
 // Regression guard for issue #290: HTML preview webview was created with
 // width 0 because the create effect read getBoundingClientRect() while the
@@ -66,5 +71,43 @@ describe('browser bounds identity', () => {
       { x: 699.42, y: 79.99, width: 688.66, height: 662.02 },
       { x: 699.7, y: 80.2, width: 688.3, height: 661.8 },
     )).toBe(true);
+  });
+});
+
+// Regression guard for issue #339: the native webview ended up parked on a
+// mid-flight rect because every sync mechanism stopped once it believed the
+// layout had settled. The reconciler's per-frame decision must never have a
+// terminal state — any rect change after ANY previously-applied sample
+// demands another sync.
+describe('shouldSyncBrowserBounds', () => {
+  const midFlight = { x: 272, y: 80, width: 690, height: 662 }; // the #339 parked rect
+  const settled = { x: 440, y: 95, width: 820, height: 610 };
+
+  it('demands a sync when the rect moves after a previously-applied sample (#339)', () => {
+    expect(shouldSyncBrowserBounds(midFlight, settled, false)).toBe(true);
+  });
+
+  it('demands a sync for a position-only move (never fires ResizeObserver)', () => {
+    expect(shouldSyncBrowserBounds(
+      { x: 698, y: 80, width: 690, height: 662 },
+      { x: 272, y: 80, width: 690, height: 662 },
+      false,
+    )).toBe(true);
+  });
+
+  it('syncs the first usable rect when nothing was delivered yet', () => {
+    expect(shouldSyncBrowserBounds(null, settled, false)).toBe(true);
+  });
+
+  it('is idle while the rect matches the delivered bounds', () => {
+    expect(shouldSyncBrowserBounds(settled, { ...settled }, false)).toBe(false);
+  });
+
+  it('skips unusable rects (degenerate / unmounted container)', () => {
+    expect(shouldSyncBrowserBounds(midFlight, null, false)).toBe(false);
+  });
+
+  it('defers while a resize invoke is in flight (serialized native updates)', () => {
+    expect(shouldSyncBrowserBounds(midFlight, settled, true)).toBe(false);
   });
 });

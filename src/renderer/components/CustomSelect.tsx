@@ -29,7 +29,7 @@ interface CustomSelectProps {
     className?: string;
     /**
      * Trigger size — controls the closed-state padding + font size:
-     *   'compact' (default when `compact={true}`): 11px / px-2 py-1
+     *   'compact' (default when `compact={true}`): 12px / px-2 py-1
      *   'sm'      (default): 12px / px-3 py-2 — fine-print fields, dense forms
      *   'md':                14px / px-3 py-2.5 — primary fields the user
      *                        focuses on (e.g. workspace picker in dispatch
@@ -75,7 +75,7 @@ export default function CustomSelect({
                 onClick={() => setIsOpen(!isOpen)}
                 className={`flex w-full items-center gap-2 rounded-lg border border-[var(--line)] bg-[var(--paper)] text-left transition-colors hover:border-[var(--ink-subtle)] ${
                     compact
-                        ? 'px-2 py-1 text-[11px]'
+                        ? 'px-2 py-1 text-xs'
                         : size === 'md'
                             ? 'px-3 py-2.5 text-sm'
                             : 'px-3 py-2 text-xs'
@@ -118,7 +118,7 @@ export default function CustomSelect({
                 <div className="max-h-60 overflow-y-auto py-1">
                     {options.map(option =>
                         option.isSeparator ? (
-                            <div key={option.value} className="px-3 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--ink-muted)]/50">
+                            <div key={option.value} className="px-3 pb-1 pt-2 text-xs font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60">
                                 {option.label}
                             </div>
                         ) : (
