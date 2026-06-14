@@ -33,5 +33,9 @@ describe('ToolImageAttachment', () => {
 
     const stack = container.firstElementChild;
     expect(stack).toHaveClass('items-start', 'max-w-full');
+
+    const caption = screen.getByText('Generated reference image');
+    expect(caption).toHaveClass('max-w-full');
+    expect(caption).not.toHaveClass('max-w-sm');
   });
 });
