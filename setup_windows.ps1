@@ -15,8 +15,37 @@ try {
     Write-Host "  MyAgents Windows 开发环境初始化" -ForegroundColor Green
     Write-Host "=========================================`n" -ForegroundColor Blue
 
+    function Refresh-ProcessPath {
+        $pathValues = @(
+            [Environment]::GetEnvironmentVariable("Path", "Process"),
+            [Environment]::GetEnvironmentVariable("Path", "Machine"),
+            [Environment]::GetEnvironmentVariable("Path", "User")
+        )
+        if ($env:USERPROFILE) {
+            $pathValues += (Join-Path $env:USERPROFILE ".cargo\bin")
+        }
+
+        $seen = @{}
+        $segments = @()
+        foreach ($pathValue in $pathValues) {
+            if ([string]::IsNullOrWhiteSpace($pathValue)) { continue }
+            foreach ($part in ($pathValue -split ';')) {
+                $trimmed = $part.Trim()
+                if ([string]::IsNullOrWhiteSpace($trimmed)) { continue }
+                $key = $trimmed.TrimEnd('\').ToLowerInvariant()
+                if (-not $seen.ContainsKey($key)) {
+                    $seen[$key] = $true
+                    $segments += $trimmed
+                }
+            }
+        }
+
+        $env:Path = ($segments -join ';')
+    }
+
     function Test-Dependency {
         param($Name, $Command, $InstallHint)
+        Refresh-ProcessPath
         Write-Host "  检查 $Name... " -NoNewline
         try {
             Invoke-Expression $Command 2>&1 | Out-Null
@@ -42,6 +71,49 @@ try {
         }
         Write-Host "  $Name 安装完成" -ForegroundColor Green
         return $true
+    }
+
+    function Install-RustupDirect {
+        Write-Host "  winget 未提供可用 rustup，直接下载 rustup-init..." -ForegroundColor Cyan
+        $installer = Join-Path $env:TEMP "rustup-init-x86_64-pc-windows-msvc.exe"
+        try {
+            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+            Invoke-WebRequest -Uri "https://win.rustup.rs/x86_64" -OutFile $installer -UseBasicParsing -TimeoutSec 300
+            & $installer -y --default-toolchain none
+            if ($LASTEXITCODE -ne 0) {
+                throw "rustup-init exited with $LASTEXITCODE"
+            }
+            Refresh-ProcessPath
+            Write-Host "  rustup-init 安装完成" -ForegroundColor Green
+            return $true
+        } catch {
+            Write-Host "  rustup-init 安装失败: $_" -ForegroundColor Red
+            return $false
+        } finally {
+            Remove-Item -Force $installer -ErrorAction SilentlyContinue
+        }
+    }
+
+    function Ensure-Rustup {
+        if (Test-Dependency "Rustup" "rustup --version" "") {
+            return $true
+        }
+
+        if ($HasWinget) {
+            $null = Install-WithWinget "Rust (rustup)" "Rustlang.Rustup"
+            Refresh-ProcessPath
+        }
+
+        if (Test-Dependency "Rustup" "rustup --version" "") {
+            return $true
+        }
+
+        if (Install-RustupDirect) {
+            return (Test-Dependency "Rustup" "rustup --version" "")
+        }
+
+        Write-Host "    请通过 rustup 安装 Rust: https://rustup.rs" -ForegroundColor Yellow
+        return $false
     }
 
     function Get-GitInstaller {
@@ -322,34 +394,22 @@ try {
         if ($LASTEXITCODE -eq 0 -or $?) { $HasWinget = $true }
     } catch { }
 
-    $NeedRestart = $false
+    Refresh-ProcessPath
 
     # Node.js (needed for typecheck/lint)
     if (-not (Test-Dependency "Node.js" "node --version" "")) {
         if ($HasWinget) {
-            Install-WithWinget "Node.js LTS" "OpenJS.NodeJS.LTS"
-            $NeedRestart = $true
+            $null = Install-WithWinget "Node.js LTS" "OpenJS.NodeJS.LTS"
+            Refresh-ProcessPath
         } else {
             Write-Host "    请安装: https://nodejs.org" -ForegroundColor Yellow
         }
     }
 
-    # Rust + Cargo
-    if (-not (Test-Dependency "Rust" "rustc --version" "")) {
-        if ($HasWinget) {
-            Install-WithWinget "Rust (rustup)" "Rustlang.Rustup"
-            $NeedRestart = $true
-        } else {
-            Write-Host "    请安装: https://rustup.rs" -ForegroundColor Yellow
-        }
-    }
-    if (-not (Test-Dependency "Rustup" "rustup --version" "")) {
-        if ($HasWinget) {
-            Install-WithWinget "Rust (rustup)" "Rustlang.Rustup"
-            $NeedRestart = $true
-        } else {
-            Write-Host "    请通过 rustup 安装 Rust: https://rustup.rs" -ForegroundColor Yellow
-        }
+    # Rust is prepared via rustup + rust-toolchain.toml below. Do not require
+    # rustc/cargo before ensure_rust_toolchain.ps1 has a chance to install them.
+    if (-not (Ensure-Rustup)) {
+        Write-Host "    请安装: https://rustup.rs" -ForegroundColor Yellow
     }
 
     # MSVC Build Tools (required by Rust on Windows)
@@ -362,27 +422,15 @@ try {
             } else {
                 Write-Host "  MSVC Build Tools 安装完成" -ForegroundColor Green
             }
-            $NeedRestart = $true
+            Refresh-ProcessPath
         } else {
             Write-Host "    请安装 Visual Studio Build Tools: https://visualstudio.microsoft.com/visual-cpp-build-tools/" -ForegroundColor Yellow
         }
     }
 
-    if ($NeedRestart) {
-        Write-Host "`n=========================================" -ForegroundColor Yellow
-        Write-Host "  依赖已安装，请关闭此窗口，打开新的 PowerShell 重新运行本脚本" -ForegroundColor Yellow
-        Write-Host "  (新安装的工具需要新终端才能生效)" -ForegroundColor Yellow
-        Write-Host "=========================================`n" -ForegroundColor Yellow
-        Write-Host "按回车键退出..." -ForegroundColor Cyan
-        Read-Host
-        exit 0
-    }
-
-    # Final check — all must be present now
+    # Pre-toolchain check: rustc/cargo are installed by ensure_rust_toolchain.ps1.
     $Missing = $false
     if (-not (Test-Dependency "Node.js" "node --version" "")) { $Missing = $true }
-    if (-not (Test-Dependency "Rust" "rustc --version" "")) { $Missing = $true }
-    if (-not (Test-Dependency "Cargo" "cargo --version" "")) { $Missing = $true }
     if (-not (Test-Dependency "Rustup" "rustup --version" "")) { $Missing = $true }
     if (-not (Test-MSVC)) { $Missing = $true }
 
@@ -402,6 +450,17 @@ try {
         exit 1
     }
     Write-Host "OK - Rust toolchain ready" -ForegroundColor Green
+
+    $MissingAfterToolchain = $false
+    if (-not (Test-Dependency "Rust" "rustc --version" "")) { $MissingAfterToolchain = $true }
+    if (-not (Test-Dependency "Cargo" "cargo --version" "")) { $MissingAfterToolchain = $true }
+    if (-not (Test-Dependency "Rustup" "rustup --version" "")) { $MissingAfterToolchain = $true }
+    if ($MissingAfterToolchain) {
+        Write-Host "`nRust toolchain 仍不可用，请检查 rustup 安装日志" -ForegroundColor Red
+        Write-Host "`n按回车键退出..." -ForegroundColor Yellow
+        Read-Host
+        exit 1
+    }
 
     Write-Host "`nStep 2/9: 下载 Node.js 运行时 (Sidecar + MCP Server + 社区工具统一 runtime)" -ForegroundColor Blue
     Get-NodeJSBinary

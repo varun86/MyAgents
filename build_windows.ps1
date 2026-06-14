@@ -148,21 +148,51 @@ try {
     # ========================================
     Write-Host "[2/7] 检查依赖..." -ForegroundColor Blue
 
-    function Test-Command {
-        param([string]$Command, [string]$HelpUrl)
-        try {
-            $null = Invoke-Expression $Command 2>&1
-            return $true
+    function Refresh-ProcessPath {
+        $pathValues = @(
+            [Environment]::GetEnvironmentVariable("Path", "Process"),
+            [Environment]::GetEnvironmentVariable("Path", "Machine"),
+            [Environment]::GetEnvironmentVariable("Path", "User")
+        )
+        if ($env:USERPROFILE) {
+            $pathValues += (Join-Path $env:USERPROFILE ".cargo\bin")
         }
-        catch {
-            Write-Host "  X - $Command 未安装" -ForegroundColor Red
-            Write-Host "      请安装: $HelpUrl" -ForegroundColor Yellow
-            return $false
+
+        $seen = @{}
+        $segments = @()
+        foreach ($pathValue in $pathValues) {
+            if ([string]::IsNullOrWhiteSpace($pathValue)) { continue }
+            foreach ($part in ($pathValue -split ';')) {
+                $trimmed = $part.Trim()
+                if ([string]::IsNullOrWhiteSpace($trimmed)) { continue }
+                $key = $trimmed.TrimEnd('\').ToLowerInvariant()
+                if (-not $seen.ContainsKey($key)) {
+                    $seen[$key] = $true
+                    $segments += $trimmed
+                }
+            }
         }
+
+        $env:Path = ($segments -join ';')
     }
 
+    function Test-Command {
+        param([string]$Command, [string]$HelpUrl)
+        Refresh-ProcessPath
+        try {
+            $null = Invoke-Expression $Command 2>&1
+            if ($LASTEXITCODE -eq 0 -or $?) {
+                return $true
+            }
+        }
+        catch { }
+        Write-Host "  X - $Command 未安装" -ForegroundColor Red
+        Write-Host "      请安装: $HelpUrl" -ForegroundColor Yellow
+        return $false
+    }
+
+    Refresh-ProcessPath
     $depOk = $true
-    if (-not (Test-Command "rustc --version" "https://rustup.rs")) { $depOk = $false }
     if (-not (Test-Command "rustup --version" "https://rustup.rs")) { $depOk = $false }
     if (-not (Test-Command "npm --version" "https://nodejs.org")) { $depOk = $false }
 
@@ -174,6 +204,11 @@ try {
             Write-Host "  Rust toolchain 准备失败: $_" -ForegroundColor Red
             $depOk = $false
         }
+    }
+
+    if ($depOk) {
+        if (-not (Test-Command "rustc --version" "https://rustup.rs")) { $depOk = $false }
+        if (-not (Test-Command "cargo --version" "https://rustup.rs")) { $depOk = $false }
     }
 
     if (-not $depOk) {

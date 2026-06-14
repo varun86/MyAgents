@@ -130,6 +130,7 @@ Rust 格式化结果由 `rustfmt` 版本决定。仓库根目录的 `rust-toolch
 - 从 `rust-toolchain.toml` 读取 channel 和 components（当前为 `1.92.0` + `rustfmt` / `clippy`）
 - 显式安装对应 component
 - 平台 build 额外安装目标 target（Windows 为 `x86_64-pc-windows-msvc`）
+- Windows setup 会刷新当前 PowerShell 的 PATH；如果 winget 只报告 Rustup 包已安装但 `rustup.exe` 仍不可用，会兜底下载官方 `rustup-init.exe`
 
 如果 Windows 上 setup 后 build 仍报 `can't find crate for core`、`target may not be installed`、`component 'rustfmt' is unavailable/not installed` 等 Rust 缺失类错误，先手动运行：
 
