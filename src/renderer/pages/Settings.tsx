@@ -3000,8 +3000,8 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                             })}
                         </div>
 
-                        {/* 分区 2：CLI 工具注册表（发现链接区已按工具箱定稿移除，减少无用信息） */}
-                        <CliToolsSection />
+                        {/* 分区 2：CLI 工具注册表（实验室门控，默认关闭） */}
+                        {config.cliToolRegistryEnabled === true && <CliToolsSection />}
                     </div>
                 )}
 
@@ -3696,6 +3696,25 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                     >
                                         <span
                                             className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-[var(--toggle-thumb)] shadow transition-transform ${config.multiAgentRuntime ? 'translate-x-5' : 'translate-x-0'
+                                                }`}
+                                        />
+                                    </button>
+                                </div>
+
+                                <div className="mt-4 flex items-center justify-between border-t border-[var(--line)] pt-4">
+                                    <div className="flex-1 pr-4">
+                                        <p className="text-sm font-medium text-[var(--ink)]">CLI 工具注册表</p>
+                                        <p className="text-xs text-[var(--ink-muted)]">
+                                            允许 AI 创建并注册命令行小工具，并在工具箱中管理；开启后新会话可自动发现已启用工具。MCP 与 myagents 内置 CLI 能力不受影响。
+                                        </p>
+                                    </div>
+                                    <button
+                                        onClick={() => updateConfig({ cliToolRegistryEnabled: config.cliToolRegistryEnabled !== true })}
+                                        className={`relative h-6 w-11 shrink-0 cursor-pointer rounded-full transition-colors ${config.cliToolRegistryEnabled === true ? 'bg-[var(--accent)]' : 'bg-[var(--line-strong)]'
+                                            }`}
+                                    >
+                                        <span
+                                            className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-[var(--toggle-thumb)] shadow transition-transform ${config.cliToolRegistryEnabled === true ? 'translate-x-5' : 'translate-x-0'
                                                 }`}
                                         />
                                     </button>

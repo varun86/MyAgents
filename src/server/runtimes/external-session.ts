@@ -48,7 +48,7 @@ import {
   createMaterializedSessionMetadata,
   type SessionMaterializationScenario,
 } from '../utils/session-materialization';
-import { findAgentByWorkspacePath } from '../utils/admin-config';
+import { findAgentByWorkspacePath, isCliToolRegistryEnabled } from '../utils/admin-config';
 import type { AgentConfig } from '../../shared/types/agent';
 import type { MessageUsage, SessionMessage } from '../types/session';
 import type { SystemInitInfo } from '../../shared/types/system';
@@ -2041,6 +2041,7 @@ async function _doStartExternalSession(options: {
   const baseSystemPrompt = buildSystemPromptAppend(options.scenario, {
     runtime: runtimeType,
     cliToolsEnabled: true,
+    userCliToolsEnabled: isCliToolRegistryEnabled(),
   });
 
   // Cross-runtime workspace protocol: append workspace instruction files

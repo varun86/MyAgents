@@ -44,6 +44,7 @@ import {
   getAllEffectiveProviders,
   isProviderDisabled,
   getProvidersDir,
+  isCliToolRegistryEnabled,
   type AdminAppConfig,
   type AgentConfigSlim,
   type ChannelConfigSlim,
@@ -1219,6 +1220,13 @@ export async function handleConfigSet(payload: { key: string; value: unknown; dr
     return { success: false, error: 'Invalid key path' };
   }
 
+  if (key.split('.')[0] === 'cliToolRegistryEnabled') {
+    return {
+      success: false,
+      error: "Cannot set 'cliToolRegistryEnabled' via config set. Enable it from Settings → About & Feedback → Lab.",
+    };
+  }
+
   // Protect structural/sensitive keys that have dedicated commands
   const protectedKeys = ['providerApiKeys', 'providerVerifyStatus', 'agents', 'mcpServers', 'mcpEnabledServers', 'mcpServerEnv', 'mcpServerArgs', 'imBotConfigs', 'cliToolEnv'];
   const rootKey = key.split('.')[0];
@@ -1341,6 +1349,14 @@ export function handleReload(workspacePath?: string): AdminResponse {
 // This prevents silent drift between docs and validator — if a runtime is
 // added to the RuntimeType union, `--help` picks it up automatically.
 const RUNTIMES_ENUM_LINE = VALID_RUNTIMES.join(' | ');
+
+const CLI_TOOL_REGISTRY_DISABLED_HELP = `myagents tool — CLI tool registry
+
+This experimental feature is currently disabled.
+
+Enable it from Settings → About & Feedback → Lab → CLI tool registry before
+using 'myagents tool ...'. The stable built-in myagents CLI commands
+(cron, thought, im, widget, task, runtime, etc.) remain available.`;
 
 const HELP_TEXTS: Record<string, string> = {
   mcp: `myagents mcp — Manage MCP tool servers
@@ -1787,6 +1803,9 @@ export function handleHelp(payload: { path?: string[] }): AdminResponse {
   const group = path[0];
 
   if (group && HELP_TEXTS[group]) {
+    if (group === 'tool' && !isCliToolRegistryEnabled()) {
+      return { success: true, data: { text: CLI_TOOL_REGISTRY_DISABLED_HELP } };
+    }
     return { success: true, data: { text: HELP_TEXTS[group] } };
   }
 
@@ -4014,6 +4033,17 @@ function setNestedValue(obj: AdminAppConfig, key: string, value: unknown): Admin
 
 const execFileAsync = promisify(execFile);
 
+function requireCliToolRegistryEnabled(): AdminResponse | null {
+  if (isCliToolRegistryEnabled()) return null;
+  return {
+    success: false,
+    error: 'CLI tool registry is disabled. Enable it in Settings → About & Feedback → Lab first.',
+    recoveryHint: {
+      message: '打开「设置 → 关于&反馈 → 实验室 → CLI 工具注册表」后再使用 myagents tool。',
+    },
+  };
+}
+
 /** Registry entry + derived display state (kind badge, unconfigured env keys) */
 function enrichCliTool(entry: CliToolRegistryEntry, config?: AdminAppConfig) {
   const cfg = config ?? loadConfig();
@@ -4025,6 +4055,8 @@ function enrichCliTool(entry: CliToolRegistryEntry, config?: AdminAppConfig) {
 }
 
 export function handleToolList(): AdminResponse {
+  const gate = requireCliToolRegistryEnabled();
+  if (gate) return gate;
   const registry = readCliToolsRegistry();
   const config = loadConfig();
   return {
@@ -4037,6 +4069,8 @@ export function handleToolList(): AdminResponse {
 }
 
 export function handleToolInfo(payload: { name?: string }): AdminResponse {
+  const gate = requireCliToolRegistryEnabled();
+  if (gate) return gate;
   const { name } = payload;
   if (!name) return { success: false, error: 'Missing required field: name' };
   const entry = readCliToolsRegistry().tools.find((t) => t.name === name);
@@ -4051,6 +4085,8 @@ export function handleToolInfo(payload: { name?: string }): AdminResponse {
 }
 
 export async function handleToolAdd(payload: { dir?: string; dryRun?: boolean }): Promise<AdminResponse> {
+  const gate = requireCliToolRegistryEnabled();
+  if (gate) return gate;
   const { dir, dryRun } = payload;
   if (!dir) {
     return {
@@ -4284,6 +4320,8 @@ export async function handleToolAdd(payload: { dir?: string; dryRun?: boolean })
 }
 
 export async function handleToolRemove(payload: { name?: string; purge?: boolean }): Promise<AdminResponse> {
+  const gate = requireCliToolRegistryEnabled();
+  if (gate) return gate;
   const { name, purge } = payload;
   if (!name) return { success: false, error: 'Missing required field: name' };
   let removed: CliToolRegistryEntry | undefined;
@@ -4327,6 +4365,8 @@ export async function handleToolRemove(payload: { name?: string; purge?: boolean
 }
 
 async function setToolEnabled(name: string | undefined, enabled: boolean): Promise<AdminResponse> {
+  const gate = requireCliToolRegistryEnabled();
+  if (gate) return gate;
   if (!name) return { success: false, error: 'Missing required field: name' };
   let found = false;
   await modifyCliToolsRegistry((reg) => {
@@ -4368,6 +4408,8 @@ export async function handleToolDisable(payload: { name?: string }): Promise<Adm
  * spawn: this runs on the sidecar event loop) with a hard timeout.
  */
 export async function handleToolReadme(payload: { name?: string }): Promise<AdminResponse> {
+  const gate = requireCliToolRegistryEnabled();
+  if (gate) return gate;
   const { name } = payload;
   if (!name) return { success: false, error: 'Missing required field: name' };
   const entry = readCliToolsRegistry().tools.find((t) => t.name === name);
@@ -4400,6 +4442,8 @@ export async function handleToolEnv(payload: {
   action?: 'set' | 'get' | 'delete';
   env?: Record<string, string>;
 }): Promise<AdminResponse> {
+  const gate = requireCliToolRegistryEnabled();
+  if (gate) return gate;
   const { name, action, env } = payload;
   if (!name) return { success: false, error: 'Missing required field: name' };
   const entry = readCliToolsRegistry().tools.find((t) => t.name === name);

@@ -70,7 +70,7 @@ import {
   isLiveFollowScenario,
   type SessionMaterializationScenario,
 } from './utils/session-materialization';
-import { findAgentByWorkspacePath, loadConfig as loadAdminConfig } from './utils/admin-config';
+import { findAgentByWorkspacePath, isCliToolRegistryEnabled, loadConfig as loadAdminConfig } from './utils/admin-config';
 import type { AgentConfig } from '../shared/types/agent';
 import { broadcast } from './sse';
 import {
@@ -271,7 +271,10 @@ export function getMyAgentsUserDir(): string {
  *
  * Called at session startup (startStreamingSession) and after skill/command CRUD operations.
  */
-export function syncProjectUserConfig(projectDir: string): void {
+export function syncProjectUserConfig(
+  projectDir: string,
+  options: { cliToolRegistryEnabled?: boolean } = {},
+): void {
   const myagentsDir = getMyAgentsUserDir();
   const isWin = process.platform === 'win32';
 
@@ -293,6 +296,7 @@ export function syncProjectUserConfig(projectDir: string): void {
     } catch {
       // Ignore read errors — treat all skills as enabled
     }
+    const cliToolRegistryEnabled = options.cliToolRegistryEnabled ?? isCliToolRegistryEnabled(loadAdminConfig());
 
     // Track which skill names we manage (enabled or disabled) so we can detect dangling symlinks
     const managedSkillNames = new Set<string>();
@@ -316,7 +320,7 @@ export function syncProjectUserConfig(projectDir: string): void {
       managedSkillNames.add(entry.name);
       const linkPath = join(projectSkillsDir, entry.name);
 
-      if (disabled.includes(entry.name)) {
+      if (disabled.includes(entry.name) || (!cliToolRegistryEnabled && entry.name === 'tool-creator')) {
         // Disabled: remove symlink if we created one (never remove real dirs)
         try {
           if (existsSync(linkPath) && lstatSync(linkPath).isSymbolicLink()) {
@@ -9019,7 +9023,9 @@ async function startStreamingSession(preWarm = false): Promise<void> {
   isPreWarming = preWarm;
   // Sync enabled user-level skills as symlinks into project's .claude/skills/
   // Must happen before buildClaudeSessionEnv() so SDK sees them via settingSources: ['project']
-  syncProjectUserConfig(agentDir);
+  const adminConfigForSession = loadAdminConfig();
+  const cliToolRegistryEnabled = isCliToolRegistryEnabled(adminConfigForSession);
+  syncProjectUserConfig(agentDir, { cliToolRegistryEnabled });
   // PRD #124: register a FRESH bridge token for this SDK subprocess.
   // `freshToken: true` retires the previous token (if any) so any late
   // requests from the dying old subprocess get rejected with a 400
@@ -9393,6 +9399,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           // those got dropped in favour of `myagents` CLI calls so builtin needs the
           // same prompt now. Single CLI, single source of truth across all runtimes.
           cliToolsEnabled: true,
+          userCliToolsEnabled: cliToolRegistryEnabled,
         }),
       },
       cwd: agentDir,

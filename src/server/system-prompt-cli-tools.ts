@@ -189,7 +189,10 @@ export function buildSessionInboxSection(_scenario: InteractionScenario): string
  * Returns an empty string when nothing applies (defensive; not expected in
  * practice since cron is always emitted).
  */
-export function buildCliToolsAppend(scenario: InteractionScenario): string {
+export function buildCliToolsAppend(
+  scenario: InteractionScenario,
+  options?: { includeUserTools?: boolean },
+): string {
   const parts: string[] = [];
 
   // cron — universal
@@ -219,9 +222,11 @@ export function buildCliToolsAppend(scenario: InteractionScenario): string {
   // execution half. Empty registry → empty string → no section emitted.
   // Registry changes take effect at the next session start / pre-warm (system
   // prompts are immutable for a live session by design).
-  const userTools = getUserToolsPromptSection();
-  if (userTools) {
-    parts.push(userTools);
+  if (options?.includeUserTools) {
+    const userTools = getUserToolsPromptSection();
+    if (userTools) {
+      parts.push(userTools);
+    }
   }
 
   return parts.join('\n\n');

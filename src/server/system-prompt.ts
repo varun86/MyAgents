@@ -112,6 +112,13 @@ export interface SystemPromptOptions {
    * desktop scenarios via `buildWidgetSection()`.
    */
   cliToolsEnabled?: boolean;
+  /**
+   * Include user-registered CLI tools from ~/.myagents/tools/registry.json in
+   * the prompt. Separate from `cliToolsEnabled` because cron / thought / IM
+   * media are stable product CLI capabilities, while the user tool registry is
+   * an experimental feature gate.
+   */
+  userCliToolsEnabled?: boolean;
 }
 
 export function buildSystemPromptAppend(scenario: InteractionScenario, options?: SystemPromptOptions): string {
@@ -176,7 +183,9 @@ export function buildSystemPromptAppend(scenario: InteractionScenario, options?:
   // capability sections (cron / IM media / thought) plus the dynamic
   // user-registered CLI tools section (PRD 0.2.36).
   if (options?.cliToolsEnabled) {
-    const cliTools = buildCliToolsAppend(scenario);
+    const cliTools = buildCliToolsAppend(scenario, {
+      includeUserTools: options.userCliToolsEnabled === true,
+    });
     if (cliTools) parts.push(cliTools);
   }
 

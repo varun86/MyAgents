@@ -27,7 +27,7 @@ use serde::Serialize;
 use super::path_safety::validate_external_read_path;
 use super::platform_blocks::is_skill_blocked_on_platform;
 use super::skill_sync::sync_workspace_skills;
-use super::skills_config::read_disabled_list;
+use super::skills_config::{read_cli_tool_registry_enabled, read_disabled_list};
 
 // These are *text-insertion* builtins: selecting one inserts `/name ` and the
 // text is sent to the AI/CLI. Do NOT add UI-action commands here (e.g. `loop`,
@@ -111,7 +111,7 @@ pub async fn cmd_list_slash_commands(workspace: String) -> Result<SlashCommandsR
     let home_dir = dirs::home_dir().ok_or_else(|| "home dir unavailable".to_string())?;
     let myagents_root = home_dir.join(".myagents");
 
-    let disabled = read_disabled_list(&myagents_root);
+    let disabled = disabled_skill_names_for_slash(&myagents_root);
 
     let mut commands: Vec<SlashCommand> = Vec::new();
 
@@ -177,6 +177,16 @@ pub async fn cmd_list_slash_commands(workspace: String) -> Result<SlashCommandsR
         commands: unique,
         global_skill_folder_names,
     })
+}
+
+fn disabled_skill_names_for_slash(myagents_root: &Path) -> Vec<String> {
+    let mut disabled = read_disabled_list(myagents_root);
+    if !read_cli_tool_registry_enabled(myagents_root)
+        && !disabled.iter().any(|name| name == "tool-creator")
+    {
+        disabled.push("tool-creator".to_string());
+    }
+    disabled
 }
 
 fn scan_commands_dir(dir: &Path, scope: &str, out: &mut Vec<SlashCommand>) {
@@ -403,6 +413,33 @@ mod tests {
     fn malformed_yaml_returns_empty() {
         let parsed = parse_skill_frontmatter("---\nname: [unclosed\n---\n");
         assert!(parsed.name.is_none());
+    }
+
+    #[test]
+    fn disabled_skill_names_include_tool_creator_when_cli_tool_registry_gate_is_off() {
+        let root = make_test_workspace("slash_gate_off_home").join(".myagents");
+        fs::create_dir_all(&root).unwrap();
+
+        let disabled = disabled_skill_names_for_slash(&root);
+
+        assert!(disabled.iter().any(|name| name == "tool-creator"));
+        let _ = fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    #[test]
+    fn disabled_skill_names_do_not_include_tool_creator_when_cli_tool_registry_gate_is_on() {
+        let root = make_test_workspace("slash_gate_on_home").join(".myagents");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("config.json"),
+            r#"{"cliToolRegistryEnabled":true}"#,
+        )
+        .unwrap();
+
+        let disabled = disabled_skill_names_for_slash(&root);
+
+        assert!(!disabled.iter().any(|name| name == "tool-creator"));
+        let _ = fs::remove_dir_all(root.parent().unwrap());
     }
 
     #[tokio::test]

@@ -76,7 +76,12 @@ myagents mcp oauth revoke <id>                          # 撤销授权
 - "X 工具用不了，是不是登录过期了" → `mcp oauth status <id>`，过期就重跑 `oauth start`
 - "给 fetch 加个 API Key 环境变量" → `mcp env fetch set FETCH_API_KEY=sk-xxx`
 
-### CLI 工具注册表（tool） — PRD 0.2.36
+### CLI 工具注册表（tool） — PRD 0.2.36，实验室开启后可用
+
+这是实验功能，默认关闭。使用前先运行 `myagents tool --help`：
+
+- 如果 help 提示去「设置 → 关于&反馈 → 实验室 → CLI 工具注册表」开启，说明当前会话不能创建、注册或管理用户 CLI 工具；不要继续尝试 `tool-creator` / `myagents tool add`，转而完成一次性任务或请用户打开实验开关。
+- 如果 help 返回完整 `list/add/remove/env` 用法，才按下面流程处理。
 
 注册的 CLI 工具会投 shim 到 `~/.myagents/bin/`（全 runtime + 终端的 PATH 上），
 description 自动注入所有新 session 的上下文——未来的 AI 会自己发现并使用它。

@@ -193,7 +193,7 @@ Usage: myagents <command> [options]
 
 Commands:
   mcp       Manage MCP tool servers
-  tool      Manage registered CLI tools (list/add/remove/enable/disable/info/env)
+  tool      Manage registered CLI tools (Lab-gated; enable in Settings first)
   model     Manage model providers
   agent     Manage agents & channels (+ 'agent show <id>' for effective defaults)
   runtime   Inspect Agent Runtimes (list installed + describe models/modes)
@@ -225,10 +225,6 @@ Examples:
   myagents mcp enable playwright --scope both
   myagents mcp oauth discover notion-mcp
   myagents mcp oauth start notion-mcp
-  myagents tool list
-  myagents tool add ~/.myagents/tools/md-merge
-  myagents tool env video-brief set VIDEO_API_KEY=sk-xxx
-  myagents tool remove md-merge --purge
   myagents model list
   myagents model set-key deepseek sk-xxx
   myagents skill list

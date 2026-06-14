@@ -73,6 +73,8 @@ export interface AdminAppConfig {
   // mcpServerEnv. Read at launch by the ~/.myagents/bin shims — env changes
   // need no shim rewrite.
   cliToolEnv?: Record<string, Record<string, string>>;
+  // Experimental gate for user-registered CLI tools. Omitted means disabled.
+  cliToolRegistryEnabled?: boolean;
   // Provider
   defaultProviderId?: string;
   providerApiKeys?: Record<string, string>;
@@ -151,6 +153,10 @@ export function loadConfig(): AdminAppConfig {
     console.error('[admin-config] config.json and .bak both unreadable, returning empty config');
     return {};
   }
+}
+
+export function isCliToolRegistryEnabled(config: AdminAppConfig = loadConfig()): boolean {
+  return config.cliToolRegistryEnabled === true;
 }
 
 /**

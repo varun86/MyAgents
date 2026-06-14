@@ -548,6 +548,10 @@ export interface AppConfig {
   showDevTools: boolean; // 显示开发者工具 (Logs/System Info)
   multiAgentRuntime?: boolean; // 多 Agent Runtime 模式（开发者，默认关闭）
   experimentalSplitView?: boolean; // 实验性：文件预览在右侧分屏而非弹窗
+  /** 实验室：用户注册 CLI 工具注册表（PRD 0.2.36）。默认关。
+   *  只控制工具箱里的 CLI 工具注册/管理/AI 自动发现；不影响 myagents CLI
+   *  本身以及 cron / task / widget / thought 等已发布 CLI 能力。 */
+  cliToolRegistryEnabled?: boolean;
   /** 开发者总门控：桌面悬浮球（PRD 0.2.35，先开发不发布）。默认关。
    *  关闭时 Tab 顶显隐开关与悬浮球本体均不存在（D10）。 */
   floatingBallDevGate?: boolean;
@@ -1406,6 +1410,7 @@ export const DEFAULT_CONFIG: AppConfig = {
   minimizeToTray: true,   // 默认开启最小化到托盘
   forceWakeLock: false,   // 默认关闭常开阻睡（智能模式仍在跑，覆盖 AI 工作期间）
   showDevTools: false,
+  cliToolRegistryEnabled: false, // 默认关闭用户注册 CLI 工具注册表（实验室）
   floatingBallHoverPeekEnabled: true,
   liteLLMModelDataRefresh: true, // 默认开启 LiteLLM 模型数据兜底刷新（开发者可关）
   claudeTranscriptCleanupPeriodDays: DEFAULT_CLAUDE_TRANSCRIPT_CLEANUP_PERIOD_DAYS,

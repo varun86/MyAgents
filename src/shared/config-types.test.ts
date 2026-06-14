@@ -95,3 +95,9 @@ describe('desktop pet defaults', () => {
     expect(DEFAULT_CONFIG.floatingBallHoverPeekEnabled).toBe(true);
   });
 });
+
+describe('CLI tool registry defaults', () => {
+  it('keeps the experimental registry off by default', () => {
+    expect(DEFAULT_CONFIG.cliToolRegistryEnabled).toBe(false);
+  });
+});
