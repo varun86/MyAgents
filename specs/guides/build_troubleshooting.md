@@ -4,8 +4,9 @@
 
 1. [Windows 构建脚本常见问题](#windows-构建脚本常见问题)
 2. [CSP 配置错误](#csp-配置错误)
-3. [Resources 缓存问题](#resources-缓存问题)
-4. [代理配置问题](#代理配置问题)
+3. [Rust toolchain / rustfmt 漂移](#rust-toolchain--rustfmt-漂移)
+4. [Resources 缓存问题](#resources-缓存问题)
+5. [代理配置问题](#代理配置问题)
 
 ---
 
@@ -112,6 +113,28 @@ foreach ($part in $requiredParts) {
     }
 }
 ```
+
+---
+
+## Rust toolchain / rustfmt 漂移
+
+**症状**：
+- 未改 Rust 逻辑，却出现几十个 `src-tauri/src/**/*.rs` 文件的 diff
+- diff 主要是 import 排序、宏参数换行、`let Some(...) else` 展开、trailing comma 等格式变化
+
+**根本原因**：
+
+Rust 格式化结果由 `rustfmt` 版本决定。仓库根目录的 `rust-toolchain.toml` 固定实际开发/CI toolchain；如果本机没有通过 rustup 进入仓库、或 IDE 使用了系统 Rust，就可能跑出不同格式。
+
+**验证方法**：
+
+```bash
+rustup show active-toolchain
+rustfmt --version
+cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+```
+
+`rustup show active-toolchain` 应显示被仓库 `rust-toolchain.toml` override。升级 Rust 时必须同时改 `rust-toolchain.toml` 和 CI toolchain，并把 `cargo fmt` 产生的机械 diff 单独提交。
 
 ---
 

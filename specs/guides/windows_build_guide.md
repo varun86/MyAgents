@@ -46,7 +46,7 @@ myagents-releases/
 
 | 软件 | 用途 | 安装方式 |
 |------|------|---------|
-| **Rust** | 编译 Tauri 后端 | https://rustup.rs |
+| **Rust** | 编译 Tauri 后端 | https://rustup.rs（必须使用 rustup；仓库 `rust-toolchain.toml` 固定实际 toolchain） |
 | **Node.js** | 前端构建工具 | https://nodejs.org |
 | **Bun** | 包管理和服务端运行时 | https://bun.sh |
 | **Visual Studio Build Tools** | MSVC 编译器 | 见下方说明 |
@@ -73,7 +73,7 @@ myagents-releases/
 1. 检查所有依赖是否已安装
 2. 下载 Bun 二进制文件到 `src-tauri/binaries/`
 3. 安装前端依赖 (`bun install`)
-4. 检查 Rust 依赖
+4. 检查 Rust 依赖（rustup 会按仓库 `rust-toolchain.toml` 自动切换固定版本）
 
 ### Git 安装包（构建必需）
 

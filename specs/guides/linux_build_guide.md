@@ -46,7 +46,7 @@ sudo apt-get install -y \
 ```
 
 `setup.sh` 在 Linux 上的行为：
-- 检查 Node.js / npm / Rust / Cargo（从 nvm / rustup 或系统包管理器安装）
+- 检查 Node.js / npm / Rust / Cargo（Rust 必须通过 rustup 安装；进入仓库后自动使用 `rust-toolchain.toml` 固定的 toolchain）
 - `scripts/download_nodejs.sh` 下载 Node.js v24 Linux x64/arm64 tarball（按 `uname -m` 自动选择）
 - `npm install` 拉取依赖（包括 SDK platform optional dep `@anthropic-ai/claude-agent-sdk-linux-<arch>`）
 - Rust `cargo fetch`
