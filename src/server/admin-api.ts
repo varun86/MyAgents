@@ -11,7 +11,7 @@
  */
 
 import { execFile } from 'node:child_process';
-import { lstatSync, mkdirSync } from 'node:fs';
+import { lstatSync, mkdirSync, renameSync, rmSync } from 'node:fs';
 import { cp as fsCp } from 'node:fs/promises';
 import { promisify } from 'node:util';
 import { splitProviderModelInput, type McpServerDefinition } from '../shared/config-types';
@@ -23,6 +23,7 @@ import {
   findPathCollision,
   getCliToolsBinDir,
   getCliToolsDir,
+  assertCliToolTreeSelfContained,
   modifyCliToolsRegistry,
   readCliToolManifest,
   readCliToolsRegistry,
@@ -4072,6 +4073,15 @@ export async function handleToolAdd(payload: { dir?: string; dryRun?: boolean })
     };
   }
   const manifest = read.manifest;
+  try {
+    assertCliToolTreeSelfContained(srcDir);
+  } catch (e) {
+    return {
+      success: false,
+      error: `[TOOL_DIR_NOT_SELF_CONTAINED] ${(e as Error).message}`,
+      recoveryHint: { message: 'Replace symlinks with real files inside the tool directory, then re-run tool add.' },
+    };
+  }
   const destDir = resolve(join(getCliToolsDir(), manifest.name));
   const needsCopy = srcDir !== destDir;
   const toolDir = needsCopy ? destDir : srcDir;
@@ -4184,20 +4194,66 @@ export async function handleToolAdd(payload: { dir?: string; dryRun?: boolean })
     registeredAt: new Date().toISOString(),
   };
 
-  // Reserve the name + write the shim inside the registry lock BEFORE copying —
-  // the duplicate check is only authoritative there, copying first would let two
-  // concurrent adds of the same name interleave writes into destDir, and keeping
-  // shim writes under the same lock serializes them against concurrent remove.
-  // Copy failure rolls the reservation + shim back.
-  let duplicate = false;
-  await modifyCliToolsRegistry((reg) => {
-    if (reg.tools.some((t) => t.name === manifest.name)) {
-      duplicate = true;
-      return null;
+  let tempDir: string | null = null;
+  if (needsCopy) {
+    tempDir = join(getCliToolsDir(), `.import-${manifest.name}-${Date.now()}-${crypto.randomUUID()}`);
+    try {
+      mkdirSync(getCliToolsDir(), { recursive: true });
+      await fsCp(srcDir, tempDir, {
+        recursive: true,
+        dereference: false,
+        force: false,
+        errorOnExist: true,
+      });
+      // Second pass closes the TOCTOU window: if a symlink appeared while fs.cp
+      // was walking the source, the staged payload is rejected before publish.
+      assertCliToolTreeSelfContained(tempDir);
+    } catch (e) {
+      if (tempDir) rmSync(tempDir, { recursive: true, force: true });
+      return {
+        success: false,
+        error: `[COPY_FAILED] Failed to stage tool dir for ${destDir}: ${(e as Error).message}`,
+        recoveryHint: { message: 'Check the source dir is readable and contains no symlinks, then re-run tool add.' },
+      };
     }
-    writeCliToolShim(manifest.name, entryPath);
-    return { ...reg, tools: [...reg.tools, entry] };
-  });
+  }
+
+  // Publish only after the payload has been staged and re-validated. The
+  // duplicate check, final rename, shim write, and registry write stay under the
+  // same registry lock so concurrent adds cannot interleave into destDir.
+  let duplicate = false;
+  let renamedToDest = false;
+  let publishError: Error | null = null;
+  try {
+    await modifyCliToolsRegistry((reg) => {
+      if (reg.tools.some((t) => t.name === manifest.name)) {
+        duplicate = true;
+        return null;
+      }
+      try {
+        if (needsCopy) {
+          try {
+            lstatSync(destDir);
+            publishError = new Error(`${destDir} already exists but '${manifest.name}' is not registered`);
+            return null;
+          } catch {
+            // Absent is the expected publish path.
+          }
+          renameSync(tempDir!, destDir);
+          renamedToDest = true;
+          tempDir = null;
+        }
+        writeCliToolShim(manifest.name, entryPath);
+        return { ...reg, tools: [...reg.tools, entry] };
+      } catch (e) {
+        publishError = e as Error;
+        return null;
+      }
+    });
+  } catch (e) {
+    publishError = e as Error;
+  }
+  if (tempDir) rmSync(tempDir, { recursive: true, force: true });
   if (duplicate) {
     return {
       success: false,
@@ -4205,26 +4261,16 @@ export async function handleToolAdd(payload: { dir?: string; dryRun?: boolean })
       recoveryHint: { recoveryCommand: `myagents tool info ${manifest.name}`, message: 'Remove it first if you want to re-register.' },
     };
   }
-
-  if (needsCopy) {
-    try {
-      mkdirSync(getCliToolsDir(), { recursive: true });
-      // dereference: 把 symlink 固化为真实文件——注册产物必须自包含，
-      // 不能留指向工具箱之外、事后可被静默替换的链接
-      await fsCp(srcDir, destDir, { recursive: true, dereference: true });
-    } catch (e) {
-      // Roll back the reservation + shim + partial copy so a failed add leaves no trace.
-      await modifyCliToolsRegistry((reg) => {
-        removeCliToolShim(manifest.name);
-        return { ...reg, tools: reg.tools.filter((t) => t.name !== manifest.name) };
-      });
-      removeCliToolDir(manifest.name);
-      return {
-        success: false,
-        error: `[COPY_FAILED] Failed to copy tool dir into ${destDir}: ${(e as Error).message}`,
-        recoveryHint: { message: 'Check the source dir is readable (broken symlinks inside fail dereferenced copy), then re-run tool add.' },
-      };
-    }
+  if (publishError) {
+    removeCliToolShim(manifest.name);
+    if (renamedToDest) removeCliToolDir(manifest.name);
+    return {
+      success: false,
+      error: publishError.message.startsWith('[')
+        ? publishError.message
+        : `[PUBLISH_FAILED] Failed to publish tool '${manifest.name}': ${publishError.message}`,
+      recoveryHint: { message: 'Re-run tool add after inspecting the destination directory.' },
+    };
   }
 
   const envHint = (manifest.envKeys ?? []).length > 0

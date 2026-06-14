@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -7,6 +7,7 @@ import {
   buildLauncherSource,
   buildUserToolsSectionText,
   findMissingEnvKeys,
+  assertCliToolTreeSelfContained,
   readCliToolManifest,
 } from './cli-tools-registry';
 
@@ -111,5 +112,18 @@ describe('readCliToolManifest', () => {
     const r = readCliToolManifest(dir);
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.code).toBe('NAME_RESERVED');
+  });
+
+  it('rejects non-entry symlinks in the tool tree', () => {
+    const dir = makeToolDir({ name: 'md-merge', description: 'd', entry: 'run.mjs' });
+    const target = join(dir, 'real-secret.txt');
+    writeFileSync(target, 'secret');
+    try {
+      symlinkSync(target, join(dir, 'secret-link.txt'));
+    } catch {
+      // Some Windows CI environments disallow symlink creation for non-admin users.
+      return;
+    }
+    expect(() => assertCliToolTreeSelfContained(dir)).toThrow(/symlink/i);
   });
 });

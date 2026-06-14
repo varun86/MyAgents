@@ -5,7 +5,7 @@
 
 use futures_util::StreamExt;
 use serde::Serialize;
-use std::io::{Cursor, Read, Seek};
+use std::io::{Cursor, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -132,7 +132,7 @@ fn read_json_file(path: &Path) -> Result<serde_json::Value, String> {
     let mut file = std::fs::File::open(path)
         .map_err(|e| format!("读取 pet.json 失败：{} ({})", path.display(), e))?;
     let mut bytes = Vec::new();
-    file.by_ref()
+    Read::by_ref(&mut file)
         .take(MAX_MANIFEST_BYTES + 1)
         .read_to_end(&mut bytes)
         .map_err(|e| format!("读取 pet.json 失败：{} ({})", path.display(), e))?;
@@ -460,6 +460,51 @@ fn find_extracted_pet_root(root: &Path) -> Result<PathBuf, String> {
     }
 }
 
+fn copy_limited_zip_entry<R: Read, W: Write>(
+    reader: &mut R,
+    writer: &mut W,
+    entry_name: &str,
+    label: &str,
+    entry_limit: u64,
+    total_limit: u64,
+    total_uncompressed: &mut u64,
+) -> Result<(), String> {
+    let mut buf = [0_u8; 16 * 1024];
+    let mut entry_copied = 0_u64;
+    loop {
+        let n = reader
+            .read(&mut buf)
+            .map_err(|e| format!("解包 zip 条目失败：{} ({})", entry_name, e))?;
+        if n == 0 {
+            return Ok(());
+        }
+        let n_u64 = n as u64;
+        entry_copied = entry_copied
+            .checked_add(n_u64)
+            .ok_or_else(|| "zip 条目解压后大小溢出".to_string())?;
+        if entry_copied > entry_limit {
+            return Err(format!(
+                "zip 包条目超过大小上限 {}MB：{}",
+                entry_limit / 1024 / 1024,
+                entry_name
+            ));
+        }
+        *total_uncompressed = total_uncompressed
+            .checked_add(n_u64)
+            .ok_or_else(|| "zip 包解压后大小溢出".to_string())?;
+        if *total_uncompressed > total_limit {
+            return Err(format!(
+                "zip 包解压后超过大小上限 {}MB：{}",
+                total_limit / 1024 / 1024,
+                label
+            ));
+        }
+        writer
+            .write_all(&buf[..n])
+            .map_err(|e| format!("写入 zip 解包文件失败：{} ({})", entry_name, e))?;
+    }
+}
+
 fn extract_pet_zip_to_temp<R: Read + Seek>(
     reader: R,
     temp_root: &Path,
@@ -488,27 +533,18 @@ fn extract_pet_zip_to_temp<R: Read + Seek>(
         if !file.is_file() {
             return Err(format!("zip 包不能包含符号链接或特殊文件：{}", file.name()));
         }
+        let entry_name = file.name().to_string();
         if file.size() > MAX_PET_ZIP_ENTRY_BYTES {
             return Err(format!(
                 "zip 包条目超过大小上限 {}MB：{}",
                 MAX_PET_ZIP_ENTRY_BYTES / 1024 / 1024,
-                file.name()
-            ));
-        }
-        total_uncompressed = total_uncompressed
-            .checked_add(file.size())
-            .ok_or_else(|| "zip 包解压后大小溢出".to_string())?;
-        if total_uncompressed > MAX_PET_ZIP_TOTAL_UNCOMPRESSED_BYTES {
-            return Err(format!(
-                "zip 包解压后超过大小上限 {}MB：{}",
-                MAX_PET_ZIP_TOTAL_UNCOMPRESSED_BYTES / 1024 / 1024,
-                label
+                entry_name
             ));
         }
 
         let enclosed = file
             .enclosed_name()
-            .ok_or_else(|| format!("zip 包条目路径不安全：{}", file.name()))?;
+            .ok_or_else(|| format!("zip 包条目路径不安全：{}", entry_name))?;
         let dest = temp_root.join(&enclosed);
         ensure_child_of(&dest, temp_root, "zip 条目")?;
         if std::fs::symlink_metadata(&dest).is_ok() {
@@ -520,15 +556,15 @@ fn extract_pet_zip_to_temp<R: Read + Seek>(
         }
         let mut out = std::fs::File::create(&dest)
             .map_err(|e| format!("创建 zip 解包文件失败：{} ({})", dest.display(), e))?;
-        let copied = std::io::copy(&mut file, &mut out)
-            .map_err(|e| format!("解包 zip 条目失败：{} ({})", file.name(), e))?;
-        if copied > MAX_PET_ZIP_ENTRY_BYTES {
-            return Err(format!(
-                "zip 包条目超过大小上限 {}MB：{}",
-                MAX_PET_ZIP_ENTRY_BYTES / 1024 / 1024,
-                file.name()
-            ));
-        }
+        copy_limited_zip_entry(
+            &mut file,
+            &mut out,
+            &entry_name,
+            label,
+            MAX_PET_ZIP_ENTRY_BYTES,
+            MAX_PET_ZIP_TOTAL_UNCOMPRESSED_BYTES,
+            &mut total_uncompressed,
+        )?;
     }
     Ok(())
 }
@@ -806,6 +842,13 @@ fn parse_petdex_import_source(input: &str) -> Result<PetdexImportSource, String>
     Ok(PetdexImportSource::Page(url))
 }
 
+fn is_allowed_petdex_fetch_url(url: &reqwest::Url) -> bool {
+    if is_petdex_zip_url(url) {
+        return true;
+    }
+    parse_petdex_import_source(url.as_str()).is_ok()
+}
+
 fn extract_petdex_zip_url(page_html: &str) -> Result<reqwest::Url, String> {
     let mut rest = page_html;
     while let Some(offset) = rest.find("https://") {
@@ -835,7 +878,16 @@ fn build_external_http_client(timeout_secs: u64) -> Result<reqwest::Client, Stri
     #[allow(clippy::disallowed_methods)]
     let builder = reqwest::Client::builder()
         .timeout(Duration::from_secs(timeout_secs))
-        .redirect(reqwest::redirect::Policy::limited(5))
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= 5 {
+                return attempt.error("too many Petdex redirects");
+            }
+            if is_allowed_petdex_fetch_url(attempt.url()) {
+                attempt.follow()
+            } else {
+                attempt.error("Petdex redirect target is not allowed")
+            }
+        }))
         .user_agent(format!("MyAgents/{}", env!("CARGO_PKG_VERSION")));
     crate::proxy_config::build_client_with_proxy(builder)
 }
@@ -1043,6 +1095,62 @@ mod tests {
         assert!(parse_petdex_import_source("https://example.com/pets/bluebow").is_err());
         assert!(parse_petdex_import_source("http://petdex.dev/pets/bluebow").is_err());
         assert!(parse_petdex_import_source("https://petdex.dev/pets/../bluebow").is_err());
+    }
+
+    #[test]
+    fn validates_petdex_redirect_targets() {
+        let page = reqwest::Url::parse("https://www.petdex.dev/pets/bluebow").unwrap();
+        let zip =
+            reqwest::Url::parse("https://assets.petdex.dev/pets/bluebow-c8b9e9491708/zip.zip")
+                .unwrap();
+        let private = reqwest::Url::parse("http://127.0.0.1:8080/pets/bluebow").unwrap();
+        let wrong_asset =
+            reqwest::Url::parse("https://assets.petdex.dev/not-pets/bluebow/zip.zip").unwrap();
+
+        assert!(is_allowed_petdex_fetch_url(&page));
+        assert!(is_allowed_petdex_fetch_url(&zip));
+        assert!(!is_allowed_petdex_fetch_url(&private));
+        assert!(!is_allowed_petdex_fetch_url(&wrong_asset));
+    }
+
+    #[test]
+    fn bounded_zip_copy_stops_before_entry_limit_overflow() {
+        let mut input = Cursor::new(vec![1_u8, 2, 3, 4]);
+        let mut output = Vec::new();
+        let mut total = 0_u64;
+        let err = copy_limited_zip_entry(
+            &mut input,
+            &mut output,
+            "big.bin",
+            "test.zip",
+            3,
+            10,
+            &mut total,
+        )
+        .unwrap_err();
+
+        assert!(err.contains("zip 包条目超过大小上限"));
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn bounded_zip_copy_stops_before_total_limit_overflow() {
+        let mut input = Cursor::new(vec![1_u8, 2, 3, 4]);
+        let mut output = Vec::new();
+        let mut total = 2_u64;
+        let err = copy_limited_zip_entry(
+            &mut input,
+            &mut output,
+            "nested.bin",
+            "test.zip",
+            10,
+            5,
+            &mut total,
+        )
+        .unwrap_err();
+
+        assert!(err.contains("zip 包解压后超过大小上限"));
+        assert!(output.is_empty());
     }
 
     #[test]

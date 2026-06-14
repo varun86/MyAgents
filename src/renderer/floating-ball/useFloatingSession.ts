@@ -18,7 +18,9 @@ import { ensureSessionSidecar, getSessionPort, proxyFetch, releaseSessionSidecar
 import { createSession } from '@/api/sessionClient';
 import { initAnalytics, setAnalyticsContext, track } from '@/analytics';
 import { loadAppConfig, atomicModifyConfig } from '@/config/services/appConfigService';
+import { getAllMcpServersFromConfig } from '@/config/services/mcpService';
 import { loadProjects } from '@/config/services/projectService';
+import type { AppConfig, Project } from '@/config/types';
 import { resolveAttachmentUrl } from '@/utils/attachmentUrl';
 import { parsePartialJson } from '@/utils/parsePartialJson';
 import { isSubagentContainerTool } from '@/components/tools/toolBadgeConfig';
@@ -280,6 +282,85 @@ export function parseSessionHistory(payload: unknown, limit: number): FbMsg[] {
 async function sessionBaseUrl(sessionId: string): Promise<string | null> {
     const port = await getSessionPort(sessionId);
     return port === null ? null : `http://127.0.0.1:${port}`;
+}
+
+function headerRecord(headers?: HeadersInit): Record<string, string> {
+    const out: Record<string, string> = {};
+    if (!headers) return out;
+    if (headers instanceof Headers) {
+        headers.forEach((value, key) => {
+            out[key] = value;
+        });
+    } else if (Array.isArray(headers)) {
+        headers.forEach(([key, value]) => {
+            out[key] = String(value);
+        });
+    } else {
+        Object.assign(out, headers);
+    }
+    return out;
+}
+
+function withFloatingCorrelation(sessionId: string, options: RequestInit = {}): RequestInit {
+    return {
+        ...options,
+        headers: {
+            ...headerRecord(options.headers),
+            'X-MyAgents-Session-Id': sessionId,
+            'X-MyAgents-Tab-Id': OWNER_ID,
+        },
+    };
+}
+
+function floatingProxyFetch(sessionId: string, url: string, options?: RequestInit): Promise<Response> {
+    return proxyFetch(url, withFloatingCorrelation(sessionId, options));
+}
+
+type EnabledAgentsResponse = {
+    success: boolean;
+    agents?: Record<string, { description: string; prompt: string; model?: string; scope?: 'user' | 'project'; folderName?: string }>;
+    error?: string;
+};
+
+async function syncFloatingSidecarConfig(
+    sessionId: string,
+    workspacePath: string,
+    config: AppConfig,
+    projects: Project[],
+): Promise<void> {
+    const base = await sessionBaseUrl(sessionId);
+    if (!base) throw new Error('sidecar 不可达');
+
+    const project = projects.find((p) => workspacePathsEqual(p.path, workspacePath));
+    const globalEnabled = new Set(Array.isArray(config.mcpEnabledServers) ? config.mcpEnabledServers : []);
+    const workspaceEnabled = project?.mcpEnabledServers ?? [];
+    const allServers = getAllMcpServersFromConfig(config);
+    const effectiveServers = allServers.filter((s) =>
+        globalEnabled.has(s.id) && workspaceEnabled.includes(s.id),
+    );
+
+    const mcpResp = await floatingProxyFetch(sessionId, `${base}/api/mcp/set`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ servers: effectiveServers }),
+    });
+    if (!mcpResp.ok) throw new Error(`MCP sync failed: HTTP ${mcpResp.status}`);
+
+    const agentsUrl = new URL(`${base}/api/agents/enabled`);
+    agentsUrl.searchParams.set('agentDir', workspacePath);
+    const agentsResp = await floatingProxyFetch(sessionId, agentsUrl.toString());
+    if (!agentsResp.ok) throw new Error(`Agent scan failed: HTTP ${agentsResp.status}`);
+    const agentsBody = (await agentsResp.json().catch(() => ({}))) as EnabledAgentsResponse;
+    if (!agentsBody.success || !agentsBody.agents) {
+        throw new Error(agentsBody.error || 'Agent scan failed');
+    }
+
+    const setAgentsResp = await floatingProxyFetch(sessionId, `${base}/api/agents/set`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ agents: agentsBody.agents }),
+    });
+    if (!setAgentsResp.ok) throw new Error(`Agent sync failed: HTTP ${setAgentsResp.status}`);
 }
 
 /**
@@ -788,7 +869,7 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
                             try {
                                 const base = await sessionBaseUrl(sid);
                                 if (!base) return;
-                                await proxyFetch(`${base}/api/enter-plan-mode/respond`, {
+                                await floatingProxyFetch(sid, `${base}/api/enter-plan-mode/respond`, {
                                     method: 'POST',
                                     headers: { 'Content-Type': 'application/json' },
                                     body: JSON.stringify({ requestId: rid, approved: true }),
@@ -872,9 +953,14 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
     }, [applySessionSnapshot]);
 
     /** Ensure sidecar + (re)connect SSE for `sid`. */
-    const connectSession = useCallback(async (sid: string, workspace: string): Promise<void> => {
+    const connectSession = useCallback(async (
+        sid: string,
+        workspace: string,
+        configSnapshot: AppConfig,
+        projectSnapshot: Project[],
+    ): Promise<void> => {
         // 串台防护（cross-review C2）：必须**先**断开旧 SSE、**再**切 sessionIdRef。
-        // 否则在 `await ensureSessionSidecar` 的空窗里，旧 session 的 SSE 若送来
+        // 否则在 await ensureSessionSidecar 的空窗里，旧 session 的 SSE 若送来
         // permission/ask/plan 事件，handler 会用已切到新 sid 的 ref → 用户的回应
         // POST 到新 sid、旧后端 pending 永久挂起。SSE 连接读的是 sessionIdRef，
         // 断开后再换 ref 即可干净重建。
@@ -883,14 +969,28 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
         sessionIdRef.current = sid;
         setSessionId(sid);
         setAnalyticsContext({ sessionId: sid });
-        // Ensure = pre-warm：伴侣窗作为长寿 owner 让 sidecar 常驻（唤起即出字
-        // 的体感来源，PRD §10「最高效 = 预热」）。
-        await ensureSessionSidecar(sid, workspace, 'tab', OWNER_ID);
-        // SSE（事件名/payload 与 Tab 完全同构，白名单已覆盖）。
-        const sse = createSseConnection('fb', sessionIdRef);
-        sse.setEventHandler((eventName, data) => handleSseEventRef.current(eventName, data));
-        sseRef.current = sse;
-        await sse.connect();
+        let ownerEnsured = false;
+        try {
+            // Ensure = pre-warm：伴侣窗作为长寿 owner 让 sidecar 常驻（唤起即出字
+            // 的体感来源，PRD §10「最高效 = 预热」）。
+            await ensureSessionSidecar(sid, workspace, 'tab', OWNER_ID);
+            ownerEnsured = true;
+            // Floating companion is a Tab owner, so it must push the same
+            // frontend-authoritative MCP/sub-agent config as Chat before turns.
+            await syncFloatingSidecarConfig(sid, workspace, configSnapshot, projectSnapshot);
+            // SSE（事件名/payload 与 Tab 完全同构，白名单已覆盖）。
+            const sse = createSseConnection('fb', sessionIdRef);
+            sse.setEventHandler((eventName, data) => handleSseEventRef.current(eventName, data));
+            sseRef.current = sse;
+            await sse.connect();
+        } catch (err) {
+            sseRef.current?.disconnect();
+            sseRef.current = null;
+            if (ownerEnsured) {
+                await releaseSessionSidecar(sid, 'tab', OWNER_ID).catch(() => false);
+            }
+            throw err;
+        }
     }, []);
 
     // ── boot：解析 Mino → session 轮换 → ensure → SSE → 历史 ──
@@ -944,7 +1044,7 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
 
                 setWorkspacePath(boundWs.path);
                 setWorkspaceName(boundWs.name || 'Mino');
-                await connectSession(sid, boundWs.path);
+                await connectSession(sid, boundWs.path, cfg, projects);
                 if (cancelled) return;
 
                 // 历史回填：REST 单一权威（同 #0608 不变量的精神——这里没有
@@ -954,7 +1054,7 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
                     try {
                         const base = await sessionBaseUrl(sid);
                         if (base) {
-                            const resp = await proxyFetch(`${base}/sessions/${sid}`, {});
+                            const resp = await floatingProxyFetch(sid, `${base}/sessions/${sid}`);
                             if (resp.ok) {
                                 const json = await resp.json();
                                 const history = parseSessionHistory(json, HISTORY_LIMIT);
@@ -1023,14 +1123,15 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
             setPlanReq(null);
             setUnread(0);
             setError(null);
-            await connectSession(sid, workspace.path);
+            const [cfg, projects] = await Promise.all([loadAppConfig(), loadProjects()]);
+            await connectSession(sid, workspace.path, cfg, projects);
             // 旧 session owner 交接（C1）。非致命：失败不阻断新会话已就绪。
             if (oldSid && oldSid !== sid) {
                 try {
                     if (oldHadPendingForm) {
                         // 卡在表单上的旧轮永远等不到回应（用户已走）→ 中止它。
                         const base = await sessionBaseUrl(oldSid);
-                        if (base) await proxyFetch(`${base}/chat/stop`, { method: 'POST' });
+                        if (base) await floatingProxyFetch(oldSid, `${base}/chat/stop`, { method: 'POST' });
                     }
                     await startBackgroundCompletion(oldSid);
                     await releaseSessionSidecar(oldSid, 'tab', OWNER_ID);
@@ -1165,7 +1266,7 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
             try {
                 const base = await sessionBaseUrl(sid);
                 if (!base) throw new Error('AI 引擎尚未就绪，稍等片刻再试');
-                const resp = await proxyFetch(`${base}/chat/send`, {
+                const resp = await floatingProxyFetch(sid, `${base}/chat/send`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
@@ -1209,7 +1310,7 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
             try {
                 const base = await sessionBaseUrl(sid);
                 if (!base) throw new Error('sidecar 不可达');
-                const resp = await proxyFetch(`${base}/api/permission/respond`, {
+                const resp = await floatingProxyFetch(sid, `${base}/api/permission/respond`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ requestId: req.requestId, decision }),
@@ -1237,7 +1338,7 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
             try {
                 const base = await sessionBaseUrl(sid);
                 if (!base) throw new Error('sidecar 不可达');
-                const resp = await proxyFetch(`${base}/api/ask-user-question/respond`, {
+                const resp = await floatingProxyFetch(sid, `${base}/api/ask-user-question/respond`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ requestId: req.requestId, answers }),
@@ -1262,7 +1363,7 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
             try {
                 const base = await sessionBaseUrl(sid);
                 if (!base) throw new Error('sidecar 不可达');
-                const resp = await proxyFetch(`${base}/api/exit-plan-mode/respond`, {
+                const resp = await floatingProxyFetch(sid, `${base}/api/exit-plan-mode/respond`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ requestId: req.requestId, approved, feedback }),
@@ -1287,7 +1388,7 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
         try {
             const base = await sessionBaseUrl(sid);
             if (!base) return;
-            await proxyFetch(`${base}/chat/stop`, { method: 'POST' });
+            await floatingProxyFetch(sid, `${base}/chat/stop`, { method: 'POST' });
         } catch (err) {
             console.warn('[fb] stop failed:', err);
         }
@@ -1320,7 +1421,8 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
         const workspace = workspaceRef.current;
         if (!sid || !workspace || sseRef.current) return;
         try {
-            await connectSession(sid, workspace.path);
+            const [cfg, projects] = await Promise.all([loadAppConfig(), loadProjects()]);
+            await connectSession(sid, workspace.path, cfg, projects);
             setReady(true);
             console.info('[fb] companion resumed');
         } catch (err) {

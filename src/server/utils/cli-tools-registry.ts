@@ -16,7 +16,7 @@
  */
 import {
   closeSync, chmodSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync,
-  renameSync, rmSync, statSync, unlinkSync, writeSync,
+  readdirSync, renameSync, rmSync, statSync, unlinkSync, writeSync,
 } from 'node:fs';
 import { delimiter, join, resolve } from 'node:path';
 import {
@@ -147,6 +147,34 @@ export function readCliToolManifest(toolDir: string): ManifestReadResult {
     };
   }
   return { ok: true, manifest };
+}
+
+/**
+ * CLI tools must be self-contained real files. A symlink anywhere in the tree
+ * can either escape the source directory during copy or turn into a mutable
+ * runtime dependency after registration.
+ */
+export function assertCliToolTreeSelfContained(toolDir: string): void {
+  const root = resolve(toolDir);
+  const rootStat = lstatSync(root);
+  if (rootStat.isSymbolicLink()) {
+    throw new Error(`tool dir is a symlink: ${root}`);
+  }
+  if (!rootStat.isDirectory()) {
+    throw new Error(`tool dir is not a directory: ${root}`);
+  }
+
+  const visit = (dir: string): void => {
+    for (const name of readdirSync(dir)) {
+      const p = join(dir, name);
+      const st = lstatSync(p);
+      if (st.isSymbolicLink()) {
+        throw new Error(`tool dir contains symlink: ${p}`);
+      }
+      if (st.isDirectory()) visit(p);
+    }
+  };
+  visit(root);
 }
 
 // ===== 命名遮蔽检测 =====
