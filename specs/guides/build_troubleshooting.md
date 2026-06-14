@@ -126,6 +126,23 @@ foreach ($part in $requiredParts) {
 
 Rust 格式化结果由 `rustfmt` 版本决定。仓库根目录的 `rust-toolchain.toml` 固定实际开发/CI toolchain；如果本机没有通过 rustup 进入仓库、或 IDE 使用了系统 Rust，就可能跑出不同格式。
 
+`setup.sh` / `setup_windows.ps1` 和各平台 build 脚本都会调用 `scripts/ensure_rust_toolchain.*`：
+- 从 `rust-toolchain.toml` 读取 channel 和 components（当前为 `1.92.0` + `rustfmt` / `clippy`）
+- 显式安装对应 component
+- 平台 build 额外安装目标 target（Windows 为 `x86_64-pc-windows-msvc`）
+
+如果 Windows 上 setup 后 build 仍报 `can't find crate for core`、`target may not be installed`、`component 'rustfmt' is unavailable/not installed` 等 Rust 缺失类错误，先手动运行：
+
+```powershell
+.\scripts\ensure_rust_toolchain.ps1 -Targets x86_64-pc-windows-msvc
+```
+
+macOS / Linux：
+
+```bash
+./scripts/ensure_rust_toolchain.sh
+```
+
 **验证方法**：
 
 ```bash
@@ -197,10 +214,11 @@ let client = reqwest::Client::builder()
 ### 构建前检查清单
 
 - [ ] 版本号已同步（`package.json`, `tauri.conf.json`, `Cargo.toml`）
-- [ ] TypeScript 类型检查通过（`bun run typecheck`）
+- [ ] Rust toolchain/components/target 已由 `scripts/ensure_rust_toolchain.*` 准备
+- [ ] TypeScript 类型检查通过（`npm run typecheck`）
 - [ ] CSP 配置完整（`connect-src` 包含 `http://ipc.localhost`）
 - [ ] 清理旧的 resources 缓存
-- [ ] 杀死残留进程（bun, MyAgents）
+- [ ] 杀死残留进程（node sidecar, MyAgents）
 
 ### 构建后验证
 

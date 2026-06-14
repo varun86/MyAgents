@@ -51,7 +51,7 @@ if [ "$PKG_VERSION" != "$TAURI_VERSION" ] || [ "$PKG_VERSION" != "$CARGO_VERSION
 fi
 
 # 杀死残留 MyAgents 实例（避免生产版和 debug 版同时运行互相打架）
-# 优先使用 PID lock file 精确杀——只杀 MyAgents 主进程，不误杀其他 bun 进程。
+# 优先使用 PID lock file 精确杀——只杀 MyAgents 主进程，不误杀其他 node 进程。
 # SIGKILL(-9) 防止 macOS Automatic Termination 自动重启被杀的 .app。
 echo -e "${BLUE}[准备] 杀死残留进程...${NC}"
 LOCK_FILE="$HOME/.myagents/app.lock"
@@ -120,6 +120,12 @@ rm -rf "${PROJECT_DIR}/src-tauri/target/debug/bundle"
 rm -rf "${PROJECT_DIR}/src-tauri/target/debug/MyAgents.app"
 rm -rf "${PROJECT_DIR}/src-tauri/target/debug/resources"
 echo -e "${GREEN}✓ 已清理并创建占位符${NC}"
+echo ""
+
+# Rust toolchain/components 与 rust-toolchain.toml、CI 和 release build 保持一致。
+echo -e "${BLUE}[准备] 准备 Rust toolchain / components...${NC}"
+"${PROJECT_DIR}/scripts/ensure_rust_toolchain.sh"
+echo -e "${GREEN}✓ Rust toolchain ready${NC}"
 echo ""
 
 # TypeScript 检查

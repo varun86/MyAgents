@@ -42,6 +42,18 @@ fi
 echo -e "${BLUE}[信息] 构建版本: ${PKG_VERSION}${NC}"
 echo ""
 
+HOST_ARCH=$(uname -m)
+if [[ "$HOST_ARCH" == "aarch64" || "$HOST_ARCH" == "arm64" ]]; then
+    DEFAULT_TARGET="aarch64-unknown-linux-gnu"
+    SDK_TRIPLE="linux-arm64"
+    NODE_ARCH="arm64"
+else
+    DEFAULT_TARGET="x86_64-unknown-linux-gnu"
+    SDK_TRIPLE="linux-x64"
+    NODE_ARCH="x64"
+fi
+TARGET="${1:-$DEFAULT_TARGET}"
+
 # 依赖检查（仅 Debian/Ubuntu 通过 dpkg 精确校验；其它发行版跳过 + 提示等价包名）
 echo -e "${BLUE}[1/6] 检查系统依赖...${NC}"
 if command -v dpkg >/dev/null 2>&1; then
@@ -79,6 +91,22 @@ else
     echo -e "${YELLOW}    patchelf${NC}"
     echo -e "${YELLOW}  Tauri 构建如缺库会给出明确错误。继续...${NC}"
 fi
+echo ""
+
+echo -e "${BLUE}[1.5/6] 检查 Rust / Node 构建依赖...${NC}"
+for cmd in node npm rustc cargo rustup; do
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+        echo -e "${RED}缺少命令: $cmd${NC}"
+        if [ "$cmd" = "rustup" ] || [ "$cmd" = "rustc" ] || [ "$cmd" = "cargo" ]; then
+            echo -e "${YELLOW}请通过 rustup 安装 Rust: https://rustup.rs${NC}"
+        else
+            echo -e "${YELLOW}请安装 Node.js 24+ / npm${NC}"
+        fi
+        exit 1
+    fi
+done
+"${PROJECT_DIR}/scripts/ensure_rust_toolchain.sh" "$TARGET"
+echo -e "${GREEN}✓ Rust / Node 构建依赖就绪${NC}"
 echo ""
 
 # TypeScript 检查
@@ -172,17 +200,6 @@ echo ""
 
 # Tauri 构建
 echo -e "${BLUE}[5/6] 构建 Tauri (AppImage + deb)...${NC}"
-HOST_ARCH=$(uname -m)
-if [[ "$HOST_ARCH" == "aarch64" || "$HOST_ARCH" == "arm64" ]]; then
-    DEFAULT_TARGET="aarch64-unknown-linux-gnu"
-    SDK_TRIPLE="linux-arm64"
-    NODE_ARCH="arm64"
-else
-    DEFAULT_TARGET="x86_64-unknown-linux-gnu"
-    SDK_TRIPLE="linux-x64"
-    NODE_ARCH="x64"
-fi
-TARGET="${1:-$DEFAULT_TARGET}"
 
 echo -e "  ${CYAN}目标: ${TARGET} (SDK: ${SDK_TRIPLE})${NC}"
 

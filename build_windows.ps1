@@ -163,16 +163,17 @@ try {
 
     $depOk = $true
     if (-not (Test-Command "rustc --version" "https://rustup.rs")) { $depOk = $false }
+    if (-not (Test-Command "rustup --version" "https://rustup.rs")) { $depOk = $false }
     if (-not (Test-Command "npm --version" "https://nodejs.org")) { $depOk = $false }
 
-    # 检查 Rust Windows 目标
-    $installedTargets = & rustup target list --installed 2>$null
-    if ($installedTargets -notcontains "x86_64-pc-windows-msvc") {
-        Write-Host "  安装 Rust 目标: x86_64-pc-windows-msvc" -ForegroundColor Yellow
-        & rustup target add x86_64-pc-windows-msvc
-    }
-    else {
-        Write-Host "  OK - Rust 目标已安装: x86_64-pc-windows-msvc" -ForegroundColor Green
+    # Rust toolchain/components/target 必须与 rust-toolchain.toml 和 CI 对齐。
+    if ($depOk) {
+        try {
+            & "$ProjectDir\scripts\ensure_rust_toolchain.ps1" -Targets @("x86_64-pc-windows-msvc")
+        } catch {
+            Write-Host "  Rust toolchain 准备失败: $_" -ForegroundColor Red
+            $depOk = $false
+        }
     }
 
     if (-not $depOk) {
@@ -777,3 +778,6 @@ if ($BuildSuccess) {
     Write-Host "按回车键退出..." -ForegroundColor Yellow
 }
 Read-Host
+if (-not $BuildSuccess) {
+    exit 1
+}

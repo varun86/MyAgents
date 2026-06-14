@@ -343,6 +343,14 @@ try {
             Write-Host "    请安装: https://rustup.rs" -ForegroundColor Yellow
         }
     }
+    if (-not (Test-Dependency "Rustup" "rustup --version" "")) {
+        if ($HasWinget) {
+            Install-WithWinget "Rust (rustup)" "Rustlang.Rustup"
+            $NeedRestart = $true
+        } else {
+            Write-Host "    请通过 rustup 安装 Rust: https://rustup.rs" -ForegroundColor Yellow
+        }
+    }
 
     # MSVC Build Tools (required by Rust on Windows)
     if (-not (Test-MSVC)) {
@@ -375,6 +383,7 @@ try {
     if (-not (Test-Dependency "Node.js" "node --version" "")) { $Missing = $true }
     if (-not (Test-Dependency "Rust" "rustc --version" "")) { $Missing = $true }
     if (-not (Test-Dependency "Cargo" "cargo --version" "")) { $Missing = $true }
+    if (-not (Test-Dependency "Rustup" "rustup --version" "")) { $Missing = $true }
     if (-not (Test-MSVC)) { $Missing = $true }
 
     if ($Missing) {
@@ -383,6 +392,16 @@ try {
         Read-Host
         exit 1
     }
+
+    Write-Host "`nStep 1.5/9: 准备 Rust toolchain / components / Windows target" -ForegroundColor Blue
+    & "$ProjectDir\scripts\ensure_rust_toolchain.ps1" -Targets @("x86_64-pc-windows-msvc")
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "  Rust toolchain 准备失败" -ForegroundColor Red
+        Write-Host "`n按回车键退出..." -ForegroundColor Yellow
+        Read-Host
+        exit 1
+    }
+    Write-Host "OK - Rust toolchain ready" -ForegroundColor Green
 
     Write-Host "`nStep 2/9: 下载 Node.js 运行时 (Sidecar + MCP Server + 社区工具统一 runtime)" -ForegroundColor Blue
     Get-NodeJSBinary
@@ -471,6 +490,9 @@ try {
     Write-Host "=========================================`n" -ForegroundColor Red
     Write-Host "错误信息: $_" -ForegroundColor Red
     Write-Host "位置: $($_.InvocationInfo.PositionMessage)" -ForegroundColor Yellow
+    Write-Host "`n按回车键退出..." -ForegroundColor Yellow
+    Read-Host
+    exit 1
 }
 
 Write-Host "`n按回车键退出..." -ForegroundColor Cyan

@@ -151,6 +151,17 @@ foreach ($dll in @("vcruntime140.dll", "vcruntime140_1.dll")) {
 Write-ColorOutput "✓ 已清理并创建占位符" "Green"
 Write-Host ""
 
+# Rust toolchain/components/target 与 rust-toolchain.toml、CI 和 release build 保持一致。
+Write-ColorOutput "[准备] 准备 Rust toolchain / components / Windows target..." "Blue"
+try {
+    & "$PROJECT_DIR\scripts\ensure_rust_toolchain.ps1" -Targets @("x86_64-pc-windows-msvc")
+} catch {
+    Write-ColorOutput "✗ Rust toolchain 准备失败: $_" "Red"
+    exit 1
+}
+Write-ColorOutput "✓ Rust toolchain ready" "Green"
+Write-Host ""
+
 # TypeScript 检查
 Write-ColorOutput "[1/3] TypeScript 类型检查..." "Blue"
 Set-Location $PROJECT_DIR
