@@ -8,15 +8,21 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ProjectDir = Split-Path -Parent $ScriptDir
 $ToolchainFile = Join-Path $ProjectDir "rust-toolchain.toml"
 
+function Get-CargoBinPath {
+    if ($env:CARGO_HOME) {
+        return (Join-Path $env:CARGO_HOME "bin")
+    }
+    return (Join-Path $env:USERPROFILE ".cargo\bin")
+}
+
 function Refresh-ProcessPath {
+    $cargoBin = Get-CargoBinPath
     $pathValues = @(
         [Environment]::GetEnvironmentVariable("Path", "Process"),
         [Environment]::GetEnvironmentVariable("Path", "Machine"),
-        [Environment]::GetEnvironmentVariable("Path", "User")
+        [Environment]::GetEnvironmentVariable("Path", "User"),
+        $cargoBin
     )
-    if ($env:USERPROFILE) {
-        $pathValues += (Join-Path $env:USERPROFILE ".cargo\bin")
-    }
 
     $seen = @{}
     $segments = @()
@@ -36,14 +42,38 @@ function Refresh-ProcessPath {
     $env:Path = ($segments -join ';')
 }
 
-function Require-CommandPath {
-    param([string]$Name, [string]$InstallHint)
+function Resolve-ToolPath {
+    param([string]$Name)
     Refresh-ProcessPath
     $cmd = Get-Command $Name -ErrorAction SilentlyContinue
-    if (-not $cmd) {
+    if ($cmd) {
+        return $cmd.Source
+    }
+    $exeName = if ($Name.EndsWith(".exe")) { $Name } else { "$Name.exe" }
+    $fallback = Join-Path (Get-CargoBinPath) $exeName
+    if (Test-Path $fallback) {
+        return $fallback
+    }
+    return $null
+}
+
+function Require-CommandPath {
+    param([string]$Name, [string]$InstallHint)
+    $cmdPath = Resolve-ToolPath $Name
+    if (-not $cmdPath) {
         throw "$Name is required. $InstallHint"
     }
-    return $cmd.Source
+    return $cmdPath
+}
+
+function Ensure-RustupProxy {
+    param([string]$ProxyName, [string]$RustupExe)
+    $cargoBin = Get-CargoBinPath
+    New-Item -ItemType Directory -Path $cargoBin -Force | Out-Null
+    $proxyPath = Join-Path $cargoBin "$ProxyName.exe"
+    if (-not (Test-Path $proxyPath)) {
+        Copy-Item -Path $RustupExe -Destination $proxyPath -Force
+    }
 }
 
 if (-not (Test-Path $ToolchainFile)) {
@@ -88,6 +118,21 @@ foreach ($Target in $Targets) {
         throw "rustup target add $Target --toolchain $RustToolchain failed"
     }
 }
+
+foreach ($ProxyName in @("rustc", "rustdoc", "cargo")) {
+    Ensure-RustupProxy $ProxyName $RustupExe
+}
+if ($Components -contains "rustfmt") {
+    foreach ($ProxyName in @("rustfmt", "cargo-fmt")) {
+        Ensure-RustupProxy $ProxyName $RustupExe
+    }
+}
+if ($Components -contains "clippy") {
+    foreach ($ProxyName in @("cargo-clippy", "clippy-driver")) {
+        Ensure-RustupProxy $ProxyName $RustupExe
+    }
+}
+Refresh-ProcessPath
 
 $CargoExe = Require-CommandPath "cargo" "Install Rust via rustup."
 & $CargoExe "+$RustToolchain" --version | Out-Host

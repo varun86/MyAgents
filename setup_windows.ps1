@@ -15,15 +15,21 @@ try {
     Write-Host "  MyAgents Windows 开发环境初始化" -ForegroundColor Green
     Write-Host "=========================================`n" -ForegroundColor Blue
 
+    function Get-CargoBinPath {
+        if ($env:CARGO_HOME) {
+            return (Join-Path $env:CARGO_HOME "bin")
+        }
+        return (Join-Path $env:USERPROFILE ".cargo\bin")
+    }
+
     function Refresh-ProcessPath {
+        $cargoBin = Get-CargoBinPath
         $pathValues = @(
             [Environment]::GetEnvironmentVariable("Path", "Process"),
             [Environment]::GetEnvironmentVariable("Path", "Machine"),
-            [Environment]::GetEnvironmentVariable("Path", "User")
+            [Environment]::GetEnvironmentVariable("Path", "User"),
+            $cargoBin
         )
-        if ($env:USERPROFILE) {
-            $pathValues += (Join-Path $env:USERPROFILE ".cargo\bin")
-        }
 
         $seen = @{}
         $segments = @()
@@ -41,6 +47,22 @@ try {
         }
 
         $env:Path = ($segments -join ';')
+    }
+
+    function Resolve-ToolPath {
+        param([string]$Name)
+        Refresh-ProcessPath
+        $cmd = Get-Command $Name -ErrorAction SilentlyContinue
+        if ($cmd) {
+            return $cmd.Source
+        }
+        $cargoBin = Get-CargoBinPath
+        $exeName = if ($Name.EndsWith(".exe")) { $Name } else { "$Name.exe" }
+        $fallback = Join-Path $cargoBin $exeName
+        if (Test-Path $fallback) {
+            return $fallback
+        }
+        return $null
     }
 
     function Test-Dependency {
@@ -76,6 +98,7 @@ try {
     function Install-RustupDirect {
         Write-Host "  winget 未提供可用 rustup，直接下载 rustup-init..." -ForegroundColor Cyan
         $installer = Join-Path $env:TEMP "rustup-init-x86_64-pc-windows-msvc.exe"
+        $cargoBin = Get-CargoBinPath
         try {
             [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
             Invoke-WebRequest -Uri "https://win.rustup.rs/x86_64" -OutFile $installer -UseBasicParsing -TimeoutSec 300
@@ -84,7 +107,18 @@ try {
                 throw "rustup-init exited with $LASTEXITCODE"
             }
             Refresh-ProcessPath
-            Write-Host "  rustup-init 安装完成" -ForegroundColor Green
+            $rustupPath = Resolve-ToolPath "rustup"
+            if (-not $rustupPath) {
+                New-Item -ItemType Directory -Path $cargoBin -Force | Out-Null
+                $rustupPath = Join-Path $cargoBin "rustup.exe"
+                Copy-Item -Path $installer -Destination $rustupPath -Force
+                Refresh-ProcessPath
+            }
+            & $rustupPath --version 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+                throw "rustup.exe is not usable at $rustupPath"
+            }
+            Write-Host "  rustup-init 安装完成 ($rustupPath)" -ForegroundColor Green
             return $true
         } catch {
             Write-Host "  rustup-init 安装失败: $_" -ForegroundColor Red

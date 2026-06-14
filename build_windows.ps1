@@ -148,15 +148,21 @@ try {
     # ========================================
     Write-Host "[2/7] 检查依赖..." -ForegroundColor Blue
 
+    function Get-CargoBinPath {
+        if ($env:CARGO_HOME) {
+            return (Join-Path $env:CARGO_HOME "bin")
+        }
+        return (Join-Path $env:USERPROFILE ".cargo\bin")
+    }
+
     function Refresh-ProcessPath {
+        $cargoBin = Get-CargoBinPath
         $pathValues = @(
             [Environment]::GetEnvironmentVariable("Path", "Process"),
             [Environment]::GetEnvironmentVariable("Path", "Machine"),
-            [Environment]::GetEnvironmentVariable("Path", "User")
+            [Environment]::GetEnvironmentVariable("Path", "User"),
+            $cargoBin
         )
-        if ($env:USERPROFILE) {
-            $pathValues += (Join-Path $env:USERPROFILE ".cargo\bin")
-        }
 
         $seen = @{}
         $segments = @()
