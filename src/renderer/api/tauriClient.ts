@@ -861,6 +861,24 @@ export async function startGlobalSidecar(): Promise<SidecarStatus> {
 let globalSidecarReadyPromise: Promise<void> | null = null;
 let globalSidecarReadyResolve: (() => void) | null = null;
 
+const GLOBAL_SERVER_URL_RETRY_DELAYS_MS: readonly number[] = [
+    50, 100, 200, 400, 800, 1500, 2000, 3000, 5000, 5000, 5000, 5000, 5000,
+];
+
+function describeInvokeError(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
+}
+
+async function readGlobalServerUrlFromRust(): Promise<string | null> {
+    try {
+        const url = await invoke<string>('cmd_get_global_server_url');
+        tabServerUrls.set('__global__', url);
+        return url;
+    } catch {
+        return null;
+    }
+}
+
 /**
  * Initialize the global sidecar ready promise
  * Called from App.tsx before starting the sidecar
@@ -895,25 +913,57 @@ export async function waitForGlobalSidecar(timeoutMs: number = 60000): Promise<v
         return;
     }
 
+    const cached = tabServerUrls.get('__global__');
+    if (cached !== undefined) return;
+
+    // The ready promise is only a same-webview hint. Floating ball windows are
+    // separate WebViews, so Rust's sidecar registry is the cross-window source
+    // of truth. Probe it first, then keep polling it until the timeout.
+    const immediate = await readGlobalServerUrlFromRust();
+    if (immediate) return;
+
     if (!globalSidecarReadyPromise) {
-        // Promise not initialized yet, create one that will resolve when sidecar starts
         initGlobalSidecarReadyPromise();
     }
 
-    // Race between the ready promise and a timeout
-    // Use a cleanup pattern to avoid timer leaks
-    let timeoutId: ReturnType<typeof setTimeout> | undefined;
-    const timeoutPromise = new Promise<never>((_, reject) => {
-        timeoutId = setTimeout(() => reject(new Error('Global sidecar startup timeout')), timeoutMs);
-    });
+    const startedAt = Date.now();
+    const deadline = startedAt + timeoutMs;
+    let attempts = 1;
+    let delayIndex = 0;
 
-    try {
-        await Promise.race([globalSidecarReadyPromise, timeoutPromise]);
-    } finally {
-        if (timeoutId) {
-            clearTimeout(timeoutId);
+    console.info(`[tauriClient] Waiting for global sidecar readiness (timeout=${timeoutMs}ms)`);
+    while (Date.now() < deadline) {
+        const delay = GLOBAL_SERVER_URL_RETRY_DELAYS_MS[
+            Math.min(delayIndex, GLOBAL_SERVER_URL_RETRY_DELAYS_MS.length - 1)
+        ];
+        delayIndex++;
+
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const delayPromise = new Promise<void>((resolve) => {
+            timer = setTimeout(resolve, Math.min(delay, Math.max(0, deadline - Date.now())));
+        });
+        await delayPromise;
+        if (timer) clearTimeout(timer);
+
+        attempts++;
+        const url = await readGlobalServerUrlFromRust();
+        if (url) {
+            console.info(
+                `[tauriClient] Global sidecar ready after ${Date.now() - startedAt}ms (attempts=${attempts})`,
+            );
+            return;
         }
     }
+
+    let lastError = 'not running';
+    try {
+        await invoke<string>('cmd_get_global_server_url');
+    } catch (error) {
+        lastError = describeInvokeError(error);
+    }
+    throw new Error(
+        `Global sidecar startup timeout after ${timeoutMs}ms (attempts=${attempts}, last=${lastError})`,
+    );
 }
 
 /**
@@ -953,6 +1003,9 @@ export async function getGlobalServerUrlWithWait(): Promise<string> {
     if (cached !== undefined) {
         return cached;
     }
+
+    const immediate = await readGlobalServerUrlFromRust();
+    if (immediate) return immediate;
 
     // Wait for sidecar to be ready
     await waitForGlobalSidecar();

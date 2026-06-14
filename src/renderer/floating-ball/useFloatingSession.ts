@@ -91,6 +91,14 @@ const HISTORY_LIMIT = 50;
 const TOOL_RESULT_DISPLAY_CAP = 8 * 1024;
 const TOOL_RESULT_TAIL_KEEP = 1024;
 
+function elapsedMs(startedAt: number): string {
+    return `${Date.now() - startedAt}ms`;
+}
+
+function describeError(err: unknown): string {
+    return err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+}
+
 function isContentBlock(value: unknown): value is ContentBlock {
     if (!value || typeof value !== 'object') return false;
     const type = (value as { type?: unknown }).type;
@@ -330,39 +338,58 @@ async function syncFloatingSidecarConfig(
     config: AppConfig,
     projects: Project[],
 ): Promise<void> {
+    const startedAt = Date.now();
+    let stage = 'resolve-port';
+    console.info(`[fb-session] sync config start session=${sessionId} workspace=${workspacePath}`);
     const base = await sessionBaseUrl(sessionId);
     if (!base) throw new Error('sidecar 不可达');
 
-    const project = projects.find((p) => workspacePathsEqual(p.path, workspacePath));
-    const globalEnabled = new Set(Array.isArray(config.mcpEnabledServers) ? config.mcpEnabledServers : []);
-    const workspaceEnabled = project?.mcpEnabledServers ?? [];
-    const allServers = getAllMcpServersFromConfig(config);
-    const effectiveServers = allServers.filter((s) =>
-        globalEnabled.has(s.id) && workspaceEnabled.includes(s.id),
-    );
+    try {
+        const project = projects.find((p) => workspacePathsEqual(p.path, workspacePath));
+        const globalEnabled = new Set(Array.isArray(config.mcpEnabledServers) ? config.mcpEnabledServers : []);
+        const workspaceEnabled = project?.mcpEnabledServers ?? [];
+        const allServers = getAllMcpServersFromConfig(config);
+        const effectiveServers = allServers.filter((s) =>
+            globalEnabled.has(s.id) && workspaceEnabled.includes(s.id),
+        );
 
-    const mcpResp = await floatingProxyFetch(sessionId, `${base}/api/mcp/set`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ servers: effectiveServers }),
-    });
-    if (!mcpResp.ok) throw new Error(`MCP sync failed: HTTP ${mcpResp.status}`);
+        stage = 'mcp-set';
+        console.info(`[fb-session] sync mcp start session=${sessionId} servers=${effectiveServers.length}`);
+        const mcpResp = await floatingProxyFetch(sessionId, `${base}/api/mcp/set`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ servers: effectiveServers }),
+        });
+        if (!mcpResp.ok) throw new Error(`MCP sync failed: HTTP ${mcpResp.status}`);
 
-    const agentsUrl = new URL(`${base}/api/agents/enabled`);
-    agentsUrl.searchParams.set('agentDir', workspacePath);
-    const agentsResp = await floatingProxyFetch(sessionId, agentsUrl.toString());
-    if (!agentsResp.ok) throw new Error(`Agent scan failed: HTTP ${agentsResp.status}`);
-    const agentsBody = (await agentsResp.json().catch(() => ({}))) as EnabledAgentsResponse;
-    if (!agentsBody.success || !agentsBody.agents) {
-        throw new Error(agentsBody.error || 'Agent scan failed');
+        stage = 'agent-scan';
+        const agentsUrl = new URL(`${base}/api/agents/enabled`);
+        agentsUrl.searchParams.set('agentDir', workspacePath);
+        const agentsResp = await floatingProxyFetch(sessionId, agentsUrl.toString());
+        if (!agentsResp.ok) throw new Error(`Agent scan failed: HTTP ${agentsResp.status}`);
+        const agentsBody = (await agentsResp.json().catch(() => ({}))) as EnabledAgentsResponse;
+        if (!agentsBody.success || !agentsBody.agents) {
+            throw new Error(agentsBody.error || 'Agent scan failed');
+        }
+
+        stage = 'agent-set';
+        const agentCount = Object.keys(agentsBody.agents).length;
+        console.info(`[fb-session] sync agents start session=${sessionId} agents=${agentCount}`);
+        const setAgentsResp = await floatingProxyFetch(sessionId, `${base}/api/agents/set`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ agents: agentsBody.agents }),
+        });
+        if (!setAgentsResp.ok) throw new Error(`Agent sync failed: HTTP ${setAgentsResp.status}`);
+        console.info(
+            `[fb-session] sync config done session=${sessionId} mcp=${effectiveServers.length} agents=${agentCount} elapsed=${elapsedMs(startedAt)}`,
+        );
+    } catch (err) {
+        console.error(
+            `[fb-session] sync config failed session=${sessionId} stage=${stage} elapsed=${elapsedMs(startedAt)} error=${describeError(err)}`,
+        );
+        throw err;
     }
-
-    const setAgentsResp = await floatingProxyFetch(sessionId, `${base}/api/agents/set`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ agents: agentsBody.agents }),
-    });
-    if (!setAgentsResp.ok) throw new Error(`Agent sync failed: HTTP ${setAgentsResp.status}`);
 }
 
 /**
@@ -926,34 +953,45 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
      *  Workspace 绑定是 load-bearing：SDK 对话树按工作区落盘，跨工作区 resume
      *  必然 "No conversation found"。 */
     const mintSession = useCallback(async (today: string, workspace: string): Promise<string> => {
+        const startedAt = Date.now();
+        console.info(`[fb-session] mint start workspace=${workspace} date=${today}`);
         // 种「最宽松权限 per runtime」由服务端在快照构造期原子完成（seedMaxPermission
         // → getMaxPermissionForRuntime），不再创建后 PATCH——避免 PATCH 失败被吞、
         // 本地态与磁盘快照不一致（cross-review）。seed≠override：这只是创建起点，
         // 之后跟随 session 活状态（用户在展开 Tab 改 → 写回快照；AI 进/出 plan →
         // chat:permission-mode-changed）。created.permissionMode 即服务端种好的值。
-        const created = await createSession(workspace, undefined, { seedMaxPermission: true });
-        const sid = created.id;
-        setPermissionMode(created.permissionMode ?? 'fullAgency');
-        applySessionSnapshot(created);
-        await atomicModifyConfig((c) => ({
-            ...c,
-            floatingBallSessionId: sid,
-            floatingBallSessionDate: today,
-            floatingBallSessionWorkspace: workspace,
-        }));
-        sessionDateRef.current = today;
-        // Provenance anchor (PRD §11.2 / D11): downstream session-scoped events
-        // — including the server-side ai_turn_complete — join back to this via
-        // session_id, which is how the desktop channel becomes sliceable in
-        // analytics without any server change.
-        track('session_new', {
-            session_id: sid,
-            triggered_by: 'floating_ball',
-            runtime: analyticsRuntimeRef.current,
-            has_initial_message: false,
-            agent_hash: null,
-        });
-        return sid;
+        try {
+            const created = await createSession(workspace, undefined, { seedMaxPermission: true });
+            const sid = created.id;
+            console.info(
+                `[fb-session] mint created session=${sid} runtime=${created.runtime ?? 'unknown'} permission=${created.permissionMode ?? 'default'} elapsed=${elapsedMs(startedAt)}`,
+            );
+            setPermissionMode(created.permissionMode ?? 'fullAgency');
+            applySessionSnapshot(created);
+            await atomicModifyConfig((c) => ({
+                ...c,
+                floatingBallSessionId: sid,
+                floatingBallSessionDate: today,
+                floatingBallSessionWorkspace: workspace,
+            }));
+            console.info(`[fb-session] mint config saved session=${sid} elapsed=${elapsedMs(startedAt)}`);
+            sessionDateRef.current = today;
+            // Provenance anchor (PRD §11.2 / D11): downstream session-scoped events
+            // — including the server-side ai_turn_complete — join back to this via
+            // session_id, which is how the desktop channel becomes sliceable in
+            // analytics without any server change.
+            track('session_new', {
+                session_id: sid,
+                triggered_by: 'floating_ball',
+                runtime: analyticsRuntimeRef.current,
+                has_initial_message: false,
+                agent_hash: null,
+            });
+            return sid;
+        } catch (err) {
+            console.error(`[fb-session] mint failed workspace=${workspace} elapsed=${elapsedMs(startedAt)} error=${describeError(err)}`);
+            throw err;
+        }
     }, [applySessionSnapshot]);
 
     /** Ensure sidecar + (re)connect SSE for `sid`. */
@@ -963,6 +1001,9 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
         configSnapshot: AppConfig,
         projectSnapshot: Project[],
     ): Promise<void> => {
+        const startedAt = Date.now();
+        let stage = 'disconnect-old-sse';
+        console.info(`[fb-session] connect start session=${sid} workspace=${workspace}`);
         // 串台防护（cross-review C2）：必须**先**断开旧 SSE、**再**切 sessionIdRef。
         // 否则在 await ensureSessionSidecar 的空窗里，旧 session 的 SSE 若送来
         // permission/ask/plan 事件，handler 会用已切到新 sid 的 ref → 用户的回应
@@ -975,24 +1016,33 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
         setAnalyticsContext({ sessionId: sid });
         let ownerEnsured = false;
         try {
+            stage = 'ensure-session-sidecar';
             // Ensure = pre-warm：伴侣窗作为长寿 owner 让 sidecar 常驻（唤起即出字
             // 的体感来源，PRD §10「最高效 = 预热」）。
             await ensureSessionSidecar(sid, workspace, 'tab', OWNER_ID);
             ownerEnsured = true;
+            console.info(`[fb-session] ensure sidecar ok session=${sid} elapsed=${elapsedMs(startedAt)}`);
+            stage = 'sync-config';
             // Floating companion is a Tab owner, so it must push the same
             // frontend-authoritative MCP/sub-agent config as Chat before turns.
             await syncFloatingSidecarConfig(sid, workspace, configSnapshot, projectSnapshot);
+            console.info(`[fb-session] sync config ok session=${sid} elapsed=${elapsedMs(startedAt)}`);
+            stage = 'connect-sse';
             // SSE（事件名/payload 与 Tab 完全同构，白名单已覆盖）。
             const sse = createSseConnection('fb', sessionIdRef);
             sse.setEventHandler((eventName, data) => handleSseEventRef.current(eventName, data));
             sseRef.current = sse;
             await sse.connect();
+            console.info(`[fb-session] sse connected session=${sid} elapsed=${elapsedMs(startedAt)}`);
         } catch (err) {
             sseRef.current?.disconnect();
             sseRef.current = null;
             if (ownerEnsured) {
                 await releaseSessionSidecar(sid, 'tab', OWNER_ID).catch(() => false);
             }
+            console.error(
+                `[fb-session] connect failed session=${sid} stage=${stage} elapsed=${elapsedMs(startedAt)} error=${describeError(err)}`,
+            );
             throw err;
         }
     }, []);
@@ -1079,12 +1129,19 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
         let cancelled = false;
 
         (async () => {
+            const bootStartedAt = Date.now();
+            let stage = 'init';
+            console.info('[fb-session] boot start');
             try {
                 // fb 窗口不挂 App.tsx，需要自己初始化 analytics（否则 platform/
                 // app_version 预载与 flush 监听都不在，事件质量打折）。
                 void initAnalytics();
 
+                stage = 'load-config-projects';
                 const [cfg, projects] = await Promise.all([loadAppConfig(), loadProjects()]);
+                console.info(
+                    `[fb-session] boot config loaded projects=${projects.length} hasSession=${Boolean(cfg.floatingBallSessionId)} date=${cfg.floatingBallSessionDate ?? 'none'} workspace=${cfg.floatingBallSessionWorkspace ?? 'none'} elapsed=${elapsedMs(bootStartedAt)}`,
+                );
                 analyticsRuntimeRef.current = cfg.multiAgentRuntime ? 'unknown' : 'builtin';
                 setSendShortcut(cfg.chatSendShortcut ?? 'enter');
                 // 设置面板（D17）：工作区选择器的候选 + 当前绑定覆盖。
@@ -1101,6 +1158,7 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
                 if (!boundWs) {
                     throw new Error('没有可用的工作区——请先在 MyAgents 中完成初始化');
                 }
+                console.info(`[fb-session] boot workspace resolved path=${boundWs.path} name=${boundWs.name ?? 'Mino'}`);
                 workspaceRef.current = { path: boundWs.path };
 
                 // Session 轮换（PRD §6.2）：身份三元组 (id, workspace, date)。
@@ -1114,7 +1172,11 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
                     || cfg.floatingBallSessionDate !== today
                     || !cfg.floatingBallSessionWorkspace
                     || !workspacePathsEqual(cfg.floatingBallSessionWorkspace, boundWs.path);
+                console.info(
+                    `[fb-session] boot session decision rotated=${rotated} session=${sid ?? 'none'} today=${today}`,
+                );
                 if (rotated) {
+                    stage = 'mint-session';
                     sid = await mintSession(today, boundWs.path);
                 } else {
                     sessionDateRef.current = cfg.floatingBallSessionDate ?? today;
@@ -1123,6 +1185,7 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
 
                 setWorkspacePath(boundWs.path);
                 setWorkspaceName(boundWs.name || 'Mino');
+                stage = 'connect-session';
                 await connectSession(sid, boundWs.path, cfg, projects);
                 if (cancelled) return;
 
@@ -1131,6 +1194,8 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
                 // session 没历史，跳过。
                 if (!rotated) {
                     try {
+                        const historyStartedAt = Date.now();
+                        console.info(`[fb-session] history load start session=${sid}`);
                         const base = await sessionBaseUrl(sid);
                         if (base) {
                             const resp = await floatingProxyFetch(sid, `${base}/sessions/${sid}`);
@@ -1143,6 +1208,9 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
                                 if (!cancelled && history.length > 0) {
                                     setMessages(history);
                                 }
+                                console.info(
+                                    `[fb-session] history load ok session=${sid} messages=${history.length} elapsed=${elapsedMs(historyStartedAt)}`,
+                                );
                                 // D14：resume 读快照当前权限模式（用户可能在展开
                                 // Tab 改过）。SessionData 携带它（SessionMetadata.
                                 // permissionMode）。同 W2 跳过 'plan'（瞬态，不该作为
@@ -1155,7 +1223,7 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
                             }
                         }
                     } catch (err) {
-                        console.warn('[fb] history load failed (non-fatal):', err);
+                        console.warn(`[fb-session] history load failed session=${sid} error=${describeError(err)}`);
                     }
                 }
 
@@ -1163,9 +1231,14 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
                     setReady(true);
                     // Lands in unified log via frontendLogger — the smoke-test
                     // signal that the desktop channel booted end-to-end.
-                    console.info(`[fb] companion ready · session=${sid} workspace=${boundWs.path} rotated=${rotated}`);
+                    console.info(
+                        `[fb-session] companion ready session=${sid} workspace=${boundWs.path} rotated=${rotated} elapsed=${elapsedMs(bootStartedAt)}`,
+                    );
                 }
             } catch (err) {
+                console.error(
+                    `[fb-session] boot failed stage=${stage} elapsed=${elapsedMs(bootStartedAt)} error=${describeError(err)}`,
+                );
                 if (!cancelled) {
                     setError(err instanceof Error ? err.message : String(err));
                 }
@@ -1189,8 +1262,10 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
      *      BackgroundCompletion owner 续命到 turn 完成后自动释放。 */
     const rotateTo = useCallback(
         async (today: string, workspace: { path: string; name?: string }) => {
+            const rotateStartedAt = Date.now();
             const oldSid = sessionIdRef.current;
             const oldHadPendingForm = pendingFormRef.current;
+            console.info(`[fb-session] rotate start old=${oldSid ?? 'none'} workspace=${workspace.path} date=${today}`);
             const sid = await mintSession(today, workspace.path);
             workspaceRef.current = { path: workspace.path };
             setWorkspacePath(workspace.path);
@@ -1215,10 +1290,10 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
                     await startBackgroundCompletion(oldSid);
                     await releaseSessionSidecar(oldSid, 'tab', OWNER_ID);
                 } catch (err) {
-                    console.warn('[fb] old session handover failed (non-fatal):', err);
+                    console.warn(`[fb-session] old session handover failed old=${oldSid} error=${describeError(err)}`);
                 }
             }
-            console.info(`[fb] session rotated · session=${sid} workspace=${workspace.path}`);
+            console.info(`[fb-session] rotate done session=${sid} workspace=${workspace.path} elapsed=${elapsedMs(rotateStartedAt)}`);
         },
         [mintSession, connectSession, replaceLiveMessage],
     );
@@ -1342,6 +1417,10 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
             // runtime 分流到 builtin / external（D16 无需前端分流）。破坏性保护由
             // hook 硬闸承担（plan-mode-gate / background-agent-permission）。
             const sendMode = permissionModeRef.current || 'fullAgency';
+            const sendStartedAt = Date.now();
+            console.info(
+                `[fb-session] send start session=${sid} chars=${finalText.length} images=${images?.length ?? 0} mode=${sendMode}`,
+            );
             try {
                 const base = await sessionBaseUrl(sid);
                 if (!base) throw new Error('AI 引擎尚未就绪，稍等片刻再试');
@@ -1369,10 +1448,12 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
                     surface: 'floating_ball',
                     session_id: sid,
                 });
+                console.info(`[fb-session] send accepted session=${sid} elapsed=${elapsedMs(sendStartedAt)}`);
                 return true;
             } catch (err) {
                 setBusy(false);
                 setError(err instanceof Error ? err.message : String(err));
+                console.error(`[fb-session] send failed session=${sid} elapsed=${elapsedMs(sendStartedAt)} error=${describeError(err)}`);
                 return false;
             } finally {
                 sendingRef.current = false;

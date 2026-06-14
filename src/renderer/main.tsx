@@ -6,7 +6,7 @@ import AppErrorBoundary from './components/AppErrorBoundary';
 import { ConfigProvider } from './config/ConfigProvider';
 import { ToastProvider } from './components/Toast';
 import { ImagePreviewProvider } from './context/ImagePreviewContext';
-import { initFrontendLogger } from './utils/frontendLogger';
+import { initFrontendLogger, setLogServerUrl, setRendererLogLabel } from './utils/frontendLogger';
 import { installMacFunctionKeyGuard } from './utils/macFunctionKeyGuard';
 
 import './index.css';
@@ -34,6 +34,34 @@ if (!import.meta.env.DEV) {
 
 const root = createRoot(document.getElementById('root')!);
 
+function bootstrapFloatingWindowLogSink(label: string): void {
+  console.info(`[${label}] window boot`);
+  void import('./api/tauriClient')
+    .then(async ({ getGlobalServerUrlWithWait, updateGlobalServerUrl }) => {
+      void import('./utils/tauriListen')
+        .then(({ listenWithCleanup }) => {
+          const ac = new AbortController();
+          void listenWithCleanup<string>('global-sidecar:restarted', (event) => {
+            const url = event.payload;
+            if (!url) return;
+            updateGlobalServerUrl(url);
+            setLogServerUrl(url);
+            console.info(`[${label}] unified log sink rebound after global restart: ${url}`);
+          }, ac.signal);
+        })
+        .catch((err) => {
+          console.warn(`[${label}] global sidecar restart listener unavailable:`, err);
+        });
+      const url = await getGlobalServerUrlWithWait();
+      if (!url) return;
+      setLogServerUrl(url);
+      console.info(`[${label}] unified log sink ready: ${url}`);
+    })
+    .catch((err) => {
+      console.warn(`[${label}] unified log sink unavailable:`, err);
+    });
+}
+
 // Floating ball windows (PRD 0.2.35): the ball + companion are separate Tauri
 // WebviewWindows loading this same bundle. Route by window label — they mount
 // their own minimal trees (no App / ConfigProvider; they read config via the
@@ -48,6 +76,8 @@ try {
 }
 
 if (tauriWindowLabel === 'fb-ball') {
+  setRendererLogLabel('fb-ball');
+  bootstrapFloatingWindowLogSink('fb-ball');
   const BallWindow = React.lazy(() => import('./floating-ball/BallWindow'));
   document.documentElement.classList.add('fb-transparent');
   root.render(
@@ -58,6 +88,8 @@ if (tauriWindowLabel === 'fb-ball') {
     </AppErrorBoundary>
   );
 } else if (tauriWindowLabel === 'fb-companion') {
+  setRendererLogLabel('fb-companion');
+  bootstrapFloatingWindowLogSink('fb-companion');
   const CompanionWindow = React.lazy(() => import('./floating-ball/CompanionWindow'));
   document.documentElement.classList.add('fb-transparent');
   root.render(
