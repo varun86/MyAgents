@@ -10,7 +10,7 @@
  */
 
 import { Bot, Minus, Square, X, RefreshCw, RotateCcw, Settings, Copy, CheckSquare } from 'lucide-react';
-import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react';
+import { type CSSProperties, type ReactNode, useCallback, useEffect, useRef, useState } from 'react';
 import { isTauri } from '@/api/tauriClient';
 import { CUSTOM_EVENTS } from '@/../shared/constants';
 import FeedbackPopover from './FeedbackPopover';
@@ -45,9 +45,21 @@ interface CustomTitleBarProps {
 
 // macOS traffic lights (close/minimize/maximize) width + padding
 const MACOS_TRAFFIC_LIGHTS_WIDTH = 78;
+const EDGE_DRAG_REGION_WIDTH = 30;
 
 // Detect platform
 const isWindows = typeof navigator !== 'undefined' && navigator.platform?.includes('Win');
+
+function TitlebarDragSpacer({ className = '', style }: { className?: string; style?: CSSProperties }) {
+    return (
+        <div
+            className={`h-full flex-shrink-0 ${className}`}
+            style={style}
+            data-tauri-drag-region
+            aria-hidden="true"
+        />
+    );
+}
 
 export default function CustomTitleBar({
     children,
@@ -163,39 +175,35 @@ export default function CustomTitleBar({
             {/* macOS traffic lights spacer - DRAGGABLE (hidden on Windows) */}
             {!isWindows && !isFullscreen && (
                 <div
-                    className="flex-shrink-0 h-full"
+                    className="h-full flex-shrink-0"
                     style={{ width: MACOS_TRAFFIC_LIGHTS_WIDTH }}
                     data-tauri-drag-region
                 />
             )}
 
-            {/* Windows: Small left padding for drag area */}
+            {/* Windows: keep a reliable left-edge drag target even when tabs fill the bar. */}
             {isWindows && (
                 <div
-                    className="flex-shrink-0 h-full w-3"
+                    className="h-full flex-shrink-0"
+                    style={{ width: EDGE_DRAG_REGION_WIDTH }}
                     data-tauri-drag-region
                 />
             )}
 
             {/* Tabs area - NOT draggable */}
-            <div
-                className="flex h-full items-center overflow-hidden"
-                data-no-drag
-            >
+            <div className="flex h-full min-w-0 flex-shrink items-center overflow-hidden" data-no-drag>
                 {children}
             </div>
 
-            {/* Flexible spacer - DRAGGABLE */}
-            <div
-                className="flex-1 h-full"
-                data-tauri-drag-region
-            />
+            {/* Empty strip after the last tab stays draggable when tabs do not fill the titlebar. */}
+            <TitlebarDragSpacer className="min-w-0 flex-1" />
 
-            {/* Right side actions - NOT draggable */}
-            <div
-                className="flex flex-shrink-0 items-center gap-1 px-3 h-full"
-                data-no-drag
-            >
+            {/* Right-edge drag target. Kept fixed so crowded tabs never cover it. */}
+            <TitlebarDragSpacer style={{ width: EDGE_DRAG_REGION_WIDTH }} />
+
+            {/* Right side actions. Buttons are non-drag; explicit gaps remain draggable. */}
+            <div className="flex h-full flex-shrink-0 items-center" data-no-drag>
+                <TitlebarDragSpacer className="w-1" />
                 {/* "恢复对话" pill (Issue #309) — opt-in restore of the previous
                     session, shown only when the last exit was NOT a deliberate
                     quit (crash / update-restart; decided in App). A compound
@@ -203,29 +211,37 @@ export default function CustomTitleBar({
                     emphasis than the green update pill (a soft terracotta tint,
                     not a call-to-action) since it's optional and dismissable. */}
                 {restoreCount > 0 && (
-                    <div className="flex h-7 items-center rounded-full border border-[var(--accent-warm-muted)] bg-[var(--accent-warm-subtle)] shadow-sm">
-                        <button
-                            onClick={onRestoreSession}
-                            className="flex h-full items-center gap-1.5 rounded-l-full pl-3 pr-2 text-xs font-medium text-[var(--ink)] transition-colors hover:bg-[var(--accent-warm-muted)] active:scale-95"
-                            title={`上次有 ${restoreCount} 个对话未关闭，点击恢复`}
+                    <>
+                        <div
+                            className="flex h-7 items-center rounded-full border border-[var(--accent-warm-muted)] bg-[var(--accent-warm-subtle)] shadow-sm"
+                            data-no-drag
                         >
-                            <RotateCcw className="h-3.5 w-3.5 text-[var(--accent-warm)]" />
-                            <span>恢复上次对话</span>
-                            {restoreCount > 1 && (
-                                <span className="flex h-4 min-w-4 items-center justify-center rounded-full bg-[var(--accent-warm-muted)] px-1 text-xs font-semibold text-[var(--accent-warm)]">
-                                    {restoreCount}
-                                </span>
-                            )}
-                        </button>
-                        <span className="h-3.5 w-px bg-[var(--accent-warm-muted)]" />
-                        <button
-                            onClick={onDismissRestore}
-                            className="flex h-full items-center rounded-r-full px-2 text-[var(--ink-muted)] transition-colors hover:bg-[var(--accent-warm-muted)] hover:text-[var(--ink)] active:scale-95"
-                            title="忽略"
-                        >
-                            <X className="h-3 w-3" />
-                        </button>
-                    </div>
+                            <button
+                                onClick={onRestoreSession}
+                                className="flex h-full items-center gap-1.5 rounded-l-full pl-3 pr-2 text-xs font-medium text-[var(--ink)] transition-colors hover:bg-[var(--accent-warm-muted)] active:scale-95"
+                                title={`上次有 ${restoreCount} 个对话未关闭，点击恢复`}
+                                data-no-drag
+                            >
+                                <RotateCcw className="h-3.5 w-3.5 text-[var(--accent-warm)]" />
+                                <span>恢复上次对话</span>
+                                {restoreCount > 1 && (
+                                    <span className="flex h-4 min-w-4 items-center justify-center rounded-full bg-[var(--accent-warm-muted)] px-1 text-xs font-semibold text-[var(--accent-warm)]">
+                                        {restoreCount}
+                                    </span>
+                                )}
+                            </button>
+                            <span className="h-3.5 w-px bg-[var(--accent-warm-muted)]" />
+                            <button
+                                onClick={onDismissRestore}
+                                className="flex h-full items-center rounded-r-full px-2 text-[var(--ink-muted)] transition-colors hover:bg-[var(--accent-warm-muted)] hover:text-[var(--ink)] active:scale-95"
+                                title="忽略"
+                                data-no-drag
+                            >
+                                <X className="h-3 w-3" />
+                            </button>
+                        </div>
+                        <TitlebarDragSpacer className="w-1" />
+                    </>
                 )}
                 {/* Update button - only shown when update is ready AND no
                     silent replacement download is in flight. Spinner +
@@ -236,17 +252,21 @@ export default function CustomTitleBar({
                     cache/disk state. Reappears automatically when the
                     replacement commits (with the new version). */}
                 {updateReady && !updatePreparing && (
-                    <button
-                        onClick={updateInstalling ? undefined : onRestartAndUpdate}
-                        disabled={updateInstalling}
-                        className="flex h-7 items-center gap-1.5 px-3 rounded-full text-xs font-medium text-white bg-[var(--success)] shadow-sm transition-all hover:bg-[var(--success)] active:scale-95 disabled:opacity-80 disabled:cursor-wait"
-                        title={updateInstalling
-                            ? '正在安装更新…'
-                            : (updateVersion ? `更新到 v${updateVersion}` : '重启并更新')}
-                    >
-                        <RefreshCw className={`h-3.5 w-3.5 ${updateInstalling ? 'animate-spin' : ''}`} />
-                        <span>{updateInstalling ? '安装中…' : '重启更新'}</span>
-                    </button>
+                    <>
+                        <button
+                            onClick={updateInstalling ? undefined : onRestartAndUpdate}
+                            disabled={updateInstalling}
+                            className="flex h-7 items-center gap-1.5 px-3 rounded-full text-xs font-medium text-white bg-[var(--success)] shadow-sm transition-all hover:bg-[var(--success)] active:scale-95 disabled:opacity-80 disabled:cursor-wait"
+                            title={updateInstalling
+                                ? '正在安装更新…'
+                                : (updateVersion ? `更新到 v${updateVersion}` : '重启并更新')}
+                            data-no-drag
+                        >
+                            <RefreshCw className={`h-3.5 w-3.5 ${updateInstalling ? 'animate-spin' : ''}`} />
+                            <span>{updateInstalling ? '安装中…' : '重启更新'}</span>
+                        </button>
+                        <TitlebarDragSpacer className="w-1" />
+                    </>
                 )}
                 {/* Feedback button + popover */}
                 {/* v0.1.69 polish: `transition-all` widened the transition
@@ -258,7 +278,7 @@ export default function CustomTitleBar({
                     bg fade smooth while letting the scale change snap
                     instantly in both directions, so the press feedback
                     lands as "down & back" without the return bounce. */}
-                <div ref={feedbackBtnRef} className="relative">
+                <div ref={feedbackBtnRef} className="relative" data-no-drag>
                     <button
                         onClick={() => setShowFeedback(prev => !prev)}
                         className={`flex h-7 items-center gap-1.5 rounded-md px-2.5 transition-colors ${
@@ -267,6 +287,7 @@ export default function CustomTitleBar({
                                 : 'text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]'
                         }`}
                         title="小助理"
+                        data-no-drag
                     >
                         <Bot className="h-4 w-4" />
                         <span className="text-sm font-medium">小助理</span>
@@ -278,26 +299,33 @@ export default function CustomTitleBar({
                         triggerRef={feedbackBtnRef}
                     />
                 </div>
+                <TitlebarDragSpacer className="w-1" />
 
                 {isTauri() && (
-                    <button
-                        onClick={() => window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.OPEN_TASK_CENTER))}
-                        className="flex h-7 items-center gap-1.5 rounded-md px-2.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
-                        title={`任务中心 (${navigator.platform.toLowerCase().includes('mac') ? '⌘Y' : 'Ctrl+Y'})`}
-                    >
-                        <CheckSquare className="h-4 w-4" />
-                        <span className="text-sm font-medium">任务</span>
-                    </button>
+                    <>
+                        <button
+                            onClick={() => window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.OPEN_TASK_CENTER))}
+                            className="flex h-7 items-center gap-1.5 rounded-md px-2.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+                            title={`任务中心 (${navigator.platform.toLowerCase().includes('mac') ? '⌘Y' : 'Ctrl+Y'})`}
+                            data-no-drag
+                        >
+                            <CheckSquare className="h-4 w-4" />
+                            <span className="text-sm font-medium">任务</span>
+                        </button>
+                        <TitlebarDragSpacer className="w-1" />
+                    </>
                 )}
 
                 <button
                     onClick={onSettingsClick || (() => console.log('Settings clicked - TODO'))}
                     className="flex h-7 items-center gap-1.5 rounded-md px-2.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
                     title={`设置 (${navigator.platform.toLowerCase().includes('mac') ? '⌘U' : 'Ctrl+U'})`}
+                    data-no-drag
                 >
                     <Settings className="h-4 w-4" />
                     <span className="text-sm font-medium">设置</span>
                 </button>
+                <TitlebarDragSpacer className="w-1" />
             </div>
 
             {/* Windows window controls */}
@@ -307,13 +335,15 @@ export default function CustomTitleBar({
                         onClick={handleMinimize}
                         className="flex w-11 items-center justify-center text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] transition-colors"
                         title="最小化"
+                        data-no-drag
                     >
                         <Minus className="h-4 w-4" />
                     </button>
                     <button
                         onClick={handleMaximize}
                         className="flex w-11 items-center justify-center text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] transition-colors"
-                        title={isMaximized ? "还原" : "最大化"}
+                        title={isMaximized ? '还原' : '最大化'}
+                        data-no-drag
                     >
                         {isMaximized ? (
                             <Copy className="h-3.5 w-3.5" />
@@ -325,6 +355,7 @@ export default function CustomTitleBar({
                         onClick={handleClose}
                         className="flex w-11 items-center justify-center text-[var(--ink-muted)] hover:bg-[var(--error)] hover:text-white transition-colors"
                         title="关闭"
+                        data-no-drag
                     >
                         <X className="h-4 w-4" />
                     </button>

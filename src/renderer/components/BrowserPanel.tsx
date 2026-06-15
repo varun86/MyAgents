@@ -133,6 +133,12 @@ export default function BrowserPanel({
   // ── Create or navigate webview when url prop changes ──
   useEffect(() => {
     if (!url) return;
+    // While the split panel is in its Windows transition-suspension window,
+    // the native webview is hidden specifically because the DOM rect is still
+    // moving. If no webview exists yet, wait instead of seeding Rust's SHOW
+    // cache with that transitional rect. Once alive, the reconciler below keeps
+    // syncing even during suspension so existing webviews still converge.
+    if (!browserAlive && isSplitTransitioning) return;
     let cancelled = false;
     let rafId = 0;
 
@@ -185,13 +191,12 @@ export default function BrowserPanel({
     };
 
     if (!browserAlive && !creatingRef.current && isVisible) {
-      // Create at the first usable rect (#290 degenerate-bounds floor). A
-      // mid-transition position is fine here: the geometry reconciler below
-      // converges the native webview onto the real container rect within a
-      // frame of `browserAlive` flipping true. The previous "wait for the
-      // rect to hold still across N frames" dance (a8cd4f47) is gone — a
+      // Create at the first usable rect after any known split-transition
+      // suspension (#290 degenerate-bounds floor). The previous "wait for the
+      // rect to hold still across N frames" dance (a8cd4f47) is still gone: a
       // momentarily-stable sample says nothing about whether the layout will
-      // move again (#339), so create-time precision cannot be load-bearing.
+      // move again (#339), so create-time precision cannot be the only owner.
+      // After creation, the reconciler below owns convergence.
       waitForUsableBounds();
     } else if (browserAlive && url !== lastRequestedUrlRef.current) {
       lastRequestedUrlRef.current = url;
@@ -202,7 +207,7 @@ export default function BrowserPanel({
       cancelled = true;
       if (rafId) cancelAnimationFrame(rafId);
     };
-  }, [url, browserAlive, isVisible, tabId, onBrowserCreated, onCreateFailed, readUsableBounds]);
+  }, [url, browserAlive, isVisible, isSplitTransitioning, tabId, onBrowserCreated, onCreateFailed, readUsableBounds]);
 
   // ── Listen for URL/loading events from Rust ──
   useEffect(() => {
