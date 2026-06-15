@@ -13,7 +13,7 @@ import CustomTitleBar from './CustomTitleBar';
 function renderBar(over: Partial<React.ComponentProps<typeof CustomTitleBar>> = {}) {
     const onRestoreSession = vi.fn();
     const onDismissRestore = vi.fn();
-    render(
+    const result = render(
         <CustomTitleBar
             onRestoreSession={onRestoreSession}
             onDismissRestore={onDismissRestore}
@@ -22,7 +22,7 @@ function renderBar(over: Partial<React.ComponentProps<typeof CustomTitleBar>> = 
             <div data-testid="tabbar" />
         </CustomTitleBar>,
     );
-    return { onRestoreSession, onDismissRestore };
+    return { ...result, onRestoreSession, onDismissRestore };
 }
 
 describe('CustomTitleBar — 恢复对话 pill (Issue #309)', () => {
@@ -53,5 +53,14 @@ describe('CustomTitleBar — 恢复对话 pill (Issue #309)', () => {
         fireEvent.click(screen.getByTitle('忽略'));
         expect(onDismissRestore).toHaveBeenCalledTimes(1);
         expect(onRestoreSession).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps explicit draggable regions around and between titlebar actions', () => {
+        const { container } = renderBar({ restoreCount: 0 });
+        const dragRegions = Array.from(container.querySelectorAll('[data-tauri-drag-region]'));
+
+        expect(dragRegions.length).toBeGreaterThanOrEqual(4);
+        expect(dragRegions.some((node) => (node as HTMLElement).style.width === '30px')).toBe(true);
+        expect(dragRegions.some((node) => (node as HTMLElement).className.includes('flex-1'))).toBe(true);
     });
 });

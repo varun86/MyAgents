@@ -7,7 +7,7 @@
  * - Hides + button when at MAX_TABS
  */
 
-import { memo, useCallback, useEffect, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useRef, useState, type WheelEvent } from 'react';
 import {
     DndContext,
     closestCenter,
@@ -22,10 +22,12 @@ import {
     sortableKeyboardCoordinates,
     horizontalListSortingStrategy,
 } from '@dnd-kit/sortable';
-import { Plus } from 'lucide-react';
+import { List, Plus } from 'lucide-react';
 
 import SortableTabItem from '@/components/SortableTabItem';
-import { type Tab, MAX_TABS } from '@/types/tab';
+import { Popover } from '@/components/ui/Popover';
+import { useCloseLayer } from '@/hooks/useCloseLayer';
+import { type Tab, MAX_TABS, getFolderName } from '@/types/tab';
 
 interface TabBarProps {
     tabs: Tab[];
@@ -46,11 +48,20 @@ export default memo(function TabBar({
 }: TabBarProps) {
     const canAddTab = tabs.length < MAX_TABS;
     const scrollContainerRef = useRef<HTMLDivElement>(null);
+    const overflowButtonRef = useRef<HTMLButtonElement>(null);
+    const [menuOpen, setMenuOpen] = useState(false);
+
+    useCloseLayer(() => {
+        if (!menuOpen) return false;
+        setMenuOpen(false);
+        return true;
+    }, menuOpen ? 260 : -1);
 
     // Track scroll state for fade indicators
     const [scrollState, setScrollState] = useState({
         canScrollLeft: false,
-        canScrollRight: false
+        canScrollRight: false,
+        isOverflowing: false,
     });
 
     // Check scroll position and update fade indicators
@@ -59,25 +70,52 @@ export default memo(function TabBar({
         if (!container) return;
 
         const { scrollLeft, scrollWidth, clientWidth } = container;
-        setScrollState({
-            canScrollLeft: scrollLeft > 0,
-            canScrollRight: scrollLeft + clientWidth < scrollWidth - 1, // -1 for rounding
+        const isOverflowing = scrollWidth > clientWidth + 1; // +1 for subpixel rounding
+        if (!isOverflowing) {
+            setMenuOpen((open) => (open ? false : open));
+        }
+        const next = {
+            canScrollLeft: isOverflowing && scrollLeft > 0,
+            canScrollRight: isOverflowing && scrollLeft + clientWidth < scrollWidth - 1,
+            isOverflowing,
+        };
+        setScrollState((prev) => {
+            if (
+                prev.canScrollLeft === next.canScrollLeft &&
+                prev.canScrollRight === next.canScrollRight &&
+                prev.isOverflowing === next.isOverflowing
+            ) {
+                return prev;
+            }
+            return next;
         });
     }, []);
 
     // Update scroll state on mount, resize, and tab changes
     useEffect(() => {
-        updateScrollState();
+        const frameId = requestAnimationFrame(updateScrollState);
 
         const container = scrollContainerRef.current;
-        if (!container) return;
+        if (!container) {
+            return () => cancelAnimationFrame(frameId);
+        }
 
         container.addEventListener('scroll', updateScrollState);
         window.addEventListener('resize', updateScrollState);
+        const resizeObserver = typeof ResizeObserver !== 'undefined'
+            ? new ResizeObserver(updateScrollState)
+            : null;
+        resizeObserver?.observe(container);
+        const fallbackMeasureInterval = resizeObserver
+            ? null
+            : window.setInterval(updateScrollState, 250);
 
         return () => {
+            cancelAnimationFrame(frameId);
             container.removeEventListener('scroll', updateScrollState);
             window.removeEventListener('resize', updateScrollState);
+            resizeObserver?.disconnect();
+            if (fallbackMeasureInterval !== null) window.clearInterval(fallbackMeasureInterval);
         };
     }, [updateScrollState, tabs.length]);
 
@@ -91,7 +129,11 @@ export default memo(function TabBar({
         // Find the active tab element and scroll it into view
         const activeTabElement = container.querySelector(`[data-tab-id="${activeTabId}"]`);
         if (activeTabElement) {
-            activeTabElement.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' });
+            activeTabElement.scrollIntoView({
+                behavior: 'smooth',
+                block: 'nearest',
+                inline: 'nearest',
+            });
             // Update scroll state after scroll animation
             setTimeout(updateScrollState, 300);
         }
@@ -106,7 +148,7 @@ export default memo(function TabBar({
         }),
         useSensor(KeyboardSensor, {
             coordinateGetter: sortableKeyboardCoordinates,
-        })
+        }),
     );
 
     // Handle drag end
@@ -117,8 +159,29 @@ export default memo(function TabBar({
         }
     };
 
+    const handleWheel = useCallback(
+        (event: WheelEvent<HTMLDivElement>) => {
+            const container = scrollContainerRef.current;
+            if (!container || !scrollState.isOverflowing) return;
+            const delta = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY;
+            if (delta === 0) return;
+            container.scrollLeft += delta;
+            event.preventDefault();
+            updateScrollState();
+        },
+        [scrollState.isOverflowing, updateScrollState],
+    );
+
+    const handleSelectFromMenu = useCallback(
+        (tabId: string) => {
+            setMenuOpen(false);
+            onSelectTab(tabId);
+        },
+        [onSelectTab],
+    );
+
     return (
-        <div className="flex h-full flex-1 items-center gap-0.5 select-none overflow-hidden">
+        <div className="flex h-full min-w-0 flex-1 items-center gap-0.5 select-none overflow-hidden">
             {/* Scroll container with fade indicators */}
             <div className="relative flex-1 overflow-hidden">
                 {/* Left fade gradient */}
@@ -149,13 +212,15 @@ export default memo(function TabBar({
                     onDragEnd={handleDragEnd}
                 >
                     <SortableContext
-                        items={tabs.map(t => t.id)}
+                        items={tabs.map((t) => t.id)}
                         strategy={horizontalListSortingStrategy}
                     >
                         <div
                             ref={scrollContainerRef}
-                            className="flex items-center gap-0.5 overflow-x-auto scrollbar-none"
+                            className="flex min-w-0 items-center gap-0.5 overflow-x-auto scrollbar-none"
                             style={{ scrollbarWidth: 'none', msOverflowStyle: 'none' }}
+                            aria-label="打开的标签页"
+                            onWheel={handleWheel}
                         >
                             {tabs.map((tab) => (
                                 <SortableTabItem
@@ -171,7 +236,84 @@ export default memo(function TabBar({
                 </DndContext>
             </div>
 
-            {/* New tab button - hidden when at max tabs */}
+            {scrollState.isOverflowing && (
+                <>
+                    <button
+                        ref={overflowButtonRef}
+                        type="button"
+                        className={`flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-md text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)]/60 hover:text-[var(--ink)] ${
+                            menuOpen ? 'bg-[var(--paper-inset)] text-[var(--ink)]' : ''
+                        }`}
+                        onClick={() => setMenuOpen((open) => !open)}
+                        aria-label="所有标签页"
+                        title="所有标签页"
+                    >
+                        <List className="h-4 w-4" />
+                    </button>
+                    <Popover
+                        open={menuOpen}
+                        onClose={() => setMenuOpen(false)}
+                        anchorRef={overflowButtonRef}
+                        placement="bottom-end"
+                        className="max-h-96 w-72 overflow-y-auto py-1"
+                    >
+                        <div className="px-3 py-2 text-xs font-semibold tracking-[0.04em] text-[var(--ink-muted)]/60">
+                            标签页
+                        </div>
+                        {tabs.map((tab) => {
+                            const hasSessionTitle = tab.title && tab.title !== 'New Tab' && tab.title !== 'New Chat';
+                            const displayTitle = hasSessionTitle
+                                ? tab.title
+                                : tab.agentDir
+                                  ? getFolderName(tab.agentDir)
+                                  : tab.title;
+                            const subtitle = tab.agentDir
+                                ? getFolderName(tab.agentDir)
+                                : tab.view === 'settings'
+                                  ? '设置'
+                                  : tab.view === 'taskcenter'
+                                    ? '任务中心'
+                                    : '启动页';
+                            const isActive = tab.id === activeTabId;
+                            return (
+                                <button
+                                    key={tab.id}
+                                    type="button"
+                                    aria-label={`切换到 ${displayTitle}`}
+                                    aria-current={isActive ? 'page' : undefined}
+                                    className={`flex w-full items-center gap-2 px-3 py-2 text-left transition-colors ${
+                                        isActive
+                                            ? 'bg-[var(--accent-warm-subtle)] text-[var(--ink)]'
+                                            : 'text-[var(--ink-secondary)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]'
+                                    }`}
+                                    onClick={() => handleSelectFromMenu(tab.id)}
+                                >
+                                    <span
+                                        className={`h-1.5 w-1.5 flex-shrink-0 rounded-full ${
+                                            tab.isGenerating
+                                                ? 'bg-[var(--success)]'
+                                                : tab.hasUnread
+                                                  ? 'bg-[var(--accent-warm)]'
+                                                  : isActive
+                                                    ? 'bg-[var(--accent-warm)]'
+                                                    : 'bg-[var(--line-strong)]'
+                                        }`}
+                                    />
+                                    <span className="min-w-0 flex-1">
+                                        <span className="block truncate text-sm font-medium">{displayTitle}</span>
+                                        <span className="block truncate text-xs text-[var(--ink-muted)]/70">
+                                            {subtitle}
+                                        </span>
+                                    </span>
+                                </button>
+                            );
+                        })}
+                    </Popover>
+                </>
+            )}
+
+            {/* New tab button - hidden when at max tabs. It sits after the overflow
+                list so extreme widths keep the recovery affordance visible first. */}
             {canAddTab && (
                 <button
                     className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-md transition-all duration-150 text-[var(--ink-muted)] hover:bg-[var(--paper-inset)]/60 hover:text-[var(--ink)]"

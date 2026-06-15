@@ -35,6 +35,7 @@ import type { ContentBlock } from '@/types/chat';
 import { isNearBottom } from './convoAutoFollow';
 import { useFloatingSession, type FbAttachment, type FbMsg } from './useFloatingSession';
 import { useFloatingComposerKeydown } from './useFloatingComposerKeydown';
+import { describeNativeFloatingBallError } from './nativeFloatingBall';
 
 import './fb.css';
 
@@ -60,6 +61,9 @@ interface FbImageDraft {
     size: number;
     data: string;
     previewUrl: string;
+    source: 'upload' | 'screenshot';
+    appName?: string | null;
+    windowTitle?: string | null;
 }
 
 const WIN_W = 440;
@@ -217,6 +221,7 @@ async function fileToImageDraft(file: File): Promise<FbImageDraft> {
         size: file.size,
         data,
         previewUrl,
+        source: 'upload',
     };
 }
 
@@ -230,6 +235,9 @@ function shotToImageDraft(shot: FbShot): FbImageDraft {
         size: Math.floor(data.length * 0.75),
         data,
         previewUrl: shot.dataUrl,
+        source: 'screenshot',
+        appName: shot.appName ?? null,
+        windowTitle: shot.windowTitle ?? null,
     };
 }
 
@@ -261,6 +269,8 @@ export default function CompanionWindow() {
     const inputRef = useRef<HTMLTextAreaElement | null>(null);
     const hideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const mouseInsideRef = useRef(false);
+    const visibilityGenerationRef = useRef(0);
+    const pinRequestSeqRef = useRef(0);
     // 活动行秒表（仅有 running 活动时跳动）
     const [nowTick, setNowTick] = useState(() => Date.now());
     const hasRunningActivity = session.activities.some((a) => a.running);
@@ -315,6 +325,7 @@ export default function CompanionWindow() {
     // ── mode → 通知球（球用它决定点击语义）＋ pin 时清未读 ──
     const applyMode = useCallback(
         (next: FbMode) => {
+            if (next === 'hidden') visibilityGenerationRef.current += 1;
             setMode(next);
             modeRef.current = next;
             void invoke('cmd_fb_relay', {
@@ -326,6 +337,21 @@ export default function CompanionWindow() {
         },
         [markRead],
     );
+
+    const beginPinRequest = useCallback(() => ({
+        seq: ++pinRequestSeqRef.current,
+        generation: visibilityGenerationRef.current,
+    }), []);
+
+    const isCurrentPinRequest = useCallback((token: { seq: number; generation: number }) => (
+        token.seq === pinRequestSeqRef.current && token.generation === visibilityGenerationRef.current
+    ), []);
+
+    const discardStalePinRequest = useCallback((token: { seq: number; generation: number }) => {
+        if (token.generation !== visibilityGenerationRef.current && modeRef.current !== 'pin') {
+            void invoke('cmd_fb_hide_companion').catch(() => undefined);
+        }
+    }, []);
 
     const hideSelf = useCallback(() => {
         if (hideTimerRef.current) {
@@ -374,17 +400,39 @@ export default function CompanionWindow() {
     // 时强制回贴底。没有它，滚轮上翻阅读会被流式新内容持续拽回底部。
     const stickToBottomRef = useRef(true);
 
+    const focusInputWhenPinned = useCallback(() => {
+        requestAnimationFrame(() => {
+            if (modeRef.current !== 'pin') return;
+            inputRef.current?.focus();
+        });
+    }, []);
+
     const summonPinned = useCallback(
         async (ctx: FbCtx | null | undefined) => {
             stickToBottomRef.current = true; // 显式唤起 = 看最新
+            const pinToken = beginPinRequest();
+            try {
+                // BallWindow may already have requested native show; companion owns
+                // the final key-window/focus ordering and fails closed on disable.
+                await invoke('cmd_fb_pin_companion');
+            } catch (err) {
+                applyMode('hidden');
+                void invoke('cmd_fb_hide_companion');
+                console.error('[fb] pin for summon failed:', err);
+                return;
+            }
+            if (!isCurrentPinRequest(pinToken)) {
+                discardStalePinRequest(pinToken);
+                return;
+            }
             applyMode('pin');
             await applySummonCtx(ctx);
             track('floating_ball_summon', { kind: 'pin' });
-            requestAnimationFrame(() => inputRef.current?.focus());
+            focusInputWhenPinned();
             // 唤起时机做按天轮换评估（boot-only 检查跨午夜长跑会失效）。
             void rotateIfStale();
         },
-        [applyMode, applySummonCtx, rotateIfStale],
+        [applyMode, applySummonCtx, beginPinRequest, discardStalePinRequest, focusInputWhenPinned, isCurrentPinRequest, rotateIfStale],
     );
 
     // ── 球 → 伴侣窗事件 ──
@@ -422,8 +470,12 @@ export default function CompanionWindow() {
         void listenWithCleanup<{ active?: boolean }>(
             'fb:lifecycle',
             (e) => {
-                if (e.payload?.active === false) void suspend();
-                else void resume();
+                if (e.payload?.active === false) {
+                    applyMode('hidden');
+                    void suspend();
+                } else {
+                    void resume();
+                }
             },
             ac.signal,
         );
@@ -466,19 +518,24 @@ export default function CompanionWindow() {
     const promoteToPin = useCallback(
         async (kind: 'click' | 'wheel') => {
             if (modeRef.current !== 'peek') return;
-            applyMode('pin');
-            track('floating_ball_summon', { kind: kind === 'click' ? 'pin' : 'wheel' });
+            const pinToken = beginPinRequest();
             try {
                 // 等 make_key_window 真正落地再聚焦：窗口还不是 key window 时
                 // focus() 不出光标——这就是"点了面板输入框却没光标"的根因。
                 await invoke('cmd_fb_pin_companion');
             } catch (err) {
+                applyMode('hidden');
+                void invoke('cmd_fb_hide_companion');
                 console.error('[fb] pin failed:', err);
+                return;
             }
-            // applyMode 已把 modeRef 翻到 pin；重新读一次（窗口可能在 IPC
-            // 期间被 Esc 关掉，hidden 时不再聚焦）。as FbMode 抵消 TS 对
-            // ref.current 的过期 narrowing（它看不见 applyMode 的写入）。
-            if ((modeRef.current as FbMode) === 'pin') inputRef.current?.focus();
+            if (!isCurrentPinRequest(pinToken)) {
+                discardStalePinRequest(pinToken);
+                return;
+            }
+            applyMode('pin');
+            track('floating_ball_summon', { kind: kind === 'click' ? 'pin' : 'wheel' });
+            focusInputWhenPinned();
             void rotateIfStale();
             if (kind === 'click') {
                 void applySummonCtx(null);
@@ -492,7 +549,7 @@ export default function CompanionWindow() {
                 })();
             }
         },
-        [applyMode, applySummonCtx, rotateIfStale],
+        [applyMode, applySummonCtx, beginPinRequest, discardStalePinRequest, focusInputWhenPinned, isCurrentPinRequest, rotateIfStale],
     );
 
     // ── 焦点纪律：pin 态输入框光标常驻 ──
@@ -519,11 +576,11 @@ export default function CompanionWindow() {
                 void promoteToPin('click');
                 return;
             }
-            inputRef.current?.focus();
+            focusInputWhenPinned();
         };
         window.addEventListener('focus', onFocus);
         return () => window.removeEventListener('focus', onFocus);
-    }, [promoteToPin]);
+    }, [focusInputWhenPinned, promoteToPin]);
 
     const onWinClick = useCallback(
         (e: React.MouseEvent<HTMLDivElement>) => {
@@ -537,9 +594,9 @@ export default function CompanionWindow() {
             if (target.closest('textarea, input, button, a')) return;
             const sel = window.getSelection();
             if (sel && !sel.isCollapsed) return;
-            inputRef.current?.focus();
+            focusInputWhenPinned();
         },
-        [promoteToPin],
+        [focusInputWhenPinned, promoteToPin],
     );
 
     // ── peek 滚轮：直接滚动会话流 + 升格 pin ──
@@ -722,6 +779,7 @@ export default function CompanionWindow() {
                         size: Math.floor(file.data.length * 0.75),
                         data: file.data,
                         previewUrl: `data:${file.mimeType};base64,${file.data}`,
+                        source: 'upload',
                     });
                 }
                 addImageDrafts(drafts);
@@ -806,6 +864,7 @@ export default function CompanionWindow() {
         const q = quote;
         setQuote(null);
         const ctx = lastCtxRef.current;
+        const screenshotDraft = drafts.find((draft) => draft.source === 'screenshot');
         const attachments: FbAttachment[] = drafts.map((draft) => ({
             id: draft.id,
             name: draft.name,
@@ -822,8 +881,9 @@ export default function CompanionWindow() {
                 data: draft.data,
             })),
             attachments,
-            appName: ctx?.appName ?? null,
-            windowTitle: ctx?.windowTitle ?? null,
+            appName: screenshotDraft?.appName ?? ctx?.appName ?? null,
+            windowTitle: screenshotDraft?.windowTitle ?? ctx?.windowTitle ?? null,
+            screenshotAttached: Boolean(screenshotDraft),
         });
     }, [imageDrafts, input, quote, session.busy, session.ready, send]);
 
@@ -845,6 +905,11 @@ export default function CompanionWindow() {
     const onShot = useCallback(async () => {
         try {
             const res = await invoke<FbShot>('cmd_fb_screenshot');
+            lastCtxRef.current = {
+                ...lastCtxRef.current,
+                appName: res.appName ?? lastCtxRef.current?.appName ?? null,
+                windowTitle: res.windowTitle ?? lastCtxRef.current?.windowTitle ?? null,
+            };
             if (canAttachImages) {
                 addImageDrafts([shotToImageDraft(res)]);
             } else {
@@ -863,7 +928,8 @@ export default function CompanionWindow() {
             track('floating_ball_summon', { kind: 'screenshot' });
         } catch (err) {
             console.warn('[fb] screenshot failed:', err);
-            toast.error('截图失败');
+            const detail = describeNativeFloatingBallError(err).trim();
+            toast.error(detail ? `截图失败：${detail.slice(0, 160)}` : '截图失败');
         }
     }, [addImageDrafts, canAttachImages, fileService, insertReferencePaths, toast]);
 

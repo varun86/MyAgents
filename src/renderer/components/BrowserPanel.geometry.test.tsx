@@ -78,14 +78,20 @@ function resizeCalls(): Array<{ x: number; y: number; width: number; height: num
     .map(([, args]) => args as { x: number; y: number; width: number; height: number });
 }
 
-function panelProps(overrides: { isVisible?: boolean } = {}) {
+function createCalls(): Array<{ x: number; y: number; width: number; height: number }> {
+  return invokeMock.mock.calls
+    .filter(([cmd]) => cmd === 'cmd_browser_create')
+    .map(([, args]) => args as { x: number; y: number; width: number; height: number });
+}
+
+function panelProps(overrides: { isVisible?: boolean; isSplitTransitioning?: boolean; browserAlive?: boolean } = {}) {
   return {
     tabId: 'tab-1',
     url: 'https://example.com',
     isVisible: overrides.isVisible ?? true,
     isDraggingSplit: false,
-    isSplitTransitioning: false,
-    browserAlive: true,
+    isSplitTransitioning: overrides.isSplitTransitioning ?? false,
+    browserAlive: overrides.browserAlive ?? true,
     sourceFile: null,
     onBrowserCreated: vi.fn(),
     onCreateFailed: vi.fn(),
@@ -123,6 +129,22 @@ afterEach(() => {
 });
 
 describe('BrowserPanel geometry reconciler (#339)', () => {
+  it('does not create the native webview from split-transition sliver bounds', async () => {
+    containerRect = { x: 1223, y: 80, width: 165, height: 662 };
+    const view = render(<BrowserPanel {...panelProps({ browserAlive: false, isSplitTransitioning: true })} />);
+
+    await flushFrame();
+    await flushFrame();
+    expect(createCalls()).toHaveLength(0);
+
+    containerRect = { x: 698, y: 80, width: 690, height: 662 };
+    view.rerender(<BrowserPanel {...panelProps({ browserAlive: false, isSplitTransitioning: false })} />);
+    await flushFrame();
+
+    expect(createCalls()).toHaveLength(1);
+    expect(createCalls()[0]).toMatchObject({ x: 698, y: 80, width: 690, height: 662 });
+  });
+
   it('keeps converging onto the container rect across successive layout moves', async () => {
     renderPanel();
 

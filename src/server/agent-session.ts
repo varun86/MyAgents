@@ -30,6 +30,13 @@ import { isEmptySuccessfulSdkResult, isRecoveredAssistantMessageError, findTurnU
 import { planRetraction } from './utils/message-retraction';
 import { diagnoseSdkSubprocessFailure } from './utils/sdk-subprocess-diagnostics';
 import { InactivityWatchdog } from './utils/inactivity-watchdog';
+import {
+  SESSION_PLANS_GITIGNORE_PATTERN,
+  clearSessionPlanMarkdown,
+  getSessionPlansDirectoryPath,
+  getSessionPlansDirectorySetting,
+  readLatestPlanMarkdownWithRetry,
+} from './utils/plan-files';
 import { WATCHDOG_RESUME_REMINDER, planWatchdogAutoResume, shouldAdoptPendingContinueIntoScheduledAutoResume, shouldConsumePendingContinueAfterAbort, shouldDeferPendingContinueToScheduledAutoResume, shouldPrependWatchdogAutoResume } from './utils/watchdog-auto-resume';
 import { processImage, resizeToolImageContent, classifyImageError } from './utils/imageResize';
 import { writeBase64FilesToAgentDir } from './utils/workspace-files';
@@ -928,6 +935,8 @@ async function surfaceInFlightQueueItem(
   meta: InFlightMetadata | null,
   options: SurfaceInFlightOptions,
 ): Promise<void> {
+  await prepareSessionPlansForUserTurn({ clearStale: false });
+
   const userMessage: MessageWire = {
     id: String(messageSequence++),
     role: 'user',
@@ -1790,6 +1799,7 @@ let currentTurnUsage = {
 let latestMainAssistantUsage: MessageUsage | null = null;
 // Timestamp when current assistant response started
 let currentTurnStartTime: number | null = null;
+let currentPlanFileMinMtimeMs: number | null = null;
 // Tool count for current turn
 let currentTurnToolCount = 0;
 let builtinTurnTraceId = '';
@@ -1902,6 +1912,7 @@ function resetTurnUsage(): void {
   };
   latestMainAssistantUsage = null;
   currentTurnStartTime = null;
+  currentPlanFileMinMtimeMs = null;
   currentTurnToolCount = 0;
   currentTurnHasOutput = false;
   currentTurnHadAssistantMessageError = false;
@@ -3659,6 +3670,17 @@ const pendingEnterPlanMode = new Map<string, {
   resolve: (approved: boolean) => void;
 }>();
 
+async function prepareSessionPlansForUserTurn(options: { clearStale: boolean }): Promise<void> {
+  if (options.clearStale && agentDir) {
+    try {
+      await clearSessionPlanMarkdown(getSessionPlansDirectoryPath(agentDir, sessionId), { expectedRoot: agentDir });
+    } catch (error) {
+      console.warn('[ExitPlanMode] Failed to clear stale session plan markdown:', error);
+    }
+  }
+  currentPlanFileMinMtimeMs = Date.now();
+}
+
 /**
  * True while the turn is blocked on a HUMAN response — a permission prompt,
  * AskUserQuestion, or plan-mode approval. The inactivity watchdog treats this
@@ -3809,7 +3831,7 @@ async function handleExitPlanMode(
   console.log('[ExitPlanMode] Requesting user approval');
 
   const obj = (input && typeof input === 'object' ? input : {}) as Record<string, unknown>;
-  const plan = typeof obj.plan === 'string' ? obj.plan : undefined;
+  const explicitPlan = typeof obj.plan === 'string' ? obj.plan : undefined;
   const allowedPrompts = Array.isArray(obj.allowedPrompts)
     ? (obj.allowedPrompts as ExitPlanModeAllowedPrompt[])
     : undefined;
@@ -3817,6 +3839,28 @@ async function handleExitPlanMode(
   const requestId = `exitplan_${Date.now()}_${Math.random().toString(36).slice(2)}`;
 
   // Short-circuit if already aborted (addEventListener won't fire for past events)
+  if (signal?.aborted) {
+    throw new DOMException('Aborted', 'AbortError');
+  }
+
+  let plan = explicitPlan;
+  if (!plan && agentDir) {
+    try {
+      const latest = await readLatestPlanMarkdownWithRetry(
+        getSessionPlansDirectoryPath(agentDir, sessionId),
+        { minMtimeMs: currentPlanFileMinMtimeMs ?? currentTurnStartTime ?? undefined, expectedRoot: agentDir, signal },
+      );
+      if (latest) {
+        plan = latest.content;
+        console.log(`[ExitPlanMode] Loaded plan from ${latest.path}${latest.truncated ? ' (truncated)' : ''}`);
+      } else {
+        console.warn('[ExitPlanMode] No session plan markdown found for current turn');
+      }
+    } catch (error) {
+      console.warn('[ExitPlanMode] Failed to load session plan markdown:', error);
+    }
+  }
+
   if (signal?.aborted) {
     throw new DOMException('Aborted', 'AbortError');
   }
@@ -9106,6 +9150,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
   const adminConfigForSession = loadAdminConfig();
   const cliToolRegistryEnabled = isCliToolRegistryEnabled(adminConfigForSession);
   syncProjectUserConfig(agentDir, { cliToolRegistryEnabled });
+  ensureGitignorePattern(agentDir, SESSION_PLANS_GITIGNORE_PATTERN);
   // PRD #124: register a FRESH bridge token for this SDK subprocess.
   // `freshToken: true` retires the previous token (if any) so any late
   // requests from the dying old subprocess get rejected with a 400
@@ -9418,6 +9463,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
       settingSources: buildSettingSources(),
       settings: {
         cleanupPeriodDays: claudeTranscriptCleanupPeriodDays,
+        plansDirectory: getSessionPlansDirectorySetting(sessionId),
         // The Artifact tool (SDK 0.3.16x+) publishes HTML/MD to claude.ai —
         // an outward data flow MyAgents has not product-decided to expose.
         // Keep the tool surface frozen; revisit as its own feature if wanted.
@@ -12324,6 +12370,10 @@ async function* messageGenerator(): AsyncGenerator<SDKUserMessage> {
       console.log(
         `[inbox] Bound turn inboxMeta from=${currentTurnInboxMeta.fromSessionId} replyBack=${currentTurnInboxMeta.replyBack} msgId=${currentTurnInboxMeta.originalMessageId}`,
       );
+    }
+
+    if (!item.wasQueued) {
+      await prepareSessionPlansForUserTurn({ clearStale: true });
     }
 
     // Modality re-check at dequeue (see prior comment in pre-fix file).
