@@ -59,8 +59,8 @@ export default memo(function SortableTabItem({
             data-tab-id={tab.id}
             title={tooltipTitle}
             className={`
-                group/tab relative flex h-8 min-w-[100px] max-w-[200px] cursor-default items-center
-                rounded-lg px-3 transition-colors duration-150 flex-shrink-0
+                group/tab relative flex h-8 min-w-[64px] max-w-[180px] flex-[1_1_136px] cursor-default items-center
+                rounded-lg px-2.5 transition-colors duration-150
                 ${isDragging ? 'shadow-lg ring-2 ring-[var(--accent)]/30' : ''}
                 ${isActive
                     ? 'bg-[var(--paper-inset)] text-[var(--ink)] shadow-sm'

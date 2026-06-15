@@ -134,8 +134,10 @@ export interface TabState {
     activeTabId: string | null;
 }
 
-// Maximum number of tabs allowed
-export const MAX_TABS = 10;
+// Maximum number of tabs allowed. The titlebar uses Chrome-like adaptive tab
+// sizing, and 12 keeps common multi-session work visible without turning every
+// mounted chat tab into unbounded sidecar ownership.
+export const MAX_TABS = 12;
 
 // Generate unique tab ID
 export function generateTabId(): string {
