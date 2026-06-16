@@ -67,7 +67,14 @@ import { deriveSessionTitle } from '../shared/sessionTitle';
 import { workspacePathsEqual } from '../shared/workspacePath';
 import { normalizeReasoningEffort, isSdkEffortLevel } from '../shared/reasoningEffort';
 import { computeContextUsage } from '../shared/contextUsage';
-import { resolveContextOccupancyFromSdkBreakdown, resolveContextOccupancyTokens } from './utils/context-occupancy';
+import { canResumeAcrossProviderBoundary } from '../shared/providerHistory';
+import {
+  chooseBuiltinContextUsageModel,
+  inferContextWindowFromSdkModelTag,
+  resolveContextOccupancyFromSdkBreakdown,
+  resolveContextOccupancyTokens,
+  resolveContextWindowFromSdkBreakdown,
+} from './utils/context-occupancy';
 import type { SystemInitInfo } from '../shared/types/system';
 import type { SlashCommand as UiSlashCommand } from '../shared/slashCommands';
 import { saveSessionMetadata, updateSessionTitleFromMessage, saveSessionMessages, saveAttachment, updateSessionMetadata, getSessionMetadata, getSessionData } from './SessionStore';
@@ -1225,25 +1232,7 @@ export type ProviderEnv = {
   modelAliases?: ModelAliases;
 };
 let currentProviderEnv: ProviderEnv | undefined = undefined;
-
-function normalizeProviderBaseUrl(baseUrl?: string): string | undefined {
-  if (!baseUrl) return undefined;
-  try {
-    const url = new URL(baseUrl);
-    const pathname = url.pathname.replace(/\/+$/, '');
-    return `${url.origin}${pathname}`;
-  } catch {
-    return baseUrl.replace(/\/+$/, '');
-  }
-}
-
-function requiresSignedSessionHistory(providerEnv?: ProviderEnv): boolean {
-  if (!providerEnv) return true; // Anthropic subscription
-  const normalizedBaseUrl = normalizeProviderBaseUrl(providerEnv.baseUrl);
-  // Current behavior only covers official Anthropic providers. If future Claude suppliers
-  // enforce the same signed-history constraint, extend this predicate in one place.
-  return normalizedBaseUrl === 'https://api.anthropic.com';
-}
+let pendingProviderHistoryBoundaryReset = false;
 
 // OpenAI Bridge: sidecar port for loopback. Per-token bridge state lives
 // in `./openai-bridge/bridge-registry`; this module owns its session's
@@ -1943,9 +1932,10 @@ function resetTurnUsage(): void {
  * **后**的新（小）窗口——正是圆环该显示的值。#323 的 4.55M / 20.40M 灾难只来自盲目用
  * `currentTurnUsage.cacheReadTokens`（N 次工具调用求和），此源无该坑。
  *
- * 窗口：优先 `lookupModelContextLength`（与注入的 `CLAUDE_CODE_AUTO_COMPACT_WINDOW` 同源），
- * 缺省 SDK 200K。**不**用 SDK `ModelUsage.contextWindow`（对 bridge 的第三方 builtin 模型只回
- * 200K 默认，与 auto-compact 实际窗口失配）。
+ * 窗口：优先 `lookupModelContextLength`（与注入的 `CLAUDE_CODE_AUTO_COMPACT_WINDOW` 同源）。
+ * registry 无法识别版本化 / 用户手填 `[1m]` 模型时，才回落 SDK 控制面的 maxTokens 或 `[1m]`
+ * 标签语义；缺省 SDK 200K。**不**用 `ModelUsage.contextWindow` 覆盖 registry 命中的模型
+ * （对 bridge 的第三方 builtin 模型只回 200K 默认，与 auto-compact 实际窗口失配）。
  */
 async function broadcastBuiltinContextUsage(): Promise<void> {
   // **同步捕获** turn-末 state，再进入可能 await 的回落分支。`broadcastBuiltinContextUsage()`
@@ -1953,9 +1943,15 @@ async function broadcastBuiltinContextUsage(): Promise<void> {
   // `resetTurnUsage()` 可能把 `currentTurnUsage.model`/`sessionId` 改掉，给本轮的 broadcast/
   // 持久化盖错头。`latestMainAssistantUsage` 在函数入口同步读，已经天然是快照。
   const occupiedFromPerCall = resolveContextOccupancyTokens(latestMainAssistantUsage);
-  const snapshotModel = currentTurnUsage.model;
+  const snapshotModel = chooseBuiltinContextUsageModel({
+    sdkResultModel: currentTurnUsage.model,
+    configuredModel: currentModel,
+    lookupWindow: lookupModelContextLength,
+  });
   const snapshotSessionId = sessionId;
   const snapshotQuerySession = querySession;
+  const registryWindow = lookupModelContextLength(snapshotModel);
+  let runtimeWindow: number | null = registryWindow ? null : inferContextWindowFromSdkModelTag(snapshotModel);
 
   let occupied = occupiedFromPerCall;
 
@@ -1968,6 +1964,9 @@ async function broadcastBuiltinContextUsage(): Promise<void> {
     try {
       const ctx = await snapshotQuerySession.getContextUsage();
       occupied = resolveContextOccupancyFromSdkBreakdown(ctx);
+      if (!registryWindow) {
+        runtimeWindow = resolveContextWindowFromSdkBreakdown(ctx) ?? runtimeWindow;
+      }
     } catch (err) {
       console.debug('[agent] getContextUsage fallback failed (will skip context-usage broadcast):', err);
     }
@@ -1977,7 +1976,7 @@ async function broadcastBuiltinContextUsage(): Promise<void> {
 
   const usage = computeContextUsage({
     occupiedTokens: occupied,
-    runtimeWindow: null,
+    runtimeWindow,
     source: 'builtin',
     model: snapshotModel,
     lookupWindow: lookupModelContextLength,
@@ -2862,6 +2861,25 @@ export function getSessionProviderEnv(): ProviderEnv | undefined {
   return currentProviderEnv;
 }
 
+function resetForProviderHistoryBoundary(): void {
+  const previousSessionId = sessionId;
+  pendingProviderHistoryBoundaryReset = false;
+  sessionRegistered = false;
+  sessionId = randomUUID();
+  hasInitialPrompt = false;
+  messages.length = 0;
+  lastPersistedIndex = 0;
+  persistedSessionMessageCache.length = 0;
+  persistChainBySession.delete(previousSessionId);
+  currentSessionUuids.clear();
+  liveSessionUuids.clear();
+  messageSequence = 0;
+  pendingResumeSessionAt = undefined;
+  pendingReloadAnchor = undefined;
+  systemInitInfo = null;
+  sdkControlReady = false;
+}
+
 /** Set provider env (called by Rust IM router via /api/provider/set on sidecar creation or config hot-reload).
  *
  * Provider env is baked into SDK subprocess environment variables at spawn time
@@ -2897,17 +2915,21 @@ export function setSessionProviderEnv(providerEnv: ProviderEnv | undefined): voi
     return;
   }
 
-  // Resume safety: entering a provider that validates signed session history requires a fresh
-  // session when the previous provider did not. Anthropic validates thinking block signatures
-  // that third-party providers don't, so resuming with third-party messages causes errors.
+  // Resume safety: SDK transcripts are only safe to resume inside one provider history family.
+  // Third-party providers can differ in replay/tool/thinking compatibility even when both expose
+  // an Anthropic-compatible surface; provider verification only proves a fresh minimal turn.
   // Must check BEFORE updating currentProviderEnv.
-  // Note: Desktop Chat also shows a ConfirmDialog for this case (see Chat.tsx), but this
+  // Note: Desktop Chat also shows a ConfirmDialog for non-empty provider switches, but this
   // backend guard is defense-in-depth for non-frontend callers (IM Bot, Cron, Agent Channel).
-  const currentRequiresSignedHistory = requiresSignedSessionHistory(currentProviderEnv);
-  const nextRequiresSignedHistory = requiresSignedSessionHistory(providerEnv);
-  if (!currentRequiresSignedHistory && nextRequiresSignedHistory) {
-    sessionRegistered = false;
-    console.log('[agent] provider switch: third-party → Anthropic — will create fresh session (signature incompatible)');
+  const crossesProviderHistoryBoundary = !canResumeAcrossProviderBoundary(currentProviderEnv, providerEnv);
+  if (crossesProviderHistoryBoundary) {
+    if (isProcessing && !isPreWarming) {
+      pendingProviderHistoryBoundaryReset = true;
+      console.log('[agent] provider switch crosses history boundary during active turn — fresh SDK session will be created after restart');
+    } else {
+      resetForProviderHistoryBoundary();
+      console.log('[agent] provider switch crosses history boundary — created fresh SDK session id');
+    }
   }
 
   currentProviderEnv = providerEnv;
@@ -7656,37 +7678,18 @@ export async function enqueueUserMessage(
   // SKIP for queued messages: provider/model changes during streaming would cause a session
   // restart that wipes the queue and races with the active stream. Queued messages inherit
   // the current session's provider/model configuration.
-  const switchingToSubscription = !isSessionBusy && providerEnv === 'subscription' && currentProviderEnv;
-  const baseUrlChanged = switchingToSubscription ||
-    (!isSessionBusy && effectiveProviderEnv && effectiveProviderEnv.baseUrl !== currentProviderEnv?.baseUrl);
-  const providerChanged = baseUrlChanged || (!isSessionBusy && effectiveProviderEnv && (
-    effectiveProviderEnv.apiKey !== currentProviderEnv?.apiKey
-  ));
+  const providerChanged = !isSessionBusy && (
+    providerEnv === 'subscription'
+      ? currentProviderEnv !== undefined
+      : providerEnv !== undefined && !providerEnvEqual(currentProviderEnv, effectiveProviderEnv)
+  );
+  const crossesProviderHistoryBoundary = providerChanged
+    && !canResumeAcrossProviderBoundary(currentProviderEnv, effectiveProviderEnv);
 
   if (providerChanged && querySession) {
     const fromLabel = currentProviderEnv?.baseUrl ?? 'anthropic';
     const toLabel = effectiveProviderEnv?.baseUrl ?? 'anthropic';
     if (isDebugMode) console.log(`[agent] provider changed from ${fromLabel} to ${toLabel}, restarting session`);
-
-    // Resume logic: entering a provider that validates signed session history from one that
-    // doesn't requires a fresh session. All other transitions can safely resume.
-    // Note: Desktop Chat also shows a ConfirmDialog for this case (see Chat.tsx), but this
-    // backend guard is defense-in-depth for non-frontend callers (IM Bot, Cron, Agent Channel).
-    const currentRequiresSignedHistory = requiresSignedSessionHistory(currentProviderEnv);
-    const nextRequiresSignedHistory = requiresSignedSessionHistory(effectiveProviderEnv);
-    if (!currentRequiresSignedHistory && nextRequiresSignedHistory) {
-      sessionRegistered = false;
-      sessionId = randomUUID();
-      hasInitialPrompt = false;
-      messages.length = 0;
-      // Pattern 3 §3.2.4 — fresh session means existing on-disk JSONL is
-      // unrelated to this in-memory state; reset the cursor.
-      lastPersistedIndex = 0;
-      persistedSessionMessageCache.length = 0;
-      systemInitInfo = null;
-      sdkControlReady = false;
-      console.log('[agent] Fresh session: third-party → Anthropic (signature incompatible)');
-    }
 
     // Update provider env BEFORE terminating so the new session picks it up
     currentProviderEnv = effectiveProviderEnv; // undefined for subscription, object for API
@@ -7722,7 +7725,20 @@ export async function enqueueUserMessage(
     toolResultIndexToId.clear();
     imTextBlockIndices.clear();
 
+    if (crossesProviderHistoryBoundary) {
+      resetForProviderHistoryBoundary();
+      console.log('[agent] Fresh session: provider history boundary changed');
+    }
+
     if (isDebugMode) console.log(`[agent] session terminated for provider switch`);
+  } else if (providerChanged) {
+    if (crossesProviderHistoryBoundary) {
+      resetForProviderHistoryBoundary();
+      console.log('[agent] Fresh session: provider history boundary changed');
+    }
+    currentProviderEnv = effectiveProviderEnv;
+    ensureActiveSessionBridgeRegistered();
+    if (isDebugMode) console.log(`[agent] provider env changed without active query: baseUrl=${effectiveProviderEnv?.baseUrl ?? 'anthropic'}`);
   } else if (effectiveProviderEnv) {
     // Provider not changed (or first message with API provider), just update tracking
     currentProviderEnv = effectiveProviderEnv;
@@ -9145,6 +9161,10 @@ async function startStreamingSession(preWarm = false): Promise<void> {
   }
 
   isPreWarming = preWarm;
+  if (pendingProviderHistoryBoundaryReset) {
+    console.log('[agent] applying deferred provider history boundary reset before SDK start');
+    resetForProviderHistoryBoundary();
+  }
   // Sync enabled user-level skills as symlinks into project's .claude/skills/
   // Must happen before buildClaudeSessionEnv() so SDK sees them via settingSources: ['project']
   const adminConfigForSession = loadAdminConfig();

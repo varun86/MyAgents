@@ -48,7 +48,7 @@ import type { CronSettingsResult, CronInitialConfig } from '@/components/cron/Cr
 import { isTauriEnvironment } from '@/utils/browserMock';
 import { isDebugMode } from '@/utils/debug';
 import { isImSource, getChannelTypeLabel } from '@/utils/taskCenterUtils';
-import { type PermissionMode, type McpServerDefinition, getEffectiveModelAliases } from '@/config/types';
+import { type PermissionMode, type McpServerDefinition, type Provider, getEffectiveModelAliases } from '@/config/types';
 import { syncMcpServerNames } from '@/components/tools/toolBadgeConfig';
 import {
   getAllMcpServers,
@@ -61,6 +61,7 @@ import { BROWSER_BLANK_URL } from '@/components/browserConstants';
 import { CUSTOM_EVENTS, isPendingSessionId } from '../../shared/constants';
 import { workspacePathsEqual } from '../../shared/workspacePath';
 import { reasoningEffortChoices } from '../../shared/reasoningEffort';
+import { canResumeAcrossProviderBoundary, type ProviderHistoryEnv } from '../../shared/providerHistory';
 import type { CapabilityInitialSelect } from '../../shared/skillsTypes';
 import { CC_MODELS, CC_PERMISSION_MODES, CODEX_PERMISSION_MODES, GEMINI_PERMISSION_MODES, getDefaultRuntimePermissionMode, getRuntimePermissionModes, buildRuntimeChangePatch } from '../../shared/types/runtime';
 import type { RuntimeType, RuntimeDetections, RuntimeConfig } from '../../shared/types/runtime';
@@ -105,14 +106,13 @@ function getRuntimeDisplayLabel(runtime: RuntimeType | undefined): string {
       return 'MyAgents';
   }
 }
-const SIGNED_HISTORY_PROVIDER_IDS = new Set(['anthropic-sub', 'anthropic-api']);
 
-function requiresSignedSessionHistory(providerId?: string): boolean {
-  if (!providerId) return false;
-  // Current behavior only covers the official Anthropic providers.
-  // If other suppliers add Claude models with the same session-signature constraint,
-  // extend this predicate instead of rewriting Chat switch logic.
-  return SIGNED_HISTORY_PROVIDER_IDS.has(providerId);
+function toProviderHistoryEnv(provider: Pick<Provider, 'type' | 'config' | 'apiProtocol'> | undefined): ProviderHistoryEnv | undefined {
+  if (!provider || provider.type === 'subscription') return undefined;
+  return {
+    baseUrl: provider.config.baseUrl,
+    apiProtocol: provider.apiProtocol,
+  };
 }
 
 /** Imperative handle exposed by SessionTitleEditor — lets the SessionMenuButton's
@@ -2516,14 +2516,14 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
 
     const newProvider = providers.find(p => p.id === providerId);
     const model = targetModel ?? newProvider?.primaryModel;
+    const canResumeProviderHistory = canResumeAcrossProviderBoundary(
+      toProviderHistoryEnv(currentProvider),
+      toProviderHistoryEnv(newProvider),
+    );
 
-    // Claude session signatures only matter when entering the official Anthropic providers.
-    // Protocol alone is not enough: many third-party providers expose Anthropic-compatible APIs,
-    // and switching between "Anthropic protocol" / "OpenAI-compatible" third-party providers
-    // should not force a new session.
-    const currentRequiresSignedHistory = requiresSignedSessionHistory(selectedProviderId);
-    const newRequiresSignedHistory = requiresSignedSessionHistory(providerId);
-    if (!currentRequiresSignedHistory && newRequiresSignedHistory && messagesRef.current.length > 0) {
+    // Existing SDK transcripts only need a new tab when crossing provider-history
+    // families. Anthropic subscription/API key can still switch in place.
+    if (!canResumeProviderHistory && messagesRef.current.length > 0) {
       setPendingProviderSwitch({ providerId, model });
       return;  // Don't update state — dialog will handle it
     }
@@ -2544,7 +2544,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     // the user's latest preference (PRD v0.1.69 §4.3 rule 2 dual-write).
     void persistTabConfigChange({ providerId, model: model ?? null });
   // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed deps; messagesRef avoids dep on messages array
-  }, [selectedProviderId, providers, currentProvider?.id, persistTabConfigChange]);
+  }, [selectedProviderId, providers, currentProvider?.id, currentProvider?.type, currentProvider?.config.baseUrl, currentProvider?.apiProtocol, persistTabConfigChange]);
 
   // Handle model change with analytics tracking.
   // Dual-write per PRD v0.1.69 §4.3 rule 2 "写 Session + 向上写 Agent": owned sessions
@@ -2848,9 +2848,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
 
   const handleOpenAgentSettings = useCallback(() => setShowWorkspaceConfig(true), []);
 
-  // Cross-protocol provider switch: third-party (OpenAI bridge) → Anthropic native.
-  // Anthropic validates thinking block signatures that third-party providers don't,
-  // so we can't resume — show confirm dialog, then open new Tab. See: #68
+  // Provider switch on non-empty builtin history: keep the current tab unchanged,
+  // save the new provider as workspace default, and open a fresh session in a new tab.
   const [pendingProviderSwitch, setPendingProviderSwitch] = useState<{
     providerId: string;
     model?: string;
@@ -2921,8 +2920,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     onForkSession(session.id, agentDir, `${runtimeLabel} Session`);
   }, [pendingRuntimeChange, currentAgent, onForkSession, agentDir]);
 
-  // Cross-protocol provider switch confirm: save new provider to project, create new session in new tab.
-  // Current tab stays unchanged (preserving the third-party session). See: #68
+  // Provider switch confirm: save new provider to project, create new session in new tab.
+  // Current tab stays unchanged with its original provider-bound SDK transcript.
   const confirmProviderSwitch = useCallback(async () => {
     const pending = pendingProviderSwitch;
     setPendingProviderSwitch(null);
@@ -4382,11 +4381,11 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
         );
       })()}
 
-      {/* Cross-Protocol Provider Switch Confirm Dialog (#68) */}
+      {/* Provider Switch Confirm Dialog */}
       {pendingProviderSwitch && (
         <ConfirmDialog
-          title="切换到 Claude 模型"
-          message="Claude 模型会验证会话历史中的签名信息，无法继续使用其他供应商的会话记录。将为你新开一个会话。"
+          title="切换 Provider"
+          message="当前会话的历史记录绑定在原 Provider 下。切换后将保留当前会话，并在新 Tab 打开一个使用新 Provider 的会话。"
           confirmText="创建新会话"
           cancelText="取消"
           onConfirm={confirmProviderSwitch}

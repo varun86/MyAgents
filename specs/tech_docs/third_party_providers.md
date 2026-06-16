@@ -171,29 +171,31 @@ if (providerChanged && querySession) {
 
 ---
 
-## ⚠️ 关键陷阱：Thinking Block 签名与 Resume
+## ⚠️ 关键陷阱：Provider 历史边界与 Resume
 
 ### 问题
 
-Anthropic 官方 API 会在 thinking block 中嵌入签名，resume session 时校验签名。第三方供应商（DeepSeek、GLM 等）不校验签名。
+Anthropic 官方 API 会在 thinking block 中嵌入签名，resume session 时校验签名。第三方供应商（DeepSeek、GLM 等）即使暴露 Anthropic-compatible API，也只证明 fresh turn 可用，不证明能 replay 另一个供应商生成的完整 SDK transcript。
 
 从第三方供应商切换到 Anthropic 官方后 resume session 会报错：`Invalid signature in thinking block`
+从三方 A 切换到三方 B 后 resume 也可能在 SDK/native 侧提前崩溃或被上游拒绝，典型表现是子进程在 `system_init` 前退出且只给 generic `Unexpected`。
 
 ### Resume 规则
 
 | From | To | Resume | 原因 |
 |------|-----|--------|------|
-| 三方（有 baseUrl） | Anthropic 官方（无 baseUrl） | ❌ 新 session | 签名不兼容 |
-| Anthropic 官方 | 三方 | ✅ resume | 三方不校验签名 |
-| 三方 A | 三方 B | ✅ resume | 三方不校验签名 |
+| 三方（有 baseUrl） | Anthropic 官方（无 baseUrl） | ❌ 新 session | 签名 / transcript replay 边界不同 |
+| Anthropic 官方 | 三方 | ❌ 新 session | provider 历史边界不同 |
+| 三方 A | 三方 B | ❌ 新 session | 三方兼容层只保证 fresh turn，不保证跨供应商 transcript replay |
 | Anthropic 订阅 | Anthropic API Key | ✅ resume | 签名兼容 |
 
 ### 区分标准
 
 ```typescript
-// 有 baseUrl = 第三方兼容供应商
-// 无 baseUrl = Anthropic 官方（订阅或 API Key 模式）
-const isThirdParty = !!providerEnv?.baseUrl;
+// Provider history identity:
+// - no baseUrl, or https://api.anthropic.com = Anthropic family
+// - otherwise protocol + normalized baseUrl = one third-party family
+// Only identical identities may resume the SDK transcript.
 ```
 
 ---
@@ -322,4 +324,3 @@ function checkDecorativeToolText(text: string): { filtered: boolean; reason?: st
 ### modelAliases 默认值
 
 自定义供应商如果没有主动设置 modelAliases，`getEffectiveModelAliases()` 和 `resolveProviderEnv()` 会用 `primaryModel` 或第一个可用模型作为 sonnet/opus/haiku 的 fallback，防止子 Agent 发送 raw `claude-*` 到三方 API。
-
