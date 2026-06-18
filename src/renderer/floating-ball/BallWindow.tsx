@@ -278,11 +278,10 @@ export default function BallWindow() {
     }, [handleMouseEnter, handleMouseLeave]);
 
     // ── click → summon ──
-    // 性能关键（用户反馈"点击卡卡的"）：窗口显示**不等** capture——AX 读选区
-    // 可达 100-300ms，串行会把 pin 的视觉反馈压在后面。并行是安全的：
-    // nonactivating panel 永不改变 frontmost app，capture 读的始终是用户
-    // 的 app（探针按 frontmost 定位，与我们窗口的 key 状态无关）。D3 红线
-    // 不变：capture 仍只在显式点击时发起，hover 永不碰。
+    // Pin activates MyAgents on macOS so IME/text services bind to the
+    // companion WebView. That means context capture must finish first: once
+    // activation happens, frontmost-window and selection probes would target us
+    // instead of the user's app. D3 red line stays intact: hover never captures.
     const summon = useCallback(async () => {
         if (companionModeRef.current === 'pin') {
             // Toggle: ball click while pinned closes the companion.
@@ -295,25 +294,25 @@ export default function BallWindow() {
             return;
         }
         pulseSummon();
-        const contextPromise = invoke<FbCtx>('cmd_fb_capture_context').catch((err) => {
+        let ctx: FbCtx | null = null;
+        try {
+            ctx = await invoke<FbCtx>('cmd_fb_capture_context');
+        } catch (err) {
             console.warn('[fb-ball] capture_context failed:', err);
-            return null;
-        });
-        // 1) 立即出窗 + 进入 pin（伴侣窗瞬时聚焦输入框）。只有 native
-        // 接受 show 后才发 React 事件；禁用后的 stale click 不能留下逻辑 pin。
+        }
+        // Reserve the companion's pin path before native show can focus it
+        // while it still thinks it is in peek mode.
+        relayToCompanion('fb:summon-pending', {});
+        // 只有 native 接受 show 后才发 React 事件；禁用后的 stale click
+        // 不能留下逻辑 pin。
         try {
             await invoke('cmd_fb_show_companion', { mode: 'pin' });
         } catch (err) {
-            void contextPromise;
+            relayToCompanion('fb:summon-cancel', {});
             console.error('[fb-ball] show pin failed:', err);
             return;
         }
-        relayToCompanion('fb:summon', {});
-        // 2) context 并行抓，到了再补进去（引用条/标题行晚到一拍，可接受）
-        const ctx = await contextPromise;
-        if (ctx) {
-            relayToCompanion('fb:summon-ctx', { ctx });
-        }
+        relayToCompanion('fb:summon', { ctx });
     }, [pulseSummon, relayToCompanion]);
 
     // ── drag / snap ──

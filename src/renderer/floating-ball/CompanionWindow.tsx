@@ -272,6 +272,8 @@ export default function CompanionWindow() {
     const mouseInsideRef = useRef(false);
     const visibilityGenerationRef = useRef(0);
     const pinRequestSeqRef = useRef(0);
+    const pinInFlightRef = useRef(false);
+    const ballSummonPendingRef = useRef(false);
     const inputFocusConvergence = useMemo(
         () => createFocusConvergence({
             getTarget: () => inputRef.current,
@@ -334,6 +336,10 @@ export default function CompanionWindow() {
     const applyMode = useCallback(
         (next: FbMode) => {
             if (next === 'hidden') visibilityGenerationRef.current += 1;
+            if (next === 'hidden') {
+                pinInFlightRef.current = false;
+                ballSummonPendingRef.current = false;
+            }
             if (next !== 'pin') inputFocusConvergence.cancel();
             setMode(next);
             modeRef.current = next;
@@ -417,28 +423,37 @@ export default function CompanionWindow() {
 
     const summonPinned = useCallback(
         async (ctx: FbCtx | null | undefined) => {
+            const hadPendingReservation = ballSummonPendingRef.current;
+            if (pinInFlightRef.current && !hadPendingReservation) return;
+            pinInFlightRef.current = true;
+            ballSummonPendingRef.current = false;
             stickToBottomRef.current = true; // 显式唤起 = 看最新
             const pinToken = beginPinRequest();
             try {
-                // BallWindow may already have requested native show; companion owns
-                // the final key-window/focus ordering and fails closed on disable.
-                await invoke('cmd_fb_pin_companion');
-            } catch (err) {
-                applyMode('hidden');
-                void invoke('cmd_fb_hide_companion');
-                console.error('[fb] pin for summon failed:', err);
-                return;
+                try {
+                    // BallWindow may already have requested native show; companion owns
+                    // the final key-window/focus ordering and fails closed on disable.
+                    await invoke('cmd_fb_pin_companion');
+                } catch (err) {
+                    applyMode('hidden');
+                    void invoke('cmd_fb_hide_companion');
+                    console.error('[fb] pin for summon failed:', err);
+                    return;
+                }
+                if (!isCurrentPinRequest(pinToken)) {
+                    discardStalePinRequest(pinToken);
+                    return;
+                }
+                applyMode('pin');
+                await applySummonCtx(ctx);
+                track('floating_ball_summon', { kind: 'pin' });
+                focusInputWhenPinned();
+                // 唤起时机做按天轮换评估（boot-only 检查跨午夜长跑会失效）。
+                void rotateIfStale();
+            } finally {
+                pinInFlightRef.current = false;
+                ballSummonPendingRef.current = false;
             }
-            if (!isCurrentPinRequest(pinToken)) {
-                discardStalePinRequest(pinToken);
-                return;
-            }
-            applyMode('pin');
-            await applySummonCtx(ctx);
-            track('floating_ball_summon', { kind: 'pin' });
-            focusInputWhenPinned();
-            // 唤起时机做按天轮换评估（boot-only 检查跨午夜长跑会失效）。
-            void rotateIfStale();
         },
         [applyMode, applySummonCtx, beginPinRequest, discardStalePinRequest, focusInputWhenPinned, isCurrentPinRequest, rotateIfStale],
     );
@@ -455,12 +470,31 @@ export default function CompanionWindow() {
             ac.signal,
         );
         void listenWithCleanup('fb:ball-leave', () => scheduleHideIfPeek(), ac.signal);
-        // summon 拆两段（性能：窗口显示不等 AX capture）：fb:summon = 快相位
-        // （立即 pin + 聚焦），fb:summon-ctx = 处境到位后补引用条/标题行。
+        // BallWindow captures context before native pin activation, reserves
+        // this pin path before native show can focus a peek window, then sends
+        // the context with the summon event. Keep the late context event as a
+        // tolerant compatibility path for already-queued events from older
+        // windows.
         void listenWithCleanup(
-            'fb:summon',
+            'fb:summon-pending',
             () => {
-                void summonPinned(null);
+                ballSummonPendingRef.current = true;
+                pinInFlightRef.current = true;
+            },
+            ac.signal,
+        );
+        void listenWithCleanup(
+            'fb:summon-cancel',
+            () => {
+                ballSummonPendingRef.current = false;
+                pinInFlightRef.current = false;
+            },
+            ac.signal,
+        );
+        void listenWithCleanup<{ ctx?: FbCtx | null }>(
+            'fb:summon',
+            (e) => {
+                void summonPinned(e.payload?.ctx ?? null);
             },
             ac.signal,
         );
@@ -526,35 +560,45 @@ export default function CompanionWindow() {
     const promoteToPin = useCallback(
         async (kind: 'click' | 'wheel') => {
             if (modeRef.current !== 'peek') return;
+            if (pinInFlightRef.current) return;
+            pinInFlightRef.current = true;
             const pinToken = beginPinRequest();
             try {
-                // 等 make_key_window 真正落地再聚焦：窗口还不是 key window 时
-                // focus() 不出光标——这就是"点了面板输入框却没光标"的根因。
-                await invoke('cmd_fb_pin_companion');
-            } catch (err) {
-                applyMode('hidden');
-                void invoke('cmd_fb_hide_companion');
-                console.error('[fb] pin failed:', err);
-                return;
-            }
-            if (!isCurrentPinRequest(pinToken)) {
-                discardStalePinRequest(pinToken);
-                return;
-            }
-            applyMode('pin');
-            track('floating_ball_summon', { kind: kind === 'click' ? 'pin' : 'wheel' });
-            focusInputWhenPinned();
-            void rotateIfStale();
-            if (kind === 'click') {
-                void applySummonCtx(null);
-                void (async () => {
+                let ctx: FbCtx | null = null;
+                if (kind === 'click') {
                     try {
-                        const ctx = await invoke<FbCtx>('cmd_fb_capture_context');
-                        await applySummonCtx(ctx);
+                        ctx = await invoke<FbCtx>('cmd_fb_capture_context');
                     } catch {
-                        // capture 失败不阻断 pin
+                        ctx = null;
                     }
-                })();
+                    if (!isCurrentPinRequest(pinToken)) {
+                        discardStalePinRequest(pinToken);
+                        return;
+                    }
+                }
+                try {
+                    // 等 make_key_window 真正落地再聚焦：窗口还不是 key window 时
+                    // focus() 不出光标——这就是"点了面板输入框却没光标"的根因。
+                    await invoke('cmd_fb_pin_companion');
+                } catch (err) {
+                    applyMode('hidden');
+                    void invoke('cmd_fb_hide_companion');
+                    console.error('[fb] pin failed:', err);
+                    return;
+                }
+                if (!isCurrentPinRequest(pinToken)) {
+                    discardStalePinRequest(pinToken);
+                    return;
+                }
+                applyMode('pin');
+                track('floating_ball_summon', { kind: kind === 'click' ? 'pin' : 'wheel' });
+                focusInputWhenPinned();
+                void rotateIfStale();
+                if (kind === 'click') {
+                    void applySummonCtx(ctx);
+                }
+            } finally {
+                pinInFlightRef.current = false;
             }
         },
         [applyMode, applySummonCtx, beginPinRequest, discardStalePinRequest, focusInputWhenPinned, isCurrentPinRequest, rotateIfStale],
@@ -945,13 +989,20 @@ export default function CompanionWindow() {
     const onExpand = useCallback(() => {
         if (!session.sessionId || !session.workspacePath) return;
         track('floating_ball_expand', {});
-        void invoke('cmd_fb_open_main_with_session', {
-            sessionId: session.sessionId,
-            workspacePath: session.workspacePath,
-            previewPath: null,
-            previewLine: null,
-        });
-        hideSelf();
+        void (async () => {
+            try {
+                await invoke('cmd_fb_open_main_with_session', {
+                    sessionId: session.sessionId,
+                    workspacePath: session.workspacePath,
+                    previewPath: null,
+                    previewLine: null,
+                });
+            } catch (err) {
+                console.error('[fb] open main with session failed:', err);
+            } finally {
+                hideSelf();
+            }
+        })();
     }, [session.sessionId, session.workspacePath, hideSelf]);
 
     const onOpenDesktopPetSettings = useCallback(() => {
@@ -964,13 +1015,20 @@ export default function CompanionWindow() {
     const onOpenMyAgentsPreview = useCallback((path: string, options?: { displayPath?: string; initialLineNumber?: number }) => {
         if (!session.sessionId || !session.workspacePath) return;
         track('floating_ball_expand', { kind: 'file_preview' });
-        void invoke('cmd_fb_open_main_with_session', {
-            sessionId: session.sessionId,
-            workspacePath: session.workspacePath,
-            previewPath: path,
-            previewLine: options?.initialLineNumber ?? null,
-        });
-        hideSelf();
+        void (async () => {
+            try {
+                await invoke('cmd_fb_open_main_with_session', {
+                    sessionId: session.sessionId,
+                    workspacePath: session.workspacePath,
+                    previewPath: path,
+                    previewLine: options?.initialLineNumber ?? null,
+                });
+            } catch (err) {
+                console.error('[fb] open main preview failed:', err);
+            } finally {
+                hideSelf();
+            }
+        })();
     }, [hideSelf, session.sessionId, session.workspacePath]);
 
     // ── AX 授权引导 ──
