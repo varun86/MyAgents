@@ -1100,6 +1100,7 @@ const toolResultIndexToId: Map<number, string> = new Map();
 // flag (Pattern B already removed those). Cross-event leakage is structurally
 // impossible — old events carry the old requestId, new subscribers filter.
 const pendingRequestIds: string[] = [];
+let currentTurnImTerminalEmitted = false;
 
 /** Emit a per-request IM event tagged with the queue head. No-op when the
  *  queue is empty (desktop / cron path, no IM trace). System-level events
@@ -1115,7 +1116,10 @@ function emitImEvent(type: ImEventType, data?: unknown): void {
  *  messageGenerator when yielding to SDK stdin. No-op for desktop / cron
  *  (no IM trace ID). */
 function pushPendingRequest(requestId: string | null | undefined): void {
-  if (requestId) pendingRequestIds.push(requestId);
+  if (requestId) {
+    currentTurnImTerminalEmitted = false;
+    pendingRequestIds.push(requestId);
+  }
 }
 
 /** Pop the queue head — called from handleMessageComplete / Stopped / Error
@@ -1133,11 +1137,32 @@ function removePendingRequest(requestId: string | null | undefined): boolean {
   return true;
 }
 
+function completeCurrentImRequest(data?: unknown): void {
+  emitImEvent('complete', data);
+  const completedReq = popPendingRequest();
+  if (completedReq) {
+    imRequestRegistry.setStatus(completedReq, 'completed');
+    imRequestRegistry.unregister(completedReq);
+    currentTurnImTerminalEmitted = true;
+  }
+}
+
+function failCurrentImRequest(data?: unknown): void {
+  emitImEvent('error', data);
+  const failedReq = popPendingRequest();
+  if (failedReq) {
+    imRequestRegistry.setStatus(failedReq, 'failed');
+    imRequestRegistry.unregister(failedReq);
+    currentTurnImTerminalEmitted = true;
+  }
+}
+
 /** Clear the entire queue — called from abortPersistentSession /
  *  clearMessageState (whole-session abort or reset). Returns drained ids. */
 function clearPendingRequests(): string[] {
   const drained = pendingRequestIds.slice();
   pendingRequestIds.length = 0;
+  currentTurnImTerminalEmitted = false;
   return drained;
 }
 // Group chat tool deny list (v0.1.28): set per IM message, cleared on next non-group request
@@ -1904,6 +1929,7 @@ function resetTurnUsage(): void {
   currentPlanFileMinMtimeMs = null;
   currentTurnToolCount = 0;
   currentTurnHasOutput = false;
+  currentTurnImTerminalEmitted = false;
   currentTurnHadAssistantMessageError = false;
   currentTurnLastAssistantMessageError = null;
   currentTurnAnalyticsSource = null;
@@ -5446,12 +5472,12 @@ function checkDecorativeToolText(text: string): { filtered: boolean; reason?: st
   return { filtered: false };
 }
 
-function appendTextChunk(chunk: string): void {
+function appendTextChunk(chunk: string): boolean {
   // Filter out decorative text from third-party APIs (e.g., 智谱 GLM-4.7)
   const decorativeCheck = checkDecorativeToolText(chunk);
   if (decorativeCheck.filtered) {
     console.log(`[agent] Filtered decorative text (${decorativeCheck.reason}), length=${chunk.length}`);
-    return;
+    return false;
   }
 
   // PRD 0.2.18 Session Inbox — accumulate text for reply pushback if this turn
@@ -5464,7 +5490,7 @@ function appendTextChunk(chunk: string): void {
   const message = ensureAssistantMessage();
   if (typeof message.content === 'string') {
     message.content += chunk;
-    return;
+    return true;
   }
   const contentArray = message.content;
   const lastBlock = contentArray[contentArray.length - 1];
@@ -5473,6 +5499,7 @@ function appendTextChunk(chunk: string): void {
   } else {
     contentArray.push({ type: 'text', text: chunk });
   }
+  return true;
 }
 
 function handleThinkingStart(index: number): void {
@@ -5845,13 +5872,13 @@ function handleMessageComplete(): void {
   // Cross-owner fix: scope by sessionId so we only clear OUR slot.
   clearAmbientLogContextField(sessionId, 'turnId');
   // Pattern B/C/G: turn complete → emit 'complete' for the head request, then
-  // pop it. Subsequent turns (mid-turn injected) advance to the next head.
-  emitImEvent('complete', '');
-  const completedReq = popPendingRequest();
-  if (completedReq) {
-    imRequestRegistry.setStatus(completedReq, 'completed');
-    imRequestRegistry.unregister(completedReq);
+  // pop it. Some result-handler fallback paths surface terminal text/error and
+  // finalize the same SDK boundary before reaching here; in that case do not
+  // advance the FIFO again and accidentally complete the next pending request.
+  if (!currentTurnImTerminalEmitted) {
+    completeCurrentImRequest('');
   }
+  currentTurnImTerminalEmitted = false;
   // PRD 0.2.14 — desktop turn ended; release mirror state so the next
   // (possibly IM-driven) turn doesn't accidentally mirror through here.
   clearMirrorState();
@@ -6075,13 +6102,13 @@ function handleMessageError(error: string, localizedError?: string): void {
   // Pattern 6: clear turnId on error too — turn is over either way.
   // Cross-owner fix: scope by sessionId so we only clear OUR slot.
   clearAmbientLogContextField(sessionId, 'turnId');
-  // Pattern B/C/G: error → emit 'error' for head + pop queue.
-  emitImEvent('error', localizedError ?? localizeImError(error));
-  const failedReq = popPendingRequest();
-  if (failedReq) {
-    imRequestRegistry.setStatus(failedReq, 'failed');
-    imRequestRegistry.unregister(failedReq);
+  // Pattern B/C/G: error → emit 'error' for head + pop queue. If the result
+  // handler already finalized this SDK boundary, don't advance to the next
+  // pending request here.
+  if (!currentTurnImTerminalEmitted) {
+    failCurrentImRequest(localizedError ?? localizeImError(error));
   }
+  currentTurnImTerminalEmitted = false;
   // PRD 0.2.14 — desktop turn errored out; release mirror state.
   clearMirrorState();
   if (messageQueue.length === 0 && pendingMidTurnQueue.length === 0 && inFlightToCliId === null) {
@@ -10807,14 +10834,15 @@ async function startStreamingSession(preWarm = false): Promise<void> {
                   emitBuiltinFirstDeltaTrace(streamEvent.delta.text);
                   // Handler first: appendTextChunk → ensureAssistantMessage() may flush
                   // pendingMidTurnQueue. Broadcast after so frontend splits before new content.
-                  appendTextChunk(streamEvent.delta.text);
-                  broadcast('chat:message-chunk', streamEvent.delta.text);
-                  currentTurnHasOutput = true;
-                  // IM stream: forward non-subagent text delta to event bus (Pattern B)
-                  emitImEvent('delta', streamEvent.delta.text);
-                  // PRD 0.2.14 — accumulate per-block text for desktop→IM mirror
-                  // (no-op when current turn isn't desktop-driven).
-                  maybeAccumulateMirrorChunk(streamEvent.index, streamEvent.delta.text);
+                  if (appendTextChunk(streamEvent.delta.text)) {
+                    broadcast('chat:message-chunk', streamEvent.delta.text);
+                    currentTurnHasOutput = true;
+                    // IM stream: forward non-subagent text delta to event bus (Pattern B)
+                    emitImEvent('delta', streamEvent.delta.text);
+                    // PRD 0.2.14 — accumulate per-block text for desktop→IM mirror
+                    // (no-op when current turn isn't desktop-driven).
+                    maybeAccumulateMirrorChunk(streamEvent.index, streamEvent.delta.text);
+                  }
                 } else {
                   console.log(`[agent] Filtered decorative text from stream (${decorativeCheck.reason})`);
                 }
@@ -11426,10 +11454,11 @@ async function startStreamingSession(preWarm = false): Promise<void> {
             console.log(`[agent] Non-streamed assistant text detected (${nonStreamedText.length} chars), broadcasting as message-chunk`);
             // Handler first: appendTextChunk → ensureAssistantMessage() may flush
             // pendingMidTurnQueue. Broadcast after so frontend splits before new content.
-            appendTextChunk(nonStreamedText);
-            broadcast('chat:message-chunk', nonStreamedText);
-            currentTurnHasOutput = true;
-            emitImEvent('delta', nonStreamedText);
+            if (appendTextChunk(nonStreamedText)) {
+              broadcast('chat:message-chunk', nonStreamedText);
+              currentTurnHasOutput = true;
+              emitImEvent('delta', nonStreamedText);
+            }
           }
         }
       } else if (sdkMessage.type === 'result') {
@@ -11512,13 +11541,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           if (pendingRequestIds.length > 0 && !isAbortResult) {
             const errorText = localizeImError(rawError);
             console.warn('[agent] SDK result is_error, forwarding to IM bus:', errorText);
-            emitImEvent('error', errorText);
-            // W2 fix: also unregister the registry entry that the legacy code skipped.
-            const failedReq = popPendingRequest();
-            if (failedReq) {
-              imRequestRegistry.setStatus(failedReq, 'failed');
-              imRequestRegistry.unregister(failedReq);
-            }
+            failCurrentImRequest(errorText);
           } else if (pendingRequestIds.length > 0 && isAbortResult) {
             // #307: an aborted IM turn must NOT push the internal diagnostic to the
             // IM peer as an error. handleMessageComplete() below runs for is_error
@@ -11597,30 +11620,35 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         // which the frontend renders as the normal inline "已停止" feedback (banner
         // suppressed by describeTerminalReason).
         if (noOutputResultText && !currentTurnHasOutput && !currentTurnToolCount && !isAbortResult) {
+          let shouldCompleteNoOutputImRequest = false;
           if (resultMessage.is_error) {
             console.warn('[agent] SDK error result with no streamed output, showing as agent-error:', resultErrorText);
             lastAgentError = resultErrorText;
             broadcast('chat:agent-error', { message: resultErrorText });
+            shouldCompleteNoOutputImRequest = true;
           } else if (resultText) {
             // Non-error result text that wasn't captured by streaming or assistant handler
             // (safety net — should rarely trigger after the assistant handler fix above)
             console.warn('[agent] SDK non-error result with no streamed output, showing as message:', resultText);
             emitBuiltinFirstDeltaTrace(resultText);
             // Handler first (same pattern as streamed text path)
-            appendTextChunk(resultText);
-            broadcast('chat:message-chunk', resultText);
-            currentTurnHasOutput = true;
+            if (appendTextChunk(resultText)) {
+              broadcast('chat:message-chunk', resultText);
+              currentTurnHasOutput = true;
+              shouldCompleteNoOutputImRequest = true;
+            }
           }
           // Forward to IM event bus (prevents "(No Response)" for SDK failures).
           // Pattern B+G: pop the head request — the upcoming handleMessageComplete
           // for this turn will find the head already cleared and skip duplicate
           // emission. Defensive against handleMessageComplete not running for
           // is_error / no-output results.
-          emitImEvent('complete', noOutputResultText);
-          const completedReq = popPendingRequest();
-          if (completedReq) {
-            imRequestRegistry.setStatus(completedReq, 'completed');
-            imRequestRegistry.unregister(completedReq);
+          // Non-error terminal text only completes IM early if it was actually
+          // appended to the transcript. Decorative provider wrappers can be
+          // rejected by appendTextChunk(); those must fall through to the empty
+          // result error path rather than reporting a hidden string as success.
+          if (shouldCompleteNoOutputImRequest && !currentTurnImTerminalEmitted) {
+            completeCurrentImRequest(noOutputResultText);
           }
         }
 
