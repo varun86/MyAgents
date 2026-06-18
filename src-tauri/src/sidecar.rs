@@ -755,6 +755,28 @@ fn decide_runtime_drift_result(
     }
 }
 
+fn owner_prefers_live_agent_runtime(owner: &SidecarOwner) -> bool {
+    matches!(
+        owner,
+        SidecarOwner::Agent(key) if key.starts_with("agent:") || key.starts_with("im:")
+    )
+}
+
+fn resolve_runtime_for_owner(
+    runtime_override: Option<String>,
+    owner: &SidecarOwner,
+    session_runtime: Option<String>,
+    agent_runtime: Option<String>,
+) -> Option<String> {
+    runtime_override.or_else(|| {
+        if owner_prefers_live_agent_runtime(owner) {
+            agent_runtime
+        } else {
+            session_runtime.or(agent_runtime)
+        }
+    })
+}
+
 #[cfg(test)]
 mod lifecycle_contract_tests {
     use super::*;
@@ -798,6 +820,72 @@ mod lifecycle_contract_tests {
         assert_eq!(
             decide_runtime_drift_result(None, "builtin", &owners),
             RuntimeDriftResult::NoDrift
+        );
+    }
+
+    #[test]
+    fn desktop_style_owner_prefers_builtin_session_metadata_over_agent_runtime() {
+        assert_eq!(
+            resolve_runtime_for_owner(
+                None,
+                &SidecarOwner::Tab("tab-a".to_string()),
+                Some("builtin".to_string()),
+                Some("codex".to_string()),
+            ),
+            Some("builtin".to_string())
+        );
+    }
+
+    #[test]
+    fn agent_owner_ignores_session_runtime_and_follows_agent_runtime() {
+        assert_eq!(
+            resolve_runtime_for_owner(
+                None,
+                &SidecarOwner::Agent("agent:a:openclaw:feishu:private:user".to_string()),
+                Some("builtin".to_string()),
+                Some("codex".to_string()),
+            ),
+            Some("codex".to_string())
+        );
+    }
+
+    #[test]
+    fn maintenance_agent_owner_prefers_session_metadata_over_agent_runtime() {
+        assert_eq!(
+            resolve_runtime_for_owner(
+                None,
+                &SidecarOwner::Agent("memory_update:a:s1".to_string()),
+                Some("builtin".to_string()),
+                Some("codex".to_string()),
+            ),
+            Some("builtin".to_string())
+        );
+    }
+
+    #[test]
+    fn session_runtime_identity_parser_preserves_builtin_metadata() {
+        let content = serde_json::json!([
+            { "id": "missing-runtime" },
+            { "id": "builtin-runtime", "runtime": "builtin" },
+            { "id": "codex-runtime", "runtime": "codex" }
+        ])
+        .to_string();
+
+        assert_eq!(
+            resolve_session_runtime_identity_from_json("missing-runtime", &content),
+            Some("builtin".to_string())
+        );
+        assert_eq!(
+            resolve_session_runtime_identity_from_json("builtin-runtime", &content),
+            Some("builtin".to_string())
+        );
+        assert_eq!(
+            resolve_session_runtime_identity_from_json("codex-runtime", &content),
+            Some("codex".to_string())
+        );
+        assert_eq!(
+            resolve_session_runtime_identity_from_json("unknown", &content),
+            None
         );
     }
 
@@ -4080,7 +4168,7 @@ fn create_new_session_sidecar<R: Runtime>(
     //     switch runtimes mid-stream just because the user tweaked the agent's
     //     default in Settings. This is the v0.1.62 session-stability guarantee.
     //
-    //   Agent (IM / agent-channel):
+    //   Live Agent peer owners (IM / agent-channel session keys):
     //     runtime_override → agent config (NO session fallback)
     //
     //     The IM peer session map is keyed on (agent, channel, user), so the
@@ -4089,24 +4177,33 @@ fn create_new_session_sidecar<R: Runtime>(
     //     Settings, they expect the next IM message to use the new runtime
     //     regardless of which session_id the peer map happens to point at.
     //
-    //     Critically, we must NOT fall back to session metadata for the Agent
-    //     branch: `resolve_agent_runtime_from_config` returns None when the
-    //     agent is builtin, and falling through to session_runtime would then
+    //     Critically, we must NOT fall back to session metadata for live IM
+    //     peer owners: `resolve_agent_runtime_from_config` returns None when
+    //     the agent is builtin, and falling through to session_runtime would
     //     silently re-resurrect a previously-used external runtime (e.g.
     //     gemini→builtin switch), defeating the whole point of the IM drift
     //     semantics. A None result here means "spawn as builtin (no env var)"
     //     which is exactly correct — the user explicitly asked for builtin.
-    let resolved_runtime = runtime_override
-        .map(|runtime| runtime.to_string())
-        .or_else(|| {
-            if matches!(owner, SidecarOwner::Agent(_)) {
-                resolve_agent_runtime_from_config(workspace_path)
-            } else {
-                resolve_session_runtime(session_id)
-                    .or_else(|| resolve_agent_runtime_from_config(workspace_path))
-            }
-        });
-    if let Some(runtime) = &resolved_runtime {
+    //
+    //   Maintenance Agent owners (for example memory_update:{agent}:{session})
+    //     target a concrete historical session_id, not an opaque peer binding,
+    //     so they follow the desktop-style session metadata rule.
+    let session_runtime = if owner_prefers_live_agent_runtime(&owner) {
+        None
+    } else {
+        resolve_session_runtime_identity(session_id)
+    };
+    let agent_runtime = resolve_agent_runtime_from_config(workspace_path);
+    let resolved_runtime = resolve_runtime_for_owner(
+        runtime_override.map(str::to_string),
+        &owner,
+        session_runtime,
+        agent_runtime,
+    );
+    let runtime_for_env = resolved_runtime
+        .as_deref()
+        .filter(|runtime| *runtime != "builtin");
+    if let Some(runtime) = runtime_for_env {
         cmd.env("MYAGENTS_RUNTIME", runtime);
     }
     let runtime_for_trace = normalize_runtime_name(resolved_runtime.as_deref()).to_string();
@@ -4228,7 +4325,7 @@ fn create_new_session_sidecar<R: Runtime>(
         state: SidecarState::Starting,
         owners,
         created_at: std::time::Instant::now(),
-        runtime: resolved_runtime.clone(),
+        runtime: runtime_for_env.map(str::to_string),
     };
 
     manager_guard.insert_sidecar(session_id, sidecar);
@@ -5720,41 +5817,37 @@ fn resolve_agent_runtime_from_config(workspace_path: &std::path::Path) -> Option
 }
 
 /// Look up the `runtime` field from session metadata in ~/.myagents/sessions.json.
-/// Returns None for "builtin" or if the session is not found.
+/// Returns Some("builtin") for builtin/missing-runtime sessions that are found,
+/// and None only when no authoritative session metadata is available.
 ///
 /// This is the authoritative source for EXISTING sessions — the session's own metadata
 /// records which runtime created it, regardless of the current agent config.
-/// Agent config (resolve_agent_runtime_from_config) decides the default for NEW sessions;
-/// session metadata is stable once created.
-fn resolve_session_runtime(session_id: &str) -> Option<String> {
-    // Gate: multi-agent runtime feature must be enabled
-    let config_path = dirs::home_dir()?.join(".myagents").join("config.json");
-    let config_content = std::fs::read_to_string(&config_path).ok()?;
-    let cfg: serde_json::Value = serde_json::from_str(strip_bom(&config_content)).ok()?;
-    if !cfg
-        .get("multiAgentRuntime")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
-    {
-        return None;
-    }
-
+/// Agent config (resolve_agent_runtime_from_config) decides the default for NEW sessions
+/// and is gated by `multiAgentRuntime`; session metadata is stable once created and is
+/// read regardless of that gate so an existing runtime-A history is never reopened as
+/// runtime B under the same MyAgents session_id.
+pub fn resolve_session_runtime_identity(session_id: &str) -> Option<String> {
     let sessions_path = dirs::home_dir()?.join(".myagents").join("sessions.json");
     let content = std::fs::read_to_string(&sessions_path).ok()?;
-    let sessions: serde_json::Value = serde_json::from_str(strip_bom(&content)).ok()?;
+    resolve_session_runtime_identity_from_json(session_id, &content)
+}
+
+fn resolve_session_runtime_identity_from_json(session_id: &str, content: &str) -> Option<String> {
+    let sessions: serde_json::Value = serde_json::from_str(strip_bom(content)).ok()?;
     let sessions_arr = sessions.as_array()?;
 
     for session in sessions_arr {
         if session.get("id").and_then(|v| v.as_str()) == Some(session_id) {
-            if let Some(runtime) = session.get("runtime").and_then(|v| v.as_str()) {
-                if runtime != "builtin" {
-                    return Some(runtime.to_string());
-                }
-            }
-            return None;
+            return Some(
+                normalize_runtime_name(session.get("runtime").and_then(|v| v.as_str())).to_string(),
+            );
         }
     }
     None
+}
+
+fn resolve_session_runtime(session_id: &str) -> Option<String> {
+    resolve_session_runtime_identity(session_id).filter(|runtime| runtime != "builtin")
 }
 
 /// Lazy validation for tab restore (Issue #232 / PRD 0.2.25).

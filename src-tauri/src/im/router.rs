@@ -17,7 +17,8 @@ use serde_json::json;
 use tauri::{AppHandle, Runtime};
 
 use crate::sidecar::{
-    ensure_session_sidecar, release_session_sidecar, ManagedSidecarManager, SidecarOwner,
+    ensure_session_sidecar, release_session_sidecar, resolve_session_runtime_identity,
+    ManagedSidecarManager, RuntimeDriftResult, SidecarOwner,
 };
 
 use super::types::{ImMessage, ImSourceType, PeerSession};
@@ -102,6 +103,26 @@ pub fn create_sidecar_http_client() -> Client {
 /// Heartbeat from Sidecar is 15s; 300s margin covers cold-start SDK initialization.
 pub fn create_sidecar_stream_client() -> Client {
     crate::local_http::sse_client()
+}
+
+fn normalize_runtime_for_peer_drift(runtime: Option<&str>) -> &str {
+    match runtime {
+        Some("claude-code") => "claude-code",
+        Some("codex") => "codex",
+        Some("gemini") => "gemini",
+        _ => "builtin",
+    }
+}
+
+fn persisted_session_runtime_differs(
+    persisted_runtime: Option<&str>,
+    desired_runtime: &str,
+) -> bool {
+    let Some(persisted_runtime) = persisted_runtime else {
+        return false;
+    };
+    normalize_runtime_for_peer_drift(Some(persisted_runtime))
+        != normalize_runtime_for_peer_drift(Some(desired_runtime))
 }
 
 impl SessionRouter {
@@ -410,12 +431,14 @@ impl SessionRouter {
     /// Detect runtime drift for an IM peer session and reset it like a `/new`.
     ///
     /// When the user changes the agent's runtime in Settings (codex → gemini
-    /// for example), any Sidecar that's still alive for this peer was spawned
-    /// with the old MYAGENTS_RUNTIME env var and cannot switch in-place. The
-    /// v0.1.62 session-stability rule — which pins a session to whichever
-    /// runtime created it — is wrong for IM: peer session mapping is opaque
-    /// to the user, they just see "my agent is now gemini" and expect the
-    /// next IM message to reflect that.
+    /// for example), either the live Sidecar runtime or the persisted session
+    /// metadata can disagree with the agent's desired runtime. The persisted
+    /// metadata check matters after idle collection/app restart, where there
+    /// is no live Sidecar for `ManagedSidecarManager` to compare. The v0.1.62
+    /// session-stability rule — which pins a session to whichever runtime
+    /// created it — is wrong for IM: peer session mapping is opaque to the
+    /// user, they just see "my agent is now gemini" and expect the next IM
+    /// message to reflect that.
     ///
     /// This method runs at the TOP of message processing (before
     /// `ensure_sidecar`). If drift is detected it:
@@ -440,6 +463,24 @@ impl SessionRouter {
         desired_runtime: &str,
         manager: &ManagedSidecarManager,
     ) -> Option<(String, String)> {
+        self.check_and_reset_on_runtime_drift_with_resolver(
+            session_key,
+            desired_runtime,
+            manager,
+            resolve_session_runtime_identity,
+        )
+    }
+
+    fn check_and_reset_on_runtime_drift_with_resolver<F>(
+        &mut self,
+        session_key: &str,
+        desired_runtime: &str,
+        manager: &ManagedSidecarManager,
+        resolve_persisted_runtime: F,
+    ) -> Option<(String, String)>
+    where
+        F: FnOnce(&str) -> Option<String>,
+    {
         let old_id = self.peer_sessions.get(session_key)?.session_id.clone();
 
         // Delegate the Sidecar-side half (compare spawn-time runtime, decide
@@ -457,8 +498,27 @@ impl SessionRouter {
             let mut mgr = manager.lock().ok()?;
             mgr.kill_sidecar_if_runtime_differs(&old_id, desired_runtime)
         };
-        if !drift_result.is_drift() {
+        let persisted_runtime = resolve_persisted_runtime(&old_id);
+        let persisted_drift =
+            persisted_session_runtime_differs(persisted_runtime.as_deref(), desired_runtime);
+
+        if !drift_result.is_drift() && !persisted_drift {
             return None;
+        }
+
+        if matches!(
+            drift_result,
+            RuntimeDriftResult::NoDrift | RuntimeDriftResult::DetectedKeptAlive
+        ) {
+            let owner = SidecarOwner::Agent(session_key.to_string());
+            if let Err(e) = release_session_sidecar(manager, &old_id, &owner) {
+                ulog_warn!(
+                    "[im-router] Failed to release old Agent owner during runtime drift (session_key={} session={}): {}",
+                    session_key,
+                    old_id,
+                    e
+                );
+            }
         }
 
         // Regenerate the peer's session_id. Zero the cached port so
@@ -474,11 +534,13 @@ impl SessionRouter {
         }
 
         ulog_info!(
-            "[im-router] Runtime drift: peer={} old={} → new={} desired={}",
+            "[im-router] Runtime drift: peer={} old={} → new={} desired={} persisted={} live_result={:?}",
             session_key,
             &old_id[..8.min(old_id.len())],
             &new_id[..8.min(new_id.len())],
-            desired_runtime
+            desired_runtime,
+            persisted_runtime.as_deref().unwrap_or("unknown"),
+            drift_result,
         );
 
         Some((old_id, new_id))
@@ -1110,10 +1172,12 @@ pub fn parse_session_key(session_key: &str) -> (ImSourceType, String) {
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
     use std::time::Instant;
 
-    use super::{parse_session_key, SessionRouter};
+    use super::{parse_session_key, persisted_session_runtime_differs, SessionRouter};
     use crate::im::types::PeerSession;
+    use crate::sidecar::SidecarManager;
 
     fn peer(session_key: &str, session_id: &str) -> PeerSession {
         let (source_type, source_id) = parse_session_key(session_key);
@@ -1175,5 +1239,46 @@ mod tests {
         assert!(router
             .peer_session_snapshot("agent:a:feishu:private:other")
             .is_some());
+    }
+
+    #[test]
+    fn persisted_builtin_session_drift_is_detected_for_external_agent_runtime() {
+        assert!(persisted_session_runtime_differs(Some("builtin"), "codex"));
+    }
+
+    #[test]
+    fn missing_persisted_session_metadata_does_not_force_a_peer_reset() {
+        assert!(!persisted_session_runtime_differs(None, "codex"));
+    }
+
+    #[test]
+    fn matching_persisted_external_runtime_has_no_peer_drift() {
+        assert!(!persisted_session_runtime_differs(Some("codex"), "codex"));
+    }
+
+    #[test]
+    fn persisted_runtime_drift_rotates_peer_session_without_live_sidecar() {
+        let session_key = "agent:a:feishu:private:user";
+        let mut router = SessionRouter::new(PathBuf::from("/tmp/workspace"));
+        router.upsert_peer_session(peer(session_key, "old-session"));
+        let manager = Arc::new(Mutex::new(SidecarManager::new()));
+
+        let reset = router.check_and_reset_on_runtime_drift_with_resolver(
+            session_key,
+            "codex",
+            &manager,
+            |_| Some("builtin".to_string()),
+        );
+
+        let (old_id, new_id) = reset.expect("persisted runtime drift should reset");
+        assert_eq!(old_id, "old-session");
+        assert_ne!(new_id, "old-session");
+
+        let ps = router
+            .peer_session_snapshot(session_key)
+            .expect("peer session remains bound after rotation");
+        assert_eq!(ps.session_id, new_id);
+        assert_eq!(ps.sidecar_port, 0);
+        assert_eq!(ps.message_count, 0);
     }
 }

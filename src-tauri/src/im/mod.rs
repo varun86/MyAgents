@@ -272,9 +272,15 @@ fn runtime_permission_choices(runtime: &str) -> Vec<RuntimePermissionChoice> {
 async fn ensure_sidecar_port_for_command<R: Runtime>(
     router: &Arc<Mutex<SessionRouter>>,
     session_key: &str,
+    desired_runtime: &str,
     app_handle: &AppHandle<R>,
     manager: &ManagedSidecarManager,
 ) -> Result<u16, String> {
+    {
+        let mut router_guard = router.lock().await;
+        router_guard.check_and_reset_on_runtime_drift(session_key, desired_runtime, manager);
+    }
+
     let prep = {
         let mut router_guard = router.lock().await;
         router_guard.prepare_ensure_sidecar(session_key).await
@@ -1957,6 +1963,7 @@ async fn create_bot_instance<R: Runtime>(
                                 match ensure_sidecar_port_for_command(
                                     &router_clone,
                                     &session_key,
+                                    &current_runtime,
                                     &app_clone,
                                     &manager_clone,
                                 ).await {
