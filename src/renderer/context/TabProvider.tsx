@@ -468,6 +468,9 @@ export default function TabProvider({
     const [contextUsage, setContextUsage] = useState<ContextUsage | null>(null);
     const liveContextUsageSessionIdRef = useRef<string | null>(null);
     const [agentPlanTodos, setAgentPlanTodos] = useState<AgentStatusTodoSnapshot[] | null>(null);
+    const clearRuntimePlanTodos = useCallback(() => {
+        setAgentPlanTodos(prev => prev === null ? prev : []);
+    }, []);
     const [lastTerminalReason, setLastTerminalReason] = useState<TerminalReason | null>(null);
     const [isConnected, setIsConnected] = useState(false);
     const [pendingPermission, setPendingPermission] = useState<PermissionRequest | null>(null);
@@ -1301,8 +1304,9 @@ export default function TabProvider({
             setSessionState('idle');
             setSystemStatus(null);
             setSystemNotice(null);
+            clearRuntimePlanTodos();
         });
-    }, [moveStreamingToHistory, clearSessionActive]);
+    }, [moveStreamingToHistory, clearSessionActive, clearRuntimePlanTodos]);
 
     // Handle SSE events
     const handleSseEvent = useCallback((eventName: string, data: unknown) => {
@@ -1366,6 +1370,7 @@ export default function TabProvider({
                         clearSessionActive();
                         setIsLoading(false);
                         setSystemStatus(null);
+                        clearRuntimePlanTodos();
                     }
                 }
                 break;
@@ -1496,6 +1501,7 @@ export default function TabProvider({
                         clearSessionActive();
                         setIsLoading(false);
                         setSystemStatus(null);
+                        clearRuntimePlanTodos();
                     } else if (
                         (payload.sessionState === 'running' || payload.sessionState === 'starting')
                         && !isStreamingRef.current
@@ -2038,6 +2044,7 @@ export default function TabProvider({
                     setIsLoading(false);
                     setSessionState('idle');  // Reset session state to idle
                     setSystemStatus(null);  // Clear system status (e.g., 'compacting') when message completes
+                    clearRuntimePlanTodos();
                     // Do NOT clear agentError here — chat:agent-error is only emitted for terminal,
                     // unrecoverable errors (rate_limit, auth fail, SDK is_error result, timeouts).
                     // Clearing on message-complete would hide the banner in the race where the error
@@ -2201,6 +2208,7 @@ export default function TabProvider({
                     setIsLoading(false);
                     setSessionState('idle');  // Reset session state to idle
                     setSystemStatus(null);  // Clear system status when user stops response
+                    clearRuntimePlanTodos();
                 });
                 // Clear stop timeout since we received confirmation
                 if (stopTimeoutRef.current) {
@@ -2229,6 +2237,7 @@ export default function TabProvider({
                     setIsLoading(false);
                     setSessionState('idle');  // Reset session state to idle on error
                     setSystemStatus(null);  // Clear system status on error
+                    clearRuntimePlanTodos();
                 });
                 // Clear stop timeout on error too
                 if (stopTimeoutRef.current) {
@@ -2936,7 +2945,7 @@ export default function TabProvider({
                 }
             }
         }
-    }, [appendLog, appendUnifiedLog, tabId, moveStreamingToHistory, beginFreshStreamIfNeeded, setStreamingMessage, postJson, clearInteractiveState, flushPendingTextNow, startRevealLoop, flushAllPendingToolDeltas, flushPendingToolInputDelta, flushPendingToolResultDelta, flushPendingSubagentToolInputDelta, flushPendingSubagentToolResultDelta, clearSessionActive, resetPaginationState, trackTabEvent, trackSessionNewForBirth]);
+    }, [appendLog, appendUnifiedLog, tabId, moveStreamingToHistory, beginFreshStreamIfNeeded, setStreamingMessage, postJson, clearInteractiveState, flushPendingTextNow, startRevealLoop, flushAllPendingToolDeltas, flushPendingToolInputDelta, flushPendingToolResultDelta, flushPendingSubagentToolInputDelta, flushPendingSubagentToolResultDelta, clearSessionActive, clearRuntimePlanTodos, resetPaginationState, trackTabEvent, trackSessionNewForBirth]);
 
     // Recovery guard — prevents concurrent recovery from both SSE failed + session-sidecar:restarted
     const recoveryInFlightRef = useRef(false);
@@ -3393,6 +3402,7 @@ export default function TabProvider({
                         clearSessionActive();
                         setIsLoading(false);
                         setSessionState(prev => prev === 'stopping' ? 'idle' : prev);
+                        clearRuntimePlanTodos();
                     });
                     return true;
                 }
@@ -3404,6 +3414,7 @@ export default function TabProvider({
                     }
                     // Also recover from 'stopping' state if SSE confirmation never arrived
                     setSessionState(prev => prev === 'stopping' ? 'idle' : prev);
+                    clearRuntimePlanTodos();
                     stopTimeoutRef.current = null;
                 }, 5000);
                 return true;

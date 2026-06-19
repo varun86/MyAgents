@@ -10,6 +10,8 @@ import { readFileSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 
+import { cancellableFetch } from './utils/cancellation';
+
 const CONFIG_PATH = join(homedir(), '.myagents', 'analytics_config.json');
 
 interface AnalyticsConfig {
@@ -56,6 +58,8 @@ const MAX_QUEUE_SIZE = 30;
 const CONFIG_PENDING_RETRY_MS = 1000;
 const PENDING_CONFIG_TTL_MS = 30_000;
 const MAX_PENDING_CONFIG_QUEUE_SIZE = 100;
+const ANALYTICS_FETCH_TIMEOUT_MS = 10_000;
+let flushInFlight = false;
 
 function loadConfig(): ConfigState {
   try {
@@ -132,6 +136,13 @@ async function flushQueue(): Promise<void> {
     flushTimer = null;
   }
 
+  if (flushInFlight) {
+    if (queue.length > 0 || pendingConfigQueue.length > 0) {
+      scheduleFlush(FLUSH_DELAY_MS);
+    }
+    return;
+  }
+
   const cfg = getConfigState();
   if (cfg === 'disabled') {
     queue.length = 0;
@@ -154,17 +165,22 @@ async function flushQueue(): Promise<void> {
 
   const events = queue.splice(0, MAX_QUEUE_SIZE);
 
+  flushInFlight = true;
   try {
-    await fetch(cfg.endpoint, {
+    await cancellableFetch(cfg.endpoint, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'X-API-Key': cfg.apiKey,
       },
       body: JSON.stringify({ events }),
+    }, {
+      timeoutMs: ANALYTICS_FETCH_TIMEOUT_MS,
     });
   } catch {
     // Silent failure — analytics must never affect the main flow
+  } finally {
+    flushInFlight = false;
   }
 
   // If there are remaining events, schedule another flush

@@ -574,10 +574,9 @@ export function resolveImProviderEnv(
   config?: AdminAppConfig,
 ): ResolvedProviderEnv | undefined {
   const c = config ?? loadConfig();
-  const normalized = agentDir.replace(/\\/g, '/');
   const agents = (c.agents ?? []) as AgentConfigSlim[];
   const agent = agents.find(a =>
-    typeof a.workspacePath === 'string' && a.workspacePath.replace(/\\/g, '/') === normalized
+    typeof a.workspacePath === 'string' && workspacePathsEqual(a.workspacePath, agentDir)
   );
   // No agent matched (legacy IM bot / workspace-path drift) — bail out so the
   // caller falls back to `payload.providerEnv`. Returning a resolution against
@@ -699,16 +698,13 @@ export function resolveWorkspaceConfig(
   // can short-circuit via `{ includeMcp: false }` to skip it entirely.
   const includeMcp = options?.includeMcp !== false;
 
-  // Normalize path separators for cross-platform matching
-  const normalizedDir = agentDir.replace(/\\/g, '/');
-
   // Find matching agent by workspace path
   const agents = (config.agents ?? []) as Array<Record<string, unknown>>;
   const agent = agents.find(a =>
-    typeof a.workspacePath === 'string' && a.workspacePath.replace(/\\/g, '/') === normalizedDir
+    typeof a.workspacePath === 'string' && workspacePathsEqual(a.workspacePath, agentDir)
   );
   const project = loadProjects().find(p =>
-    typeof p.path === 'string' && p.path.replace(/\\/g, '/') === normalizedDir
+    typeof p.path === 'string' && workspacePathsEqual(p.path, agentDir)
   );
 
   // --- Resolve MCP ---

@@ -98,6 +98,37 @@ describe('resolveWorkspaceConfig permissionMode (#295)', () => {
     expect(resolveWorkspaceConfig(workspacePath, null, { includeMcp: false }).permissionMode).toBe('fullAgency');
   });
 
+  it('matches Windows workspace identity across separators, case, and trailing slash', async () => {
+    const storedWorkspacePath = 'C:\\Users\\Alice\\Project\\';
+    const runtimeWorkspacePath = 'c:/users/alice/project';
+    writeConfig({
+      defaultPermissionMode: 'auto',
+      agents: [{
+        id: 'agent-1',
+        name: 'Windows Agent',
+        enabled: true,
+        workspacePath: storedWorkspacePath,
+        runtime: 'codex',
+        runtimeConfig: {
+          permissionMode: 'no-restrictions',
+          reasoningEffort: 'xhigh',
+        },
+      }],
+    });
+    writeProjects([{
+      id: 'project-1',
+      name: 'Windows Project',
+      path: storedWorkspacePath,
+      permissionMode: 'plan',
+    }]);
+
+    const { resolveWorkspaceConfig } = await import('../utils/admin-config');
+    const resolved = resolveWorkspaceConfig(runtimeWorkspacePath, null, { includeMcp: false });
+
+    expect(resolved.permissionMode).toBe('no-restrictions');
+    expect(resolved.reasoningEffort).toBe('xhigh');
+  });
+
   it('falls back to auto when no valid builtin permission mode is configured', async () => {
     const workspacePath = join(scratch, 'workspace');
     writeConfig({

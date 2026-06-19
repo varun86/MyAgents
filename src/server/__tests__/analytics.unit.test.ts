@@ -85,4 +85,28 @@ describe('server analytics', () => {
 
     expect(mocks.fetch).not.toHaveBeenCalled();
   });
+
+  it('does not overlap flushes while a send is still in flight', async () => {
+    mocks.configRaw = enabledConfig();
+    let resolveFetch: ((value: { ok: boolean }) => void) | undefined;
+    mocks.fetch.mockImplementation(() => new Promise(resolve => {
+      resolveFetch = resolve as (value: { ok: boolean }) => void;
+    }));
+    const { trackServer } = await import('../analytics');
+
+    for (let i = 0; i < 30; i += 1) {
+      trackServer('ai_turn_complete', { index: i });
+    }
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(mocks.fetch).toHaveBeenCalledTimes(1);
+
+    for (let i = 30; i < 60; i += 1) {
+      trackServer('ai_turn_complete', { index: i });
+    }
+    expect(mocks.fetch).toHaveBeenCalledTimes(1);
+
+    resolveFetch?.({ ok: true });
+    await Promise.resolve();
+  });
 });
