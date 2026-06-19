@@ -831,6 +831,20 @@ pre code {
   position: relative;
 }
 
+.workspace-card-channel-tags-fade {
+  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 18px), transparent);
+  mask-image: linear-gradient(to right, #000 calc(100% - 18px), transparent);
+}
+
+.workspace-card-action-overlay {
+  background: linear-gradient(
+    to right,
+    transparent 0%,
+    color-mix(in srgb, var(--paper-elevated) 78%, transparent) 40%,
+    var(--paper-elevated) 78%
+  );
+}
+
 /* Floating divider between brand and workspaces */
 .launcher-workspaces::before {
   content: '';

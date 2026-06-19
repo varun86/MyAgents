@@ -93,7 +93,7 @@ export default memo(function WorkspaceCard({
                 onClick={() => !isLoading && onLaunch(project)}
                 onContextMenu={handleContextMenu}
                 disabled={isLoading}
-                className={`group flex w-full items-center gap-3 rounded-xl bg-[var(--paper-elevated)] px-4 py-3 text-left transition-shadow duration-150 ease-out hover:shadow-sm active:scale-[0.98] ${
+                className={`group relative flex w-full items-center gap-3 rounded-xl bg-[var(--paper-elevated)] px-4 py-3 text-left transition-shadow duration-150 ease-out hover:shadow-sm active:scale-[0.98] ${
                     isLoading ? 'pointer-events-none opacity-60' : 'cursor-pointer'
                 }`}
             >
@@ -109,10 +109,10 @@ export default memo(function WorkspaceCard({
                 {/* Text + channel tags */}
                 <div className="min-w-0 flex-1">
                     <h3 className="flex min-w-0 items-center gap-1.5 overflow-hidden whitespace-nowrap text-sm font-medium text-[var(--ink)]">
-                        <span className="min-w-0 truncate">{displayName}</span>
+                        <span className="min-w-0 shrink truncate">{displayName}</span>
                         {isProactive && <HeartPulse className="h-3 w-3 shrink-0 text-[var(--heartbeat)]" />}
                         {channelTags.length > 0 && (
-                            <span className="inline-flex min-w-0 shrink overflow-hidden whitespace-nowrap">
+                            <span className="workspace-card-channel-tags-fade inline-flex min-w-0 flex-1 overflow-hidden whitespace-nowrap">
                                 <span className="inline-flex shrink-0 items-center gap-1">
                                     {channelTags.map(tag => (
                                         <span
@@ -152,18 +152,21 @@ export default memo(function WorkspaceCard({
 
                 {/* Settings shortcut — visible on hover, custom tooltip */}
                 {!isLoading && (
-                    <div
-                        className="group/btn relative shrink-0 rounded-lg p-2 text-[var(--ink-muted)] opacity-0 transition-all hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] group-hover:opacity-100"
-                        role="button"
-                        tabIndex={-1}
-                        onClick={(e) => {
-                            e.stopPropagation();
-                            onAgentSettings(project);
-                        }}
-                    >
-                        <SlidersHorizontal className="h-4 w-4" strokeWidth={2.2} />
-                        <span className="pointer-events-none absolute -bottom-7 left-1/2 -translate-x-1/2 whitespace-nowrap rounded-md bg-[var(--button-dark-bg)] px-2 py-0.5 text-xs text-[var(--button-primary-text)] opacity-0 shadow-lg transition-opacity group-hover/btn:opacity-100">
-                            Agent 设置
+                    <div className="workspace-card-action-overlay pointer-events-none absolute inset-y-0 right-0 flex w-20 items-center justify-end pr-3 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
+                        <span
+                            className="group/btn pointer-events-auto relative rounded-lg p-2 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+                            role="button"
+                            tabIndex={-1}
+                            aria-label="Agent 设置"
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                onAgentSettings(project);
+                            }}
+                        >
+                            <SlidersHorizontal className="h-4 w-4" strokeWidth={2.2} />
+                            <span className="pointer-events-none absolute -bottom-7 left-1/2 -translate-x-1/2 whitespace-nowrap rounded-md bg-[var(--button-dark-bg)] px-2 py-0.5 text-xs text-[var(--button-primary-text)] opacity-0 shadow-lg transition-opacity group-hover/btn:opacity-100">
+                                Agent 设置
+                            </span>
                         </span>
                     </div>
                 )}

@@ -84,6 +84,38 @@ describe('WorkspaceCard', () => {
         expect(screen.getByText('Telegram')).toBeInTheDocument();
     });
 
+    it('keeps channel tags in a fade-clipped row and moves settings into an overlay', () => {
+        const status: AgentStatusData = {
+            agentId: 'agent-1',
+            agentName: 'Mino5',
+            enabled: true,
+            channels: [{
+                channelId: 'channel-1',
+                channelType: 'telegram',
+                status: 'online',
+                uptimeSeconds: 12,
+                activeSessions: [],
+                restartCount: 0,
+                bufferedMessages: 0,
+            }],
+        };
+
+        renderCard({
+            agent: agent({
+                channels: [{
+                    id: 'channel-1',
+                    type: 'telegram',
+                    enabled: true,
+                    setupCompleted: true,
+                }],
+            }),
+            agentStatus: status,
+        });
+
+        expect(screen.getByText('Telegram').closest('.workspace-card-channel-tags-fade')).not.toBeNull();
+        expect(screen.getByLabelText('Agent 设置').parentElement).toHaveClass('workspace-card-action-overlay');
+    });
+
     it('shows pin action in the right-click menu', () => {
         const onTogglePin = vi.fn();
 
