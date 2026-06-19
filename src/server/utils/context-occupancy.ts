@@ -84,3 +84,45 @@ export function resolveContextOccupancyFromSdkBreakdown(
   if (typeof total !== 'number' || !Number.isFinite(total) || total <= 0) return null;
   return Math.round(total);
 }
+
+export function resolveContextWindowFromSdkBreakdown(
+  response: { maxTokens?: number | null | undefined; rawMaxTokens?: number | null | undefined } | null | undefined,
+): number | null {
+  if (!response) return null;
+  const maxTokens = response.maxTokens ?? response.rawMaxTokens;
+  if (typeof maxTokens !== 'number' || !Number.isFinite(maxTokens) || maxTokens <= 0) return null;
+  return Math.round(maxTokens);
+}
+
+function nonEmptyModel(model: string | undefined | null): string | undefined {
+  if (!model) return undefined;
+  const trimmed = model.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+/**
+ * Choose the model id used for the builtin context-usage window lookup.
+ *
+ * SDK result `modelUsage` keys can be provider-resolved aliases (for example
+ * `deepseek-v4-pro-260425[1m]`) that are useful for stats but not present in
+ * MyAgents' registry. The configured session model is the authority for the
+ * auto-compact cap and UI ring. Prefer the SDK key only when the registry knows
+ * it; otherwise fall back to the configured model instead of defaulting to 200K.
+ */
+export function chooseBuiltinContextUsageModel(params: {
+  sdkResultModel?: string | null;
+  configuredModel?: string | null;
+  lookupWindow: (model?: string) => number | null | undefined;
+}): string | undefined {
+  const sdkResultModel = nonEmptyModel(params.sdkResultModel);
+  if (sdkResultModel && params.lookupWindow(sdkResultModel)) return sdkResultModel;
+
+  const configuredModel = nonEmptyModel(params.configuredModel);
+  if (configuredModel && params.lookupWindow(configuredModel)) return configuredModel;
+
+  return sdkResultModel ?? configuredModel;
+}
+
+export function inferContextWindowFromSdkModelTag(model: string | undefined | null): number | null {
+  return model && /\[1m\]/i.test(model) ? 1_000_000 : null;
+}

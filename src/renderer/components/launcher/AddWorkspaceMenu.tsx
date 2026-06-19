@@ -27,7 +27,7 @@ export default memo(function AddWorkspaceMenu({
             <button
                 ref={buttonRef}
                 onClick={toggle}
-                className="flex items-center gap-1.5 rounded-lg bg-[var(--button-primary-bg)] px-2.5 py-1.5 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)]"
+                className="flex items-center gap-1.5 rounded-lg bg-[var(--button-primary-bg)] px-2.5 py-1 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)]"
             >
                 <Plus className="h-3.5 w-3.5" />
                 添加

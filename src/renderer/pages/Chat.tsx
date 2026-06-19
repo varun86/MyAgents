@@ -2,6 +2,7 @@ import { AlertTriangle, ArrowLeft, Globe, History, Loader2, Plus, PanelRightOpen
 import { forwardRef, lazy, Suspense, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
 
 import { track } from '@/analytics';
+import type { HistoryEntrySource } from '@/analytics';
 import { useCloseLayer } from '@/hooks/useCloseLayer';
 import ConfirmDialog from '@/components/ConfirmDialog';
 import WorkspaceIcon from '@/components/launcher/WorkspaceIcon';
@@ -48,7 +49,7 @@ import type { CronSettingsResult, CronInitialConfig } from '@/components/cron/Cr
 import { isTauriEnvironment } from '@/utils/browserMock';
 import { isDebugMode } from '@/utils/debug';
 import { isImSource, getChannelTypeLabel } from '@/utils/taskCenterUtils';
-import { type PermissionMode, type McpServerDefinition, getEffectiveModelAliases } from '@/config/types';
+import { type PermissionMode, type McpServerDefinition, type Provider, getEffectiveModelAliases } from '@/config/types';
 import { syncMcpServerNames } from '@/components/tools/toolBadgeConfig';
 import {
   getAllMcpServers,
@@ -60,9 +61,19 @@ import { BrowserPanelContext } from '@/context/BrowserPanelContext';
 import { BROWSER_BLANK_URL } from '@/components/browserConstants';
 import { CUSTOM_EVENTS, isPendingSessionId } from '../../shared/constants';
 import { workspacePathsEqual } from '../../shared/workspacePath';
-import { reasoningEffortChoices } from '../../shared/reasoningEffort';
+import { coerceReasoningEffortForRuntime, reasoningEffortChoices } from '../../shared/reasoningEffort';
+import { canResumeAcrossProviderBoundary, type ProviderHistoryEnv } from '../../shared/providerHistory';
 import type { CapabilityInitialSelect } from '../../shared/skillsTypes';
-import { CC_MODELS, CC_PERMISSION_MODES, CODEX_PERMISSION_MODES, GEMINI_PERMISSION_MODES, getDefaultRuntimePermissionMode, getRuntimePermissionModes, buildRuntimeChangePatch } from '../../shared/types/runtime';
+import {
+  buildRuntimeChangePatch,
+  CC_MODELS,
+  CC_PERMISSION_MODES,
+  CODEX_PERMISSION_MODES,
+  coerceModelForRuntime,
+  coercePermissionModeForRuntime,
+  GEMINI_PERMISSION_MODES,
+  getDefaultRuntimePermissionMode,
+} from '../../shared/types/runtime';
 import type { RuntimeType, RuntimeDetections, RuntimeConfig } from '../../shared/types/runtime';
 import type { FilePreviewIntent, InitialMessage, SidecarConfigDisposition } from '@/types/tab';
 import type { FilePreviewFocusTarget } from '@/types/filePreview';
@@ -77,6 +88,8 @@ type SplitPreviewFile = {
   content: string;
   size: number;
   path: string;
+  sourceScope?: 'workspace' | 'local';
+  localPath?: string;
   richDocKind?: RichDocKind;
   initialEditMode?: boolean;
   initialLineNumber?: number;
@@ -105,14 +118,36 @@ function getRuntimeDisplayLabel(runtime: RuntimeType | undefined): string {
       return 'MyAgents';
   }
 }
-const SIGNED_HISTORY_PROVIDER_IDS = new Set(['anthropic-sub', 'anthropic-api']);
 
-function requiresSignedSessionHistory(providerId?: string): boolean {
-  if (!providerId) return false;
-  // Current behavior only covers the official Anthropic providers.
-  // If other suppliers add Claude models with the same session-signature constraint,
-  // extend this predicate instead of rewriting Chat switch logic.
-  return SIGNED_HISTORY_PROVIDER_IDS.has(providerId);
+function coerceExternalRuntimeModelForUi(model: string | undefined, runtime: RuntimeType): string | undefined {
+  return runtime === 'builtin' ? model : coerceModelForRuntime(model, runtime);
+}
+
+function coerceExternalRuntimePermissionForUi(mode: string | undefined, runtime: RuntimeType): string | undefined {
+  return runtime === 'builtin' ? mode : coercePermissionModeForRuntime(mode, runtime);
+}
+
+function coerceReasoningEffortForUi(effort: string | undefined, runtime: RuntimeType): string | undefined {
+  return coerceReasoningEffortForRuntime(effort, runtime);
+}
+
+function toProviderHistoryEnv(
+  provider: Pick<Provider, 'id' | 'type' | 'config' | 'apiProtocol'> | undefined,
+  model?: string,
+): ProviderHistoryEnv | undefined {
+  if (!provider) return model ? { model } : undefined;
+  if (provider.type === 'subscription') {
+    return {
+      providerId: provider.id,
+      model,
+    };
+  }
+  return {
+    providerId: provider.id,
+    baseUrl: provider.config.baseUrl,
+    apiProtocol: provider.apiProtocol,
+    model,
+  };
 }
 
 /** Imperative handle exposed by SessionTitleEditor — lets the SessionMenuButton's
@@ -178,7 +213,7 @@ interface ChatProps {
   /** Called when user starts a new session. Returns true if handled externally (background completion started). */
   onNewSession?: () => Promise<boolean>;
   /** Called when user selects a different session from history - uses Session singleton logic */
-  onSwitchSession?: (sessionId: string) => void;
+  onSwitchSession?: (sessionId: string, historyEntrySource?: HistoryEntrySource) => void;
   /** Called when user opens a history session in a NEW tab (vs. switching the current one) */
   onOpenSessionInNewTab?: (sessionId: string, title: string) => void;
   /** Initial message from Launcher for auto-send on workspace open */
@@ -310,6 +345,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     if (!provider || provider.type === 'subscription') return undefined;
     const aliases = getEffectiveModelAliases(provider, configRef.current.providerModelAliases);
     return {
+      providerId: provider.id,
       baseUrl: provider.config.baseUrl,
       apiKey: apiKeysRef.current[provider.id],
       authType: provider.authType,
@@ -481,13 +517,15 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
 
   const handleSplitFilePreview = useCallback((file: SplitPreviewFile, options?: { initialEditMode?: boolean }) => {
     const ext = file.name.toLowerCase().split('.').pop();
+    const isLocalFile = file.sourceScope === 'local';
     if ((ext === 'html' || ext === 'htm') && isSplitViewEnabled && !file.focusTarget) {
       // HTML files → open in embedded browser for live preview
       // Store file metadata so browser toolbar can offer "Edit Source" toggle
-      setBrowserSourceFile(file);
-      // file.path is relative to agentDir — construct absolute path for Rust
+      setBrowserSourceFile(isLocalFile ? null : file);
+      // Workspace files are relative to agentDir; local file links already carry
+      // an absolute path.
       const sep = agentDir?.includes('\\') ? '\\' : '/';
-      const absPath = agentDir ? `${agentDir}${sep}${file.path}` : file.path;
+      const absPath = isLocalFile ? (file.localPath ?? file.path) : (agentDir ? `${agentDir}${sep}${file.path}` : file.path);
       startBrowserSplitTransitionIfNeeded();
       setBrowserUrl(absPath);
       setSplitActiveView('browser');
@@ -941,7 +979,10 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     (currentAgent?.runtimeConfig as { model?: string } | undefined)?.model
   );
   const [runtimePermissionMode, setRuntimePermissionMode] = useState<string>(
-    (currentAgent?.runtimeConfig as { permissionMode?: string } | undefined)?.permissionMode
+    coerceExternalRuntimePermissionForUi(
+      (currentAgent?.runtimeConfig as { permissionMode?: string } | undefined)?.permissionMode,
+      currentRuntime,
+    )
     || getDefaultRuntimePermissionMode(currentRuntime) || 'default'
   );
 
@@ -963,17 +1004,15 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   useEffect(() => {
     if (!isExternalRuntime) return;
     const cfg = currentAgent?.runtimeConfig as { permissionMode?: string; model?: string } | undefined;
-    const validModes = new Set(getRuntimePermissionModes(currentRuntime).map((m) => m.value));
     const saved = cfg?.permissionMode;
-    const effective = saved && validModes.has(saved)
-      ? saved
-      : (getDefaultRuntimePermissionMode(currentRuntime) || 'default');
+    const effective = coerceExternalRuntimePermissionForUi(saved, currentRuntime)
+      ?? (getDefaultRuntimePermissionMode(currentRuntime) || 'default');
     setRuntimePermissionMode(effective);
-    setRuntimeModel(cfg?.model);
+    setRuntimeModel(coerceExternalRuntimeModelForUi(cfg?.model, currentRuntime));
     // #324 — re-seed effort on runtime transition. RUNTIME_CONFIG_PER_RUNTIME_FIELDS
     // scrubs reasoningEffort on agent runtime change, so a leftover value from a
     // different runtime can't be read here; absent = 'default'.
-    setReasoningEffort((cfg as { reasoningEffort?: string } | undefined)?.reasoningEffort ?? 'default');
+    setReasoningEffort(coerceReasoningEffortForUi((cfg as { reasoningEffort?: string } | undefined)?.reasoningEffort, currentRuntime) ?? 'default');
     // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional: only re-sync on runtime transitions, not on every currentAgent.runtimeConfig edit
   }, [currentRuntime, isExternalRuntime]);
 
@@ -1107,9 +1146,17 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   // Effective model/permission based on runtime.
   // For external runtimes: if user hasn't explicitly selected a model (runtimeModel=undefined),
   // use the default model from the runtime's model list — this matches what the UI displays.
+  const effectiveRuntimeModel = isExternalRuntime
+    ? coerceExternalRuntimeModelForUi(runtimeModel, currentRuntime)
+    : undefined;
   const effectiveModel = isExternalRuntime
-    ? (runtimeModel ?? runtimeModels?.find(m => m.isDefault)?.value)
+    ? (effectiveRuntimeModel ?? runtimeModels?.find(m => m.isDefault)?.value)
     : selectedModel;
+  const effectiveRuntimePermissionMode = isExternalRuntime
+    ? (coerceExternalRuntimePermissionForUi(runtimePermissionMode, currentRuntime)
+      ?? getDefaultRuntimePermissionMode(currentRuntime)
+      ?? 'default')
+    : undefined;
   // #244: the `permissionMode` useState initializer runs while useConfig() is
   // still loading, and the one-time project-sync effect that corrects it fires
   // AFTER first paint — so a fresh-tab first send could ship the stale 'auto'.
@@ -1124,7 +1171,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   // choice instead of overriding it with the agent default).
   const permissionStateAuthoritative = projectSyncedRef.current || hadInitialMessage.current;
   const effectivePermissionMode = isExternalRuntime
-    ? runtimePermissionMode as PermissionMode
+    ? effectiveRuntimePermissionMode as PermissionMode
     : resolveBuiltinPermissionMode({
         projectSynced: permissionStateAuthoritative,
         statePermissionMode: permissionMode,
@@ -1136,15 +1183,28 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   const buildCronRuntimeConfig = useCallback((): RuntimeConfig | undefined => {
     if (!isExternalRuntime) return undefined;
     const base = { ...((currentAgent?.runtimeConfig as RuntimeConfig | undefined) ?? {}) };
-    if (runtimeModel !== undefined) {
-      base.model = runtimeModel;
+    const persistedModel = coerceExternalRuntimeModelForUi(base.model, currentRuntime);
+    if (persistedModel) {
+      base.model = persistedModel;
+    } else {
+      delete base.model;
     }
-    const hasPersistedPermission = typeof (currentAgent?.runtimeConfig as RuntimeConfig | undefined)?.permissionMode === 'string';
-    if (hasPersistedPermission || runtimePermissionMode !== getDefaultRuntimePermissionMode(currentRuntime)) {
-      base.permissionMode = runtimePermissionMode;
+    const selectedRuntimeModel = coerceExternalRuntimeModelForUi(runtimeModel, currentRuntime);
+    if (selectedRuntimeModel !== undefined) {
+      base.model = selectedRuntimeModel;
+    }
+    const persistedPermission = coerceExternalRuntimePermissionForUi(base.permissionMode, currentRuntime);
+    if (persistedPermission) {
+      base.permissionMode = persistedPermission;
+    } else {
+      delete base.permissionMode;
+    }
+    const selectedPermission = effectiveRuntimePermissionMode ?? getDefaultRuntimePermissionMode(currentRuntime);
+    if (persistedPermission !== undefined || selectedPermission !== getDefaultRuntimePermissionMode(currentRuntime)) {
+      base.permissionMode = selectedPermission;
     }
     return Object.keys(base).length > 0 ? base : undefined;
-  }, [isExternalRuntime, currentAgent?.runtimeConfig, runtimeModel, runtimePermissionMode, currentRuntime]);
+  }, [isExternalRuntime, currentAgent?.runtimeConfig, runtimeModel, effectiveRuntimePermissionMode, currentRuntime]);
 
   // Callback to refresh workspace (exposed to SimpleChatInput)
   const triggerWorkspaceRefresh = useCallback(() => {
@@ -1199,9 +1259,12 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     // 'auto' default if useConfig() hasn't resolved yet. projectSynced:false
     // forces the agent→project→global fallback (there's no explicit choice to
     // honor on this auto-send).
-    const effectivePermission = (launchMessage.permissionMode ?? (isExternalRuntime
-      ? runtimePermissionMode
-      : resolveBuiltinPermissionMode({
+    const effectivePermission = (isExternalRuntime
+      ? (coerceExternalRuntimePermissionForUi(launchMessage.permissionMode, currentRuntime)
+        ?? effectiveRuntimePermissionMode
+        ?? getDefaultRuntimePermissionMode(currentRuntime)
+        ?? 'default')
+      : (launchMessage.permissionMode ?? resolveBuiltinPermissionMode({
           projectSynced: false,
           statePermissionMode: permissionMode,
           agentPermissionMode: currentAgent?.permissionMode as string | undefined,
@@ -1209,7 +1272,9 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
           defaultPermissionMode: config.defaultPermissionMode,
         }))) as PermissionMode;
     const effectiveModel = isExternalRuntime
-      ? (launchMessage.runtimeModel ?? runtimeModel)
+      ? (coerceExternalRuntimeModelForUi(launchMessage.runtimeModel, currentRuntime)
+        ?? effectiveRuntimeModel
+        ?? runtimeModels?.find(m => m.isDefault)?.value)
       : (builtinSel?.model ?? selectedModel);
     const provider = builtinSel
       ? providers.find(p => p.id === builtinSel.providerId) ?? currentProvider
@@ -1255,7 +1320,11 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
           // External runtime has its own permission mode state (runtimePermissionMode),
           // while builtin uses permissionMode. Set the correct one based on runtime.
           if (isExternalRuntime) {
-            setRuntimePermissionMode(launchMessage.permissionMode);
+            setRuntimePermissionMode(
+              coerceExternalRuntimePermissionForUi(launchMessage.permissionMode, currentRuntime)
+              ?? getDefaultRuntimePermissionMode(currentRuntime)
+              ?? 'default',
+            );
           } else {
             setPermissionMode(launchMessage.permissionMode);
             // #244: the launcher choice is now the authoritative builtin mode —
@@ -1266,7 +1335,9 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
           }
         }
         if (isExternalRuntime) {
-          if (launchMessage.runtimeModel) setRuntimeModel(launchMessage.runtimeModel);
+          if (launchMessage.runtimeModel) {
+            setRuntimeModel(coerceExternalRuntimeModelForUi(launchMessage.runtimeModel, currentRuntime));
+          }
         } else if (builtinSel) {
           // Apply the paired (provider, model) atomically — type system guarantees both present.
           setSelectedProviderId(builtinSel.providerId);
@@ -1278,11 +1349,14 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
         // Set BEFORE the sends below so the builtin send payload carries it;
         // for external runtimes push it explicitly (no payload channel).
         if (launchMessage.reasoningEffort) {
-          setReasoningEffort(launchMessage.reasoningEffort);
+          const launchReasoningEffort = isExternalRuntime
+            ? (coerceReasoningEffortForUi(launchMessage.reasoningEffort, currentRuntime) ?? 'default')
+            : launchMessage.reasoningEffort;
+          setReasoningEffort(launchReasoningEffort);
           if (configDispositionRef.current === 'pending') {
-            deferredEffortPushRef.current = launchMessage.reasoningEffort;
+            deferredEffortPushRef.current = launchReasoningEffort;
           } else {
-            pushReasoningEffort(launchMessage.reasoningEffort);
+            pushReasoningEffort(launchReasoningEffort);
           }
         }
 
@@ -2118,12 +2192,18 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     // re-derive from the agent — this is the write-read symmetry of IM live-follow.
     const snapshotRuntime = (sessionMeta.runtime as RuntimeType | undefined) ?? agentRuntime;
     const snapshotIsExternal = snapshotRuntime !== 'builtin';
-    const model = sessionMeta.model ?? (snapshotIsExternal
+    const rawModel = sessionMeta.model ?? (snapshotIsExternal
       ? (currentAgent?.runtimeConfig as RuntimeConfig | undefined)?.model
       : currentAgent?.model);
-    const mode = sessionMeta.permissionMode ?? (snapshotIsExternal
+    const model = snapshotIsExternal
+      ? coerceExternalRuntimeModelForUi(rawModel, snapshotRuntime)
+      : rawModel;
+    const rawMode = sessionMeta.permissionMode ?? (snapshotIsExternal
       ? (currentAgent?.runtimeConfig as RuntimeConfig | undefined)?.permissionMode
       : (currentAgent?.permissionMode as string | undefined));
+    const mode = snapshotIsExternal
+      ? coerceExternalRuntimePermissionForUi(rawMode, snapshotRuntime)
+      : rawMode;
     const providerId = sessionMeta.providerId ?? currentAgent?.providerId;
     const mcp = sessionMeta.mcpEnabledServers ?? currentAgent?.mcpEnabledServers;
     // #324 — snapshot effort wins over agent default; a persisted 'default'
@@ -2135,20 +2215,21 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     const snapEffort = sessionMeta.reasoningEffort ?? (snapshotIsExternal
       ? (currentAgent?.runtimeConfig as RuntimeConfig | undefined)?.reasoningEffort
       : currentAgent?.reasoningEffort);
-    if (model) {
-      if (snapshotIsExternal) {
-        setRuntimeModel(model);
-      } else {
+    if (snapshotIsExternal) {
+      setRuntimeModel(model);
+    } else if (model) {
         setSelectedModel(model);
-      }
     }
-    setReasoningEffort(snapEffort ?? 'default');
-    if (mode) {
-      if (snapshotIsExternal) {
-        setRuntimePermissionMode(mode);
-      } else {
-        setPermissionMode(mode as PermissionMode);
-      }
+    setReasoningEffort(
+      (snapshotIsExternal
+        ? coerceReasoningEffortForUi(snapEffort, snapshotRuntime)
+        : snapEffort)
+      ?? 'default',
+    );
+    if (snapshotIsExternal) {
+      setRuntimePermissionMode(mode ?? getDefaultRuntimePermissionMode(snapshotRuntime) ?? 'default');
+    } else if (mode) {
+      setPermissionMode(mode as PermissionMode);
     }
     if (providerId) setSelectedProviderId(providerId);
     if (mcp) setWorkspaceMcpEnabled(mcp);
@@ -2505,6 +2586,14 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       // Provider unchanged but caller passed a specific model — treat as model change.
       // Same dual-write policy as handleModelChange (PRD §4.3 rule 2).
       if (targetModel) {
+        const canResumeProviderHistory = canResumeAcrossProviderBoundary(
+          toProviderHistoryEnv(currentProvider, selectedModel),
+          toProviderHistoryEnv(currentProvider, targetModel),
+        );
+        if (!canResumeProviderHistory && messagesRef.current.length > 0) {
+          setPendingProviderSwitch({ providerId, model: targetModel });
+          return;
+        }
         setSelectedModel(targetModel);
         void persistTabConfigChange({ model: targetModel });
       }
@@ -2516,14 +2605,15 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
 
     const newProvider = providers.find(p => p.id === providerId);
     const model = targetModel ?? newProvider?.primaryModel;
+    const canResumeProviderHistory = canResumeAcrossProviderBoundary(
+      toProviderHistoryEnv(currentProvider, selectedModel),
+      toProviderHistoryEnv(newProvider, model),
+    );
 
-    // Claude session signatures only matter when entering the official Anthropic providers.
-    // Protocol alone is not enough: many third-party providers expose Anthropic-compatible APIs,
-    // and switching between "Anthropic protocol" / "OpenAI-compatible" third-party providers
-    // should not force a new session.
-    const currentRequiresSignedHistory = requiresSignedSessionHistory(selectedProviderId);
-    const newRequiresSignedHistory = requiresSignedSessionHistory(providerId);
-    if (!currentRequiresSignedHistory && newRequiresSignedHistory && messagesRef.current.length > 0) {
+    // Existing SDK transcripts only need a new tab when crossing provider-history
+    // families. Ordinary third-party providers share a portable protocol family;
+    // entries in providerHistory's isolated set intentionally do not.
+    if (!canResumeProviderHistory && messagesRef.current.length > 0) {
       setPendingProviderSwitch({ providerId, model });
       return;  // Don't update state — dialog will handle it
     }
@@ -2544,7 +2634,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     // the user's latest preference (PRD v0.1.69 §4.3 rule 2 dual-write).
     void persistTabConfigChange({ providerId, model: model ?? null });
   // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed deps; messagesRef avoids dep on messages array
-  }, [selectedProviderId, providers, currentProvider?.id, persistTabConfigChange]);
+  }, [selectedProviderId, selectedModel, providers, currentProvider?.id, currentProvider?.type, currentProvider?.config.baseUrl, currentProvider?.apiProtocol, persistTabConfigChange]);
 
   // Handle model change with analytics tracking.
   // Dual-write per PRD v0.1.69 §4.3 rule 2 "写 Session + 向上写 Agent": owned sessions
@@ -2559,9 +2649,20 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     // Track model_switch event
     track('model_switch', { model });
 
+    const canResumeProviderHistory = canResumeAcrossProviderBoundary(
+      toProviderHistoryEnv(currentProvider, selectedModel),
+      toProviderHistoryEnv(currentProvider, model),
+    );
+    const currentProviderId = selectedProviderId ?? currentProvider?.id;
+    if (!canResumeProviderHistory && messagesRef.current.length > 0 && currentProviderId) {
+      setPendingProviderSwitch({ providerId: currentProviderId, model });
+      return;
+    }
+
     setSelectedModel(model);
     void persistTabConfigChange({ model });
-  }, [selectedModel, persistTabConfigChange]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed deps; currentProvider fields cover toProviderHistoryEnv inputs
+  }, [selectedModel, currentProvider?.id, currentProvider?.type, currentProvider?.config.baseUrl, currentProvider?.apiProtocol, selectedProviderId, persistTabConfigChange]);
 
   // External-runtime model change. Same dual-write policy as builtin
   // `handleModelChange`, routed through `runtimeModel` so the helper writes
@@ -2848,9 +2949,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
 
   const handleOpenAgentSettings = useCallback(() => setShowWorkspaceConfig(true), []);
 
-  // Cross-protocol provider switch: third-party (OpenAI bridge) → Anthropic native.
-  // Anthropic validates thinking block signatures that third-party providers don't,
-  // so we can't resume — show confirm dialog, then open new Tab. See: #68
+  // Provider switch on non-empty builtin history: keep the current tab unchanged,
+  // save the new provider as workspace default, and open a fresh session in a new tab.
   const [pendingProviderSwitch, setPendingProviderSwitch] = useState<{
     providerId: string;
     model?: string;
@@ -2921,8 +3021,9 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     onForkSession(session.id, agentDir, `${runtimeLabel} Session`);
   }, [pendingRuntimeChange, currentAgent, onForkSession, agentDir]);
 
-  // Cross-protocol provider switch confirm: save new provider to project, create new session in new tab.
-  // Current tab stays unchanged (preserving the third-party session). See: #68
+  // Provider/model history-boundary confirm: save the requested selection to
+  // project, create a new session in a new tab, and leave the current tab on
+  // its original SDK transcript.
   const confirmProviderSwitch = useCallback(async () => {
     const pending = pendingProviderSwitch;
     setPendingProviderSwitch(null);
@@ -3138,8 +3239,9 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   // 稳定，SimpleChatInput 的 React.memo 不再被打穿，输入框在 AI 流式输出时不会
   // 每 token 重渲染。AgentStatusPanel 内部仍随 commit 重渲染，其 DOM 仅在
   // 派生 todos/subagents 变化时才改，成本由 React 协调器吸收。
+  const supportsAgentStatusPanel = currentRuntime === 'builtin' || currentRuntime === 'codex';
   const agentStatusSlot = useMemo(
-    () => isExternalRuntime
+    () => !supportsAgentStatusPanel
       ? undefined
       : (
         <AgentStatusPanel
@@ -3147,7 +3249,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
           onJumpToTool={handleJumpToTool}
         />
       ),
-    [isExternalRuntime, handleJumpToTool],
+    [supportsAgentStatusPanel, handleJumpToTool],
   );
 
   // PRD 0.2.32 — 智能压缩入口（builtin only）。用与正常发送完全相同的已解析
@@ -3443,14 +3545,14 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   }, [forkTarget, apiPost, onForkSession]);
 
   // Handler for selecting a session from history dropdown
-  const handleSelectSession = useCallback((id: string) => {
+  const handleSelectSession = useCallback((id: string, historyEntrySource: HistoryEntrySource = 'chat_dropdown') => {
     // PRD 0.2.19 cross-review fix (B3): explicitly stamp session_switch with the
     // TARGET session id, not the source. Without this, Active Context auto-inject
     // attaches the pre-switch session id (still the "source") because the switch
     // hasn't completed yet, making the event semantics "from→to" backwards.
-    track('session_switch', { session_id: id });
+    track('session_switch', { session_id: id, legacy_compat: true });
     if (onSwitchSession) {
-      onSwitchSession(id);
+      onSwitchSession(id, historyEntrySource);
     } else {
       if (cronStateRef.current.task?.status === 'running') {
         console.log('[Chat] Cannot switch session while cron task is running (no onSwitchSession handler)');
@@ -3681,7 +3783,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
             <SessionHistoryDropdown
               agentDir={agentDir}
               currentSessionId={sessionId}
-              onSelectSession={handleSelectSession}
+              onSelectSession={(id) => handleSelectSession(id, 'chat_dropdown')}
               onOpenInNewTab={onOpenSessionInNewTab}
               onDeleteCurrentSession={handleNewSession}
               isOpen={showHistory}
@@ -4185,8 +4287,9 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
                     content={splitFile.content}
                     size={splitFile.size}
                     path={splitFile.path}
+                    localPath={splitFile.localPath}
                     richDocKind={splitFile.richDocKind}
-                    workspacePath={agentDir}
+                    workspacePath={splitFile.sourceScope === 'local' ? null : agentDir}
                     initialEditMode={splitFile.initialEditMode}
                     initialLineNumber={splitFile.initialLineNumber}
                     focusTarget={splitFile.focusTarget}
@@ -4214,6 +4317,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
                     }}
                     onSwitchToBrowser={browserUrl ? handleEditorSwitchToBrowser : undefined}
                     onQuoteFile={handleQuoteFile}
+                    onRevealInTree={handleRevealInTree}
                     onQuoteSelection={handleQuoteFileSelection}
                   />
                 </Suspense>
@@ -4309,8 +4413,9 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
             content={fullscreenPreviewFile.content}
             size={fullscreenPreviewFile.size}
             path={fullscreenPreviewFile.path}
+            localPath={fullscreenPreviewFile.localPath}
             richDocKind={fullscreenPreviewFile.richDocKind}
-            workspacePath={agentDir}
+            workspacePath={fullscreenPreviewFile.sourceScope === 'local' ? null : agentDir}
             initialEditMode={fullscreenPreviewFile.initialEditMode}
             initialLineNumber={fullscreenPreviewFile.initialLineNumber}
             focusTarget={fullscreenPreviewFile.focusTarget}
@@ -4327,6 +4432,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
               setWorkspaceRefreshTrigger(prev => prev + 1);
             }}
             onQuoteFile={handleQuoteFile}
+            onRevealInTree={handleRevealInTree}
             onQuoteSelection={handleQuoteFileSelection}
           />
         </Suspense>
@@ -4382,11 +4488,11 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
         );
       })()}
 
-      {/* Cross-Protocol Provider Switch Confirm Dialog (#68) */}
+      {/* Provider / Model History-Boundary Confirm Dialog */}
       {pendingProviderSwitch && (
         <ConfirmDialog
-          title="切换到 Claude 模型"
-          message="Claude 模型会验证会话历史中的签名信息，无法继续使用其他供应商的会话记录。将为你新开一个会话。"
+          title="切换模型/Provider"
+          message="当前会话的历史记录不能安全切换到目标模型/Provider。切换后将保留当前会话，并在新 Tab 打开一个使用新模型/Provider 的会话。"
           confirmText="创建新会话"
           cancelText="取消"
           onConfirm={confirmProviderSwitch}
@@ -4494,7 +4600,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
             setCronDetailTask(updated);
             toastRef.current?.success('任务已停止');
           }}
-          onOpenSession={handleSelectSession}
+          onOpenSession={(id) => handleSelectSession(id, 'task_run_history')}
         />
       )}
     </div>

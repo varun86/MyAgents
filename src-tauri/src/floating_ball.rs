@@ -113,6 +113,7 @@ mod imp {
     use super::{FbCapabilities, FbContext, FbPlacement};
     use crate::{ulog_error, ulog_info, ulog_warn};
     use serde::Serialize;
+    use std::cell::RefCell;
     use std::path::PathBuf;
     use std::sync::Mutex;
     use tauri::{
@@ -130,6 +131,13 @@ mod imp {
     const COMPANION_W: f64 = 440.0;
     const COMPANION_H: f64 = 660.0;
     const COMPANION_GAP: f64 = 10.0;
+
+    type RunningApplication =
+        tauri_nspanel::objc2::rc::Retained<tauri_nspanel::objc2_app_kit::NSRunningApplication>;
+
+    thread_local! {
+        static PIN_FOREGROUND_APP: RefCell<Option<RunningApplication>> = const { RefCell::new(None) };
+    }
 
     tauri_panel! {
         // The ball never takes keyboard focus — pure visual + mouse target.
@@ -152,6 +160,80 @@ mod imp {
                 is_floating_panel: true
             }
         })
+    }
+
+    fn remember_pin_foreground_app() {
+        let Some(_mtm) = tauri_nspanel::objc2::MainThreadMarker::new() else {
+            return;
+        };
+        let ws = tauri_nspanel::objc2_app_kit::NSWorkspace::sharedWorkspace();
+        let previous = ws.frontmostApplication();
+        let current = tauri_nspanel::objc2_app_kit::NSRunningApplication::currentApplication();
+        PIN_FOREGROUND_APP.with(|slot| {
+            if slot.borrow().is_some() {
+                return;
+            }
+            *slot.borrow_mut() = if current.isActive() {
+                None
+            } else {
+                previous.filter(|app| !app.isTerminated())
+            };
+        });
+    }
+
+    fn activate_current_app_for_text_input() {
+        let Some(mtm) = tauri_nspanel::objc2::MainThreadMarker::new() else {
+            return;
+        };
+        tauri_nspanel::objc2_app_kit::NSApplication::sharedApplication(mtm).activate();
+    }
+
+    fn companion_is_key_window(app: &AppHandle) -> bool {
+        let Some(companion) = app.get_webview_window(COMPANION_LABEL) else {
+            return false;
+        };
+        let Ok(ns_window_ptr) = companion.ns_window() else {
+            return false;
+        };
+        if ns_window_ptr.is_null() {
+            return false;
+        }
+        // SAFETY: This is called from main-thread native window operations or
+        // run_on_main_thread fade cleanup. The NSWindow pointer is borrowed only
+        // synchronously while `companion` is alive.
+        let ns_window: &tauri_nspanel::objc2_app_kit::NSWindow =
+            unsafe { &*(ns_window_ptr as *const tauri_nspanel::objc2_app_kit::NSWindow) };
+        ns_window.isKeyWindow()
+    }
+
+    fn restore_pin_foreground_app(restore_allowed: bool) {
+        let previous = PIN_FOREGROUND_APP.with(|slot| slot.borrow_mut().take());
+        if !restore_allowed {
+            return;
+        }
+        let Some(previous) = previous else {
+            return;
+        };
+        if previous.isTerminated() {
+            return;
+        }
+        let Some(mtm) = tauri_nspanel::objc2::MainThreadMarker::new() else {
+            return;
+        };
+        let current = tauri_nspanel::objc2_app_kit::NSRunningApplication::currentApplication();
+        if !current.isActive() {
+            return;
+        }
+        tauri_nspanel::objc2_app_kit::NSApplication::sharedApplication(mtm)
+            .yieldActivationToApplication(&previous);
+        let _ = previous.activateFromApplication_options(
+            &current,
+            tauri_nspanel::objc2_app_kit::NSApplicationActivationOptions::empty(),
+        );
+    }
+
+    pub fn suppress_pin_foreground_restore() {
+        restore_pin_foreground_app(false);
     }
 
     // ── Hover detection: NSEvent.mouseLocation polling ──
@@ -605,7 +687,11 @@ mod imp {
         // 作废 in-flight 渐变 task（否则它会在已隐藏的窗口上继续步进 alpha）。
         let _ = next_companion_gen();
         if let Ok(panel) = app.get_webview_panel(COMPANION_LABEL) {
+            let should_restore = companion_is_key_window(app);
             panel.hide();
+            restore_pin_foreground_app(should_restore);
+        } else {
+            restore_pin_foreground_app(false);
         }
         if let Ok(panel) = app.get_webview_panel(BALL_LABEL) {
             panel.hide();
@@ -751,10 +837,12 @@ mod imp {
                 set_tracked_alpha(1.0);
                 let app2 = app.clone();
                 let _ = app.run_on_main_thread(move || {
+                    let should_restore = companion_is_key_window(&app2);
                     if let Ok(panel) = app2.get_webview_panel(COMPANION_LABEL) {
                         panel.hide();
                         panel.set_alpha_value(1.0); // 复位（下次 show 会先归零）
                     }
+                    restore_pin_foreground_app(should_restore);
                 });
             }
         });
@@ -784,8 +872,8 @@ mod imp {
         panel.order_front_regardless();
         panel.show();
         if mode == "pin" {
-            // Keyboard focus moves to the panel; the user's app stays
-            // frontmost because of the nonactivating style mask.
+            remember_pin_foreground_app();
+            activate_current_app_for_text_input();
             panel.make_key_window();
         }
         // Peek: visible but never key — D1. 半透明完全由 DOM 暖纸表达。
@@ -805,6 +893,8 @@ mod imp {
             .get_webview_panel(COMPANION_LABEL)
             .map_err(|_| "[fb] companion panel missing".to_string())?;
         let generation = next_companion_gen();
+        remember_pin_foreground_app();
+        activate_current_app_for_text_input();
         panel.order_front_regardless();
         panel.show();
         panel.make_key_window();
@@ -816,16 +906,20 @@ mod imp {
 
     pub fn hide_companion(app: &AppHandle) {
         let Some(win) = app.get_webview_window(COMPANION_LABEL) else {
+            restore_pin_foreground_app(false);
             return;
         };
         if !win.is_visible().unwrap_or(false) {
+            restore_pin_foreground_app(false);
             return;
         }
         let generation = next_companion_gen();
         crate::ulog_debug!("[fb] companion fade-out start (gen {generation})");
         // 渐隐到 0 后由 fade task 收尾 orderOut（hide_when_done）。
-        // hide()/orderOut is sufficient — AppKit reassigns key to the
-        // frontmost app on its own. (Do NOT call resign_key_window directly;
+        // hide()/orderOut is sufficient for pure nonactivating panels. Pin now
+        // activates MyAgents so IME/text services attach to WKWebView, so the
+        // fade-out completion explicitly yields activation back to the app that
+        // was frontmost before pin. (Do NOT call resign_key_window directly;
         // AppKit docs reserve it as a system callback.)
         fade_companion_to(app, generation, 0.0, FADE_OUT_MS, true);
     }
@@ -2508,6 +2602,11 @@ mod commands {
         preview_line: Option<u32>,
     ) -> Result<(), String> {
         use tauri::Emitter;
+        #[cfg(target_os = "macos")]
+        run_native_window_op(app.clone(), "suppress pin restore", |_app| {
+            imp::suppress_pin_foreground_restore();
+            Ok(())
+        })?;
         crate::tray::show_main_window(&app);
         let preview = preview_path.map(|path| {
             serde_json::json!({
@@ -2531,6 +2630,11 @@ mod commands {
     #[tauri::command]
     pub async fn cmd_fb_open_desktop_pet_settings(app: AppHandle) -> Result<(), String> {
         use tauri::Emitter;
+        #[cfg(target_os = "macos")]
+        run_native_window_op(app.clone(), "suppress pin restore", |_app| {
+            imp::suppress_pin_foreground_restore();
+            Ok(())
+        })?;
         crate::tray::show_main_window(&app);
         app.emit_to(
             "main",

@@ -14,7 +14,7 @@ import { createContext, useContext } from 'react';
 import type { Dispatch, SetStateAction } from 'react';
 
 import type { ImageAttachment } from '@/components/SimpleChatInput';
-import type { Message } from '@/types/chat';
+import type { AgentStatusTodoSnapshot, Message } from '@/types/chat';
 import type { LogEntry } from '@/types/log';
 import type { QueuedMessageInfo } from '@/types/queue';
 import type { SystemInitInfo } from '../../shared/types/system';
@@ -98,6 +98,12 @@ export interface TabState {
      */
     contextUsage: ContextUsage | null;
     /**
+     * Runtime-native plan/todo snapshot (Codex `turn/plan/updated` today).
+     * Transient UI state only; ordinary chat history remains the source for
+     * persisted builtin TodoWrite / Task tool todos.
+     */
+    agentPlanTodos: AgentStatusTodoSnapshot[] | null;
+    /**
      * SDK 0.2.91+ terminal_reason of the last turn. Set on chat:message-complete,
      * cleared on next send / session load / reset. `completed` and missing reasons
      * are normalized to null (no banner needed). Typed as `TerminalReason | null`
@@ -166,7 +172,7 @@ export interface TabContextValue extends TabState {
     isConnected: boolean;
 
     // Chat actions
-    sendMessage: (text: string, images?: ImageAttachment[], permissionMode?: PermissionMode, model?: string, providerEnv?: { baseUrl?: string; apiKey?: string; authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key'; apiProtocol?: 'anthropic' | 'openai'; maxOutputTokens?: number; maxOutputTokensParamName?: 'max_tokens' | 'max_completion_tokens' | 'max_output_tokens'; upstreamFormat?: 'chat_completions' | 'responses' }, isCron?: boolean, reasoningEffort?: string) => Promise<boolean>;
+    sendMessage: (text: string, images?: ImageAttachment[], permissionMode?: PermissionMode, model?: string, providerEnv?: { providerId?: string; baseUrl?: string; apiKey?: string; authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key'; apiProtocol?: 'anthropic' | 'openai'; maxOutputTokens?: number; maxOutputTokensParamName?: 'max_tokens' | 'max_completion_tokens' | 'max_output_tokens'; upstreamFormat?: 'chat_completions' | 'responses' }, isCron?: boolean, reasoningEffort?: string) => Promise<boolean>;
     stopResponse: () => Promise<boolean>;
     loadSession: (sessionId: string, options?: { skipLoadingReset?: boolean }) => Promise<boolean>;
     /** Prepend the next page of older messages. Safe to call repeatedly — guarded internally. */
@@ -245,6 +251,7 @@ const defaultContextValue: TabContextValue = {
     systemStatus: null,
     systemNotice: null,
     contextUsage: null,
+    agentPlanTodos: null,
     lastTerminalReason: null,
     pendingPermission: null,
     pendingAskUserQuestion: null,

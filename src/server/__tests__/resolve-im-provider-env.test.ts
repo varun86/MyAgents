@@ -249,8 +249,8 @@ describe('resolveImProviderEnv (#237)', () => {
     expect(env?.baseUrl).toBe('https://open.bigmodel.cn/api/anthropic');
   });
 
-  it('normalizes Windows-style backslashes in workspacePath', async () => {
-    const winPath = 'C:\\Users\\test\\workspace';
+  it('normalizes Windows workspace identity across separators, case, and trailing slash', async () => {
+    const winPath = 'C:\\Users\\Test\\workspace\\';
     writeConfig({
       agents: [{
         id: 'agent-1',
@@ -265,8 +265,8 @@ describe('resolveImProviderEnv (#237)', () => {
     });
 
     const { resolveImProviderEnv } = await import('../utils/admin-config');
-    // Same path with forward slashes should also match.
-    const fwdEnv = resolveImProviderEnv('C:/Users/test/workspace', undefined);
+    // Same Windows identity with forward slashes, different case, and no trailing slash should match.
+    const fwdEnv = resolveImProviderEnv('c:/users/test/workspace', undefined);
     expect(fwdEnv?.baseUrl).toBe('https://api.deepseek.com/anthropic');
   });
 });

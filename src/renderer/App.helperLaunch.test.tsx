@@ -37,6 +37,8 @@ const mocks = vi.hoisted(() => {
     activateSession: vi.fn(async () => undefined),
     getSessionPort: vi.fn(async () => null),
     startBackgroundCompletion: vi.fn(async () => ({ started: false })),
+    setAppActiveCorrelation: vi.fn(),
+    setAppActiveTabId: vi.fn(),
   };
 });
 
@@ -47,12 +49,20 @@ vi.mock('@/analytics', () => ({
   clearAnalyticsContext: vi.fn(),
   setPendingSurface: vi.fn(),
   clearPendingSurface: vi.fn(),
+  setPendingSessionBirth: vi.fn(),
+  clearPendingSessionBirth: vi.fn(),
+  birthContextForSurface: vi.fn((surface: string) => ({
+    surface,
+    entryIntent: surface === 'new_chat_button' ? 'new_chat' : 'unknown',
+    hasInitialMessage: surface !== 'new_chat_button',
+  })),
   hashAgentName: vi.fn(async () => 'agent-hash'),
   hashAgentNameSync: vi.fn(() => 'agent-hash'),
 }));
 
 vi.mock('@/api/tauriClient', () => ({
   stopTabSidecar: vi.fn(async () => undefined),
+  setAppActiveCorrelation: mocks.setAppActiveCorrelation,
   startGlobalSidecar: mocks.startGlobalSidecar,
   initGlobalSidecarReadyPromise: mocks.initGlobalSidecarReadyPromise,
   markGlobalSidecarReady: mocks.markGlobalSidecarReady,
@@ -225,6 +235,7 @@ vi.mock('@/utils/frontendLogger', () => ({
   forceFlushLogs: vi.fn(async () => undefined),
   setLogServerUrl: vi.fn(),
   clearLogServerUrl: vi.fn(),
+  setAppActiveTabId: mocks.setAppActiveTabId,
 }));
 
 vi.mock('@/utils/lastExitMarker', () => ({
@@ -286,6 +297,13 @@ describe('App helper launch', () => {
 
       expect(launchStart).toContain('view=launcher');
       expect(launchStart).not.toContain('view=undefined');
+      expect(mocks.setAppActiveTabId).toHaveBeenCalledWith(
+        expect.stringMatching(/^tab-/),
+        expect.arrayContaining([expect.stringMatching(/^tab-/)]),
+      );
+      expect(mocks.setAppActiveCorrelation).toHaveBeenCalledWith(expect.objectContaining({
+        tabId: expect.stringMatching(/^tab-/),
+      }));
     } finally {
       logSpy.mockRestore();
     }

@@ -8,13 +8,14 @@ import {
   track,
   setAnalyticsContext,
   clearAnalyticsContext,
-  setPendingSurface,
-  clearPendingSurface,
+  setPendingSessionBirth,
+  clearPendingSessionBirth,
+  birthContextForSurface,
   hashAgentName,
   hashAgentNameSync,
 } from '@/analytics';
-import type { Surface } from '@/analytics';
-import { stopTabSidecar, startGlobalSidecar, initGlobalSidecarReadyPromise, markGlobalSidecarReady, getGlobalServerUrl, getSessionActivation, updateSessionTab, ensureSessionSidecar, releaseSessionSidecar, activateSession, deactivateSession, upgradeSessionId, getSessionPort, hasSessionSidecar, getSessionGeneration, stopSseProxy, startBackgroundCompletion, cancelBackgroundCompletion, updateGlobalServerUrl, canRestoreSession } from '@/api/tauriClient';
+import type { AssistantEntry, EntryIntent, HistoryEntrySource, PendingSessionBirthContext, Surface } from '@/analytics';
+import { stopTabSidecar, startGlobalSidecar, initGlobalSidecarReadyPromise, markGlobalSidecarReady, getGlobalServerUrl, getSessionActivation, updateSessionTab, ensureSessionSidecar, releaseSessionSidecar, activateSession, deactivateSession, upgradeSessionId, getSessionPort, hasSessionSidecar, getSessionGeneration, stopSseProxy, startBackgroundCompletion, cancelBackgroundCompletion, updateGlobalServerUrl, canRestoreSession, setAppActiveCorrelation } from '@/api/tauriClient';
 import ConfirmDialog from '@/components/ConfirmDialog';
 import BugReportOverlay from '@/components/BugReportOverlay';
 import CustomTitleBar from '@/components/CustomTitleBar';
@@ -70,7 +71,7 @@ import { updateSession } from '@/api/sessionClient';
 import { dismissTopmost } from '@/utils/closeLayer';
 import { dispatchAppShortcut } from '@/utils/appShortcuts';
 import { handleSelectAllKeydown } from '@/utils/selectAllRouter';
-import { forceFlushLogs, setLogServerUrl, clearLogServerUrl } from '@/utils/frontendLogger';
+import { forceFlushLogs, setLogServerUrl, clearLogServerUrl, setAppActiveTabId } from '@/utils/frontendLogger';
 import { normalizeRuntime, resolveEffectiveRuntime, planSessionOpen } from '@/utils/sessionOpenPlan';
 import { resolveNotificationClickRoute } from '@/utils/notificationClickRoute';
 import { applyTerminalSessionToTabs } from '@/utils/sessionTermination';
@@ -119,6 +120,13 @@ async function resolveSessionRuntimeForOpen(
   }
 }
 
+export interface LaunchProjectAnalyticsContext {
+  surface?: Surface;
+  entryIntent?: EntryIntent;
+  assistantEntry?: AssistantEntry;
+  historyEntrySource?: HistoryEntrySource;
+}
+
 // ============================================================
 // MemoizedTabContent — prevents re-rendering tabs whose props haven't changed.
 // When switching tabs, only the newly active and previously active tabs re-render.
@@ -132,7 +140,7 @@ interface TabContentProps {
   /**
    * When true, render only a cheap placeholder instead of the (heavy) tab
    * content. Set for a freshly created tab so its full subtree (e.g. the
-   * Launcher: BrandSection + SimpleChatInput + selectors + RecentTasks +
+   * Launcher: BrandSection + SimpleChatInput + selectors + LauncherRightRail +
    * WorkspaceCards) does NOT mount inside the synchronous click commit —
    * that mount is what janked the "+" / Cmd+T action. handleNewTab clears
    * the flag right after the placeholder paints (runAfterNextPaint), so React
@@ -145,11 +153,11 @@ interface TabContentProps {
   settingsInitialMcpId: string | undefined;
   settingsInitialSelect: CapabilityInitialSelect | undefined;
   // Launcher callbacks
-  onLaunchProject: (project: Project, sessionId?: string, initialMessage?: InitialMessage) => void;
+  onLaunchProject: (project: Project, sessionId?: string, initialMessage?: InitialMessage, analyticsContext?: LaunchProjectAnalyticsContext) => void;
   // Chat callbacks
   onBack: () => Promise<void>;
-  onSwitchSession: (tabId: string, sessionId: string) => Promise<void>;
-  onOpenSessionInNewTab: (tabId: string, sessionId: string, title: string) => Promise<void>;
+  onSwitchSession: (tabId: string, sessionId: string, historyEntrySource?: HistoryEntrySource) => Promise<void>;
+  onOpenSessionInNewTab: (tabId: string, sessionId: string, title: string, historyEntrySource?: HistoryEntrySource) => Promise<void>;
   onNewSession: (tabId: string) => Promise<boolean>;
   onUpdateGenerating: (tabId: string, isGenerating: boolean) => void;
   onUpdateTitle: (tabId: string, title: string) => void;
@@ -250,8 +258,8 @@ export const MemoizedTabContent = memo(function TabContent({
           <Suspense fallback={<ChatBootOverlay />}>
             <Chat
               onBack={onBack}
-              onSwitchSession={(sessionId) => onSwitchSession(tab.id, sessionId)}
-              onOpenSessionInNewTab={(sessionId, title) => onOpenSessionInNewTab(tab.id, sessionId, title)}
+              onSwitchSession={(sessionId, historyEntrySource) => onSwitchSession(tab.id, sessionId, historyEntrySource)}
+              onOpenSessionInNewTab={(sessionId, title) => onOpenSessionInNewTab(tab.id, sessionId, title, 'chat_dropdown_new_tab')}
               onNewSession={() => onNewSession(tab.id)}
               initialMessage={tab.initialMessage}
               onInitialMessageConsumed={() => onClearInitialMessage(tab.id)}
@@ -352,7 +360,7 @@ export default function App() {
   // TabProvider / sidecar until first activation — see MemoizedTabContent).
   const [restoreCandidate] = useState(() => buildRestoredTabs());
   const [tabs, setTabs] = useState<Tab[]>(() => [createNewTab()]);
-  const [activeTabId, setActiveTabId] = useState<string | null>(() => tabs[0]?.id ?? null);
+  const [activeTabId, setActiveTabIdState] = useState<string | null>(() => tabs[0]?.id ?? null);
 
   // "恢复对话" pill (Issue #309). `restorePillCount > 0` shows it; the resolved
   // candidate is held in a ref (NOT localStorage — the persist effect clears
@@ -366,6 +374,34 @@ export default function App() {
 
   const activeTabIdRef = useRef(activeTabId);
   activeTabIdRef.current = activeTabId;
+
+  const syncRendererCorrelationForTab = useCallback((tabId: string | null | undefined, nextTabs: readonly Tab[] = tabsRef.current) => {
+    const activeTab = tabId ? nextTabs.find((t) => t.id === tabId) : undefined;
+    setAppActiveTabId(tabId, nextTabs.map((t) => t.id));
+    setAppActiveCorrelation({
+      tabId,
+      sessionId: activeTab?.sessionId ?? undefined,
+      tabs: nextTabs.map((t) => ({ id: t.id, sessionId: t.sessionId })),
+    });
+  }, []);
+
+  const setActiveTabId = useCallback((
+    next: string | null | ((current: string | null) => string | null),
+    nextTabs: readonly Tab[] = tabsRef.current,
+  ) => {
+    if (typeof next === 'function') {
+      setActiveTabIdState((current) => {
+        const resolved = next(current);
+        activeTabIdRef.current = resolved;
+        syncRendererCorrelationForTab(resolved, nextTabs);
+        return resolved;
+      });
+      return;
+    }
+    activeTabIdRef.current = next;
+    syncRendererCorrelationForTab(next, nextTabs);
+    setActiveTabIdState(next);
+  }, [syncRendererCorrelationForTab]);
 
   // Persist open chat tabs after every structural change (Issue #232). This is
   // a POST-COMMIT effect — it flushes shortly after each tabs/activeTabId change
@@ -452,7 +488,7 @@ export default function App() {
     track('restore_last_session', { count: candidate.tabs.length });
     setTabs(plan.tabs);
     setActiveTabId(plan.activeTabId);
-  }, []);
+  }, [setActiveTabId]);
 
   // ✕ on the pill — dismiss without restoring (don't nag again this session).
   const handleDismissRestore = useCallback(() => {
@@ -493,6 +529,7 @@ export default function App() {
   // cannot be hidden behind a placeholder — they intentionally do not use this.
   const openNewTabDeferred = useCallback((newTab: Tab) => {
     perfMark(RENDERER_PERF_PHASE.newTabReveal, { tabId: newTab.id }); // P0: new-tab timeline anchor
+    const nextTabs = [...tabsRef.current, newTab];
     setDeferredMountTabIds((prev) => {
       if (prev.has(newTab.id)) return prev;
       const next = new Set(prev);
@@ -500,7 +537,7 @@ export default function App() {
       return next;
     });
     setTabs((prev) => [...prev, newTab]);
-    setActiveTabId(newTab.id);
+    setActiveTabId(newTab.id, nextTabs);
     runAfterNextPaint(() => {
       setDeferredMountTabIds((prev) => {
         if (!prev.has(newTab.id)) return prev;
@@ -509,18 +546,18 @@ export default function App() {
         return next;
       });
     });
-  }, []);
+  }, [setActiveTabId]);
 
   // Helper-overlay launches must hand `handleLaunchProject` a real, committed
   // active launcher tab. Mutating activeTabIdRef before React has committed the
   // tab produces `view=undefined` and can let the new Chat auto-send while hidden.
   const openLaunchTabNow = useCallback((newTab: Tab) => {
+    const nextTabs = [...tabsRef.current, newTab];
     flushSync(() => {
       setTabs((prev) => [...prev, newTab]);
-      setActiveTabId(newTab.id);
+      setActiveTabId(newTab.id, nextTabs);
     });
-    activeTabIdRef.current = newTab.id;
-  }, []);
+  }, [setActiveTabId]);
 
   const removeUnusedPrecreatedLaunchTab = useCallback((tabId: string) => {
     setTabs((prev) => {
@@ -549,6 +586,14 @@ export default function App() {
       sessionId: sid && !isPendingSessionId(sid) ? sid : null,
     });
   }, [activeTabId, tabs]);
+
+  // Renderer correlation must follow the App-level active tab, not only mounted
+  // Chat TabProviders. Launcher / Settings / TaskCenter do not mount a
+  // TabProvider, but logs and proxy headers still need their tab id instead of
+  // inheriting the previously-focused chat tab.
+  useEffect(() => {
+    syncRendererCorrelationForTab(activeTabId, tabs);
+  }, [activeTabId, tabs, syncRendererCorrelationForTab]);
 
   // PRD 0.2.19 cross-review fix: prewarm agent_hash cache when config.agents
   // loads/changes, so the first `workspace_open` / `session_new` for each agent
@@ -579,6 +624,46 @@ export default function App() {
   // handleSwitchSession useCallback deps (it's intentionally a stable empty-deps callback).
   const configRef = useRef(config);
   configRef.current = config;
+
+  const trackHistorySessionOpen = useCallback((
+    sessionId: string,
+    agentDir: string,
+    runtime: RuntimeType,
+    entrySource: HistoryEntrySource,
+  ) => {
+    const cfg = configRef.current;
+    const agent = getAgentByWorkspacePath(cfg, agentDir);
+    track('history_open', {
+      agent_hash: hashAgentNameSync(agent?.name ?? null),
+      runtime,
+      session_id: sessionId,
+      entry_source: entrySource,
+    });
+  }, []);
+
+  const trackHistorySessionOpenAsync = useCallback((
+    sessionId: string,
+    agentDir: string,
+    entrySource: HistoryEntrySource,
+  ) => {
+    void (async () => {
+      const cfg = configRef.current;
+      const agent = getAgentByWorkspacePath(cfg, agentDir);
+      const runtime = await resolveSessionRuntimeForOpen(
+        sessionId,
+        normalizeRuntime(agent?.runtime),
+        cfg?.multiAgentRuntime,
+      );
+      track('history_open', {
+        agent_hash: hashAgentNameSync(agent?.name ?? null),
+        runtime,
+        session_id: sessionId,
+        entry_source: entrySource,
+      });
+    })().catch((error) => {
+      console.warn(`[App] Failed to track history_open for session ${sessionId}:`, error);
+    });
+  }, []);
 
   // Toast (ref-stabilized per CLAUDE.md rules)
   const toast = useToast();
@@ -1052,7 +1137,7 @@ export default function App() {
     // Drop any leftover pending surface for this tab to avoid leaking it into
     // a later (unrelated) session_new — the analytics module keeps these
     // module-level until consumed.
-    clearPendingSurface(tabId);
+    clearPendingSessionBirth(tabId);
 
     // ========== IMMEDIATE UI UPDATE (non-blocking) ==========
     // Update UI state first for instant response
@@ -1131,7 +1216,7 @@ export default function App() {
     cleanupResources().catch(err =>
       console.error(`[App] Unhandled cleanup error for tab ${tabId}:`, err)
     );
-  }, []);
+  }, [setActiveTabId]);
 
   // Close tab — if AI is generating, close immediately and let it finish in background.
   // No confirmation dialog: background completion keeps the Sidecar alive.
@@ -1146,7 +1231,7 @@ export default function App() {
 
     void performCloseTab(tabId);
   // eslint-disable-next-line react-hooks/exhaustive-deps -- callbacks stabilized via tabsRef
-  }, []);
+  }, [setActiveTabId]);
 
   // Close current active tab (for Cmd+W)
   const closeCurrentTab = useCallback(() => {
@@ -1164,7 +1249,7 @@ export default function App() {
     // Multiple tabs OR last tab is chat/settings: use the unified confirmation logic
     void closeTabWithConfirmation(currentActiveTabId);
   // eslint-disable-next-line react-hooks/exhaustive-deps -- callbacks stabilized via tabsRef
-  }, []);
+  }, [setActiveTabId]);
 
   // Application-level keyboard shortcuts (new/close/switch tab, task-center,
   // settings, reload-block). The bindings + matching live in the declarative
@@ -1202,7 +1287,7 @@ export default function App() {
     window.addEventListener('keydown', handleKeyDown, { capture: true });
     return () => window.removeEventListener('keydown', handleKeyDown, { capture: true });
   // eslint-disable-next-line react-hooks/exhaustive-deps -- callbacks stabilized via tabsRef
-  }, []);
+  }, [setActiveTabId]);
 
   /**
    * Launch a project with Session Singleton Architecture
@@ -1216,7 +1301,8 @@ export default function App() {
   const handleLaunchProject = useCallback(async (
     project: Project,
     sessionId?: string,
-    initialMessage?: InitialMessage
+    initialMessage?: InitialMessage,
+    analyticsContext?: LaunchProjectAnalyticsContext,
   ) => {
     const activeTabId = activeTabIdRef.current;
     if (!activeTabId) return;
@@ -1238,26 +1324,51 @@ export default function App() {
     // Scenario 3 creates a new tab, the new TabProvider's chat:system-init must
     // consume the surface from THE NEW tabId, not the original activeTabId.
     // Tracked here for review feedback B2/H2 (Codex BLOCKER, Codex HIGH).
-    let pendingSurfaceForLaunch: Surface | null = null;
+    let pendingSurfaceForLaunch: PendingSessionBirthContext | null = null;
+    let workspaceOpenAnalytics: {
+      agent_hash: string | null;
+      runtime: ReturnType<typeof resolveEffectiveRuntime>;
+      entry_intent: EntryIntent;
+      has_initial_message: boolean;
+      session_id: null;
+    } | null = null;
     if (!sessionId) {
-      // workspace_open path (NEW session): agent_card (no initialMessage) vs
-      // launcher_input (initialMessage present). For a new session the agent's
-      // current config IS the spawn runtime, so the agent-config effective
-      // runtime is authoritative here (agrees with server-side ai_turn_complete).
+      // workspace_open path (NEW session): caller-provided analytics context is
+      // authoritative. Falling back to launcher_input for initialMessage preserves
+      // legacy producers, but new producers should pass their true entry intent
+      // so `/init`, task alignment, and support diagnostics do not all collapse
+      // into the launcher input bucket.
       const cfg = configRef.current;
       const agent = getAgentByWorkspacePath(cfg, project.path);
-      pendingSurfaceForLaunch = initialMessage ? 'launcher_input' : 'agent_card';
-      track('workspace_open', {
+      const fallbackLaunchContext = initialMessage
+        ? { surface: 'launcher_input' as const, entryIntent: 'send_message' as const }
+        : { surface: 'agent_card' as const, entryIntent: 'open_workspace' as const };
+      const launchContext = {
+        surface: analyticsContext?.surface ?? fallbackLaunchContext.surface,
+        entryIntent: analyticsContext?.entryIntent ?? fallbackLaunchContext.entryIntent,
+        assistantEntry: analyticsContext?.assistantEntry,
+      };
+      pendingSurfaceForLaunch = {
+        surface: launchContext.surface,
+        entryIntent: launchContext.entryIntent,
+        hasInitialMessage: !!initialMessage,
+        assistantEntry: launchContext.assistantEntry,
+      };
+      workspaceOpenAnalytics = {
         agent_hash: hashAgentNameSync(agent?.name ?? null),
         runtime: resolveEffectiveRuntime(agent?.runtime, !!cfg.multiAgentRuntime),
+        entry_intent: launchContext.entryIntent,
+        has_initial_message: !!initialMessage,
         session_id: null,
-      });
+      };
     }
     // history_open (existing session) is tracked in the `sessionId` branch below,
     // AFTER the session's frozen runtime (targetRuntime) is resolved. The agent's
     // config may have changed since the session was created, so config-based
     // runtime would diverge from the server-side ai_turn_complete (cross-review C2).
-    // Explicit `session_id: null` there suppresses Active Context auto-injection.
+    // `history_open` explicitly reports the TARGET session id. It is not in the
+    // Active Context auto-inject allowlist, so missing this id would make history
+    // joins impossible instead of merely falling back.
 
     setTabErrors((prev) => ({ ...prev, [activeTabId]: null }));
     setLoadingTabs((prev) => ({ ...prev, [activeTabId]: true }));
@@ -1269,6 +1380,11 @@ export default function App() {
       console.log(`[App][launch] START active=${activeTabId} view=${activeTab?.view} hasSession=${!!activeTab?.sessionId} target-sessionId=${sessionId ?? 'NEW'}`);
 
       if (sessionId) {
+        // Existing-session opens are not session births. Clear any stale
+        // new-session birth context left on this tab so a later system-init for
+        // the target history session cannot consume it as `session_new`.
+        clearPendingSessionBirth(activeTabId);
+
         const cfg = configRef.current;
         const targetAgentRuntime = normalizeRuntime(getAgentByWorkspacePath(cfg, project.path)?.runtime);
         const currentAgentRuntime = activeTab?.agentDir
@@ -1289,11 +1405,12 @@ export default function App() {
         // runtime (targetRuntime, from session metadata) — matches the sidecar
         // spawn runtime and thus server-side ai_turn_complete.runtime — rather
         // than the agent's possibly-drifted current config.
-        track('history_open', {
-          agent_hash: hashAgentNameSync(getAgentByWorkspacePath(cfg, project.path)?.name ?? null),
-          runtime: targetRuntime,
-          session_id: null,
-        });
+        trackHistorySessionOpen(
+          sessionId,
+          project.path,
+          targetRuntime,
+          analyticsContext?.historyEntrySource ?? 'launcher_recent',
+        );
         const currentRuntime = activeTab?.sessionId ? resolvedCurrentRuntime : targetRuntime;
         const plan = planSessionOpen({
           tabs: tabsRef.current,
@@ -1462,7 +1579,13 @@ export default function App() {
       // synchronously once readiness lands, and the target TabProvider needs to
       // consume the surface from this tabId at that moment.
       if (pendingSurfaceForLaunch) {
-        setPendingSurface(targetTabId, pendingSurfaceForLaunch);
+        if (workspaceOpenAnalytics) {
+          track('workspace_open', {
+            ...workspaceOpenAnalytics,
+            tab_id: targetTabId,
+          });
+        }
+        setPendingSessionBirth(targetTabId, pendingSurfaceForLaunch);
       }
 
       // INSTANT-NAV: flip to the chat shell BEFORE awaiting the sidecar boot, so the
@@ -1580,8 +1703,8 @@ export default function App() {
       // PRD 0.2.19 review fix (H3): clear pending surface on launch failure so
       // a later unrelated session_new doesn't inherit a stale surface from this
       // failed attempt. Cover both candidate tabIds (Scenario 3 retarget case).
-      clearPendingSurface(targetTabId);
-      if (targetTabId !== activeTabId) clearPendingSurface(activeTabId);
+      clearPendingSessionBirth(targetTabId);
+      if (targetTabId !== activeTabId) clearPendingSessionBirth(activeTabId);
 
       // Surface the error on the tab the user is actually looking at — when
       // the stale jump-to-tab fallthrough rerouted us to `plan.tabId`, the
@@ -1636,7 +1759,7 @@ export default function App() {
       launchingTabRef.current = null;
       setLoadingTabs((prev) => ({ ...prev, [activeTabId]: false, [targetTabId]: false }));
     }
-  }, []);
+  }, [setActiveTabId, trackHistorySessionOpen]);
 
   // Clear initialMessage from a tab after it has been consumed by Chat
   const clearInitialMessage = useCallback((tabId: string) => {
@@ -1711,7 +1834,7 @@ export default function App() {
     } finally {
       setLoadingTabs(prev => ({ ...prev, [newTab.id]: false }));
     }
-  }, []);
+  }, [setActiveTabId]);
 
   /**
    * Spawn a fresh Tab bound to an EXISTING session, ensure its sidecar, and
@@ -1793,7 +1916,7 @@ export default function App() {
     } finally {
       setLoadingTabs(prev => ({ ...prev, [newTab.id]: false }));
     }
-  }, []);
+  }, [setActiveTabId]);
 
   // Per-session in-flight guard for open-in-new-tab. Without it, a rapid
   // double-click both observe a `tabsRef.current` that doesn't yet reflect the
@@ -1809,10 +1932,23 @@ export default function App() {
    * The real activation is fetched (not hard-coded null) so a cron-owned
    * session routes through the activation-preserving attach path.
    */
-  const handleOpenSessionInNewTab = useCallback(async (tabId: string, sessionId: string, title: string) => {
+  const handleOpenSessionInNewTab = useCallback(async (
+    tabId: string,
+    sessionId: string,
+    title: string,
+    historyEntrySource: HistoryEntrySource = 'chat_dropdown_new_tab',
+  ) => {
     if (openingInNewTabRef.current.has(sessionId)) return;
     openingInNewTabRef.current.add(sessionId);
     try {
+      const sourceTab = tabsRef.current.find(t => t.id === tabId);
+      const sessionAgentDir = sourceTab?.agentDir;
+      if (!sessionAgentDir) {
+        console.error('[App] Cannot open session in new tab: source tab has no agentDir');
+        return;
+      }
+      trackHistorySessionOpenAsync(sessionId, sessionAgentDir, historyEntrySource);
+
       const activation = await getSessionActivation(sessionId);
       const plan = planSessionOpen({
         tabs: tabsRef.current,
@@ -1826,27 +1962,28 @@ export default function App() {
         setActiveTabId(plan.tabId);
         return;
       }
-      const sourceTab = tabsRef.current.find(t => t.id === tabId);
-      const sessionAgentDir = sourceTab?.agentDir;
-      if (!sessionAgentDir) {
-        console.error('[App] Cannot open session in new tab: source tab has no agentDir');
-        return;
-      }
       await spawnTabForExistingSession(sessionId, sessionAgentDir, title || getFolderName(sessionAgentDir), {
         preserveCronActivation: plan.type === 'attach-existing-sidecar',
       });
     } finally {
       openingInNewTabRef.current.delete(sessionId);
     }
-  }, [spawnTabForExistingSession]);
+  }, [setActiveTabId, spawnTabForExistingSession, trackHistorySessionOpenAsync]);
 
   /**
    * Handle session switch from within Chat (history dropdown)
    * Implements Session singleton with all 4 scenarios
    */
-  const handleSwitchSession = useCallback(async (tabId: string, sessionId: string) => {
+  const handleSwitchSession = useCallback(async (
+    tabId: string,
+    sessionId: string,
+    historyEntrySource: HistoryEntrySource = 'chat_dropdown',
+  ) => {
     const tabsSnapshot = tabsRef.current;
     const currentTab = tabsSnapshot.find(t => t.id === tabId);
+    if (currentTab?.agentDir) {
+      trackHistorySessionOpenAsync(sessionId, currentTab.agentDir, historyEntrySource);
+    }
 
     // Fast path: Session already open in a Tab → Jump to that Tab.
     // Skip the ~100ms of runtime/activation/cron IO below if we already know we're
@@ -2179,7 +2316,7 @@ export default function App() {
     // spawnTabForExistingSession has stable identity ([] deps), so listing it
     // keeps exhaustive-deps happy without changing handleSwitchSession's own
     // stability (callers rely on this being reference-stable).
-  }, [spawnTabForExistingSession]);
+  }, [setActiveTabId, spawnTabForExistingSession, trackHistorySessionOpenAsync]);
 
   const handleBackToLauncher = useCallback(async () => {
     const activeTabId = activeTabIdRef.current;
@@ -2270,7 +2407,7 @@ export default function App() {
       // of resetSession (user clicked "新对话" while AI was still streaming) —
       // without this, chat:system-init would fall back to 'launcher_input' and
       // silently misclassify all AI-running new-session opens.
-      setPendingSurface(tabId, 'new_chat_button');
+      setPendingSessionBirth(tabId, birthContextForSurface('new_chat_button'));
 
       // Create new pending session with new Sidecar
       const pendingSessionId = createPendingSessionId(tabId);
@@ -2324,7 +2461,7 @@ export default function App() {
     }
     setTabs((prev) => prev.filter((t) => t.id !== tabId));
     setActiveTabId((curr) => (curr === tabId ? remaining[remaining.length - 1].id : curr));
-  }, []);
+  }, [setActiveTabId]);
 
   // Attach an already-on-disk session to a tab WITHOUT going through
   // planSessionOpen — the planner would see the tab already holds this
@@ -2416,7 +2553,7 @@ export default function App() {
 
   const handleSelectTab = useCallback((tabId: string) => {
     setActiveTabId(tabId);
-  }, []);
+  }, [setActiveTabId]);
 
   // Activate a restored cold tab whenever it becomes active — via ANY path
   // (click, Cmd+Tab/Cmd+1-9, swipe, session jump, or the initial active tab on
@@ -2532,7 +2669,7 @@ export default function App() {
     openNewTabDeferred(newTab);
 
     // Global Sidecar is now started on App mount, no need to start here
-  }, [openNewTabDeferred]);
+  }, [openNewTabDeferred, setActiveTabId]);
 
   // Listen for OPEN_SETTINGS custom event from child components
   useEffect(() => {
@@ -2548,7 +2685,7 @@ export default function App() {
       window.removeEventListener(CUSTOM_EVENTS.OPEN_SETTINGS, handleOpenSettingsEvent as EventListener);
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps -- callback stabilized via tabsRef
-  }, []);
+  }, [setActiveTabId]);
 
   // Open TaskCenter as a singleton tab (mirrors handleOpenSettings)
   const handleOpenTaskCenter = useCallback(() => {
@@ -2571,7 +2708,7 @@ export default function App() {
       sidecarConfigDisposition: 'push',
     };
     openNewTabDeferred(newTab);
-  }, [openNewTabDeferred]);
+  }, [openNewTabDeferred, setActiveTabId]);
 
   // Intent carried across `OPEN_TASK_CENTER` — the event dispatcher
   // (Launcher "我的任务" tab's search icon) wants more than just "open
@@ -2801,12 +2938,12 @@ export default function App() {
         };
         setTabs((prev) => [...prev, seeded]);
         setActiveTabId(newTab.id);
-        activeTabIdRef.current = newTab.id;
 
         await handleLaunchProject(
           workspace,
           undefined,
           initialMessage,
+          { surface: 'task_center', entryIntent: 'thought_alignment' },
         );
 
         // handleLaunchProject's internal setTabs overwrites `title` with the
@@ -2826,7 +2963,7 @@ export default function App() {
     return () =>
       window.removeEventListener(CUSTOM_EVENTS.OPEN_AI_DISCUSSION, handler);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- stable via refs
-  }, []);
+  }, [setActiveTabId]);
 
   // Listen for OPEN_SESSION_IN_NEW_TAB — task center's 任务执行 session list
   // dispatches this to open a historical execution in a fresh chat tab.
@@ -2843,8 +2980,9 @@ export default function App() {
         sessionId: string;
         workspacePath: string;
         preview?: { path?: string; initialLineNumber?: number };
+        historyEntrySource?: HistoryEntrySource;
       }>;
-      const { sessionId, workspacePath, preview } = event.detail ?? {};
+      const { sessionId, workspacePath, preview, historyEntrySource } = event.detail ?? {};
       if (!sessionId || !workspacePath) return;
       const pendingFilePreview: FilePreviewIntent | undefined = preview?.path
         ? {
@@ -2861,6 +2999,13 @@ export default function App() {
         console.warn(
           '[App] OPEN_SESSION_IN_NEW_TAB workspace not in projects; opening by path:',
           workspacePath,
+        );
+      }
+      if (historyEntrySource) {
+        trackHistorySessionOpenAsync(
+          sessionId,
+          workspace?.path ?? workspacePath,
+          historyEntrySource,
         );
       }
 
@@ -2907,7 +3052,7 @@ export default function App() {
         handler,
       );
     // eslint-disable-next-line react-hooks/exhaustive-deps -- stable via refs
-  }, []);
+  }, [trackHistorySessionOpenAsync]);
 
   // Listen for JUMP_TO_TAB custom event (Session singleton constraint)
   useEffect(() => {
@@ -2926,7 +3071,7 @@ export default function App() {
     return () => {
       window.removeEventListener(CUSTOM_EVENTS.JUMP_TO_TAB, handleJumpToTab as EventListener);
     };
-  }, []);
+  }, [setActiveTabId]);
 
   // Listen for LAUNCH_BUG_REPORT custom event (AI-powered bug reporting)
   useEffect(() => {
@@ -2937,8 +3082,9 @@ export default function App() {
       appVersion: string;
       images?: ImageAttachment[];
       resumeSessionId?: string;
+      assistantEntry?: AssistantEntry;
     }>) => {
-      const { description, appVersion, providerId, model, resumeSessionId } = event.detail;
+      const { description, appVersion, providerId, model, resumeSessionId, assistantEntry } = event.detail;
       try {
         // Resume path runs FIRST and out-of-order with the MAX_TABS guard:
         // if the helper session is already owned by another Tab, we just
@@ -2947,9 +3093,17 @@ export default function App() {
         if (resumeSessionId) {
           const existing = tabsRef.current.find(t => t.sessionId === resumeSessionId);
           if (existing) {
+            if (existing.agentDir) {
+              trackHistorySessionOpenAsync(
+                resumeSessionId,
+                existing.agentDir,
+                'settings_helper_history',
+              );
+            } else {
+              console.warn(`[App] Cannot track helper history resume ${resumeSessionId}: existing tab has no agentDir`);
+            }
             if (activeTabIdRef.current !== existing.id) {
               setActiveTabId(existing.id);
-              activeTabIdRef.current = existing.id;
             }
             return;
           }
@@ -2976,7 +3130,9 @@ export default function App() {
           const newTab = createNewTab();
           openLaunchTabNow(newTab);
           try {
-            await handleLaunchProject(project, resumeSessionId, undefined);
+            await handleLaunchProject(project, resumeSessionId, undefined, {
+              historyEntrySource: 'settings_helper_history',
+            });
           } finally {
             removeUnusedPrecreatedLaunchTab(newTab.id);
           }
@@ -3049,7 +3205,12 @@ export default function App() {
         openLaunchTabNow(newTab);
 
         try {
-          await handleLaunchProject(project, undefined, initialMessage);
+          await handleLaunchProject(
+            project,
+            undefined,
+            initialMessage,
+            { surface: 'bug_report', entryIntent: 'support_diagnostics', assistantEntry: assistantEntry ?? 'other' },
+          );
 
           // Override tab title
           setTabs((prev) =>
@@ -3282,6 +3443,7 @@ export default function App() {
           initialProviderId={helperAgentDefaults.initialProviderId}
           initialModel={helperAgentDefaults.initialModel}
           onModelChange={helperAgentDefaults.onModelChange}
+          assistantEntry="tab_top"
         />
       )}
     </div>

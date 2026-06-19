@@ -394,6 +394,25 @@ impl HeartbeatRunner {
 
         ulog_debug!("[heartbeat] Acquired peer lock for {}", session_key);
 
+        let current_runtime = self.runtime.read().await.clone();
+
+        {
+            let drift_result = router.lock().await.check_and_reset_on_runtime_drift(
+                &session_key,
+                &current_runtime,
+                sidecar_manager,
+            );
+            if let Some((old_id, new_id)) = drift_result {
+                ulog_info!(
+                    "[heartbeat] Runtime drift reset peer {} before heartbeat: {} -> {} ({})",
+                    session_key,
+                    &old_id[..8.min(old_id.len())],
+                    &new_id[..8.min(new_id.len())],
+                    current_runtime,
+                );
+            }
+        }
+
         // Ensure sidecar is running — split into 3 phases to avoid holding router lock
         // during the blocking sidecar creation (up to 5 minutes).
         // Phase 1: Check health / extract info (brief lock)
@@ -443,7 +462,6 @@ impl HeartbeatRunner {
             let model = self.current_model.read().await.clone();
             let penv = self.current_provider_env.read().await.clone();
             let mcp = self.mcp_servers_json.read().await.clone();
-            let runtime = self.runtime.read().await.clone();
             let runtime_config = self.runtime_config.read().await.clone();
             let http_client = {
                 let rg = router.lock().await;
@@ -452,7 +470,7 @@ impl HeartbeatRunner {
             super::router::SessionRouter::sync_ai_config_with_client(
                 &http_client,
                 port,
-                &runtime,
+                &current_runtime,
                 runtime_config.as_ref(),
                 model.as_deref(),
                 mcp.as_deref(),
@@ -531,7 +549,7 @@ impl HeartbeatRunner {
             source_id: source_id.clone(),
             ack_max_chars,
             is_high_priority,
-            runtime: self.runtime.read().await.clone(),
+            runtime: current_runtime.clone(),
             runtime_config: self.runtime_config.read().await.clone(),
             pending_cron_events: pending_snapshot.clone(),
         };
