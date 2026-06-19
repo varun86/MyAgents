@@ -4317,6 +4317,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
                     }}
                     onSwitchToBrowser={browserUrl ? handleEditorSwitchToBrowser : undefined}
                     onQuoteFile={handleQuoteFile}
+                    onRevealInTree={handleRevealInTree}
                     onQuoteSelection={handleQuoteFileSelection}
                   />
                 </Suspense>
@@ -4431,6 +4432,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
               setWorkspaceRefreshTrigger(prev => prev + 1);
             }}
             onQuoteFile={handleQuoteFile}
+            onRevealInTree={handleRevealInTree}
             onQuoteSelection={handleQuoteFileSelection}
           />
         </Suspense>

@@ -13,7 +13,7 @@
  * 2. Explicit `onSave`/`onRevealFile` props — when caller provides save logic directly
  *    (e.g. Settings panels editing `~/.myagents/agents/...`)
  */
-import { AtSign, Check, Edit2, Expand, Eye, FileText, FolderOpen, Loader2, X } from 'lucide-react';
+import { AtSign, Check, Copy, Edit2, Expand, Eye, FileText, FolderOpen, Loader2, LocateFixed, MoreHorizontal, X } from 'lucide-react';
 import Tip from './Tip';
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useState, useRef } from 'react';
 import { createPortal } from 'react-dom';
@@ -30,6 +30,8 @@ import { retainFocusOnMouseDown } from '@/utils/focusRetention';
 import Markdown from './Markdown';
 import { useToast } from './Toast';
 import OverlayBackdrop from '@/components/OverlayBackdrop';
+import { MenuItem } from '@/components/ui/MenuItem';
+import { Popover } from '@/components/ui/Popover';
 
 // Lazy load Monaco Editor: the ~3MB bundle is only loaded when user first opens a file
 const MonacoEditor = lazy(() => import('./MonacoEditor'));
@@ -117,6 +119,8 @@ interface FilePreviewModalProps {
      *  `@<path>` into the chat input and closes the modal. Omit on non-chat surfaces
      *  (settings panels, agent admin pages) — the button hides automatically. */
     onQuoteFile?: (path: string) => void;
+    /** Reveal this workspace-relative file inside the app's workspace tree. */
+    onRevealInTree?: (path: string) => void;
     /** When provided, the Monaco editor (used for code files & markdown edit mode)
      *  shows a floating「引用」menu on selection that injects `@<path>#L<start>[-L<end>]`
      *  into the chat input. Markdown preview mode (rendered HTML) intentionally does
@@ -365,6 +369,7 @@ export default function FilePreviewModal({
     externalRefreshSignal,
     onExternalContentUpdated,
     onQuoteFile,
+    onRevealInTree,
     onQuoteSelection,
 }: FilePreviewModalProps) {
     // Cmd+W dismissal: only register for fullscreen mode (z-[210]).
@@ -431,6 +436,8 @@ export default function FilePreviewModal({
     const savedIndicatorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const markdownScrollRef = useRef<HTMLDivElement | null>(null);
     const pendingMarkdownScrollTopRef = useRef<number | null>(null);
+    const [moreMenuOpen, setMoreMenuOpen] = useState(false);
+    const moreButtonRef = useRef<HTMLButtonElement | null>(null);
 
     // Sync content when prop changes (e.g., when file is reloaded externally OR when the
     // viewer switches to a different file in-place). MUST depend on `path`/`name` too:
@@ -445,6 +452,7 @@ export default function FilePreviewModal({
         }
         setEditContent(content);
         setSavedContent(content);
+        setMoreMenuOpen(false);
     }, [content, path, name]);
 
     // Reset markdown view-mode + cancel any in-flight inline rename when the
@@ -938,6 +946,26 @@ export default function FilePreviewModal({
         handleCloseRef.current();
     }, [isDirectEdit, handleManualFlush]);
 
+    const absolutePathForDisplay = useMemo(() => {
+        if (localPath) return localPath;
+        if (!workspacePath) return path;
+        const sep = workspacePath.includes('\\') ? '\\' : '/';
+        return path ? `${workspacePath}${sep}${path}` : workspacePath;
+    }, [localPath, path, workspacePath]);
+
+    const handleCopyFilePath = useCallback(() => {
+        navigator.clipboard
+            .writeText(absolutePathForDisplay)
+            .then(() => toastRef.current.success('已复制文件路径'))
+            .catch(() => toastRef.current.error('复制失败'));
+    }, [absolutePathForDisplay]);
+
+    const handleRevealInTree = useCallback(() => {
+        if (!onRevealInTree || localPath) return;
+        onRevealInTree(pathRef.current);
+        if (!embedded) handleCloseRef.current();
+    }, [embedded, localPath, onRevealInTree]);
+
     /** Monaco-side selection quote: forwards line range + text to caller. The toolbar
      *  「引用文件」 path also closes the modal, but selection-quote intentionally does
      *  NOT — users typically quote multiple ranges in succession when reading code. */
@@ -995,6 +1023,75 @@ export default function FilePreviewModal({
             toastRef.current.error('无法打开目录');
         }
     }, [canReveal, localPath, onRevealFile, workspacePath]);
+
+    const renderMoreMenu = (compact: boolean) => {
+        const iconClass = compact ? 'h-3.5 w-3.5' : 'h-4 w-4';
+        const buttonClass = compact
+            ? 'rounded-md p-1 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]'
+            : 'rounded-md p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]';
+        const runMenuAction = (action: () => void | Promise<void>) => {
+            setMoreMenuOpen(false);
+            void action();
+        };
+
+        return (
+            <>
+                <Tip label="更多" position="bottom">
+                    <button
+                        ref={moreButtonRef}
+                        type="button"
+                        onClick={() => setMoreMenuOpen(open => !open)}
+                        onMouseDown={retainFocusOnMouseDown}
+                        className={buttonClass}
+                        aria-label="更多"
+                    >
+                        <MoreHorizontal className={iconClass} />
+                    </button>
+                </Tip>
+                <Popover
+                    open={moreMenuOpen}
+                    onClose={() => setMoreMenuOpen(false)}
+                    anchorRef={moreButtonRef}
+                    placement="bottom-end"
+                    className="w-48 py-1"
+                >
+                    {onQuoteFile && (
+                        <MenuItem
+                            icon={<AtSign className="h-3.5 w-3.5" />}
+                            label="引用"
+                            onClick={() => runMenuAction(handleQuoteFileClick)}
+                        />
+                    )}
+                    {onRevealInTree && !localPath && (
+                        <MenuItem
+                            icon={<LocateFixed className="h-3.5 w-3.5" />}
+                            label="在文件目录中展示"
+                            onClick={() => runMenuAction(handleRevealInTree)}
+                        />
+                    )}
+                    <MenuItem
+                        icon={<Copy className="h-3.5 w-3.5" />}
+                        label="复制文件路径"
+                        onClick={() => runMenuAction(handleCopyFilePath)}
+                    />
+                    {canReveal && (
+                        <MenuItem
+                            icon={<FolderOpen className="h-3.5 w-3.5" />}
+                            label="打开所在文件夹"
+                            onClick={() => runMenuAction(handleOpenInFinder)}
+                        />
+                    )}
+                    {canRename && (
+                        <MenuItem
+                            icon={<Edit2 className="h-3.5 w-3.5" />}
+                            label="重命名"
+                            onClick={() => runMenuAction(handleStartRename)}
+                        />
+                    )}
+                </Popover>
+            </>
+        );
+    };
 
     // ─── Render content ───────────────────────────────────────────────────────
     const renderPreviewContent = () => {
@@ -1133,24 +1230,13 @@ export default function FilePreviewModal({
 
                     {/* Right: actions */}
                     <div className="flex flex-shrink-0 items-center justify-end gap-2">
-                        {/* Quote whole file into chat input — first slot (most-frequent action).
-                            `retainFocusOnMouseDown` so the click doesn't steal focus from the
-                            chat input on macOS WebKit (matches sibling preview/edit toggle). */}
-                        {onQuoteFile && (
-                            <Tip label="引用文件" position="bottom">
-                                <button type="button"
-                                    onClick={handleQuoteFileClick}
-                                    onMouseDown={retainFocusOnMouseDown}
-                                    className="rounded-md p-1 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]">
-                                    <AtSign className="h-3.5 w-3.5" />
-                                </button>
-                            </Tip>
-                        )}
+                        {renderMoreMenu(true)}
 
                         {/* Switch to browser preview — only for HTML files with an active browser */}
                         {onSwitchToBrowser && (
                             <Tip label="网页预览" position="bottom">
                                 <button type="button" onClick={handleSwitchToBrowserClick}
+                                    aria-label="网页预览"
                                     className="rounded-md p-1 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]">
                                     <Eye className="h-3.5 w-3.5" />
                                 </button>
@@ -1160,6 +1246,7 @@ export default function FilePreviewModal({
                         {onFullscreen && (
                             <Tip label="全屏预览" position="bottom">
                                 <button type="button" onClick={handleFullscreenClick}
+                                    aria-label="全屏预览"
                                     className="rounded-md p-1 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]">
                                     <Expand className="h-3.5 w-3.5" />
                                 </button>
@@ -1168,6 +1255,7 @@ export default function FilePreviewModal({
 
                         <Tip label="关闭" position="bottom">
                             <button type="button" onClick={handleClose}
+                                aria-label="关闭"
                                 className="rounded-md p-1 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]">
                                 <X className="h-3.5 w-3.5" />
                             </button>
@@ -1250,16 +1338,7 @@ export default function FilePreviewModal({
 
                     {/* Right: actions */}
                     <div className="flex flex-shrink-0 items-center justify-end gap-1.5">
-                        {onQuoteFile && (
-                            <Tip label="引用文件" position="bottom">
-                                <button type="button"
-                                    onClick={handleQuoteFileClick}
-                                    onMouseDown={retainFocusOnMouseDown}
-                                    className="rounded-md p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]">
-                                    <AtSign className="h-4 w-4" />
-                                </button>
-                            </Tip>
-                        )}
+                        {renderMoreMenu(false)}
                         <button
                             type="button"
                             onClick={handleClose}

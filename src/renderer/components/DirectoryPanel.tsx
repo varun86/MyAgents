@@ -3566,6 +3566,7 @@ const DirectoryPanel = memo(
               contextMenu.isMultiSelect,
             )}
             onClose={() => setContextMenu(null)}
+            zIndex={320}
           />
         )}
 
@@ -3575,6 +3576,7 @@ const DirectoryPanel = memo(
             y={searchContextMenu.y}
             items={getSearchResultContextMenuItems(searchContextMenu.hit)}
             onClose={() => setSearchContextMenu(null)}
+            zIndex={320}
           />
         )}
 
@@ -3659,6 +3661,9 @@ const DirectoryPanel = memo(
                   await fileService.openInFinder({ path: p });
                 }}
                 onQuoteFile={onQuoteFile}
+                onRevealInTree={(path) => {
+                  void handleRevealSearchResultInTree(path);
+                }}
                 onQuoteSelection={onQuoteSelection}
               />
             </Suspense>
