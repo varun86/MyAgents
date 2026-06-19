@@ -21,6 +21,10 @@ import type {
   ImagePayload,
 } from './types';
 import type { ToolAttachment } from '../../shared/types/tool-attachment';
+import {
+  buildFilePatchDisplayDescriptor,
+  type ToolDisplayPayload,
+} from '../../shared/toolDisplay/filePatch';
 import { StaleRuntimeSessionError } from './types';
 import { awaitInFlightSaves, rebuildAttachmentRegistryFromBlocks, trackInFlightSave } from './tool-attachments';
 import { maybeSpill, type LargeValueRef } from '../utils/large-value-store';
@@ -168,6 +172,8 @@ export interface PersistContentBlock {
     // PRD 0.2.15 — rich-media attachments. Persisted with the tool block so
     // history replay can re-render images without re-running the tool.
     attachments?: ToolAttachment[];
+    // Compact display protocol. Large text bodies remain in input/result.
+    display?: ToolDisplayPayload;
     // PRD 0.2.27 — nested tool calls emitted by a sub-agent (Codex collab-agent),
     // mirroring builtin's ToolUse.subagentCalls. Persisted with the parent spawn
     // card so history replay re-renders the nesting. Shape matches the renderer's
@@ -941,7 +947,11 @@ function flushAllPending(): void {
         streamIndex: currentContentBlocks.length,
       },
     };
-    if (block.tool) attachPendingSubagentCalls(toolId, block.tool);
+    if (block.tool) {
+      const display = buildFilePatchDisplayDescriptor(block.tool);
+      if (display) block.tool.display = display;
+      attachPendingSubagentCalls(toolId, block.tool);
+    }
     currentContentBlocks.push(block);
   }
   pendingToolInputs.clear();
@@ -1794,6 +1804,8 @@ export function buildExternalAssistantSnapshotContent(state: ExternalAssistantSn
       },
     };
     if (block.tool) {
+      const display = buildFilePatchDisplayDescriptor(block.tool);
+      if (display) block.tool.display = display;
       attachPendingSubagentCallsToSnapshot(toolId, block.tool, state.pendingSubagentCallsByParent);
     }
     blocks.push(block);
@@ -3579,6 +3591,8 @@ function applyExternalToolResult(event: Extract<UnifiedEvent, { kind: 'tool_resu
       if (event.attachments && event.attachments.length > 0) {
         currentContentBlocks[i].tool!.attachments = event.attachments;
       }
+      const display = buildFilePatchDisplayDescriptor(currentContentBlocks[i].tool!);
+      if (display) currentContentBlocks[i].tool!.display = display;
       break;
     }
   }
@@ -3769,7 +3783,11 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
             streamIndex: currentContentBlocks.length,
           },
         };
-        if (block.tool) attachPendingSubagentCalls(event.toolUseId, block.tool);
+        if (block.tool) {
+          const display = buildFilePatchDisplayDescriptor(block.tool);
+          if (display) block.tool.display = display;
+          attachPendingSubagentCalls(event.toolUseId, block.tool);
+        }
         currentContentBlocks.push(block);
         pendingToolInputs.delete(event.toolUseId);
       }
@@ -4387,6 +4405,8 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
             if (toolBlockIdx >= 0 && currentContentBlocks[toolBlockIdx].tool) {
               currentContentBlocks[toolBlockIdx].tool!.result = resultText.slice(0, 5000);
               currentContentBlocks[toolBlockIdx].tool!.isError = block.is_error === true;
+              const display = buildFilePatchDisplayDescriptor(currentContentBlocks[toolBlockIdx].tool!);
+              if (display) currentContentBlocks[toolBlockIdx].tool!.display = display;
             }
             recordRuntimeActivity();
           }

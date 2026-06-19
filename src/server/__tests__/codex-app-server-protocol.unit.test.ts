@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import {
+  buildCodexFileChangeResultContent,
   buildCodexInitializeParams,
   buildCodexSandboxPolicy,
   buildCodexTurnStartParams,
@@ -147,6 +148,41 @@ describe('Codex app-server protocol helpers', () => {
       error: 'websocket failed',
       result: 'websocket failed',
     });
+  });
+
+  it('formats fileChange object kinds without leaking [object Object]', () => {
+    expect(buildCodexFileChangeResultContent([
+      {
+        path: '/tmp/a.md',
+        kind: { type: 'update', move_path: null },
+        diff: '@@ -1 +1 @@\n-old\n+new',
+      },
+      {
+        path: '/tmp/new.md',
+        kind: { type: 'add' },
+        diff: 'hello',
+      },
+    ])).toBe('update: /tmp/a.md\n@@ -1 +1 @@\n-old\n+new\n\nadd: /tmp/new.md\nhello');
+    expect(buildCodexFileChangeResultContent([
+      {
+        path: '/tmp/old.md',
+        kind: { type: 'move', move_path: '/tmp/new.md' },
+      },
+    ])).toBe('move: /tmp/old.md -> /tmp/new.md');
+    expect(buildCodexFileChangeResultContent([])).toBe('File changed');
+  });
+
+  it('ignores malformed fileChange entries before formatting result text', () => {
+    expect(buildCodexFileChangeResultContent([
+      null,
+      'not-a-change',
+      {
+        path: '/tmp/old.md',
+        kind: { type: 'move', move_path: '/tmp/new.md' },
+      },
+    ])).toBe('move: /tmp/old.md -> /tmp/new.md');
+
+    expect(buildCodexFileChangeResultContent([null, 'not-a-change'])).toBe('File changed');
   });
 
   it('serializes command/file approvals with session scope when always allowed', () => {

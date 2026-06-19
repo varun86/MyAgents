@@ -62,6 +62,10 @@ import { resolveAuthHeaders, onTokenChange, startTokenRefreshScheduler } from '.
 // gemini-image / edge-tts registered in builtin-mcp-meta.ts.
 
 import type { ToolInput } from '../renderer/types/chat';
+import {
+  buildFilePatchDisplayDescriptor,
+  type ToolDisplayPayload,
+} from '../shared/toolDisplay/filePatch';
 import { parsePartialJson } from '../shared/parsePartialJson';
 import { deriveSessionTitle } from '../shared/sessionTitle';
 import { workspacePathsEqual } from '../shared/workspacePath';
@@ -507,6 +511,8 @@ type ToolUseState = {
    *  gemini-image image), normalized into the same first-class attachment channel
    *  as the Codex runtime. Persisted with the block; rendered via ToolAttachmentGallery. */
   attachments?: ToolAttachment[];
+  /** Compact display protocol. Large text bodies remain in input/result. */
+  display?: ToolDisplayPayload;
 };
 
 type SubagentToolCall = {
@@ -5790,6 +5796,10 @@ function handleContentBlockStop(index: number, toolId?: string): void {
         toolBlock.tool.parsedInput = parsed;
       }
     }
+    const display = buildFilePatchDisplayDescriptor(toolBlock.tool);
+    if (display) {
+      toolBlock.tool.display = display;
+    }
     // Pattern 3 §D.3 — block has reached terminal state, drop the throttle
     // cursor so a future tool with a recycled id starts fresh.
     if (toolId) lastParsedBytesByToolId.delete(toolId);
@@ -6341,6 +6351,10 @@ function setToolResult(toolUseId: string, content: string, isError?: boolean): v
   toolBlock.tool.result = content;
   if (typeof isError === 'boolean') {
     toolBlock.tool.isError = isError;
+  }
+  const display = buildFilePatchDisplayDescriptor(toolBlock.tool);
+  if (display) {
+    toolBlock.tool.display = display;
   }
 }
 

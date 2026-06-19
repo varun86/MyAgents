@@ -18,6 +18,7 @@ import type {
 } from '@anthropic-ai/claude-agent-sdk/sdk-tools';
 
 import type { ToolUse } from '@/types/stream';
+import type { ToolDisplayPayload } from '../../shared/toolDisplay/filePatch';
 import type { ToolAttachment } from '../../shared/types/tool-attachment';
 
 export type { ToolAttachment, ToolAttachmentKind } from '../../shared/types/tool-attachment';
@@ -126,6 +127,9 @@ export interface ToolUseSimple extends ToolUse {
   // PRD 0.2.15 — rich-media attachments (image/audio/pdf/file) produced by the tool.
   // Rendered uniformly via ToolAttachmentGallery; orthogonal to `result` text.
   attachments?: ToolAttachment[];
+  // Compact protocol descriptor for specialized tool display. Text/diff bodies
+  // stay in the existing input/result channels for history compatibility.
+  display?: ToolDisplayPayload;
 }
 
 export interface ContentBlock {

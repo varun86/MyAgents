@@ -16,6 +16,7 @@ import type {
   RuntimeProxyPolicy, RuntimeDiagnosticIssue,
 } from '../../shared/types/runtime';
 import { CODEX_PERMISSION_MODES } from '../../shared/types/runtime';
+import { coerceFileChanges, formatFileChangeForResult } from '../../shared/fileChange';
 import type { AgentRuntime, RuntimeConfigCapabilities, RuntimeProcess, SessionStartOptions, UnifiedEvent, UnifiedEventCallback, ImagePayload, SubAgentScope } from './types';
 import { StaleRuntimeSessionError } from './types';
 import { mapCodexTokenUsage, type CodexThreadTokenUsage } from './codex-token-usage';
@@ -116,6 +117,13 @@ function codexTraceId(params: Record<string, unknown>, fallbackItemId?: string, 
   if (!itemId) return undefined;
   const threadId = stringValue(params.threadId);
   return [threadId, itemId, suffix].filter((part): part is string => !!part).join('::');
+}
+
+export function buildCodexFileChangeResultContent(changes: unknown): string {
+  const normalized = coerceFileChanges(changes);
+  return normalized.length > 0
+    ? normalized.map(formatFileChangeForResult).join('\n\n')
+    : 'File changed';
 }
 
 // ─── Temp image directory for Codex (which requires file paths, not base64) ───
@@ -1826,7 +1834,10 @@ export class CodexRuntime implements AgentRuntime {
             if (typeof p?.threadId === 'string') detail += ` thread=${p.threadId.slice(0, 12)}`;
             // Tool-specific context
             if (item.type === 'commandExecution' && item.command) detail += ` cmd=${(item.command as string).slice(0, 80)}`;
-            if (item.type === 'fileChange' && Array.isArray(item.changes)) detail += ` files=${(item.changes as Array<{path:string}>).map(c => c.path).join(',')}`;
+            if (item.type === 'fileChange' && Array.isArray(item.changes)) {
+              const paths = coerceFileChanges(item.changes).map((change) => change.path).filter(Boolean);
+              if (paths.length > 0) detail += ` files=${paths.join(',')}`;
+            }
             if ((item.type === 'mcpToolCall' || item.type === 'dynamicToolCall') && item.tool) detail += ` tool=${item.tool}`;
             if (item.type === 'agentMessage' && typeof item.text === 'string') detail += ` text=${(item.text as string).length}chars`;
             // Exit code / error for completed items
@@ -2488,7 +2499,7 @@ export class CodexRuntime implements AgentRuntime {
         const item = p.item as {
           type: string; id: string;
           command?: string; aggregatedOutput?: string; exitCode?: number; durationMs?: number; cwd?: string; processId?: string; status?: string;
-          changes?: Array<{ path: string; kind: string; diff: string }>;
+          changes?: unknown;
           tool?: string; server?: string; mcpAppResourceUri?: string;
           arguments?: unknown; namespace?: string | null;
           result?: unknown; error?: { message: string };
@@ -2538,9 +2549,7 @@ export class CodexRuntime implements AgentRuntime {
             // Show file paths and diffs for each changed file, plus terminal status
             // (inProgress / completed / failed / declined) — `declined` matters
             // because user-rejected patches look identical to other states without it.
-            const details = Array.isArray(item.changes)
-              ? item.changes.map(c => `${c.kind}: ${c.path}${c.diff ? '\n' + c.diff : ''}`).join('\n\n')
-              : 'File changed';
+            const details = buildCodexFileChangeResultContent(item.changes);
             const isFailedPatch = item.status === 'failed' || item.status === 'declined';
             const statusPrefix = item.status && item.status !== 'completed'
               ? `[${item.status}]\n`

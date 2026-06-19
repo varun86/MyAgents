@@ -208,6 +208,13 @@ Server → Client (Notification): {"jsonrpc":"2.0","method":"item/agentMessage/d
 
 未列出的 item type 会在 `console.warn` 中打印 unhandled，方便 Codex 升级后定位漏接。
 
+`fileChange.changes[].kind` 在 Codex 新 schema 中是对象（如 `{type:"update", move_path:null}`），不是字符串。
+Sidecar 必须通过 `src/shared/toolDisplay/filePatch.ts` 归一化后再生成 `tool_result.content`，否则 SSE / 历史会出现
+`[object Object]: /path`。`filePatch` 展示协议的 owner 也是这个 shared 模块：new data 的 `Edit` / `Write`
+tool block 会写入 compact `tool.display.kind === "file_patch"` descriptor（路径、状态、统计、view kind），不复制
+`old_string` / `new_string` / `content` / `diff` 大文本。Renderer 通过同一个 resolver 读取新 descriptor，并对
+历史数据继续 fallback 到 `parsedInput -> inputJson -> input`，与 builtin SDK 的 `old_string/new_string` 摘要共用同一展示语义。
+
 ### Sub-agent（collab-agent）工具嵌套（PRD 0.2.27）
 
 Codex 主 agent 可派生 sub-agent（`collabAgentToolCall` 的 `spawnAgent`）。**sub-agent 是独立的 Codex thread**，其工具调用、文本、思考通过同一条 app-server stdio 连接多路复用回来——每条 `item/started` / `item/completed` 通知都带顶层 `threadId` + `turnId`。沿用 builtin 的嵌套渲染（`Task` 卡片 → `subagentCalls[]` → `chat:subagent-*` SSE → `TaskTool` 可展开 trace），把 sub-agent trace 折叠进对应 spawn 卡片，而不是平铺进主 transcript。
