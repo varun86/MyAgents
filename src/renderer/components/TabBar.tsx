@@ -12,7 +12,6 @@ import {
     DndContext,
     closestCenter,
     KeyboardSensor,
-    PointerSensor,
     useSensor,
     useSensors,
     type DragEndEvent,
@@ -26,6 +25,7 @@ import { List, Plus } from 'lucide-react';
 
 import SortableTabItem from '@/components/SortableTabItem';
 import { TAB_BAR_BUTTON_WIDTH_PX, TAB_BAR_GAP_PX, getTabStripIdealWidth } from '@/components/tabBarLayout';
+import { TabPointerSensor, TAB_POINTER_SENSOR_OPTIONS } from '@/components/tabPointerSensor';
 import { Popover } from '@/components/ui/Popover';
 import { useCloseLayer } from '@/hooks/useCloseLayer';
 import { type Tab, MAX_TABS, getFolderName } from '@/types/tab';
@@ -143,11 +143,7 @@ export default memo(function TabBar({
 
     // Configure sensors for drag detection
     const sensors = useSensors(
-        useSensor(PointerSensor, {
-            activationConstraint: {
-                distance: 8,
-            },
-        }),
+        useSensor(TabPointerSensor, TAB_POINTER_SENSOR_OPTIONS),
         useSensor(KeyboardSensor, {
             coordinateGetter: sortableKeyboardCoordinates,
         }),
