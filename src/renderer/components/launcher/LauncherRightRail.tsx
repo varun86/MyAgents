@@ -270,8 +270,8 @@ export default memo(function LauncherRightRail({
 
     return (
         <section className="launcher-workspaces flex flex-col overflow-hidden">
-            <div ref={scrollRootRef} className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-6 py-6">
-                <div className="space-y-5">
+            <div ref={scrollRootRef} className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
+                <div className="px-6 pb-6 pt-6">
                     <section>
                         <div className="mb-4 flex items-center justify-between">
                             <h2 className="text-sm font-semibold tracking-[0.04em] text-[var(--ink-muted)]">
@@ -352,11 +352,11 @@ export default memo(function LauncherRightRail({
                                     </div>
                                 </div>
                                 {hiddenWorkspaceCount > 0 && (
-                                    <div className="mt-4 flex justify-center">
+                                    <div className="mt-3 flex justify-center">
                                         <button
                                             type="button"
                                             onClick={handleToggleWorkspaces}
-                                            className="inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-semibold text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
+                                            className="inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-xs font-semibold text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
                                         >
                                             {workspacesExpanded ? (
                                                 <>
@@ -376,12 +376,11 @@ export default memo(function LauncherRightRail({
                         )}
                     </section>
 
-                    <div className="mx-0 border-t border-[var(--line-subtle)]" />
+                    <div className="mt-3 border-t border-[var(--line-subtle)]" />
 
-                    <section>
+                    <section className="mt-2">
                         <div
-                            className="sticky top-0 z-20 -mx-6 px-6 py-3"
-                            style={{ backgroundColor: 'color-mix(in srgb, var(--paper) 96%, transparent)' }}
+                            className="sticky top-0 z-20 -mx-6 bg-[var(--paper)] px-6 py-2.5"
                         >
                             <div className="flex items-center justify-between gap-3">
                                 <div className="flex min-w-0 items-center gap-2">
@@ -433,11 +432,10 @@ export default memo(function LauncherRightRail({
                                 <div className="space-y-5">
                                     {groupedSessions.map(group => (
                                         <div key={group.key}>
-                                            <div className="mb-2 flex items-center gap-3">
-                                                <span className="shrink-0 text-xs font-semibold text-[var(--ink-muted)]/70">
+                                            <div className="mb-2">
+                                                <span className="text-xs font-semibold text-[var(--ink-muted)]/70">
                                                     {group.label}
                                                 </span>
-                                                <div className="h-px flex-1 bg-[var(--line)]" />
                                             </div>
                                             <div className="space-y-0.5">
                                                 {group.sessions.map(session => {
@@ -599,8 +597,7 @@ const LauncherHistoryRow = memo(function LauncherHistoryRow({
                 <Clock className="h-2.5 w-2.5" />
                 <span>{formatTime(session.lastActiveAt)}</span>
             </div>
-            <div className="flex w-24 shrink-0 items-center gap-1.5 text-xs text-[var(--ink-muted)]/55">
-                <WorkspaceIcon icon={project.icon} size={14} />
+            <div className="flex w-24 shrink-0 items-center text-xs text-[var(--ink-muted)]/55">
                 <span className="min-w-0 truncate">{getProjectDisplayName(project)}</span>
             </div>
             {tags.map((tag, index) => (
