@@ -12,6 +12,8 @@ const mocks = vi.hoisted(() => ({
   saveFile: vi.fn(),
   rename: vi.fn(),
   openInFinder: vi.fn(),
+  openPathExternal: vi.fn(),
+  toastSuccess: vi.fn(),
   toastWarning: vi.fn(),
 }));
 
@@ -22,6 +24,7 @@ vi.mock('@/hooks/useWorkspaceFileService', () => ({
     saveFile: mocks.saveFile,
     rename: mocks.rename,
     openInFinder: mocks.openInFinder,
+    openPathExternal: mocks.openPathExternal,
   }),
 }));
 
@@ -32,7 +35,7 @@ vi.mock('@/hooks/useWorkspaceChangeSignal', () => ({
 vi.mock('@/components/Toast', () => ({
   useToast: () => ({
     showToast: vi.fn(),
-    success: vi.fn(),
+    success: mocks.toastSuccess,
     error: vi.fn(),
     warning: mocks.toastWarning,
     info: vi.fn(),
@@ -215,6 +218,56 @@ describe('FilePreviewModal live reload', () => {
     expect(editor.value).toBe('local dirty content');
   });
 
+  it('exposes file actions from the embedded toolbar more menu', async () => {
+    const onQuoteFile = vi.fn();
+    const onRevealInTree = vi.fn();
+    const onClose = vi.fn();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    });
+
+    render(
+      <FilePreviewModal
+        {...baseProps}
+        onClose={onClose}
+        onQuoteFile={onQuoteFile}
+        onRevealInTree={onRevealInTree}
+      />,
+    );
+
+    fireEvent.click(screen.getByLabelText('更多'));
+    expect(screen.getByRole('button', { name: '引用' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '在文件目录中展示' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '复制文件路径' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '打开所在文件夹' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '重命名' })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '在文件目录中展示' }));
+    expect(onRevealInTree).toHaveBeenCalledWith('notes.md');
+    expect(onClose).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByLabelText('更多'));
+    fireEvent.click(screen.getByRole('button', { name: '复制文件路径' }));
+    expect(writeText).toHaveBeenCalledWith('/workspace/notes.md');
+    await waitFor(() => expect(mocks.toastSuccess).toHaveBeenCalledWith('已复制文件路径'));
+
+    fireEvent.click(screen.getByLabelText('更多'));
+    fireEvent.click(screen.getByRole('button', { name: '打开所在文件夹' }));
+    expect(mocks.openInFinder).toHaveBeenCalledWith({ path: 'notes.md' });
+
+    fireEvent.click(screen.getByLabelText('更多'));
+    fireEvent.click(screen.getByRole('button', { name: '重命名' }));
+    expect(screen.getByDisplayValue('notes.md')).toBeInTheDocument();
+
+    fireEvent.keyDown(screen.getByDisplayValue('notes.md'), { key: 'Escape' });
+    fireEvent.click(screen.getByLabelText('更多'));
+    fireEvent.click(screen.getByRole('button', { name: '引用' }));
+    await waitFor(() => expect(onQuoteFile).toHaveBeenCalledWith('notes.md'));
+    expect(onClose).toHaveBeenCalled();
+  });
+
   it('passes the saved baseline to autosave and converts stale-save failures into external-update pending', async () => {
     mocks.saveFile.mockRejectedValueOnce(new Error('File changed externally'));
     mocks.readPreview.mockResolvedValueOnce({
@@ -277,8 +330,7 @@ describe('FilePreviewModal live reload', () => {
       expect(screen.getByText(/^外部更新 \d{2}:\d{2}$/)).toBeTruthy();
     });
 
-    const iconButtons = screen.getAllByRole('button').filter((button) => !button.textContent?.trim());
-    fireEvent.click(iconButtons[0]);
+    fireEvent.click(screen.getByLabelText('全屏预览'));
 
     expect(onFullscreen).not.toHaveBeenCalled();
     expect(mocks.toastWarning).toHaveBeenCalledWith('文件已在外部更新，未自动覆盖');

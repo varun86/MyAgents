@@ -62,12 +62,23 @@ import { resolveAuthHeaders, onTokenChange, startTokenRefreshScheduler } from '.
 // gemini-image / edge-tts registered in builtin-mcp-meta.ts.
 
 import type { ToolInput } from '../renderer/types/chat';
+import {
+  buildFilePatchDisplayDescriptor,
+  type ToolDisplayPayload,
+} from '../shared/toolDisplay/filePatch';
 import { parsePartialJson } from '../shared/parsePartialJson';
 import { deriveSessionTitle } from '../shared/sessionTitle';
 import { workspacePathsEqual } from '../shared/workspacePath';
 import { normalizeReasoningEffort, isSdkEffortLevel } from '../shared/reasoningEffort';
 import { computeContextUsage } from '../shared/contextUsage';
-import { resolveContextOccupancyFromSdkBreakdown, resolveContextOccupancyTokens } from './utils/context-occupancy';
+import { canResumeAcrossProviderBoundary, type ProviderHistoryEnv } from '../shared/providerHistory';
+import {
+  chooseBuiltinContextUsageModel,
+  inferContextWindowFromSdkModelTag,
+  resolveContextOccupancyFromSdkBreakdown,
+  resolveContextOccupancyTokens,
+  resolveContextWindowFromSdkBreakdown,
+} from './utils/context-occupancy';
 import type { SystemInitInfo } from '../shared/types/system';
 import type { SlashCommand as UiSlashCommand } from '../shared/slashCommands';
 import { saveSessionMetadata, updateSessionTitleFromMessage, saveSessionMessages, saveAttachment, updateSessionMetadata, getSessionMetadata, getSessionData } from './SessionStore';
@@ -500,6 +511,8 @@ type ToolUseState = {
    *  gemini-image image), normalized into the same first-class attachment channel
    *  as the Codex runtime. Persisted with the block; rendered via ToolAttachmentGallery. */
   attachments?: ToolAttachment[];
+  /** Compact display protocol. Large text bodies remain in input/result. */
+  display?: ToolDisplayPayload;
 };
 
 type SubagentToolCall = {
@@ -627,6 +640,7 @@ type RestartReason =
   | 'oauth'        // MCP OAuth token acquired/refreshed
   | 'model-window'  // setSessionModel — contextLength crossed a boundary, need to reinject CLAUDE_CODE_AUTO_COMPACT_WINDOW
   | 'model-aliases' // setSessionModel — collapsed provider aliases now target a different active model
+  | 'provider-history' // setSessionModel — future isolated model/provider boundary requires fresh SDK transcript
   | 'plugins'      // PRD 0.2.17 — Claude plugin install / uninstall / toggle
   | 'reasoning-effort'; // #324 — Anthropic-protocol effort is a query()-spawn option, needs respawn
 
@@ -1093,6 +1107,7 @@ const toolResultIndexToId: Map<number, string> = new Map();
 // flag (Pattern B already removed those). Cross-event leakage is structurally
 // impossible — old events carry the old requestId, new subscribers filter.
 const pendingRequestIds: string[] = [];
+let currentTurnImTerminalEmitted = false;
 
 /** Emit a per-request IM event tagged with the queue head. No-op when the
  *  queue is empty (desktop / cron path, no IM trace). System-level events
@@ -1108,7 +1123,10 @@ function emitImEvent(type: ImEventType, data?: unknown): void {
  *  messageGenerator when yielding to SDK stdin. No-op for desktop / cron
  *  (no IM trace ID). */
 function pushPendingRequest(requestId: string | null | undefined): void {
-  if (requestId) pendingRequestIds.push(requestId);
+  if (requestId) {
+    currentTurnImTerminalEmitted = false;
+    pendingRequestIds.push(requestId);
+  }
 }
 
 /** Pop the queue head — called from handleMessageComplete / Stopped / Error
@@ -1126,11 +1144,32 @@ function removePendingRequest(requestId: string | null | undefined): boolean {
   return true;
 }
 
+function completeCurrentImRequest(data?: unknown): void {
+  emitImEvent('complete', data);
+  const completedReq = popPendingRequest();
+  if (completedReq) {
+    imRequestRegistry.setStatus(completedReq, 'completed');
+    imRequestRegistry.unregister(completedReq);
+    currentTurnImTerminalEmitted = true;
+  }
+}
+
+function failCurrentImRequest(data?: unknown): void {
+  emitImEvent('error', data);
+  const failedReq = popPendingRequest();
+  if (failedReq) {
+    imRequestRegistry.setStatus(failedReq, 'failed');
+    imRequestRegistry.unregister(failedReq);
+    currentTurnImTerminalEmitted = true;
+  }
+}
+
 /** Clear the entire queue — called from abortPersistentSession /
  *  clearMessageState (whole-session abort or reset). Returns drained ids. */
 function clearPendingRequests(): string[] {
   const drained = pendingRequestIds.slice();
   pendingRequestIds.length = 0;
+  currentTurnImTerminalEmitted = false;
   return drained;
 }
 // Group chat tool deny list (v0.1.28): set per IM message, cleared on next non-group request
@@ -1214,6 +1253,8 @@ let currentModel: string | undefined = undefined;
 let currentReasoningEffort: string | undefined = undefined;
 // Provider environment config (baseUrl, apiKey, authType) for third-party providers
 export type ProviderEnv = {
+  /** Provider registry id. Metadata only: not forwarded as an SDK env var. */
+  providerId?: string;
   baseUrl?: string;
   apiKey?: string;
   authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key';
@@ -1225,24 +1266,16 @@ export type ProviderEnv = {
   modelAliases?: ModelAliases;
 };
 let currentProviderEnv: ProviderEnv | undefined = undefined;
+let pendingProviderHistoryBoundaryReset = false;
 
-function normalizeProviderBaseUrl(baseUrl?: string): string | undefined {
-  if (!baseUrl) return undefined;
-  try {
-    const url = new URL(baseUrl);
-    const pathname = url.pathname.replace(/\/+$/, '');
-    return `${url.origin}${pathname}`;
-  } catch {
-    return baseUrl.replace(/\/+$/, '');
-  }
-}
-
-function requiresSignedSessionHistory(providerEnv?: ProviderEnv): boolean {
-  if (!providerEnv) return true; // Anthropic subscription
-  const normalizedBaseUrl = normalizeProviderBaseUrl(providerEnv.baseUrl);
-  // Current behavior only covers official Anthropic providers. If future Claude suppliers
-  // enforce the same signed-history constraint, extend this predicate in one place.
-  return normalizedBaseUrl === 'https://api.anthropic.com';
+function toProviderHistoryEnv(providerEnv: ProviderEnv | undefined, model?: string): ProviderHistoryEnv | undefined {
+  if (!providerEnv) return model ? { model } : undefined;
+  return {
+    providerId: providerEnv.providerId,
+    baseUrl: providerEnv.baseUrl,
+    apiProtocol: providerEnv.apiProtocol,
+    model,
+  };
 }
 
 // OpenAI Bridge: sidecar port for loopback. Per-token bridge state lives
@@ -1915,6 +1948,7 @@ function resetTurnUsage(): void {
   currentPlanFileMinMtimeMs = null;
   currentTurnToolCount = 0;
   currentTurnHasOutput = false;
+  currentTurnImTerminalEmitted = false;
   currentTurnHadAssistantMessageError = false;
   currentTurnLastAssistantMessageError = null;
   currentTurnAnalyticsSource = null;
@@ -1943,9 +1977,10 @@ function resetTurnUsage(): void {
  * **后**的新（小）窗口——正是圆环该显示的值。#323 的 4.55M / 20.40M 灾难只来自盲目用
  * `currentTurnUsage.cacheReadTokens`（N 次工具调用求和），此源无该坑。
  *
- * 窗口：优先 `lookupModelContextLength`（与注入的 `CLAUDE_CODE_AUTO_COMPACT_WINDOW` 同源），
- * 缺省 SDK 200K。**不**用 SDK `ModelUsage.contextWindow`（对 bridge 的第三方 builtin 模型只回
- * 200K 默认，与 auto-compact 实际窗口失配）。
+ * 窗口：优先 `lookupModelContextLength`（与注入的 `CLAUDE_CODE_AUTO_COMPACT_WINDOW` 同源）。
+ * registry 无法识别版本化 / 用户手填 `[1m]` 模型时，才回落 SDK 控制面的 maxTokens 或 `[1m]`
+ * 标签语义；缺省 SDK 200K。**不**用 `ModelUsage.contextWindow` 覆盖 registry 命中的模型
+ * （对 bridge 的第三方 builtin 模型只回 200K 默认，与 auto-compact 实际窗口失配）。
  */
 async function broadcastBuiltinContextUsage(): Promise<void> {
   // **同步捕获** turn-末 state，再进入可能 await 的回落分支。`broadcastBuiltinContextUsage()`
@@ -1953,9 +1988,15 @@ async function broadcastBuiltinContextUsage(): Promise<void> {
   // `resetTurnUsage()` 可能把 `currentTurnUsage.model`/`sessionId` 改掉，给本轮的 broadcast/
   // 持久化盖错头。`latestMainAssistantUsage` 在函数入口同步读，已经天然是快照。
   const occupiedFromPerCall = resolveContextOccupancyTokens(latestMainAssistantUsage);
-  const snapshotModel = currentTurnUsage.model;
+  const snapshotModel = chooseBuiltinContextUsageModel({
+    sdkResultModel: currentTurnUsage.model,
+    configuredModel: currentModel,
+    lookupWindow: lookupModelContextLength,
+  });
   const snapshotSessionId = sessionId;
   const snapshotQuerySession = querySession;
+  const registryWindow = lookupModelContextLength(snapshotModel);
+  let runtimeWindow: number | null = registryWindow ? null : inferContextWindowFromSdkModelTag(snapshotModel);
 
   let occupied = occupiedFromPerCall;
 
@@ -1968,6 +2009,9 @@ async function broadcastBuiltinContextUsage(): Promise<void> {
     try {
       const ctx = await snapshotQuerySession.getContextUsage();
       occupied = resolveContextOccupancyFromSdkBreakdown(ctx);
+      if (!registryWindow) {
+        runtimeWindow = resolveContextWindowFromSdkBreakdown(ctx) ?? runtimeWindow;
+      }
     } catch (err) {
       console.debug('[agent] getContextUsage fallback failed (will skip context-usage broadcast):', err);
     }
@@ -1977,12 +2021,12 @@ async function broadcastBuiltinContextUsage(): Promise<void> {
 
   const usage = computeContextUsage({
     occupiedTokens: occupied,
-    runtimeWindow: null,
+    runtimeWindow,
     source: 'builtin',
     model: snapshotModel,
     lookupWindow: lookupModelContextLength,
   });
-  broadcast('chat:context-usage', usage);
+  broadcast('chat:context-usage', { ...usage, sessionId: snapshotSessionId });
   // PRD 0.2.32 — 持久化**同一个**快照到 session 记录（单一数据源）。每轮末一次写盘，
   // 重开会话时前端从 session metadata seed → 环立即显示且与会话期间一致。fire-and-forget。
   void updateSessionMetadata(snapshotSessionId, { lastContextUsage: usage }).catch((err) =>
@@ -2758,8 +2802,28 @@ export function setSessionModel(model: string, opts?: { imConfigSync?: boolean }
 
   const oldModel = currentModel;
   const aliasEnvChanged = modelAliasEnvChangesForModel(currentProviderEnv?.modelAliases, oldModel, model);
+  const crossesProviderHistoryBoundary = !canResumeAcrossProviderBoundary(
+    toProviderHistoryEnv(currentProviderEnv, oldModel),
+    toProviderHistoryEnv(currentProviderEnv, model),
+  );
   currentModel = model;
   console.log(`[agent] session model set: ${oldModel ?? 'undefined'} -> ${model}`);
+
+  if (crossesProviderHistoryBoundary) {
+    if (isProcessing && !isPreWarming) {
+      pendingProviderHistoryBoundaryReset = true;
+      console.log('[agent] model switch crosses provider-history boundary during active turn -> deferred fresh SDK session');
+      if (querySession) scheduleDeferredRestart('provider-history');
+    } else {
+      resetForProviderHistoryBoundary();
+      console.log('[agent] model switch crosses provider-history boundary -> created fresh SDK session id');
+      if (querySession) {
+        abortPersistentSession();
+        schedulePreWarm();
+      }
+    }
+    return;
+  }
 
   // Apply model change to SDK subprocess immediately (including during pre-warm).
   // Without this, changing model during pre-warm creates a desync:
@@ -2862,6 +2926,25 @@ export function getSessionProviderEnv(): ProviderEnv | undefined {
   return currentProviderEnv;
 }
 
+function resetForProviderHistoryBoundary(): void {
+  const previousSessionId = sessionId;
+  pendingProviderHistoryBoundaryReset = false;
+  sessionRegistered = false;
+  sessionId = randomUUID();
+  hasInitialPrompt = false;
+  messages.length = 0;
+  lastPersistedIndex = 0;
+  persistedSessionMessageCache.length = 0;
+  persistChainBySession.delete(previousSessionId);
+  currentSessionUuids.clear();
+  liveSessionUuids.clear();
+  messageSequence = 0;
+  pendingResumeSessionAt = undefined;
+  pendingReloadAnchor = undefined;
+  systemInitInfo = null;
+  sdkControlReady = false;
+}
+
 /** Set provider env (called by Rust IM router via /api/provider/set on sidecar creation or config hot-reload).
  *
  * Provider env is baked into SDK subprocess environment variables at spawn time
@@ -2897,17 +2980,24 @@ export function setSessionProviderEnv(providerEnv: ProviderEnv | undefined): voi
     return;
   }
 
-  // Resume safety: entering a provider that validates signed session history requires a fresh
-  // session when the previous provider did not. Anthropic validates thinking block signatures
-  // that third-party providers don't, so resuming with third-party messages causes errors.
+  // Resume safety: SDK transcripts are only safe to resume inside one provider history family.
+  // Third-party providers can differ in replay/tool/thinking compatibility even when both expose
+  // an Anthropic-compatible surface; provider verification only proves a fresh minimal turn.
   // Must check BEFORE updating currentProviderEnv.
-  // Note: Desktop Chat also shows a ConfirmDialog for this case (see Chat.tsx), but this
+  // Note: Desktop Chat also shows a ConfirmDialog for non-empty provider switches, but this
   // backend guard is defense-in-depth for non-frontend callers (IM Bot, Cron, Agent Channel).
-  const currentRequiresSignedHistory = requiresSignedSessionHistory(currentProviderEnv);
-  const nextRequiresSignedHistory = requiresSignedSessionHistory(providerEnv);
-  if (!currentRequiresSignedHistory && nextRequiresSignedHistory) {
-    sessionRegistered = false;
-    console.log('[agent] provider switch: third-party → Anthropic — will create fresh session (signature incompatible)');
+  const crossesProviderHistoryBoundary = !canResumeAcrossProviderBoundary(
+    toProviderHistoryEnv(currentProviderEnv, currentModel),
+    toProviderHistoryEnv(providerEnv, currentModel),
+  );
+  if (crossesProviderHistoryBoundary) {
+    if (isProcessing && !isPreWarming) {
+      pendingProviderHistoryBoundaryReset = true;
+      console.log('[agent] provider switch crosses history boundary during active turn — fresh SDK session will be created after restart');
+    } else {
+      resetForProviderHistoryBoundary();
+      console.log('[agent] provider switch crosses history boundary — created fresh SDK session id');
+    }
   }
 
   currentProviderEnv = providerEnv;
@@ -2951,7 +3041,8 @@ export function setSessionProviderEnv(providerEnv: ProviderEnv | undefined): voi
 function providerEnvEqual(a: ProviderEnv | undefined, b: ProviderEnv | undefined): boolean {
   if (!a && !b) return true;
   if (!a || !b) return false;
-  return a.baseUrl === b.baseUrl
+  return a.providerId === b.providerId
+    && a.baseUrl === b.baseUrl
     && a.apiKey === b.apiKey
     && a.authType === b.authType
     && a.apiProtocol === b.apiProtocol
@@ -4421,6 +4512,7 @@ function createMetadataForSessionId(
     sessionId: targetSessionId,
     scenario,
     agent,
+    runtimeOverride: getCurrentRuntimeType(),
     fallbackRuntime: getCurrentRuntimeType(),
     title,
   });
@@ -5424,12 +5516,12 @@ function checkDecorativeToolText(text: string): { filtered: boolean; reason?: st
   return { filtered: false };
 }
 
-function appendTextChunk(chunk: string): void {
+function appendTextChunk(chunk: string): boolean {
   // Filter out decorative text from third-party APIs (e.g., 智谱 GLM-4.7)
   const decorativeCheck = checkDecorativeToolText(chunk);
   if (decorativeCheck.filtered) {
     console.log(`[agent] Filtered decorative text (${decorativeCheck.reason}), length=${chunk.length}`);
-    return;
+    return false;
   }
 
   // PRD 0.2.18 Session Inbox — accumulate text for reply pushback if this turn
@@ -5442,7 +5534,7 @@ function appendTextChunk(chunk: string): void {
   const message = ensureAssistantMessage();
   if (typeof message.content === 'string') {
     message.content += chunk;
-    return;
+    return true;
   }
   const contentArray = message.content;
   const lastBlock = contentArray[contentArray.length - 1];
@@ -5451,6 +5543,7 @@ function appendTextChunk(chunk: string): void {
   } else {
     contentArray.push({ type: 'text', text: chunk });
   }
+  return true;
 }
 
 function handleThinkingStart(index: number): void {
@@ -5704,6 +5797,10 @@ function handleContentBlockStop(index: number, toolId?: string): void {
         toolBlock.tool.parsedInput = parsed;
       }
     }
+    const display = buildFilePatchDisplayDescriptor(toolBlock.tool);
+    if (display) {
+      toolBlock.tool.display = display;
+    }
     // Pattern 3 §D.3 — block has reached terminal state, drop the throttle
     // cursor so a future tool with a recycled id starts fresh.
     if (toolId) lastParsedBytesByToolId.delete(toolId);
@@ -5823,13 +5920,13 @@ function handleMessageComplete(): void {
   // Cross-owner fix: scope by sessionId so we only clear OUR slot.
   clearAmbientLogContextField(sessionId, 'turnId');
   // Pattern B/C/G: turn complete → emit 'complete' for the head request, then
-  // pop it. Subsequent turns (mid-turn injected) advance to the next head.
-  emitImEvent('complete', '');
-  const completedReq = popPendingRequest();
-  if (completedReq) {
-    imRequestRegistry.setStatus(completedReq, 'completed');
-    imRequestRegistry.unregister(completedReq);
+  // pop it. Some result-handler fallback paths surface terminal text/error and
+  // finalize the same SDK boundary before reaching here; in that case do not
+  // advance the FIFO again and accidentally complete the next pending request.
+  if (!currentTurnImTerminalEmitted) {
+    completeCurrentImRequest('');
   }
+  currentTurnImTerminalEmitted = false;
   // PRD 0.2.14 — desktop turn ended; release mirror state so the next
   // (possibly IM-driven) turn doesn't accidentally mirror through here.
   clearMirrorState();
@@ -6053,13 +6150,13 @@ function handleMessageError(error: string, localizedError?: string): void {
   // Pattern 6: clear turnId on error too — turn is over either way.
   // Cross-owner fix: scope by sessionId so we only clear OUR slot.
   clearAmbientLogContextField(sessionId, 'turnId');
-  // Pattern B/C/G: error → emit 'error' for head + pop queue.
-  emitImEvent('error', localizedError ?? localizeImError(error));
-  const failedReq = popPendingRequest();
-  if (failedReq) {
-    imRequestRegistry.setStatus(failedReq, 'failed');
-    imRequestRegistry.unregister(failedReq);
+  // Pattern B/C/G: error → emit 'error' for head + pop queue. If the result
+  // handler already finalized this SDK boundary, don't advance to the next
+  // pending request here.
+  if (!currentTurnImTerminalEmitted) {
+    failCurrentImRequest(localizedError ?? localizeImError(error));
   }
+  currentTurnImTerminalEmitted = false;
   // PRD 0.2.14 — desktop turn errored out; release mirror state.
   clearMirrorState();
   if (messageQueue.length === 0 && pendingMidTurnQueue.length === 0 && inFlightToCliId === null) {
@@ -6255,6 +6352,10 @@ function setToolResult(toolUseId: string, content: string, isError?: boolean): v
   toolBlock.tool.result = content;
   if (typeof isError === 'boolean') {
     toolBlock.tool.isError = isError;
+  }
+  const display = buildFilePatchDisplayDescriptor(toolBlock.tool);
+  if (display) {
+    toolBlock.tool.display = display;
   }
 }
 
@@ -7656,42 +7757,31 @@ export async function enqueueUserMessage(
   // SKIP for queued messages: provider/model changes during streaming would cause a session
   // restart that wipes the queue and races with the active stream. Queued messages inherit
   // the current session's provider/model configuration.
-  const switchingToSubscription = !isSessionBusy && providerEnv === 'subscription' && currentProviderEnv;
-  const baseUrlChanged = switchingToSubscription ||
-    (!isSessionBusy && effectiveProviderEnv && effectiveProviderEnv.baseUrl !== currentProviderEnv?.baseUrl);
-  const providerChanged = baseUrlChanged || (!isSessionBusy && effectiveProviderEnv && (
-    effectiveProviderEnv.apiKey !== currentProviderEnv?.apiKey
-  ));
+  const providerChanged = !isSessionBusy && (
+    providerEnv === 'subscription'
+      ? currentProviderEnv !== undefined
+      : providerEnv !== undefined && !providerEnvEqual(currentProviderEnv, effectiveProviderEnv)
+  );
+  const nextModel = model ?? currentModel;
+  const modelChanged = !isSessionBusy && model !== undefined && model !== currentModel;
+  const crossesProviderHistoryBoundary = !isSessionBusy
+    && (providerChanged || modelChanged)
+    && !canResumeAcrossProviderBoundary(
+      toProviderHistoryEnv(currentProviderEnv, currentModel),
+      toProviderHistoryEnv(effectiveProviderEnv, nextModel),
+    );
 
-  if (providerChanged && querySession) {
+  if ((providerChanged || crossesProviderHistoryBoundary) && querySession) {
     const fromLabel = currentProviderEnv?.baseUrl ?? 'anthropic';
     const toLabel = effectiveProviderEnv?.baseUrl ?? 'anthropic';
-    if (isDebugMode) console.log(`[agent] provider changed from ${fromLabel} to ${toLabel}, restarting session`);
+    if (isDebugMode) console.log(`[agent] provider/history changed from ${fromLabel} to ${toLabel}, restarting session`);
 
-    // Resume logic: entering a provider that validates signed session history from one that
-    // doesn't requires a fresh session. All other transitions can safely resume.
-    // Note: Desktop Chat also shows a ConfirmDialog for this case (see Chat.tsx), but this
-    // backend guard is defense-in-depth for non-frontend callers (IM Bot, Cron, Agent Channel).
-    const currentRequiresSignedHistory = requiresSignedSessionHistory(currentProviderEnv);
-    const nextRequiresSignedHistory = requiresSignedSessionHistory(effectiveProviderEnv);
-    if (!currentRequiresSignedHistory && nextRequiresSignedHistory) {
-      sessionRegistered = false;
-      sessionId = randomUUID();
-      hasInitialPrompt = false;
-      messages.length = 0;
-      // Pattern 3 §3.2.4 — fresh session means existing on-disk JSONL is
-      // unrelated to this in-memory state; reset the cursor.
-      lastPersistedIndex = 0;
-      persistedSessionMessageCache.length = 0;
-      systemInitInfo = null;
-      sdkControlReady = false;
-      console.log('[agent] Fresh session: third-party → Anthropic (signature incompatible)');
+    if (providerChanged) {
+      // Update provider env BEFORE terminating so the new session picks it up
+      currentProviderEnv = effectiveProviderEnv; // undefined for subscription, object for API
+      // PRD #124: keep bridge registration in sync (handles all provider transitions).
+      ensureActiveSessionBridgeRegistered();
     }
-
-    // Update provider env BEFORE terminating so the new session picks it up
-    currentProviderEnv = effectiveProviderEnv; // undefined for subscription, object for API
-    // PRD #124: keep bridge registration in sync (handles all provider transitions).
-    ensureActiveSessionBridgeRegistered();
     // Terminate current session - it will restart automatically when processing the message
     abortPersistentSession();
     // Wait for the current session to fully terminate before proceeding
@@ -7722,7 +7812,22 @@ export async function enqueueUserMessage(
     toolResultIndexToId.clear();
     imTextBlockIndices.clear();
 
+    if (crossesProviderHistoryBoundary) {
+      resetForProviderHistoryBoundary();
+      console.log('[agent] Fresh session: provider history boundary changed');
+    }
+
     if (isDebugMode) console.log(`[agent] session terminated for provider switch`);
+  } else if (providerChanged || crossesProviderHistoryBoundary) {
+    if (crossesProviderHistoryBoundary) {
+      resetForProviderHistoryBoundary();
+      console.log('[agent] Fresh session: provider history boundary changed');
+    }
+    if (providerChanged) {
+      currentProviderEnv = effectiveProviderEnv;
+      ensureActiveSessionBridgeRegistered();
+      if (isDebugMode) console.log(`[agent] provider env changed without active query: baseUrl=${effectiveProviderEnv?.baseUrl ?? 'anthropic'}`);
+    }
   } else if (effectiveProviderEnv) {
     // Provider not changed (or first message with API provider), just update tracking
     currentProviderEnv = effectiveProviderEnv;
@@ -9145,6 +9250,10 @@ async function startStreamingSession(preWarm = false): Promise<void> {
   }
 
   isPreWarming = preWarm;
+  if (pendingProviderHistoryBoundaryReset) {
+    console.log('[agent] applying deferred provider history boundary reset before SDK start');
+    resetForProviderHistoryBoundary();
+  }
   // Sync enabled user-level skills as symlinks into project's .claude/skills/
   // Must happen before buildClaudeSessionEnv() so SDK sees them via settingSources: ['project']
   const adminConfigForSession = loadAdminConfig();
@@ -10787,14 +10896,15 @@ async function startStreamingSession(preWarm = false): Promise<void> {
                   emitBuiltinFirstDeltaTrace(streamEvent.delta.text);
                   // Handler first: appendTextChunk → ensureAssistantMessage() may flush
                   // pendingMidTurnQueue. Broadcast after so frontend splits before new content.
-                  appendTextChunk(streamEvent.delta.text);
-                  broadcast('chat:message-chunk', streamEvent.delta.text);
-                  currentTurnHasOutput = true;
-                  // IM stream: forward non-subagent text delta to event bus (Pattern B)
-                  emitImEvent('delta', streamEvent.delta.text);
-                  // PRD 0.2.14 — accumulate per-block text for desktop→IM mirror
-                  // (no-op when current turn isn't desktop-driven).
-                  maybeAccumulateMirrorChunk(streamEvent.index, streamEvent.delta.text);
+                  if (appendTextChunk(streamEvent.delta.text)) {
+                    broadcast('chat:message-chunk', streamEvent.delta.text);
+                    currentTurnHasOutput = true;
+                    // IM stream: forward non-subagent text delta to event bus (Pattern B)
+                    emitImEvent('delta', streamEvent.delta.text);
+                    // PRD 0.2.14 — accumulate per-block text for desktop→IM mirror
+                    // (no-op when current turn isn't desktop-driven).
+                    maybeAccumulateMirrorChunk(streamEvent.index, streamEvent.delta.text);
+                  }
                 } else {
                   console.log(`[agent] Filtered decorative text from stream (${decorativeCheck.reason})`);
                 }
@@ -11406,10 +11516,11 @@ async function startStreamingSession(preWarm = false): Promise<void> {
             console.log(`[agent] Non-streamed assistant text detected (${nonStreamedText.length} chars), broadcasting as message-chunk`);
             // Handler first: appendTextChunk → ensureAssistantMessage() may flush
             // pendingMidTurnQueue. Broadcast after so frontend splits before new content.
-            appendTextChunk(nonStreamedText);
-            broadcast('chat:message-chunk', nonStreamedText);
-            currentTurnHasOutput = true;
-            emitImEvent('delta', nonStreamedText);
+            if (appendTextChunk(nonStreamedText)) {
+              broadcast('chat:message-chunk', nonStreamedText);
+              currentTurnHasOutput = true;
+              emitImEvent('delta', nonStreamedText);
+            }
           }
         }
       } else if (sdkMessage.type === 'result') {
@@ -11492,13 +11603,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           if (pendingRequestIds.length > 0 && !isAbortResult) {
             const errorText = localizeImError(rawError);
             console.warn('[agent] SDK result is_error, forwarding to IM bus:', errorText);
-            emitImEvent('error', errorText);
-            // W2 fix: also unregister the registry entry that the legacy code skipped.
-            const failedReq = popPendingRequest();
-            if (failedReq) {
-              imRequestRegistry.setStatus(failedReq, 'failed');
-              imRequestRegistry.unregister(failedReq);
-            }
+            failCurrentImRequest(errorText);
           } else if (pendingRequestIds.length > 0 && isAbortResult) {
             // #307: an aborted IM turn must NOT push the internal diagnostic to the
             // IM peer as an error. handleMessageComplete() below runs for is_error
@@ -11577,30 +11682,35 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         // which the frontend renders as the normal inline "已停止" feedback (banner
         // suppressed by describeTerminalReason).
         if (noOutputResultText && !currentTurnHasOutput && !currentTurnToolCount && !isAbortResult) {
+          let shouldCompleteNoOutputImRequest = false;
           if (resultMessage.is_error) {
             console.warn('[agent] SDK error result with no streamed output, showing as agent-error:', resultErrorText);
             lastAgentError = resultErrorText;
             broadcast('chat:agent-error', { message: resultErrorText });
+            shouldCompleteNoOutputImRequest = true;
           } else if (resultText) {
             // Non-error result text that wasn't captured by streaming or assistant handler
             // (safety net — should rarely trigger after the assistant handler fix above)
             console.warn('[agent] SDK non-error result with no streamed output, showing as message:', resultText);
             emitBuiltinFirstDeltaTrace(resultText);
             // Handler first (same pattern as streamed text path)
-            appendTextChunk(resultText);
-            broadcast('chat:message-chunk', resultText);
-            currentTurnHasOutput = true;
+            if (appendTextChunk(resultText)) {
+              broadcast('chat:message-chunk', resultText);
+              currentTurnHasOutput = true;
+              shouldCompleteNoOutputImRequest = true;
+            }
           }
           // Forward to IM event bus (prevents "(No Response)" for SDK failures).
           // Pattern B+G: pop the head request — the upcoming handleMessageComplete
           // for this turn will find the head already cleared and skip duplicate
           // emission. Defensive against handleMessageComplete not running for
           // is_error / no-output results.
-          emitImEvent('complete', noOutputResultText);
-          const completedReq = popPendingRequest();
-          if (completedReq) {
-            imRequestRegistry.setStatus(completedReq, 'completed');
-            imRequestRegistry.unregister(completedReq);
+          // Non-error terminal text only completes IM early if it was actually
+          // appended to the transcript. Decorative provider wrappers can be
+          // rejected by appendTextChunk(); those must fall through to the empty
+          // result error path rather than reporting a hidden string as success.
+          if (shouldCompleteNoOutputImRequest && !currentTurnImTerminalEmitted) {
+            completeCurrentImRequest(noOutputResultText);
           }
         }
 

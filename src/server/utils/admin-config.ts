@@ -24,7 +24,15 @@ import { stripBom } from '../../shared/utils';
 import { workspacePathsEqual } from '../../shared/workspacePath';
 import type { McpServerDefinition } from '../../shared/config-types';
 import { applyProviderEnablementAndOrder, isProviderEnabled, PRESET_MCP_SERVERS, PRESET_PROVIDERS } from '../../shared/config-types';
+import {
+  coerceModelForRuntime,
+  coercePermissionModeForRuntime,
+  getDefaultRuntimePermissionMode,
+  normalizeRuntime,
+  type RuntimeType,
+} from '../../shared/types/runtime';
 import type { SessionMetadata } from '../types/session';
+import { coerceReasoningEffortSettingForRuntime } from '../../shared/reasoningEffort';
 import { ensureDirSync } from './fs-utils';
 import { withFileLock, FileBusyError } from './file-lock';
 
@@ -425,6 +433,8 @@ export function isProviderDisabled(providerId: string, config?: AdminAppConfig):
 
 /** Provider environment for SDK subprocess (structural match with ProviderEnv in agent-session.ts) */
 export interface ResolvedProviderEnv {
+  /** Provider registry id. Metadata only: not forwarded as an SDK env var. */
+  providerId?: string;
   baseUrl?: string;
   apiKey?: string;
   authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key';
@@ -465,6 +475,7 @@ export function resolveProviderEnv(
   // Extract provider config fields (same shape as frontend Chat.tsx builds)
   const providerConfig = (provider.config ?? {}) as Record<string, unknown>;
   const result: ResolvedProviderEnv = {
+    providerId,
     baseUrl: providerConfig.baseUrl ? String(providerConfig.baseUrl) : undefined,
     apiKey,
     authType: (provider.authType as ResolvedProviderEnv['authType']) ?? 'both',
@@ -563,10 +574,9 @@ export function resolveImProviderEnv(
   config?: AdminAppConfig,
 ): ResolvedProviderEnv | undefined {
   const c = config ?? loadConfig();
-  const normalized = agentDir.replace(/\\/g, '/');
   const agents = (c.agents ?? []) as AgentConfigSlim[];
   const agent = agents.find(a =>
-    typeof a.workspacePath === 'string' && a.workspacePath.replace(/\\/g, '/') === normalized
+    typeof a.workspacePath === 'string' && workspacePathsEqual(a.workspacePath, agentDir)
   );
   // No agent matched (legacy IM bot / workspace-path drift) — bail out so the
   // caller falls back to `payload.providerEnv`. Returning a resolution against
@@ -688,16 +698,13 @@ export function resolveWorkspaceConfig(
   // can short-circuit via `{ includeMcp: false }` to skip it entirely.
   const includeMcp = options?.includeMcp !== false;
 
-  // Normalize path separators for cross-platform matching
-  const normalizedDir = agentDir.replace(/\\/g, '/');
-
   // Find matching agent by workspace path
   const agents = (config.agents ?? []) as Array<Record<string, unknown>>;
   const agent = agents.find(a =>
-    typeof a.workspacePath === 'string' && a.workspacePath.replace(/\\/g, '/') === normalizedDir
+    typeof a.workspacePath === 'string' && workspacePathsEqual(a.workspacePath, agentDir)
   );
   const project = loadProjects().find(p =>
-    typeof p.path === 'string' && p.path.replace(/\\/g, '/') === normalizedDir
+    typeof p.path === 'string' && workspacePathsEqual(p.path, agentDir)
   );
 
   // --- Resolve MCP ---
@@ -749,10 +756,32 @@ export function resolveWorkspaceConfig(
     if (decoded) providerEnv = decoded;
   }
 
+  const resolvedRuntime: RuntimeType = normalizeRuntime(
+    (sessionMeta?.runtime as string | undefined) ?? (agent?.runtime as string | undefined),
+  );
+  const agentRuntimeConfig = agent?.runtimeConfig as {
+    model?: string;
+    permissionMode?: string;
+    reasoningEffort?: string;
+  } | undefined;
+
   // --- Resolve Model ---
-  // Priority: session.model → agent.model → provider's primaryModel (if resolved)
-  let model = sessionMeta?.model ?? (agent?.model as string | undefined) ?? undefined;
-  if (!model && providerId) {
+  // Runtime-aware priority:
+  // - builtin: session.model → agent.model → provider primary model
+  // - external: session.model → agent.runtimeConfig.model → runtime default
+  const rawModel = resolvedRuntime === 'builtin'
+    ? sessionMeta?.model ?? (agent?.model as string | undefined) ?? undefined
+    : sessionMeta?.model ?? agentRuntimeConfig?.model;
+  let model = coerceModelForRuntime(rawModel, resolvedRuntime);
+  if (resolvedRuntime !== 'builtin'
+      && typeof rawModel === 'string'
+      && rawModel.trim().length > 0
+      && model === undefined) {
+    console.warn(
+      `[runtime-coerce] dropping stale workspace model='${rawModel}' on runtime='${resolvedRuntime}'; falling back to runtime default. sessionId=${sessionMeta?.id ?? '<none>'} agentDir=${agentDir}`,
+    );
+  }
+  if (!model && providerId && resolvedRuntime === 'builtin') {
     const provider = findEffectiveProvider(providerId, config);
     if (provider && isProviderEnabled(provider)) {
       model = (provider as Record<string, unknown>).primaryModel as string | undefined;
@@ -765,29 +794,55 @@ export function resolveWorkspaceConfig(
   // hold the literal 'default' — that is a meaningful value ("session reverted
   // to default") and must win over a non-default agent value, which the ??
   // chain handles naturally.
-  const agentRuntimeConfig = agent?.runtimeConfig as { reasoningEffort?: string } | undefined;
-  const agentRuntime = (agent?.runtime as string | undefined) ?? 'builtin';
-  const reasoningEffort = sessionMeta?.reasoningEffort
-    ?? (agentRuntime === 'builtin'
+  const rawReasoningEffort = sessionMeta?.reasoningEffort
+    ?? (resolvedRuntime === 'builtin'
       ? (agent?.reasoningEffort as string | undefined)
       : agentRuntimeConfig?.reasoningEffort);
+  const reasoningEffort = resolvedRuntime === 'builtin'
+    ? rawReasoningEffort
+    : coerceReasoningEffortSettingForRuntime(rawReasoningEffort, resolvedRuntime);
+  if (resolvedRuntime !== 'builtin'
+      && typeof rawReasoningEffort === 'string'
+      && rawReasoningEffort.trim().length > 0
+      && rawReasoningEffort.trim() !== 'default'
+      && reasoningEffort === undefined) {
+    console.warn(
+      `[runtime-coerce] dropping stale workspace reasoningEffort='${rawReasoningEffort}' on runtime='${resolvedRuntime}'; falling back to runtime default. sessionId=${sessionMeta?.id ?? '<none>'} agentDir=${agentDir}`,
+    );
+  }
 
   // --- Resolve Permission Mode ---
-  // Same precedence as renderer Chat/Launcher builtin mode resolution:
-  // session snapshot → Agent → Project → global default. Pre-warm uses this
-  // before the first user message, so plan/fullAgency cannot rely on a later
-  // in-place SDK mode switch.
-  // Deliberate divergence from the renderer's UI fallback (which defaults a
-  // missing defaultPermissionMode to 'plan'): headless pre-warm for IM/cron
-  // sessions must default to 'auto' (classify, non-blocking), NOT 'plan'
-  // (read-only) — defaulting headless sessions to plan would make them refuse
-  // every write before the first user message. Only reachable on a brand-new
-  // empty config; once the UI has run, config.defaultPermissionMode is set.
-  const permissionMode = asBuiltinPermissionMode(sessionMeta?.permissionMode)
-    ?? asBuiltinPermissionMode(agent?.permissionMode)
-    ?? asBuiltinPermissionMode(project?.permissionMode)
-    ?? asBuiltinPermissionMode(config.defaultPermissionMode)
-    ?? 'auto';
+  // Builtin keeps the historical precedence:
+  // session snapshot → Agent → Project → global default. External runtimes use
+  // only their runtime-specific fields; project/global builtin permission
+  // values are not portable.
+  let permissionMode: string;
+  if (resolvedRuntime === 'builtin') {
+    // Deliberate divergence from the renderer's UI fallback (which defaults a
+    // missing defaultPermissionMode to 'plan'): headless pre-warm for IM/cron
+    // sessions must default to 'auto' (classify, non-blocking), NOT 'plan'
+    // (read-only) — defaulting headless sessions to plan would make them refuse
+    // every write before the first user message. Only reachable on a brand-new
+    // empty config; once the UI has run, config.defaultPermissionMode is set.
+    permissionMode = asBuiltinPermissionMode(sessionMeta?.permissionMode)
+      ?? asBuiltinPermissionMode(agent?.permissionMode)
+      ?? asBuiltinPermissionMode(project?.permissionMode)
+      ?? asBuiltinPermissionMode(config.defaultPermissionMode)
+      ?? 'auto';
+  } else {
+    const rawPermissionMode = sessionMeta?.permissionMode ?? agentRuntimeConfig?.permissionMode;
+    const coercedPermissionMode = coercePermissionModeForRuntime(rawPermissionMode, resolvedRuntime);
+    if (typeof rawPermissionMode === 'string'
+        && rawPermissionMode.trim().length > 0
+        && coercedPermissionMode === undefined) {
+      console.warn(
+        `[runtime-coerce] dropping stale workspace permissionMode='${rawPermissionMode}' on runtime='${resolvedRuntime}'; falling back to runtime default. sessionId=${sessionMeta?.id ?? '<none>'} agentDir=${agentDir}`,
+      );
+    }
+    permissionMode = coercedPermissionMode
+      ?? getDefaultRuntimePermissionMode(resolvedRuntime)
+      ?? 'default';
+  }
 
   // Gate on the signals that indicate a real workspace match — NOT permissionMode,
   // which now always resolves to a non-empty string ('auto' fallback) and would

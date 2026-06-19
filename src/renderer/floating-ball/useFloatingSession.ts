@@ -993,6 +993,7 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
             track('session_new', {
                 session_id: sid,
                 triggered_by: 'floating_ball',
+                entry_intent: 'new_chat',
                 runtime: analyticsRuntimeRef.current,
                 has_initial_message: false,
                 agent_hash: null,

@@ -15,6 +15,7 @@ import {
     getToolSummaryNode,
     isSubagentContainerTool
 } from '@/components/tools/toolBadgeConfig';
+import { isSubagentContainerRunning } from '@/components/tools/subagentActivity';
 import ToolUse from '@/components/ToolUse';
 import ToolAttachmentGallery from '@/components/tools/ToolAttachmentGallery';
 import type { ContentBlock } from '@/types/chat';
@@ -64,9 +65,9 @@ const ProcessRow = memo(function ProcessRow({
 
     // Tool: 是最后一个 block 且正在 streaming 且没有 result 就是 active
     const isToolActive = isTool && isLastBlock && isStreaming && (Boolean(block.tool?.isLoading) || !block.tool?.result);
-    const isTaskRunning = isTaskTool && block.tool?.isLoading && !block.tool?.result;
+    const isTaskRunning = isTaskTool && isSubagentContainerRunning(block.tool);
 
-    const isBlockActive = isThinkingActive || isToolActive;
+    const isBlockActive = isThinkingActive || isToolActive || isTaskRunning;
 
     // Thinking timer - update elapsed time every second while thinking is active
     useEffect(() => {
@@ -285,11 +286,11 @@ const ProcessRow = memo(function ProcessRow({
                  *  `isBlockActive` (which requires last+streaming) leaves
                  *  earlier still-running tasks showing a grey dot while the
                  *  expanded TaskTool detail still says "Agent is running".
-                 *  Fall back to the tool's own isLoading/!result state for
+                 *  Fall back to the tool's own running state for
                  *  Task/Agent so each parallel task's indicator reflects its
                  *  own truth — same predicate TaskTool.tsx uses for its
                  *  internal "执行中" badge. */}
-                <div className={`flex size-1.5 shrink-0 rounded-full ${(isBlockActive || isTaskRunning)
+                <div className={`flex size-1.5 shrink-0 rounded-full ${isBlockActive
                     ? 'bg-[var(--success)] animate-pulse'
                     : block.isFailed || block.tool?.isFailed
                         ? 'bg-[var(--error)]'

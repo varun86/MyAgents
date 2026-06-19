@@ -72,8 +72,8 @@ export default memo(function SortableTabItem({
                 }
             `}
             onMouseDown={(e) => {
-                // Select tab immediately on pointer press (not click/release)
-                // This fires before dnd-kit's PointerSensor can intercept
+                // Selection is owned by press, not click: a real drag may
+                // intentionally swallow the later click event.
                 if (e.button !== 0) return; // Left click only
                 if ((e.target as HTMLElement).closest('button')) return; // Skip close button
                 onSelectTab(tab.id);
@@ -82,7 +82,7 @@ export default memo(function SortableTabItem({
         >
             {/* Tab title — drag handle is bound here, not on the entire tab */}
             <span
-                className="min-w-0 flex-1 truncate text-xs font-medium select-none cursor-grab active:cursor-grabbing"
+                className="min-w-0 flex-1 truncate text-xs font-medium select-none"
                 {...listeners}
             >
                 {displayTitle}

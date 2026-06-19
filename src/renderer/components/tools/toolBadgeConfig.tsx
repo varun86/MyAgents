@@ -25,6 +25,15 @@ import type { SubagentToolCall, ToolInput, ToolUseSimple } from '@/types/chat';
 
 import { getEffectiveTodoWriteTodos } from '@/utils/todoWriteState';
 import { getTaskListSnapshot } from '@/utils/taskTodoState';
+import {
+  getFilePatchPrimaryPath,
+  resolveFilePatchDisplay,
+  type FilePatchDisplay,
+} from '../../../shared/toolDisplay/filePatch';
+import {
+  isSubagentCallRunning,
+  isSubagentContainerRunning,
+} from './subagentActivity';
 
 // ===== MCP Server Name Registry =====
 // Module-level map updated by Chat.tsx when MCP config changes.
@@ -76,7 +85,7 @@ function isObject(value: unknown): value is Record<string, unknown> {
 }
 
 // Safe property extraction helpers
-function getStringProp(input: ToolInput | undefined, key: string): string | undefined {
+function getStringProp(input: ToolInput | Record<string, unknown> | null | undefined, key: string): string | undefined {
   if (!input || !isObject(input)) return undefined;
   const value = input[key];
   return typeof value === 'string' ? value : undefined;
@@ -194,6 +203,14 @@ function getTodoWriteLabel(tool: ToolUseSimple): string {
     return `Todo ${completedCount}/${todos.length}`;
   }
   return 'Todo List';
+}
+
+function getFilePatchLabel(tool: ToolUseSimple): string | null {
+  const display = resolveFilePatchDisplay(tool);
+  const filePath = display ? getFilePatchPrimaryPath(display) : null;
+  if (!filePath) return null;
+  const fileName = filePath.split(/[/\\]/).pop() || filePath;
+  return fileName.length > 20 ? `${fileName.substring(0, 17)}...` : fileName;
 }
 
 // SDK 0.3.142+ incremental Task tools (TaskCreate/TaskUpdate/TaskGet/TaskList) —
@@ -550,16 +567,7 @@ export function getToolBadgeConfig(toolName: string): ToolBadgeConfig {
 // external runtimes (like Gemini) surface their real tool identifier (e.g.
 // "run_shell_command") in the UI while internally still routing tool.name to a
 // MyAgents-native component (BashTool/GrepTool/...) for rich body rendering.
-/**
- * Tools that render as an expandable sub-agent container (a card holding a nested
- * `subagentCalls` trace). Single source of truth — used by ToolUse routing,
- * ProcessRow anchoring, TabProvider stats init, and the label helpers below.
- * builtin: Task / Agent (SDK `parent_tool_use_id`). Codex: CollabAgent (collab
- * spawn card, PRD 0.2.27). Keep these call sites in lockstep via this predicate.
- */
-export function isSubagentContainerTool(name: string): boolean {
-  return name === 'Task' || name === 'Agent' || name === 'CollabAgent';
-}
+export { isSubagentContainerTool } from './subagentActivity';
 
 // Human-readable label for a Codex collab-agent card by its action + model.
 const COLLAB_ACTION_LABELS: Record<string, string> = {
@@ -601,6 +609,10 @@ export function getToolLabel(tool: ToolUseSimple): string {
   // handle before the `!parsedInput` early-return below.
   if (tool.name === 'TaskCreate' || tool.name === 'TaskUpdate' || tool.name === 'TaskGet' || tool.name === 'TaskList') {
     return getTaskTodoLabel(tool);
+  }
+  if (tool.name === 'Write' || tool.name === 'Edit') {
+    const label = getFilePatchLabel(tool);
+    if (label) return label;
   }
 
   if (!tool.parsedInput) {
@@ -654,6 +666,10 @@ export function getToolLabel(tool: ToolUseSimple): string {
     case 'Read':
     case 'Write':
     case 'Edit': {
+      if (tool.name === 'Write' || tool.name === 'Edit') {
+        const label = getFilePatchLabel(tool);
+        if (label) return label;
+      }
       const filePath = getStringProp(tool.parsedInput, 'file_path');
       if (filePath) {
         const fileName = filePath.split(/[/\\]/).pop() || filePath;
@@ -693,11 +709,11 @@ export function getToolLabel(tool: ToolUseSimple): string {
     case 'Task':
     case 'Agent':
     case 'CollabAgent': {
-      const isTaskRunning = tool.isLoading && !tool.result;
+      const isTaskRunning = isSubagentContainerRunning(tool);
       // When running, show the latest subagent tool (running or most recent).
       if (isTaskRunning && tool.subagentCalls && tool.subagentCalls.length > 0) {
-        // Prefer running tool, otherwise show the last tool
-        const runningCall = tool.subagentCalls.find(c => c.isLoading);
+        // Prefer the latest running tool, otherwise show the last tool.
+        const runningCall = [...tool.subagentCalls].reverse().find(isSubagentCallRunning);
         const latestCall = runningCall || tool.subagentCalls[tool.subagentCalls.length - 1];
         if (latestCall) {
           return getSubagentCallLabel(latestCall);
@@ -825,21 +841,6 @@ export function getToolExpandedLabel(tool: ToolUseSimple): string {
 }
 
 /**
- * Count lines for git-style diff stats. Trailing newlines do NOT count as an extra line —
- * `"a\n"` is 1 line (matches `wc -l` semantics + git diff stats).
- *   ""        → 0
- *   "a"       → 1
- *   "a\n"     → 1
- *   "a\nb"    → 2
- *   "a\nb\n"  → 2
- */
-function countLines(s: string | undefined): number {
-  if (!s) return 0;
-  const parts = s.split('\n');
-  return s.endsWith('\n') ? parts.length - 1 : parts.length;
-}
-
-/**
  * Parse Grep SDK result. Prefers SDK's authoritative `numMatches` / `numFiles`
  * fields (see `node_modules/@anthropic-ai/claude-agent-sdk/sdk-tools.d.ts::GrepOutput`),
  * falls back to deriving from `content` for older payloads or `output_mode: "content"`
@@ -888,6 +889,29 @@ function parseGlobStats(result: string | undefined): { files: number } | null {
   return null;
 }
 
+function renderFilePatchSummary(display: FilePatchDisplay): ReactNode {
+  const { added, removed } = display.summary;
+  const showRemoved =
+    removed > 0 ||
+    display.changes.some((change) => change.kind !== 'add' || change.removed > 0 || change.view.kind === 'old-new');
+
+  if (!showRemoved) {
+    return (
+      <span className="text-xs font-mono whitespace-nowrap text-[var(--success)]">
+        +{added}
+      </span>
+    );
+  }
+
+  return (
+    <span className="text-xs font-mono whitespace-nowrap">
+      <span className="text-[var(--success)]">+{added}</span>
+      {' '}
+      <span className="text-[var(--error)]">-{removed}</span>
+    </span>
+  );
+}
+
 /**
  * Outer ProcessRow summary chip — surfaces the most actionable result detail
  * next to the tool's main label (Edit `+5 -13`, Write `+25`, Grep `N matches in M files`).
@@ -900,31 +924,10 @@ function parseGlobStats(result: string | undefined): { files: number } | null {
  */
 export function getToolSummaryNode(tool: ToolUseSimple): ReactNode | null {
   switch (tool.name) {
-    case 'Edit': {
-      const oldStr = getStringProp(tool.parsedInput, 'old_string');
-      const newStr = getStringProp(tool.parsedInput, 'new_string');
-      // Hold the chip back until BOTH sides have streamed; otherwise users see
-      // misleading `+0 -N` mid-stream when only old_string has arrived.
-      // Empty string is a valid pure insert/delete so we check `=== undefined`, not falsy.
-      if (oldStr === undefined || newStr === undefined) return null;
-      const added = countLines(newStr);
-      const removed = countLines(oldStr);
-      return (
-        <span className="text-xs font-mono whitespace-nowrap">
-          <span className="text-[var(--success)]">+{added}</span>
-          {' '}
-          <span className="text-[var(--error)]">-{removed}</span>
-        </span>
-      );
-    }
+    case 'Edit':
     case 'Write': {
-      const content = getStringProp(tool.parsedInput, 'content');
-      if (content === undefined) return null;
-      return (
-        <span className="text-xs font-mono text-[var(--success)]">
-          +{countLines(content)}
-        </span>
-      );
+      const display = resolveFilePatchDisplay(tool);
+      return display ? renderFilePatchSummary(display) : null;
     }
     case 'Grep': {
       const stats = parseGrepStats(tool.result);

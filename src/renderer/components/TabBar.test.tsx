@@ -112,6 +112,14 @@ describe('TabBar', () => {
             .toBe(`${TAB_ITEM_MIN_WIDTH_PX}px`);
     });
 
+    it('selects tabs on mouse down so drag click capture cannot swallow tab switching', () => {
+        const props = renderTabBar();
+
+        fireEvent.mouseDown(screen.getByText('Session 2'), { button: 0 });
+
+        expect(props.onSelectTab).toHaveBeenCalledWith('tab-2');
+    });
+
     it('sizes the occupied tab strip from tab count, not title content', () => {
         const shortTabs = [makeTab('tab-1', 'A'), makeTab('tab-2', 'B')];
         const longTabs = [

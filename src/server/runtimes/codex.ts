@@ -16,7 +16,8 @@ import type {
   RuntimeProxyPolicy, RuntimeDiagnosticIssue,
 } from '../../shared/types/runtime';
 import { CODEX_PERMISSION_MODES } from '../../shared/types/runtime';
-import type { AgentRuntime, RuntimeConfigCapabilities, RuntimeProcess, SessionStartOptions, UnifiedEvent, UnifiedEventCallback, ImagePayload, SubAgentScope } from './types';
+import { coerceFileChanges, formatFileChangeForResult } from '../../shared/fileChange';
+import type { AgentPlanTodo, AgentRuntime, RuntimeConfigCapabilities, RuntimeProcess, SessionStartOptions, UnifiedEvent, UnifiedEventCallback, ImagePayload, SubAgentScope } from './types';
 import { StaleRuntimeSessionError } from './types';
 import { mapCodexTokenUsage, type CodexThreadTokenUsage } from './codex-token-usage';
 import { augmentedProcessEnv, resolveCommand, stripAnsi } from './env-utils';
@@ -116,6 +117,13 @@ function codexTraceId(params: Record<string, unknown>, fallbackItemId?: string, 
   if (!itemId) return undefined;
   const threadId = stringValue(params.threadId);
   return [threadId, itemId, suffix].filter((part): part is string => !!part).join('::');
+}
+
+export function buildCodexFileChangeResultContent(changes: unknown): string {
+  const normalized = coerceFileChanges(changes);
+  return normalized.length > 0
+    ? normalized.map(formatFileChangeForResult).join('\n\n')
+    : 'File changed';
 }
 
 // ─── Temp image directory for Codex (which requires file paths, not base64) ───
@@ -604,6 +612,8 @@ export function resolveTopLevelSpawnCard(
  * method belongs here:
  *   - LIFECYCLE (turn/*, thread/status|closed): a child's turn/completed would
  *     finalize the user's turn early + resetTurnAccumulators() mid-fan-out.
+ *     A child's turn/plan/updated would also overwrite the main AgentStatusPanel
+ *     todo snapshot.
  *   - USAGE (thread/tokenUsage/updated): a child's token usage would otherwise
  *     flow through as a `usage` event and pollute the MAIN session's context
  *     indicator + persisted lastContextUsage (external-session attributes every
@@ -614,6 +624,7 @@ export function resolveTopLevelSpawnCard(
 const CHILD_GATED_METHODS: ReadonlySet<string> = new Set([
   'turn/started',
   'turn/completed',
+  'turn/plan/updated',
   'thread/status/changed',
   'thread/closed',
   'thread/tokenUsage/updated',
@@ -1182,6 +1193,40 @@ export function mapCodexTurnCompletedNotification(
     ...(errorMessage ? { error: errorMessage, result: errorMessage } : {}),
     ...(status !== 'completed' && !errorMessage ? { result: `Turn ended with status ${status}` } : {}),
   };
+}
+
+function normalizeCodexPlanStatus(status: unknown): AgentPlanTodo['status'] {
+  switch (status) {
+    case 'completed':
+      return 'completed';
+    case 'inProgress':
+    case 'in_progress':
+      return 'in_progress';
+    case 'pending':
+    default:
+      return 'pending';
+  }
+}
+
+export function mapCodexTurnPlanUpdatedNotification(
+  params: unknown,
+): Extract<UnifiedEvent, { kind: 'agent_plan_update' }> {
+  const p = objectValue(params);
+  const todos = arrayValue(p.plan)
+    .map((raw, idx): AgentPlanTodo | null => {
+      const step = objectValue(raw);
+      const content = stringValue(step.step)?.trim();
+      if (!content) return null;
+      return {
+        key: `codex-plan-${idx}`,
+        content,
+        activeForm: content,
+        status: normalizeCodexPlanStatus(step.status),
+      };
+    })
+    .filter((todo): todo is AgentPlanTodo => todo !== null);
+
+  return { kind: 'agent_plan_update', todos };
 }
 
 // ─── Diagnostic helpers (issue #194) ───
@@ -1826,7 +1871,10 @@ export class CodexRuntime implements AgentRuntime {
             if (typeof p?.threadId === 'string') detail += ` thread=${p.threadId.slice(0, 12)}`;
             // Tool-specific context
             if (item.type === 'commandExecution' && item.command) detail += ` cmd=${(item.command as string).slice(0, 80)}`;
-            if (item.type === 'fileChange' && Array.isArray(item.changes)) detail += ` files=${(item.changes as Array<{path:string}>).map(c => c.path).join(',')}`;
+            if (item.type === 'fileChange' && Array.isArray(item.changes)) {
+              const paths = coerceFileChanges(item.changes).map((change) => change.path).filter(Boolean);
+              if (paths.length > 0) detail += ` files=${paths.join(',')}`;
+            }
             if ((item.type === 'mcpToolCall' || item.type === 'dynamicToolCall') && item.tool) detail += ` tool=${item.tool}`;
             if (item.type === 'agentMessage' && typeof item.text === 'string') detail += ` text=${(item.text as string).length}chars`;
             // Exit code / error for completed items
@@ -2293,7 +2341,10 @@ export class CodexRuntime implements AgentRuntime {
 
       // ── Turn lifecycle ──
       case 'turn/started':
-        return { kind: 'status_change', state: 'running' };
+        return [
+          { kind: 'status_change', state: 'running' },
+          { kind: 'agent_plan_update', todos: [] },
+        ];
 
       case 'turn/completed': {
         const turn = p.turn;
@@ -2304,7 +2355,10 @@ export class CodexRuntime implements AgentRuntime {
         codexProc.subThreadToParent.clear();
         codexProc.subThreadMeta.clear();
         codexProc.collabControlToolParents.clear();
-        return mapCodexTurnCompletedNotification(turn);
+        return [
+          mapCodexTurnCompletedNotification(turn),
+          { kind: 'agent_plan_update', todos: [] },
+        ];
       }
 
       // ── Text streaming ──
@@ -2488,7 +2542,7 @@ export class CodexRuntime implements AgentRuntime {
         const item = p.item as {
           type: string; id: string;
           command?: string; aggregatedOutput?: string; exitCode?: number; durationMs?: number; cwd?: string; processId?: string; status?: string;
-          changes?: Array<{ path: string; kind: string; diff: string }>;
+          changes?: unknown;
           tool?: string; server?: string; mcpAppResourceUri?: string;
           arguments?: unknown; namespace?: string | null;
           result?: unknown; error?: { message: string };
@@ -2538,9 +2592,7 @@ export class CodexRuntime implements AgentRuntime {
             // Show file paths and diffs for each changed file, plus terminal status
             // (inProgress / completed / failed / declined) — `declined` matters
             // because user-rejected patches look identical to other states without it.
-            const details = Array.isArray(item.changes)
-              ? item.changes.map(c => `${c.kind}: ${c.path}${c.diff ? '\n' + c.diff : ''}`).join('\n\n')
-              : 'File changed';
+            const details = buildCodexFileChangeResultContent(item.changes);
             const isFailedPatch = item.status === 'failed' || item.status === 'declined';
             const statusPrefix = item.status && item.status !== 'completed'
               ? `[${item.status}]\n`
@@ -2850,7 +2902,6 @@ export class CodexRuntime implements AgentRuntime {
 
       case 'thread/name/updated':
       case 'turn/diff/updated':
-      case 'turn/plan/updated':
       case 'remoteControl/status/changed':
       case 'thread/goal/cleared':
       case 'item/reasoning/summaryPartAdded':
@@ -2868,6 +2919,9 @@ export class CodexRuntime implements AgentRuntime {
       case 'thread/unarchived':
         // Not relevant to our event stream — ignore
         return null;
+
+      case 'turn/plan/updated':
+        return mapCodexTurnPlanUpdatedNotification(p);
 
       case 'serverRequest/resolved': {
         const requestId = resolvedServerRequestId(p);

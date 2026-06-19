@@ -145,12 +145,22 @@ export async function updateProject(project: Project): Promise<void> {
     });
 }
 
+export function applyProjectPatch(project: Project, updates: Partial<Omit<Project, 'id'>>): Project {
+    const next: Project = { ...project, ...updates };
+    for (const key of Object.keys(updates) as Array<keyof Omit<Project, 'id'>>) {
+        if (updates[key] === undefined) {
+            delete (next as Partial<Record<keyof Omit<Project, 'id'>, unknown>>)[key];
+        }
+    }
+    return next;
+}
+
 export async function patchProject(projectId: string, updates: Partial<Omit<Project, 'id'>>): Promise<Project | null> {
     return withProjectsLock(async () => {
         const projects = await loadProjects();
         const index = projects.findIndex((p) => p.id === projectId);
         if (index >= 0) {
-            projects[index] = { ...projects[index], ...updates };
+            projects[index] = applyProjectPatch(projects[index], updates);
             await saveProjects(projects);
             return projects[index];
         }

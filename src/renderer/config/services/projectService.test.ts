@@ -6,7 +6,7 @@ import {
   isProjectVisibleToUser,
   isSystemPresetProject,
 } from '../types';
-import { applyProjectRemovalIntent } from './projectService';
+import { applyProjectPatch, applyProjectRemovalIntent } from './projectService';
 
 function project(overrides: Partial<Project> = {}): Project {
   return {
@@ -89,5 +89,16 @@ describe('applyProjectRemovalIntent', () => {
     });
     expect(result?.projects[0]).toEqual(result?.project);
     expect(result?.projects[1]).toEqual(other);
+  });
+});
+
+describe('applyProjectPatch', () => {
+  it('removes undefined fields so unpinning clears pinnedAt on save', () => {
+    const patched = applyProjectPatch(
+      project({ pinnedAt: '2026-06-19T10:00:00.000Z' }),
+      { pinnedAt: undefined },
+    );
+
+    expect(patched).not.toHaveProperty('pinnedAt');
   });
 });

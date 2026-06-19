@@ -58,3 +58,31 @@ describe('ProcessRow thinking block expand behaviour', () => {
     expect(screen.queryByText(new RegExp(REASONING, 'i'))).toBeNull();
   });
 });
+
+describe('ProcessRow Codex CollabAgent activity', () => {
+  it('keeps a completed parent row active while a nested sub-agent call is still streaming', () => {
+    const block = {
+      type: 'tool_use',
+      tool: {
+        id: 'card-1',
+        name: 'CollabAgent',
+        input: { tool: 'spawnAgent', prompt: 'review analytics', model: 'gpt-5.5' },
+        parsedInput: { tool: 'spawnAgent', prompt: 'review analytics', model: 'gpt-5.5' },
+        streamIndex: 0,
+        result: 'Tool: spawnAgent\nStatus: completed',
+        isLoading: false,
+        taskStartTime: Date.now() - 10_000,
+        subagentCalls: [
+          { id: 'child-1', name: 'AgentMessage', input: {}, result: 'still reviewing', isLoading: true },
+        ],
+      },
+    } as ContentBlock;
+
+    const { container } = render(<ProcessRow block={block} index={0} totalBlocks={1} isStreaming />);
+
+    expect(screen.getByText('Sub-agent')).toBeInTheDocument();
+    expect(screen.getByText('Agent message')).toBeInTheDocument();
+    expect(container.querySelector('.animate-spin')).not.toBeNull();
+    expect(container.querySelector('.animate-pulse')).not.toBeNull();
+  });
+});

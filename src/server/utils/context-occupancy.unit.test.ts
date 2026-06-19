@@ -2,9 +2,12 @@ import { describe, expect, it } from 'vitest';
 
 import type { MessageUsage } from '../types/session';
 import {
+  chooseBuiltinContextUsageModel,
+  inferContextWindowFromSdkModelTag,
   observedContextTokens,
   resolveContextOccupancyFromSdkBreakdown,
   resolveContextOccupancyTokens,
+  resolveContextWindowFromSdkBreakdown,
 } from './context-occupancy';
 
 describe('observedContextTokens', () => {
@@ -115,5 +118,67 @@ describe('resolveContextOccupancyFromSdkBreakdown (#343 — fallback when provid
       model: 'minimax-m3',
     };
     expect(resolveContextOccupancyFromSdkBreakdown(response)).toBe(42_000);
+  });
+});
+
+describe('resolveContextWindowFromSdkBreakdown', () => {
+  it('returns null for missing or invalid SDK window fields', () => {
+    expect(resolveContextWindowFromSdkBreakdown(null)).toBeNull();
+    expect(resolveContextWindowFromSdkBreakdown({})).toBeNull();
+    expect(resolveContextWindowFromSdkBreakdown({ maxTokens: 0 })).toBeNull();
+    expect(resolveContextWindowFromSdkBreakdown({ maxTokens: Number.NaN })).toBeNull();
+  });
+
+  it('uses maxTokens before rawMaxTokens and rounds finite positive values', () => {
+    expect(resolveContextWindowFromSdkBreakdown({ maxTokens: 1_000_000, rawMaxTokens: 200_000 })).toBe(1_000_000);
+    expect(resolveContextWindowFromSdkBreakdown({ rawMaxTokens: 999_999.6 })).toBe(1_000_000);
+  });
+});
+
+describe('chooseBuiltinContextUsageModel (#373 — SDK model aliases must not force a 200K window)', () => {
+  const windows = new Map<string, number>([
+    ['deepseek-v4-pro', 1_000_000],
+    ['deepseek-v4-flash', 1_000_000],
+  ]);
+  const lookupWindow = (model?: string) => model ? windows.get(model.replace(/\[1m\]$/i, '')) : undefined;
+
+  it('keeps a registry-known SDK result model', () => {
+    expect(chooseBuiltinContextUsageModel({
+      sdkResultModel: 'deepseek-v4-flash[1m]',
+      configuredModel: 'deepseek-v4-pro',
+      lookupWindow,
+    })).toBe('deepseek-v4-flash[1m]');
+  });
+
+  it('falls back to the configured model when the SDK reports a provider-versioned alias', () => {
+    expect(chooseBuiltinContextUsageModel({
+      sdkResultModel: 'deepseek-v4-pro-260425[1m]',
+      configuredModel: 'deepseek-v4-pro',
+      lookupWindow,
+    })).toBe('deepseek-v4-pro');
+  });
+
+  it('uses the configured model for compact/control turns with no result model', () => {
+    expect(chooseBuiltinContextUsageModel({
+      sdkResultModel: undefined,
+      configuredModel: 'deepseek-v4-pro',
+      lookupWindow,
+    })).toBe('deepseek-v4-pro');
+  });
+
+  it('preserves an unknown SDK model when there is no known configured fallback', () => {
+    expect(chooseBuiltinContextUsageModel({
+      sdkResultModel: 'vendor-model-2026[1m]',
+      configuredModel: 'custom-model',
+      lookupWindow,
+    })).toBe('vendor-model-2026[1m]');
+  });
+});
+
+describe('inferContextWindowFromSdkModelTag', () => {
+  it('mirrors the SDK [1m] tag as a last-resort runtime window hint', () => {
+    expect(inferContextWindowFromSdkModelTag('deepseek-v4-pro-260425[1m]')).toBe(1_000_000);
+    expect(inferContextWindowFromSdkModelTag('deepseek-v4-pro')).toBeNull();
+    expect(inferContextWindowFromSdkModelTag(undefined)).toBeNull();
   });
 });

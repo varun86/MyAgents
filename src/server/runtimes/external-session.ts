@@ -21,18 +21,22 @@ import type {
   ImagePayload,
 } from './types';
 import type { ToolAttachment } from '../../shared/types/tool-attachment';
+import {
+  buildFilePatchDisplayDescriptor,
+  type ToolDisplayPayload,
+} from '../../shared/toolDisplay/filePatch';
 import { StaleRuntimeSessionError } from './types';
 import { awaitInFlightSaves, rebuildAttachmentRegistryFromBlocks, trackInFlightSave } from './tool-attachments';
 import { maybeSpill, type LargeValueRef } from '../utils/large-value-store';
 import type { AskUserQuestionInput, AskUserQuestion } from '../../shared/types/askUserQuestion';
 import { withQuestionTextAnswerKeys } from '../../shared/types/askUserQuestion';
-import { normalizeReasoningEffort } from '../../shared/reasoningEffort';
+import { coerceReasoningEffortForRuntime, normalizeReasoningEffort } from '../../shared/reasoningEffort';
 import { getExternalRuntime, getCurrentRuntimeType, isExternalRuntime } from './factory';
 import { resolveCodexWorkspaceInstructions } from './workspace-instructions';
 import { shouldQueueExternalSend, canDrainExternalQueue } from './external-queue-policy';
 import { decideSessionCompleteErrorAction } from './external-abort-policy';
 import { TurnFinalizationGate } from './external-turn-finalization';
-import type { RuntimeType } from '../../shared/types/runtime';
+import { coerceModelForRuntime, coercePermissionModeForRuntime, type RuntimeType } from '../../shared/types/runtime';
 import { deriveSessionTitle } from '../../shared/sessionTitle';
 import { isPendingSessionId } from '../../shared/constants';
 import {
@@ -168,6 +172,8 @@ export interface PersistContentBlock {
     // PRD 0.2.15 — rich-media attachments. Persisted with the tool block so
     // history replay can re-render images without re-running the tool.
     attachments?: ToolAttachment[];
+    // Compact display protocol. Large text bodies remain in input/result.
+    display?: ToolDisplayPayload;
     // PRD 0.2.27 — nested tool calls emitted by a sub-agent (Codex collab-agent),
     // mirroring builtin's ToolUse.subagentCalls. Persisted with the parent spawn
     // card so history replay re-renders the nesting. Shape matches the renderer's
@@ -312,6 +318,57 @@ const EXTERNAL_MAX_QUEUE_SIZE = 50;
 // millisecond (enqueue idle path vs turn-end drain) don't collide → frontend de-dup drop.
 let externalUserMsgSeq = 0;
 
+function coerceExternalRuntimeModel(
+  model: string | null | undefined,
+  runtime: RuntimeType,
+  source: string,
+  sessionId = lastSessionId,
+): string | undefined {
+  const trimmed = typeof model === 'string' ? model.trim() : '';
+  if (!trimmed) return undefined;
+  const coerced = coerceModelForRuntime(trimmed, runtime);
+  if (coerced === undefined) {
+    console.warn(
+      `[runtime-coerce] dropping stale external runtime model='${trimmed}' on runtime='${runtime}' source=${source}; falling back to runtime default. sessionId=${sessionId || '(none)'}`,
+    );
+  }
+  return coerced;
+}
+
+function coerceExternalRuntimePermissionMode(
+  mode: string | null | undefined,
+  runtime: RuntimeType,
+  source: string,
+  sessionId = lastSessionId,
+): string | undefined {
+  const trimmed = typeof mode === 'string' ? mode.trim() : '';
+  if (!trimmed) return undefined;
+  const coerced = coercePermissionModeForRuntime(trimmed, runtime);
+  if (coerced === undefined) {
+    console.warn(
+      `[runtime-coerce] dropping stale external runtime permissionMode='${trimmed}' on runtime='${runtime}' source=${source}; falling back to runtime default. sessionId=${sessionId || '(none)'}`,
+    );
+  }
+  return coerced;
+}
+
+function coerceExternalRuntimeReasoningEffort(
+  effort: string | null | undefined,
+  runtime: RuntimeType,
+  source: string,
+  sessionId = lastSessionId,
+): string | undefined {
+  const normalized = normalizeReasoningEffort(effort);
+  if (!normalized) return undefined;
+  const coerced = coerceReasoningEffortForRuntime(normalized, runtime);
+  if (coerced === undefined) {
+    console.warn(
+      `[runtime-coerce] dropping stale external runtime reasoningEffort='${normalized}' on runtime='${runtime}' source=${source}; falling back to runtime default. sessionId=${sessionId || '(none)'}`,
+    );
+  }
+  return coerced;
+}
+
 /**
  * Clear all queued desktop messages and broadcast queue:cancelled per item (so the renderer
  * removes the pills). MUST be called wherever the session is torn down or switched — a stale
@@ -342,10 +399,21 @@ function captureExternalRuntimeConfigSnapshot(
   permissionMode: string | undefined,
   context: ExternalSendContext,
 ): ExternalRuntimeConfigSnapshot {
+  const runtime = getCurrentRuntimeType();
   return {
-    model: model ?? context.model ?? lastModel,
-    permissionMode: permissionMode ?? context.permissionMode ?? lastPermissionMode,
-    reasoningEffort: resolveTurnReasoningEffort(context) ?? '',
+    model: coerceExternalRuntimeModel(model ?? context.model ?? lastModel, runtime, 'message-capture', context.sessionId),
+    permissionMode: coerceExternalRuntimePermissionMode(
+      permissionMode ?? context.permissionMode ?? lastPermissionMode,
+      runtime,
+      'message-capture',
+      context.sessionId,
+    ),
+    reasoningEffort: coerceExternalRuntimeReasoningEffort(
+      resolveTurnReasoningEffort(context),
+      runtime,
+      'message-capture',
+      context.sessionId,
+    ) ?? '',
   };
 }
 
@@ -884,12 +952,10 @@ async function ensureExternalSessionMetadataForRealUserTurn(params: {
     sessionId,
     scenario: materializationScenarioFromInteraction(scenario),
     agent,
+    runtimeOverride: getCurrentRuntimeType(),
     fallbackRuntime: getCurrentRuntimeType(),
     title,
   });
-  // Honor the runtime currently driving this sidecar even if the agent record
-  // has drifted since pre-warm.
-  meta.runtime = getCurrentRuntimeType();
   if (pendingBirth?.runtimeSessionId) {
     meta.runtimeSessionId = pendingBirth.runtimeSessionId;
   }
@@ -941,7 +1007,11 @@ function flushAllPending(): void {
         streamIndex: currentContentBlocks.length,
       },
     };
-    if (block.tool) attachPendingSubagentCalls(toolId, block.tool);
+    if (block.tool) {
+      const display = buildFilePatchDisplayDescriptor(block.tool);
+      if (display) block.tool.display = display;
+      attachPendingSubagentCalls(toolId, block.tool);
+    }
     currentContentBlocks.push(block);
   }
   pendingToolInputs.clear();
@@ -1369,15 +1439,36 @@ export function restoreExternalSessionState(
   // an existing session (sidecar process not yet running) leaves
   // lastModel/lastPermissionMode empty and adoption silently no-ops.
   if (meta?.model) {
-    lastModel = meta.model;
+    const restoredModel = coerceExternalRuntimeModel(
+      meta.model,
+      currentRuntimeType,
+      'session-restore',
+      sessionId,
+    );
+    if (restoredModel) {
+      lastModel = restoredModel;
+    }
   }
   if (meta?.permissionMode) {
-    lastPermissionMode = meta.permissionMode;
+    const restoredPermissionMode = coerceExternalRuntimePermissionMode(
+      meta.permissionMode,
+      currentRuntimeType,
+      'session-restore',
+      sessionId,
+    );
+    if (restoredPermissionMode) {
+      lastPermissionMode = restoredPermissionMode;
+    }
   }
   // #324 — snapshot stores the setting ('default' | level); module state is
   // normalized ('' = default), so a persisted 'default' collapses to ''.
   if (meta?.reasoningEffort) {
-    lastReasoningEffort = normalizeReasoningEffort(meta.reasoningEffort) ?? '';
+    lastReasoningEffort = coerceExternalRuntimeReasoningEffort(
+      meta.reasoningEffort,
+      currentRuntimeType,
+      'session-restore',
+      sessionId,
+    ) ?? '';
   }
   console.log(`[external-session] Restored state for session ${sessionId}, runtimeSessionId=${lastRuntimeSessionId} (${allSessionMessages.length} messages), permissionMode=${lastPermissionMode || '(default)'}, model=${lastModel || '(default)'}, effort=${lastReasoningEffort || '(default)'}`);
 }
@@ -1428,12 +1519,31 @@ function externalConfigPatchKeys(patch: ExternalRuntimeConfigPatch): Array<keyof
   return (['model', 'permissionMode', 'reasoningEffort'] as const).filter((key) => patch[key] !== undefined);
 }
 
-function normalizeExternalRuntimeConfigPatch(patch: ExternalRuntimeConfigPatch): ExternalRuntimeConfigPatch {
+function normalizeExternalRuntimeConfigPatch(
+  patch: ExternalRuntimeConfigPatch,
+  source: ExternalConfigSource,
+): ExternalRuntimeConfigPatch {
   const normalized: ExternalRuntimeConfigPatch = {};
-  if (patch.model !== undefined) normalized.model = patch.model ?? '';
-  if (patch.permissionMode !== undefined) normalized.permissionMode = patch.permissionMode ?? '';
+  if (patch.model !== undefined) {
+    normalized.model = coerceExternalRuntimeModel(
+      patch.model,
+      getCurrentRuntimeType(),
+      source,
+    ) ?? '';
+  }
+  if (patch.permissionMode !== undefined) {
+    normalized.permissionMode = coerceExternalRuntimePermissionMode(
+      patch.permissionMode,
+      getCurrentRuntimeType(),
+      source,
+    ) ?? '';
+  }
   if (patch.reasoningEffort !== undefined) {
-    normalized.reasoningEffort = normalizeReasoningEffort(patch.reasoningEffort) ?? '';
+    normalized.reasoningEffort = coerceExternalRuntimeReasoningEffort(
+      patch.reasoningEffort,
+      getCurrentRuntimeType(),
+      source,
+    ) ?? '';
   }
   return normalized;
 }
@@ -1596,7 +1706,7 @@ export async function updateExternalRuntimeConfig(
 
   const source = opts.source ?? 'runtime-config';
   const runtime = getCurrentRuntimeType();
-  const normalized = normalizeExternalRuntimeConfigPatch(patch);
+  const normalized = normalizeExternalRuntimeConfigPatch(patch, source);
   const keys = externalConfigPatchKeys(normalized);
   if (keys.length === 0) {
     console.log(`[external-session] external-config noop: sessionId=${lastSessionId || '(none)'} runtime=${runtime} source=${source} keys=(none)`);
@@ -1648,7 +1758,7 @@ export async function setExternalPermissionMode(mode: string): Promise<ExternalC
 
 export async function setExternalReasoningEffort(setting: string): Promise<ExternalConfigUpdateResult> {
   return updateExternalRuntimeConfig(
-    { reasoningEffort: normalizeReasoningEffort(setting) ?? '' },
+    { reasoningEffort: setting },
     { source: 'legacy-reasoning-effort-set' },
   );
 }
@@ -1794,6 +1904,8 @@ export function buildExternalAssistantSnapshotContent(state: ExternalAssistantSn
       },
     };
     if (block.tool) {
+      const display = buildFilePatchDisplayDescriptor(block.tool);
+      if (display) block.tool.display = display;
       attachPendingSubagentCallsToSnapshot(toolId, block.tool, state.pendingSubagentCallsByParent);
     }
     blocks.push(block);
@@ -2076,6 +2188,24 @@ async function _doStartExternalSession(options: {
     console.log(`[external-session] Upgrading pending session ID: ${options.sessionId} → ${realId}`);
     options.sessionId = realId;
   }
+  const startModel = coerceExternalRuntimeModel(
+    options.model,
+    runtimeType,
+    options.resumeSessionId ? 'resume-start-options' : 'start-options',
+    options.sessionId,
+  );
+  const startPermissionMode = coerceExternalRuntimePermissionMode(
+    options.permissionMode,
+    runtimeType,
+    options.resumeSessionId ? 'resume-start-options' : 'start-options',
+    options.sessionId,
+  );
+  const startReasoningEffort = coerceExternalRuntimeReasoningEffort(
+    options.reasoningEffort,
+    runtimeType,
+    options.resumeSessionId ? 'resume-start-options' : 'start-options',
+    options.sessionId,
+  );
 
   const existingMetadataAtStart = getSessionMetadata(options.sessionId);
   if (shouldTrackPendingExternalSessionBirth({
@@ -2093,7 +2223,7 @@ async function _doStartExternalSession(options: {
     clearPendingExternalSessionBirth(options.sessionId);
   }
 
-  console.log(`[external-session] Starting ${runtimeType} session for ${options.sessionId}, model=${options.model || '(default)'}, permissionMode=${options.permissionMode || '(default)'}, scenario=${options.scenario.type}, resume=${options.resumeSessionId || 'none'}`);
+  console.log(`[external-session] Starting ${runtimeType} session for ${options.sessionId}, model=${startModel || '(default)'}, permissionMode=${startPermissionMode || '(default)'}, scenario=${options.scenario.type}, resume=${options.resumeSessionId || 'none'}`);
   // Detect pre-warm: prewarmExternalSession calls us with initialMessage=undefined.
   // Stamp this onto the session_init broadcast so the frontend doesn't enter the
   // "loading" state for a process that hasn't started processing any turn yet.
@@ -2111,9 +2241,9 @@ async function _doStartExternalSession(options: {
   // message A followed by config B) deliberately opt out so the older message's
   // start options do not overwrite the newer desired state.
   if (options.recordConfigState !== false) {
-    if (options.model !== undefined) lastModel = options.model;
-    if (options.permissionMode !== undefined) lastPermissionMode = options.permissionMode;
-    if (options.reasoningEffort !== undefined) lastReasoningEffort = options.reasoningEffort;
+    if (options.model !== undefined) lastModel = startModel ?? '';
+    if (options.permissionMode !== undefined) lastPermissionMode = startPermissionMode ?? '';
+    if (options.reasoningEffort !== undefined) lastReasoningEffort = startReasoningEffort ?? '';
   }
   // Only clear message history for new sessions, not resumes
   if (!options.resumeSessionId) {
@@ -2186,9 +2316,9 @@ async function _doStartExternalSession(options: {
         initialMessage: options.initialMessage,
         initialImages: options.initialImages,
         systemPromptAppend,
-        model: options.model,
-        permissionMode: options.permissionMode,
-        reasoningEffort: options.reasoningEffort,
+        model: startModel,
+        permissionMode: startPermissionMode,
+        reasoningEffort: startReasoningEffort,
         scenario: options.scenario,
         resumeSessionId: resumeId,
         envPolicy: resolvedEnvPolicy,
@@ -2319,7 +2449,12 @@ export interface ExternalSendContext {
  */
 function resolveTurnReasoningEffort(context: ExternalSendContext | undefined): string | undefined {
   if (context?.reasoningEffort !== undefined) {
-    return normalizeReasoningEffort(context.reasoningEffort) ?? '';
+    return coerceExternalRuntimeReasoningEffort(
+      context.reasoningEffort,
+      getCurrentRuntimeType(),
+      'turn-context',
+      context.sessionId,
+    ) ?? '';
   }
   return lastReasoningEffort || undefined;
 }
@@ -2567,7 +2702,7 @@ export async function sendExternalMessage(
         model: _model ?? context?.model ?? lastModel,
         permissionMode: _permissionMode ?? context?.permissionMode ?? lastPermissionMode,
         reasoningEffort: resolveTurnReasoningEffort(context),
-      }),
+      }, 'message-snapshot'),
       'message-snapshot',
     );
     if (applyResult.error) {
@@ -3579,6 +3714,8 @@ function applyExternalToolResult(event: Extract<UnifiedEvent, { kind: 'tool_resu
       if (event.attachments && event.attachments.length > 0) {
         currentContentBlocks[i].tool!.attachments = event.attachments;
       }
+      const display = buildFilePatchDisplayDescriptor(currentContentBlocks[i].tool!);
+      if (display) currentContentBlocks[i].tool!.display = display;
       break;
     }
   }
@@ -3769,7 +3906,11 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
             streamIndex: currentContentBlocks.length,
           },
         };
-        if (block.tool) attachPendingSubagentCalls(event.toolUseId, block.tool);
+        if (block.tool) {
+          const display = buildFilePatchDisplayDescriptor(block.tool);
+          if (display) block.tool.display = display;
+          attachPendingSubagentCalls(event.toolUseId, block.tool);
+        }
         currentContentBlocks.push(block);
         pendingToolInputs.delete(event.toolUseId);
       }
@@ -4075,6 +4216,14 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
       break;
     }
 
+    case 'agent_plan_update': {
+      broadcast('chat:agent-plan-update', {
+        sessionId: lastSessionId ?? null,
+        todos: event.todos,
+      });
+      break;
+    }
+
     case 'status_change': {
       // Map runtime states to frontend session states (match builtin runtime behavior)
       const stateMap: Record<string, string> = { running: 'running', error: 'error', waiting_permission: 'running' };
@@ -4318,7 +4467,8 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
           model: currentTurnUsage.model,
           lookupWindow: lookupModelContextLength,
         });
-        broadcast('chat:context-usage', ctxUsage);
+        const ctxSessionId = currentTurnTraceSessionId || lastSessionId || undefined;
+        broadcast('chat:context-usage', ctxSessionId ? { ...ctxUsage, sessionId: ctxSessionId } : ctxUsage);
         // PRD 0.2.32 — 留住本轮最新快照；Codex 亚轮会多次进这里，不每次写盘，turn 末
         // persistTurnResult 快照后写一次（单一数据源，供重开 seed）。
         currentTurnContextUsage = ctxUsage;
@@ -4386,6 +4536,8 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
             if (toolBlockIdx >= 0 && currentContentBlocks[toolBlockIdx].tool) {
               currentContentBlocks[toolBlockIdx].tool!.result = resultText.slice(0, 5000);
               currentContentBlocks[toolBlockIdx].tool!.isError = block.is_error === true;
+              const display = buildFilePatchDisplayDescriptor(currentContentBlocks[toolBlockIdx].tool!);
+              if (display) currentContentBlocks[toolBlockIdx].tool!.display = display;
             }
             recordRuntimeActivity();
           }
