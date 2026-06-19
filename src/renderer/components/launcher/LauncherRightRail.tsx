@@ -219,14 +219,14 @@ export default memo(function LauncherRightRail({
                 <div className="px-6 pb-6 pt-6">
                     <section>
                         <div className="mb-4 flex items-center justify-between">
-                            <h2 className="text-sm font-semibold tracking-[0.04em] text-[var(--ink-muted)]">
+                            <h2 className="text-base font-semibold tracking-[0.04em] text-[var(--ink-muted)]">
                                 Agent 工作区
                             </h2>
                             <div className="flex items-center gap-3">
                                 {showDevTools && (
                                     <button
                                         onClick={onShowLogs}
-                                        className="rounded-lg px-2.5 py-1.5 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
+                                        className="rounded-lg px-2.5 py-1 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
                                         title="查看 Rust 日志"
                                     >
                                         Logs
@@ -329,7 +329,7 @@ export default memo(function LauncherRightRail({
                         >
                             <div className="flex items-center justify-between gap-3">
                                 <div className="flex min-w-0 items-center gap-2">
-                                    <h2 className="shrink-0 text-sm font-semibold tracking-[0.04em] text-[var(--ink-muted)]">
+                                    <h2 className="shrink-0 text-base font-semibold tracking-[0.04em] text-[var(--ink-muted)]">
                                         历史对话
                                     </h2>
                                     <WorkspaceHistoryFilter
@@ -452,7 +452,7 @@ function WorkspaceHistoryFilter({ projects, value, onChange }: WorkspaceHistoryF
                 ref={buttonRef}
                 type="button"
                 onClick={() => setOpen(value => !value)}
-                className="inline-flex max-w-36 items-center gap-1 rounded-md px-2 py-1 text-xs font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
+                className="inline-flex h-6 max-w-36 items-center gap-1 rounded-md px-2 py-0 text-xs font-medium leading-none text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
                 title="筛选工作区"
             >
                 <span className="min-w-0 truncate">{label}</span>
@@ -530,7 +530,7 @@ const LauncherHistoryRow = memo(function LauncherHistoryRow({
             tabIndex={0}
             onClick={handleClick}
             onKeyDown={handleKeyDown}
-            className="group relative flex w-full cursor-pointer items-center gap-2 rounded-lg px-3 py-2 text-left transition-all hover:bg-[var(--hover-bg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
+            className="group relative flex w-full cursor-pointer items-center gap-2 overflow-hidden rounded-lg px-3 py-2 text-left transition-all hover:bg-[var(--hover-bg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
         >
             <div className="flex w-14 shrink-0 items-center gap-1 text-xs text-[var(--ink-muted)]/50">
                 <Clock className="h-2.5 w-2.5" />
@@ -542,7 +542,7 @@ const LauncherHistoryRow = memo(function LauncherHistoryRow({
             {tags.map((tag, index) => (
                 <SessionTagBadge key={index} tag={tag} />
             ))}
-            <span className="min-w-0 flex-1 truncate text-sm text-[var(--ink-secondary)] transition-colors group-hover:text-[var(--ink)]">
+            <span className="launcher-history-row-title-fade min-w-0 flex-1 truncate text-sm text-[var(--ink-secondary)] transition-colors group-hover:text-[var(--ink)]">
                 {displayText}
                 {msgCount && (
                     <span className="ml-1.5 text-xs text-[var(--ink-muted)]/40">
@@ -550,22 +550,26 @@ const LauncherHistoryRow = memo(function LauncherHistoryRow({
                     </span>
                 )}
             </span>
-            <button
-                ref={menuButtonRef}
-                type="button"
-                onMouseDown={event => event.stopPropagation()}
-                onClick={(event) => {
-                    event.stopPropagation();
-                    setMenuOpen(value => !value);
-                }}
-                className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-[var(--ink-muted)] transition-all hover:bg-[var(--paper)] hover:text-[var(--ink)] focus-visible:opacity-100 ${
+            <div
+                className={`launcher-history-row-action-overlay pointer-events-none absolute inset-y-0 right-0 flex w-16 items-center justify-end pr-2 transition-opacity ${
                     menuOpen ? 'opacity-100' : 'opacity-0 group-hover:opacity-100 group-focus-within:opacity-100'
                 }`}
-                title="更多"
-                aria-label="更多"
             >
-                <MoreHorizontal className="h-4 w-4" />
-            </button>
+                <button
+                    ref={menuButtonRef}
+                    type="button"
+                    onMouseDown={event => event.stopPropagation()}
+                    onClick={(event) => {
+                        event.stopPropagation();
+                        setMenuOpen(value => !value);
+                    }}
+                    className="pointer-events-auto flex h-7 w-7 items-center justify-center rounded-md text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper)] hover:text-[var(--ink)] focus-visible:opacity-100"
+                    title="更多"
+                    aria-label="更多"
+                >
+                    <MoreHorizontal className="h-4 w-4" />
+                </button>
+            </div>
             <Popover
                 open={menuOpen}
                 onClose={() => setMenuOpen(false)}

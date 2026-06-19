@@ -127,6 +127,15 @@ describe('LauncherRightRail', () => {
         expect(screen.getByRole('dialog', { name: 'session stats' })).toHaveTextContent('stats:stats-session');
     });
 
+    it('renders history row actions as an overlay without taking title width', () => {
+        renderRail({ sessions: [session({ title: 'Session A' })] });
+
+        const row = screen.getByRole('button', { name: /Session A/ });
+
+        expect(screen.getByText('Session A').closest('.launcher-history-row-title-fade')).not.toBeNull();
+        expect(within(row).getByLabelText('更多').parentElement).toHaveClass('launcher-history-row-action-overlay');
+    });
+
     it('does not open the history session from row menu keyboard activation keys', () => {
         const onOpenTask = vi.fn();
         renderRail({ onOpenTask, sessions: [session({ id: 'stats-session', title: 'Session A' })] });

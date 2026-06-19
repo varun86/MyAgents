@@ -845,6 +845,22 @@ pre code {
   );
 }
 
+.launcher-history-row-title-fade {
+  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 22px), transparent);
+  mask-image: linear-gradient(to right, #000 calc(100% - 22px), transparent);
+}
+
+.launcher-history-row-action-overlay {
+  --launcher-history-row-overlay-bg: color-mix(in srgb, var(--paper) 92%, var(--accent-warm));
+
+  background: linear-gradient(
+    to right,
+    transparent 0%,
+    color-mix(in srgb, var(--launcher-history-row-overlay-bg) 76%, transparent) 38%,
+    var(--launcher-history-row-overlay-bg) 78%
+  );
+}
+
 /* Floating divider between brand and workspaces */
 .launcher-workspaces::before {
   content: '';
