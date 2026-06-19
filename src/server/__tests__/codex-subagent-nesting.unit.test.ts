@@ -322,6 +322,7 @@ describe('isChildThreadGatedMethod', () => {
   it('gates thread/turn lifecycle methods', () => {
     expect(isChildThreadGatedMethod('turn/started')).toBe(true);
     expect(isChildThreadGatedMethod('turn/completed')).toBe(true);
+    expect(isChildThreadGatedMethod('turn/plan/updated')).toBe(true);
     expect(isChildThreadGatedMethod('thread/status/changed')).toBe(true);
     expect(isChildThreadGatedMethod('thread/closed')).toBe(true);
   });

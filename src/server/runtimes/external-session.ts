@@ -4216,6 +4216,14 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
       break;
     }
 
+    case 'agent_plan_update': {
+      broadcast('chat:agent-plan-update', {
+        sessionId: lastSessionId ?? null,
+        todos: event.todos,
+      });
+      break;
+    }
+
     case 'status_change': {
       // Map runtime states to frontend session states (match builtin runtime behavior)
       const stateMap: Record<string, string> = { running: 'running', error: 'error', waiting_permission: 'running' };

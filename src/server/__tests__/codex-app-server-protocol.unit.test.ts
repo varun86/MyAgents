@@ -9,6 +9,7 @@ import {
   initializeCodexRpc,
   KNOWN_CODEX_SERVER_REQUEST_METHODS,
   mapCodexTurnCompletedNotification,
+  mapCodexTurnPlanUpdatedNotification,
   serializeCodexPermissionResponse,
   type PendingCodexRequest,
 } from '../runtimes/codex';
@@ -147,6 +148,39 @@ describe('Codex app-server protocol helpers', () => {
       status: 'failed',
       error: 'websocket failed',
       result: 'websocket failed',
+    });
+  });
+
+  it('maps Codex turn/plan/updated into an AgentStatusPanel todo snapshot', () => {
+    expect(mapCodexTurnPlanUpdatedNotification({
+      plan: [
+        { step: 'Inspect status flow', status: 'completed' },
+        { step: 'Wire plan updates', status: 'inProgress' },
+        { step: 'Run tests', status: 'pending' },
+        { step: '   ', status: 'pending' },
+      ],
+    })).toEqual({
+      kind: 'agent_plan_update',
+      todos: [
+        {
+          key: 'codex-plan-0',
+          content: 'Inspect status flow',
+          activeForm: 'Inspect status flow',
+          status: 'completed',
+        },
+        {
+          key: 'codex-plan-1',
+          content: 'Wire plan updates',
+          activeForm: 'Wire plan updates',
+          status: 'in_progress',
+        },
+        {
+          key: 'codex-plan-2',
+          content: 'Run tests',
+          activeForm: 'Run tests',
+          status: 'pending',
+        },
+      ],
     });
   });
 

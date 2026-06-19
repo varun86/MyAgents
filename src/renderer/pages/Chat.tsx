@@ -3239,8 +3239,9 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   // 稳定，SimpleChatInput 的 React.memo 不再被打穿，输入框在 AI 流式输出时不会
   // 每 token 重渲染。AgentStatusPanel 内部仍随 commit 重渲染，其 DOM 仅在
   // 派生 todos/subagents 变化时才改，成本由 React 协调器吸收。
+  const supportsAgentStatusPanel = currentRuntime === 'builtin' || currentRuntime === 'codex';
   const agentStatusSlot = useMemo(
-    () => isExternalRuntime
+    () => !supportsAgentStatusPanel
       ? undefined
       : (
         <AgentStatusPanel
@@ -3248,7 +3249,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
           onJumpToTool={handleJumpToTool}
         />
       ),
-    [isExternalRuntime, handleJumpToTool],
+    [supportsAgentStatusPanel, handleJumpToTool],
   );
 
   // PRD 0.2.32 — 智能压缩入口（builtin only）。用与正常发送完全相同的已解析

@@ -39,6 +39,42 @@ describe('useAgentStatusState — TodoWrite ↔ Task selection', () => {
     // The TodoWrite list must NOT be blanked out by the empty Task accumulation.
     expect(result.current.todos.map(t => t.content)).toEqual(['旧任务']);
   });
+
+  it('prefers a runtime-native plan snapshot when provided', () => {
+    const messages: Message[] = [
+      toolMsg('m1', {
+        name: 'TodoWrite',
+        parsedInput: { todos: [{ content: 'stale', status: 'in_progress', activeForm: 'stale' }] },
+      }),
+    ];
+
+    const { result } = renderHook(() => useAgentStatusState(messages, [
+      { key: 'codex-plan-0', content: 'Read Codex schema', activeForm: 'Read Codex schema', status: 'completed' },
+      { key: 'codex-plan-1', content: 'Wire status panel', activeForm: 'Wire status panel', status: 'in_progress' },
+    ]));
+
+    expect(result.current.todos.map(t => ({ key: t.key, content: t.content, status: t.status }))).toEqual([
+      { key: 'codex-plan-0', content: 'Read Codex schema', status: 'completed' },
+      { key: 'codex-plan-1', content: 'Wire status panel', status: 'in_progress' },
+    ]);
+    expect(result.current.summary.todoCompleted).toBe(1);
+    expect(result.current.summary.todoInProgress).toBe(1);
+  });
+
+  it('treats an empty runtime-native plan snapshot as an explicit clear', () => {
+    const messages: Message[] = [
+      toolMsg('m1', {
+        name: 'TodoWrite',
+        parsedInput: { todos: [{ content: 'stale', status: 'in_progress', activeForm: 'stale' }] },
+      }),
+    ];
+
+    const { result } = renderHook(() => useAgentStatusState(messages, []));
+
+    expect(result.current.todos).toEqual([]);
+    expect(result.current.summary.todoTotal).toBe(0);
+    expect(result.current.summary.todoInProgress).toBe(0);
+  });
 });
 
 describe('useAgentStatusState — Codex CollabAgent activity', () => {

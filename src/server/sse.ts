@@ -76,6 +76,7 @@ export const SSE_EVENT_PRIORITIES: Readonly<Record<string, SseEventPriority>> = 
   // for unregistered events, which would never coalesce and spam a one-shot
   // [sse] missing-from-priorities warning per process).
   'chat:context-usage': 'coalescible',
+  'chat:agent-plan-update': 'coalescible',
   // (Phase E PRD 0.2.7: `workspace:files-changed` SSE event removed; the
   // renderer subscribes to the Rust workspace_files watcher via Tauri
   // events instead, so this whitelist no longer needs the entry.)

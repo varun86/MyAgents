@@ -41,7 +41,7 @@ import {
     shouldPreserveSnapshotOnPendingBirthPropSync,
 } from './sessionScopedEventGuards';
 import { isSubagentContainerTool } from '@/components/tools/toolBadgeConfig';
-import type { Message, ContentBlock, ToolUseSimple, ToolInput, TaskStats, SubagentToolCall } from '@/types/chat';
+import type { AgentStatusTodoSnapshot, Message, ContentBlock, ToolUseSimple, ToolInput, TaskStats, SubagentToolCall } from '@/types/chat';
 import type { ToolUse } from '@/types/stream';
 import type { SystemInitInfo } from '../../shared/types/system';
 import type { RuntimeDiagnostics } from '../../shared/types/runtime';
@@ -72,6 +72,25 @@ import { setBackgroundTaskStatus, setBackgroundTaskDescription, getBackgroundTas
 // via the /refs/:id endpoint when oversize).
 const TOOL_RESULT_DISPLAY_CAP = 8 * 1024;
 const TOOL_RESULT_TAIL_KEEP = 1024;
+
+function normalizeAgentPlanTodos(value: unknown): AgentStatusTodoSnapshot[] {
+    if (!Array.isArray(value)) return [];
+    return value.flatMap((raw, idx): AgentStatusTodoSnapshot[] => {
+        if (!raw || typeof raw !== 'object') return [];
+        const item = raw as Record<string, unknown>;
+        const content = typeof item.content === 'string' ? item.content.trim() : '';
+        if (!content) return [];
+        const status = item.status === 'completed' || item.status === 'in_progress' || item.status === 'pending'
+            ? item.status
+            : 'pending';
+        return [{
+            key: typeof item.key === 'string' && item.key ? item.key : `runtime-plan-${idx}`,
+            content,
+            activeForm: typeof item.activeForm === 'string' && item.activeForm ? item.activeForm : content,
+            status,
+        }];
+    });
+}
 
 /**
  * Force-complete any unclosed thinking blocks in a content array.
@@ -448,6 +467,7 @@ export default function TabProvider({
     // cleared on session switch / reset. 见 ContextUsageIndicator。
     const [contextUsage, setContextUsage] = useState<ContextUsage | null>(null);
     const liveContextUsageSessionIdRef = useRef<string | null>(null);
+    const [agentPlanTodos, setAgentPlanTodos] = useState<AgentStatusTodoSnapshot[] | null>(null);
     const [lastTerminalReason, setLastTerminalReason] = useState<TerminalReason | null>(null);
     const [isConnected, setIsConnected] = useState(false);
     const [pendingPermission, setPendingPermission] = useState<PermissionRequest | null>(null);
@@ -468,7 +488,7 @@ export default function TabProvider({
         const previousSessionId = previousSessionPropRef.current;
         const currentSessionIdBeforePropSync = currentSessionIdRef.current;
         previousSessionPropRef.current = sessionId;
-        const shouldPreserveSdkSlashCommands = shouldPreserveSnapshotOnPendingBirthPropSync({
+        const shouldPreservePendingBirthSnapshots = shouldPreserveSnapshotOnPendingBirthPropSync({
             previousSessionId,
             nextSessionId: sessionId,
             currentSessionIdBeforeSync: currentSessionIdBeforePropSync,
@@ -487,7 +507,10 @@ export default function TabProvider({
         // lastContextUsage; new-session paths (reset/adopt) also clear explicitly for immediacy.
         liveContextUsageSessionIdRef.current = null;
         setContextUsage(null);
-        if (!shouldPreserveSdkSlashCommands) {
+        if (!shouldPreservePendingBirthSnapshots) {
+            setAgentPlanTodos(null);
+        }
+        if (!shouldPreservePendingBirthSnapshots) {
             setSdkSlashCommands([]);
         }
     }, [sessionId]);
@@ -632,6 +655,7 @@ export default function TabProvider({
         setStreamingMessage(null);
         liveContextUsageSessionIdRef.current = null;
         setContextUsage(null);  // PRD 0.2.32 — 新会话无持久占用；仅清展示态（不碰后端持久数据）
+        setAgentPlanTodos(null);
         setSdkSlashCommands([]);
         seenIdsRef.current.clear();
         restoredSessionIdRef.current = null;  // new session: no REST-restored history → replay normally
@@ -746,6 +770,7 @@ export default function TabProvider({
         setStreamingMessage(null);
         liveContextUsageSessionIdRef.current = null;
         setContextUsage(null);  // PRD 0.2.32 — 新会话无持久占用；仅清展示态（不碰后端持久数据）
+        setAgentPlanTodos(null);
         setSdkSlashCommands([]);
         seenIdsRef.current.clear();
         restoredSessionIdRef.current = null;  // new session: no REST-restored history → replay normally
@@ -1326,6 +1351,7 @@ export default function TabProvider({
                     setAgentError(null);
                     setLastTerminalReason(null);
                     setSystemNotice(null);
+                    setAgentPlanTodos(null);
                     clearInteractiveState();
                 }
 
@@ -2146,6 +2172,24 @@ export default function TabProvider({
                     void _payloadSessionId;
                     setContextUsage(usage);
                 }
+                break;
+            }
+
+            case 'chat:agent-plan-update': {
+                const payload = data as { sessionId?: string | null; todos?: unknown } | null;
+                const payloadSessionId = payload?.sessionId ?? null;
+                const currentId = currentSessionIdRef.current;
+                const connectedId = connectedSseSessionIdRef.current;
+                if (!shouldAcceptSessionScopedSseSnapshot({
+                    connectedSessionId: connectedId,
+                    currentSessionId: currentId,
+                    payloadSessionId,
+                    isConnectedSessionPending: connectedId ? isPendingSessionId(connectedId) : false,
+                    isCurrentSessionPending: currentId ? isPendingSessionId(currentId) : false,
+                })) {
+                    break;
+                }
+                setAgentPlanTodos(normalizeAgentPlanTodos(payload?.todos));
                 break;
             }
 
@@ -3544,6 +3588,7 @@ export default function TabProvider({
 
             // Clear current state and load new messages
             seenIdsRef.current.clear();
+            setAgentPlanTodos(null);
             isNewSessionRef.current = false; // Allow SSE replays again
             resetBirthPendingRef.current = false;
             resetBirthSessionIdRef.current = null;
@@ -4173,6 +4218,7 @@ export default function TabProvider({
         systemStatus,
         systemNotice,
         contextUsage,
+        agentPlanTodos,
         lastTerminalReason,
         pendingPermission,
         pendingAskUserQuestion,
@@ -4212,7 +4258,7 @@ export default function TabProvider({
         onCronTaskExitRequested: onCronTaskExitRequestedRef,
     }), [
         tabId, agentDir, currentSessionId, messages, historyMessages, streamingMessage, firstItemIndex, hasMoreBefore, isLoading, isSessionLoading, sessionState, sessionRuntime, sessionMeta,
-        logs, unifiedLogs, systemInitInfo, sdkSlashCommands, runtimeDiagnostics, agentError, systemStatus, systemNotice, contextUsage, lastTerminalReason, pendingPermission, pendingAskUserQuestion, pendingExitPlanMode, pendingEnterPlanMode, toolCompleteCount, queuedMessages, isConnected,
+        logs, unifiedLogs, systemInitInfo, sdkSlashCommands, runtimeDiagnostics, agentError, systemStatus, systemNotice, contextUsage, agentPlanTodos, lastTerminalReason, pendingPermission, pendingAskUserQuestion, pendingExitPlanMode, pendingEnterPlanMode, toolCompleteCount, queuedMessages, isConnected,
         setMessages, appendLog, appendUnifiedLog, clearUnifiedLogs, sendMessage, stopResponse, loadSession, loadOlderMessages, resetSession, adoptMigratedSession,
         apiGetJson, postJson, apiPutJson, apiDeleteJson, respondPermission, respondAskUserQuestion, respondExitPlanMode, cancelQueuedMessage, forceExecuteQueuedMessage
     ]);

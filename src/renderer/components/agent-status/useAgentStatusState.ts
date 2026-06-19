@@ -1,15 +1,14 @@
 // PRD 0.2.17 — Agent Status Panel
 //
-// 派生 hook：从 messages + 后台任务状态模块（backgroundTaskStatus）派生统一的
-// AgentStatusState。**不引入新 SSE 事件**——所有数据都已存在于现有事件流和
-// renderer 内存中。
+// 派生 hook：从 messages + 后台任务状态模块（backgroundTaskStatus）+
+// runtime-native plan snapshot 派生统一的 AgentStatusState。
 //
 // 后续接入外部 Runtime 时新增 mapper（如 mapCodexEvents → AgentStatusState），
 // 消费侧组件不变（PRD §5.2）。
 
 import { useEffect, useMemo, useState } from 'react';
 
-import type { AgentInput, Message, ToolUseSimple } from '@/types/chat';
+import type { AgentInput, AgentStatusTodoSnapshot, Message, ToolUseSimple } from '@/types/chat';
 import {
   isSubagentContainerRunning,
   isSubagentContainerTool,
@@ -63,7 +62,10 @@ function collectCompletedBgToolIdsFromHistory(messages: Message[]): Set<string> 
  * - subagents（background）：所有 run_in_background=true 的 Task tool_use 块，
  *   其 backgroundTaskStatus 状态未到 terminal 的视为仍在运行。
  */
-export function useAgentStatusState(messages: Message[]): AgentStatusState {
+export function useAgentStatusState(
+  messages: Message[],
+  runtimePlanTodos: readonly AgentStatusTodoSnapshot[] | null = null,
+): AgentStatusState {
   // 订阅后台任务状态变化，触发 useMemo 重算。
   const [bgEpoch, setBgEpoch] = useState(0);
   useEffect(() => {
@@ -154,6 +156,15 @@ export function useAgentStatusState(messages: Message[]): AgentStatusState {
       }
     }
 
+    if (runtimePlanTodos !== null) {
+      todos = runtimePlanTodos.map((t, idx) => ({
+        content: t.content,
+        status: t.status,
+        activeForm: t.activeForm,
+        key: t.key || `runtime-plan-${idx}`,
+      }));
+    }
+
     // 排序：同步在前（按 startedAt 升序），后台在后（按 startedAt 升序）。
     subagents.sort((a, b) => {
       if (a.mode !== b.mode) return a.mode === 'sync' ? -1 : 1;
@@ -185,7 +196,7 @@ export function useAgentStatusState(messages: Message[]): AgentStatusState {
     };
     // bgEpoch 在 deps 里仅为触发重算；其引用本身在闭包外不使用。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [messages, bgEpoch]);
+  }, [messages, runtimePlanTodos, bgEpoch]);
 }
 
 // 稳定 fallback startedAt：tool.taskStartTime 缺失时，记录首次见到此 toolId 的时间。

@@ -14,7 +14,7 @@ import { createContext, useContext } from 'react';
 import type { Dispatch, SetStateAction } from 'react';
 
 import type { ImageAttachment } from '@/components/SimpleChatInput';
-import type { Message } from '@/types/chat';
+import type { AgentStatusTodoSnapshot, Message } from '@/types/chat';
 import type { LogEntry } from '@/types/log';
 import type { QueuedMessageInfo } from '@/types/queue';
 import type { SystemInitInfo } from '../../shared/types/system';
@@ -97,6 +97,12 @@ export interface TabState {
      * 自取数，不穿 SimpleChatInput props 以免 textarea 重渲)。
      */
     contextUsage: ContextUsage | null;
+    /**
+     * Runtime-native plan/todo snapshot (Codex `turn/plan/updated` today).
+     * Transient UI state only; ordinary chat history remains the source for
+     * persisted builtin TodoWrite / Task tool todos.
+     */
+    agentPlanTodos: AgentStatusTodoSnapshot[] | null;
     /**
      * SDK 0.2.91+ terminal_reason of the last turn. Set on chat:message-complete,
      * cleared on next send / session load / reset. `completed` and missing reasons
@@ -245,6 +251,7 @@ const defaultContextValue: TabContextValue = {
     systemStatus: null,
     systemNotice: null,
     contextUsage: null,
+    agentPlanTodos: null,
     lastTerminalReason: null,
     pendingPermission: null,
     pendingAskUserQuestion: null,

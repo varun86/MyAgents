@@ -109,6 +109,16 @@ export interface SubAgentScope {
   role?: string;
 }
 
+export type AgentPlanTodoStatus = 'pending' | 'in_progress' | 'completed';
+
+export interface AgentPlanTodo {
+  /** Stable key for renderer reconciliation within the current runtime plan snapshot. */
+  key: string;
+  content: string;
+  activeForm: string;
+  status: AgentPlanTodoStatus;
+}
+
 /**
  * Unified event emitted by any runtime, consumed by the session layer.
  * The session layer maps these to SSE broadcast calls.
@@ -222,6 +232,9 @@ export type UnifiedEvent =
   // session_init's `tools: []` was the previous diagnostic surface — vestigial
   // for external runtimes; this event is the real signal.
   | { kind: 'runtime_diagnostics'; diagnostics: RuntimeDiagnostics }
+
+  // === Runtime-native todo/plan snapshot ===
+  | { kind: 'agent_plan_update'; todos: AgentPlanTodo[] }
 
   // === Message replay (for session resume) ===
   | { kind: 'message_replay'; message: { id: string; role: string; content: unknown; timestamp?: string } }

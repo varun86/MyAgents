@@ -44,6 +44,15 @@ export type {
   NotebookEditInput
 };
 
+export type AgentStatusTodoSnapshotStatus = 'pending' | 'in_progress' | 'completed';
+
+export interface AgentStatusTodoSnapshot {
+  key: string;
+  content: string;
+  activeForm: string;
+  status: AgentStatusTodoSnapshotStatus;
+}
+
 export type ToolInput =
   | AgentInput
   | BashInput

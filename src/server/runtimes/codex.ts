@@ -17,7 +17,7 @@ import type {
 } from '../../shared/types/runtime';
 import { CODEX_PERMISSION_MODES } from '../../shared/types/runtime';
 import { coerceFileChanges, formatFileChangeForResult } from '../../shared/fileChange';
-import type { AgentRuntime, RuntimeConfigCapabilities, RuntimeProcess, SessionStartOptions, UnifiedEvent, UnifiedEventCallback, ImagePayload, SubAgentScope } from './types';
+import type { AgentPlanTodo, AgentRuntime, RuntimeConfigCapabilities, RuntimeProcess, SessionStartOptions, UnifiedEvent, UnifiedEventCallback, ImagePayload, SubAgentScope } from './types';
 import { StaleRuntimeSessionError } from './types';
 import { mapCodexTokenUsage, type CodexThreadTokenUsage } from './codex-token-usage';
 import { augmentedProcessEnv, resolveCommand, stripAnsi } from './env-utils';
@@ -612,6 +612,8 @@ export function resolveTopLevelSpawnCard(
  * method belongs here:
  *   - LIFECYCLE (turn/*, thread/status|closed): a child's turn/completed would
  *     finalize the user's turn early + resetTurnAccumulators() mid-fan-out.
+ *     A child's turn/plan/updated would also overwrite the main AgentStatusPanel
+ *     todo snapshot.
  *   - USAGE (thread/tokenUsage/updated): a child's token usage would otherwise
  *     flow through as a `usage` event and pollute the MAIN session's context
  *     indicator + persisted lastContextUsage (external-session attributes every
@@ -622,6 +624,7 @@ export function resolveTopLevelSpawnCard(
 const CHILD_GATED_METHODS: ReadonlySet<string> = new Set([
   'turn/started',
   'turn/completed',
+  'turn/plan/updated',
   'thread/status/changed',
   'thread/closed',
   'thread/tokenUsage/updated',
@@ -1190,6 +1193,40 @@ export function mapCodexTurnCompletedNotification(
     ...(errorMessage ? { error: errorMessage, result: errorMessage } : {}),
     ...(status !== 'completed' && !errorMessage ? { result: `Turn ended with status ${status}` } : {}),
   };
+}
+
+function normalizeCodexPlanStatus(status: unknown): AgentPlanTodo['status'] {
+  switch (status) {
+    case 'completed':
+      return 'completed';
+    case 'inProgress':
+    case 'in_progress':
+      return 'in_progress';
+    case 'pending':
+    default:
+      return 'pending';
+  }
+}
+
+export function mapCodexTurnPlanUpdatedNotification(
+  params: unknown,
+): Extract<UnifiedEvent, { kind: 'agent_plan_update' }> {
+  const p = objectValue(params);
+  const todos = arrayValue(p.plan)
+    .map((raw, idx): AgentPlanTodo | null => {
+      const step = objectValue(raw);
+      const content = stringValue(step.step)?.trim();
+      if (!content) return null;
+      return {
+        key: `codex-plan-${idx}`,
+        content,
+        activeForm: content,
+        status: normalizeCodexPlanStatus(step.status),
+      };
+    })
+    .filter((todo): todo is AgentPlanTodo => todo !== null);
+
+  return { kind: 'agent_plan_update', todos };
 }
 
 // ─── Diagnostic helpers (issue #194) ───
@@ -2304,7 +2341,10 @@ export class CodexRuntime implements AgentRuntime {
 
       // ── Turn lifecycle ──
       case 'turn/started':
-        return { kind: 'status_change', state: 'running' };
+        return [
+          { kind: 'status_change', state: 'running' },
+          { kind: 'agent_plan_update', todos: [] },
+        ];
 
       case 'turn/completed': {
         const turn = p.turn;
@@ -2315,7 +2355,10 @@ export class CodexRuntime implements AgentRuntime {
         codexProc.subThreadToParent.clear();
         codexProc.subThreadMeta.clear();
         codexProc.collabControlToolParents.clear();
-        return mapCodexTurnCompletedNotification(turn);
+        return [
+          mapCodexTurnCompletedNotification(turn),
+          { kind: 'agent_plan_update', todos: [] },
+        ];
       }
 
       // ── Text streaming ──
@@ -2859,7 +2902,6 @@ export class CodexRuntime implements AgentRuntime {
 
       case 'thread/name/updated':
       case 'turn/diff/updated':
-      case 'turn/plan/updated':
       case 'remoteControl/status/changed':
       case 'thread/goal/cleared':
       case 'item/reasoning/summaryPartAdded':
@@ -2877,6 +2919,9 @@ export class CodexRuntime implements AgentRuntime {
       case 'thread/unarchived':
         // Not relevant to our event stream — ignore
         return null;
+
+      case 'turn/plan/updated':
+        return mapCodexTurnPlanUpdatedNotification(p);
 
       case 'serverRequest/resolved': {
         const requestId = resolvedServerRequestId(p);
