@@ -79,6 +79,7 @@ function renderRail(options: {
                 onOpenOverlay={vi.fn()}
                 onRemoveProject={vi.fn()}
                 onAgentSettings={vi.fn()}
+                onOpenProjectFolder={vi.fn()}
                 onToggleProjectPin={vi.fn()}
                 onAddFolder={vi.fn()}
                 onCreateFromTemplate={vi.fn()}
@@ -204,6 +205,22 @@ describe('LauncherRightRail', () => {
         fireEvent.click(popover);
 
         expect(onOpenTask).not.toHaveBeenCalled();
+    });
+
+    it('opens the same history menu from row right-click without opening the session', () => {
+        const onOpenTask = vi.fn();
+        renderRail({ onOpenTask, sessions: [session({ id: 'stats-session', title: 'Session A' })] });
+
+        const row = screen.getByRole('button', { name: /Session A/ });
+        fireEvent.contextMenu(row, { clientX: 120, clientY: 240 });
+
+        expect(screen.getByRole('button', { name: '查看统计' })).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: '删除' })).toBeInTheDocument();
+
+        fireEvent.click(screen.getByRole('button', { name: '查看统计' }));
+
+        expect(onOpenTask).not.toHaveBeenCalled();
+        expect(screen.getByRole('dialog', { name: 'session stats' })).toHaveTextContent('stats:stats-session');
     });
 
     it('opens delete confirmation without opening the history session', () => {

@@ -53,6 +53,7 @@ interface LauncherRightRailProps {
     onOpenOverlay: (mode?: 'default' | 'search') => void;
     onRemoveProject: (project: Project) => void;
     onAgentSettings: (project: Project) => void;
+    onOpenProjectFolder: (project: Project) => void;
     onToggleProjectPin: (project: Project) => void;
     onAddFolder: () => void;
     onCreateFromTemplate: () => void;
@@ -75,6 +76,7 @@ export default memo(function LauncherRightRail({
     onOpenOverlay,
     onRemoveProject,
     onAgentSettings,
+    onOpenProjectFolder,
     onToggleProjectPin,
     onAddFolder,
     onCreateFromTemplate,
@@ -289,6 +291,7 @@ export default memo(function LauncherRightRail({
                                                     onLaunch={onLaunch}
                                                     onRemove={onRemoveProject}
                                                     onAgentSettings={onAgentSettings}
+                                                    onOpenFolder={onOpenProjectFolder}
                                                     onTogglePin={onToggleProjectPin}
                                                     isLoading={launchingProjectId === project.id && isStarting}
                                                 />
@@ -519,15 +522,35 @@ const LauncherHistoryRow = memo(function LauncherHistoryRow({
     menuOpen,
     onMenuOpenChange,
 }: LauncherHistoryRowProps) {
-    const menuButtonRef = useRef<HTMLButtonElement | null>(null);
+    const menuAnchorRef = useRef<HTMLSpanElement | null>(null);
+    const [menuAnchor, setMenuAnchor] = useState<{
+        x: number;
+        y: number;
+        placement: 'bottom-start' | 'bottom-end';
+    } | null>(null);
     const displayText = getSessionDisplayText(session);
     const msgCount = formatMessageCount(session);
+
+    const closeMenu = useCallback(() => {
+        setMenuAnchor(null);
+        onMenuOpenChange(false);
+    }, [onMenuOpenChange]);
 
     const handleOpen = useCallback(() => onOpen(session, project), [onOpen, project, session]);
     const handleClick = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
         if (!event.currentTarget.contains(event.target as Node)) return;
         handleOpen();
     }, [handleOpen]);
+    const handleContextMenu = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
+        event.preventDefault();
+        event.stopPropagation();
+        setMenuAnchor({
+            x: event.clientX,
+            y: event.clientY,
+            placement: 'bottom-start',
+        });
+        onMenuOpenChange(true);
+    }, [onMenuOpenChange]);
     const handleKeyDown = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
         if (event.target !== event.currentTarget) return;
         if (event.key !== 'Enter' && event.key !== ' ') return;
@@ -540,6 +563,7 @@ const LauncherHistoryRow = memo(function LauncherHistoryRow({
             role="button"
             tabIndex={0}
             onClick={handleClick}
+            onContextMenu={handleContextMenu}
             onKeyDown={handleKeyDown}
             className="group relative flex w-full cursor-pointer items-center gap-2 overflow-hidden rounded-lg px-3 py-2 text-left transition-all hover:bg-[var(--hover-bg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
         >
@@ -566,11 +590,20 @@ const LauncherHistoryRow = memo(function LauncherHistoryRow({
                 }`}
             >
                 <button
-                    ref={menuButtonRef}
                     type="button"
                     onClick={(event) => {
                         event.stopPropagation();
-                        onMenuOpenChange(!menuOpen);
+                        if (menuOpen) {
+                            closeMenu();
+                            return;
+                        }
+                        const rect = event.currentTarget.getBoundingClientRect();
+                        setMenuAnchor({
+                            x: rect.right,
+                            y: rect.bottom,
+                            placement: 'bottom-end',
+                        });
+                        onMenuOpenChange(true);
                     }}
                     className="pointer-events-auto flex h-7 w-7 items-center justify-center rounded-md text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper)] hover:text-[var(--ink)] focus-visible:opacity-100"
                     title="更多"
@@ -579,34 +612,44 @@ const LauncherHistoryRow = memo(function LauncherHistoryRow({
                     <MoreHorizontal className="h-4 w-4" />
                 </button>
             </div>
-            <Popover
-                open={menuOpen}
-                onClose={() => onMenuOpenChange(false)}
-                anchorRef={menuButtonRef}
-                placement="bottom-end"
-                className="w-36 py-1"
-            >
-                <MenuItem
-                    icon={<BarChart2 className="h-3.5 w-3.5" />}
-                    label="查看统计"
-                    onClick={() => {
-                        onMenuOpenChange(false);
-                        onShowStats(session);
-                    }}
-                />
-                <MenuItem
-                    icon={<Trash2 className="h-3.5 w-3.5" />}
-                    label="删除"
-                    tone="danger"
-                    disabled={isCronProtected}
-                    title={isCronProtected ? '请先停止定时任务后再删除' : undefined}
-                    onClick={() => {
-                        if (isCronProtected) return;
-                        onMenuOpenChange(false);
-                        onRequestDelete(session);
-                    }}
-                />
-            </Popover>
+            {menuOpen && menuAnchor && (
+                <>
+                    <span
+                        ref={menuAnchorRef}
+                        className="fixed h-px w-px"
+                        style={{ left: menuAnchor.x, top: menuAnchor.y }}
+                        aria-hidden
+                    />
+                    <Popover
+                        open
+                        onClose={closeMenu}
+                        anchorRef={menuAnchorRef}
+                        placement={menuAnchor.placement}
+                        className="w-36 py-1"
+                    >
+                        <MenuItem
+                            icon={<BarChart2 className="h-3.5 w-3.5" />}
+                            label="查看统计"
+                            onClick={() => {
+                                closeMenu();
+                                onShowStats(session);
+                            }}
+                        />
+                        <MenuItem
+                            icon={<Trash2 className="h-3.5 w-3.5" />}
+                            label="删除"
+                            tone="danger"
+                            disabled={isCronProtected}
+                            title={isCronProtected ? '请先停止定时任务后再删除' : undefined}
+                            onClick={() => {
+                                if (isCronProtected) return;
+                                closeMenu();
+                                onRequestDelete(session);
+                            }}
+                        />
+                    </Popover>
+                </>
+            )}
         </div>
     );
 });

@@ -42,6 +42,7 @@ import { apiGetJson } from '@/api/apiFetch';
 import { isBrowserDevMode, pickFolderForDialog } from '@/utils/browserMock';
 import { resolveLauncherProvider } from '@/utils/optionResolve';
 import { useAgentStatuses } from '@/hooks/useAgentStatuses';
+import { useWorkspaceFileService } from '@/hooks/useWorkspaceFileService';
 import type { SessionMetadata } from '@/api/sessionClient';
 import type { InitialMessage } from '@/types/tab';
 
@@ -88,6 +89,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
     const hasAnyAgent = useMemo(() => visibleProjects.some(p => p.isAgent), [visibleProjects]);
     const { statuses: agentStatuses } = useAgentStatuses(hasAnyAgent);
     const taskCenterData = useTaskCenterData({ isActive });
+    const { openPathExternal } = useWorkspaceFileService(null);
 
     // Build agent lookup: project path → { agent config, runtime status }
     const agentLookup = useMemo(() => {
@@ -833,6 +835,14 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
     const handleAgentSettings = useCallback((project: Project) => {
         setAgentOverlay({ workspacePath: project.path, initialTab: 'agent' });
     }, []);
+    const handleOpenProjectFolder = useCallback(async (project: Project) => {
+        try {
+            await openPathExternal({ fullPath: project.path, workspace: null });
+        } catch (err) {
+            console.error('[Launcher] Failed to open project folder:', err);
+            toastRef.current.error('打开所在文件夹失败');
+        }
+    }, [openPathExternal]);
     const handleCloseAgentOverlay = useCallback(() => setAgentOverlay(null), []);
 
     // SystemPromptsPanel "智能生成" → close the overlay and launch the workspace into
@@ -966,6 +976,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
                     onOpenOverlay={handleOpenOverlay}
                     onRemoveProject={handleRemoveProject}
                     onAgentSettings={handleAgentSettings}
+                    onOpenProjectFolder={handleOpenProjectFolder}
                     onToggleProjectPin={handleToggleProjectPin}
                     onAddFolder={handleAddProject}
                     onCreateFromTemplate={handleOpenTemplateDialog}

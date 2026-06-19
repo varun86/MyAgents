@@ -6,7 +6,7 @@
  */
 
 import { memo, useCallback, useRef, useState } from 'react';
-import { Loader2, Trash2, Settings2, HeartPulse, SlidersHorizontal, Pin, PinOff } from 'lucide-react';
+import { FolderOpen, Loader2, Trash2, Settings2, HeartPulse, MoreHorizontal, Pin, PinOff } from 'lucide-react';
 
 import { MenuItem } from '@/components/ui/MenuItem';
 import { Popover } from '@/components/ui/Popover';
@@ -43,6 +43,7 @@ interface WorkspaceCardProps {
     onLaunch: (project: Project) => void;
     onRemove: (project: Project) => void;
     onAgentSettings: (project: Project) => void;
+    onOpenFolder: (project: Project) => void;
     onTogglePin: (project: Project) => void;
     isLoading?: boolean;
 }
@@ -54,18 +55,34 @@ export default memo(function WorkspaceCard({
     onLaunch,
     onRemove,
     onAgentSettings,
+    onOpenFolder,
     onTogglePin,
     isLoading,
 }: WorkspaceCardProps) {
     // Context menu state
-    const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
+    const [contextMenu, setContextMenu] = useState<{
+        x: number;
+        y: number;
+        placement: 'bottom-start' | 'bottom-end';
+    } | null>(null);
     const menuAnchorRef = useRef<HTMLSpanElement | null>(null);
 
     const handleContextMenu = useCallback((e: React.MouseEvent) => {
         e.preventDefault();
         if (isLoading) return;
         window.getSelection()?.removeAllRanges();
-        setContextMenu({ x: e.clientX, y: e.clientY });
+        setContextMenu({ x: e.clientX, y: e.clientY, placement: 'bottom-start' });
+    }, [isLoading]);
+
+    const handleMoreClick = useCallback((e: React.MouseEvent<HTMLSpanElement>) => {
+        e.stopPropagation();
+        if (isLoading) return;
+        const rect = e.currentTarget.getBoundingClientRect();
+        setContextMenu({
+            x: rect.right,
+            y: rect.bottom,
+            placement: 'bottom-end',
+        });
     }, [isLoading]);
 
     const closeContextMenu = useCallback(() => setContextMenu(null), []);
@@ -150,22 +167,19 @@ export default memo(function WorkspaceCard({
                     </p>
                 </div>
 
-                {/* Settings shortcut — visible on hover, custom tooltip */}
+                {/* More shortcut — visible on hover, opens the same menu as right-click */}
                 {!isLoading && (
                     <div className="workspace-card-action-overlay pointer-events-none absolute inset-y-0 right-0 z-20 flex w-20 items-center justify-end pr-3 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
                         <span
                             className="group/btn pointer-events-auto relative z-20 rounded-lg p-2 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
                             role="button"
                             tabIndex={-1}
-                            aria-label="Agent 设置"
-                            onClick={(e) => {
-                                e.stopPropagation();
-                                onAgentSettings(project);
-                            }}
+                            aria-label="更多"
+                            onClick={handleMoreClick}
                         >
-                            <SlidersHorizontal className="h-4 w-4" strokeWidth={2.2} />
+                            <MoreHorizontal className="h-4 w-4" strokeWidth={2.2} />
                             <span className="pointer-events-none absolute right-full top-1/2 z-30 mr-2 -translate-y-1/2 whitespace-nowrap rounded-md bg-[var(--button-dark-bg)] px-2 py-0.5 text-xs text-[var(--button-primary-text)] opacity-0 shadow-lg transition-opacity group-hover/btn:opacity-100">
-                                Agent 设置
+                                更多
                             </span>
                         </span>
                     </div>
@@ -185,7 +199,7 @@ export default memo(function WorkspaceCard({
                         open
                         onClose={closeContextMenu}
                         anchorRef={menuAnchorRef}
-                        placement="bottom-start"
+                        placement={contextMenu.placement}
                         offset={2}
                         className="w-36 py-1"
                     >
@@ -205,6 +219,14 @@ export default memo(function WorkspaceCard({
                             onClick={() => {
                                 closeContextMenu();
                                 onAgentSettings(project);
+                            }}
+                        />
+                        <MenuItem
+                            icon={<FolderOpen className="h-3.5 w-3.5" />}
+                            label="打开所在文件夹"
+                            onClick={() => {
+                                closeContextMenu();
+                                onOpenFolder(project);
                             }}
                         />
                         <MenuItem

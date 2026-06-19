@@ -39,6 +39,7 @@ function renderCard(props: Partial<ComponentProps<typeof WorkspaceCard>> = {}) {
             onLaunch={vi.fn()}
             onRemove={vi.fn()}
             onAgentSettings={vi.fn()}
+            onOpenFolder={vi.fn()}
             onTogglePin={vi.fn()}
             {...props}
         />,
@@ -84,7 +85,7 @@ describe('WorkspaceCard', () => {
         expect(screen.getByText('Telegram')).toBeInTheDocument();
     });
 
-    it('keeps channel tags in a fade-clipped row and moves settings into an overlay', () => {
+    it('keeps channel tags in a fade-clipped row and moves actions into an overlay', () => {
         const status: AgentStatusData = {
             agentId: 'agent-1',
             agentName: 'Mino5',
@@ -113,10 +114,38 @@ describe('WorkspaceCard', () => {
         });
 
         expect(screen.getByText('Telegram').closest('.workspace-card-channel-tags-fade')).not.toBeNull();
-        const settingsButton = screen.getByLabelText('Agent 设置');
-        expect(settingsButton.closest('button')).toHaveClass('hover:z-20');
-        expect(settingsButton.parentElement).toHaveClass('workspace-card-action-overlay', 'z-20');
-        expect(screen.getByText('Agent 设置')).toHaveClass('z-30');
+        const moreButton = screen.getByLabelText('更多');
+        expect(moreButton.closest('button')).toHaveClass('hover:z-20');
+        expect(moreButton.parentElement).toHaveClass('workspace-card-action-overlay', 'z-20');
+        expect(screen.getByText('更多')).toHaveClass('z-30');
+    });
+
+    it('opens the context menu from the hover more action without launching the workspace', () => {
+        const onLaunch = vi.fn();
+        const onAgentSettings = vi.fn();
+
+        renderCard({ onLaunch, onAgentSettings });
+        fireEvent.click(screen.getByLabelText('更多'));
+
+        expect(onLaunch).not.toHaveBeenCalled();
+        expect(screen.getByRole('button', { name: '置顶' })).toBeInTheDocument();
+
+        fireEvent.click(screen.getByRole('button', { name: 'Agent 设置' }));
+
+        expect(onAgentSettings).toHaveBeenCalledWith(project);
+        expect(onLaunch).not.toHaveBeenCalled();
+    });
+
+    it('opens the workspace folder from the shared workspace menu', () => {
+        const onLaunch = vi.fn();
+        const onOpenFolder = vi.fn();
+
+        renderCard({ onLaunch, onOpenFolder });
+        fireEvent.click(screen.getByLabelText('更多'));
+        fireEvent.click(screen.getByRole('button', { name: '打开所在文件夹' }));
+
+        expect(onOpenFolder).toHaveBeenCalledWith(project);
+        expect(onLaunch).not.toHaveBeenCalled();
     });
 
     it('shows pin action in the right-click menu', () => {
