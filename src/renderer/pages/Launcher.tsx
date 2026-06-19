@@ -4,7 +4,6 @@
  * Responsive: stacks vertically below 768px
  */
 
-import { FolderPlus, LayoutTemplate, Loader2 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState, lazy, Suspense } from 'react';
 
 import { perfMark } from '@/utils/perfMark';
@@ -21,7 +20,7 @@ import ConfirmDialog from '@/components/ConfirmDialog';
 // P1: click-opened overlays — lazy so their subtrees (which transitively pull
 // Markdown → mermaid/katex/syntax-highlighter) leave the eager entry chunk.
 const TaskCenterOverlay = lazy(() => import('@/components/TaskCenterOverlay'));
-import { AddWorkspaceMenu, BrandSection, RecentTasks, TemplateLibraryDialog, WorkspaceCard, WorkspaceEditDialog } from '@/components/launcher';
+import { BrandSection, LauncherRightRail, TemplateLibraryDialog, WorkspaceEditDialog } from '@/components/launcher';
 const WorkspaceConfigPanel = lazy(() => import('@/components/WorkspaceConfigPanel'));
 import { useConfig } from '@/hooks/useConfig';
 import { useTaskCenterData } from '@/hooks/useTaskCenterData';
@@ -61,7 +60,7 @@ interface LauncherProps {
 export default function Launcher({ onLaunchProject, isStarting, startError: _startError, isActive }: LauncherProps) {
     const toast = useToast();
     const toastRef = useRef(toast);
-    toastRef.current = toast;
+    const pinToggleInFlightRef = useRef(new Set<string>());
     const {
         config,
         projects,
@@ -77,6 +76,10 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
         refreshProviderData,
         updateConfig,
     } = useConfig();
+
+    useEffect(() => {
+        toastRef.current = toast;
+    }, [toast]);
 
     // Filter out internal projects (e.g. ~/.myagents diagnostic workspace)
     const visibleProjects = useMemo(() => projects.filter(isProjectVisibleToUser), [projects]);
@@ -779,9 +782,25 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
         console.log('[Launcher] Path dialog cancelled');
     };
 
-    const handleRemoveProject = (project: Project) => {
+    const handleRemoveProject = useCallback((project: Project) => {
         setProjectToRemove(project);
-    };
+    }, []);
+
+    const handleToggleProjectPin = useCallback(async (project: Project) => {
+        if (pinToggleInFlightRef.current.has(project.id)) return;
+        pinToggleInFlightRef.current.add(project.id);
+        try {
+            const currentProject = projects.find(candidate => candidate.id === project.id) ?? project;
+            await patchProject(project.id, {
+                pinnedAt: currentProject.pinnedAt ? undefined : new Date().toISOString(),
+            });
+        } catch (err) {
+            console.error('[Launcher] failed to toggle workspace pin:', err);
+            toastRef.current.warning('置顶状态保存失败，请重试');
+        } finally {
+            pinToggleInFlightRef.current.delete(project.id);
+        }
+    }, [patchProject, projects]);
 
     const confirmRemoveProject = async () => {
         if (projectToRemove) {
@@ -808,6 +827,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
     const handleOpenTemplateDialog = useCallback(() => setShowTemplateDialog(true), []);
     const handleCloseTemplateDialog = useCallback(() => setShowTemplateDialog(false), []);
     const handleCloseEditDialog = useCallback(() => setEditingProject(null), []);
+    const handleShowLogs = useCallback(() => setShowLogs(true), []);
 
     // Agent overlay handlers
     const handleAgentSettings = useCallback((project: Project) => {
@@ -933,96 +953,24 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
                     />
                 </section>
 
-                {/* Right: Workspaces Section */}
-                <section className="launcher-workspaces flex flex-col overflow-hidden">
-                    {/* Recent Tasks */}
-                    <div className="flex-shrink-0 px-6 pt-6">
-                        <RecentTasks
-                            projects={visibleProjects}
-                            onOpenTask={handleOpenTask}
-                            onOpenOverlay={handleOpenOverlay}
-                            taskCenterData={taskCenterData}
-                        />
-                    </div>
-
-                    {/* Workspaces Header */}
-                    <div className="mx-6 border-t border-[var(--line)]" />
-                    <div className="flex flex-shrink-0 items-center justify-between px-6 py-4">
-                        <h2 className="text-sm font-semibold tracking-[0.04em] text-[var(--ink-muted)]">
-                            Agent 工作区
-                        </h2>
-                        <div className="flex items-center gap-3">
-                            {config.showDevTools && (
-                                <button
-                                    onClick={() => setShowLogs(true)}
-                                    className="rounded-lg px-2.5 py-1.5 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
-                                    title="查看 Rust 日志"
-                                >
-                                    Logs
-                                </button>
-                            )}
-                            {visibleProjects.length > 0 && (
-                                <AddWorkspaceMenu
-                                    onAddFolder={handleAddProject}
-                                    onCreateFromTemplate={handleOpenTemplateDialog}
-                                />
-                            )}
-                        </div>
-                    </div>
-
-                    {/* Workspaces List */}
-                    <div className="flex-1 overflow-y-auto overscroll-contain px-6 pb-6">
-                        {isLoading ? (
-                            <div className="flex flex-col items-center justify-center py-16">
-                                <Loader2 className="h-5 w-5 animate-spin text-[var(--ink-muted)]/50" />
-                                <p className="mt-4 text-sm text-[var(--ink-muted)]/70">加载中...</p>
-                            </div>
-                        ) : visibleProjects.length === 0 ? (
-                            <div className="flex flex-col items-center justify-center py-16 text-center">
-                                <h3 className="mb-1.5 text-lg font-medium text-[var(--ink)]">
-                                    还没有工作区
-                                </h3>
-                                <p className="mb-6 max-w-[220px] text-sm leading-relaxed text-[var(--ink-muted)]/60">
-                                    添加本地项目文件夹，或从模板快速创建
-                                </p>
-                                <div className="flex items-center gap-3">
-                                    <button
-                                        onClick={handleAddProject}
-                                        className="flex items-center gap-1.5 rounded-full bg-[var(--button-secondary-bg)] px-4 py-2.5 text-sm font-medium text-[var(--button-secondary-text)] transition-all hover:bg-[var(--button-secondary-bg-hover)] hover:shadow-sm"
-                                    >
-                                        <FolderPlus className="h-3.5 w-3.5" />
-                                        添加文件夹
-                                    </button>
-                                    <button
-                                        onClick={handleOpenTemplateDialog}
-                                        className="flex items-center gap-1.5 rounded-full bg-[var(--button-primary-bg)] px-4 py-2.5 text-sm font-medium text-[var(--button-primary-text)] transition-all hover:bg-[var(--button-primary-bg-hover)] hover:shadow-sm"
-                                    >
-                                        <LayoutTemplate className="h-3.5 w-3.5" />
-                                        从模板创建
-                                    </button>
-                                </div>
-                            </div>
-                        ) : (
-                            <div className="grid grid-cols-2 gap-3">
-                                {visibleProjects.map((project) => {
-                                    const agentData = agentLookup.get(normalizeWorkspacePathIdentity(project.path));
-                                    return (
-                                        <WorkspaceCard
-                                            key={project.id}
-                                            project={project}
-                                            agent={agentData?.agent}
-                                            agentStatus={agentData?.status}
-                                            onLaunch={handleLaunch}
-                                            onRemove={handleRemoveProject}
-                                            onAgentSettings={handleAgentSettings}
-                                            isLoading={launchingProjectId === project.id && isStarting}
-                                        />
-                                    );
-                                })}
-                            </div>
-                        )}
-                    </div>
-                </section>
+                <LauncherRightRail
+                    projects={visibleProjects}
+                    agentLookup={agentLookup}
+                    isProjectsLoading={isLoading}
+                    isStarting={isStarting}
+                    launchingProjectId={launchingProjectId}
+                    showDevTools={config.showDevTools}
+                    taskCenterData={taskCenterData}
+                    onLaunch={handleLaunch}
+                    onOpenTask={handleOpenTask}
+                    onOpenOverlay={handleOpenOverlay}
+                    onRemoveProject={handleRemoveProject}
+                    onAgentSettings={handleAgentSettings}
+                    onToggleProjectPin={handleToggleProjectPin}
+                    onAddFolder={handleAddProject}
+                    onCreateFromTemplate={handleOpenTemplateDialog}
+                    onShowLogs={handleShowLogs}
+                />
             </main>
 
             {/* Task Center Overlay */}

@@ -838,8 +838,10 @@ pre code {
   left: 0;
   top: 24px;
   bottom: 24px;
+  z-index: 30;
   width: 1px;
   background: var(--line);
+  pointer-events: none;
 }
 
 /* Responsive: stack vertically below 768px (use --breakpoint-mobile) */

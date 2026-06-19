@@ -3,10 +3,10 @@
  * Layout: Logo+Slogan pinned to upper area, input box anchored to lower area
  * with workspace selector integrated into the input toolbar.
  *
- * Phase 2 (v0.1.69): a 任务 / 想法 ModeSegment sits between the slogan and the
+ * Phase 2 (v0.1.69): a 对话 / 想法 ModeSegment sits between the slogan and the
  * input. Switching to 「想法」 repurposes the input as a freeform Thought entry
  * (persisted to ~/.myagents/thoughts/ via `thoughtCreate`), bypassing the full
- * Chat launch flow. Switching back to 「任务」 restores the default behavior.
+ * Chat launch flow. Switching back to 「对话」 restores the default behavior.
  */
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -155,7 +155,7 @@ export default memo(function BrandSection({
     // fetch races prepend → potential "flash and reappear" if a concurrent
     // external change landed between).
     //
-    // Skipped entirely in 任务 mode on mount so user's steady state (most
+    // Skipped entirely in 对话 mode on mount so user's steady state (most
     // sessions) doesn't pay a full `thoughtList()` round-trip for a `#`
     // picker they never open. The moment the user flips to 想法, this
     // effect re-runs and populates the list before they can open the
@@ -275,7 +275,7 @@ export default memo(function BrandSection({
     // eslint-disable-next-line react-hooks/exhaustive-deps -- stagedCron read intentionally; we don't want this effect to re-fire when the user merely stages a new cron, only when workspace changes
     }, [selectedProject?.path]);
 
-    // Task-mode submit is a straight pass-through to the parent's `onSend`.
+    // Dialogue-mode submit is a straight pass-through to the parent's `onSend`.
     // Thought-mode submit is owned entirely by ThoughtInput (below) — it
     // calls `thoughtCreate` itself and fires `handleThoughtCreated`, so
     // this handler never sees thought content anymore.
@@ -356,7 +356,7 @@ export default memo(function BrandSection({
     //     mounted — an explicit chord, safe to listen on `window`.
     //   • Plain Tab toggles too, and — crucially — fires even when the
     //     textarea is focused. The tooltip on the ModeSegment buttons
-    //     ("按 Tab 切换到「任务」") promises this behaviour; guarding
+    //     ("按 Tab 切换到「对话」") promises this behaviour; guarding
     //     against editable targets like earlier iterations did made the
     //     tooltip a lie the moment mount-time focus landed the caret in
     //     the textarea. Child components that legitimately need to
@@ -430,7 +430,7 @@ export default memo(function BrandSection({
                 </p>
             </div>
 
-            {/* Mode declaration: 任务 / 想法 (see DESIGN.md §6.8, PRD §4.1).
+            {/* Mode declaration: 对话 / 想法 (see DESIGN.md §6.8, PRD §4.1).
                 `mt-6 mb-6` opens breathing room above (separating from
                 the brand group) and below (separating from the input
                 affordance) — deliberately generous so the Launcher
@@ -541,7 +541,7 @@ export default memo(function BrandSection({
                     {/* PRD 0.2.7 Phase F: launcher-only chip row that surfaces
                      *  the Agent workspace + Runtime in the same screen slot the
                      *  thought-mode `RecentThoughtsRow` uses. Mutually exclusive
-                     *  with that strip — task mode shows this, thought mode
+                     *  with that strip — dialogue mode shows this, thought mode
                      *  shows recent thoughts. */}
                     {mode === 'task' && (
                         <div className="absolute left-0 right-0 top-full mt-3">

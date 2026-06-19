@@ -292,6 +292,8 @@ export interface Project {
   name: string;
   path: string;
   lastOpened?: string;
+  /** Launcher right rail pin time. Pinned workspaces sort newest-first. */
+  pinnedAt?: string | undefined;
   // Project-specific settings (null means use default)
   providerId: string | null;
   permissionMode: PermissionMode | null;

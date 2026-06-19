@@ -1,14 +1,10 @@
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import type { ComponentProps } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 
 import type { Project } from '@/config/types';
 import type { AgentConfig } from '../../../shared/types/agent';
 import type { AgentStatusData } from '@/hooks/useAgentStatuses';
-
-vi.mock('@/hooks/useCloseLayer', () => ({
-    useCloseLayer: () => undefined,
-}));
 
 import WorkspaceCard from './WorkspaceCard';
 
@@ -43,6 +39,7 @@ function renderCard(props: Partial<ComponentProps<typeof WorkspaceCard>> = {}) {
             onLaunch={vi.fn()}
             onRemove={vi.fn()}
             onAgentSettings={vi.fn()}
+            onTogglePin={vi.fn()}
             {...props}
         />,
     );
@@ -85,5 +82,26 @@ describe('WorkspaceCard', () => {
         });
 
         expect(screen.getByText('Telegram')).toBeInTheDocument();
+    });
+
+    it('shows pin action in the right-click menu', () => {
+        const onTogglePin = vi.fn();
+
+        renderCard({ onTogglePin });
+        fireEvent.contextMenu(screen.getByRole('button', { name: /Mino5/ }));
+        fireEvent.click(screen.getByRole('button', { name: '置顶' }));
+
+        expect(onTogglePin).toHaveBeenCalledWith(project);
+    });
+
+    it('shows unpin action for pinned projects', () => {
+        const pinnedProject = { ...project, pinnedAt: '2026-06-01T00:00:00.000Z' };
+        const onTogglePin = vi.fn();
+
+        renderCard({ project: pinnedProject, onTogglePin });
+        fireEvent.contextMenu(screen.getByRole('button', { name: /Mino5/ }));
+        fireEvent.click(screen.getByRole('button', { name: '取消置顶' }));
+
+        expect(onTogglePin).toHaveBeenCalledWith(pinnedProject);
     });
 });

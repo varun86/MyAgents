@@ -140,7 +140,7 @@ interface TabContentProps {
   /**
    * When true, render only a cheap placeholder instead of the (heavy) tab
    * content. Set for a freshly created tab so its full subtree (e.g. the
-   * Launcher: BrandSection + SimpleChatInput + selectors + RecentTasks +
+   * Launcher: BrandSection + SimpleChatInput + selectors + LauncherRightRail +
    * WorkspaceCards) does NOT mount inside the synchronous click commit —
    * that mount is what janked the "+" / Cmd+T action. handleNewTab clears
    * the flag right after the placeholder paints (runAfterNextPaint), so React
