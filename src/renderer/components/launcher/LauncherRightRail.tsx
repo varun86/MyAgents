@@ -5,7 +5,6 @@ import {
     Check,
     ChevronDown,
     ChevronUp,
-    Clock,
     FolderPlus,
     LayoutTemplate,
     Loader2,
@@ -215,7 +214,7 @@ export default memo(function LauncherRightRail({
     const hasMoreHistory = visibleHistoryCount < filteredSessions.length;
 
     return (
-        <section className="launcher-workspaces flex flex-col overflow-hidden">
+        <section className="launcher-workspaces relative flex flex-col overflow-hidden">
             <div ref={scrollRootRef} className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
                 <div className="px-6 pb-6 pt-6">
                     <section>
@@ -409,6 +408,10 @@ export default memo(function LauncherRightRail({
                     </section>
                 </div>
             </div>
+            <div
+                aria-hidden="true"
+                className="pointer-events-none absolute bottom-0 left-0 right-3 z-30 h-10 bg-gradient-to-t from-[var(--paper)] to-[var(--paper-a0)]"
+            />
 
             {pendingDeleteSession && (
                 <ConfirmDialog
@@ -540,9 +543,8 @@ const LauncherHistoryRow = memo(function LauncherHistoryRow({
             onKeyDown={handleKeyDown}
             className="group relative flex w-full cursor-pointer items-center gap-2 overflow-hidden rounded-lg px-3 py-2 text-left transition-all hover:bg-[var(--hover-bg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
         >
-            <div className="flex w-14 shrink-0 items-center gap-1 text-xs text-[var(--ink-muted)]/50">
-                <Clock className="h-2.5 w-2.5" />
-                <span>{formatTime(session.lastActiveAt)}</span>
+            <div className="flex w-16 shrink-0 items-center text-xs tabular-nums text-[var(--ink-muted)]/50">
+                <span className="min-w-0 truncate">{formatTime(session.lastActiveAt)}</span>
             </div>
             <div className="flex w-16 shrink-0 items-center text-xs text-[var(--ink-muted)]/55">
                 <span className="min-w-0 truncate">{getProjectDisplayName(project)}</span>
