@@ -100,19 +100,44 @@ describe('LauncherRightRail', () => {
     });
 
     it('collapses workspaces immediately and returns the right rail to the top', () => {
-        const projects = [project(1), project(2), project(3), project(4), project(5), project(6)];
+        const projects = [
+            project(1),
+            project(2),
+            project(3),
+            project(4),
+            project(5),
+            project(6),
+            project(7),
+            project(8),
+        ];
         const { container } = renderRail({ projects });
         const scrollRoot = container.querySelector('.launcher-workspaces > div') as HTMLDivElement;
 
         fireEvent.click(screen.getByRole('button', { name: /展开更多 2 个/ }));
-        expect(screen.getByText('Project 6')).toBeInTheDocument();
+        expect(screen.getByText('Project 8')).toBeInTheDocument();
 
         scrollRoot.scrollTop = 420;
         fireEvent.click(screen.getByRole('button', { name: /收起/ }));
 
         expect(screen.getByRole('button', { name: /展开更多 2 个/ })).toBeInTheDocument();
-        expect(screen.queryByText('Project 6')).not.toBeInTheDocument();
+        expect(screen.queryByText('Project 8')).not.toBeInTheDocument();
         expect(scrollRoot.scrollTo).toHaveBeenCalledWith({ top: 0, behavior: 'auto' });
+    });
+
+    it('shows six collapsed workspaces before revealing the expand button', () => {
+        renderRail({ projects: [project(1), project(2), project(3), project(4), project(5), project(6)] });
+
+        expect(screen.getByText('Project 6')).toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: /展开更多/ })).not.toBeInTheDocument();
+    });
+
+    it('keeps the sticky history header inside the content column', () => {
+        const { container } = renderRail();
+        const stickyHeader = container.querySelector('.sticky') as HTMLElement;
+
+        expect(stickyHeader).toHaveClass('bg-[var(--paper)]');
+        expect(stickyHeader).not.toHaveClass('-mx-6');
+        expect(stickyHeader).not.toHaveClass('px-6');
     });
 
     it('does not open the history session when a row menu action is clicked', () => {
@@ -134,6 +159,22 @@ describe('LauncherRightRail', () => {
 
         expect(screen.getByText('Session A').closest('.launcher-history-row-title-fade')).not.toBeNull();
         expect(within(row).getByLabelText('更多').parentElement).toHaveClass('launcher-history-row-action-overlay');
+    });
+
+    it('keeps only one history row menu open at a time', () => {
+        renderRail({
+            sessions: [
+                session({ id: 'session-a', title: 'Session A' }),
+                session({ id: 'session-b', title: 'Session B', lastActiveAt: '2026-06-20T00:18:00.000Z' }),
+            ],
+        });
+
+        fireEvent.click(within(screen.getByRole('button', { name: /Session A/ })).getByLabelText('更多'));
+        expect(screen.getAllByRole('button', { name: '查看统计' })).toHaveLength(1);
+
+        fireEvent.click(within(screen.getByRole('button', { name: /Session B/ })).getByLabelText('更多'));
+        expect(screen.getAllByRole('button', { name: '查看统计' })).toHaveLength(1);
+        expect(screen.getAllByRole('button', { name: '删除' })).toHaveLength(1);
     });
 
     it('does not open the history session from row menu keyboard activation keys', () => {

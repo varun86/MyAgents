@@ -33,7 +33,7 @@ import WorkspaceCard from './WorkspaceCard';
 import WorkspaceIcon from './WorkspaceIcon';
 import { sortLauncherProjects } from './workspaceSort';
 
-const COLLAPSED_WORKSPACE_COUNT = 4;
+const COLLAPSED_WORKSPACE_COUNT = 6;
 const HISTORY_PAGE_SIZE = 30;
 const WORKSPACE_ROW_MAX_HEIGHT = 94;
 
@@ -92,6 +92,7 @@ export default memo(function LauncherRightRail({
         scopeKey: 'all',
         count: HISTORY_PAGE_SIZE,
     });
+    const [openHistoryMenuSessionId, setOpenHistoryMenuSessionId] = useState<string | null>(null);
     const [pendingDeleteSession, setPendingDeleteSession] = useState<{ id: string; title: string } | null>(null);
     const [statsSession, setStatsSession] = useState<{ id: string; title: string } | null>(null);
 
@@ -325,7 +326,7 @@ export default memo(function LauncherRightRail({
 
                     <section className="mt-2">
                         <div
-                            className="sticky top-0 z-20 -mx-6 bg-[var(--paper)] px-6 py-2.5"
+                            className="sticky top-0 z-20 bg-[var(--paper)] py-2.5"
                         >
                             <div className="flex items-center justify-between gap-3">
                                 <div className="flex min-w-0 items-center gap-2">
@@ -388,6 +389,10 @@ export default memo(function LauncherRightRail({
                                                 onOpen={onOpenTask}
                                                 onShowStats={handleShowStatsSession}
                                                 onRequestDelete={handleRequestDeleteSession}
+                                                menuOpen={openHistoryMenuSessionId === session.id}
+                                                onMenuOpenChange={(open) => {
+                                                    setOpenHistoryMenuSessionId(open ? session.id : null);
+                                                }}
                                             />
                                         );
                                     })}
@@ -496,6 +501,8 @@ interface LauncherHistoryRowProps {
     onOpen: (session: SessionMetadata, project: Project) => void;
     onShowStats: (session: SessionMetadata) => void;
     onRequestDelete: (session: SessionMetadata) => void;
+    menuOpen: boolean;
+    onMenuOpenChange: (open: boolean) => void;
 }
 
 const LauncherHistoryRow = memo(function LauncherHistoryRow({
@@ -506,8 +513,9 @@ const LauncherHistoryRow = memo(function LauncherHistoryRow({
     onOpen,
     onShowStats,
     onRequestDelete,
+    menuOpen,
+    onMenuOpenChange,
 }: LauncherHistoryRowProps) {
-    const [menuOpen, setMenuOpen] = useState(false);
     const menuButtonRef = useRef<HTMLButtonElement | null>(null);
     const displayText = getSessionDisplayText(session);
     const msgCount = formatMessageCount(session);
@@ -558,10 +566,9 @@ const LauncherHistoryRow = memo(function LauncherHistoryRow({
                 <button
                     ref={menuButtonRef}
                     type="button"
-                    onMouseDown={event => event.stopPropagation()}
                     onClick={(event) => {
                         event.stopPropagation();
-                        setMenuOpen(value => !value);
+                        onMenuOpenChange(!menuOpen);
                     }}
                     className="pointer-events-auto flex h-7 w-7 items-center justify-center rounded-md text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper)] hover:text-[var(--ink)] focus-visible:opacity-100"
                     title="更多"
@@ -572,7 +579,7 @@ const LauncherHistoryRow = memo(function LauncherHistoryRow({
             </div>
             <Popover
                 open={menuOpen}
-                onClose={() => setMenuOpen(false)}
+                onClose={() => onMenuOpenChange(false)}
                 anchorRef={menuButtonRef}
                 placement="bottom-end"
                 className="w-36 py-1"
@@ -581,7 +588,7 @@ const LauncherHistoryRow = memo(function LauncherHistoryRow({
                     icon={<BarChart2 className="h-3.5 w-3.5" />}
                     label="查看统计"
                     onClick={() => {
-                        setMenuOpen(false);
+                        onMenuOpenChange(false);
                         onShowStats(session);
                     }}
                 />
@@ -593,7 +600,7 @@ const LauncherHistoryRow = memo(function LauncherHistoryRow({
                     title={isCronProtected ? '请先停止定时任务后再删除' : undefined}
                     onClick={() => {
                         if (isCronProtected) return;
-                        setMenuOpen(false);
+                        onMenuOpenChange(false);
                         onRequestDelete(session);
                     }}
                 />

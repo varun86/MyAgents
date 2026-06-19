@@ -113,7 +113,10 @@ describe('WorkspaceCard', () => {
         });
 
         expect(screen.getByText('Telegram').closest('.workspace-card-channel-tags-fade')).not.toBeNull();
-        expect(screen.getByLabelText('Agent 设置').parentElement).toHaveClass('workspace-card-action-overlay');
+        const settingsButton = screen.getByLabelText('Agent 设置');
+        expect(settingsButton.closest('button')).toHaveClass('hover:z-20');
+        expect(settingsButton.parentElement).toHaveClass('workspace-card-action-overlay', 'z-20');
+        expect(screen.getByText('Agent 设置')).toHaveClass('z-30');
     });
 
     it('shows pin action in the right-click menu', () => {
