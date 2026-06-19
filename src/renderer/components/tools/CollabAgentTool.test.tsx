@@ -9,6 +9,7 @@ import type { ToolUseSimple } from '@/types/chat';
 
 import TaskTool from './TaskTool';
 import { getToolLabel, getToolMainLabel, isSubagentContainerTool } from './toolBadgeConfig';
+import { isSubagentContainerRunning } from './subagentActivity';
 
 afterEach(() => cleanup());
 
@@ -64,6 +65,26 @@ describe('CollabAgent labels', () => {
     }));
     expect(label).toBe('Agent message');
   });
+  it('compact label still follows the nested trace after spawnAgent itself completed', () => {
+    const tool = collabTool({
+      result: 'Tool: spawnAgent\nStatus: completed',
+      isLoading: false,
+      subagentCalls: [{ id: 'wait-1', name: 'CollabAgent', input: { tool: 'wait' }, isLoading: true }],
+    });
+    expect(isSubagentContainerRunning(tool)).toBe(true);
+    expect(getToolLabel(tool)).toBe('等待子 Agent');
+  });
+  it('compact label prefers the latest running nested call', () => {
+    const label = getToolLabel(collabTool({
+      result: 'Tool: spawnAgent\nStatus: completed',
+      isLoading: false,
+      subagentCalls: [
+        { id: 'wait-1', name: 'CollabAgent', input: { tool: 'wait' }, isLoading: true },
+        { id: 'msg-1', name: 'AgentMessage', input: {}, result: 'newer output', isLoading: true },
+      ],
+    }));
+    expect(label).toBe('Agent message');
+  });
 });
 
 describe('TaskTool renders a CollabAgent card with a nested trace', () => {
@@ -99,5 +120,26 @@ describe('TaskTool renders a CollabAgent card with a nested trace', () => {
       isLoading: false,
     })} />);
     expect(screen.getByText(/Tool: wait/)).toBeInTheDocument();
+  });
+
+  it('keeps a completed spawnAgent card in running state while nested calls stream', () => {
+    const { container } = render(<TaskTool tool={collabTool({
+      result: 'Tool: spawnAgent\nStatus: completed',
+      isLoading: false,
+      taskStartTime: Date.now() - 10_000,
+      taskStats: { toolCount: 84, inputTokens: 0, outputTokens: 0 },
+      subagentCalls: [
+        { id: 'thinking-1', name: 'Thinking', input: {}, result: 'checking', isLoading: true },
+      ],
+    })} />);
+
+    expect(screen.getByText('运行中')).toBeInTheDocument();
+    expect(screen.queryByText('完成')).not.toBeInTheDocument();
+    expect(screen.getByText('调用工具 84 次')).toBeInTheDocument();
+
+    const toggle = container.querySelector('[aria-controls="task-trace-content"]');
+    expect(toggle).not.toBeNull();
+    fireEvent.click(toggle!);
+    expect(screen.getByText('执行中')).toBeInTheDocument();
   });
 });

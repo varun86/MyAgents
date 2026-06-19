@@ -30,6 +30,10 @@ import {
   resolveFilePatchDisplay,
   type FilePatchDisplay,
 } from '../../../shared/toolDisplay/filePatch';
+import {
+  isSubagentCallRunning,
+  isSubagentContainerRunning,
+} from './subagentActivity';
 
 // ===== MCP Server Name Registry =====
 // Module-level map updated by Chat.tsx when MCP config changes.
@@ -563,16 +567,7 @@ export function getToolBadgeConfig(toolName: string): ToolBadgeConfig {
 // external runtimes (like Gemini) surface their real tool identifier (e.g.
 // "run_shell_command") in the UI while internally still routing tool.name to a
 // MyAgents-native component (BashTool/GrepTool/...) for rich body rendering.
-/**
- * Tools that render as an expandable sub-agent container (a card holding a nested
- * `subagentCalls` trace). Single source of truth — used by ToolUse routing,
- * ProcessRow anchoring, TabProvider stats init, and the label helpers below.
- * builtin: Task / Agent (SDK `parent_tool_use_id`). Codex: CollabAgent (collab
- * spawn card, PRD 0.2.27). Keep these call sites in lockstep via this predicate.
- */
-export function isSubagentContainerTool(name: string): boolean {
-  return name === 'Task' || name === 'Agent' || name === 'CollabAgent';
-}
+export { isSubagentContainerTool } from './subagentActivity';
 
 // Human-readable label for a Codex collab-agent card by its action + model.
 const COLLAB_ACTION_LABELS: Record<string, string> = {
@@ -714,11 +709,11 @@ export function getToolLabel(tool: ToolUseSimple): string {
     case 'Task':
     case 'Agent':
     case 'CollabAgent': {
-      const isTaskRunning = tool.isLoading && !tool.result;
+      const isTaskRunning = isSubagentContainerRunning(tool);
       // When running, show the latest subagent tool (running or most recent).
       if (isTaskRunning && tool.subagentCalls && tool.subagentCalls.length > 0) {
-        // Prefer running tool, otherwise show the last tool
-        const runningCall = tool.subagentCalls.find(c => c.isLoading);
+        // Prefer the latest running tool, otherwise show the last tool.
+        const runningCall = [...tool.subagentCalls].reverse().find(isSubagentCallRunning);
         const latestCall = runningCall || tool.subagentCalls[tool.subagentCalls.length - 1];
         if (latestCall) {
           return getSubagentCallLabel(latestCall);

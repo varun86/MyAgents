@@ -9,7 +9,11 @@
 
 import { useEffect, useMemo, useState } from 'react';
 
-import type { AgentInput, Message } from '@/types/chat';
+import type { AgentInput, Message, ToolUseSimple } from '@/types/chat';
+import {
+  isSubagentContainerRunning,
+  isSubagentContainerTool,
+} from '@/components/tools/subagentActivity';
 import { getEffectiveTodoWriteTodos } from '@/utils/todoWriteState';
 import { accumulateTaskTodos, isTaskTodoTool, type TaskToolCall } from '@/utils/taskTodoState';
 import {
@@ -109,9 +113,9 @@ export function useAgentStatusState(messages: Message[]): AgentStatusState {
           continue;
         }
 
-        if (tool.name === 'Task' || tool.name === 'Agent') {
+        if (isSubagentContainerTool(tool.name)) {
           const input = tool.parsedInput as AgentInput | undefined;
-          const isBackground = input?.run_in_background === true;
+          const isBackground = tool.name !== 'CollabAgent' && input?.run_in_background === true;
 
           if (isBackground) {
             // 后台任务过滤条件，三道防线（任一命中 → 视为已完成 → 跳过）：
@@ -124,8 +128,8 @@ export function useAgentStatusState(messages: Message[]): AgentStatusState {
             if (isTerminalStatus(status)) continue;
             subagents.push(buildSubagentStatus(tool, input, 'background'));
           } else {
-            // 同步任务：isLoading && !result 视为活跃。
-            const isActive = !!tool.isLoading && !tool.result;
+            // 同步任务：父工具还在跑，或 Codex spawn 已完成但 nested trace 仍在跑。
+            const isActive = isSubagentContainerRunning(tool);
             if (!isActive) continue;
             subagents.push(buildSubagentStatus(tool, input, 'sync'));
           }
@@ -189,7 +193,7 @@ export function useAgentStatusState(messages: Message[]): AgentStatusState {
 const firstSeenAtByToolId = new Map<string, number>();
 
 function buildSubagentStatus(
-  tool: { id: string; taskStartTime?: number; taskStats?: { inputTokens: number; outputTokens: number; toolCount: number }; subagentCalls?: unknown[] },
+  tool: Pick<ToolUseSimple, 'id' | 'name' | 'parsedInput' | 'taskStartTime' | 'taskStats' | 'subagentCalls'>,
   input: AgentInput | undefined,
   mode: 'sync' | 'background',
 ): SubagentStatus {
@@ -203,14 +207,36 @@ function buildSubagentStatus(
       firstSeenAtByToolId.set(tool.id, startedAt);
     }
   }
+  const fallback = buildSubagentStatusFallback(tool);
   return {
     id: tool.id,
-    agentType: input?.subagent_type ?? 'general-purpose',
-    description: input?.description ?? '',
+    agentType: input?.subagent_type ?? fallback.agentType,
+    description: input?.description ?? fallback.description,
     mode,
     startedAt,
     inputTokens: tool.taskStats?.inputTokens ?? 0,
     outputTokens: tool.taskStats?.outputTokens ?? 0,
     toolCount: tool.taskStats?.toolCount ?? tool.subagentCalls?.length ?? 0,
+  };
+}
+
+function getStringProp(input: unknown, key: string): string | undefined {
+  if (!input || typeof input !== 'object') return undefined;
+  const value = (input as Record<string, unknown>)[key];
+  return typeof value === 'string' ? value : undefined;
+}
+
+function buildSubagentStatusFallback(
+  tool: Pick<ToolUseSimple, 'name' | 'parsedInput'>,
+): { agentType: string; description: string } {
+  if (tool.name !== 'CollabAgent') {
+    return { agentType: 'general-purpose', description: '' };
+  }
+  const action = getStringProp(tool.parsedInput, 'tool');
+  const model = getStringProp(tool.parsedInput, 'model');
+  const prompt = getStringProp(tool.parsedInput, 'prompt') ?? getStringProp(tool.parsedInput, 'description') ?? '';
+  return {
+    agentType: model ? `Codex · ${model}` : 'Codex',
+    description: action === 'spawnAgent' ? prompt : action ?? '',
   };
 }

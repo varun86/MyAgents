@@ -30,6 +30,7 @@ import { applyProviderEnablementAndOrder, type Provider } from '@/config/types';
 import { ALLOWED_IMAGE_MIME_TYPES, isImageFile, isImageMimeType } from '../../shared/fileTypes';
 import { renameIfBareClipboardImage } from '@/utils/clipboardImage';
 import { formatDuration, getToolBadgeConfig, getToolLabel, getToolMainLabel, getToolSummaryNode, isSubagentContainerTool } from '@/components/tools/toolBadgeConfig';
+import { isSubagentContainerRunning } from '@/components/tools/subagentActivity';
 import { groupContentBlocksForDisplay } from '@/utils/contentBlockDisplay';
 import type { ContentBlock } from '@/types/chat';
 import { isNearBottom } from './convoAutoFollow';
@@ -86,7 +87,7 @@ function ActivityRow({ block, isStreaming, tick }: { block: ContentBlock; isStre
     const isTaskTool = !!tool?.name && isSubagentContainerTool(tool.name);
     const isThinkingActive = isThinking && block.isComplete !== true && isStreaming;
     const isToolActive = !!tool?.isLoading;
-    const isTaskRunning = isTaskTool && !!tool?.isLoading && !tool?.result;
+    const isTaskRunning = isTaskTool && isSubagentContainerRunning(tool);
     const isRunning = isThinkingActive || isToolActive || isTaskRunning;
 
     let icon: ReactNode = null;

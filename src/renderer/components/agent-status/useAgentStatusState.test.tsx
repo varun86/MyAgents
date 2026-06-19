@@ -40,3 +40,33 @@ describe('useAgentStatusState — TodoWrite ↔ Task selection', () => {
     expect(result.current.todos.map(t => t.content)).toEqual(['旧任务']);
   });
 });
+
+describe('useAgentStatusState — Codex CollabAgent activity', () => {
+  it('keeps a completed spawnAgent card visible while nested calls are still running', () => {
+    const messages: Message[] = [
+      toolMsg('m1', {
+        name: 'CollabAgent',
+        parsedInput: { tool: 'spawnAgent', prompt: 'review analytics', model: 'gpt-5.5' } as unknown as ToolUseSimple['parsedInput'],
+        result: 'Tool: spawnAgent\nStatus: completed',
+        isLoading: false,
+        taskStartTime: 123,
+        taskStats: { toolCount: 84, inputTokens: 0, outputTokens: 0 },
+        subagentCalls: [
+          { id: 'child-1', name: 'Bash', input: { command: 'rg analytics' }, result: '...', isLoading: false },
+          { id: 'child-2', name: 'Thinking', input: {}, result: 'still checking', isLoading: true },
+        ],
+      }),
+    ];
+
+    const { result } = renderHook(() => useAgentStatusState(messages));
+    expect(result.current.summary.subagentRunning).toBe(1);
+    expect(result.current.subagents[0]).toMatchObject({
+      id: 'CollabAgent-m1',
+      agentType: 'Codex · gpt-5.5',
+      description: 'review analytics',
+      mode: 'sync',
+      startedAt: 123,
+      toolCount: 84,
+    });
+  });
+});

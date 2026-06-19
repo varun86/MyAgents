@@ -3,6 +3,7 @@ import type { AgentInput, BackgroundTaskStats, SubagentToolCall, ToolUseSimple, 
 
 import Markdown from '@/components/Markdown';
 import { formatDuration } from '@/components/tools/toolBadgeConfig';
+import { isSubagentCallRunning, isSubagentContainerRunning } from '@/components/tools/subagentActivity';
 import ToolAttachmentGallery from '@/components/tools/ToolAttachmentGallery';
 import { ExpandableResult } from '@/components/tools/utils';
 import { useTabApiOptional } from '@/context/TabContext';
@@ -398,7 +399,7 @@ const SubagentCallItem = memo(function SubagentCallItem({ call }: { call: Subage
     return call.inputJson ?? (call.input ? JSON.stringify(call.input, null, 2) : undefined);
   }, [call.inputJson, call.input]);
 
-  const isCallRunning = call.isLoading && !call.result;
+  const isCallRunning = isSubagentCallRunning(call);
 
   return (
     <div className="group flex flex-col gap-2 rounded-lg border border-[var(--line)] bg-[var(--paper)] p-3">
@@ -484,7 +485,7 @@ const TaskTraceList = memo(function TaskTraceList({ calls }: { calls: SubagentTo
 
 export default function TaskTool({ tool }: TaskToolProps) {
   const input = tool.parsedInput as AgentInput;
-  const isRunning = tool.isLoading && !tool.result;
+  const isRunning = isSubagentContainerRunning(tool);
   const [traceExpanded, setTraceExpanded] = useState(false);
   const statsBarRef = useRef<HTMLDivElement>(null);
 
