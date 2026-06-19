@@ -8,12 +8,13 @@ import {
   track,
   setAnalyticsContext,
   clearAnalyticsContext,
-  setPendingSurface,
-  clearPendingSurface,
+  setPendingSessionBirth,
+  clearPendingSessionBirth,
+  birthContextForSurface,
   hashAgentName,
   hashAgentNameSync,
 } from '@/analytics';
-import type { Surface } from '@/analytics';
+import type { EntryIntent, PendingSessionBirthContext, Surface } from '@/analytics';
 import { stopTabSidecar, startGlobalSidecar, initGlobalSidecarReadyPromise, markGlobalSidecarReady, getGlobalServerUrl, getSessionActivation, updateSessionTab, ensureSessionSidecar, releaseSessionSidecar, activateSession, deactivateSession, upgradeSessionId, getSessionPort, hasSessionSidecar, getSessionGeneration, stopSseProxy, startBackgroundCompletion, cancelBackgroundCompletion, updateGlobalServerUrl, canRestoreSession, setAppActiveCorrelation } from '@/api/tauriClient';
 import ConfirmDialog from '@/components/ConfirmDialog';
 import BugReportOverlay from '@/components/BugReportOverlay';
@@ -119,6 +120,11 @@ async function resolveSessionRuntimeForOpen(
   }
 }
 
+export interface LaunchProjectAnalyticsContext {
+  surface: Surface;
+  entryIntent: EntryIntent;
+}
+
 // ============================================================
 // MemoizedTabContent — prevents re-rendering tabs whose props haven't changed.
 // When switching tabs, only the newly active and previously active tabs re-render.
@@ -145,7 +151,7 @@ interface TabContentProps {
   settingsInitialMcpId: string | undefined;
   settingsInitialSelect: CapabilityInitialSelect | undefined;
   // Launcher callbacks
-  onLaunchProject: (project: Project, sessionId?: string, initialMessage?: InitialMessage) => void;
+  onLaunchProject: (project: Project, sessionId?: string, initialMessage?: InitialMessage, analyticsContext?: LaunchProjectAnalyticsContext) => void;
   // Chat callbacks
   onBack: () => Promise<void>;
   onSwitchSession: (tabId: string, sessionId: string) => Promise<void>;
@@ -1089,7 +1095,7 @@ export default function App() {
     // Drop any leftover pending surface for this tab to avoid leaking it into
     // a later (unrelated) session_new — the analytics module keeps these
     // module-level until consumed.
-    clearPendingSurface(tabId);
+    clearPendingSessionBirth(tabId);
 
     // ========== IMMEDIATE UI UPDATE (non-blocking) ==========
     // Update UI state first for instant response
@@ -1253,7 +1259,8 @@ export default function App() {
   const handleLaunchProject = useCallback(async (
     project: Project,
     sessionId?: string,
-    initialMessage?: InitialMessage
+    initialMessage?: InitialMessage,
+    analyticsContext?: LaunchProjectAnalyticsContext,
   ) => {
     const activeTabId = activeTabIdRef.current;
     if (!activeTabId) return;
@@ -1275,26 +1282,47 @@ export default function App() {
     // Scenario 3 creates a new tab, the new TabProvider's chat:system-init must
     // consume the surface from THE NEW tabId, not the original activeTabId.
     // Tracked here for review feedback B2/H2 (Codex BLOCKER, Codex HIGH).
-    let pendingSurfaceForLaunch: Surface | null = null;
+    let pendingSurfaceForLaunch: PendingSessionBirthContext | null = null;
+    let workspaceOpenAnalytics: {
+      agent_hash: string | null;
+      runtime: ReturnType<typeof resolveEffectiveRuntime>;
+      entry_intent: EntryIntent;
+      has_initial_message: boolean;
+      session_id: null;
+    } | null = null;
     if (!sessionId) {
-      // workspace_open path (NEW session): agent_card (no initialMessage) vs
-      // launcher_input (initialMessage present). For a new session the agent's
-      // current config IS the spawn runtime, so the agent-config effective
-      // runtime is authoritative here (agrees with server-side ai_turn_complete).
+      // workspace_open path (NEW session): caller-provided analytics context is
+      // authoritative. Falling back to launcher_input for initialMessage preserves
+      // legacy producers, but new producers should pass their true entry intent
+      // so `/init`, task alignment, and support diagnostics do not all collapse
+      // into the launcher input bucket.
       const cfg = configRef.current;
       const agent = getAgentByWorkspacePath(cfg, project.path);
-      pendingSurfaceForLaunch = initialMessage ? 'launcher_input' : 'agent_card';
-      track('workspace_open', {
+      const launchContext = analyticsContext ?? (
+        initialMessage
+          ? { surface: 'launcher_input' as const, entryIntent: 'send_message' as const }
+          : { surface: 'agent_card' as const, entryIntent: 'open_workspace' as const }
+      );
+      pendingSurfaceForLaunch = {
+        surface: launchContext.surface,
+        entryIntent: launchContext.entryIntent,
+        hasInitialMessage: !!initialMessage,
+      };
+      workspaceOpenAnalytics = {
         agent_hash: hashAgentNameSync(agent?.name ?? null),
         runtime: resolveEffectiveRuntime(agent?.runtime, !!cfg.multiAgentRuntime),
+        entry_intent: launchContext.entryIntent,
+        has_initial_message: !!initialMessage,
         session_id: null,
-      });
+      };
     }
     // history_open (existing session) is tracked in the `sessionId` branch below,
     // AFTER the session's frozen runtime (targetRuntime) is resolved. The agent's
     // config may have changed since the session was created, so config-based
     // runtime would diverge from the server-side ai_turn_complete (cross-review C2).
-    // Explicit `session_id: null` there suppresses Active Context auto-injection.
+    // `history_open` explicitly reports the TARGET session id. It is not in the
+    // Active Context auto-inject allowlist, so missing this id would make history
+    // joins impossible instead of merely falling back.
 
     setTabErrors((prev) => ({ ...prev, [activeTabId]: null }));
     setLoadingTabs((prev) => ({ ...prev, [activeTabId]: true }));
@@ -1306,6 +1334,11 @@ export default function App() {
       console.log(`[App][launch] START active=${activeTabId} view=${activeTab?.view} hasSession=${!!activeTab?.sessionId} target-sessionId=${sessionId ?? 'NEW'}`);
 
       if (sessionId) {
+        // Existing-session opens are not session births. Clear any stale
+        // new-session birth context left on this tab so a later system-init for
+        // the target history session cannot consume it as `session_new`.
+        clearPendingSessionBirth(activeTabId);
+
         const cfg = configRef.current;
         const targetAgentRuntime = normalizeRuntime(getAgentByWorkspacePath(cfg, project.path)?.runtime);
         const currentAgentRuntime = activeTab?.agentDir
@@ -1329,7 +1362,7 @@ export default function App() {
         track('history_open', {
           agent_hash: hashAgentNameSync(getAgentByWorkspacePath(cfg, project.path)?.name ?? null),
           runtime: targetRuntime,
-          session_id: null,
+          session_id: sessionId,
         });
         const currentRuntime = activeTab?.sessionId ? resolvedCurrentRuntime : targetRuntime;
         const plan = planSessionOpen({
@@ -1499,7 +1532,13 @@ export default function App() {
       // synchronously once readiness lands, and the target TabProvider needs to
       // consume the surface from this tabId at that moment.
       if (pendingSurfaceForLaunch) {
-        setPendingSurface(targetTabId, pendingSurfaceForLaunch);
+        if (workspaceOpenAnalytics) {
+          track('workspace_open', {
+            ...workspaceOpenAnalytics,
+            tab_id: targetTabId,
+          });
+        }
+        setPendingSessionBirth(targetTabId, pendingSurfaceForLaunch);
       }
 
       // INSTANT-NAV: flip to the chat shell BEFORE awaiting the sidecar boot, so the
@@ -1617,8 +1656,8 @@ export default function App() {
       // PRD 0.2.19 review fix (H3): clear pending surface on launch failure so
       // a later unrelated session_new doesn't inherit a stale surface from this
       // failed attempt. Cover both candidate tabIds (Scenario 3 retarget case).
-      clearPendingSurface(targetTabId);
-      if (targetTabId !== activeTabId) clearPendingSurface(activeTabId);
+      clearPendingSessionBirth(targetTabId);
+      if (targetTabId !== activeTabId) clearPendingSessionBirth(activeTabId);
 
       // Surface the error on the tab the user is actually looking at — when
       // the stale jump-to-tab fallthrough rerouted us to `plan.tabId`, the
@@ -2307,7 +2346,7 @@ export default function App() {
       // of resetSession (user clicked "新对话" while AI was still streaming) —
       // without this, chat:system-init would fall back to 'launcher_input' and
       // silently misclassify all AI-running new-session opens.
-      setPendingSurface(tabId, 'new_chat_button');
+      setPendingSessionBirth(tabId, birthContextForSurface('new_chat_button'));
 
       // Create new pending session with new Sidecar
       const pendingSessionId = createPendingSessionId(tabId);
@@ -2843,6 +2882,7 @@ export default function App() {
           workspace,
           undefined,
           initialMessage,
+          { surface: 'task_center', entryIntent: 'thought_alignment' },
         );
 
         // handleLaunchProject's internal setTabs overwrites `title` with the
@@ -3084,7 +3124,12 @@ export default function App() {
         openLaunchTabNow(newTab);
 
         try {
-          await handleLaunchProject(project, undefined, initialMessage);
+          await handleLaunchProject(
+            project,
+            undefined,
+            initialMessage,
+            { surface: 'bug_report', entryIntent: 'support_diagnostics' },
+          );
 
           // Override tab title
           setTabs((prev) =>

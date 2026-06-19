@@ -13,8 +13,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { flushSync } from 'react-dom';
 import type { ReactNode } from 'react';
 
-import { track, consumePendingSurface, setPendingSurface, hashAgentNameSync } from '@/analytics';
-import type { Surface } from '@/analytics';
+import {
+    track,
+    consumePendingSessionBirth,
+    setPendingSessionBirth,
+    hashAgentNameSync,
+    birthContextForSurface,
+} from '@/analytics';
+import type { PendingSessionBirthContext } from '@/analytics';
 import { useConfigData } from '@/config/useConfigData';
 import { getAgentByWorkspacePath } from '@/config/services/agentConfigService';
 import { notifyConfigChanged } from '@/config/services/appConfigService';
@@ -700,7 +706,7 @@ export default function TabProvider({
             // `isNewSessionRef.current` is already true (set above), which the
             // organic-mint detector in chat:system-init uses to know that the
             // upcoming id-change is an intentional reset (vs spurious sync).
-            setPendingSurface(tabId, 'new_chat_button');
+            setPendingSessionBirth(tabId, birthContextForSurface('new_chat_button'));
 
             return true;
         } catch (error) {
@@ -781,15 +787,20 @@ export default function TabProvider({
         void onSessionIdChangeRef.current?.(newSessionId);
     }, [tabId, setStreamingMessage, clearInteractiveState, clearSessionActive, resetPaginationState]);
 
-    const trackSessionNewForBirth = useCallback((newSessionId: string, fallback: Surface) => {
-        const surface = consumePendingSurface(tabId, fallback);
+    const trackSessionNewForBirth = useCallback((
+        newSessionId: string,
+        fallback: PendingSessionBirthContext,
+        runtimeOverride?: RuntimeType,
+    ) => {
+        const birth = consumePendingSessionBirth(tabId, fallback);
         const meta = analyticsMetaRef.current;
         track('session_new', {
             session_id: newSessionId,
             tab_id: tabId,
-            triggered_by: surface,
-            runtime: meta.runtime,
-            has_initial_message: surface !== 'new_chat_button',
+            triggered_by: birth.surface,
+            entry_intent: birth.entryIntent,
+            runtime: runtimeOverride ?? meta.runtime,
+            has_initial_message: birth.hasInitialMessage,
             agent_hash: meta.agentHash,
         });
     }, [tabId]);
@@ -2269,8 +2280,14 @@ export default function TabProvider({
                             //     so fallback to 'new_chat_button' even if pending was lost
                             //   - otherwise → organic mint via launcher input (most common
                             //     case where caller didn't setPendingSurface)
-                            const fallback: Surface = isNewSessionRef.current ? 'new_chat_button' : 'launcher_input';
-                            trackSessionNewForBirth(newSessionId, fallback);
+                            const fallback = isNewSessionRef.current
+                                ? birthContextForSurface('new_chat_button')
+                                : birthContextForSurface('launcher_input');
+                            trackSessionNewForBirth(
+                                newSessionId,
+                                fallback,
+                                payload.runtime ? normalizeRuntime(payload.runtime) : undefined,
+                            );
                         }
                     } else if (
                         newSessionId &&
@@ -2282,7 +2299,11 @@ export default function TabProvider({
                         // reset-birth analytics/guard lifecycle without waiting for an
                         // artificial id change.
                         resetBirthPendingRef.current = false;
-                        trackSessionNewForBirth(newSessionId, 'new_chat_button');
+                        trackSessionNewForBirth(
+                            newSessionId,
+                            birthContextForSurface('new_chat_button'),
+                            payload.runtime ? normalizeRuntime(payload.runtime) : undefined,
+                        );
                     }
                 }
                 break;

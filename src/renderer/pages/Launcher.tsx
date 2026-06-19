@@ -12,6 +12,7 @@ import { RENDERER_PERF_PHASE } from '../../shared/perfTrace';
 import { open } from '@tauri-apps/plugin-dialog';
 
 import { track } from '@/analytics';
+import type { EntryIntent, Surface } from '@/analytics';
 import { type ImageAttachment } from '@/components/SimpleChatInput';
 import { useToast } from '@/components/Toast';
 import { UnifiedLogsPanel } from '@/components/UnifiedLogsPanel';
@@ -46,7 +47,12 @@ import type { SessionMetadata } from '@/api/sessionClient';
 import type { InitialMessage } from '@/types/tab';
 
 interface LauncherProps {
-    onLaunchProject: (project: Project, sessionId?: string, initialMessage?: InitialMessage) => void;
+    onLaunchProject: (
+        project: Project,
+        sessionId?: string,
+        initialMessage?: InitialMessage,
+        analyticsContext?: { surface: Surface; entryIntent: EntryIntent },
+    ) => void;
     isStarting?: boolean;
     startError?: string | null;
     isActive?: boolean;
@@ -656,7 +662,12 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
             }
         }
 
-        onLaunchProject(selectedWorkspace, undefined, initialMessage);
+        onLaunchProject(
+            selectedWorkspace,
+            undefined,
+            initialMessage,
+            { surface: 'launcher_input', entryIntent: 'send_message' },
+        );
     }, [selectedWorkspace, launcherProvider, launcherPermissionMode,
         launcherSelectedModel, launcherReasoningEffort, launcherWorkspaceMcpEnabled, launcherGlobalMcpEnabled,
         launcherEnabledPlugins, config.plugins, config.enabledPlugins,
@@ -680,7 +691,12 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
         touchProject(project.id).catch((err) => {
             console.warn('[Launcher] Failed to update lastOpened:', err);
         });
-        onLaunchProject(project, sessionId);
+        onLaunchProject(
+            project,
+            sessionId,
+            undefined,
+            sessionId ? undefined : { surface: 'agent_card', entryIntent: 'open_workspace' },
+        );
     }, [touchProject, onLaunchProject]);
 
     const handleOpenTask = useCallback((session: SessionMetadata, project: Project) => {
@@ -823,7 +839,12 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
             ...(builtinSelection ? { builtinSelection } : {}),
             ...(runtimeModel ? { runtimeModel } : {}),
         };
-        onLaunchProject(project, undefined, initialMessage);
+        onLaunchProject(
+            project,
+            undefined,
+            initialMessage,
+            { surface: 'agent_setup', entryIntent: 'workspace_init' },
+        );
     }, [agentOverlay, projects, launcherProvider, providers, launcherPermissionMode, launcherSelectedModel, isExternalRuntime, onLaunchProject]);
 
     return (

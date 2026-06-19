@@ -34,8 +34,16 @@ export {
 // 隐私哈希（v0.2.19）
 export { hashAgentName, hashAgentNameSync } from './hash';
 
-// Pending Surface registry（v0.2.19）—— session_new 之前 caller 打 surface，consumer 消费
-export { setPendingSurface, consumePendingSurface, clearPendingSurface } from './pendingSurface';
+// Pending birth context registry —— session_new 之前 caller 打入口上下文，consumer 消费
+export {
+  setPendingSessionBirth,
+  consumePendingSessionBirth,
+  clearPendingSessionBirth,
+  setPendingSurface,
+  consumePendingSurface,
+  clearPendingSurface,
+  birthContextForSurface,
+} from './pendingSurface';
 
 // 类型导出
 export type {
@@ -46,6 +54,7 @@ export type {
   MessageCompleteParams,
   Source,
   Surface,
+  EntryIntent,
   SessionNewParams,
   WorkspaceOpenParams,
   HistoryOpenParams,
@@ -59,6 +68,7 @@ export type {
   AgentChannelToggleParams,
   TrackEvent,
 } from './types';
+export type { PendingSessionBirthContext } from './pendingSurface';
 
 // 配置（调试用）
 export { isAnalyticsEnabled, getAnalyticsConfig } from './config';

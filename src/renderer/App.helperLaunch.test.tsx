@@ -49,6 +49,13 @@ vi.mock('@/analytics', () => ({
   clearAnalyticsContext: vi.fn(),
   setPendingSurface: vi.fn(),
   clearPendingSurface: vi.fn(),
+  setPendingSessionBirth: vi.fn(),
+  clearPendingSessionBirth: vi.fn(),
+  birthContextForSurface: vi.fn((surface: string) => ({
+    surface,
+    entryIntent: surface === 'new_chat_button' ? 'new_chat' : 'unknown',
+    hasInitialMessage: surface !== 'new_chat_button',
+  })),
   hashAgentName: vi.fn(async () => 'agent-hash'),
   hashAgentNameSync: vi.fn(() => 'agent-hash'),
 }));
