@@ -3371,6 +3371,7 @@ export default function TabProvider({
         postJson<{ success: boolean; error?: string; queued?: boolean; queueId?: string; isInFlight?: boolean }>('/chat/send', {
             text: trimmed,
             images: imageData,
+            sessionId: currentSessionIdRef.current ?? sessionId,
             permissionMode: permissionMode ?? 'auto',
             // #264 — echo the global background-agent permission policy so the
             // builtin PermissionRequest hook applies it to run_in_background sub-agents.

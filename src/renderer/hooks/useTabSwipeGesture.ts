@@ -2,6 +2,7 @@ import { useEffect, useRef, type RefObject } from 'react';
 import { flushSync } from 'react-dom';
 import type { Tab } from '@/types/tab';
 import { formatPerfLine, type PerfTraceDetail } from '../../shared/perfTrace';
+import { perfMark } from '@/utils/perfMark';
 
 interface UseTabSwipeGestureOptions {
   contentRef: RefObject<HTMLDivElement | null>;
@@ -127,21 +128,27 @@ function targetKind(target: EventTarget | null): string {
 }
 
 function traceTabSwipe(phase: string, detail?: PerfTraceDetail): void {
+  let explicitTrace: string | null = null;
   try {
-    if (typeof localStorage !== 'undefined' && localStorage.getItem('myagents:tab-swipe-trace') === '0') {
+    explicitTrace = typeof localStorage !== 'undefined'
+      ? localStorage.getItem('myagents:tab-swipe-trace')
+      : null;
+    if (explicitTrace === '0') {
       return;
     }
   } catch {
     // localStorage may be unavailable in tests or hardened WebViews; tracing
     // should remain best-effort and never affect gesture handling.
   }
+  const perfPhase = `tab_swipe_${phase}`;
+  if (explicitTrace !== '1') {
+    perfMark(perfPhase, detail);
+    return;
+  }
   try {
-    // frontendLogger intercepts console.debug and persists this to unified logs.
-    // This Phase 0 probe is intentionally on-by-default so real-device testing
-    // cannot silently produce no data in production-like builds.
     console.debug(formatPerfLine({
       trace: 'renderer',
-      phase: `tab_swipe_${phase}`,
+      phase: perfPhase,
       detail,
     }));
   } catch {

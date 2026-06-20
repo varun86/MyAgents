@@ -2242,10 +2242,14 @@ async function _doStartExternalSession(options: {
   // to a real UUID. A pending-prefixed ID in SessionStore breaks history reload
   // because the frontend's loadSession guard skips any session whose ID starts
   // with "pending-". Fix: mint a real UUID here on the first start (not resume).
+  const originalSessionId = options.sessionId;
   if (isPendingSessionId(options.sessionId) && !options.resumeSessionId) {
     const realId = crypto.randomUUID();
     console.log(`[external-session] Upgrading pending session ID: ${options.sessionId} → ${realId}`);
     options.sessionId = realId;
+    if (startingSessionId === originalSessionId) {
+      startingSessionId = realId;
+    }
   }
   const startModel = coerceExternalRuntimeModel(
     options.model,
@@ -2530,9 +2534,16 @@ export async function sendExternalMessage(
   if (hasInputImages && !context?.sessionId) {
     return { queued: false, error: '图片附件缺少会话上下文，无法发送' };
   }
-  const resolvedImages = context?.sessionId
-    ? resolveImagePayloads(context.sessionId, images)
-    : undefined;
+  let resolvedImages: ResolvedImagePayload[] | undefined;
+  try {
+    resolvedImages = context?.sessionId
+      ? resolveImagePayloads(context.sessionId, images)
+      : undefined;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error('[external-session] failed to resolve image attachments:', err);
+    return { queued: false, error: message };
+  }
   const hasImages = resolvedImages && resolvedImages.length > 0;
   const turnAnalyticsSource = context?.analyticsSource ?? context?.scenario.type ?? lastAnalyticsSource;
   const userAttachments = preBroadcasted?.attachments

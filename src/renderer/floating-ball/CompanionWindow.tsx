@@ -27,7 +27,7 @@ import { track } from '@/analytics';
 import { loadAppConfig, mergePresetCustomModels } from '@/config/services/appConfigService';
 import { getAllProviders, modelSupportsModality } from '@/config/services/providerService';
 import { applyProviderEnablementAndOrder, type Provider } from '@/config/types';
-import { ALLOWED_IMAGE_MIME_TYPES, USER_IMAGE_ATTACHMENT_MAX_BYTES, isImageFile, isImageMimeType } from '../../shared/fileTypes';
+import { ALLOWED_IMAGE_MIME_TYPES, USER_IMAGE_ATTACHMENT_MAX_BYTES, isChatImageFile, isImageMimeType } from '../../shared/fileTypes';
 import { resolveAttachmentUrl } from '@/utils/attachmentUrl';
 import { renameIfBareClipboardImage } from '@/utils/clipboardImage';
 import { formatDuration, getToolBadgeConfig, getToolLabel, getToolMainLabel, getToolSummaryNode, isSubagentContainerTool } from '@/components/tools/toolBadgeConfig';
@@ -761,7 +761,7 @@ export default function CompanionWindow() {
         const imageFiles: File[] = [];
         const otherFiles: File[] = [];
         for (const file of files) {
-            if (isImageFile(file.name) || isImageMimeType(file.type)) imageFiles.push(file);
+            if (isChatImageFile(file.name) || isImageMimeType(file.type)) imageFiles.push(file);
             else otherFiles.push(file);
         }
 
@@ -814,7 +814,7 @@ export default function CompanionWindow() {
         const otherPaths: string[] = [];
         for (const path of paths) {
             const filename = path.split(/[\\/]/).pop() || path;
-            if (isImageFile(filename)) imagePaths.push(path);
+            if (isChatImageFile(filename)) imagePaths.push(path);
             else otherPaths.push(path);
         }
 

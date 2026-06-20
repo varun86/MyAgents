@@ -16,12 +16,29 @@ export const IMAGE_EXTENSIONS = new Set([
   'ico',
 ]);
 
+/** Image extensions that can be sent as chat image attachments. */
+export const CHAT_IMAGE_EXTENSIONS = new Set([
+  'png',
+  'jpg',
+  'jpeg',
+  'gif',
+  'webp',
+]);
+
 /**
  * Check if a filename represents an image file based on extension
  */
 export function isImageFile(filename: string): boolean {
   const ext = filename.split('.').pop()?.toLowerCase() ?? '';
   return IMAGE_EXTENSIONS.has(ext);
+}
+
+/**
+ * Check if a filename can be routed as a chat image attachment.
+ */
+export function isChatImageFile(filename: string): boolean {
+  const ext = filename.split('.').pop()?.toLowerCase() ?? '';
+  return CHAT_IMAGE_EXTENSIONS.has(ext);
 }
 
 /**
@@ -49,7 +66,7 @@ export const USER_IMAGE_ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024;
  * Check if a MIME type is a supported image type
  */
 export function isImageMimeType(mimeType: string): boolean {
-  return ALLOWED_IMAGE_MIME_TYPES.includes(mimeType) || mimeType.startsWith('image/');
+  return ALLOWED_IMAGE_MIME_TYPES.includes(mimeType);
 }
 
 /**

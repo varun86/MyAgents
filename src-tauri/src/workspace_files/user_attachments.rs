@@ -17,9 +17,7 @@ use super::path_safety::{sanitize_filename, validate_external_read_path};
 
 const MAX_USER_IMAGE_ATTACHMENT_BYTES: u64 = 10 * 1024 * 1024;
 
-const ALLOWED_IMAGE_EXTS: &[&str] = &[
-    "png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "ico", "tiff", "tif", "avif",
-];
+const ALLOWED_IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp"];
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -101,7 +99,12 @@ async fn prepare_one_user_image_attachment(
 
     match ext.as_deref() {
         Some(e) if ALLOWED_IMAGE_EXTS.contains(&e) => {}
-        _ => return Err(make_err("invalid_type", "Only image files are allowed".to_string())),
+        _ => {
+            return Err(make_err(
+                "invalid_type",
+                "Only image files are allowed".to_string(),
+            ))
+        }
     }
 
     let resolved = validate_external_read_path(raw_path)
@@ -117,7 +120,10 @@ async fn prepare_one_user_image_attachment(
         return Err(make_err("not_regular", "Not a regular file".to_string()));
     }
     if symlink_meta.len() > MAX_USER_IMAGE_ATTACHMENT_BYTES {
-        return Err(make_err("too_large", "File too large (max 10MB)".to_string()));
+        return Err(make_err(
+            "too_large",
+            "File too large (max 10MB)".to_string(),
+        ));
     }
 
     let mut file = tokio::fs::File::open(&resolved)
@@ -132,7 +138,10 @@ async fn prepare_one_user_image_attachment(
         return Err(make_err("read_failed", format!("Read failed: {}", e)));
     }
     if bytes.len() as u64 > MAX_USER_IMAGE_ATTACHMENT_BYTES {
-        return Err(make_err("too_large", "File too large (max 10MB)".to_string()));
+        return Err(make_err(
+            "too_large",
+            "File too large (max 10MB)".to_string(),
+        ));
     }
 
     let Some(data_dir) = myagents_data_dir() else {
@@ -142,12 +151,16 @@ async fn prepare_one_user_image_attachment(
         ));
     };
     let session_dir = data_dir.join("attachments").join(session_id);
-    tokio::fs::create_dir_all(&session_dir)
-        .await
-        .map_err(|e| make_err("write_failed", format!("Failed to create attachment dir: {}", e)))?;
+    tokio::fs::create_dir_all(&session_dir).await.map_err(|e| {
+        make_err(
+            "write_failed",
+            format!("Failed to create attachment dir: {}", e),
+        )
+    })?;
 
     let id = uuid::Uuid::new_v4().to_string();
-    let ext_for_file = extension_for_mime_or_source(&mime_for_ext(ext.as_deref().unwrap_or("")), ext.as_deref());
+    let ext_for_file =
+        extension_for_mime_or_source(&mime_for_ext(ext.as_deref().unwrap_or("")), ext.as_deref());
     let file_name = format!("{}.{}", id, ext_for_file);
     let target = session_dir.join(&file_name);
     let mut out = tokio::fs::OpenOptions::new()
@@ -155,7 +168,12 @@ async fn prepare_one_user_image_attachment(
         .create_new(true)
         .open(&target)
         .await
-        .map_err(|e| make_err("write_failed", format!("Failed to create attachment: {}", e)))?;
+        .map_err(|e| {
+            make_err(
+                "write_failed",
+                format!("Failed to create attachment: {}", e),
+            )
+        })?;
     out.write_all(&bytes)
         .await
         .map_err(|e| make_err("write_failed", format!("Failed to write attachment: {}", e)))?;

@@ -2,14 +2,14 @@ import { randomUUID } from 'crypto';
 
 import { cancellableFetch } from '../utils/cancellation';
 import { buildReplyBody, type ReplyPayload } from './reply-deliver';
-import { drainPendingSessionWatches } from './watch-registry';
+import { ackPendingSessionWatch, listPendingSessionWatches } from './watch-registry';
 import type { PendingInboxMessage, DeliverOutcome } from './types';
 
 export async function deliverSessionWatchEvents(
   currentSessionId: string,
   payload: ReplyPayload,
 ): Promise<void> {
-  const watches = drainPendingSessionWatches();
+  const watches = listPendingSessionWatches();
   if (watches.length === 0) return;
 
   const managementPort = process.env.MYAGENTS_MANAGEMENT_PORT;
@@ -26,6 +26,7 @@ export async function deliverSessionWatchEvents(
       console.warn(
         `[session-watch] dropping watch ${watch.watchId}: target mismatch current=${currentSessionId} watch=${watch.targetSessionId}`,
       );
+      ackPendingSessionWatch(watch.watchId);
       continue;
     }
 
@@ -83,7 +84,9 @@ export async function deliverSessionWatchEvents(
         console.warn(
           `[session-watch] watch ${watch.watchId} not delivered: ${JSON.stringify(json?.outcome)}`,
         );
+        continue;
       }
+      ackPendingSessionWatch(watch.watchId);
     } catch (err) {
       console.error('[session-watch] HTTP failure pushing watch event:', err);
     }

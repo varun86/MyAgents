@@ -92,6 +92,10 @@ async fn register_on_target_sidecar(
             Ok(response) => {
                 let status = response.status();
                 if !status.is_success() {
+                    if status.as_u16() == 503 && deadline.is_some_and(|d| Instant::now() < d) {
+                        tokio::time::sleep(Duration::from_millis(250)).await;
+                        continue;
+                    }
                     return Err(format!("target watch register HTTP {}", status.as_u16()));
                 }
                 return response
@@ -115,8 +119,7 @@ pub async fn register_session_watch(
     manager: ManagedSidecarManager,
     req: SessionWatchRequest,
 ) -> SessionWatchResult {
-    let Some((port, observed_sidecar_state)) =
-        lookup_live_port(&manager, &req.target_session_id)
+    let Some((port, observed_sidecar_state)) = lookup_live_port(&manager, &req.target_session_id)
     else {
         return SessionWatchResult {
             watch_id: req.watch_id,

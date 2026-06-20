@@ -14,10 +14,16 @@ export function registerPendingSessionWatch(watch: PendingSessionWatch): void {
   pendingWatches.set(watch.watchId, watch);
 }
 
-export function drainPendingSessionWatches(): PendingSessionWatch[] {
-  const watches = [...pendingWatches.values()];
+export function listPendingSessionWatches(): PendingSessionWatch[] {
+  return [...pendingWatches.values()];
+}
+
+export function ackPendingSessionWatch(watchId: string): void {
+  pendingWatches.delete(watchId);
+}
+
+export function clearPendingSessionWatchesForTest(): void {
   pendingWatches.clear();
-  return watches;
 }
 
 export function pendingSessionWatchCount(): number {

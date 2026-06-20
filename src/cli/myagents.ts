@@ -1723,7 +1723,7 @@ async function main(): Promise<void> {
       ? (errorBody as { code?: string }).code
       : (result as { code?: string }).code;
     if (code === 'session_not_found') process.exit(1);
-    if (code === 'rejected' || code === 'delivery_failed') process.exit(2);
+    if (code === 'rejected' || code === 'delivery_failed' || code === 'watch_failed') process.exit(2);
     process.exit(1); // fallback
   }
 

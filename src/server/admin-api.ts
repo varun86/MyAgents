@@ -1756,7 +1756,7 @@ WHEN TO USE
   ✓ 当前任务依赖另一个 session 的工作,或用户让你监听它 → watch
   ✓ 用户在对话里给了你一个 sessionId,让你与其交互或监听
   ✗ 想答复当前用户——直接回复就行,不要用这个工具
-  ✗ 想给 IM peer 发消息——用 \`myagents im send\`,不是这个
+  ✗ 想给 IM peer 发消息——用 \`myagents im send-media\`,不是这个
 
 OPTIONS
   send <sessionId>       目标 session 的 ID(必填)
@@ -1807,7 +1807,7 @@ SESSION EVENT NOTES
     </myagents-session-event>
 
 SEE ALSO
-  myagents im send           给 IM peer 发消息(不是给 session)`,
+  myagents im send-media     给 IM peer 发消息(不是给 session)`,
 };
 
 export function handleHelp(payload: { path?: string[] }): AdminResponse {

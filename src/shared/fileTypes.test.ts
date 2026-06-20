@@ -4,6 +4,7 @@ import {
   BINARY_EXTENSIONS,
   getFileExtension,
   getRichDocKind,
+  isChatImageFile,
   isImageFile,
   isImageMimeType,
   isPreviewable,
@@ -23,13 +24,20 @@ describe('fileTypes — extension + MIME detection', () => {
   it('isImageFile matches known image extensions case-insensitively', () => {
     expect(isImageFile('photo.PNG')).toBe(true);
     expect(isImageFile('a.b.jpeg')).toBe(true);
+    expect(isImageFile('diagram.svg')).toBe(true);
     expect(isImageFile('notes.txt')).toBe(false);
     expect(isImageFile('archive.pdf')).toBe(false);
   });
 
-  it('isImageMimeType accepts the allowlist and any image/* subtype', () => {
+  it('isChatImageFile matches only formats accepted as chat image attachments', () => {
+    expect(isChatImageFile('photo.PNG')).toBe(true);
+    expect(isChatImageFile('diagram.svg')).toBe(false);
+    expect(isChatImageFile('icon.ico')).toBe(false);
+  });
+
+  it('isImageMimeType accepts only chat image attachment MIME types', () => {
     expect(isImageMimeType('image/png')).toBe(true);
-    expect(isImageMimeType('image/heic')).toBe(true); // image/* prefix branch
+    expect(isImageMimeType('image/heic')).toBe(false);
     expect(isImageMimeType('application/pdf')).toBe(false);
     expect(isImageMimeType('text/plain')).toBe(false);
   });

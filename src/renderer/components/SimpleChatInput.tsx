@@ -18,7 +18,7 @@ import QueuedMessagesPanel from './QueuedMessageBubble';
 import CronTaskStatusBar from './cron/CronTaskStatusBar';
 import CronTaskOverlay from './cron/CronTaskOverlay';
 import { useUndoStack } from '@/hooks/useUndoStack';
-import { isImageFile, isImageMimeType, ALLOWED_IMAGE_MIME_TYPES, USER_IMAGE_ATTACHMENT_MAX_BYTES } from '../../shared/fileTypes';
+import { isChatImageFile, isImageMimeType, ALLOWED_IMAGE_MIME_TYPES, USER_IMAGE_ATTACHMENT_MAX_BYTES } from '../../shared/fileTypes';
 import type { QueuedMessageInfo } from '@/types/queue';
 import { CUSTOM_EVENTS } from '../../shared/constants';
 import { reasoningEffortChoices, REASONING_EFFORT_DESCRIPTIONS, REASONING_EFFORT_DEFAULT } from '../../shared/reasoningEffort';
@@ -824,7 +824,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
     const otherFiles: File[] = [];
 
     for (const file of files) {
-      if (isImageFile(file.name) || isImageMimeType(file.type)) {
+      if (isChatImageFile(file.name) || isImageMimeType(file.type)) {
         imageFiles.push(file);
       } else {
         otherFiles.push(file);
@@ -988,7 +988,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
     for (const path of paths) {
       // Support both / and \ path separators
       const filename = path.split(/[\\/]/).pop() || path;
-      if (isImageFile(filename)) {
+      if (isChatImageFile(filename)) {
         imagePaths.push(path);
       } else {
         otherPaths.push(path);

@@ -106,6 +106,7 @@ async function schedulePluginRestartLazy(): Promise<void> {
   }
 }
 import type { SessionSource, TurnAnalyticsSource } from './types/session';
+import { isPendingSessionId } from '../shared/constants';
 import { parseAgentFrontmatter, parseFullAgentContent, serializeAgentContent } from '../shared/agentCommands';
 import { scanAgents, readWorkspaceConfig, writeWorkspaceConfig, loadEnabledAgents, readAgentMeta, writeAgentMeta, findAgent } from './agents/agent-loader';
 import type { AgentFrontmatter, AgentMeta, AgentWorkspaceConfig } from '../shared/agentTypes';
@@ -626,6 +627,7 @@ import {
 } from './runtimes/external-session';
 import { installAutoTitleHook } from './session-title-service';
 import type { ImagePayload } from './runtimes/types';
+import { rehomeImagePayloadsForSession } from './runtimes/image-payload';
 import {
   VALID_RUNTIMES,
   coerceModelForRuntime,
@@ -641,12 +643,26 @@ import { neutralizeInboxStructuralTags, sanitizeInboxLabel } from './inbox/sanit
 
 type PermissionMode = 'auto' | 'plan' | 'fullAgency' | 'custom';
 
+function getRuntimeSessionIdForRequest(): string {
+  if (shouldUseExternalRuntime()) {
+    return getExternalSessionId() || getCurrentBoundSessionId() || getSessionId();
+  }
+  return getSessionId();
+}
+
+function resolveExternalPrewarmSessionId(requestedSessionId: string | undefined): string {
+  if (requestedSessionId && !isPendingSessionId(requestedSessionId)) {
+    return requestedSessionId;
+  }
+  return getRuntimeSessionIdForRequest();
+}
+
 function latestAssistantResultForCurrentSession(): string {
   let latestResult = shouldUseExternalRuntime()
     ? getLastExternalAssistantText()
     : getLastBuiltinAssistantText();
   if (!latestResult.trim()) {
-    const data = getSessionData(getSessionId());
+    const data = getSessionData(getRuntimeSessionIdForRequest());
     latestResult = data
       ? getLatestAssistantResultFromMessages(data.messages)
       : NO_TEXT_RESPONSE;
@@ -682,6 +698,7 @@ function getCommandDownloadInfo(command: string): { runtimeName?: string; downlo
 type SendMessagePayload = {
   text?: string;
   images?: ImagePayload[];
+  sessionId?: string;
   permissionMode?: PermissionMode;
   // Background-agent permission policy (#264). Global app-config value the
   // renderer echoes per-send (idempotent setter); controls the builtin
@@ -1519,7 +1536,7 @@ async function routeAdminApi(pathname: string, payload: Record<string, unknown>)
       prompt: typeof payload.prompt === 'string' ? payload.prompt : '',
       replyBack: payload.replyBack !== false,
     };
-    const result = await handleAdminInbox(getSessionId(), sessionRequest);
+    const result = await handleAdminInbox(getRuntimeSessionIdForRequest(), sessionRequest);
     // PRD 0.2.18 cross-review CC HIGH #4 — the previous shape spread
     // `result.response` AFTER `error: string`, so the nested `error: { code,
     // message }` object overwrote the string. CLI printResult then rendered
@@ -1538,7 +1555,7 @@ async function routeAdminApi(pathname: string, payload: Record<string, unknown>)
   }
   if (route === 'session/watch') {
     const { handleAdminSessionWatch } = await import('./inbox/watch-handler');
-    const result = await handleAdminSessionWatch(getSessionId(), {
+    const result = await handleAdminSessionWatch(getRuntimeSessionIdForRequest(), {
       targetSessionId: typeof payload.targetSessionId === 'string' ? payload.targetSessionId : '',
     });
     return result.status >= 200 && result.status < 300
@@ -2228,7 +2245,7 @@ async function main() {
       // so callers do not read the previous turn during finalization windows.
       if (pathname === '/api/session-latest-result' && request.method === 'GET') {
         return jsonResponse({
-          sessionId: getSessionId(),
+          sessionId: getRuntimeSessionIdForRequest(),
           latestResult: latestAssistantResultForCurrentSession(),
         });
       }
@@ -2248,7 +2265,8 @@ async function main() {
         if (!body?.watchId || !body.watcherSessionId || !body.targetSessionId) {
           return jsonResponse({ accepted: false, reason: 'invalid body' }, 400);
         }
-        if (body.targetSessionId !== getSessionId()) {
+        const runtimeSessionId = getRuntimeSessionIdForRequest();
+        if (body.targetSessionId !== runtimeSessionId) {
           return jsonResponse({ accepted: false, reason: 'target session mismatch' }, 409);
         }
         const targetSessionState = shouldUseExternalRuntime()
@@ -2396,7 +2414,9 @@ async function main() {
           return jsonResponse({ success: false, error: 'Invalid JSON payload.' }, 400);
         }
         const text = payload?.text?.trim() ?? '';
-        const images = payload?.images ?? [];
+        let images = payload?.images ?? [];
+        const clientSessionId = typeof payload?.sessionId === 'string' ? payload.sessionId : undefined;
+        const runtimeSessionId = getRuntimeSessionIdForRequest();
         const permissionMode = payload?.permissionMode ?? 'auto';
         const model = payload?.model;
         const providerEnv = payload?.providerEnv;
@@ -2408,6 +2428,12 @@ async function main() {
         // Allow sending with just images or just text
         if (!text && images.length === 0) {
           return jsonResponse({ success: false, error: 'Message must have text or images.' }, 400);
+        }
+        try {
+          images = rehomeImagePayloadsForSession(clientSessionId, runtimeSessionId, images) ?? images;
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          return jsonResponse({ success: false, error: message }, 400);
         }
 
         // ─── External Runtime branch (v0.1.59) ───
@@ -2437,7 +2463,7 @@ async function main() {
           // directly (they're inside the sidecar event loop, no 120s ceiling,
           // and already single-flighted at the caller level).
           const sendCtx = {
-            sessionId: getSessionId(),
+            sessionId: runtimeSessionId,
             workspacePath: agentDir,
             scenario: interactionScenario,
             analyticsSource,
@@ -2462,7 +2488,11 @@ async function main() {
               console.error(`[chat] external send threw: ${msg}`);
               broadcast('chat:agent-error', { message: msg });
             });
-          return jsonResponse({ success: true, queued: true, queueId: sent.queueId });
+          return jsonResponse({
+            success: true,
+            queued: sent.queued,
+            ...(sent.queueId ? { queueId: sent.queueId } : {}),
+          });
         }
 
         // ─── Builtin Runtime (existing path) ───
@@ -2605,7 +2635,7 @@ async function main() {
           model?: string;
           permissionMode?: string;
         };
-        const sessionId = body.sessionId || getSessionId();
+        const sessionId = resolveExternalPrewarmSessionId(body.sessionId);
         if (!sessionId) {
           return jsonResponse({ success: false, error: 'No sessionId available' }, 400);
         }
@@ -3147,7 +3177,7 @@ async function main() {
             const runtimeResult = await sendExternalMessage(
               wrappedPrompt, undefined, undefined, undefined,
               {
-                sessionId: getSessionId(),
+                sessionId: getRuntimeSessionIdForRequest(),
                 workspacePath: agentDir,
                 scenario: { type: 'cron', taskId, intervalMinutes: intervalMinutes ?? 15, aiCanExit: aiCanExit ?? false },
                 permissionMode: effectivePermissionMode,
@@ -3557,7 +3587,7 @@ async function main() {
             const ccResult = await sendExternalMessage(
               wrappedPrompt, undefined, undefined, undefined,
               {
-                sessionId: getSessionId(),
+                sessionId: getRuntimeSessionIdForRequest(),
                 workspacePath: agentDir,
                 scenario: { type: 'cron', taskId: taskId ?? 'unknown', intervalMinutes: intervalMinutes ?? 0, aiCanExit: aiCanExit ?? false },
                 permissionMode: effectivePermissionMode,
@@ -8862,7 +8892,7 @@ async function main() {
             const ccResult = await sendExternalMessage(
               finalMessage, payload.images ?? undefined, undefined, undefined,
               {
-                sessionId: getSessionId(),
+                sessionId: getRuntimeSessionIdForRequest(),
                 workspacePath: agentDir,
                 scenario: { type: 'agent-channel' as const, platform: imSource, sourceType: imSourceType, botName: payload.botName },
                 permissionMode: getRuntimeConfigPermissionMode(runtimeConfig, payloadRuntime),
@@ -9352,7 +9382,7 @@ description: >
             const ccResult = await sendExternalMessage(
               enrichedPrompt, undefined, undefined, undefined,
               {
-                sessionId: getSessionId(),
+                sessionId: getRuntimeSessionIdForRequest(),
                 workspacePath: agentDir,
                 scenario: { type: 'agent-channel', platform: payload.source?.split('_')[0] ?? 'unknown', sourceType: 'private' },
                 permissionMode: getRuntimeConfigPermissionMode(runtimeConfig, getActiveRuntimeType()),
@@ -9523,7 +9553,7 @@ description: >
           if (useExternal) {
             const runtimeType = getActiveRuntimeType();
             const ext = await sendExternalMessage(prompt, undefined, undefined, undefined, {
-              sessionId: getSessionId(),
+              sessionId: getRuntimeSessionIdForRequest(),
               workspacePath: currentAgentDir,
               scenario: { type: 'desktop' },
               permissionMode: getMaxPermissionForRuntime(runtimeType),
@@ -9736,10 +9766,10 @@ description: >
                 //   typically Case 3 too. If we ever hit Case 1/2 with an IM
                 //   Bot, the desktop scenario would mis-prompt — that's a known
                 //   gap (would need scenario plumbing through inboxMeta).
-                const sessionMeta = getSessionMetadata(getSessionId());
+                const sessionMeta = getSessionMetadata(getRuntimeSessionIdForRequest());
                 const workspacePath = sessionMeta?.agentDir ?? process.cwd();
                 return sendExternalMessage(text, undefined, undefined, undefined, {
-                  sessionId: getSessionId(),
+                  sessionId: getRuntimeSessionIdForRequest(),
                   workspacePath,
                   scenario: { type: 'desktop' },
                   inboxMeta,

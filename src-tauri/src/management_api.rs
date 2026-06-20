@@ -2362,12 +2362,8 @@ async fn session_watch_handler(
         }));
     };
 
-    let result = crate::inbox::watch::register_session_watch(
-        app_handle.clone(),
-        manager.clone(),
-        req,
-    )
-    .await;
+    let result =
+        crate::inbox::watch::register_session_watch(app_handle.clone(), manager.clone(), req).await;
 
     Json(serde_json::json!({
         "ok": true,
