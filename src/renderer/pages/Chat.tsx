@@ -346,6 +346,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     const aliases = getEffectiveModelAliases(provider, configRef.current.providerModelAliases);
     return {
       providerId: provider.id,
+      providerName: provider.name,
       baseUrl: provider.config.baseUrl,
       apiKey: apiKeysRef.current[provider.id],
       authType: provider.authType,

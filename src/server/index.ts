@@ -716,6 +716,7 @@ type SendMessagePayload = {
   // object = use this specific third-party provider
   providerEnv?: {
     providerId?: string;
+    providerName?: string;
     baseUrl?: string;
     apiKey?: string;
     authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key';
@@ -723,6 +724,7 @@ type SendMessagePayload = {
     maxOutputTokens?: number;
     maxOutputTokensParamName?: 'max_tokens' | 'max_completion_tokens' | 'max_output_tokens';
     upstreamFormat?: 'chat_completions' | 'responses';
+    modelAliases?: { sonnet?: string; opus?: string; haiku?: string };
   } | 'subscription';
 };
 
@@ -848,6 +850,7 @@ type CronExecutePayload = {
   model?: string;
   providerEnv?: {
     providerId?: string;
+    providerName?: string;
     baseUrl?: string;
     apiKey?: string;
     authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key';
@@ -855,6 +858,7 @@ type CronExecutePayload = {
     maxOutputTokens?: number;
     maxOutputTokensParamName?: 'max_tokens' | 'max_completion_tokens' | 'max_output_tokens';
     upstreamFormat?: 'chat_completions' | 'responses';
+    modelAliases?: { sonnet?: string; opus?: string; haiku?: string };
   };
   /**
    * PRD 0.2.9: per-task provider id. When set, sidecar live-resolves the
@@ -8745,6 +8749,7 @@ async function main() {
               // `providerId` when both are present.
               providerEnv: payloadRuntime === 'builtin' && payload.providerEnv ? {
                 providerId: payload.providerEnv.providerId,
+                providerName: payload.providerEnv.providerName,
                 baseUrl: payload.providerEnv.baseUrl,
                 apiKey: payload.providerEnv.apiKey,
                 authType: payload.providerEnv.authType,
@@ -8752,6 +8757,7 @@ async function main() {
                 maxOutputTokens: payload.providerEnv.maxOutputTokens,
                 maxOutputTokensParamName: payload.providerEnv.maxOutputTokensParamName,
                 upstreamFormat: payload.providerEnv.upstreamFormat,
+                modelAliases: payload.providerEnv.modelAliases,
               } : undefined,
               providerId: imProviderId,
               runtime: payloadRuntime,

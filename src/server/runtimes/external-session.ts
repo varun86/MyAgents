@@ -38,7 +38,7 @@ import { resolveCodexWorkspaceInstructions } from './workspace-instructions';
 import { shouldQueueExternalSend, canDrainExternalQueue } from './external-queue-policy';
 import { decideSessionCompleteErrorAction } from './external-abort-policy';
 import { TurnFinalizationGate } from './external-turn-finalization';
-import { coerceModelForRuntime, coercePermissionModeForRuntime, type RuntimeType } from '../../shared/types/runtime';
+import { coerceModelForRuntime, coercePermissionModeForRuntime, RUNTIME_DISPLAY_NAMES, type RuntimeType } from '../../shared/types/runtime';
 import { deriveSessionTitle } from '../../shared/sessionTitle';
 import { isPendingSessionId } from '../../shared/constants';
 import {
@@ -106,6 +106,11 @@ const turnFinalization = new TurnFinalizationGate();
 // whose synthetic session_complete carries no terminal_reason. Consumed (reset to
 // false) the first time the handler reads it, with a backstop reset at session start.
 let userRequestedExternalStop = false;
+
+function externalRuntimeProviderName(runtime: RuntimeType): string {
+  return RUNTIME_DISPLAY_NAMES[runtime];
+}
+
 let startingPromise: Promise<void> | null = null;  // Guard against concurrent startExternalSession
 // Target sessionId of the in-flight startExternalSession. Set the moment
 // startExternalSession is called (before _doStartExternalSession's spawn-and-handshake
@@ -3712,6 +3717,10 @@ async function persistTurnResult(): Promise<void> {
       platform: lastScenario.type === 'im' ? lastScenario.platform : null,
       runtime: runtimeType,
       model: usageData?.model || lastRuntimeReportedModel || lastModel || null,
+      provider_name: externalRuntimeProviderName(runtimeType),
+      api_protocol: null,
+      provider_base_url: null,
+      provider_api_protocol: null,
       input_tokens: usageData?.inputTokens ?? 0,
       output_tokens: usageData?.outputTokens ?? 0,
       cache_read_tokens: usageData?.cacheReadTokens ?? 0,

@@ -849,6 +849,31 @@ type InFlightMetadata = {
 };
 let inFlightMetadata: InFlightMetadata | null = null;
 
+type TurnProviderAnalytics = {
+  provider_name: string | null;
+  api_protocol: 'anthropic' | 'openai' | null;
+  provider_base_url: string | null;
+  provider_api_protocol: 'anthropic' | 'openai' | null;
+};
+
+const SUBSCRIPTION_PROVIDER_ANALYTICS: TurnProviderAnalytics = {
+  provider_name: 'Anthropic (订阅)',
+  api_protocol: 'anthropic',
+  provider_base_url: 'https://api.anthropic.com',
+  provider_api_protocol: 'anthropic',
+};
+
+function buildTurnProviderAnalytics(providerEnv: ProviderEnv | undefined): TurnProviderAnalytics {
+  if (!providerEnv) return SUBSCRIPTION_PROVIDER_ANALYTICS;
+  const protocol = providerEnv.apiProtocol ?? 'anthropic';
+  return {
+    provider_name: providerEnv.providerName ?? providerEnv.providerId ?? null,
+    api_protocol: protocol,
+    provider_base_url: providerEnv.baseUrl ?? 'https://api.anthropic.com',
+    provider_api_protocol: protocol,
+  };
+}
+
 /**
  * Clear the in-flight queued-command slot. Keeps the three coupled fields in lockstep so a
  * future clear site can't forget the #289 force flag (which, if left stale, would be checked
@@ -1236,6 +1261,8 @@ type MessageQueueItem = {
   requestId?: string;
   /** Per-turn analytics attribution; defaults to currentScenario.type. */
   analyticsSource?: TurnAnalyticsSource;
+  /** Provider metadata snapshotted at turn admission for ai_turn_complete. */
+  providerAnalytics?: TurnProviderAnalytics;
   // PRD 0.2.18 Session Inbox — per-turn binding for reply pushback.
   // Bound on dequeue (generator yield), read at result handler. When present
   // and replyBack=true, turn-end pushes a send.result session event back to
@@ -1301,6 +1328,8 @@ let currentReasoningEffort: string | undefined = undefined;
 export type ProviderEnv = {
   /** Provider registry id. Metadata only: not forwarded as an SDK env var. */
   providerId?: string;
+  /** Provider display name. Analytics metadata only: not forwarded as an SDK env var. */
+  providerName?: string;
   baseUrl?: string;
   apiKey?: string;
   authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key';
@@ -2010,6 +2039,7 @@ let currentTurnHasOutput = false;
 let currentTurnHadAssistantMessageError = false;
 let currentTurnLastAssistantMessageError: string | null = null;
 let currentTurnAnalyticsSource: TurnAnalyticsSource | null = null;
+let currentTurnProviderAnalytics: TurnProviderAnalytics | null = null;
 let currentTurnCompactResult: 'success' | 'failed' | null = null;
 let currentTurnSawCompactBoundary = false;
 // Whether the current turn observed any non-init SDK frame (assistant /
@@ -2115,6 +2145,7 @@ function resetTurnUsage(): void {
   currentTurnHadAssistantMessageError = false;
   currentTurnLastAssistantMessageError = null;
   currentTurnAnalyticsSource = null;
+  currentTurnProviderAnalytics = null;
   currentTurnCompactResult = null;
   currentTurnSawCompactBoundary = false;
   turnHadSubstantiveActivity = false;
@@ -7642,6 +7673,7 @@ async function enqueueWatchdogResumeReminderAtQueueFront(
     messageText: trimmed,
     wasQueued: false,
     resolve: () => {},
+    providerAnalytics: buildTurnProviderAnalytics(currentProviderEnv),
   };
 
   console.log('[agent] Watchdog auto-resume inserted reminder at recovery queue front');
@@ -7960,6 +7992,9 @@ export async function enqueueUserMessage(
   const effectiveProviderEnv: ProviderEnv | undefined = providerEnv === undefined
     ? currentProviderEnv                                         // undefined → keep current (safe default)
     : (providerEnv === 'subscription' ? undefined : providerEnv); // 'subscription' → clear, object → use it
+  const turnProviderAnalytics = buildTurnProviderAnalytics(
+    isSessionBusy ? currentProviderEnv : effectiveProviderEnv,
+  );
 
   // Check if provider has changed (requires session restart since environment vars can't be updated)
   // SKIP for queued messages: provider/model changes during streaming would cause a session
@@ -8414,6 +8449,7 @@ export async function enqueueUserMessage(
       attachments: savedAttachments.length > 0 ? savedAttachments : undefined,
       requestId,
       analyticsSource: analyticsSource ?? currentScenario.type,
+      providerAnalytics: turnProviderAnalytics,
       inboxMeta,
     };
 
@@ -8551,6 +8587,7 @@ export async function enqueueUserMessage(
     attachments: savedAttachments.length > 0 ? savedAttachments : undefined,
     requestId,
     analyticsSource: analyticsSource ?? currentScenario.type,
+    providerAnalytics: turnProviderAnalytics,
     inboxMeta,
   };
 
@@ -12176,6 +12213,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
             platform: currentScenario.type === 'im' ? currentScenario.platform : null,
             runtime: 'builtin',
             model: currentTurnUsage.model ?? null,
+            ...(currentTurnProviderAnalytics ?? buildTurnProviderAnalytics(currentProviderEnv)),
             input_tokens: currentTurnUsage.inputTokens,
             output_tokens: currentTurnUsage.outputTokens,
             cache_read_tokens: currentTurnUsage.cacheReadTokens,
@@ -12834,6 +12872,7 @@ async function* messageGenerator(): AsyncGenerator<SDKUserMessage> {
     }
     beginBuiltinTurnTrace(traceSource, traceTurnId, item.requestId);
     currentTurnAnalyticsSource = item.analyticsSource ?? currentScenario.type;
+    currentTurnProviderAnalytics = item.providerAnalytics ?? buildTurnProviderAnalytics(currentProviderEnv);
 
     isStreamingMessage = true;
     // Pattern B+G: push this user message's requestId onto the FIFO queue.
