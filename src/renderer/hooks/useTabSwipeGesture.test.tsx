@@ -145,6 +145,10 @@ function debugLines(): string[] {
   return vi.mocked(console.debug).mock.calls.map(([line]) => String(line));
 }
 
+function phaseCount(phaseName: string): number {
+  return phases().filter((phase) => phase === phaseName).length;
+}
+
 describe('useTabSwipeGesture Phase 0 trace', () => {
   beforeEach(() => {
     vi.spyOn(console, 'debug').mockImplementation(() => {});
@@ -309,6 +313,41 @@ describe('useTabSwipeGesture Phase 0 trace', () => {
     }
   });
 
+  it('absorbs small no-phase post-commit tails after cooldown without opening a bounce gesture', () => {
+    vi.useFakeTimers();
+    try {
+      const onSwitchTab = vi.fn();
+      render(<Harness onSwitchTab={onSwitchTab} tabItems={threeTabs} />);
+      const content = screen.getByTestId('tab-content');
+      setContainerWidth(content, 1000);
+
+      dispatchWheel(content, { deltaX: 400, deltaY: 0 });
+      dispatchWheel(content, { deltaX: 0, deltaY: 0, phase: 8 });
+
+      expect(onSwitchTab).toHaveBeenCalledTimes(1);
+      expect(onSwitchTab).toHaveBeenCalledWith('tab-b');
+
+      vi.advanceTimersByTime(400);
+      vi.advanceTimersByTime(251);
+
+      const beginCountBeforeTail = phaseCount('tab_swipe_begin');
+      const snapEndCountBeforeTail = phaseCount('tab_swipe_snap_end');
+      const lateNoPhaseTail = dispatchWheel(content, { deltaX: 4, deltaY: 0 });
+
+      expect(lateNoPhaseTail.defaultPrevented).toBe(true);
+      expect(phaseCount('tab_swipe_begin')).toBe(beginCountBeforeTail);
+      expect(onSwitchTab).toHaveBeenCalledTimes(1);
+      expect(phases()).toContain('tab_swipe_post_commit_tail_absorb');
+
+      vi.advanceTimersByTime(600);
+
+      expect(onSwitchTab).toHaveBeenCalledTimes(1);
+      expect(phaseCount('tab_swipe_snap_end')).toBe(snapEndCountBeforeTail);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('allows a fresh non-momentum swipe after the shortened cooldown', () => {
     vi.useFakeTimers();
     try {
@@ -331,6 +370,116 @@ describe('useTabSwipeGesture Phase 0 trace', () => {
       expect(freshSwipe.defaultPrevented).toBe(true);
       expect(onSwitchTab).toHaveBeenCalledTimes(2);
       expect(onSwitchTab).toHaveBeenLastCalledWith('tab-c');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('lets a deliberate fast swipe pass through the post-commit tail window', () => {
+    vi.useFakeTimers();
+    try {
+      const onSwitchTab = vi.fn();
+      render(<Harness onSwitchTab={onSwitchTab} tabItems={threeTabs} />);
+      const content = screen.getByTestId('tab-content');
+      setContainerWidth(content, 1000);
+
+      dispatchWheel(content, { deltaX: 400, deltaY: 0 });
+      dispatchWheel(content, { deltaX: 0, deltaY: 0, phase: 8 });
+
+      expect(onSwitchTab).toHaveBeenCalledTimes(1);
+      expect(onSwitchTab).toHaveBeenCalledWith('tab-b');
+
+      vi.advanceTimersByTime(400);
+      vi.advanceTimersByTime(251);
+
+      const beginCountBeforeFreshSwipe = phaseCount('tab_swipe_begin');
+      const freshSwipe = dispatchWheel(content, { deltaX: 400, deltaY: 0 });
+      dispatchWheel(content, { deltaX: 0, deltaY: 0, phase: 8 });
+
+      expect(freshSwipe.defaultPrevented).toBe(true);
+      expect(phaseCount('tab_swipe_begin')).toBe(beginCountBeforeFreshSwipe + 1);
+      expect(onSwitchTab).toHaveBeenCalledTimes(2);
+      expect(onSwitchTab).toHaveBeenLastCalledWith('tab-c');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not absorb vertical-dominant scroll inside the post-commit tail window', () => {
+    vi.useFakeTimers();
+    try {
+      const onSwitchTab = vi.fn();
+      render(<Harness onSwitchTab={onSwitchTab} tabItems={threeTabs} />);
+      const content = screen.getByTestId('tab-content');
+      setContainerWidth(content, 1000);
+
+      dispatchWheel(content, { deltaX: 400, deltaY: 0 });
+      dispatchWheel(content, { deltaX: 0, deltaY: 0, phase: 8 });
+
+      expect(onSwitchTab).toHaveBeenCalledTimes(1);
+
+      vi.advanceTimersByTime(400);
+      vi.advanceTimersByTime(251);
+
+      const verticalScroll = dispatchWheel(content, { deltaX: 1, deltaY: 30 });
+
+      expect(verticalScroll.defaultPrevented).toBe(false);
+      expect(phases()).not.toContain('tab_swipe_post_commit_tail_absorb');
+      expect(onSwitchTab).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not classify explicit-phase deltas as no-phase post-commit tails', () => {
+    vi.useFakeTimers();
+    try {
+      const onSwitchTab = vi.fn();
+      render(<Harness onSwitchTab={onSwitchTab} tabItems={threeTabs} />);
+      const content = screen.getByTestId('tab-content');
+      setContainerWidth(content, 1000);
+
+      dispatchWheel(content, { deltaX: 400, deltaY: 0 });
+      dispatchWheel(content, { deltaX: 0, deltaY: 0, phase: 8 });
+
+      expect(onSwitchTab).toHaveBeenCalledTimes(1);
+
+      vi.advanceTimersByTime(400);
+      vi.advanceTimersByTime(251);
+
+      const beginCountBeforePhasedDelta = phaseCount('tab_swipe_begin');
+      const phasedDelta = dispatchWheel(content, { deltaX: 4, deltaY: 0, phase: 1, momentumPhase: 0 });
+
+      expect(phasedDelta.defaultPrevented).toBe(true);
+      expect(phaseCount('tab_swipe_begin')).toBe(beginCountBeforePhasedDelta + 1);
+      expect(phases()).not.toContain('tab_swipe_post_commit_tail_absorb');
+      expect(onSwitchTab).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not enable no-phase tail absorption after a bounce-back snap', () => {
+    vi.useFakeTimers();
+    try {
+      const onSwitchTab = vi.fn();
+      render(<Harness onSwitchTab={onSwitchTab} tabItems={threeTabs} />);
+      const content = screen.getByTestId('tab-content');
+      setContainerWidth(content, 1000);
+
+      dispatchWheel(content, { deltaX: -80, deltaY: 0 });
+
+      vi.advanceTimersByTime(40);
+      vi.advanceTimersByTime(300);
+      vi.advanceTimersByTime(501);
+
+      const beginCountBeforeTail = phaseCount('tab_swipe_begin');
+      const noPhaseAfterBounce = dispatchWheel(content, { deltaX: -4, deltaY: 0 });
+
+      expect(noPhaseAfterBounce.defaultPrevented).toBe(true);
+      expect(phaseCount('tab_swipe_begin')).toBe(beginCountBeforeTail + 1);
+      expect(phases()).not.toContain('tab_swipe_post_commit_tail_absorb');
+      expect(onSwitchTab).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
     }

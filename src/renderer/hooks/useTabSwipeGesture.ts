@@ -48,7 +48,10 @@ interface SwipeState {
   traceTrackingStartedAt: number;
   traceLastIdleKey: string | null;
   traceCooldownAbsorbCount: number;
+  tracePostCommitTailAbsorbCount: number;
   suppressMomentumTail: boolean;
+  suppressMomentumTailUntil: number;
+  suppressMomentumTailDeltaSign: -1 | 0 | 1;
 }
 
 // --- Tuning constants ---
@@ -83,6 +86,8 @@ const SNAP_SAFETY_BUFFER = 50;         // ms — fallback timeout margin
 const RUBBER_BAND_MAX = 80;            // px — max boundary stretch
 const COMMIT_COOLDOWN = 250;           // ms — absorb immediate inertial tail after tab switch
 const BOUNCE_COOLDOWN = 500;           // ms — absorb inertial events after bounce-back
+const POST_COMMIT_TAIL_WINDOW = 650;   // ms — absorb small no-phase inertia after cooldown
+const POST_COMMIT_TAIL_MAX_DELTA = 12; // px — real follow-up swipes exceed this and pass through
 
 const TRACE_FULL_SAMPLE_COUNT = 6;
 const TRACE_SAMPLE_INTERVAL = 4;
@@ -162,6 +167,16 @@ function isActiveMomentumPhase(momentumPhase: number | undefined): boolean {
   return typeof momentumPhase === 'number' && momentumPhase > 0;
 }
 
+function isSmallPostCommitTail(deltaX: number, deltaY: number, expectedDeltaSign: -1 | 0 | 1): boolean {
+  const ax = Math.abs(deltaX);
+  const ay = Math.abs(deltaY);
+  return ax > 0
+    && ax <= POST_COMMIT_TAIL_MAX_DELTA
+    && ay <= POST_COMMIT_TAIL_MAX_DELTA
+    && ax >= ay
+    && (expectedDeltaSign === 0 || Math.sign(deltaX) === expectedDeltaSign);
+}
+
 /**
  * Check if the wheel event target is inside a horizontally scrollable element
  * that can still scroll in the given direction. If so, the inner element should
@@ -227,7 +242,10 @@ export function useTabSwipeGesture({
     traceTrackingStartedAt: 0,
     traceLastIdleKey: null,
     traceCooldownAbsorbCount: 0,
+    tracePostCommitTailAbsorbCount: 0,
     suppressMomentumTail: false,
+    suppressMomentumTailUntil: 0,
+    suppressMomentumTailDeltaSign: 0,
   });
 
   useEffect(() => {
@@ -280,7 +298,10 @@ export function useTabSwipeGesture({
       state.traceTrackingStartedAt = 0;
       state.traceLastIdleKey = null;
       state.traceCooldownAbsorbCount = 0;
+      state.tracePostCommitTailAbsorbCount = 0;
       state.suppressMomentumTail = false;
+      state.suppressMomentumTailUntil = 0;
+      state.suppressMomentumTailDeltaSign = 0;
     }
 
     function scheduleDirectionReset() {
@@ -485,6 +506,8 @@ export function useTabSwipeGesture({
           resetState();
           state.cooldownUntil = performance.now() + COMMIT_COOLDOWN;
           state.suppressMomentumTail = true;
+          state.suppressMomentumTailUntil = performance.now() + POST_COMMIT_TAIL_WINDOW;
+          state.suppressMomentumTailDeltaSign = swipeDir === 1 ? -1 : 1;
         };
         adjEl.addEventListener('transitionend', onEnd as EventListener, { once: true });
         state.activeOnEnd = onEnd;
@@ -525,6 +548,8 @@ export function useTabSwipeGesture({
           resetState();
           state.cooldownUntil = performance.now() + BOUNCE_COOLDOWN;
           state.suppressMomentumTail = true;
+          state.suppressMomentumTailUntil = 0;
+          state.suppressMomentumTailDeltaSign = 0;
         };
         listenEl.addEventListener('transitionend', onEnd as EventListener, { once: true });
         state.activeOnEnd = onEnd;
@@ -623,18 +648,33 @@ export function useTabSwipeGesture({
       const zeroDelta = deltaX === 0 && deltaY === 0;
 
       if (state.suppressMomentumTail) {
-        if (isActiveMomentumPhase(momentumPhase)) {
-          traceTabSwipe('post_commit_momentum_absorb', {
-            gestureId: state.traceGestureId,
-            deltaX: roundPx(deltaX),
-            deltaY: roundPx(deltaY),
-            wheelPhase: phaseValue(wheelPhase),
-            momentumPhase: phaseValue(momentumPhase),
-          });
+        const now = performance.now();
+        const activeMomentumTail = isActiveMomentumPhase(momentumPhase);
+        const hasExplicitPhase = typeof wheelPhase === 'number' || typeof momentumPhase === 'number';
+        const smallNoPhaseTail = !activeMomentumTail
+          && !hasExplicitPhase
+          && now < state.suppressMomentumTailUntil
+          && isSmallPostCommitTail(deltaX, deltaY, state.suppressMomentumTailDeltaSign);
+
+        if (activeMomentumTail || smallNoPhaseTail) {
+          state.tracePostCommitTailAbsorbCount++;
+          if (shouldTraceCooldownAbsorb(state.tracePostCommitTailAbsorbCount)) {
+            traceTabSwipe(activeMomentumTail ? 'post_commit_momentum_absorb' : 'post_commit_tail_absorb', {
+              gestureId: state.traceGestureId,
+              deltaX: roundPx(deltaX),
+              deltaY: roundPx(deltaY),
+              wheelPhase: phaseValue(wheelPhase),
+              momentumPhase: phaseValue(momentumPhase),
+              remainingMs: Math.max(0, Math.round(state.suppressMomentumTailUntil - now)),
+            });
+          }
           e.preventDefault();
           return;
         }
         state.suppressMomentumTail = false;
+        state.suppressMomentumTailUntil = 0;
+        state.suppressMomentumTailDeltaSign = 0;
+        state.tracePostCommitTailAbsorbCount = 0;
       }
 
       if (
