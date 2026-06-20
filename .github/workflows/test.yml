@@ -66,13 +66,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
-      - name: Prepare externalBin placeholder for cargo tests
+      - name: Prepare Tauri bundle path placeholders for cargo tests
         run: |
-          # Tauri validates externalBin paths during build-script execution.
-          # Public cuse releases currently ship macOS/Windows artifacts only;
-          # this Linux CI job runs Rust unit tests, not a distributable Linux
-          # bundle, so provide an inert target-named stub for the path check.
+          # Tauri validates bundle resource paths during build-script execution.
+          # This Linux CI job runs Rust unit tests, not a distributable Linux
+          # bundle, so provide inert runner-local placeholders for paths that
+          # are intentionally not committed.
           mkdir -p src-tauri/binaries
           printf '#!/usr/bin/env sh\nexit 0\n' > src-tauri/binaries/cuse-x86_64-unknown-linux-gnu
           chmod +x src-tauri/binaries/cuse-x86_64-unknown-linux-gnu
+          mkdir -p mino
+          printf '# CI placeholder for Tauri resource validation\n' > mino/CLAUDE.md
       - run: cargo test --manifest-path src-tauri/Cargo.toml --locked

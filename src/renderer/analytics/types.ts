@@ -29,7 +29,7 @@ export interface BaseEventParams {
  *
  * 适用规则：当一个事件可以由多个入口触发（例如任务创建既可以通过 GUI
  * 的"+ 新建"按钮，也可以通过 `myagents task create-direct` CLI），就必须
- * 带上这个字段，方便后续按渠道做拆分分析。详见 `analytics_design.md` §4.3。
+ * 带上这个字段，方便后续按渠道做拆分分析。详见 `specs/tech_docs/analytics_design.md`。
  *
  * 取值约定：
  *   - `desktop`     桌面端 GUI（未来若有移动端 app，再加 `mobile`）
@@ -46,7 +46,7 @@ export type Source = 'desktop' | 'floating_ball' | 'cli' | 'cli_agent' | 'cron' 
  *
  * `source` 回答"哪个进程触发"（desktop/cli/cron/im），`surface` 回答
  * "desktop 内部哪个 UI 表面触发"。两者正交，配合解释"用户究竟是怎么开始
- * 用 MyAgents 的"。详见 `analytics_design.md` §4.4。
+ * 用 MyAgents 的"。详见 `specs/tech_docs/analytics_design.md`。
  *
  * 取值约定：
  *   - `launcher_input`   启动页输入框直接发首条消息（New Tab 空状态 + 用户打字）
@@ -218,7 +218,7 @@ export type EventName =
  *
  * 这是整个会话生命周期的"出生证明"。下游所有 session-scoped 事件通过
  * `session_id` 反查这条记录拿 provenance，不要在每个下游事件上重复
- * 打 `triggered_by`。详见 `analytics_design.md` §4.4 / §4.5。
+ * 打 `triggered_by`。详见 `specs/tech_docs/analytics_design.md`。
  */
 export interface SessionNewParams {
   /** SDK Session ID（与 ~/.myagents/sessions/*.jsonl 文件名一致） */
