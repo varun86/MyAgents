@@ -19,6 +19,7 @@ import type {
   RuntimeProcess,
   UnifiedEvent,
   ImagePayload,
+  ResolvedImagePayload,
 } from './types';
 import type { ToolAttachment } from '../../shared/types/tool-attachment';
 import {
@@ -27,6 +28,7 @@ import {
 } from '../../shared/toolDisplay/filePatch';
 import { StaleRuntimeSessionError } from './types';
 import { awaitInFlightSaves, rebuildAttachmentRegistryFromBlocks, trackInFlightSave } from './tool-attachments';
+import { messageAttachmentsFromImagePayloads, resolveImagePayloads } from './image-payload';
 import { maybeSpill, type LargeValueRef } from '../utils/large-value-store';
 import type { AskUserQuestionInput, AskUserQuestion } from '../../shared/types/askUserQuestion';
 import { withQuestionTextAnswerKeys } from '../../shared/types/askUserQuestion';
@@ -303,6 +305,25 @@ interface ExternalQueuedConfigOperation {
 }
 
 type ExternalTurnOperation = ExternalQueuedMessageOperation | ExternalQueuedConfigOperation;
+
+function sessionMessageAttachmentsFromImages(
+  sessionId: string | undefined,
+  images: ImagePayload[] | undefined,
+): SessionMessage['attachments'] | undefined {
+  if (!sessionId || !images || images.length === 0) return undefined;
+  try {
+    const attachments = messageAttachmentsFromImagePayloads(sessionId, images).map((att) => ({
+      id: att.id,
+      name: att.name,
+      mimeType: att.mimeType,
+      path: att.relativePath,
+    }));
+    return attachments.length > 0 ? attachments : undefined;
+  } catch (err) {
+    console.error('[external-session] failed to prepare user image attachments:', err);
+    return undefined;
+  }
+}
 
 // ─── External turn-boundary operation queue (messages + config) ───
 // Codex/CC/Gemini are turn-level: each send starts a NEW turn. Desktop sends
@@ -1222,6 +1243,17 @@ function resetTurnAccumulators(): void {
   currentTurnEstimatedInputTokens = 0;
 }
 
+function rollbackReservedExternalTurnAfterDrainFailure(): void {
+  resetTurnAccumulators();
+  currentTurnStartTime = 0;
+  turnCompleted = true;
+  earlyBroadcastedUserMsg = null;
+  setExternalSessionState('idle');
+  if (externalOperationQueue.length > 0) {
+    setTimeout(drainExternalQueueAfterTurn, 0);
+  }
+}
+
 function buildPersistedTurnUsage(): MessageUsage | undefined {
   const fallbackModel = currentTurnUsage?.model
     || lastRuntimeReportedModel
@@ -1271,7 +1303,7 @@ let activeRequestId: string | null = null;
 
 // PRD 0.2.18 Session Inbox — per-turn binding for reply pushback. Set on
 // sendExternalMessage accept (after context.inboxMeta arrives via /api/inbox/drain),
-// read at persistTurnResult to push <inbox-reply> back to caller. Cleared at
+// read at persistTurnResult to push a send.result session event back to caller. Cleared at
 // the end of persistTurnResult regardless of success/error.
 // Same per-turn semantics as agent-session.ts::currentTurnInboxMeta.
 let currentTurnInboxMeta: import('../inbox/types').InboxTurnMeta | null = null;
@@ -1280,6 +1312,33 @@ let currentTurnInboxMeta: import('../inbox/types').InboxTurnMeta | null = null;
 // reply pushback. Reset at turn start, populated as `chat:tool-result-complete`
 // events fire, drained at persistTurnResult.
 const currentTurnAttachmentHints: string[] = [];
+
+function currentExternalTurnTextSnapshot(): string {
+  const blockText = currentContentBlocks
+    .filter((b) => b.type === 'text' && typeof b.text === 'string')
+    .map((b) => b.text ?? '')
+    .join('\n\n')
+    .trim();
+  return blockText || currentAssistantText.trim();
+}
+
+function deliverExternalWatchError(errorCode: string, errorMessage: string): void {
+  if (!lastSessionId) return;
+  const sid = lastSessionId;
+  const text = currentExternalTurnTextSnapshot();
+  const attachmentHints = currentTurnAttachmentHints.length > 0
+    ? [...currentTurnAttachmentHints]
+    : undefined;
+  void import('../inbox/watch-deliver').then(({ deliverSessionWatchEvents }) =>
+    deliverSessionWatchEvents(sid, {
+      text,
+      error: { code: errorCode, message: errorMessage },
+      attachmentHints,
+    }),
+  ).catch((err) =>
+    console.error('[session-watch] external failure watch push failed:', err),
+  );
+}
 
 /**
  * PRD 0.2.18 — clear inbox meta + push error reply if needed when
@@ -2076,7 +2135,7 @@ export async function startExternalSession(options: {
   sessionId: string;
   workspacePath: string;
   initialMessage?: string;
-  initialImages?: ImagePayload[];
+  initialImages?: ResolvedImagePayload[];
   model?: string;
   permissionMode?: string;
   /** #324 — NORMALIZED effort level, OR '' = explicit reset to the runtime
@@ -2122,7 +2181,7 @@ async function _doStartExternalSession(options: {
   sessionId: string;
   workspacePath: string;
   initialMessage?: string;
-  initialImages?: ImagePayload[];
+  initialImages?: ResolvedImagePayload[];
   model?: string;
   permissionMode?: string;
   reasoningEffort?: string;
@@ -2183,10 +2242,14 @@ async function _doStartExternalSession(options: {
   // to a real UUID. A pending-prefixed ID in SessionStore breaks history reload
   // because the frontend's loadSession guard skips any session whose ID starts
   // with "pending-". Fix: mint a real UUID here on the first start (not resume).
+  const originalSessionId = options.sessionId;
   if (isPendingSessionId(options.sessionId) && !options.resumeSessionId) {
     const realId = crypto.randomUUID();
     console.log(`[external-session] Upgrading pending session ID: ${options.sessionId} → ${realId}`);
     options.sessionId = realId;
+    if (startingSessionId === originalSessionId) {
+      startingSessionId = realId;
+    }
   }
   const startModel = coerceExternalRuntimeModel(
     options.model,
@@ -2467,8 +2530,24 @@ export async function sendExternalMessage(
   context?: ExternalSendContext,
   preBroadcasted?: SessionMessage,
 ): Promise<{ queued: boolean; error?: string }> {
-  const hasImages = images && images.length > 0;
+  const hasInputImages = images && images.length > 0;
+  if (hasInputImages && !context?.sessionId) {
+    return { queued: false, error: '图片附件缺少会话上下文，无法发送' };
+  }
+  let resolvedImages: ResolvedImagePayload[] | undefined;
+  try {
+    resolvedImages = context?.sessionId
+      ? resolveImagePayloads(context.sessionId, images)
+      : undefined;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error('[external-session] failed to resolve image attachments:', err);
+    return { queued: false, error: message };
+  }
+  const hasImages = resolvedImages && resolvedImages.length > 0;
   const turnAnalyticsSource = context?.analyticsSource ?? context?.scenario.type ?? lastAnalyticsSource;
+  const userAttachments = preBroadcasted?.attachments
+    ?? sessionMessageAttachmentsFromImages(context?.sessionId, images);
 
   // Show user message immediately — don't block on pre-warm or turn serialization.
   // The message appears in the chat as soon as the user presses send, giving
@@ -2483,13 +2562,16 @@ export async function sendExternalMessage(
   // the user's bubble would flash twice with different IDs.
   let earlyUserMsg: SessionMessage;
   if (preBroadcasted) {
-    earlyUserMsg = preBroadcasted;
+    earlyUserMsg = userAttachments && !preBroadcasted.attachments
+      ? { ...preBroadcasted, attachments: userAttachments }
+      : preBroadcasted;
   } else {
     earlyUserMsg = {
       id: `user-${Date.now()}`,
       role: 'user',
       content: text,
       timestamp: new Date().toISOString(),
+      attachments: userAttachments,
     };
     broadcast('chat:message-replay', { message: earlyUserMsg });
   }
@@ -2578,7 +2660,7 @@ export async function sendExternalMessage(
     count: hasImages ? images?.length : 0,
     detail: {
       source: turnAnalyticsSource,
-      hasImages: Boolean(hasImages),
+      hasImages: Boolean(hasInputImages),
       preBroadcasted: Boolean(preBroadcasted),
     },
   });
@@ -2594,7 +2676,7 @@ export async function sendExternalMessage(
         sessionId: context.sessionId,
         workspacePath: context.workspacePath,
         initialMessage: text,
-        initialImages: hasImages ? images : undefined,
+        initialImages: hasImages ? resolvedImages : undefined,
         model: context.model ?? lastModel,
         permissionMode: context.permissionMode ?? lastPermissionMode,
         reasoningEffort: resolveTurnReasoningEffort(context),
@@ -2626,7 +2708,7 @@ export async function sendExternalMessage(
         sessionId: lastSessionId,
         workspacePath: lastWorkspacePath,
         initialMessage: text,
-        initialImages: hasImages ? images : undefined,
+        initialImages: hasImages ? resolvedImages : undefined,
         model: nextModel,
         permissionMode: nextPermissionMode,
         reasoningEffort: resolveTurnReasoningEffort(context), // #324
@@ -2658,6 +2740,7 @@ export async function sendExternalMessage(
       role: 'user',
       content: text,
       timestamp: new Date().toISOString(),
+      attachments: userAttachments,
     };
     if (!earlyBroadcastedUserMsg) {
       broadcast('chat:message-replay', { message: userMsg });
@@ -2720,7 +2803,7 @@ export async function sendExternalMessage(
     }
 
     setExternalSessionState('running');
-    await activeRuntime.sendMessage(activeProcess, text, hasImages ? images : undefined);
+    await activeRuntime.sendMessage(activeProcess, text, hasImages ? resolvedImages : undefined);
     return { queued: true };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -2789,6 +2872,7 @@ export function enqueueExternalSendForDesktop(
     role: 'user',
     content: text,
     timestamp: new Date().toISOString(),
+    attachments: sessionMessageAttachmentsFromImages(context.sessionId, images),
   };
   broadcast('chat:message-replay', { message: userMsg });
 
@@ -2859,11 +2943,18 @@ async function drainExternalOperationsAfterTurn(): Promise<void> {
       role: 'user',
       content: item.text,
       timestamp: new Date().toISOString(),
+      attachments: sessionMessageAttachmentsFromImages(item.context.sessionId, item.images),
     };
     // Surface the bubble now (turn end) — mirrors the builtin queue:started fallback.
     broadcast('queue:started', {
       queueId: item.queueId,
-      userMessage: { id: userMsg.id, role: 'user', content: item.text, timestamp: userMsg.timestamp },
+      userMessage: {
+        id: userMsg.id,
+        role: 'user',
+        content: item.text,
+        timestamp: userMsg.timestamp,
+        attachments: userMsg.attachments,
+      },
     });
     // Send (serialized), adopting the surfaced bubble so sendExternalMessage doesn't re-broadcast.
     const task = externalDesktopSendTail.then(() =>
@@ -2875,10 +2966,14 @@ async function drainExternalOperationsAfterTurn(): Promise<void> {
     void task
       .then((result) => {
         if (result && !result.queued && result.error) {
+          rollbackReservedExternalTurnAfterDrainFailure();
           broadcast('chat:agent-error', { message: result.error });
         }
       })
-      .catch((err) => broadcast('chat:agent-error', { message: err instanceof Error ? err.message : String(err) }));
+      .catch((err) => {
+        rollbackReservedExternalTurnAfterDrainFailure();
+        broadcast('chat:agent-error', { message: err instanceof Error ? err.message : String(err) });
+      });
   } finally {
     if (externalOperationDrainInFlight) {
       externalOperationDrainInFlight = false;
@@ -3157,6 +3252,7 @@ export async function stopExternalSession(): Promise<boolean> {
     activeRequestId = null;
     // PRD 0.2.18 — clear inbox meta on hard stop (user clicked stop / runtime
     // killed mid-turn). Push session_aborted reply so caller doesn't hang.
+    deliverExternalWatchError('session_aborted', 'external runtime session was stopped before turn completed');
     clearInboxMetaOnRejection('session_aborted', 'external runtime session was stopped before turn completed');
     // Drop queued desktop messages on a hard stop (user clicked Stop) — otherwise the pills
     // orphan and, with state now 'idle' + queueLength>0, the next send queues behind stale
@@ -3501,18 +3597,17 @@ async function persistTurnResult(): Promise<void> {
     // turnContextUsage was snapshotted at the synchronous function entry (above) to
     // survive a concurrent turn's resetTurnAccumulators() during the await window.
 
-    // PRD 0.2.18 — capture reply text into local var BEFORE resetTurnAccumulators
-    // clears the source. The finally block reads this for inbox reply pushback.
-    if (turnInboxMeta) {
-      if (turnContentBlocks.length > 0) {
-        capturedReplyText = turnContentBlocks
-          .filter((b) => b.type === 'text' && typeof b.text === 'string')
-          .map((b) => b.text ?? '')
-          .join('\n\n')
-          .trim();
-      }
-      if (!capturedReplyText) capturedReplyText = turnAssistantText.trim();
+    // PRD 0.2.18 / 0.2.37 — capture turn text BEFORE resetTurnAccumulators
+    // clears the source. Inbox send.result and session watch.completed both
+    // read this in finally.
+    if (turnContentBlocks.length > 0) {
+      capturedReplyText = turnContentBlocks
+        .filter((b) => b.type === 'text' && typeof b.text === 'string')
+        .map((b) => b.text ?? '')
+        .join('\n\n')
+        .trim();
     }
+    if (!capturedReplyText) capturedReplyText = turnAssistantText.trim();
 
     // Reset only what we still own: if a degraded concurrent send already ran
     // resetTurnAccumulators(), the module global points at the NEW turn's
@@ -3657,6 +3752,24 @@ async function persistTurnResult(): Promise<void> {
         }),
       ).catch((err) =>
         console.error('[inbox] external turn-end reply pushback failed:', err),
+      );
+    }
+    if (lastSessionId) {
+      const watchText = capturedReplyText || currentAssistantText.trim();
+      const watchError = lastTurnSucceeded
+        ? undefined
+        : {
+            code: 'turn_failed',
+            message: persistFailureReason ?? 'external runtime turn did not complete successfully',
+          };
+      void import('../inbox/watch-deliver').then(({ deliverSessionWatchEvents }) =>
+        deliverSessionWatchEvents(lastSessionId, {
+          text: watchText,
+          error: watchError,
+          attachmentHints: turnAttachmentHints.length > 0 ? turnAttachmentHints : undefined,
+        }),
+      ).catch((err) =>
+        console.error('[session-watch] external turn-end watch push failed:', err),
       );
     }
 
@@ -4275,6 +4388,7 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
           imRequestRegistry.unregister(activeRequestId);
         }
         activeRequestId = null;
+        deliverExternalWatchError(cleanup === 'stopped' ? 'session_aborted' : 'turn_failed', message);
         clearInboxMetaOnRejection('turn_failed', message);
         resetTurnAccumulators();
         pendingPermissionSuggestions.clear();
@@ -4395,6 +4509,7 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
             detail: { source: 'user_stop', error: errorMessage },
           });
           console.log(`[external-session] Suppressing error banner for user-initiated stop (was: "${errorMessage}")`);
+          deliverExternalWatchError('session_aborted', 'external runtime session was stopped before turn completed');
           // Cross-review 0.2.32: when persistTurnResult is in flight it OWNS the
           // accumulators (it still has to read the content blocks; its push
           // branches reset them). Resetting here would race it and drop the
@@ -4408,6 +4523,7 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
           broadcast('chat:agent-error', { message: errorMessage });
           broadcast('chat:message-error', errorMessage);
           fireImCallback('error', errorMessage);
+          deliverExternalWatchError('turn_failed', errorMessage);
           // Same finalization-ownership rule as the suppress branch above.
           if (!turnFinalization.inFlight) resetTurnAccumulators(); // Prevent stale content leaking into next turn
         }

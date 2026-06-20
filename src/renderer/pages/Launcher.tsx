@@ -56,9 +56,10 @@ interface LauncherProps {
     isStarting?: boolean;
     startError?: string | null;
     isActive?: boolean;
+    attachmentSessionId?: string | null;
 }
 
-export default function Launcher({ onLaunchProject, isStarting, startError: _startError, isActive }: LauncherProps) {
+export default function Launcher({ onLaunchProject, isStarting, startError: _startError, isActive, attachmentSessionId }: LauncherProps) {
     const toast = useToast();
     const toastRef = useRef(toast);
     const pinToggleInFlightRef = useRef(new Set<string>());
@@ -924,6 +925,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
                         onAddFolder={handleAddProject}
                         onSetDefaultWorkspace={handleSetDefault}
                         onSend={handleBrandSend}
+                        attachmentSessionId={attachmentSessionId}
                         isStarting={launchingProjectId === selectedWorkspace?.id && isStarting}
                         provider={launcherProvider}
                         providers={providers}

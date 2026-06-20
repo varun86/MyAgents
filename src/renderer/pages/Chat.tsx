@@ -2925,8 +2925,13 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       if (queuedMsg?.images && queuedMsg.images.length > 0) {
         const restoredImages: ImageAttachment[] = queuedMsg.images.map(img => ({
           id: img.id,
-          file: new File([], img.name), // Placeholder — original blob is gone
+          file: new File([], img.name, { type: img.mimeType || 'application/octet-stream' }), // Placeholder — original blob is gone
           preview: img.preview,
+          source: img.source,
+          name: img.name,
+          mimeType: img.mimeType,
+          sizeBytes: img.sizeBytes,
+          relativePath: img.relativePath,
         }));
         chatInputRef.current?.setImages(restoredImages);
       }
@@ -3389,6 +3394,11 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
         id: a.id,
         file: new File([], a.name, { type: a.mimeType }),
         preview: a.previewUrl || '',
+        source: a.relativePath || a.savedPath ? 'attachment_ref' : undefined,
+        name: a.name,
+        mimeType: a.mimeType,
+        sizeBytes: a.size,
+        relativePath: a.relativePath || a.savedPath,
       }));
       chatInputRef.current?.setImages(restoredImages);
     }
@@ -3472,6 +3482,11 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
           id: a.id,
           file: new File([], a.name, { type: a.mimeType }),
           preview: a.previewUrl || '',
+          source: a.relativePath || a.savedPath ? 'attachment_ref' as const : undefined,
+          name: a.name,
+          mimeType: a.mimeType,
+          sizeBytes: a.size,
+          relativePath: a.relativePath || a.savedPath,
         }));
         handleSendMessageRef.current(content, imageAttachments?.length ? imageAttachments : undefined);
       })
@@ -4040,6 +4055,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
             systemStatus={systemStatus}
             agentDir={agentDir}
             workspacePath={agentDir}
+            sessionId={sessionId}
             sdkSlashCommands={visibleSdkSlashCommands}
             provider={currentProvider}
             providers={providers}

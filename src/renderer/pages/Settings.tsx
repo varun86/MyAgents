@@ -43,6 +43,8 @@ import {
     getPresetMcpServer,
     DEFAULT_CLAUDE_TRANSCRIPT_CLEANUP_PERIOD_DAYS,
     normalizeClaudeTranscriptCleanupPeriodDays,
+    normalizeChatQueueResponseMode,
+    type ChatQueueResponseMode,
 } from '@/config/types';
 import {
     getAllMcpServers,
@@ -3271,33 +3273,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                     </button>
                                 </div>
 
-                                {/* 主题 */}
-                                <div className="mt-6 flex items-center justify-between">
-                                    <div>
-                                        <p className="text-sm font-medium text-[var(--ink)]">主题</p>
-                                        <p className="mt-0.5 text-xs text-[var(--ink-muted)]">设置应用外观模式</p>
-                                    </div>
-                                    <div className="flex gap-0.5 rounded-full bg-[var(--paper-inset)] p-0.5">
-                                        {(['system', 'light', 'dark'] as const).map((mode) => (
-                                            <button
-                                                key={mode}
-                                                onClick={() => updateConfig({ theme: mode })}
-                                                className={`rounded-full px-3 py-1 text-xs font-medium transition-all ${
-                                                    config.theme === mode
-                                                        ? 'bg-[var(--paper-elevated)] text-[var(--ink)] shadow-sm'
-                                                        : 'text-[var(--ink-muted)] hover:text-[var(--ink-secondary)]'
-                                                }`}
-                                            >
-                                                {mode === 'system' ? '跟随系统' : mode === 'light' ? '日间模式' : '夜间模式'}
-                                            </button>
-                                        ))}
-                                    </div>
-                                </div>
-                            </div>
-
-                            {/* Default Workspace */}
-                            <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
-                                <h3 className="text-base font-medium text-[var(--ink)]">默认工作区</h3>
+                                {/* Default Workspace */}
                                 <div className="mt-4 flex items-center justify-between">
                                     <div className="flex-1 pr-4">
                                         <p className="text-sm font-medium text-[var(--ink)]">启动时打开的工作区</p>
@@ -3344,6 +3320,65 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                             },
                                         }}
                                     />
+                                </div>
+
+                                {/* 主题 */}
+                                <div className="mt-6 flex items-center justify-between">
+                                    <div>
+                                        <p className="text-sm font-medium text-[var(--ink)]">主题</p>
+                                        <p className="mt-0.5 text-xs text-[var(--ink-muted)]">设置应用外观模式</p>
+                                    </div>
+                                    <div className="flex gap-0.5 rounded-full bg-[var(--paper-inset)] p-0.5">
+                                        {(['system', 'light', 'dark'] as const).map((mode) => (
+                                            <button
+                                                key={mode}
+                                                onClick={() => updateConfig({ theme: mode })}
+                                                className={`rounded-full px-3 py-1 text-xs font-medium transition-all ${
+                                                    config.theme === mode
+                                                        ? 'bg-[var(--paper-elevated)] text-[var(--ink)] shadow-sm'
+                                                        : 'text-[var(--ink-muted)] hover:text-[var(--ink-secondary)]'
+                                                }`}
+                                            >
+                                                {mode === 'system' ? '跟随系统' : mode === 'light' ? '日间模式' : '夜间模式'}
+                                            </button>
+                                        ))}
+                                    </div>
+                                </div>
+                            </div>
+
+                            {/* Chat Queue Response Mode */}
+                            <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
+                                <h3 className="text-base font-medium text-[var(--ink)]">连续发送消息</h3>
+                                <div className="mt-4 flex items-center justify-between gap-4">
+                                    <div className="flex-1">
+                                        <p className="text-sm font-medium text-[var(--ink)]">队列响应模式</p>
+                                        <p className="text-xs text-[var(--ink-muted)]">
+                                            {normalizeChatQueueResponseMode(config.chatQueueResponseMode) === 'turn'
+                                                ? '仅在 AI 完成一个执行轮次后，自动发送下一条消息'
+                                                : 'AI 执行过程中会阅读消息，自主判断响应时机'}
+                                        </p>
+                                    </div>
+                                    <div className="flex shrink-0 gap-0.5 rounded-full bg-[var(--paper-inset)] p-0.5">
+                                        {([
+                                            { value: 'realtime', label: '实时响应' },
+                                            { value: 'turn', label: '轮次响应' },
+                                        ] as const satisfies ReadonlyArray<{ value: ChatQueueResponseMode; label: string }>).map((opt) => {
+                                            const active = normalizeChatQueueResponseMode(config.chatQueueResponseMode) === opt.value;
+                                            return (
+                                                <button
+                                                    key={opt.value}
+                                                    onClick={() => void updateConfig({ chatQueueResponseMode: opt.value })}
+                                                    className={`rounded-full px-3 py-1 text-xs font-medium transition-all ${
+                                                        active
+                                                            ? 'bg-[var(--paper-elevated)] text-[var(--ink)] shadow-sm'
+                                                            : 'text-[var(--ink-muted)] hover:text-[var(--ink-secondary)]'
+                                                    }`}
+                                                >
+                                                    {opt.label}
+                                                </button>
+                                            );
+                                        })}
+                                    </div>
                                 </div>
                             </div>
 

@@ -518,6 +518,7 @@ pub fn run() {
             // re-export at the parent module level.
             workspace_files::files_b64::cmd_workspace_import_files_b64,
             workspace_files::files_b64::cmd_workspace_read_files_b64,
+            workspace_files::user_attachments::cmd_prepare_user_image_attachments,
             workspace_files::check_paths::cmd_workspace_check_paths,
             workspace_files::check_paths::cmd_check_local_paths,
             workspace_files::transfer::cmd_workspace_copy_paths,

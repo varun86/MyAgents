@@ -25,7 +25,12 @@
  * (first-message correctness) stays in Launcher, eager, and never flows here.
  */
 
-import { deleteSession as deleteSessionApi, getSessions, type SessionMetadata } from '@/api/sessionClient';
+import {
+    deleteSession as deleteSessionApi,
+    getSessions,
+    updateSession as updateSessionApi,
+    type SessionMetadata,
+} from '@/api/sessionClient';
 import { getAllCronTasks, getBackgroundSessions } from '@/api/cronTaskClient';
 import { taskCenterAvailable, taskList } from '@/api/taskCenter';
 import { deactivateSession } from '@/api/tauriClient';
@@ -72,6 +77,7 @@ export interface TaskCenterRefreshOptions {
 
 export interface TaskCenterActions {
     deleteSession: (sessionId: string) => Promise<boolean>;
+    setSessionFavorite: (sessionId: string, favorite: boolean) => Promise<boolean>;
     refreshSessions: () => void;
     refreshCronTasks: () => void;
     refreshTasks: () => void;
@@ -195,6 +201,13 @@ let state: StoreState = {
 const listeners = new Set<() => void>();
 const deletedSessionIds = new Set<string>(); // cross-instance tombstones
 
+interface FavoriteMutation {
+    desired: boolean;
+    promise: Promise<boolean>;
+}
+
+const favoriteMutations = new Map<string, FavoriteMutation>();
+
 let started = false;
 let lifecycleGen = 0; // bumped on stop — an in-flight fetch captured before a stop must not apply state or retry
 let retryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -278,6 +291,44 @@ function setState(patch: Partial<StoreState>): void {
     state = { ...state, ...patch };
     snapshot = buildSnapshot();
     for (const l of listeners) l();
+}
+
+function patchSessionFavorite(sessionId: string, favorite: boolean): void {
+    setState({
+        sessions: state.sessions.map((session) =>
+            session.id === sessionId ? { ...session, favorite } : session,
+        ),
+    });
+}
+
+async function runFavoriteMutation(sessionId: string, previous: boolean, mutation: FavoriteMutation): Promise<boolean> {
+    let lastPersisted = previous;
+    try {
+        while (true) {
+            const next = mutation.desired;
+            patchSessionFavorite(sessionId, next);
+            const updated = await updateSessionApi(sessionId, { favorite: next });
+            if (!updated) {
+                patchSessionFavorite(sessionId, lastPersisted);
+                return false;
+            }
+
+            lastPersisted = !!updated.favorite;
+            patchSessionFavorite(sessionId, lastPersisted);
+            if (mutation.desired === lastPersisted) {
+                refresh('sessions', { force: true, reason: 'set-session-favorite', silent: true });
+                return true;
+            }
+        }
+    } catch (err) {
+        console.warn('[taskCenterStore] Failed to update session favorite:', err);
+        patchSessionFavorite(sessionId, lastPersisted);
+        return false;
+    } finally {
+        if (favoriteMutations.get(sessionId) === mutation) {
+            favoriteMutations.delete(sessionId);
+        }
+    }
 }
 
 // ===== Fetch + refreshers =====
@@ -414,6 +465,23 @@ export const actions: TaskCenterActions = {
         refresh('sessions', { force: true, reason: 'delete-session', silent: true });
         return true;
     },
+    setSessionFavorite: async (sessionId: string, favorite: boolean) => {
+        const existing = favoriteMutations.get(sessionId);
+        if (existing) {
+            existing.desired = favorite;
+            patchSessionFavorite(sessionId, favorite);
+            return existing.promise;
+        }
+
+        const previous = state.sessions.find((session) => session.id === sessionId)?.favorite ?? false;
+        const mutation: FavoriteMutation = {
+            desired: favorite,
+            promise: Promise.resolve(false),
+        };
+        favoriteMutations.set(sessionId, mutation);
+        mutation.promise = runFavoriteMutation(sessionId, previous, mutation);
+        return mutation.promise;
+    },
     refreshSessions: () => refresh('sessions', { force: true, silent: true }),
     refreshCronTasks: () => refresh('cronTasks', { force: true, silent: true }),
     refreshTasks: () => refresh('tasks', { force: true, silent: true }),
@@ -501,6 +569,7 @@ export function __resetTaskCenterStoreForTest(): void {
     state = { sessions: [], cronTasks: [], tasks: [], backgroundSessionIds: [], agentStatuses: {}, agents: [], floatingBallSessionId: null, isLoading: true, error: null };
     listeners.clear();
     deletedSessionIds.clear();
+    favoriteMutations.clear();
     mapsCache = null;
     snapshot = buildSnapshot();
     started = false;
@@ -514,4 +583,9 @@ export function __resetTaskCenterStoreForTest(): void {
         if (refreshTimers[k]) { clearTimeout(refreshTimers[k]!); refreshTimers[k] = null; }
     }
     for (const k of Object.keys(latestSeqByScope)) delete latestSeqByScope[k as TaskCenterRefreshScope];
+}
+
+/** Test-only: seed sessions without starting the subscriber fetch lifecycle. */
+export function __setTaskCenterSessionsForTest(sessions: SessionMetadata[]): void {
+    setState({ sessions });
 }

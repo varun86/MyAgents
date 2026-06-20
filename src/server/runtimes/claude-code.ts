@@ -12,7 +12,7 @@ import { join } from 'path';
 import type { RuntimeDetection, RuntimeModelInfo, RuntimePermissionMode, RuntimeType } from '../../shared/types/runtime';
 import { CC_PERMISSION_MODES } from '../../shared/types/runtime';
 import { isSdkEffortLevel } from '../../shared/reasoningEffort';
-import type { AgentRuntime, RuntimeConfigCapabilities, RuntimeProcess, SessionStartOptions, UnifiedEvent, UnifiedEventCallback, ImagePayload } from './types';
+import type { AgentRuntime, RuntimeConfigCapabilities, RuntimeProcess, SessionStartOptions, UnifiedEvent, UnifiedEventCallback, ResolvedImagePayload } from './types';
 import { augmentedProcessEnv, resolveCommand, stripAnsi } from './env-utils';
 import { ensureDirSync } from '../utils/fs-utils';
 import { killWithEscalation } from './utils/kill-with-escalation';
@@ -22,7 +22,7 @@ import { withLogContext } from '../logger-context';
  * Build CC CLI message content — string for text-only, array of content blocks for images+text.
  * Matches Anthropic Messages API content format which CC CLI consumes natively.
  */
-function buildMessageContent(text: string, images?: ImagePayload[]): string | unknown[] {
+function buildMessageContent(text: string, images?: ResolvedImagePayload[]): string | unknown[] {
   if (!images || images.length === 0) return text;
   const blocks: unknown[] = [];
   for (const img of images) {
@@ -520,7 +520,7 @@ export class ClaudeCodeRuntime implements AgentRuntime {
     return handle;
   }
 
-  async sendMessage(process: RuntimeProcess, message: string, images?: ImagePayload[]): Promise<void> {
+  async sendMessage(process: RuntimeProcess, message: string, images?: ResolvedImagePayload[]): Promise<void> {
     const content = buildMessageContent(message, images);
     const userMsg = {
       type: 'user',

@@ -3,6 +3,10 @@ export interface QueuedImageInfo {
   id: string;
   name: string;
   preview: string; // data URL for preview display
+  mimeType?: string;
+  sizeBytes?: number;
+  source?: 'inline_base64' | 'attachment_ref';
+  relativePath?: string;
 }
 
 export interface QueuedMessageInfo {
@@ -10,6 +14,7 @@ export interface QueuedMessageInfo {
   text: string;                // Original text, for cancel → restore to input
   images?: QueuedImageInfo[];  // Lightweight image info for display and restore
   timestamp: number;
+  deliveryMode?: 'realtime' | 'turn';
   /**
    * True when this queue item has already been yielded to the SDK CLI
    * subprocess and is waiting to be drained into AI's context. It is still
