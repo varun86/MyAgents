@@ -33,55 +33,45 @@ export default function QueuedMessagesPanel({ messages, onCancel, onForceExecute
 
       {/* Message list */}
       <div className="space-y-1">
-        {messages.map((qm) => {
-          const statusLabel = qm.deliveryMode === 'turn'
-            ? '下一轮'
-            : (qm.isInFlight ? '已发送' : '排队');
-          return (
-            <div key={qm.queueId} className="group flex items-center gap-1.5">
-              {/* Message text */}
-              <div className="flex min-w-0 flex-1 items-center gap-1.5">
-                <span className="min-w-0 truncate text-sm text-[var(--ink)]">
-                  {qm.text.length > 60 ? qm.text.slice(0, 60) + '...' : qm.text}
-                </span>
-                <span className="shrink-0 rounded border border-[var(--line)] px-1 py-0.5 text-xs text-[var(--ink-muted)]">
-                  {statusLabel}
-                </span>
+        {messages.map((qm) => (
+          <div key={qm.queueId} className="group flex items-center gap-1.5">
+            {/* Message text */}
+            <div className="min-w-0 flex-1 truncate text-sm text-[var(--ink)]">
+              {qm.text.length > 60 ? qm.text.slice(0, 60) + '...' : qm.text}
+            </div>
+
+            {/* Images indicator */}
+            {qm.images && qm.images.length > 0 && (
+              <div className="flex shrink-0 gap-0.5">
+                {qm.images.slice(0, 2).map((img) => (
+                  <div key={img.id} className="h-5 w-5 overflow-hidden rounded border border-[var(--ink-muted)]/20">
+                    <img src={img.preview} alt={img.name} className="h-full w-full object-cover" />
+                  </div>
+                ))}
               </div>
+            )}
 
-              {/* Images indicator */}
-              {qm.images && qm.images.length > 0 && (
-                <div className="flex shrink-0 gap-0.5">
-                  {qm.images.slice(0, 2).map((img) => (
-                    <div key={img.id} className="h-5 w-5 overflow-hidden rounded border border-[var(--ink-muted)]/20">
-                      <img src={img.preview} alt={img.name} className="h-full w-full object-cover" />
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              {/* Action buttons — visible on hover. In-flight items are still
+            {/* Action buttons — visible on hover. In-flight items are still
                 conditionally cancellable via SDK cancel_async_message; backend
                 SSE remains the source of truth for removing the pill. */}
-              <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
-                <button
-                  onClick={() => onForceExecute(qm.queueId)}
-                  title="立即发送"
-                  className="rounded p-0.5 text-[var(--ink-muted)] hover:bg-[var(--surface-hover)] hover:text-[var(--ink)]"
-                >
-                  <Play size={12} />
-                </button>
-                <button
-                  onClick={() => onCancel(qm.queueId)}
-                  title={qm.isInFlight ? '撤回发送' : '取消排队'}
-                  className="rounded p-0.5 text-[var(--ink-muted)] hover:bg-[var(--surface-hover)] hover:text-[var(--ink)]"
-                >
-                  <X size={12} />
-                </button>
-              </div>
+            <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
+              <button
+                onClick={() => onForceExecute(qm.queueId)}
+                title="立即发送"
+                className="rounded p-0.5 text-[var(--ink-muted)] hover:bg-[var(--surface-hover)] hover:text-[var(--ink)]"
+              >
+                <Play size={12} />
+              </button>
+              <button
+                onClick={() => onCancel(qm.queueId)}
+                title={qm.isInFlight ? '撤回发送' : '取消排队'}
+                className="rounded p-0.5 text-[var(--ink-muted)] hover:bg-[var(--surface-hover)] hover:text-[var(--ink)]"
+              >
+                <X size={12} />
+              </button>
             </div>
-          );
-        })}
+          </div>
+        ))}
       </div>
     </div>
   );
