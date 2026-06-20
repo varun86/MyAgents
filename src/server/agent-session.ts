@@ -81,7 +81,7 @@ import {
 } from './utils/context-occupancy';
 import type { SystemInitInfo } from '../shared/types/system';
 import type { SlashCommand as UiSlashCommand } from '../shared/slashCommands';
-import { saveSessionMetadata, updateSessionTitleFromMessage, saveSessionMessages, saveAttachment, updateSessionMetadata, getSessionMetadata, getSessionData } from './SessionStore';
+import { saveSessionMetadata, updateSessionTitleFromMessage, saveSessionMessages, updateSessionMetadata, getSessionMetadata, getSessionData } from './SessionStore';
 import { firePostTurnTitleHook } from './turn-hooks';
 import { createSessionMetadata, type SessionMessage, type MessageAttachment, type MessageUsage, type SessionSource, type TurnAnalyticsSource } from './types/session';
 import { extractAssistantTextFromStoredContent } from './inbox/latest-result';
@@ -109,7 +109,8 @@ import { getCurrentRuntimeType, isExternalRuntime } from './runtimes/factory';
 import { resolveLastRealUserMessagePreview } from './utils/session-message-preview';
 import { decideBuiltinSessionResume } from './utils/builtin-session-resume';
 import { elapsedMs, emitPerfTrace, nowMs } from './utils/perf-trace';
-import type { ImagePayload } from './runtimes/types';
+import type { ImagePayload, ResolvedImagePayload } from './runtimes/types';
+import { messageAttachmentsFromImagePayloads, resolveImagePayloads } from './runtimes/image-payload';
 import { buildBuiltinMediaAttachments, saveExtractedToolResultAttachments } from './runtimes/builtin-media-attachments';
 import {
   appendOmittedImageNote,
@@ -1048,7 +1049,7 @@ function fireDesktopAssistantBlockMirror(text: string): void {
   });
 }
 
-/** Convert ImagePayload[] to MirrorImage[] keeping only PNG/JPG (Q5 lockdown). */
+/** Convert resolved user images to MirrorImage[] keeping only PNG/JPG (Q5 lockdown). */
 // Pre-validation cap MUST stay in sync with Rust's
 // `MIRROR_IMAGE_MAX_BYTES = 5MB` in management_api.rs (and its
 // `MIRROR_IMAGE_MAX_BASE64_LEN` derivation). Base64 with padding inflates
@@ -1061,7 +1062,7 @@ function fireDesktopAssistantBlockMirror(text: string): void {
 const MIRROR_IMAGE_MAX_BYTES = 5 * 1024 * 1024;
 const MIRROR_IMAGE_MAX_BASE64_CHARS = Math.ceil(MIRROR_IMAGE_MAX_BYTES / 3) * 4 + 64;
 
-function toMirrorImages(images: ImagePayload[] | undefined): MirrorImage[] | undefined {
+function toMirrorImages(images: ResolvedImagePayload[] | undefined): MirrorImage[] | undefined {
   if (!images || images.length === 0) return undefined;
   const out: MirrorImage[] = [];
   for (const img of images) {
@@ -8011,24 +8012,21 @@ export async function enqueueUserMessage(
   // pre-warm), the per-turn metadata still proves the subprocess is alive.
   setSessionState((systemInitInfo || sdkControlReady) ? 'running' : 'starting');
 
-  // Save images to disk and create attachment records
-  const savedAttachments: MessageWire['attachments'] = [];
+  // Persist/adopt user image attachment records, then resolve refs at the
+  // Sidecar runtime boundary. Renderer path drops send attachment refs, not
+  // large base64 request bodies; legacy no-path File/paste fallback may still
+  // arrive as inline base64 and is saved here.
+  let resolvedImages: ResolvedImagePayload[] | undefined;
+  let savedAttachments: MessageWire['attachments'] = [];
   if (hasImages) {
-    for (const img of images) {
-      try {
-        const attachmentId = randomUUID();
-        const relativePath = saveAttachment(sessionId, attachmentId, img.name, img.data, img.mimeType);
-        savedAttachments.push({
-          id: attachmentId,
-          name: img.name,
-          size: img.data.length, // Approximate size from base64
-          mimeType: img.mimeType,
-          relativePath,
-          isImage: true,
-        });
-      } catch (error) {
-        console.error('[agent] Failed to save attachment:', error);
-      }
+    try {
+      savedAttachments = messageAttachmentsFromImagePayloads(sessionId, images);
+      resolvedImages = resolveImagePayloads(sessionId, images);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error('[agent] Failed to resolve image attachments:', error);
+      broadcast('chat:message-error', `图片处理失败：${message}`);
+      return { queued: false, error: message };
     }
   }
 
@@ -8060,7 +8058,7 @@ export async function enqueueUserMessage(
   // at dequeue to catch any drift), otherwise the session's current model.
   const modelForFilter = model ?? currentModel;
   const imagesAllowed = modelSupportsModality(modelForFilter, 'image');
-  const filteredImageCount = hasImages && !imagesAllowed ? images!.length : 0;
+  const filteredImageCount = hasImages && !imagesAllowed ? resolvedImages!.length : 0;
 
   // Mutable text payload — modality fallback (below) appends `@<path>`
   // references for images that can't go in as image content blocks. Title /
@@ -8070,7 +8068,7 @@ export async function enqueueUserMessage(
   // Add images first so Claude can see them before the text query
   // Images are resized/sliced server-side to stay within API limits (≤1568px, long images → 1:2 tiles)
   if (hasImages && imagesAllowed) {
-    for (const img of images) {
+    for (const img of resolvedImages!) {
       let tiles: Awaited<ReturnType<typeof processImage>>;
       try {
         tiles = await processImage(img);
@@ -8119,7 +8117,7 @@ export async function enqueueUserMessage(
       const targetDir = join(agentDir, 'myagents_files');
       try {
         const written = await writeBase64FilesToAgentDir(
-          images!.map((img) => ({ name: img.name, content: img.data })),
+          resolvedImages!.map((img) => ({ name: img.name, content: img.data })),
           targetDir,
           agentDir,
         );
@@ -8222,7 +8220,7 @@ export async function enqueueUserMessage(
         requestId,
         source: metadata?.source,
         analyticsSource: analyticsSource ?? currentScenario.type,
-        mirrorImages: toMirrorImages(images),
+        mirrorImages: toMirrorImages(resolvedImages),
       };
       wakeGenerator(queueItem);
       console.log(`[agent] Message queued mid-turn (in-flight to CLI): queueId=${queueId} requestId=${requestId ?? '-'} text="${trimmed.slice(0, 50)}"`);
@@ -8292,7 +8290,7 @@ export async function enqueueUserMessage(
   // Q1·C: mirror the full user text + PNG/JPG attachments. Rust silently
   // no-ops if no channel binding exists for this session.
   if (metadata?.source === 'desktop') {
-    fireDesktopUserMirror(trimmed, toMirrorImages(images));
+    fireDesktopUserMirror(trimmed, toMirrorImages(resolvedImages));
   } else {
     // New non-desktop turn — make sure stale mirror state from a prior
     // desktop turn doesn't bleed into this AI response.

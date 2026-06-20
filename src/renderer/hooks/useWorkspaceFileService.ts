@@ -120,6 +120,27 @@ interface ReadAsBase64Response {
   files: ReadAsBase64Item[];
 }
 
+interface PreparedUserImageAttachment {
+  id: string;
+  name: string;
+  mimeType: string;
+  sizeBytes: number;
+  relativePath: string;
+}
+
+interface PrepareUserImageAttachmentError {
+  path: string;
+  name: string;
+  code: string;
+  message: string;
+}
+
+interface PrepareUserImageAttachmentsResponse {
+  success: boolean;
+  attachments: PreparedUserImageAttachment[];
+  errors: PrepareUserImageAttachmentError[];
+}
+
 interface FileSearchResult {
   path: string;
   name: string;
@@ -193,7 +214,8 @@ interface GitignoreResult {
  * `openPathExternal`, `openPathWithDefault`, `checkLocalPaths`,
  * `readLocalPreview`, `downloadLocalFile`, `downloadLocalFileBytes`,
  * `readLocalFileAsBlobUrl` (all take absolute paths), `readPathsAsBase64`
- * (takes absolute image paths from drag-drop), `watchStop` (takes opaque token).
+ * (legacy absolute image path → base64), `prepareUserImageAttachments`
+ * (absolute image path → app-owned attachment ref), `watchStop` (takes opaque token).
  *
  * Cross-review round 2 (Codex HIGH-3): consumers like SkillDetailPanel /
  * CommandDetailPanel pass `null` because they only need workspace-free
@@ -221,6 +243,12 @@ export interface WorkspaceFileService {
   }): Promise<InternalCopyResult>;
   /** [workspace-free] Read absolute image paths and return base64 (for Tauri image drops). */
   readPathsAsBase64(args: { paths: string[] }): Promise<ReadAsBase64Response>;
+  /** [workspace-free] Copy absolute image paths into `~/.myagents/attachments/<sessionId>/`
+   *  and return ref metadata. This is the primary path for chat image drops. */
+  prepareUserImageAttachments(args: {
+    sessionId: string;
+    paths: string[];
+  }): Promise<PrepareUserImageAttachmentsResponse>;
   /** [requires workspace] Append a pattern to `<workspace>/.gitignore` if not already present. */
   addGitignore(args: { pattern: string }): Promise<GitignoreResult>;
   /** [requires workspace] Fuzzy file-name search for the @ mention picker. */
@@ -386,6 +414,17 @@ export function useWorkspaceFileService(workspacePath: string | null): Workspace
     async ({ paths }) => {
       // Doesn't need a workspace — paths are absolute.
       return invokeIfTauri<ReadAsBase64Response>('cmd_workspace_read_files_b64', { paths });
+    },
+    [invokeIfTauri],
+  );
+
+  const prepareUserImageAttachments: WorkspaceFileService['prepareUserImageAttachments'] = useCallback(
+    async ({ sessionId, paths }) => {
+      // Doesn't need a workspace — paths are absolute and destination is app-owned.
+      return invokeIfTauri<PrepareUserImageAttachmentsResponse>('cmd_prepare_user_image_attachments', {
+        sessionId,
+        paths,
+      });
     },
     [invokeIfTauri],
   );
@@ -739,6 +778,7 @@ export function useWorkspaceFileService(workspacePath: string | null): Workspace
       copyPaths,
       copyInternal,
       readPathsAsBase64,
+      prepareUserImageAttachments,
       addGitignore,
       searchFiles,
       deleteFile,
@@ -778,6 +818,7 @@ export function useWorkspaceFileService(workspacePath: string | null): Workspace
       copyPaths,
       copyInternal,
       readPathsAsBase64,
+      prepareUserImageAttachments,
       addGitignore,
       searchFiles,
       deleteFile,

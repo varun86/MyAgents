@@ -27,7 +27,8 @@ import { track } from '@/analytics';
 import { loadAppConfig, mergePresetCustomModels } from '@/config/services/appConfigService';
 import { getAllProviders, modelSupportsModality } from '@/config/services/providerService';
 import { applyProviderEnablementAndOrder, type Provider } from '@/config/types';
-import { ALLOWED_IMAGE_MIME_TYPES, isImageFile, isImageMimeType } from '../../shared/fileTypes';
+import { ALLOWED_IMAGE_MIME_TYPES, USER_IMAGE_ATTACHMENT_MAX_BYTES, isImageFile, isImageMimeType } from '../../shared/fileTypes';
+import { resolveAttachmentUrl } from '@/utils/attachmentUrl';
 import { renameIfBareClipboardImage } from '@/utils/clipboardImage';
 import { formatDuration, getToolBadgeConfig, getToolLabel, getToolMainLabel, getToolSummaryNode, isSubagentContainerTool } from '@/components/tools/toolBadgeConfig';
 import { isSubagentContainerRunning } from '@/components/tools/subagentActivity';
@@ -64,6 +65,8 @@ interface FbImageDraft {
     data: string;
     previewUrl: string;
     source: 'upload' | 'screenshot';
+    transport?: 'inline_base64' | 'attachment_ref';
+    relativePath?: string;
     appName?: string | null;
     windowTitle?: string | null;
 }
@@ -72,7 +75,7 @@ const WIN_W = 440;
 const WIN_H_KEY = 'fb-win-h';
 const HIDE_GRACE_MS = 280;
 const MAX_IMAGES = 5;
-const MAX_IMAGE_SIZE = 5 * 1024 * 1024;
+const MAX_IMAGE_SIZE = USER_IMAGE_ATTACHMENT_MAX_BYTES;
 
 function loadWinH(): number {
     const saved = parseInt(localStorage.getItem(WIN_H_KEY) ?? '', 10);
@@ -224,6 +227,7 @@ async function fileToImageDraft(file: File): Promise<FbImageDraft> {
         data,
         previewUrl,
         source: 'upload',
+        transport: 'inline_base64',
     };
 }
 
@@ -238,6 +242,7 @@ function shotToImageDraft(shot: FbShot): FbImageDraft {
         data,
         previewUrl: shot.dataUrl,
         source: 'screenshot',
+        transport: 'inline_base64',
         appName: shot.appName ?? null,
         windowTitle: shot.windowTitle ?? null,
     };
@@ -760,6 +765,19 @@ export default function CompanionWindow() {
             else otherFiles.push(file);
         }
 
+        const oversizedImageFiles = imageFiles.filter((file) => file.size > MAX_IMAGE_SIZE);
+        if (oversizedImageFiles.length > 0) {
+            toast.warning(
+                oversizedImageFiles.length === 1
+                    ? '图片超过 10MB，请从文件夹拖入以作为 @文件 引用'
+                    : `${oversizedImageFiles.length} 张图片超过 10MB，请从文件夹拖入以作为 @文件 引用`,
+            );
+            for (const image of oversizedImageFiles) {
+                const idx = imageFiles.indexOf(image);
+                if (idx >= 0) imageFiles.splice(idx, 1);
+            }
+        }
+
         if (imageFiles.length > 0 && !canAttachImages) {
             toast.info('当前模型不支持图片输入，已转为文件存入工作区供模型读取');
             for (const image of imageFiles) otherFiles.push(renameIfBareClipboardImage(image));
@@ -771,10 +789,6 @@ export default function CompanionWindow() {
             for (const file of imageFiles) {
                 if (!ALLOWED_IMAGE_MIME_TYPES.includes(file.type)) {
                     toast.warning(`不支持的图片格式：${file.name}`);
-                    continue;
-                }
-                if (file.size > MAX_IMAGE_SIZE) {
-                    toast.warning(`${file.name} 超过 5MB，已跳过`);
                     continue;
                 }
                 try {
@@ -812,28 +826,39 @@ export default function CompanionWindow() {
 
         if (imagePaths.length > 0) {
             try {
-                const readResult = await fileService.readPathsAsBase64({ paths: imagePaths });
-                if (!readResult.success) throw new Error('读取图片失败');
+                if (!session.sessionId) throw new Error('会话尚未就绪');
+                const prepared = await fileService.prepareUserImageAttachments({
+                    sessionId: session.sessionId,
+                    paths: imagePaths,
+                });
                 const drafts: FbImageDraft[] = [];
                 const fallbackPaths: string[] = [];
-                for (const file of readResult.files ?? []) {
-                    if (!file.data || file.error) {
-                        fallbackPaths.push(file.path);
-                        continue;
-                    }
-                    if (!ALLOWED_IMAGE_MIME_TYPES.includes(file.mimeType)) {
-                        toast.warning(`不支持的图片格式：${file.name}`);
-                        continue;
-                    }
+                let oversizedCount = 0;
+                for (const file of prepared.attachments) {
+                    const previewUrl = resolveAttachmentUrl({ relativePath: file.relativePath });
+                    if (!previewUrl) continue;
                     drafts.push({
-                        id: makeId('img'),
+                        id: file.id,
                         name: file.name,
                         mimeType: file.mimeType,
-                        size: Math.floor(file.data.length * 0.75),
-                        data: file.data,
-                        previewUrl: `data:${file.mimeType};base64,${file.data}`,
+                        size: file.sizeBytes,
+                        data: '',
+                        previewUrl,
                         source: 'upload',
+                        transport: 'attachment_ref',
+                        relativePath: file.relativePath,
                     });
+                }
+                for (const err of prepared.errors) {
+                    if (err.code === 'too_large') oversizedCount += 1;
+                    fallbackPaths.push(err.path);
+                }
+                if (oversizedCount > 0) {
+                    toast.info(
+                        oversizedCount === 1
+                            ? '图片超过 10MB，已作为文件引用添加'
+                            : `${oversizedCount} 张图片超过 10MB，已作为文件引用添加`,
+                    );
                 }
                 addImageDrafts(drafts);
                 otherPaths.push(...fallbackPaths);
@@ -844,7 +869,7 @@ export default function CompanionWindow() {
         }
 
         await copyPathsAsReferences(otherPaths);
-    }, [addImageDrafts, canAttachImages, copyPathsAsReferences, fileService, session.workspacePath, toast]);
+    }, [addImageDrafts, canAttachImages, copyPathsAsReferences, fileService, session.sessionId, session.workspacePath, toast]);
 
     useTauriFileDrop({
         enabled: mode !== 'hidden',
@@ -923,16 +948,30 @@ export default function CompanionWindow() {
             name: draft.name,
             size: draft.size,
             mimeType: draft.mimeType,
+            relativePath: draft.relativePath,
             previewUrl: draft.previewUrl,
             isImage: true,
         }));
         await send(text, {
             quote: q,
-            images: drafts.map((draft) => ({
-                name: draft.name,
-                mimeType: draft.mimeType,
-                data: draft.data,
-            })),
+            images: drafts.map((draft) => (
+                draft.transport === 'attachment_ref' && draft.relativePath
+                    ? {
+                        kind: 'attachment_ref' as const,
+                        id: draft.id,
+                        name: draft.name,
+                        mimeType: draft.mimeType,
+                        sizeBytes: draft.size,
+                        relativePath: draft.relativePath,
+                    }
+                    : {
+                        kind: 'inline_base64' as const,
+                        name: draft.name,
+                        mimeType: draft.mimeType,
+                        sizeBytes: draft.size,
+                        data: draft.data,
+                    }
+            )),
             attachments,
             appName: screenshotDraft?.appName ?? ctx?.appName ?? null,
             windowTitle: screenshotDraft?.windowTitle ?? ctx?.windowTitle ?? null,

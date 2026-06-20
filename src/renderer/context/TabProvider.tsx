@@ -41,7 +41,7 @@ import {
     shouldPreserveSnapshotOnPendingBirthPropSync,
 } from './sessionScopedEventGuards';
 import { isSubagentContainerTool } from '@/components/tools/toolBadgeConfig';
-import type { AgentStatusTodoSnapshot, Message, ContentBlock, ToolUseSimple, ToolInput, TaskStats, SubagentToolCall } from '@/types/chat';
+import type { AgentStatusTodoSnapshot, Message, MessageAttachment, ContentBlock, ToolUseSimple, ToolInput, TaskStats, SubagentToolCall } from '@/types/chat';
 import type { ToolUse } from '@/types/stream';
 import type { SystemInitInfo } from '../../shared/types/system';
 import type { RuntimeDiagnostics } from '../../shared/types/runtime';
@@ -57,7 +57,7 @@ import { isExistingSessionSwitch, isResetSessionBirth, shouldDegradedLoad } from
 import { getSessionDisplayText } from '@/utils/sessionDisplay';
 import { listenWithCleanup } from '@/utils/tauriListen';
 import type { PermissionMode } from '@/config/types';
-import type { QueuedMessageInfo } from '@/types/queue';
+import type { QueuedImageInfo, QueuedMessageInfo } from '@/types/queue';
 import {
     notifyMessageComplete,
     notifyPermissionRequest,
@@ -72,6 +72,100 @@ import { setBackgroundTaskStatus, setBackgroundTaskDescription, getBackgroundTas
 // via the /refs/:id endpoint when oversize).
 const TOOL_RESULT_DISPLAY_CAP = 8 * 1024;
 const TOOL_RESULT_TAIL_KEEP = 1024;
+
+function imageAttachmentName(img: ImageAttachment): string {
+    return img.name || img.file.name;
+}
+
+function imageAttachmentMimeType(img: ImageAttachment): string {
+    return img.mimeType || img.file.type || 'application/octet-stream';
+}
+
+function imageAttachmentSize(img: ImageAttachment): number {
+    return img.sizeBytes ?? img.file.size;
+}
+
+function queuedImageInfo(img: ImageAttachment): QueuedImageInfo {
+    return {
+        id: img.id,
+        name: imageAttachmentName(img),
+        preview: img.preview,
+        mimeType: imageAttachmentMimeType(img),
+        sizeBytes: imageAttachmentSize(img),
+        source: img.source,
+        relativePath: img.relativePath,
+    };
+}
+
+function imagePayloadForSend(img: ImageAttachment) {
+    const name = imageAttachmentName(img);
+    const mimeType = imageAttachmentMimeType(img);
+    const sizeBytes = imageAttachmentSize(img);
+    if (img.source === 'attachment_ref' && img.relativePath) {
+        return {
+            kind: 'attachment_ref' as const,
+            id: img.id,
+            name,
+            mimeType,
+            sizeBytes,
+            relativePath: img.relativePath,
+        };
+    }
+    return {
+        kind: 'inline_base64' as const,
+        name,
+        mimeType,
+        sizeBytes,
+        data: img.preview.split(',')[1] ?? '',
+    };
+}
+
+type WireMessageAttachment = {
+    id: string;
+    name: string;
+    size?: number;
+    mimeType: string;
+    path?: string;
+    relativePath?: string;
+    savedPath?: string;
+    previewUrl?: string;
+    isImage?: boolean;
+};
+
+function normalizeWireAttachments(
+    attachments: WireMessageAttachment[] | undefined,
+): MessageAttachment[] | undefined {
+    if (!attachments || attachments.length === 0) return undefined;
+    return attachments.map((att) => {
+        const relativePath = att.relativePath ?? att.path ?? att.savedPath;
+        const normalized: MessageAttachment = {
+            id: att.id,
+            name: att.name,
+            size: att.size ?? 0,
+            mimeType: att.mimeType,
+            relativePath,
+            savedPath: att.savedPath,
+            isImage: att.isImage ?? att.mimeType.startsWith('image/'),
+        };
+        const previewUrl = att.previewUrl ?? resolveAttachmentUrl(normalized);
+        return previewUrl ? { ...normalized, previewUrl } : normalized;
+    });
+}
+
+function mergeAttachmentPreviews(
+    attachments: MessageAttachment[] | undefined,
+    previews: MessageAttachment[] | undefined,
+): MessageAttachment[] | undefined {
+    if (!attachments || attachments.length === 0) return previews;
+    if (!previews || previews.length === 0) return attachments;
+    return attachments.map((att) => {
+        const match = previews.find((preview) =>
+            preview.id === att.id ||
+            (preview.name === att.name && preview.mimeType === att.mimeType)
+        );
+        return match?.previewUrl ? { ...att, previewUrl: match.previewUrl } : att;
+    });
+}
 
 function normalizeAgentPlanTodos(value: unknown): AgentStatusTodoSnapshot[] {
     if (!Array.isArray(value)) return [];
@@ -612,6 +706,7 @@ export default function TabProvider({
         size: number;
         mimeType: string;
         previewUrl: string;
+        relativePath?: string;
         isImage: boolean;
     }[] | null>(null);
 
@@ -1377,7 +1472,7 @@ export default function TabProvider({
             }
 
             case 'chat:message-replay': {
-                const payload = data as { message: { id: string; role: 'user' | 'assistant'; content: string | ContentBlock[]; timestamp: string; sdkUuid?: string; metadata?: Message['metadata'] }; replayKind?: 'cold-history' } | null;
+                const payload = data as { message: { id: string; role: 'user' | 'assistant'; content: string | ContentBlock[]; timestamp: string; sdkUuid?: string; metadata?: Message['metadata']; attachments?: WireMessageAttachment[] }; replayKind?: 'cold-history' } | null;
                 if (!payload?.message) break;
                 const msg = payload.message;
                 // `chat:message-replay` is OVERLOADED: the SSE-connect backfill carries
@@ -1410,11 +1505,10 @@ export default function TabProvider({
                 if (seenIdsRef.current.has(msg.id)) break;
                 seenIdsRef.current.add(msg.id);
 
-                // Merge pending attachments with user messages
-                let attachments = undefined;
+                let attachments = normalizeWireAttachments(msg.attachments);
                 if (msg.role === 'user' && pendingAttachmentsRef.current) {
-                    attachments = pendingAttachmentsRef.current;
-                    pendingAttachmentsRef.current = null; // Clear after use
+                    attachments = mergeAttachmentPreviews(attachments, pendingAttachmentsRef.current);
+                    pendingAttachmentsRef.current = null;
                 }
 
                 // Replayed assistant messages are completed — mark thinking blocks as isComplete
@@ -2770,7 +2864,7 @@ export default function TabProvider({
                         role: 'user';
                         content: string;
                         timestamp: string;
-                        attachments?: Array<{ id: string; name: string; size: number; mimeType: string; relativePath?: string; savedPath?: string; previewUrl?: string; isImage?: boolean }>;
+                        attachments?: WireMessageAttachment[];
                     };
                 } | null;
                 if (payload?.queueId) {
@@ -2784,10 +2878,7 @@ export default function TabProvider({
                         if (!seenIdsRef.current.has(msgId)) {
                             seenIdsRef.current.add(msgId);
 
-                            // Merge backend attachments (authoritative path/size) with frontend preview URLs.
-                            // Backend savedAttachments have relativePath but no previewUrl;
-                            // frontend queuedMessages have the original data URL previews.
-                            let attachments = payload.userMessage.attachments;
+                            let attachments = normalizeWireAttachments(payload.userMessage.attachments);
                             // Look up queued message by real queueId first;
                             // fall back to first opt-* entry when queue:started arrives
                             // before .then() replaces the optimistic ID (known race).
@@ -2799,30 +2890,22 @@ export default function TabProvider({
                             if (attachments?.length && queuedMsg?.images?.length) {
                                 // Merge: prefer frontend's local blob/data URL, fall back to
                                 // the Tauri custom-protocol URL resolved from relativePath.
-                                attachments = attachments.map(att => {
+                                attachments = attachments.map((att) => {
                                     const match = queuedMsg.images!.find(img => img.name === att.name);
-                                    const previewUrl = match?.preview ?? resolveAttachmentUrl(att);
-                                    return previewUrl ? { ...att, previewUrl } : att;
-                                });
-                            } else if (attachments?.length) {
-                                // Sibling tab / reconnect case: no local upload state,
-                                // resolve previews from the persisted attachment paths.
-                                attachments = attachments.map(att => {
-                                    const previewUrl = resolveAttachmentUrl(att);
-                                    return previewUrl ? { ...att, previewUrl } : att;
+                                    return match?.preview ? { ...att, previewUrl: match.preview } : att;
                                 });
                             } else if (!attachments?.length && queuedMsg?.images?.length) {
                                 // Fallback: server sent no attachments, use frontend snapshot
                                 attachments = queuedMsg.images.map(img => ({
                                     id: img.id,
                                     name: img.name,
-                                    size: 0,
-                                    mimeType: 'image/png',
+                                    size: img.sizeBytes ?? 0,
+                                    mimeType: img.mimeType ?? 'image/png',
+                                    relativePath: img.relativePath,
                                     previewUrl: img.preview,
                                     isImage: true,
                                 }));
                             }
-
                             const userMsg: Message = {
                                 id: msgId,
                                 role: 'user' as const,
@@ -2868,6 +2951,7 @@ export default function TabProvider({
                             }
                         }
                     }
+                    pendingAttachmentsRef.current = null;
 
                     setQueuedMessages(prev => {
                         const filtered = prev.filter(q => q.queueId !== payload.queueId);
@@ -3251,21 +3335,18 @@ export default function TabProvider({
         if (hasImages) {
             pendingAttachmentsRef.current = images.map((img) => ({
                 id: img.id,
-                name: img.file.name,
-                size: img.file.size,
-                mimeType: img.file.type,
+                name: imageAttachmentName(img),
+                size: imageAttachmentSize(img),
+                mimeType: imageAttachmentMimeType(img),
                 previewUrl: img.preview,
+                relativePath: img.relativePath,
                 isImage: true,
             }));
         }
 
-        // Prepare image data for backend
-        const imageData = images?.map((img) => ({
-            name: img.file.name,
-            mimeType: img.file.type,
-            // Extract base64 data from data URL (remove "data:image/xxx;base64," prefix)
-            data: img.preview.split(',')[1],
-        }));
+        // Prepare image data for backend. Path-backed attachments carry refs;
+        // only legacy no-path File/paste fallback carries base64.
+        const imageData = images?.map(imagePayloadForSend);
 
         // Optimistic queue: immediately show badge when AI is streaming.
         // We don't know the real queueId yet (backend assigns it), so use a local ID.
@@ -3275,7 +3356,7 @@ export default function TabProvider({
             setQueuedMessages(prev => [...prev, {
                 queueId: localQueueId,
                 text: trimmed,
-                images: images?.map(img => ({ id: img.id, name: img.file.name, preview: img.preview })),
+                images: images?.map(queuedImageInfo),
                 timestamp: Date.now(),
             }]);
         }
@@ -3312,6 +3393,7 @@ export default function TabProvider({
                 });
 
                 if (response.queued && response.queueId) {
+                    pendingAttachmentsRef.current = null;
                     const realQueueId = response.queueId;
                     if (startedQueueIdsRef.current.has(realQueueId)) {
                         // Already started (mid-turn injection) — clean up optimistic entry
@@ -3327,7 +3409,7 @@ export default function TabProvider({
                                     ...q,
                                     queueId: realQueueId,
                                     isInFlight: !!response.isInFlight,
-                                    images: images?.map(img => ({ id: img.id, name: img.file.name, preview: img.preview })),
+                                    images: images?.map(queuedImageInfo),
                                 }
                                 : q
                         ));
@@ -3338,14 +3420,14 @@ export default function TabProvider({
                                 // SSE already added it — enrich with image data if available
                                 if (!images?.length) return prev;
                                 return prev.map(q => q.queueId === realQueueId
-                                    ? { ...q, images: images.map(img => ({ id: img.id, name: img.file.name, preview: img.preview })) }
+                                    ? { ...q, images: images.map(queuedImageInfo) }
                                     : q
                                 );
                             }
                             return [...prev, {
                                 queueId: realQueueId,
                                 text: trimmed,
-                                images: images?.map(img => ({ id: img.id, name: img.file.name, preview: img.preview })),
+                                images: images?.map(queuedImageInfo),
                                 timestamp: Date.now(),
                                 isInFlight: !!response.isInFlight,
                             }];

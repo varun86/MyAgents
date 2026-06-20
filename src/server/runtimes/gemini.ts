@@ -32,7 +32,7 @@ import type {
   SessionStartOptions,
   UnifiedEvent,
   UnifiedEventCallback,
-  ImagePayload,
+  ResolvedImagePayload,
 } from './types';
 import { StaleRuntimeSessionError } from './types';
 import { augmentedProcessEnv, resolveCommand, stripAnsi } from './env-utils';
@@ -259,7 +259,7 @@ async function writeSessionSystemPrompt(
  * ACP accepts `{ type: 'image', mimeType, data }` with base64 data natively —
  * simpler than Codex's localImage temp-file dance.
  */
-function buildGeminiPrompt(text: string, images?: ImagePayload[]): unknown[] {
+function buildGeminiPrompt(text: string, images?: ResolvedImagePayload[]): unknown[] {
   const blocks: unknown[] = [];
   if (images && images.length > 0) {
     for (const img of images) {
@@ -1094,7 +1094,7 @@ export class GeminiRuntime implements AgentRuntime {
   async sendMessage(
     process: RuntimeProcess,
     message: string,
-    images?: ImagePayload[],
+    images?: ResolvedImagePayload[],
   ): Promise<void> {
     const geminiProc = process as GeminiProcess;
     if (geminiProc.exited) throw new Error('Gemini process has exited');
@@ -1115,7 +1115,7 @@ export class GeminiRuntime implements AgentRuntime {
   private dispatchPrompt(
     geminiProc: GeminiProcess,
     message: string,
-    images: ImagePayload[] | undefined,
+    images: ResolvedImagePayload[] | undefined,
     emit: UnifiedEventCallback,
   ): void {
     // Live events begin now. Any session/update that arrives from here on is part

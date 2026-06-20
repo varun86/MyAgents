@@ -1,5 +1,6 @@
 import { AlertCircle, ChevronRight, ChevronUp, Gauge, Loader, Paperclip, Plus, Send, Square, X, FileText, AtSign, Wrench, Timer, Settings2, Unlock } from 'lucide-react';
 import { memo, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState, forwardRef } from 'react';
+import { open } from '@tauri-apps/plugin-dialog';
 
 import Tip from '@/components/Tip';
 import { useToast } from '@/components/Toast';
@@ -17,7 +18,7 @@ import QueuedMessagesPanel from './QueuedMessageBubble';
 import CronTaskStatusBar from './cron/CronTaskStatusBar';
 import CronTaskOverlay from './cron/CronTaskOverlay';
 import { useUndoStack } from '@/hooks/useUndoStack';
-import { isImageFile, isImageMimeType, ALLOWED_IMAGE_MIME_TYPES } from '../../shared/fileTypes';
+import { isImageFile, isImageMimeType, ALLOWED_IMAGE_MIME_TYPES, USER_IMAGE_ATTACHMENT_MAX_BYTES } from '../../shared/fileTypes';
 import type { QueuedMessageInfo } from '@/types/queue';
 import { CUSTOM_EVENTS } from '../../shared/constants';
 import { reasoningEffortChoices, REASONING_EFFORT_DESCRIPTIONS, REASONING_EFFORT_DEFAULT } from '../../shared/reasoningEffort';
@@ -25,6 +26,7 @@ import { isDebugMode } from '@/utils/debug';
 import { retainFocusOnMouseDown } from '@/utils/focusRetention';
 import { renameIfBareClipboardImage } from '@/utils/clipboardImage';
 import { detectExcessiveRepetition } from '@/utils/excessiveRepetition';
+import { isTauriEnvironment } from '@/utils/browserMock';
 import { isProviderAvailable } from '@/config/configService';
 import { modelSupportsModality } from '@/config/services/providerService';
 import RuntimeSelector from '@/components/RuntimeSelector';
@@ -36,6 +38,7 @@ import {
   findHighlightRanges,
   renderTextWithHighlights,
 } from '@/utils/highlightSearchMatches';
+import { resolveAttachmentUrl } from '@/utils/attachmentUrl';
 
 // ===== Module-level pure helpers (extracted from render body) =====
 
@@ -68,7 +71,12 @@ function getCurrentModelLabel(
 export interface ImageAttachment {
   id: string;
   file: File;
-  preview: string; // data URL for preview
+  preview: string; // data/protocol URL for preview
+  source?: 'inline_base64' | 'attachment_ref';
+  name?: string;
+  mimeType?: string;
+  sizeBytes?: number;
+  relativePath?: string;
 }
 
 interface SimpleChatInputProps {
@@ -92,6 +100,8 @@ interface SimpleChatInputProps {
    *  selected workspace). When null/undefined the input still renders but those
    *  features error toast if the user tries them. (PRD 0.2.7) */
   workspacePath?: string | null;
+  /** Current chat session id; used to stage path-backed user image attachments. */
+  sessionId?: string | null;
   /** Session state for stop button UI ('stopping' shows disabled spinner) */
   sessionState?: SessionState;
   /** System status (e.g., 'compacting') - when set, shows disabled send button instead of stop */
@@ -237,7 +247,11 @@ const MAX_LINES = 9;
 // 2-row default to preserve screen real estate for the message stream.
 const LAUNCHER_MIN_LINES = 3;
 const MAX_IMAGES = 5;
-const MAX_IMAGE_SIZE = 5 * 1024 * 1024; // 5MB
+const MAX_IMAGE_SIZE = USER_IMAGE_ATTACHMENT_MAX_BYTES;
+
+function imageAttachmentName(img: ImageAttachment): string {
+  return img.name || img.file.name;
+}
 
 // Methods exposed to parent via ref
 export interface SimpleChatInputHandle {
@@ -354,6 +368,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   agentStatusSlot,
   onOverlayHeightChange,
   workspacePath = null,
+  sessionId = null,
 }, ref) {
   const isLauncherMode = mode === 'launcher';
   // Launcher-vs-Chat minimum row count, referenced by both the auto-resize
@@ -363,6 +378,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   const effectiveMinLines = isLauncherMode ? LAUNCHER_MIN_LINES : 2;
   const isExternalRuntime = runtime !== 'builtin';
   const overlayRootRef = useRef<HTMLDivElement>(null);
+  const attachmentSessionId = sessionId;
 
   // Compute display modes and model name based on runtime
   const displayPermissionModes = isExternalRuntime && runtimePermissionModes
@@ -712,32 +728,70 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   // by syncProjectUserConfig() at session startup. No per-invocation copy needed.
   const handleSkillSelect = useCallback((_cmd: SlashCommand) => {}, []);
 
-  // Validate and add image (resize is handled server-side in enqueueUserMessage)
+  // Validate and add inline image fallback (resize is handled server-side in enqueueUserMessage).
+  // Finder/Explorer path drops should use addPreparedImageAttachment instead so
+  // /chat/send carries an attachment ref rather than a large base64 payload.
   const addImage = useCallback((file: File) => {
-    if (images.length >= MAX_IMAGES) {
-      toastRef.current.warning(`最多只能上传 ${MAX_IMAGES} 张图片`);
-      return;
-    }
     if (!ALLOWED_IMAGE_MIME_TYPES.includes(file.type)) {
       toastRef.current.warning('不支持的图片格式，请使用 PNG/JPG/GIF/WebP');
       return;
     }
     if (file.size > MAX_IMAGE_SIZE) {
-      toastRef.current.warning('图片大小不能超过 5MB');
+      toastRef.current.warning('图片大小不能超过 10MB');
       return;
     }
 
     const reader = new FileReader();
     reader.onload = (e) => {
       const dataUrl = e.target?.result as string;
-      setImages((prev) => [...prev, {
-        id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-        file,
-        preview: dataUrl,
-      }]);
+      setImages((prev) => {
+        if (prev.length >= MAX_IMAGES) {
+          toastRef.current.warning(`最多只能上传 ${MAX_IMAGES} 张图片`);
+          return prev;
+        }
+        return [...prev, {
+          id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+          file,
+          preview: dataUrl,
+          source: 'inline_base64',
+          name: file.name,
+          mimeType: file.type,
+          sizeBytes: file.size,
+        }];
+      });
     };
     reader.readAsDataURL(file);
-  }, [images.length]);
+  }, []);
+
+  const addPreparedImageAttachment = useCallback((attachment: {
+    id: string;
+    name: string;
+    mimeType: string;
+    sizeBytes: number;
+    relativePath: string;
+  }) => {
+    const preview = resolveAttachmentUrl({ relativePath: attachment.relativePath });
+    if (!preview) {
+      toastRef.current.warning(`图片 "${attachment.name}" 预览地址生成失败`);
+      return;
+    }
+    setImages((prev) => {
+      if (prev.length >= MAX_IMAGES) {
+        toastRef.current.warning(`最多只能上传 ${MAX_IMAGES} 张图片`);
+        return prev;
+      }
+      return [...prev, {
+        id: attachment.id,
+        file: new File([], attachment.name, { type: attachment.mimeType }),
+        preview,
+        source: 'attachment_ref',
+        name: attachment.name,
+        mimeType: attachment.mimeType,
+        sizeBytes: attachment.sizeBytes,
+        relativePath: attachment.relativePath,
+      }];
+    });
+  }, []);
 
   // Remove image
   const removeImage = useCallback((id: string) => {
@@ -790,16 +844,29 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
     // they have no `inputModalities` metadata and treat all models as
     // multimodal-capable. Forcing fallback there would be a false negative
     // for runtimes whose models DO accept images (Gemini 2.5 / 3).
-    const fallbackImagesToFiles =
-      imageFiles.length > 0 &&
-      !isExternalRuntime &&
-      !modelSupportsModality(provider, currentModelId, 'image');
-
     // Capture the user-intended file count BEFORE merging fallback images
     // into otherFiles. The downstream success toast ("已添加 N 个文件到工作区")
     // should only count files the user actually meant to drop in — fallback
     // images already get their own info toast and double-toasting feels noisy.
     const userIntendedFileCount = otherFiles.length;
+
+    const oversizedImageFiles = imageFiles.filter((file) => file.size > MAX_IMAGE_SIZE);
+    if (oversizedImageFiles.length > 0) {
+      toastRef.current.warning(
+        oversizedImageFiles.length === 1
+          ? '图片超过 10MB，请使用“上传文件”或从文件夹拖入以作为 @文件 引用'
+          : `${oversizedImageFiles.length} 张图片超过 10MB，请使用“上传文件”或从文件夹拖入以作为 @文件 引用`,
+      );
+      for (const img of oversizedImageFiles) {
+        const idx = imageFiles.indexOf(img);
+        if (idx >= 0) imageFiles.splice(idx, 1);
+      }
+    }
+
+    const fallbackImagesToFiles =
+      imageFiles.length > 0 &&
+      !isExternalRuntime &&
+      !modelSupportsModality(provider, currentModelId, 'image');
 
     if (fallbackImagesToFiles) {
       toastRef.current.info(
@@ -951,35 +1018,48 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
       imagePaths.length = 0;
     }
 
-    // Handle image files — read absolute paths via Rust and add as image attachments.
-    // PRD 0.2.7: routed through fileService.readPathsAsBase64 (no Sidecar dependency).
+    // Handle image files — copy absolute paths into the app-owned attachment
+    // store and keep only refs in the send payload. Oversized images fall
+    // through to the workspace file-reference path below.
     if (imagePaths.length > 0) {
+      if (!attachmentSessionId) {
+        toastRef.current.error('无法添加图片：当前会话尚未就绪');
+        return;
+      }
+      const pendingFileReferencePaths: string[] = [];
+      let oversizedCount = 0;
       try {
-        const readResult = await fileService.readPathsAsBase64({ paths: imagePaths });
-        if (readResult.success && readResult.files) {
-          for (const fileData of readResult.files) {
-            if (fileData.data && !fileData.error) {
-              // Create a File object from base64 data
-              const byteString = atob(fileData.data);
-              const ab = new ArrayBuffer(byteString.length);
-              const ia = new Uint8Array(ab);
-              for (let i = 0; i < byteString.length; i++) {
-                ia[i] = byteString.charCodeAt(i);
-              }
-              const blob = new Blob([ab], { type: fileData.mimeType });
-              const file = new File([blob], fileData.name, { type: fileData.mimeType });
-              addImage(file);
-            }
+        const prepared = await fileService.prepareUserImageAttachments({
+          sessionId: attachmentSessionId,
+          paths: imagePaths,
+        });
+        for (const attachment of prepared.attachments) {
+          addPreparedImageAttachment(attachment);
+        }
+        for (const err of prepared.errors) {
+          if (err.code === 'too_large') {
+            oversizedCount += 1;
+          } else if (isDebugMode()) {
+            console.warn('[SimpleChatInput] Failed to prepare image attachment, treating as file:', err);
           }
+          pendingFileReferencePaths.push(err.path);
         }
       } catch (err) {
-        // If image reading fails, fall back to treating them as regular files
         if (isDebugMode()) {
-          console.warn('[SimpleChatInput] Failed to read images, treating as regular files:', err);
+          console.warn('[SimpleChatInput] Failed to prepare image attachments, treating as regular files:', err);
         }
-        otherPaths.push(...imagePaths);
-        imagePaths.length = 0;
+        pendingFileReferencePaths.push(...imagePaths);
       }
+
+      if (oversizedCount > 0) {
+        toastRef.current.info(
+          oversizedCount === 1
+            ? '图片超过 10MB，已作为文件引用添加'
+            : `${oversizedCount} 张图片超过 10MB，已作为文件引用添加`,
+        );
+      }
+      otherPaths.push(...pendingFileReferencePaths);
+      imagePaths.length = 0;
     }
 
     // Handle non-image files - copy to myagents_files and insert @references.
@@ -1052,7 +1132,31 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
         toastRef.current.error(err instanceof Error ? err.message : '文件复制失败');
       }
     }
-  }, [fileService, workspacePath, addImage, inputValue, textareaRef, undoStack, onWorkspaceRefresh, provider, currentModelId, isExternalRuntime]);
+  }, [fileService, workspacePath, addPreparedImageAttachment, inputValue, textareaRef, undoStack, onWorkspaceRefresh, provider, currentModelId, isExternalRuntime, attachmentSessionId]);
+
+  const handleUploadButtonClick = useCallback(async () => {
+    setShowPlusMenu(false);
+    if (isTauriEnvironment()) {
+      try {
+        const selected = await open({
+          multiple: true,
+          directory: false,
+          title: '选择文件',
+        });
+        const paths = Array.isArray(selected)
+          ? selected.filter((path): path is string => typeof path === 'string')
+          : (typeof selected === 'string' ? [selected] : []);
+        if (paths.length > 0) {
+          await processDroppedFilePaths(paths);
+        }
+      } catch (err) {
+        console.error('[SimpleChatInput] File picker error:', err);
+        toastRef.current.error('选择文件失败');
+      }
+      return;
+    }
+    fileInputRef.current?.click();
+  }, [processDroppedFilePaths]);
 
   // Insert @references at cursor position or end of input
   // Uses inputValueRef for stable callback (avoids rebuilding on every input change)
@@ -1805,7 +1909,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                     src={img.preview}
                     alt="attachment"
                     className="h-16 w-16 rounded-lg object-cover border border-[var(--line)] cursor-pointer"
-                    onDoubleClick={() => openPreview(img.preview, img.file.name)}
+                    onDoubleClick={() => openPreview(img.preview, imageAttachmentName(img))}
                   />
                   <button
                     type="button"
@@ -2132,7 +2236,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                   type="button"
                   onClick={(e) => {
                     e.stopPropagation();
-                    fileInputRef.current?.click();
+                    void handleUploadButtonClick();
                   }}
                   className="flex w-full items-center gap-2 px-3 py-2 text-sm text-[var(--ink-muted)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
                 >

@@ -17,7 +17,7 @@ import type {
 } from '../../shared/types/runtime';
 import { CODEX_PERMISSION_MODES } from '../../shared/types/runtime';
 import { coerceFileChanges, formatFileChangeForResult } from '../../shared/fileChange';
-import type { AgentPlanTodo, AgentRuntime, RuntimeConfigCapabilities, RuntimeProcess, SessionStartOptions, UnifiedEvent, UnifiedEventCallback, ImagePayload, SubAgentScope } from './types';
+import type { AgentPlanTodo, AgentRuntime, RuntimeConfigCapabilities, RuntimeProcess, SessionStartOptions, UnifiedEvent, UnifiedEventCallback, ResolvedImagePayload, SubAgentScope } from './types';
 import { StaleRuntimeSessionError } from './types';
 import { mapCodexTokenUsage, type CodexThreadTokenUsage } from './codex-token-usage';
 import { augmentedProcessEnv, resolveCommand, stripAnsi } from './env-utils';
@@ -136,7 +136,7 @@ const TEMP_IMG_DIR = join(
  * Write base64 image to a temp file and return its path.
  * Codex CLI accepts `localImage` input with file paths.
  */
-function writeImageToTempFile(img: ImagePayload): string {
+function writeImageToTempFile(img: ResolvedImagePayload): string {
   if (!existsSync(TEMP_IMG_DIR)) {
     ensureDirSync(TEMP_IMG_DIR);
   }
@@ -171,7 +171,7 @@ function cleanupStaleTempImages(): void {
  * Build Codex input array with optional images.
  * Images are written to temp files and referenced via `localImage` type.
  */
-function buildCodexInput(text: string, images?: ImagePayload[]): unknown[] {
+function buildCodexInput(text: string, images?: ResolvedImagePayload[]): unknown[] {
   const input: unknown[] = [];
   if (images && images.length > 0) {
     for (const img of images) {
@@ -2109,7 +2109,7 @@ export class CodexRuntime implements AgentRuntime {
     return codexProc;
   }
 
-  async sendMessage(process: RuntimeProcess, message: string, images?: ImagePayload[]): Promise<void> {
+  async sendMessage(process: RuntimeProcess, message: string, images?: ResolvedImagePayload[]): Promise<void> {
     const codexProc = process as CodexProcess;
     if (codexProc.exited) throw new Error('Codex process has exited');
 

@@ -42,6 +42,9 @@ export const ALLOWED_IMAGE_MIME_TYPES = [
   'image/webp',
 ];
 
+/** Product boundary for chat image attachments. Larger images are routed as @path file references. */
+export const USER_IMAGE_ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024;
+
 /**
  * Check if a MIME type is a supported image type
  */

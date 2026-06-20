@@ -19,7 +19,7 @@
 
 import { createRequire } from 'module';
 import type { Sharp, SharpOptions } from 'sharp';
-import type { ImagePayload } from '../runtimes/types';
+import type { ResolvedImagePayload } from '../runtimes/types';
 import { getBundledSharpEntryPoint } from './runtime';
 
 /** Claude API recommends ≤1568px on both sides; larger images are auto-shrunk by the API, wasting bandwidth and TTFT. */
@@ -236,10 +236,10 @@ export function classifyImageError(err: unknown): string {
  * path, kept for API symmetry and as the documented fallback shape (always 1 image).
  */
 export async function resizeImageIfNeeded(
-  img: ImagePayload,
+  img: ResolvedImagePayload,
   signal?: AbortSignal,
   timeoutMs: number = DEFAULT_TIMEOUT_MS,
-): Promise<ImagePayload> {
+): Promise<ResolvedImagePayload> {
   const [first] = await processImageInternal(img, /*allowSlice*/ false, signal, timeoutMs);
   return first ?? img;
 }
@@ -254,19 +254,19 @@ export async function resizeImageIfNeeded(
  * Callers surface the error to the user rather than silently sending an oversized payload.
  */
 export async function processImage(
-  img: ImagePayload,
+  img: ResolvedImagePayload,
   signal?: AbortSignal,
   timeoutMs: number = DEFAULT_TIMEOUT_MS,
-): Promise<ImagePayload[]> {
+): Promise<ResolvedImagePayload[]> {
   return processImageInternal(img, /*allowSlice*/ true, signal, timeoutMs);
 }
 
 async function processImageInternal(
-  img: ImagePayload,
+  img: ResolvedImagePayload,
   allowSlice: boolean,
   signal: AbortSignal | undefined,
   timeoutMs: number,
-): Promise<ImagePayload[]> {
+): Promise<ResolvedImagePayload[]> {
   // Fast-reject: base64 upper bound BEFORE any decode work.
   if (img.data.length > MAX_BASE64_LENGTH) {
     const sizeMB = (img.data.length / 1024 / 1024).toFixed(1);
@@ -319,7 +319,7 @@ async function processImageInternal(
     // 10% overlap, applied only at tile start (for tiles after the first).
     const overlap = Math.round(tileSize * 0.1);
 
-    const tiles: ImagePayload[] = [];
+    const tiles: ResolvedImagePayload[] = [];
     for (let i = 0; i < tileCount; i++) {
       if (signal?.aborted) throw new Error('aborted during tile encode');
       const start = Math.max(0, i * tileSize - (i > 0 ? overlap : 0));

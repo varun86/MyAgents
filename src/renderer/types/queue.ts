@@ -3,6 +3,10 @@ export interface QueuedImageInfo {
   id: string;
   name: string;
   preview: string; // data URL for preview display
+  mimeType?: string;
+  sizeBytes?: number;
+  source?: 'inline_base64' | 'attachment_ref';
+  relativePath?: string;
 }
 
 export interface QueuedMessageInfo {

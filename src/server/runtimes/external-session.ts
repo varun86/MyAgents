@@ -19,6 +19,7 @@ import type {
   RuntimeProcess,
   UnifiedEvent,
   ImagePayload,
+  ResolvedImagePayload,
 } from './types';
 import type { ToolAttachment } from '../../shared/types/tool-attachment';
 import {
@@ -27,6 +28,7 @@ import {
 } from '../../shared/toolDisplay/filePatch';
 import { StaleRuntimeSessionError } from './types';
 import { awaitInFlightSaves, rebuildAttachmentRegistryFromBlocks, trackInFlightSave } from './tool-attachments';
+import { messageAttachmentsFromImagePayloads, resolveImagePayloads } from './image-payload';
 import { maybeSpill, type LargeValueRef } from '../utils/large-value-store';
 import type { AskUserQuestionInput, AskUserQuestion } from '../../shared/types/askUserQuestion';
 import { withQuestionTextAnswerKeys } from '../../shared/types/askUserQuestion';
@@ -303,6 +305,25 @@ interface ExternalQueuedConfigOperation {
 }
 
 type ExternalTurnOperation = ExternalQueuedMessageOperation | ExternalQueuedConfigOperation;
+
+function sessionMessageAttachmentsFromImages(
+  sessionId: string | undefined,
+  images: ImagePayload[] | undefined,
+): SessionMessage['attachments'] | undefined {
+  if (!sessionId || !images || images.length === 0) return undefined;
+  try {
+    const attachments = messageAttachmentsFromImagePayloads(sessionId, images).map((att) => ({
+      id: att.id,
+      name: att.name,
+      mimeType: att.mimeType,
+      path: att.relativePath,
+    }));
+    return attachments.length > 0 ? attachments : undefined;
+  } catch (err) {
+    console.error('[external-session] failed to prepare user image attachments:', err);
+    return undefined;
+  }
+}
 
 // ─── External turn-boundary operation queue (messages + config) ───
 // Codex/CC/Gemini are turn-level: each send starts a NEW turn. Desktop sends
@@ -1222,6 +1243,17 @@ function resetTurnAccumulators(): void {
   currentTurnEstimatedInputTokens = 0;
 }
 
+function rollbackReservedExternalTurnAfterDrainFailure(): void {
+  resetTurnAccumulators();
+  currentTurnStartTime = 0;
+  turnCompleted = true;
+  earlyBroadcastedUserMsg = null;
+  setExternalSessionState('idle');
+  if (externalOperationQueue.length > 0) {
+    setTimeout(drainExternalQueueAfterTurn, 0);
+  }
+}
+
 function buildPersistedTurnUsage(): MessageUsage | undefined {
   const fallbackModel = currentTurnUsage?.model
     || lastRuntimeReportedModel
@@ -2103,7 +2135,7 @@ export async function startExternalSession(options: {
   sessionId: string;
   workspacePath: string;
   initialMessage?: string;
-  initialImages?: ImagePayload[];
+  initialImages?: ResolvedImagePayload[];
   model?: string;
   permissionMode?: string;
   /** #324 — NORMALIZED effort level, OR '' = explicit reset to the runtime
@@ -2149,7 +2181,7 @@ async function _doStartExternalSession(options: {
   sessionId: string;
   workspacePath: string;
   initialMessage?: string;
-  initialImages?: ImagePayload[];
+  initialImages?: ResolvedImagePayload[];
   model?: string;
   permissionMode?: string;
   reasoningEffort?: string;
@@ -2494,8 +2526,17 @@ export async function sendExternalMessage(
   context?: ExternalSendContext,
   preBroadcasted?: SessionMessage,
 ): Promise<{ queued: boolean; error?: string }> {
-  const hasImages = images && images.length > 0;
+  const hasInputImages = images && images.length > 0;
+  if (hasInputImages && !context?.sessionId) {
+    return { queued: false, error: '图片附件缺少会话上下文，无法发送' };
+  }
+  const resolvedImages = context?.sessionId
+    ? resolveImagePayloads(context.sessionId, images)
+    : undefined;
+  const hasImages = resolvedImages && resolvedImages.length > 0;
   const turnAnalyticsSource = context?.analyticsSource ?? context?.scenario.type ?? lastAnalyticsSource;
+  const userAttachments = preBroadcasted?.attachments
+    ?? sessionMessageAttachmentsFromImages(context?.sessionId, images);
 
   // Show user message immediately — don't block on pre-warm or turn serialization.
   // The message appears in the chat as soon as the user presses send, giving
@@ -2510,13 +2551,16 @@ export async function sendExternalMessage(
   // the user's bubble would flash twice with different IDs.
   let earlyUserMsg: SessionMessage;
   if (preBroadcasted) {
-    earlyUserMsg = preBroadcasted;
+    earlyUserMsg = userAttachments && !preBroadcasted.attachments
+      ? { ...preBroadcasted, attachments: userAttachments }
+      : preBroadcasted;
   } else {
     earlyUserMsg = {
       id: `user-${Date.now()}`,
       role: 'user',
       content: text,
       timestamp: new Date().toISOString(),
+      attachments: userAttachments,
     };
     broadcast('chat:message-replay', { message: earlyUserMsg });
   }
@@ -2605,7 +2649,7 @@ export async function sendExternalMessage(
     count: hasImages ? images?.length : 0,
     detail: {
       source: turnAnalyticsSource,
-      hasImages: Boolean(hasImages),
+      hasImages: Boolean(hasInputImages),
       preBroadcasted: Boolean(preBroadcasted),
     },
   });
@@ -2621,7 +2665,7 @@ export async function sendExternalMessage(
         sessionId: context.sessionId,
         workspacePath: context.workspacePath,
         initialMessage: text,
-        initialImages: hasImages ? images : undefined,
+        initialImages: hasImages ? resolvedImages : undefined,
         model: context.model ?? lastModel,
         permissionMode: context.permissionMode ?? lastPermissionMode,
         reasoningEffort: resolveTurnReasoningEffort(context),
@@ -2653,7 +2697,7 @@ export async function sendExternalMessage(
         sessionId: lastSessionId,
         workspacePath: lastWorkspacePath,
         initialMessage: text,
-        initialImages: hasImages ? images : undefined,
+        initialImages: hasImages ? resolvedImages : undefined,
         model: nextModel,
         permissionMode: nextPermissionMode,
         reasoningEffort: resolveTurnReasoningEffort(context), // #324
@@ -2685,6 +2729,7 @@ export async function sendExternalMessage(
       role: 'user',
       content: text,
       timestamp: new Date().toISOString(),
+      attachments: userAttachments,
     };
     if (!earlyBroadcastedUserMsg) {
       broadcast('chat:message-replay', { message: userMsg });
@@ -2747,7 +2792,7 @@ export async function sendExternalMessage(
     }
 
     setExternalSessionState('running');
-    await activeRuntime.sendMessage(activeProcess, text, hasImages ? images : undefined);
+    await activeRuntime.sendMessage(activeProcess, text, hasImages ? resolvedImages : undefined);
     return { queued: true };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -2816,6 +2861,7 @@ export function enqueueExternalSendForDesktop(
     role: 'user',
     content: text,
     timestamp: new Date().toISOString(),
+    attachments: sessionMessageAttachmentsFromImages(context.sessionId, images),
   };
   broadcast('chat:message-replay', { message: userMsg });
 
@@ -2886,11 +2932,18 @@ async function drainExternalOperationsAfterTurn(): Promise<void> {
       role: 'user',
       content: item.text,
       timestamp: new Date().toISOString(),
+      attachments: sessionMessageAttachmentsFromImages(item.context.sessionId, item.images),
     };
     // Surface the bubble now (turn end) — mirrors the builtin queue:started fallback.
     broadcast('queue:started', {
       queueId: item.queueId,
-      userMessage: { id: userMsg.id, role: 'user', content: item.text, timestamp: userMsg.timestamp },
+      userMessage: {
+        id: userMsg.id,
+        role: 'user',
+        content: item.text,
+        timestamp: userMsg.timestamp,
+        attachments: userMsg.attachments,
+      },
     });
     // Send (serialized), adopting the surfaced bubble so sendExternalMessage doesn't re-broadcast.
     const task = externalDesktopSendTail.then(() =>
@@ -2902,10 +2955,14 @@ async function drainExternalOperationsAfterTurn(): Promise<void> {
     void task
       .then((result) => {
         if (result && !result.queued && result.error) {
+          rollbackReservedExternalTurnAfterDrainFailure();
           broadcast('chat:agent-error', { message: result.error });
         }
       })
-      .catch((err) => broadcast('chat:agent-error', { message: err instanceof Error ? err.message : String(err) }));
+      .catch((err) => {
+        rollbackReservedExternalTurnAfterDrainFailure();
+        broadcast('chat:agent-error', { message: err instanceof Error ? err.message : String(err) });
+      });
   } finally {
     if (externalOperationDrainInFlight) {
       externalOperationDrainInFlight = false;
