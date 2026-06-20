@@ -41,6 +41,7 @@ export interface FbAttachment {
     name: string;
     size: number;
     mimeType: string;
+    relativePath?: string;
     previewUrl?: string;
     isImage?: boolean;
 }
@@ -80,7 +81,10 @@ export interface FbPermReq {
 
 export interface FbSendOpts {
     quote?: string | null;
-    images?: Array<{ name: string; mimeType: string; data: string }>;
+    images?: Array<
+        | { kind?: 'inline_base64'; name: string; mimeType: string; data: string; sizeBytes?: number }
+        | { kind: 'attachment_ref'; id?: string; name: string; mimeType: string; relativePath: string; sizeBytes?: number }
+    >;
     attachments?: FbAttachment[];
     /** Eager-captured source window（最前台 app / 窗口标题）— context reminder only. */
     appName?: string | null;

@@ -18,13 +18,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { DragEvent, ClipboardEvent } from 'react';
 
-import { ALLOWED_IMAGE_MIME_TYPES } from '../../shared/fileTypes';
+import { ALLOWED_IMAGE_MIME_TYPES, USER_IMAGE_ATTACHMENT_MAX_BYTES } from '../../shared/fileTypes';
 import type { ImageAttachment } from '@/components/SimpleChatInput';
 
 export interface UseImageAttachmentsOptions {
     /** Maximum number of attached images. Default 5. */
     maxImages?: number;
-    /** Maximum per-image byte size. Default 5 MiB. */
+    /** Maximum per-image byte size. Default 10 MiB. */
     maxImageSize?: number;
 }
 
@@ -51,7 +51,7 @@ export interface UseImageAttachmentsResult {
 }
 
 const DEFAULT_MAX_IMAGES = 5;
-const DEFAULT_MAX_IMAGE_SIZE = 5 * 1024 * 1024;
+const DEFAULT_MAX_IMAGE_SIZE = USER_IMAGE_ATTACHMENT_MAX_BYTES;
 
 function makeId(): string {
     return `${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;

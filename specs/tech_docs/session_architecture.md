@@ -87,6 +87,44 @@ querySession = query({
 | Subprocess crash 恢复 | `finally` 块触发 `schedulePreWarm()` 重建 session |
 | 配置变更重启 | MCP / Agent 变更导致 session 中止后恢复 |
 
+### Session 间事件协议（send / watch）
+
+`myagents session send` / `watch` 不是普通文本拼接，而是结构化的 session event
+协议。CLI 经 `/api/admin/session/*` 进入当前 Sidecar，事件统一渲染为
+`<myagents-session-event ...>` prompt，正文 payload 先经过结构标签 neutralize，
+避免被跨 session 内容伪造协议边界。
+
+| 事件 | 语义 | 投递路径 |
+|------|------|----------|
+| `send.request` | 源 session 给目标 session 投递工作或通知 | 源 Sidecar → Management API `/api/inbox/deliver` → 目标 Sidecar |
+| `send.result` | 目标 turn 结束后把结果回推给源 session | 目标 Sidecar turn terminal → Management API → 源 Sidecar |
+| `watch.already_idle` | 注册 watch 时目标已无活跃 turn，立即返回最近结果 | 调用方 Sidecar 本地生成 event prompt |
+| `watch.completed` | watch 注册时目标正在运行，该 turn 正常 terminal 后回推结果 | 目标 Sidecar pending watch registry → Management API → watcher Sidecar |
+| `watch.error` | 被 watch 的目标 turn 中止、错误或无法确认正常完成 | 同 `watch.completed` |
+
+`watch` 的 owner 分两层：Rust Management API 先用 live sidecar 表确认目标 session
+是否仍在运行，并在目标 sidecar 上注册 pending watch；目标 sidecar 只在 turn terminal
+时调用 `deliverSessionWatchEvents()` 生成最终事件。只有 watcher sidecar 确认 inbox
+delivery 成功后，目标 sidecar 才 ack 并清理 pending watch；Management API 暂时不可用
+时保留待重试，避免完成事件丢失。
+
+### Desktop 连续 Query 队列模式（0.2.37）
+
+内置 AgentSDK 的桌面 `/chat/send` 支持两种连续发送策略，由
+`AppConfig.chatQueueResponseMode` 控制，默认值为 `realtime`：
+
+| 模式 | 语义 | 队列归属 |
+|------|------|----------|
+| `realtime` | 保持旧行为：当前 turn 忙时尽快把 query 投递给 SDK，让 SDK 在持久 `messageGenerator()` 中尽早消费 | 原 `messageQueue` / `pendingMidTurnQueue` / in-flight slot |
+| `turn` | 轮次响应：只有上一轮完整 terminal（complete / stopped / error）后，才把下一条 query 投递给 SDK | 独立 `turnBoundaryQueue` |
+
+隔离边界：
+
+- 只有 `/chat/send` 调 `enqueueUserMessage(..., { fromDesktopChatSend: true })` 时读取该设置；IM / Cron / Inbox drain / external runtime 继续走原有实时语义。
+- `turnBoundaryQueue` 不直接复用 `messageQueue` 的 mid-turn 投递语义；它只在 clean turn boundary 由 `startNextTurnQueuedItem()` 启动，避免轮次模式污染实时模式。
+- 一旦 `turnBoundaryQueue` 或 turn-mode admission ticket 已存在，后续同 session 的桌面 `/chat/send` 忙时发送必须继续排到 turn boundary；非桌面来源不读取该 UI 设置，保持各自既有队列语义。
+- abort / stop / crash recovery 必须同时清理或恢复 `messageQueue`、`pendingMidTurnQueue`、`turnBoundaryQueue` 和 admission ticket，避免只处理旧队列造成 orphan query。
+
 ### `sessionRegistered` 状态
 
 ```typescript

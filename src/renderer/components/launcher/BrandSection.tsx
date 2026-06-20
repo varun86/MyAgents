@@ -47,6 +47,8 @@ interface BrandSectionProps {
         images?: ImageAttachment[],
         cron?: import('@/types/tab').InitialMessageCron,
     ) => void;
+    /** Pending session id used for launcher-staged user attachments. */
+    attachmentSessionId?: string | null;
     isStarting?: boolean;
     // Provider/Model (pass-through to SimpleChatInput)
     provider?: Provider | null;
@@ -96,6 +98,7 @@ export default memo(function BrandSection({
     onAddFolder,
     onSetDefaultWorkspace,
     onSend,
+    attachmentSessionId,
     isStarting,
     provider,
     providers,
@@ -490,6 +493,7 @@ export default memo(function BrandSection({
                                 /* PRD 0.2.7: workspace_files invokes need a path; selectedProject
                                  * is the launcher's "current workspace" from WorkspaceSelector. */
                                 workspacePath={selectedProject?.path ?? null}
+                                sessionId={attachmentSessionId}
                                 /* PRD 0.2.7 cron staging — StatusBar shows iff a config is staged. */
                                 cronModeEnabled={stagedCron !== null}
                                 cronConfig={cronStatusBarConfig}

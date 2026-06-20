@@ -11,6 +11,7 @@ import {
     MoreHorizontal,
     RefreshCw,
     Search,
+    Star,
     Trash2,
 } from 'lucide-react';
 
@@ -36,7 +37,9 @@ const COLLAPSED_WORKSPACE_COUNT = 6;
 const HISTORY_PAGE_SIZE = 30;
 const WORKSPACE_ROW_MAX_HEIGHT = 94;
 
-type WorkspaceFilterValue = 'all' | string;
+type HistoryFilterValue = 'all' | 'favorites' | string;
+
+const FAVORITE_HISTORY_FILTER: HistoryFilterValue = 'favorites';
 
 type AgentLookup = Map<string, { agent: AgentConfig; status?: AgentStatusData | undefined }>;
 
@@ -88,7 +91,7 @@ export default memo(function LauncherRightRail({
     const { sessions, cronTasks, sessionTagsMap, isLoading: isHistoryLoading, error, refresh, actions } = taskCenterData;
 
     const [workspacesExpanded, setWorkspacesExpanded] = useState(false);
-    const [workspaceFilter, setWorkspaceFilter] = useState<WorkspaceFilterValue>('all');
+    const [historyFilter, setHistoryFilter] = useState<HistoryFilterValue>('all');
     const [historyPage, setHistoryPage] = useState<{ scopeKey: string; count: number }>({
         scopeKey: 'all',
         count: HISTORY_PAGE_SIZE,
@@ -106,9 +109,11 @@ export default memo(function LauncherRightRail({
         return map;
     }, [projects]);
 
-    const effectiveWorkspaceFilter =
-        workspaceFilter === 'all' || projectByPathKey.has(workspaceFilter)
-            ? workspaceFilter
+    const effectiveHistoryFilter =
+        historyFilter === 'all' ||
+            historyFilter === FAVORITE_HISTORY_FILTER ||
+            projectByPathKey.has(historyFilter)
+            ? historyFilter
             : 'all';
 
     const handleToggleWorkspaces = useCallback(() => {
@@ -135,12 +140,13 @@ export default memo(function LauncherRightRail({
         return sessions.filter((session) => {
             const key = normalizeWorkspacePathIdentity(session.agentDir);
             if (!projectByPathKey.has(key)) return false;
-            if (effectiveWorkspaceFilter !== 'all' && key !== effectiveWorkspaceFilter) return false;
+            if (effectiveHistoryFilter === FAVORITE_HISTORY_FILTER) return !!session.favorite;
+            if (effectiveHistoryFilter !== 'all' && key !== effectiveHistoryFilter) return false;
             return true;
         });
-    }, [sessions, projectByPathKey, effectiveWorkspaceFilter]);
+    }, [sessions, projectByPathKey, effectiveHistoryFilter]);
 
-    const historyScopeKey = effectiveWorkspaceFilter;
+    const historyScopeKey = effectiveHistoryFilter;
     const visibleHistoryCount = historyPage.scopeKey === historyScopeKey
         ? historyPage.count
         : HISTORY_PAGE_SIZE;
@@ -211,6 +217,16 @@ export default memo(function LauncherRightRail({
             title: getSessionDisplayText(target),
         });
     }, []);
+
+    const handleToggleFavoriteSession = useCallback(async (target: SessionMetadata) => {
+        try {
+            const success = await actions.setSessionFavorite(target.id, !target.favorite);
+            if (!success) toast.error('收藏失败，请重试');
+        } catch (err) {
+            console.error('[LauncherRightRail] Toggle favorite failed:', err);
+            toast.error('收藏失败，请重试');
+        }
+    }, [actions, toast]);
 
     const showEmptyProjects = !isProjectsLoading && sortedProjects.length === 0;
     const hasMoreHistory = visibleHistoryCount < filteredSessions.length;
@@ -335,10 +351,10 @@ export default memo(function LauncherRightRail({
                                     <h2 className="shrink-0 text-base font-semibold tracking-[0.04em] text-[var(--ink-muted)]">
                                         历史对话
                                     </h2>
-                                    <WorkspaceHistoryFilter
+                                    <HistoryFilter
                                         projects={sortedProjects}
-                                        value={effectiveWorkspaceFilter}
-                                        onChange={setWorkspaceFilter}
+                                        value={effectiveHistoryFilter}
+                                        onChange={setHistoryFilter}
                                     />
                                 </div>
                                 <button
@@ -374,7 +390,11 @@ export default memo(function LauncherRightRail({
                                 </div>
                             ) : pagedSessions.length === 0 ? (
                                 <div className="flex items-center py-10 text-sm text-[var(--ink-muted)]/70">
-                                    {effectiveWorkspaceFilter === 'all' ? '暂无历史对话' : '该工作区暂无历史对话'}
+                                    {effectiveHistoryFilter === FAVORITE_HISTORY_FILTER
+                                        ? '暂无收藏对话'
+                                        : effectiveHistoryFilter === 'all'
+                                            ? '暂无历史对话'
+                                            : '该工作区暂无历史对话'}
                                 </div>
                             ) : (
                                 <div className="space-y-0.5">
@@ -389,6 +409,7 @@ export default memo(function LauncherRightRail({
                                                 tags={sessionTagsMap.get(session.id) ?? []}
                                                 isCronProtected={cronProtectedSessionIds.has(session.id)}
                                                 onOpen={onOpenTask}
+                                                onToggleFavorite={handleToggleFavoriteSession}
                                                 onShowStats={handleShowStatsSession}
                                                 onRequestDelete={handleRequestDeleteSession}
                                                 menuOpen={openHistoryMenuSessionId === session.id}
@@ -437,22 +458,26 @@ export default memo(function LauncherRightRail({
     );
 });
 
-interface WorkspaceHistoryFilterProps {
+interface HistoryFilterProps {
     projects: Project[];
-    value: WorkspaceFilterValue;
-    onChange: (value: WorkspaceFilterValue) => void;
+    value: HistoryFilterValue;
+    onChange: (value: HistoryFilterValue) => void;
 }
 
-function WorkspaceHistoryFilter({ projects, value, onChange }: WorkspaceHistoryFilterProps) {
+function HistoryFilter({ projects, value, onChange }: HistoryFilterProps) {
     const [open, setOpen] = useState(false);
     const buttonRef = useRef<HTMLButtonElement | null>(null);
     const selectedProject = useMemo(
         () => projects.find(project => normalizeWorkspacePathIdentity(project.path) === value),
         [projects, value],
     );
-    const label = value === 'all' ? '全部' : selectedProject ? getProjectDisplayName(selectedProject) : '全部';
+    const label = value === FAVORITE_HISTORY_FILTER
+        ? '我的收藏'
+        : value === 'all'
+            ? '全部'
+            : selectedProject ? getProjectDisplayName(selectedProject) : '全部';
 
-    const handleSelect = useCallback((next: WorkspaceFilterValue) => {
+    const handleSelect = useCallback((next: HistoryFilterValue) => {
         onChange(next);
         setOpen(false);
     }, [onChange]);
@@ -464,7 +489,8 @@ function WorkspaceHistoryFilter({ projects, value, onChange }: WorkspaceHistoryF
                 type="button"
                 onClick={() => setOpen(value => !value)}
                 className="inline-flex h-6 max-w-36 items-center gap-1 rounded-md px-2 py-0 text-xs font-medium leading-none text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
-                title="筛选工作区"
+                title="筛选历史对话"
+                aria-label={`筛选历史对话：${label}`}
             >
                 <span className="min-w-0 truncate">{label}</span>
                 <ChevronDown className="h-3 w-3 shrink-0" />
@@ -481,6 +507,14 @@ function WorkspaceHistoryFilter({ projects, value, onChange }: WorkspaceHistoryF
                     label="全部"
                     active={value === 'all'}
                     onClick={() => handleSelect('all')}
+                />
+                <MenuItem
+                    icon={value === FAVORITE_HISTORY_FILTER
+                        ? <Check className="h-3.5 w-3.5" />
+                        : <Star className="h-3.5 w-3.5" />}
+                    label="我的收藏"
+                    active={value === FAVORITE_HISTORY_FILTER}
+                    onClick={() => handleSelect(FAVORITE_HISTORY_FILTER)}
                 />
                 {projects.map(project => {
                     const key = normalizeWorkspacePathIdentity(project.path);
@@ -505,6 +539,7 @@ interface LauncherHistoryRowProps {
     tags: SessionTag[];
     isCronProtected: boolean;
     onOpen: (session: SessionMetadata, project: Project) => void;
+    onToggleFavorite: (session: SessionMetadata) => void;
     onShowStats: (session: SessionMetadata) => void;
     onRequestDelete: (session: SessionMetadata) => void;
     menuOpen: boolean;
@@ -517,6 +552,7 @@ const LauncherHistoryRow = memo(function LauncherHistoryRow({
     tags,
     isCronProtected,
     onOpen,
+    onToggleFavorite,
     onShowStats,
     onRequestDelete,
     menuOpen,
@@ -632,8 +668,16 @@ const LauncherHistoryRow = memo(function LauncherHistoryRow({
                         onClose={closeMenu}
                         anchorRef={menuAnchorRef}
                         placement={menuAnchor.placement}
-                        className="w-36 py-1"
+                        className="w-40 py-1"
                     >
+                        <MenuItem
+                            icon={<Star className="h-3.5 w-3.5" fill={session.favorite ? 'currentColor' : 'none'} />}
+                            label={session.favorite ? '取消收藏' : '收藏对话'}
+                            onClick={() => {
+                                closeMenu();
+                                onToggleFavorite(session);
+                            }}
+                        />
                         <MenuItem
                             icon={<BarChart2 className="h-3.5 w-3.5" />}
                             label="查看统计"

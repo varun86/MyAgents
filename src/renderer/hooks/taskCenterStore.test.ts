@@ -1,6 +1,19 @@
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+const sessionClientMocks = vi.hoisted(() => ({
+    deleteSession: vi.fn(),
+    getSessions: vi.fn(),
+    updateSession: vi.fn(),
+}));
+
+vi.mock('@/api/sessionClient', () => ({
+    deleteSession: sessionClientMocks.deleteSession,
+    getSessions: sessionClientMocks.getSessions,
+    updateSession: sessionClientMocks.updateSession,
+}));
 
 import {
+    actions,
     filterTombstoned,
     sortSessionsByLastActive,
     computeCronBotInfoMap,
@@ -8,6 +21,7 @@ import {
     resolveFloatingBallBoundSession,
     getSnapshot,
     __resetTaskCenterStoreForTest,
+    __setTaskCenterSessionsForTest,
 } from './taskCenterStore';
 import type { SessionMetadata } from '@/api/sessionClient';
 import type { CronTask } from '@/types/cronTask';
@@ -16,6 +30,34 @@ import type { AgentStatusMap } from '@/hooks/useAgentStatuses';
 
 const sess = (id: string, lastActiveAt: string): SessionMetadata =>
     ({ id, lastActiveAt } as unknown as SessionMetadata);
+
+const favoriteSession = (favorite?: boolean): SessionMetadata => {
+    const base: SessionMetadata = {
+        id: 's1',
+        agentDir: '/ws',
+        title: 'Session',
+        createdAt: '2026-06-20T00:00:00.000Z',
+        lastActiveAt: '2026-06-20T00:00:00.000Z',
+    };
+    return favorite === undefined ? base : { ...base, favorite };
+};
+
+function deferred<T>() {
+    let resolve!: (value: T) => void;
+    let reject!: (reason?: unknown) => void;
+    const promise = new Promise<T>((res, rej) => {
+        resolve = res;
+        reject = rej;
+    });
+    return { promise, resolve, reject };
+}
+
+beforeEach(() => {
+    __resetTaskCenterStoreForTest();
+    vi.clearAllMocks();
+    sessionClientMocks.deleteSession.mockResolvedValue(true);
+    sessionClientMocks.getSessions.mockResolvedValue([]);
+});
 
 describe('filterTombstoned', () => {
     it('returns the same array reference when there are no tombstones', () => {
@@ -125,5 +167,51 @@ describe('store snapshot', () => {
         expect(a.isLoading).toBe(true);
         expect(a.sessions).toEqual([]);
         expect(a.sessionTagsMap.size).toBe(0);
+    });
+});
+
+describe('actions.setSessionFavorite', () => {
+    it('optimistically updates then rolls back when PATCH fails', async () => {
+        __setTaskCenterSessionsForTest([favoriteSession(false)]);
+        sessionClientMocks.updateSession.mockRejectedValueOnce(new Error('write failed'));
+        const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+        try {
+            const success = await actions.setSessionFavorite('s1', true);
+
+            expect(success).toBe(false);
+            expect(sessionClientMocks.updateSession).toHaveBeenCalledWith('s1', { favorite: true });
+            expect(!!getSnapshot().sessions[0]?.favorite).toBe(false);
+        } finally {
+            warnSpy.mockRestore();
+        }
+    });
+
+    it('serializes opposite in-flight requests so the final intent wins', async () => {
+        __setTaskCenterSessionsForTest([favoriteSession(false)]);
+        sessionClientMocks.getSessions.mockResolvedValue([favoriteSession()]);
+        const firstPatch = deferred<SessionMetadata | null>();
+        const secondPatch = deferred<SessionMetadata | null>();
+        sessionClientMocks.updateSession
+            .mockImplementationOnce(() => firstPatch.promise)
+            .mockImplementationOnce(() => secondPatch.promise);
+
+        const firstResult = actions.setSessionFavorite('s1', true);
+        expect(getSnapshot().sessions[0]?.favorite).toBe(true);
+
+        const secondResult = actions.setSessionFavorite('s1', false);
+        expect(!!getSnapshot().sessions[0]?.favorite).toBe(false);
+        expect(sessionClientMocks.updateSession).toHaveBeenCalledTimes(1);
+
+        firstPatch.resolve(favoriteSession(true));
+        await Promise.resolve();
+        await Promise.resolve();
+
+        expect(sessionClientMocks.updateSession).toHaveBeenCalledTimes(2);
+        expect(sessionClientMocks.updateSession).toHaveBeenNthCalledWith(2, 's1', { favorite: false });
+
+        secondPatch.resolve(favoriteSession());
+        await expect(Promise.all([firstResult, secondResult])).resolves.toEqual([true, true]);
+        expect(!!getSnapshot().sessions[0]?.favorite).toBe(false);
     });
 });

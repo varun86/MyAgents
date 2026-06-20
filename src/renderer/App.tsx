@@ -214,6 +214,7 @@ export const MemoizedTabContent = memo(function TabContent({
           isStarting={isLoading}
           startError={error}
           isActive={isActive}
+          attachmentSessionId={createPendingSessionId(tab.id)}
         />
       ) : kind === 'settings' ? (
         <Suspense fallback={PAGE_FALLBACK}>

@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.2.37] - 2026-06-20
+
+> 本版聚焦 Chat 会话事件协作、高频对话体验和大图片发送链路：新增 session watch 事件协议与连续发送响应模式，图片拖入改走文件 ref 以避免大 payload，启动页历史与收藏操作更完整，同时修复 external runtime 新会话从 pending session 升级到真实 session 后的附件与 watch owner 归属问题。
+
+### Added
+
+- **Session watch 事件协议**：`myagents session watch` 可监听另一个 session 的当前运行结果，完成后通过 `<myagents-session-event type="watch.completed">` 推回当前 session。
+- **连续发送响应模式**：设置中新增“连续发送消息”，可选择“实时响应”或“轮次响应”；轮次响应会等 AI 完成当前轮次后再自动发送下一条消息，适合希望严格一问一答的场景。
+- **大图片路径 ref 发送**：从 Finder / Explorer 拖入聊天的大图片会先落到 app 附件目录，再以 ref 进入 Sidecar，避免大 base64 直接穿过 IPC / SSE。
+- **启动页历史与收藏控制**：历史会话、对话收藏和右栏交互补齐更多 hover / 右键 / 分页细节，提升长列表使用效率。
+- **文件预览完整复制**：文件预览支持复制完整文本内容，代码块与 Markdown 复制路径更稳定。
+
+### Changed
+
+- **图片附件格式边界收敛**：聊天图片附件统一限定为 PNG / JPEG / GIF / WebP；其他图片格式走普通文件引用路径。
+- **外部 Runtime 新会话 owner 统一**：新建 tab 的 `pending-*` 会话在进入 Sidecar 后统一归属到真实 session id，watch、图片 ref、历史持久化使用同一个 owner。
+
+### Fixed
+
+- **首条图片消息不再因 pending ref 失效**：修复 builtin / external runtime 新会话首条路径图片发送时，附件仍归属 `pending-*` 而 runtime 使用真实 session id 导致校验失败的问题。
+- **Session watch 不再丢完成事件**：watch 投递改为确认送达后再清理 pending 记录；管理 API 短暂不可用时保留待重试。
+- **启动中 sidecar 的 watch 注册更稳**：目标 sidecar 已绑定 HTTP 但 readiness 尚未完成时，503 注册响应会在启动 deadline 内重试。
+- **触控板切换标签更稳**：修复滑动释放、连续滑动和尾段事件导致的重复切换或卡住问题。
+- **历史日期按本地自然日显示**：会话历史和搜索结果不再因具体时刻跨天边界而落到错误的“今天 / 昨天”分组。
+- **Windows 静止滚动条更克制**：Windows 上滚动条拇指静止时默认隐藏，滚动时短暂显色，减少长列表常驻视觉噪音。
+- **CLI / 文档小修**：更新 session help 中过期的 IM 命令名称，并补齐 watch 注册失败的 CLI exit code 映射。
+
+---
+
 ## [0.2.36] - 2026-06-20
 
 > 本版重构启动页右栏，把「Agent 工作区」与「历史对话」整合成更适合长期使用的工作台：工作区支持置顶、展开、更多菜单和打开所在文件夹；历史对话支持工作区筛选、吸顶、分页加载与右键菜单。另有文件预览更多菜单、文件补丁展示协议、入口归因分析，以及外部 Runtime / IM / 上下文统计的一批稳定性修复。

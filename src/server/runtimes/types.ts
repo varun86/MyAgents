@@ -7,13 +7,39 @@ import type { ModelUsageEntry } from '../types/session';
 import type { ToolAttachment } from '../../shared/types/tool-attachment';
 import type { LargeValueRef } from '../utils/large-value-store';
 
-/**
- * Image payload from frontend (base64-encoded)
- */
-export interface ImagePayload {
+export interface InlineImagePayload {
+  kind?: 'inline_base64';
   name: string;
   mimeType: string;
   data: string;  // base64 without data URL prefix
+  sizeBytes?: number;
+}
+
+export interface AttachmentRefImagePayload {
+  kind: 'attachment_ref';
+  id?: string;
+  name: string;
+  mimeType: string;
+  relativePath: string;
+  sizeBytes?: number;
+}
+
+/**
+ * Image payload accepted at Sidecar ingress. Renderer path drops use
+ * `attachment_ref`; legacy no-path File/paste fallback may still send
+ * bounded base64.
+ */
+export type ImagePayload = InlineImagePayload | AttachmentRefImagePayload;
+
+/** Image payload after Sidecar resolves refs at the runtime boundary. */
+export type ResolvedImagePayload = InlineImagePayload & { data: string };
+
+export function isAttachmentRefImagePayload(img: ImagePayload): img is AttachmentRefImagePayload {
+  return img.kind === 'attachment_ref';
+}
+
+export function isInlineImagePayload(img: ImagePayload): img is InlineImagePayload {
+  return typeof (img as { data?: unknown }).data === 'string';
 }
 
 /**
@@ -23,7 +49,7 @@ export interface SessionStartOptions {
   sessionId: string;
   workspacePath: string;
   initialMessage?: string;
-  initialImages?: ImagePayload[];
+  initialImages?: ResolvedImagePayload[];
   systemPromptAppend?: string;
   model?: string;
   permissionMode?: string;
@@ -275,7 +301,7 @@ export interface AgentRuntime {
   ): Promise<RuntimeProcess>;
 
   /** Send a follow-up user message to an active session */
-  sendMessage(process: RuntimeProcess, message: string, images?: ImagePayload[]): Promise<void>;
+  sendMessage(process: RuntimeProcess, message: string, images?: ResolvedImagePayload[]): Promise<void>;
 
   /** Respond to a permission request from the runtime */
   respondPermission(

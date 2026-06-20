@@ -40,7 +40,10 @@ function session(overrides: Partial<SessionMetadata> = {}): SessionMetadata {
     };
 }
 
-function taskCenterData(sessions: SessionMetadata[]): TaskCenterData {
+function taskCenterData(
+    sessions: SessionMetadata[],
+    actionOverrides: Partial<TaskCenterData['actions']> = {},
+): TaskCenterData {
     return {
         sessions,
         cronTasks: [],
@@ -52,9 +55,11 @@ function taskCenterData(sessions: SessionMetadata[]): TaskCenterData {
         refresh: vi.fn(),
         actions: {
             deleteSession: vi.fn(async () => true),
+            setSessionFavorite: vi.fn(async () => true),
             refreshSessions: vi.fn(),
             refreshCronTasks: vi.fn(),
             refreshTasks: vi.fn(),
+            ...actionOverrides,
         },
     };
 }
@@ -62,6 +67,7 @@ function taskCenterData(sessions: SessionMetadata[]): TaskCenterData {
 function renderRail(options: {
     projects?: Project[];
     sessions?: SessionMetadata[];
+    actionOverrides?: Partial<TaskCenterData['actions']>;
     onOpenTask?: ReturnType<typeof vi.fn>;
 } = {}) {
     const projects = options.projects ?? [project(1), project(2), project(3), project(4)];
@@ -73,7 +79,7 @@ function renderRail(options: {
                 agentLookup={new Map()}
                 isProjectsLoading={false}
                 launchingProjectId={null}
-                taskCenterData={taskCenterData(options.sessions ?? [session()])}
+                taskCenterData={taskCenterData(options.sessions ?? [session()], options.actionOverrides)}
                 onLaunch={vi.fn()}
                 onOpenTask={onOpenTask}
                 onOpenOverlay={vi.fn()}
@@ -162,6 +168,22 @@ describe('LauncherRightRail', () => {
         expect(within(row).getByLabelText('更多').parentElement).toHaveClass('launcher-history-row-action-overlay');
     });
 
+    it('filters launcher history to favorite sessions', () => {
+        renderRail({
+            sessions: [
+                session({ id: 'favorite-session', title: 'Favorite Session', favorite: true }),
+                session({ id: 'plain-session', title: 'Plain Session', lastActiveAt: '2026-06-20T00:18:00.000Z' }),
+            ],
+        });
+
+        fireEvent.click(screen.getByRole('button', { name: /筛选历史对话/ }));
+        fireEvent.click(screen.getByRole('button', { name: '我的收藏' }));
+
+        expect(screen.getByText('Favorite Session')).toBeInTheDocument();
+        expect(screen.queryByText('Plain Session')).not.toBeInTheDocument();
+        expect(screen.getByRole('button', { name: /筛选历史对话：我的收藏/ })).toBeInTheDocument();
+    });
+
     it('keeps only one history row menu open at a time', () => {
         renderRail({
             sessions: [
@@ -176,6 +198,37 @@ describe('LauncherRightRail', () => {
         fireEvent.click(within(screen.getByRole('button', { name: /Session B/ })).getByLabelText('更多'));
         expect(screen.getAllByRole('button', { name: '查看统计' })).toHaveLength(1);
         expect(screen.getAllByRole('button', { name: '删除' })).toHaveLength(1);
+    });
+
+    it('toggles favorite from the history row menu without opening the session', () => {
+        const onOpenTask = vi.fn();
+        const setSessionFavorite = vi.fn(async () => true);
+        renderRail({
+            onOpenTask,
+            actionOverrides: { setSessionFavorite },
+            sessions: [session({ id: 'favorite-target', title: 'Session A', favorite: false })],
+        });
+
+        const row = screen.getByRole('button', { name: /Session A/ });
+        fireEvent.click(within(row).getByLabelText('更多'));
+        fireEvent.click(screen.getByRole('button', { name: '收藏对话' }));
+
+        expect(onOpenTask).not.toHaveBeenCalled();
+        expect(setSessionFavorite).toHaveBeenCalledWith('favorite-target', true);
+    });
+
+    it('toggles favorite off from the history row menu', () => {
+        const setSessionFavorite = vi.fn(async () => true);
+        renderRail({
+            actionOverrides: { setSessionFavorite },
+            sessions: [session({ id: 'favorite-target', title: 'Session A', favorite: true })],
+        });
+
+        const row = screen.getByRole('button', { name: /Session A/ });
+        fireEvent.click(within(row).getByLabelText('更多'));
+        fireEvent.click(screen.getByRole('button', { name: '取消收藏' }));
+
+        expect(setSessionFavorite).toHaveBeenCalledWith('favorite-target', false);
     });
 
     it('does not open the history session from row menu keyboard activation keys', () => {
