@@ -394,7 +394,7 @@ const Message = memo(function Message({ message, isLoading = false, onRewind, on
           )}
           {/* text-base 自带 1.7 行高（@theme 配对），与 .ai-message-content 一致 —— 用户气泡
               与 AI 正文同为 prose 档，行高不再分叉（PRD 0.2.34 P2-5） */}
-          <article className="relative w-fit max-w-[85%] rounded-2xl border border-[var(--line)] bg-[var(--paper-elevated)] p-4 text-base text-[var(--ink)] shadow-md select-text">
+          <article className="relative w-fit max-w-[85%] rounded-2xl border border-[var(--line)] bg-[var(--paper-elevated)] p-4 text-base text-[var(--ink)] select-text">
             {/* System injection tag badge */}
             {systemTag && (
               <div className="mb-2 -mt-0.5">
