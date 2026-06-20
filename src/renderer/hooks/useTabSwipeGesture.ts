@@ -47,6 +47,8 @@ interface SwipeState {
   traceSampleCount: number;
   traceTrackingStartedAt: number;
   traceLastIdleKey: string | null;
+  traceCooldownAbsorbCount: number;
+  suppressMomentumTail: boolean;
 }
 
 // --- Tuning constants ---
@@ -58,7 +60,6 @@ const VELOCITY_SAMPLES = 5;
 const VELOCITY_SAMPLE_MAX_AGE = 100;   // ms — discard samples older than this
 const COMMIT_VELOCITY = 300;           // px/s — velocity threshold for tab switch (both proactive & idle)
 const POSITION_THRESHOLD = 0.25;       // 25% of container width → switch on release
-const PROACTIVE_POSITION_MAX = 0.5;    // 50% → commit regardless of velocity (clearly switching)
 
 const IDLE_SLOW = 500;                 // ms — finger barely moving or paused
 const IDLE_FAST = 200;                 // ms — was recently moving fast → decide quickly after stop
@@ -80,17 +81,18 @@ const SNAP_DURATION = 200;             // ms
 const SNAP_EASING = 'cubic-bezier(0.2, 1, 0.3, 1)';
 const SNAP_SAFETY_BUFFER = 50;         // ms — fallback timeout margin
 const RUBBER_BAND_MAX = 80;            // px — max boundary stretch
-const COMMIT_COOLDOWN = 1200;          // ms — absorb inertial events after tab switch (covers full macOS inertia)
+const COMMIT_COOLDOWN = 250;           // ms — absorb immediate inertial tail after tab switch
 const BOUNCE_COOLDOWN = 500;           // ms — absorb inertial events after bounce-back
 
 const TRACE_FULL_SAMPLE_COUNT = 6;
 const TRACE_SAMPLE_INTERVAL = 4;
+const COOLDOWN_TRACE_INTERVAL = 8;
 
 function clamp(val: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, val));
 }
 
-type SnapDecisionSource = 'manual' | 'webkit-phase' | 'momentum-phase' | 'idle' | 'proactive';
+type SnapDecisionSource = 'manual' | 'webkit-phase' | 'momentum-phase' | 'idle';
 
 function roundPx(value: number): number {
   return Math.round(value * 10) / 10;
@@ -144,6 +146,20 @@ function traceTabSwipe(phase: string, detail?: PerfTraceDetail): void {
 
 function shouldTraceSample(sample: number): boolean {
   return sample <= TRACE_FULL_SAMPLE_COUNT || sample % TRACE_SAMPLE_INTERVAL === 0;
+}
+
+function shouldTraceCooldownAbsorb(count: number): boolean {
+  return count <= 3 || count % COOLDOWN_TRACE_INTERVAL === 0;
+}
+
+function isHorizontalDominant(deltaX: number, deltaY: number): boolean {
+  const ax = Math.abs(deltaX);
+  const ay = Math.abs(deltaY);
+  return ax >= DIR_LOCK_MIN && ax > ay * DIR_LOCK_RATIO;
+}
+
+function isActiveMomentumPhase(momentumPhase: number | undefined): boolean {
+  return typeof momentumPhase === 'number' && momentumPhase > 0;
 }
 
 /**
@@ -210,6 +226,8 @@ export function useTabSwipeGesture({
     traceSampleCount: 0,
     traceTrackingStartedAt: 0,
     traceLastIdleKey: null,
+    traceCooldownAbsorbCount: 0,
+    suppressMomentumTail: false,
   });
 
   useEffect(() => {
@@ -261,6 +279,16 @@ export function useTabSwipeGesture({
       state.traceSampleCount = 0;
       state.traceTrackingStartedAt = 0;
       state.traceLastIdleKey = null;
+      state.traceCooldownAbsorbCount = 0;
+      state.suppressMomentumTail = false;
+    }
+
+    function scheduleDirectionReset() {
+      if (state.dirResetTimer !== null) clearTimeout(state.dirResetTimer);
+      state.dirResetTimer = setTimeout(() => {
+        state.direction = null;
+        state.dirResetTimer = null;
+      }, DIR_RESET_TIMEOUT);
     }
 
     function cleanupDOM() {
@@ -456,6 +484,7 @@ export function useTabSwipeGesture({
           }
           resetState();
           state.cooldownUntil = performance.now() + COMMIT_COOLDOWN;
+          state.suppressMomentumTail = true;
         };
         adjEl.addEventListener('transitionend', onEnd as EventListener, { once: true });
         state.activeOnEnd = onEnd;
@@ -495,6 +524,7 @@ export function useTabSwipeGesture({
           cleanupDOM();
           resetState();
           state.cooldownUntil = performance.now() + BOUNCE_COOLDOWN;
+          state.suppressMomentumTail = true;
         };
         listenEl.addEventListener('transitionend', onEnd as EventListener, { once: true });
         state.activeOnEnd = onEnd;
@@ -558,10 +588,20 @@ export function useTabSwipeGesture({
     function handleWheel(e: WheelEvent) {
       // Absorb events during cooldown (post-animation inertial events)
       if (state.cooldownUntil > 0 && performance.now() < state.cooldownUntil) {
+        state.traceCooldownAbsorbCount++;
+        if (shouldTraceCooldownAbsorb(state.traceCooldownAbsorbCount)) {
+          traceTabSwipe('cooldown_absorb', {
+            gestureId: state.traceGestureId,
+            remainingMs: Math.max(0, Math.round(state.cooldownUntil - performance.now())),
+            deltaX: roundPx(e.deltaX),
+            deltaY: roundPx(e.deltaY),
+          });
+        }
         e.preventDefault();
         return;
       }
       state.cooldownUntil = 0;
+      state.traceCooldownAbsorbCount = 0;
 
       const tabs = tabsRef.current;
       if (tabs.length <= 1) {
@@ -581,6 +621,21 @@ export function useTabSwipeGesture({
       const wheelPhase = (e as unknown as { phase?: number }).phase;
       const momentumPhase = (e as unknown as { momentumPhase?: number }).momentumPhase;
       const zeroDelta = deltaX === 0 && deltaY === 0;
+
+      if (state.suppressMomentumTail) {
+        if (isActiveMomentumPhase(momentumPhase)) {
+          traceTabSwipe('post_commit_momentum_absorb', {
+            gestureId: state.traceGestureId,
+            deltaX: roundPx(deltaX),
+            deltaY: roundPx(deltaY),
+            wheelPhase: phaseValue(wheelPhase),
+            momentumPhase: phaseValue(momentumPhase),
+          });
+          e.preventDefault();
+          return;
+        }
+        state.suppressMomentumTail = false;
+      }
 
       if (
         state.phase === 'idle'
@@ -621,6 +676,20 @@ export function useTabSwipeGesture({
             momentumPhase: phaseValue(momentumPhase),
           });
         }
+        if (
+          state.phase === 'tracking'
+          && (wheelPhase === WEBKIT_PHASE_ENDED || wheelPhase === WEBKIT_PHASE_CANCELLED)
+        ) {
+          if (state.idleTimer !== null) { clearTimeout(state.idleTimer); state.idleTimer = null; }
+          traceTabSwipe('release', {
+            gestureId: state.traceGestureId,
+            source: 'webkit-phase',
+            wheelPhase: phaseValue(wheelPhase),
+            momentumPhase: phaseValue(momentumPhase),
+            zeroDelta: true,
+          });
+          makeSnapDecision('webkit-phase');
+        }
         return;
       }
 
@@ -648,6 +717,7 @@ export function useTabSwipeGesture({
           });
         } else {
           state.direction = 'vertical';
+          scheduleDirectionReset();
           traceTabSwipe('direction_lock', {
             gestureId: state.traceGestureId,
             direction: 'vertical',
@@ -662,17 +732,44 @@ export function useTabSwipeGesture({
       }
 
       if (state.direction === 'vertical' || state.direction === 'inner-scroll') {
-        if (state.dirResetTimer !== null) clearTimeout(state.dirResetTimer);
-        state.dirResetTimer = setTimeout(() => {
-          state.direction = null;
-          state.dirResetTimer = null;
-        }, DIR_RESET_TIMEOUT);
-        traceTabSwipe('direction_defer', {
-          gestureId: state.traceGestureId,
-          direction: directionValue(state.direction),
-          resetMs: DIR_RESET_TIMEOUT,
-        });
-        return;
+        const previousDirection = state.direction;
+        const horizontalDominant = isHorizontalDominant(deltaX, deltaY);
+        if (previousDirection === 'inner-scroll' && horizontalDominant) {
+          const innerScroll = hasInnerHorizontalScroll(e.target, cont, deltaX);
+          if (innerScroll) {
+            scheduleDirectionReset();
+            traceTabSwipe('direction_defer', {
+              gestureId: state.traceGestureId,
+              direction: directionValue(state.direction),
+              resetMs: DIR_RESET_TIMEOUT,
+            });
+            return;
+          }
+          if (state.dirResetTimer !== null) {
+            clearTimeout(state.dirResetTimer);
+            state.dirResetTimer = null;
+          }
+          state.direction = 'horizontal';
+          traceTabSwipe('direction_relock', {
+            gestureId: state.traceGestureId,
+            from: previousDirection,
+            to: directionValue(state.direction),
+            absX: roundPx(Math.abs(deltaX)),
+            absY: roundPx(Math.abs(deltaY)),
+            innerScroll,
+            target: targetKind(e.target),
+          });
+        } else {
+          if (!horizontalDominant) {
+            scheduleDirectionReset();
+          }
+          traceTabSwipe('direction_defer', {
+            gestureId: state.traceGestureId,
+            direction: directionValue(state.direction),
+            resetMs: DIR_RESET_TIMEOUT,
+          });
+          return;
+        }
       }
 
       e.preventDefault();
@@ -785,49 +882,6 @@ export function useTabSwipeGesture({
           adjacentIndex: state.adjacentIndex,
           momentum: state.momentumFlag,
         });
-      }
-
-      // ── Proactive commit (prevents inertia drift / overshoot) ──
-      // When content crosses threshold with clear velocity, commit IMMEDIATELY.
-      // This mirrors native macOS: once the swipe is decisive, the system locks in.
-      // Without this, inertia events keep drifting the content past the target.
-      if (state.adjacentEl && !atBoundary) {
-        const positionPct = Math.abs(state.offsetX) / cw;
-        const v = getVelocity();
-        const vDir = v > 0 ? 1 : -1;
-        const oDir: -1 | 1 = state.offsetX > 0 ? 1 : -1;
-
-        const fastSwipe = positionPct > POSITION_THRESHOLD
-          && Math.abs(v) > COMMIT_VELOCITY
-          && vDir === oDir;
-        const nearTarget = positionPct > PROACTIVE_POSITION_MAX;
-
-        if (fastSwipe || nearTarget) {
-          if (state.idleTimer !== null) { clearTimeout(state.idleTimer); state.idleTimer = null; }
-          traceTabSwipe('proactive_commit', {
-            gestureId: state.traceGestureId,
-            reason: nearTarget ? 'near-target' : 'fast-swipe',
-            positionPct: roundPct(positionPct),
-            velocity: Math.round(v),
-            offsetDir: oDir,
-          });
-          traceTabSwipe('decision', {
-            gestureId: state.traceGestureId,
-            source: 'proactive',
-            shouldCommit: true,
-            positionTriggered: positionPct > POSITION_THRESHOLD,
-            velocityTriggered: Math.abs(v) > COMMIT_VELOCITY,
-            offsetX: roundPx(state.offsetX),
-            offsetPct: roundPct(positionPct),
-            velocity: Math.round(v),
-            offsetDir: oDir,
-            adjacentIndex: state.adjacentIndex,
-            sampleCount: state.traceSampleCount,
-            elapsedMs: state.traceTrackingStartedAt > 0 ? Math.round(performance.now() - state.traceTrackingStartedAt) : 0,
-          });
-          animateSnap(true, oDir);
-          return;
-        }
       }
 
       // ── WebKit phase-based gesture end (if available) ──
