@@ -1,0 +1,163 @@
+# Analytics Event Contract
+
+> Tracked source of truth for analytics event names and stable dimensions.
+> Local PRDs under `specs/prd/` are ignored and must not be test inputs.
+
+## Principles
+
+- Events describe product state changes, not raw UI clicks.
+- Reuse dimensions (`source`, `surface`, `entry_intent`) instead of splitting events by every entry point.
+- Session-scoped events should carry `session_id` directly or receive it from the active analytics context.
+- User-defined names must not be uploaded raw. Use local salted hashes for agent/workspace grouping.
+
+## Shared Dimensions
+
+### Source
+
+`source` identifies the process/channel that triggered an event:
+
+- `desktop`
+- `floating_ball`
+- `cli`
+- `cli_agent`
+- `cron`
+- `im`
+
+### Surface
+
+`surface` identifies the UI or product surface within a source:
+
+- `launcher_input`
+- `agent_card`
+- `history_click`
+- `new_chat_button`
+- `task_center`
+- `bug_report`
+- `agent_setup`
+- `cmd_k`
+- `external_link`
+- `cron`
+- `im`
+- `floating_ball`
+- `unknown`
+
+### Entry Intent
+
+`entry_intent` describes what the entry point is trying to do:
+
+- `send_message`
+- `open_workspace`
+- `open_history`
+- `thought_alignment`
+- `workspace_init`
+- `support_diagnostics`
+- `new_chat`
+- `fork`
+- `unknown`
+
+## Event Names
+
+Application lifecycle:
+
+- `app_launch`
+
+Session management:
+
+- `session_new`
+- `session_switch`
+- `session_rewind`
+- `session_title_edit`
+- `session_fork`
+
+Core interaction:
+
+- `message_send`
+- `message_complete`
+- `message_stop`
+- `message_error`
+- `message_retry`
+- `message_copy`
+- `message_export`
+
+Thinking export and copy:
+
+- `thinking_copy`
+- `thinking_export`
+
+Tool and permission flow:
+
+- `tool_use`
+- `permission_grant`
+- `permission_deny`
+
+Configuration changes:
+
+- `provider_switch`
+- `model_switch`
+- `reasoning_effort_switch`
+- `mcp_add`
+- `mcp_remove`
+
+Agent, channel, and skill management:
+
+- `agent_add`
+- `agent_remove`
+- `agent_channel_create`
+- `agent_channel_remove`
+- `agent_channel_toggle`
+- `skill_use`
+- `im_bot_create`
+- `im_bot_toggle`
+- `im_bot_remove`
+
+Feature usage:
+
+- `tab_new`
+- `tab_close`
+- `restore_last_session`
+- `settings_open`
+- `workspace_open`
+- `workspace_create`
+- `history_open`
+- `file_drop`
+- `tts_play`
+- `task_center_open`
+- `bug_report_submit`
+
+System events:
+
+- `update_check`
+- `update_install`
+
+Cron and launcher scheduling:
+
+- `cron_enable`
+- `cron_start`
+- `cron_stop`
+- `cron_recover`
+- `launcher_cron_stage`
+- `launcher_cron_create_standalone`
+
+Task center:
+
+- `task_create`
+- `task_run`
+- `task_stop`
+- `task_delete`
+- `task_align_discuss`
+
+Launcher and thoughts:
+
+- `launcher_mode_switch`
+- `thought_create`
+
+Floating ball:
+
+- `floating_ball_toggle`
+- `floating_ball_summon`
+- `floating_ball_expand`
+- `floating_ball_pet_select`
+
+Server-side AI turn:
+
+- `ai_turn_complete`

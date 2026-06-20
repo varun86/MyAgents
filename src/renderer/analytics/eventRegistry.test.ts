@@ -102,7 +102,7 @@ describe('analytics event registry', () => {
   });
 
   it('documents every tracked literal event in analytics_design.md', () => {
-    const doc = readFileSync(resolve(REPO_ROOT, 'specs/prd/analytics_design.md'), 'utf-8');
+    const doc = readFileSync(resolve(REPO_ROOT, 'specs/tech_docs/analytics_design.md'), 'utf-8');
     const tracked = trackedLiteralEvents();
     const missing = [...tracked.keys()]
       .filter(event => !doc.includes(`\`${event}\``))
