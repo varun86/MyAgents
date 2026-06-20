@@ -2521,6 +2521,7 @@ async function main() {
             undefined,
             undefined,
             analyticsSource,
+            { fromDesktopChatSend: true },
           );
           if (result.error) {
             return jsonResponse({ success: false, error: result.error }, 429);
@@ -2530,6 +2531,7 @@ async function main() {
             queued: result.queued,
             queueId: result.queueId,
             isInFlight: result.isInFlight,
+            deliveryMode: result.deliveryMode,
           });
         } catch (error) {
           return jsonResponse(

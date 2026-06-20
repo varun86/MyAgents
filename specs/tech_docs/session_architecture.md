@@ -87,6 +87,23 @@ querySession = query({
 | Subprocess crash 恢复 | `finally` 块触发 `schedulePreWarm()` 重建 session |
 | 配置变更重启 | MCP / Agent 变更导致 session 中止后恢复 |
 
+### Desktop 连续 Query 队列模式（0.2.37）
+
+内置 AgentSDK 的桌面 `/chat/send` 支持两种连续发送策略，由
+`AppConfig.chatQueueResponseMode` 控制，默认值为 `realtime`：
+
+| 模式 | 语义 | 队列归属 |
+|------|------|----------|
+| `realtime` | 保持旧行为：当前 turn 忙时尽快把 query 投递给 SDK，让 SDK 在持久 `messageGenerator()` 中尽早消费 | 原 `messageQueue` / `pendingMidTurnQueue` / in-flight slot |
+| `turn` | 轮次响应：只有上一轮完整 terminal（complete / stopped / error）后，才把下一条 query 投递给 SDK | 独立 `turnBoundaryQueue` |
+
+隔离边界：
+
+- 只有 `/chat/send` 调 `enqueueUserMessage(..., { fromDesktopChatSend: true })` 时读取该设置；IM / Cron / Inbox drain / external runtime 继续走原有实时语义。
+- `turnBoundaryQueue` 不直接复用 `messageQueue` 的 mid-turn 投递语义；它只在 clean turn boundary 由 `startNextTurnQueuedItem()` 启动，避免轮次模式污染实时模式。
+- 一旦 `turnBoundaryQueue` 或 turn-mode admission ticket 已存在，后续同 session 的忙时发送必须继续排到 turn boundary；禁止后来的 realtime / 非桌面消息越过已经承诺的下一轮。
+- abort / stop / crash recovery 必须同时清理或恢复 `messageQueue`、`pendingMidTurnQueue`、`turnBoundaryQueue` 和 admission ticket，避免只处理旧队列造成 orphan query。
+
 ### `sessionRegistered` 状态
 
 ```typescript

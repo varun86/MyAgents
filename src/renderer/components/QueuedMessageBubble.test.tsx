@@ -25,4 +25,21 @@ describe('QueuedMessagesPanel', () => {
     await userEvent.click(screen.getByTitle('撤回发送'));
     expect(onCancel).toHaveBeenCalledWith('q-1');
   });
+
+  it('labels turn-boundary queued messages as next-turn work', () => {
+    render(
+      <QueuedMessagesPanel
+        messages={[{
+          queueId: 'q-2',
+          text: '第二条消息',
+          timestamp: Date.now(),
+          deliveryMode: 'turn',
+        }]}
+        onCancel={vi.fn()}
+        onForceExecute={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText('下一轮')).toBeInTheDocument();
+  });
 });

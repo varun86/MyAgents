@@ -43,6 +43,8 @@ import {
     getPresetMcpServer,
     DEFAULT_CLAUDE_TRANSCRIPT_CLEANUP_PERIOD_DAYS,
     normalizeClaudeTranscriptCleanupPeriodDays,
+    normalizeChatQueueResponseMode,
+    type ChatQueueResponseMode,
 } from '@/config/types';
 import {
     getAllMcpServers,
@@ -3291,6 +3293,45 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                                 {mode === 'system' ? '跟随系统' : mode === 'light' ? '日间模式' : '夜间模式'}
                                             </button>
                                         ))}
+                                    </div>
+                                </div>
+                            </div>
+
+                            {/* Chat Queue Response Mode */}
+                            <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
+                                <h3 className="text-base font-medium text-[var(--ink)]">连续发送队列</h3>
+                                <p className="mt-1 text-xs text-[var(--ink-muted)]">
+                                    控制内置 AgentSDK 正在运行时，桌面连续发送的 query 何时交给 AI。
+                                </p>
+                                <div className="mt-4 flex items-center justify-between gap-4">
+                                    <div className="flex-1">
+                                        <p className="text-sm font-medium text-[var(--ink)]">队列响应模式</p>
+                                        <p className="text-xs text-[var(--ink-muted)]">
+                                            {normalizeChatQueueResponseMode(config.chatQueueResponseMode) === 'turn'
+                                                ? '上一轮完整结束后，再发送下一条排队 query'
+                                                : '尽快把排队 query 投递给 AgentSDK 消费'}
+                                        </p>
+                                    </div>
+                                    <div className="flex shrink-0 gap-0.5 rounded-full bg-[var(--paper-inset)] p-0.5">
+                                        {([
+                                            { value: 'realtime', label: '实时响应' },
+                                            { value: 'turn', label: '轮次响应' },
+                                        ] as const satisfies ReadonlyArray<{ value: ChatQueueResponseMode; label: string }>).map((opt) => {
+                                            const active = normalizeChatQueueResponseMode(config.chatQueueResponseMode) === opt.value;
+                                            return (
+                                                <button
+                                                    key={opt.value}
+                                                    onClick={() => void updateConfig({ chatQueueResponseMode: opt.value })}
+                                                    className={`rounded-full px-3 py-1 text-xs font-medium transition-all ${
+                                                        active
+                                                            ? 'bg-[var(--paper-elevated)] text-[var(--ink)] shadow-sm'
+                                                            : 'text-[var(--ink-muted)] hover:text-[var(--ink-secondary)]'
+                                                    }`}
+                                                >
+                                                    {opt.label}
+                                                </button>
+                                            );
+                                        })}
                                     </div>
                                 </div>
                             </div>

@@ -4,6 +4,7 @@ import {
   DEFAULT_CLAUDE_TRANSCRIPT_CLEANUP_PERIOD_DAYS,
   DEFAULT_CONFIG,
   PRESET_PROVIDERS,
+  normalizeChatQueueResponseMode,
   normalizeClaudeTranscriptCleanupPeriodDays,
   normalizeProviderOrder,
   splitProviderModelInput,
@@ -65,6 +66,16 @@ describe('normalizeClaudeTranscriptCleanupPeriodDays', () => {
     expect(normalizeClaudeTranscriptCleanupPeriodDays(30.9)).toBe(30);
     expect(normalizeClaudeTranscriptCleanupPeriodDays(0)).toBe(1);
     expect(normalizeClaudeTranscriptCleanupPeriodDays(-12)).toBe(1);
+  });
+});
+
+describe('normalizeChatQueueResponseMode', () => {
+  it('defaults to realtime and accepts only the turn override', () => {
+    expect(DEFAULT_CONFIG.chatQueueResponseMode).toBe('realtime');
+    expect(normalizeChatQueueResponseMode(undefined)).toBe('realtime');
+    expect(normalizeChatQueueResponseMode('realtime')).toBe('realtime');
+    expect(normalizeChatQueueResponseMode('turn')).toBe('turn');
+    expect(normalizeChatQueueResponseMode('invalid')).toBe('realtime');
   });
 });
 

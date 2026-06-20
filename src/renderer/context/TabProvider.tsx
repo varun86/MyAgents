@@ -2825,16 +2825,24 @@ export default function TabProvider({
                 // `isInFlight` indicates the backend has already yielded this item
                 // to the SDK CLI. It remains conditionally cancellable via the
                 // SDK control plane until replay/dequeue confirmation arrives.
-                const payload = data as { queueId: string; messageText: string; isInFlight?: boolean } | null;
+                const payload = data as { queueId: string; messageText: string; isInFlight?: boolean; deliveryMode?: 'realtime' | 'turn' } | null;
                 if (payload?.queueId) {
                     console.log(`[TabProvider] queue:added queueId=${payload.queueId} isInFlight=${!!payload.isInFlight}`);
                     setQueuedMessages(prev => {
                         // Exact queueId match — already added by .then(); update isInFlight if it changed.
                         const existingIdx = prev.findIndex(q => q.queueId === payload.queueId);
                         if (existingIdx !== -1) {
-                            if (prev[existingIdx].isInFlight === !!payload.isInFlight) return prev;
+                            const nextDeliveryMode = payload.deliveryMode ?? prev[existingIdx].deliveryMode;
+                            if (
+                                prev[existingIdx].isInFlight === !!payload.isInFlight
+                                && prev[existingIdx].deliveryMode === nextDeliveryMode
+                            ) return prev;
                             const next = [...prev];
-                            next[existingIdx] = { ...prev[existingIdx], isInFlight: !!payload.isInFlight };
+                            next[existingIdx] = {
+                                ...prev[existingIdx],
+                                isInFlight: !!payload.isInFlight,
+                                deliveryMode: nextDeliveryMode,
+                            };
                             return next;
                         }
                         // Optimistic entry exists — .then() will reconcile with real queueId
@@ -2844,6 +2852,7 @@ export default function TabProvider({
                             text: payload.messageText,
                             timestamp: Date.now(),
                             isInFlight: !!payload.isInFlight,
+                            deliveryMode: payload.deliveryMode,
                         }];
                     });
                 }
@@ -3368,7 +3377,14 @@ export default function TabProvider({
         // When no providerEnv is given (subscription mode), send 'subscription' explicitly
         // so enqueueUserMessage knows this is an intentional switch, not "I don't know".
         // IM/Cron callers omit the field entirely (undefined = "keep current provider").
-        postJson<{ success: boolean; error?: string; queued?: boolean; queueId?: string; isInFlight?: boolean }>('/chat/send', {
+        postJson<{
+            success: boolean;
+            error?: string;
+            queued?: boolean;
+            queueId?: string;
+            isInFlight?: boolean;
+            deliveryMode?: 'realtime' | 'turn';
+        }>('/chat/send', {
             text: trimmed,
             images: imageData,
             sessionId: currentSessionIdRef.current ?? sessionId,
@@ -3410,6 +3426,7 @@ export default function TabProvider({
                                     ...q,
                                     queueId: realQueueId,
                                     isInFlight: !!response.isInFlight,
+                                    deliveryMode: response.deliveryMode,
                                     images: images?.map(queuedImageInfo),
                                 }
                                 : q
@@ -3419,9 +3436,12 @@ export default function TabProvider({
                         setQueuedMessages(prev => {
                             if (prev.some(q => q.queueId === realQueueId)) {
                                 // SSE already added it — enrich with image data if available
-                                if (!images?.length) return prev;
                                 return prev.map(q => q.queueId === realQueueId
-                                    ? { ...q, images: images.map(queuedImageInfo) }
+                                    ? {
+                                        ...q,
+                                        deliveryMode: response.deliveryMode ?? q.deliveryMode,
+                                        images: images?.length ? images.map(queuedImageInfo) : q.images,
+                                    }
                                     : q
                                 );
                             }
@@ -3431,6 +3451,7 @@ export default function TabProvider({
                                 images: images?.map(queuedImageInfo),
                                 timestamp: Date.now(),
                                 isInFlight: !!response.isInFlight,
+                                deliveryMode: response.deliveryMode,
                             }];
                         });
                     }
