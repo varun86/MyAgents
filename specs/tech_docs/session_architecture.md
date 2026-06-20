@@ -87,6 +87,27 @@ querySession = query({
 | Subprocess crash 恢复 | `finally` 块触发 `schedulePreWarm()` 重建 session |
 | 配置变更重启 | MCP / Agent 变更导致 session 中止后恢复 |
 
+### Session 间事件协议（send / watch）
+
+`myagents session send` / `watch` 不是普通文本拼接，而是结构化的 session event
+协议。CLI 经 `/api/admin/session/*` 进入当前 Sidecar，事件统一渲染为
+`<myagents-session-event ...>` prompt，正文 payload 先经过结构标签 neutralize，
+避免被跨 session 内容伪造协议边界。
+
+| 事件 | 语义 | 投递路径 |
+|------|------|----------|
+| `send.request` | 源 session 给目标 session 投递工作或通知 | 源 Sidecar → Management API `/api/inbox/deliver` → 目标 Sidecar |
+| `send.result` | 目标 turn 结束后把结果回推给源 session | 目标 Sidecar turn terminal → Management API → 源 Sidecar |
+| `watch.already_idle` | 注册 watch 时目标已无活跃 turn，立即返回最近结果 | 调用方 Sidecar 本地生成 event prompt |
+| `watch.completed` | watch 注册时目标正在运行，该 turn 正常 terminal 后回推结果 | 目标 Sidecar pending watch registry → Management API → watcher Sidecar |
+| `watch.error` | 被 watch 的目标 turn 中止、错误或无法确认正常完成 | 同 `watch.completed` |
+
+`watch` 的 owner 分两层：Rust Management API 先用 live sidecar 表确认目标 session
+是否仍在运行，并在目标 sidecar 上注册 pending watch；目标 sidecar 只在 turn terminal
+时调用 `deliverSessionWatchEvents()` 生成最终事件。只有 watcher sidecar 确认 inbox
+delivery 成功后，目标 sidecar 才 ack 并清理 pending watch；Management API 暂时不可用
+时保留待重试，避免完成事件丢失。
+
 ### Desktop 连续 Query 队列模式（0.2.37）
 
 内置 AgentSDK 的桌面 `/chat/send` 支持两种连续发送策略，由
