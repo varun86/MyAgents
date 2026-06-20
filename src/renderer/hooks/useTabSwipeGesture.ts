@@ -1,6 +1,7 @@
 import { useEffect, useRef, type RefObject } from 'react';
 import { flushSync } from 'react-dom';
 import type { Tab } from '@/types/tab';
+import { formatPerfLine, type PerfTraceDetail } from '../../shared/perfTrace';
 
 interface UseTabSwipeGestureOptions {
   contentRef: RefObject<HTMLDivElement | null>;
@@ -42,6 +43,10 @@ interface SwipeState {
   prevMergedVelocity: number;
   accFactors: number[];
   momentumFlag: boolean;
+  traceGestureId: number;
+  traceSampleCount: number;
+  traceTrackingStartedAt: number;
+  traceLastIdleKey: string | null;
 }
 
 // --- Tuning constants ---
@@ -78,8 +83,67 @@ const RUBBER_BAND_MAX = 80;            // px — max boundary stretch
 const COMMIT_COOLDOWN = 1200;          // ms — absorb inertial events after tab switch (covers full macOS inertia)
 const BOUNCE_COOLDOWN = 500;           // ms — absorb inertial events after bounce-back
 
+const TRACE_FULL_SAMPLE_COUNT = 6;
+const TRACE_SAMPLE_INTERVAL = 4;
+
 function clamp(val: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, val));
+}
+
+type SnapDecisionSource = 'manual' | 'webkit-phase' | 'momentum-phase' | 'idle' | 'proactive';
+
+function roundPx(value: number): number {
+  return Math.round(value * 10) / 10;
+}
+
+function roundPct(value: number): number {
+  return Math.round(value * 1000) / 1000;
+}
+
+function phaseValue(value: number | undefined): number {
+  return typeof value === 'number' ? value : -1;
+}
+
+function directionValue(direction: SwipeState['direction']): string {
+  return direction ?? 'none';
+}
+
+function targetKind(target: EventTarget | null): string {
+  const el = target instanceof HTMLElement
+    ? target
+    : target instanceof Node ? target.parentElement : null;
+  if (!el) return 'unknown';
+  if (el instanceof HTMLTextAreaElement) return 'textarea';
+  if (el instanceof HTMLInputElement) return 'input';
+  if (el.isContentEditable) return 'contenteditable';
+  return el.tagName.toLowerCase();
+}
+
+function traceTabSwipe(phase: string, detail?: PerfTraceDetail): void {
+  try {
+    if (typeof localStorage !== 'undefined' && localStorage.getItem('myagents:tab-swipe-trace') === '0') {
+      return;
+    }
+  } catch {
+    // localStorage may be unavailable in tests or hardened WebViews; tracing
+    // should remain best-effort and never affect gesture handling.
+  }
+  try {
+    // frontendLogger intercepts console.debug and persists this to unified logs.
+    // This Phase 0 probe is intentionally on-by-default so real-device testing
+    // cannot silently produce no data in production-like builds.
+    console.debug(formatPerfLine({
+      trace: 'renderer',
+      phase: `tab_swipe_${phase}`,
+      detail,
+    }));
+  } catch {
+    // Ignore logging failures in the hot wheel path.
+  }
+}
+
+function shouldTraceSample(sample: number): boolean {
+  return sample <= TRACE_FULL_SAMPLE_COUNT || sample % TRACE_SAMPLE_INTERVAL === 0;
 }
 
 /**
@@ -142,6 +206,10 @@ export function useTabSwipeGesture({
     prevMergedVelocity: 0,
     accFactors: [],
     momentumFlag: false,
+    traceGestureId: 0,
+    traceSampleCount: 0,
+    traceTrackingStartedAt: 0,
+    traceLastIdleKey: null,
   });
 
   useEffect(() => {
@@ -190,6 +258,9 @@ export function useTabSwipeGesture({
       state.prevMergedVelocity = 0;
       state.accFactors = [];
       state.momentumFlag = false;
+      state.traceSampleCount = 0;
+      state.traceTrackingStartedAt = 0;
+      state.traceLastIdleKey = null;
     }
 
     function cleanupDOM() {
@@ -302,14 +373,24 @@ export function useTabSwipeGesture({
     // ALL animations are non-cancellable. Once a decision is made, it's final.
 
     function animateSnap(commit: boolean, swipeDir: -1 | 1) {
+      const cont = contentRef.current;
+      const cw = cont?.clientWidth ?? 0;
+      const durationBaseDetail: PerfTraceDetail = {
+        gestureId: state.traceGestureId,
+        commit,
+        swipeDir,
+        offsetX: roundPx(state.offsetX),
+        offsetPct: cw > 0 ? roundPct(Math.abs(state.offsetX) / cw) : 0,
+        adjacentIndex: state.adjacentIndex,
+        sampleCount: state.traceSampleCount,
+      };
+      traceTabSwipe('snap_start', durationBaseDetail);
       state.phase = 'animating';
       state.generation++;
       const gen = state.generation;
 
-      const cont = contentRef.current;
       if (!cont) { resetState(); return; }
 
-      const cw = cont.clientWidth;
       const curEl = state.currentEl;
       const adjEl = state.adjacentEl;
       if (!curEl) { cleanupDOM(); resetState(); return; }
@@ -358,6 +439,11 @@ export function useTabSwipeGesture({
         const onEnd = (e?: Event) => {
           if (e instanceof TransitionEvent && e.propertyName !== 'transform') return;
           if (state.generation !== gen) return;
+          traceTabSwipe('snap_end', {
+            ...durationBaseDetail,
+            result: 'commit',
+            durationMs: duration,
+          });
           state.generation++;
           clearAllTimers();
           detachOnEnd();
@@ -398,6 +484,11 @@ export function useTabSwipeGesture({
         const onEnd = (e?: Event) => {
           if (e instanceof TransitionEvent && e.propertyName !== 'transform') return;
           if (state.generation !== gen) return;
+          traceTabSwipe('snap_end', {
+            ...durationBaseDetail,
+            result: 'bounce',
+            durationMs: SNAP_DURATION,
+          });
           state.generation++;
           clearAllTimers();
           detachOnEnd();
@@ -414,7 +505,7 @@ export function useTabSwipeGesture({
 
     // ─── Snap decision ────────────────────────────────────────
 
-    function makeSnapDecision() {
+    function makeSnapDecision(source: SnapDecisionSource = 'manual') {
       if (state.phase !== 'tracking') return;
       const cont = contentRef.current;
       if (!cont) { resetState(); return; }
@@ -432,7 +523,34 @@ export function useTabSwipeGesture({
         if (velDir !== offsetDir) shouldCommit = false;
       }
 
+      traceTabSwipe('decision', {
+        gestureId: state.traceGestureId,
+        source,
+        shouldCommit,
+        positionTriggered,
+        velocityTriggered,
+        offsetX: roundPx(state.offsetX),
+        offsetPct: roundPct(Math.abs(state.offsetX) / cw),
+        velocity: Math.round(v),
+        offsetDir,
+        adjacentIndex: state.adjacentIndex,
+        sampleCount: state.traceSampleCount,
+        elapsedMs: state.traceTrackingStartedAt > 0 ? Math.round(performance.now() - state.traceTrackingStartedAt) : 0,
+      });
       animateSnap(shouldCommit, offsetDir);
+    }
+
+    function ensureTraceGestureId() {
+      if (state.phase === 'idle' && state.direction === null && state.traceSampleCount === 0) {
+        state.traceGestureId++;
+      }
+    }
+
+    function traceIdleScheduled(detail: PerfTraceDetail & { reason: string; timeoutMs: number }) {
+      const key = `${detail.reason}:${detail.timeoutMs}`;
+      if (key === state.traceLastIdleKey && !shouldTraceSample(state.traceSampleCount)) return;
+      state.traceLastIdleKey = key;
+      traceTabSwipe('idle_scheduled', detail);
     }
 
     // ─── Main wheel handler ───────────────────────────────────
@@ -458,12 +576,53 @@ export function useTabSwipeGesture({
       if (!cont) return;
 
       const { deltaX, deltaY } = e;
-      if (deltaX === 0 && deltaY === 0) return;
-
       // WebKit (Tauri WKWebView on macOS) may expose gesture phase.
       // Note: these are non-standard and may not be available in all browsers.
       const wheelPhase = (e as unknown as { phase?: number }).phase;
       const momentumPhase = (e as unknown as { momentumPhase?: number }).momentumPhase;
+      const zeroDelta = deltaX === 0 && deltaY === 0;
+
+      if (
+        state.phase === 'idle'
+        && state.direction === null
+        && (Math.abs(deltaX) >= DIR_LOCK_MIN || typeof wheelPhase === 'number' || typeof momentumPhase === 'number')
+      ) {
+        ensureTraceGestureId();
+      }
+
+      const nextSample = state.phase === 'tracking' ? state.traceSampleCount + 1 : state.traceSampleCount;
+      if (
+        (state.phase !== 'idle' && shouldTraceSample(nextSample))
+        || Math.abs(deltaX) >= DIR_LOCK_MIN
+        || typeof wheelPhase === 'number'
+        || typeof momentumPhase === 'number'
+      ) {
+        traceTabSwipe('sample', {
+          gestureId: state.traceGestureId,
+          sample: nextSample,
+          state: state.phase,
+          direction: directionValue(state.direction),
+          deltaX: roundPx(deltaX),
+          deltaY: roundPx(deltaY),
+          wheelPhase: phaseValue(wheelPhase),
+          momentumPhase: phaseValue(momentumPhase),
+          zeroDelta,
+          target: targetKind(e.target),
+        });
+      }
+
+      if (zeroDelta) {
+        if (typeof wheelPhase === 'number' || typeof momentumPhase === 'number') {
+          traceTabSwipe('zero_delta_phase', {
+            gestureId: state.traceGestureId,
+            state: state.phase,
+            direction: directionValue(state.direction),
+            wheelPhase: phaseValue(wheelPhase),
+            momentumPhase: phaseValue(momentumPhase),
+          });
+        }
+        return;
+      }
 
       // ── Direction lock ──
       if (state.direction === null && state.phase !== 'animating') {
@@ -472,13 +631,32 @@ export function useTabSwipeGesture({
         if (ax < DIR_LOCK_MIN && ay < DIR_LOCK_MIN) return;
         if (ax > ay * DIR_LOCK_RATIO) {
           // Horizontal gesture — but check if an inner element should handle it
-          if (hasInnerHorizontalScroll(e.target, cont, deltaX)) {
+          const innerScroll = hasInnerHorizontalScroll(e.target, cont, deltaX);
+          if (innerScroll) {
             state.direction = 'inner-scroll';
           } else {
             state.direction = 'horizontal';
           }
+          traceTabSwipe('direction_lock', {
+            gestureId: state.traceGestureId,
+            direction: directionValue(state.direction),
+            absX: roundPx(ax),
+            absY: roundPx(ay),
+            ratio: ay > 0 ? roundPct(ax / ay) : 99,
+            innerScroll,
+            target: targetKind(e.target),
+          });
         } else {
           state.direction = 'vertical';
+          traceTabSwipe('direction_lock', {
+            gestureId: state.traceGestureId,
+            direction: 'vertical',
+            absX: roundPx(ax),
+            absY: roundPx(ay),
+            ratio: ay > 0 ? roundPct(ax / ay) : 99,
+            innerScroll: false,
+            target: targetKind(e.target),
+          });
         }
         if (state.direction === 'vertical') return;
       }
@@ -489,6 +667,11 @@ export function useTabSwipeGesture({
           state.direction = null;
           state.dirResetTimer = null;
         }, DIR_RESET_TIMEOUT);
+        traceTabSwipe('direction_defer', {
+          gestureId: state.traceGestureId,
+          direction: directionValue(state.direction),
+          resetMs: DIR_RESET_TIMEOUT,
+        });
         return;
       }
 
@@ -523,9 +706,20 @@ export function useTabSwipeGesture({
         state.prevMergedVelocity = 0;
         state.accFactors = [];
         state.momentumFlag = false;
+        state.traceSampleCount = 0;
+        state.traceTrackingStartedAt = performance.now();
+        state.traceLastIdleKey = null;
+        traceTabSwipe('begin', {
+          gestureId: state.traceGestureId,
+          activeIndex,
+          tabCount: tabs.length,
+          width: cw,
+          currentReady: state.currentEl !== null,
+        });
       }
 
       // ── Accumulate offset (CLAMPED to ±containerWidth) ──
+      state.traceSampleCount++;
       state.offsetX = clamp(state.offsetX - deltaX, -cw, cw);
       addSample(-deltaX);
 
@@ -543,9 +737,19 @@ export function useTabSwipeGesture({
         state.adjacentIndex = wantIdx;
         state.adjacentEl = getTabEl(wantIdx);
         if (state.adjacentEl) {
+          const wasInvisible = state.adjacentEl.classList.contains('invisible');
+          const contentVisibility = state.adjacentEl.style.contentVisibility || 'css';
           const adjOff = state.offsetX > 0 ? -cw + state.offsetX : cw + state.offsetX;
           state.adjacentEl.style.transform = `translateX(${adjOff}px)`;
           showTab(state.adjacentEl);
+          traceTabSwipe('neighbor_prepare', {
+            gestureId: state.traceGestureId,
+            activeIndex,
+            adjacentIndex: state.adjacentIndex,
+            wasInvisible,
+            contentVisibility,
+            offsetX: roundPx(state.offsetX),
+          });
         }
       }
 
@@ -569,6 +773,19 @@ export function useTabSwipeGesture({
           : cw + visOffset;
         state.adjacentEl.style.transform = `translateX(${adjOff}px)`;
       }
+      if (shouldTraceSample(state.traceSampleCount)) {
+        traceTabSwipe('update', {
+          gestureId: state.traceGestureId,
+          sample: state.traceSampleCount,
+          offsetX: roundPx(state.offsetX),
+          visualOffsetX: roundPx(visOffset),
+          offsetPct: roundPct(Math.abs(state.offsetX) / cw),
+          velocity: Math.round(getVelocity()),
+          atBoundary,
+          adjacentIndex: state.adjacentIndex,
+          momentum: state.momentumFlag,
+        });
+      }
 
       // ── Proactive commit (prevents inertia drift / overshoot) ──
       // When content crosses threshold with clear velocity, commit IMMEDIATELY.
@@ -587,6 +804,27 @@ export function useTabSwipeGesture({
 
         if (fastSwipe || nearTarget) {
           if (state.idleTimer !== null) { clearTimeout(state.idleTimer); state.idleTimer = null; }
+          traceTabSwipe('proactive_commit', {
+            gestureId: state.traceGestureId,
+            reason: nearTarget ? 'near-target' : 'fast-swipe',
+            positionPct: roundPct(positionPct),
+            velocity: Math.round(v),
+            offsetDir: oDir,
+          });
+          traceTabSwipe('decision', {
+            gestureId: state.traceGestureId,
+            source: 'proactive',
+            shouldCommit: true,
+            positionTriggered: positionPct > POSITION_THRESHOLD,
+            velocityTriggered: Math.abs(v) > COMMIT_VELOCITY,
+            offsetX: roundPx(state.offsetX),
+            offsetPct: roundPct(positionPct),
+            velocity: Math.round(v),
+            offsetDir: oDir,
+            adjacentIndex: state.adjacentIndex,
+            sampleCount: state.traceSampleCount,
+            elapsedMs: state.traceTrackingStartedAt > 0 ? Math.round(performance.now() - state.traceTrackingStartedAt) : 0,
+          });
           animateSnap(true, oDir);
           return;
         }
@@ -595,14 +833,26 @@ export function useTabSwipeGesture({
       // ── WebKit phase-based gesture end (if available) ──
       if (wheelPhase === WEBKIT_PHASE_ENDED || wheelPhase === WEBKIT_PHASE_CANCELLED) {
         if (state.idleTimer !== null) { clearTimeout(state.idleTimer); state.idleTimer = null; }
-        makeSnapDecision();
+        traceTabSwipe('release', {
+          gestureId: state.traceGestureId,
+          source: 'webkit-phase',
+          wheelPhase: phaseValue(wheelPhase),
+          momentumPhase: phaseValue(momentumPhase),
+        });
+        makeSnapDecision('webkit-phase');
         return;
       }
 
       // ── WebKit momentum phase: finger already lifted ──
       if (typeof momentumPhase === 'number' && momentumPhase > 0) {
         if (state.idleTimer !== null) { clearTimeout(state.idleTimer); state.idleTimer = null; }
-        makeSnapDecision();
+        traceTabSwipe('release', {
+          gestureId: state.traceGestureId,
+          source: 'momentum-phase',
+          wheelPhase: phaseValue(wheelPhase),
+          momentumPhase: phaseValue(momentumPhase),
+        });
+        makeSnapDecision('momentum-phase');
         return;
       }
 
@@ -614,7 +864,19 @@ export function useTabSwipeGesture({
       //   - Slow / paused                        → 500ms (finger might still be on pad)
       if (atBoundary) {
         if (state.idleTimer !== null) clearTimeout(state.idleTimer);
-        state.idleTimer = setTimeout(makeSnapDecision, IDLE_BOUNDARY);
+        state.idleTimer = setTimeout(() => {
+          traceTabSwipe('release', {
+            gestureId: state.traceGestureId,
+            source: 'idle-boundary',
+            timeoutMs: IDLE_BOUNDARY,
+          });
+          makeSnapDecision('idle');
+        }, IDLE_BOUNDARY);
+        traceIdleScheduled({
+          gestureId: state.traceGestureId,
+          reason: 'boundary',
+          timeoutMs: IDLE_BOUNDARY,
+        });
       } else {
         if (state.idleTimer !== null) clearTimeout(state.idleTimer);
         const absDelta = Math.abs(deltaX);
@@ -623,14 +885,31 @@ export function useTabSwipeGesture({
         const timeout = isInertiaTail ? IDLE_INERTIA_TAIL
           : recentV > COMMIT_VELOCITY ? IDLE_FAST
           : IDLE_SLOW;
-        state.idleTimer = setTimeout(makeSnapDecision, timeout);
+        state.idleTimer = setTimeout(() => {
+          traceTabSwipe('release', {
+            gestureId: state.traceGestureId,
+            source: 'idle',
+            timeoutMs: timeout,
+            reason: isInertiaTail ? 'inertia-tail' : recentV > COMMIT_VELOCITY ? 'fast' : 'slow',
+          });
+          makeSnapDecision('idle');
+        }, timeout);
+        traceIdleScheduled({
+          gestureId: state.traceGestureId,
+          reason: isInertiaTail ? 'inertia-tail' : recentV > COMMIT_VELOCITY ? 'fast' : 'slow',
+          timeoutMs: timeout,
+          recentVelocity: Math.round(recentV),
+          absDelta: roundPx(absDelta),
+        });
       }
     }
 
     container.addEventListener('wheel', handleWheel, { passive: false });
+    traceTabSwipe('listener_attached');
 
     return () => {
       container.removeEventListener('wheel', handleWheel);
+      traceTabSwipe('listener_detached');
       cleanupDOM();
       resetState();
     };
