@@ -4,7 +4,7 @@
   "type": "module",
   "version": "0.2.37",
   "license": "Apache-2.0",
-  "packageManager": "npm@10.8.2",
+  "packageManager": "npm@11.13.0",
   "engines": {
     "node": ">=22.0.0"
   },
