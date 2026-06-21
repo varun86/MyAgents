@@ -30,15 +30,9 @@ function sourceWithoutCommentLines(file: string): string {
 
 describe('SessionEngine runtime boundary', () => {
   it('keeps Phase5 migrated route modules behind SessionEngine instead of direct builtin/external adapters', () => {
-    const routeFiles = [
-      'src/server/routes/session-read.ts',
-      'src/server/routes/chat-stream.ts',
-      'src/server/routes/session-config.ts',
-      'src/server/routes/session-operations.ts',
-    ].map(file => join(repoRoot, file));
+    const routeFiles = listSourceFiles('src/server/routes');
     const forbidden = [
       '../agent-session',
-      '../runtimes/external-session',
       'enqueueUserMessage(',
       'sendExternalMessage(',
       'waitForSessionIdle(',
@@ -47,12 +41,21 @@ describe('SessionEngine runtime boundary', () => {
       'didLastTurnSucceed(',
       'getAndClearLastAgentError(',
     ];
+    const externalRuntimeImportAllowed = new Set([
+      'src/server/routes/session-engine-runtime.ts',
+    ]);
 
     const violations = routeFiles.flatMap((file) => {
+      const relativePath = relative(repoRoot, file);
       const source = readFileSync(file, 'utf8');
-      return forbidden
+      const baseViolations = forbidden
         .filter(pattern => source.includes(pattern))
-        .map(pattern => `${relative(repoRoot, file)} contains ${pattern}`);
+        .map(pattern => `${relativePath} contains ${pattern}`);
+      const externalRuntimeViolations = source.includes('../runtimes/external-session')
+        && !externalRuntimeImportAllowed.has(relativePath)
+        ? [`${relativePath} imports external-session internals`]
+        : [];
+      return [...baseViolations, ...externalRuntimeViolations];
     });
 
     expect(violations).toEqual([]);
@@ -166,12 +169,7 @@ describe('SessionEngine runtime boundary', () => {
   });
 
   it('keeps session-core pure and side-effect free', () => {
-    const coreFiles = [
-      'src/server/session-core/turn-result-policy.ts',
-      'src/server/session-core/runtime-config-policy.ts',
-      'src/server/session-core/turn-queue.ts',
-      'src/server/session-core/mcp-sync-policy.ts',
-    ].map(file => join(repoRoot, file));
+    const coreFiles = listSourceFiles('src/server/session-core');
     const forbidden = [
       '../agent-session',
       '../builtin-session',
