@@ -429,6 +429,13 @@ function resetModuleState(): void {
   clearExternalQueueWithCancellation();
 }
 
+export function __resetExternalSessionForTests(): void {
+  if (process.env.NODE_ENV !== 'test' && process.env.VITEST !== 'true') {
+    throw new Error('__resetExternalSessionForTests is only available in tests');
+  }
+  resetModuleState();
+}
+
 /**
  * PRD #131 (Codex review #4) — drain pending interactive requests by
  * broadcasting `*:expired` so the frontend modal clears before we wipe the

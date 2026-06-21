@@ -1,5 +1,5 @@
 /**
- * Unit tests for the suspension-aware inactivity watchdog.
+ * Regression tests for the suspension-aware inactivity watchdog.
  *
  * The whole point of the primitive is that process suspension (macOS sleep /
  * App Nap) must NOT count as inactivity. These tests drive a fake clock so we

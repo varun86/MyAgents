@@ -4,7 +4,7 @@
  * Tests specific to Moonshot API mode.
  * Requires valid API key in ~/.myagents/config.json.
  *
- * Run: vitest run src/server/__tests__/provider-moonshot.test.ts
+ * Run: npm run test:credentialed
  */
 
 import { describe, it, expect, beforeAll } from 'vitest';
@@ -101,8 +101,9 @@ describe('Moonshot Provider Tests', () => {
   });
 
   describe('Error Handling', () => {
-    it('should handle invalid API key error gracefully', async () => {
-      // Test with invalid API key - this should always run regardless of provider availability
+    it.skipIf(!isAvailable)('should handle invalid API key error gracefully', async () => {
+      // Still a real upstream network smoke: only run when credentialed tests
+      // have a configured Moonshot provider, never in no-secret environments.
       const result = await runTestQuery({
         provider: {
           ...provider.config,

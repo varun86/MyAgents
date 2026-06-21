@@ -1,5 +1,5 @@
 /**
- * Pattern 2 §G — large-value-store unit tests.
+ * Pattern 2 §G — large-value-store regression tests.
  *
  * Covers:
  *  (a) maybeSpill returns inline for values <= inlineMaxBytes

@@ -252,12 +252,16 @@ npm run tauri:dev                 # Tauri 开发模式（完整桌面体验）
 ./build_macos.sh                  # 生产构建
 ./publish_release.sh              # 发布到 R2
 npm run typecheck && npm run lint # 代码质量检查
+npm run test:classification       # server 测试后缀/分层 guard
 npm run test:unit                 # 快池（纯逻辑，并行，秒级）— 开发回合中频繁跑
 npm run test:dom                  # jsdom 池（*.test.tsx 组件/安全不变量，秒级）
-npm run test:changed              # 只跑受未提交改动影响的测试
-npm test                          # 全套（unit + stateful 串行池，含真实 SDK/IO，~3min）
-npm run coverage                  # 覆盖率报告（不设硬阈值，看改动文件 ratchet）
+npm run test:integration          # CI-safe 后端集成池（串行、no-egress、无真实密钥）
+npm run test:credentialed         # 真实 Provider/SDK/network smoke，显式本地跑，不进默认 CI
+npm run test:changed              # 受未提交改动影响的 deterministic 测试（不跑 credentialed）
+npm test                          # classification + unit + dom + integration，不跑 credentialed
+npm run coverage                  # 非 credentialed 覆盖率报告（不设硬阈值，看改动文件 ratchet）
 cargo fmt --manifest-path src-tauri/Cargo.toml -- --check  # Rust 格式检查（使用 rust-toolchain.toml pin 的 rustfmt）
+cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D clippy::disallowed_methods -D clippy::disallowed_macros
 ```
 
 ## Rust 工具链纪律
@@ -270,22 +274,21 @@ Rust 工具链由仓库根目录 `rust-toolchain.toml` 固定，开发机和 CI 
 
 ## 测试纪律（回归护栏）
 
-测试用 Vitest，拆三个 project（见 `vitest.config.ts`）：`unit`（纯逻辑，node env，并行 forks，秒级，含 `src/shared/**`、`src/renderer/**` 的 `*.test.ts`、server 侧 `*.unit.test.ts`）+ `dom`（jsdom env，`*.test.tsx` 组件/安全不变量测试，秒级，无 secret，已进 CI）+ `stateful`（singleFork 串行，现有 `src/server/__tests__/**`，触碰模块级全局/端口/真实 SDK）。Rust 测试走 `cargo test`（独立，`npm test` 不碰）。**注意 `test:unit` 只跑 `.test.ts`，组件级 `.test.tsx` 在 `dom` 池——改组件/写 `.test.tsx` 后 MUST 跑 `npm run test:dom`。**
+测试不是为了追覆盖率，而是把重要行为、历史事故和架构边界变成可执行契约；AI 开发时 MUST 把它当成开发回合内的护栏，主动跑、即时修。
 
-**这套测试存在的唯一目的是在快速迭代中拦住回归**。AI 开发时 MUST 把它当成开发回合内的护栏，主动跑、即时修：
+当前 Vitest 四池（见 `vitest.config.ts`）：`unit` = 纯逻辑快池（`src/shared/**` / `src/renderer/**` 的 `*.test.ts` + server 侧 `*.unit.test.ts`，并行、秒级）；`dom` = `*.test.tsx` 组件 / hook / 安全不变量（jsdom，秒级）；`integration` = CI-safe 后端集成池（`*.integration.test.ts`，singleFork，允许 module globals / loopback / 临时 HOME / SessionStore）；`credentialed` = 真实 Provider / SDK / network smoke（`*.credentialed.test.ts`，显式本地跑，不被 `npm test` / public CI 执行）。`unit` / `integration` 都加载 `src/test/setup-no-egress.ts`，禁止非 loopback 出站；Rust 测试走 `cargo test`，`npm test` 不覆盖 Rust。
 
-- **改纯逻辑后 MUST 跑 `npm run test:unit`**（秒级，无理由不跑）；改后端核心后跑 `npm run test:changed`。
-- **修 bug MUST 先加一个能复现该 bug 的回归测试**（characterization test）让它先红，再修到绿——把"反复出同类 bug"从根上掐断。这是红线，不是建议。
-- **新增红线 helper / 纯函数 MUST 配单测**（放进 `unit` 快池：`src/shared/` 直接 `*.test.ts`；server 侧用 `*.unit.test.ts` 后缀进快池）。
-- **测试红了不许靠改弱断言/`skip` 糊过去**——先判断是产品 bug 还是测试漂移（拿确凿依据），产品 bug 就修产品代码。订正不变量必须有理由。
-- 写"纯逻辑可单测"的代码：把决策逻辑抽成纯函数（Functional Core / Imperative Shell），副作用留在薄外壳。巨型文件（`agent-session.ts` / `TabProvider.tsx`）的新逻辑优先抽纯核心再测。
-- 涉及时间的测试 MUST 注入时钟 / `vi.useFakeTimers`，涉及本地日期的 MUST pin `process.env.TZ`（否则跨时区/CI flaky）。
-
-CI（`.github/workflows/test.yml`）在 PR + push 到 `dev/*`/`main` 时自动跑 typecheck + lint + `test:unit` + `test:dom` + `cargo test`，**不过不让合**。
+- **操作速查**：组件测试的 `*.test.tsx` 只进 `dom`，不会被 `test:unit` 覆盖；旧 `stateful` 池已拆成 `integration`（stateful but deterministic，进 CI）和 `credentialed`（真实密钥/真实网络，显式本地跑）；`test:changed` 只适合本地快速回归，改测试分层、CI、runtime/session 边界时仍要跑 `test:classification` + 对应全池。
+- **何时补测试**：修 bug MUST 补能复现该 bug 的回归测试；新增红线 helper / 纯函数 MUST 配单测；改 pure policy / parser / queue / config 判断，优先进 `unit`；改 session / runtime / turn / transcript / IO / security 边界时，补 integration / boundary guard，能静态拦的用 lint / depcruise / clippy。
+- **何时可不补**：纯文档、copy、样式微调、机械搬文件且已有等价覆盖时可以不加，但不能用这个理由跳过高风险行为变化。
+- **怎么写**：把决策逻辑抽成纯函数（Functional Core / Imperative Shell），副作用留薄外壳；server 测试文件名必须显式分层：`*.unit.test.ts` / `*.integration.test.ts` / `*.credentialed.test.ts`，不允许裸 `src/server/**/*.test.ts`；涉及时间 MUST 注入时钟 / `vi.useFakeTimers`，涉及本地日期 MUST pin `process.env.TZ`。
+- **稳定性红线**：默认测试必须 deterministic，不依赖真实网络、真实密钥、真实 HOME；需要真实 Provider / SDK / upstream 的测试只能进 `credentialed`，无 secret 时 self-skip；测试失败不许靠弱化断言或 `skip` 糊过去，先判断是产品 bug 还是测试契约漂移，订正不变量必须有理由。
+- **命令纪律**：改纯逻辑后跑 `npm run test:unit`；改组件 / `.test.tsx` 后跑 `npm run test:dom`；改后端 session / runtime / persistence / IO / security 后跑 `npm run test:integration` 和 `npm run test:classification`；需要本地 deterministic 全量 Vitest 才跑 `npm test`；真实供应商链路才手动跑 `npm run test:credentialed`。
+- **CI gate**：PR + push 到 `dev/**` / `main` 跑 typecheck + lint + `test:classification` + `test:unit` + `test:dom` + `test:integration` + `build:server` / `build:bridge` / `build:cli` / `build:web` + `cargo test` + Clippy redline；credentialed 与完整 `tauri build` 不进普通 CI。
 
 ## Git 与工作流
 
-- **提交前 MUST**：`npm run typecheck` + `npm run test:unit`（秒级；若动了 `.test.tsx`/组件再加 `npm run test:dom`），检查当前分支（`git branch --show-current`）
+- **提交前 MUST**：`npm run typecheck` + `npm run test:unit`（秒级；若动了 `.test.tsx`/组件再加 `npm run test:dom`；若动了后端 session/runtime/IO/security 再加 `npm run test:classification` + `npm run test:integration`），检查当前分支（`git branch --show-current`）
 - **并发 writer 纪律（本仓库常态）**：working tree 可能被并行 session / 用户同时改，会话开始的 git 快照是**冻结的**、不反映实时树。提交前 MUST 重跑 `git status`；**禁止 `git add -A` / `git add .`**——显式列出只属于你的文件；对改过的文件用 `git diff -- <file>` 确认没混入别人的 hunk（混了就别整文件 stage，隔离自己的 hunk 或先协调）；验证后**尽快提交**（拖延会被并发 `commit -a` 把混合文件卷走）。**禁止** `checkout HEAD -- <file>` / amend 共享 commit 去"清理"——会毁掉对方未提交工作，改用追加 commit。whole-tree `npm run lint` / `typecheck` 可能因别人未提交代码报错，用 `npx eslint <你的文件>` 自查
 - **发布前验"已提交态"而非工作树**：并发 writer 可能提交了组件改动、却把配套测试 fix 留在工作区 → **已提交分支是红的，但你本地 `npm test` 因工作区 fix 而绿**（0.2.29 实战：`SimpleChatInput` 的 `useConfigData` 改动已提交、其测试 mock 未提交 → 已提交态 `useConfigData must be used within <ConfigProvider>`）。合 main / 打 tag 前 MUST 先 `git stash` 掉无关工作区文件（或确认 `git status` 干净）再跑易红测试；load-bearing 的未提交 fix 就显式提交进发布准备，别 ship 红分支
 - **分支策略**：`dev/x.x.x` 开发 → 合并到 `main`。MUST NOT 在 main 直接提交

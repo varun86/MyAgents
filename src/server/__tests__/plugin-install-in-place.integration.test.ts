@@ -8,8 +8,8 @@
  * staging→rename flow tripped its own `existsSync(installPath)` guard. Fix:
  * detect source-is-target and register the directory in place.
  *
- * Stateful (touches real fs + config.json lock + module-level installingNames),
- * so it lives in the serial `stateful` pool, not the fast unit pool.
+ * Stateful but credential-free (real fs + config.json lock + module-level
+ * installingNames), so it lives in the serial `integration` pool.
  */
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';

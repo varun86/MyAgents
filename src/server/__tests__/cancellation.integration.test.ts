@@ -1,5 +1,5 @@
 /**
- * Pattern 1 — cancellation helpers unit tests.
+ * Pattern 1 — cancellation helpers regression tests.
  *
  * Covers:
  *  (a) withAbortSignal aborts inner op when outer signal fires; outer signal preserved

@@ -1,5 +1,5 @@
 /**
- * Pattern 2 §G — SSE backpressure & priority unit tests.
+ * Pattern 2 §G — SSE backpressure & priority regression tests.
  *
  * Covers:
  *  (a) Critical events are never dropped, even with a slow consumer.

@@ -4,7 +4,7 @@
  * Basic functionality tests for Claude Agent SDK.
  * Tests run with Anthropic subscription (default provider).
  *
- * Run: bun test src/server/__tests__/sdk-smoke.test.ts
+ * Run: npm run test:credentialed
  */
 
 import { describe, it, expect, beforeAll } from 'vitest';

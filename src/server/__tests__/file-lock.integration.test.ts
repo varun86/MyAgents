@@ -1,5 +1,5 @@
 /**
- * Pattern 5 — file-lock helper unit tests.
+ * Pattern 5 — file-lock helper regression tests.
  *
  * Covers:
  *  (a) basic withFileLock serializes two concurrent ops in the same process

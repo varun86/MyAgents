@@ -4,7 +4,7 @@
  * Tests specific to Anthropic subscription mode.
  * Requires valid ~/.claude.json with OAuth account.
  *
- * Run: bun test src/server/__tests__/provider-anthropic.test.ts
+ * Run: npm run test:credentialed
  */
 
 import { describe, it, expect, beforeAll } from 'vitest';

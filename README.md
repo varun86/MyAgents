@@ -188,8 +188,13 @@ npm run typecheck
 # Lint，包含 ESLint 和 dependency-cruiser 架构边界检查
 npm run lint
 
-# 单元测试
-npm run test
+# 测试分层
+npm run test:classification  # server 测试命名/分层 guard
+npm run test:unit            # 纯逻辑快池
+npm run test:dom             # React/jsdom 组件与 hook
+npm run test:integration     # CI-safe 后端集成池，无真实网络/密钥
+npm test                     # classification + unit + dom + integration
+npm run test:credentialed    # 真实 Provider/SDK smoke，显式本地运行
 
 # Debug 构建，含 DevTools
 ./build_dev.sh
@@ -250,7 +255,11 @@ specs/                        架构、设计、技术文档
 ```bash
 npm run typecheck
 npm run lint
+npm run test:classification
+npm run test:unit
 ```
+
+后端 Session、Runtime、IO 或安全边界改动还应跑 `npm run test:integration`；真实 Provider / SDK 链路只在本机显式跑 `npm run test:credentialed`，不属于默认 CI。
 
 如果改动涉及 Rust、Tauri 命令、Sidecar 生命周期、Runtime、MCP、任务中心或插件桥接，请先阅读对应 `specs/tech_docs/` 文档，避免绕开已有架构。
 
@@ -439,8 +448,13 @@ npm run typecheck
 # Lint, including ESLint and dependency-cruiser architecture boundary checks
 npm run lint
 
-# Unit tests
-npm run test
+# Test layers
+npm run test:classification  # server test naming / classification guard
+npm run test:unit            # pure logic fast pool
+npm run test:dom             # React/jsdom components and hooks
+npm run test:integration     # CI-safe backend integration, no real network/secrets
+npm test                     # classification + unit + dom + integration
+npm run test:credentialed    # real provider / SDK smoke, explicit local run
 
 # Debug build with DevTools
 ./build_dev.sh
@@ -501,7 +515,11 @@ Run at least:
 ```bash
 npm run typecheck
 npm run lint
+npm run test:classification
+npm run test:unit
 ```
+
+For backend Session, Runtime, IO, or security-boundary changes, also run `npm run test:integration`. Real provider / SDK smoke tests live under `npm run test:credentialed` and are explicit local checks, not default CI.
 
 If your change touches Rust, Tauri commands, Sidecar lifecycle, Runtime, MCP, Task Center, or Plugin Bridge, read the matching `specs/tech_docs/` document first so the change grows from the existing architecture.
 
