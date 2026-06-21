@@ -581,9 +581,9 @@ myagents diagnose runtime codex --workspace=<path>   # 别名糖
 ```
 config.multiAgentRuntime (磁盘/React state)
   │
-  ├── Rust sidecar.rs: resolve_agent_runtime_from_config()
+  ├── Rust sidecar/runtime_identity.rs: resolve_agent_runtime_from_config()
   │     → 仅当 multiAgentRuntime=true 时读取 agent.runtime
-  │     → 设置 MYAGENTS_RUNTIME 环境变量注入 Sidecar
+  │     → sidecar/session_lifecycle.rs 或 sidecar/instances.rs 在 spawn 时注入 MYAGENTS_RUNTIME
   │
   ├── Node factory.ts: getCurrentRuntimeType()
   │     → 读取 process.env.MYAGENTS_RUNTIME
