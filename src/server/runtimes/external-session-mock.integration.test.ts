@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -38,11 +38,19 @@ class FakeRuntimeProcess implements RuntimeProcess {
 class FakeRuntime implements AgentRuntime {
   readonly type: RuntimeType = 'codex';
   readonly sentMessages: string[] = [];
+  readonly steeredMessages: Array<{ message: string; clientUserMessageId?: string }> = [];
   readonly permissionResponses: Array<{ requestId: string; decision: string; reason?: string }> = [];
+  steerMessage?: AgentRuntime['steerMessage'];
   private callback: UnifiedEventCallback | null = null;
   private readonly timers = new Set<ReturnType<typeof setTimeout>>();
 
-  constructor(private readonly scripts: TurnScript[]) {}
+  constructor(private readonly scripts: TurnScript[], options: { realtimeSteering?: boolean } = {}) {
+    if (options.realtimeSteering) {
+      this.steerMessage = async (_process, message, _images, steerOptions) => {
+        this.steeredMessages.push({ message, clientUserMessageId: steerOptions?.clientUserMessageId });
+      };
+    }
+  }
 
   async detect() {
     return { installed: true, version: 'fake-runtime' };
@@ -170,10 +178,16 @@ let previousHome: string | undefined;
 let previousUserProfile: string | undefined;
 let previousRuntime: string | undefined;
 
-async function createHarness(scripts: TurnScript[]): Promise<Harness> {
+async function createHarness(
+  scripts: TurnScript[],
+  options: { realtimeSteering?: boolean; config?: Record<string, unknown> } = {},
+): Promise<Harness> {
   vi.resetModules();
   const home = mkdtempSync(join(tmpdir(), 'myagents-external-mock-'));
   mkdirSync(join(home, '.myagents'), { recursive: true });
+  if (options.config) {
+    writeFileSync(join(home, '.myagents', 'config.json'), JSON.stringify(options.config));
+  }
   previousHome = process.env.HOME;
   previousUserProfile = process.env.USERPROFILE;
   previousRuntime = process.env.MYAGENTS_RUNTIME;
@@ -181,7 +195,7 @@ async function createHarness(scripts: TurnScript[]): Promise<Harness> {
   process.env.USERPROFILE = home;
   process.env.MYAGENTS_RUNTIME = 'codex';
 
-  const runtime = new FakeRuntime(scripts);
+  const runtime = new FakeRuntime(scripts, { realtimeSteering: options.realtimeSteering });
   vi.doMock('./factory', () => ({
     getCurrentRuntimeType: () => 'codex',
     getExternalRuntime: () => runtime,
@@ -324,6 +338,66 @@ describe('external SessionEngine with fake runtime', () => {
     await expect(harness.engine.waitIdle(2_000, 10)).resolves.toBe(true);
     expect(harness.runtime.sentMessages).toEqual(['first', 'second']);
     expect(harness.engine.getLatestAssistantResult().latestResult).toBe('second queued answer');
+  });
+
+  it('steers a second desktop send into the active Codex turn in realtime mode', async () => {
+    const harness = await createHarness([
+      { kind: 'success', text: 'single steered answer', completeDelayMs: 80 },
+    ], { realtimeSteering: true });
+    const sessionId = 'session-realtime-steer';
+    const workspacePath = join(harness.home, 'workspace');
+
+    await harness.engine.sendDesktopMessage(desktopRequest(sessionId, workspacePath, 'first'));
+    await waitFor(() => harness.runtime.sentMessages.includes('first'), 'first dispatch');
+    const second = await harness.engine.sendDesktopMessage(desktopRequest(sessionId, workspacePath, 'second'));
+
+    expect(second).toMatchObject({
+      success: true,
+      queued: true,
+      isInFlight: true,
+      deliveryMode: 'realtime',
+    });
+    await waitFor(() => harness.runtime.steeredMessages.length === 1, 'realtime steer dispatch');
+
+    expect(harness.runtime.sentMessages).toEqual(['first']);
+    expect(harness.runtime.steeredMessages[0]).toMatchObject({ message: 'second' });
+
+    await expect(harness.engine.waitIdle(2_000, 10)).resolves.toBe(true);
+    const persisted = harness.sessionStore.getSessionData(sessionId);
+    expect(persisted?.messages.filter((message) => message.role === 'user').map((message) => message.content)).toEqual([
+      'first',
+      'second',
+    ]);
+    expect(persisted?.messages.filter((message) => message.role === 'assistant')).toHaveLength(1);
+    expect(harness.engine.getLatestAssistantResult().latestResult).toBe('single steered answer');
+  });
+
+  it('keeps Codex steering-capable runtimes on turn boundaries when configured for turn response', async () => {
+    const harness = await createHarness([
+      { kind: 'success', text: 'first turn-mode answer', completeDelayMs: 80 },
+      { kind: 'success', text: 'second turn-mode answer' },
+    ], {
+      realtimeSteering: true,
+      config: { chatQueueResponseMode: 'turn' },
+    });
+    const sessionId = 'session-turn-mode';
+    const workspacePath = join(harness.home, 'workspace');
+
+    await harness.engine.sendDesktopMessage(desktopRequest(sessionId, workspacePath, 'first'));
+    await waitFor(() => harness.runtime.sentMessages.includes('first'), 'first dispatch');
+    const second = await harness.engine.sendDesktopMessage(desktopRequest(sessionId, workspacePath, 'second'));
+
+    expect(second).toMatchObject({
+      success: true,
+      queued: true,
+      deliveryMode: 'turn',
+    });
+    expect(harness.runtime.steeredMessages).toEqual([]);
+    expect(harness.runtime.sentMessages).toEqual(['first']);
+
+    await waitFor(() => harness.runtime.sentMessages.includes('second'), 'turn-mode queued dispatch');
+    await expect(harness.engine.waitIdle(2_000, 10)).resolves.toBe(true);
+    expect(harness.runtime.sentMessages).toEqual(['first', 'second']);
   });
 
   it('keeps permission pending until runtime delivery succeeds', async () => {

@@ -110,13 +110,44 @@ describe('external operation queue owner', () => {
   it('blocks immediate sends while a drain reservation is in flight', async () => {
     const queue = await loadFreshQueueOwner();
 
-    expect(queue.shouldQueueExternalDesktopSend('idle')).toBe(false);
+    expect(queue.shouldQueueExternalDesktopSend('idle', {
+      responseMode: 'realtime',
+      canSteerActiveTurn: true,
+    })).toBe(false);
     queue.setExternalOperationDrainInFlight(true);
-    expect(queue.shouldQueueExternalDesktopSend('idle')).toBe(true);
+    expect(queue.shouldQueueExternalDesktopSend('idle', {
+      responseMode: 'realtime',
+      canSteerActiveTurn: true,
+    })).toBe(true);
     expect(queue.canDrainExternalOperations('idle')).toBe(false);
 
     queue.setExternalOperationDrainInFlight(false);
-    expect(queue.shouldQueueExternalDesktopSend('idle')).toBe(false);
+    expect(queue.shouldQueueExternalDesktopSend('idle', {
+      responseMode: 'realtime',
+      canSteerActiveTurn: true,
+    })).toBe(false);
+  });
+
+  it('allows realtime active-turn steering only before queued work exists', async () => {
+    const queue = await loadFreshQueueOwner();
+
+    expect(queue.shouldQueueExternalDesktopSend('running', {
+      responseMode: 'realtime',
+      canSteerActiveTurn: true,
+    })).toBe(false);
+    queue.enqueueExternalMessageOperation({
+      text: 'already queued',
+      context: context(),
+      runtimeConfig: snapshot(),
+    });
+    expect(queue.shouldQueueExternalDesktopSend('running', {
+      responseMode: 'realtime',
+      canSteerActiveTurn: true,
+    })).toBe(true);
+    expect(queue.shouldQueueExternalDesktopSend('running', {
+      responseMode: 'turn',
+      canSteerActiveTurn: true,
+    })).toBe(true);
   });
 
   it('moves queued messages to the front, cancels them, and reports message status only', async () => {

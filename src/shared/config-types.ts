@@ -553,9 +553,11 @@ export interface AppConfig {
    *  'modEnter' 则 ⌘/Ctrl+Enter 发送、Enter 换行。统一作用于全部"和 AI 对话"的
    *  输入：主对话框 / AI 小助理 / 问题反馈（见 utils/chatSendKey.ts）。 */
   chatSendShortcut?: 'enter' | 'modEnter';
-  /** 桌面 Chat 连续发送 query 时的 builtin AgentSDK 队列投递策略。
-   *  'realtime'（默认）= busy 时尽快交给 SDK async queue；
+  /** 桌面 Chat 连续发送 query 时的队列投递策略。
+   *  'realtime'（默认）= busy 时尽快交给可实时响应的 runtime
+   *  （builtin SDK async queue；Codex app-server turn/steer）；
    *  'turn' = busy 时留在 turn-boundary queue，上一轮结束后再作为下一轮发送。
+   *  不支持实时 steering 的 external runtime 自动 fallback 到 'turn' 行为。
    *  仅桌面交互发送读取；IM/Cron/Inbox 等非桌面来源保持既有语义。 */
   chatQueueResponseMode?: ChatQueueResponseMode;
   showDevTools: boolean; // 显示开发者工具 (Logs/System Info)

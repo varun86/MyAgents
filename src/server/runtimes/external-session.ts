@@ -31,6 +31,7 @@ import { resolveCodexWorkspaceInstructions } from './workspace-instructions';
 import { RUNTIME_DISPLAY_NAMES, type RuntimeType } from '../../shared/types/runtime';
 import { deriveSessionTitle } from '../../shared/sessionTitle';
 import { isPendingSessionId } from '../../shared/constants';
+import { resolveChatQueueResponseMode } from '../session-core/turn-queue';
 import {
   saveSessionMetadata,
   updateSessionMetadata,
@@ -42,7 +43,7 @@ import {
   createMaterializedSessionMetadata,
   type SessionMaterializationScenario,
 } from '../utils/session-materialization';
-import { findAgentByWorkspacePath, isCliToolRegistryEnabled } from '../utils/admin-config';
+import { findAgentByWorkspacePath, isCliToolRegistryEnabled, loadConfig as loadAdminConfig } from '../utils/admin-config';
 import type { AgentConfig } from '../../shared/types/agent';
 import type { MessageUsage, SessionMessage, TurnAnalyticsSource } from '../types/session';
 import type { SystemInitInfo } from '../../shared/types/system';
@@ -115,6 +116,7 @@ import {
   isExternalOperationDrainInFlight,
   isExternalQueueGenerationStaleError,
   moveExternalQueuedMessageToFront,
+  nextExternalQueueId,
   nextExternalUserMessageId,
   releaseExternalDrainReservation,
   reserveExternalOperationForDrain,
@@ -227,6 +229,7 @@ import {
   getLastPersistedRuntimeUsageTotals,
   persistExternalUserMessageAppend,
   pushExternalSessionMessage,
+  removeAndPersistExternalSessionMessage,
   removeExternalSessionMessageById,
   resetExternalTranscriptState,
   setExternalSessionMessages,
@@ -403,6 +406,22 @@ let pendingExternalSessionBirth: PendingExternalSessionBirth | null = null;
 function setExternalSessionState(state: ExternalSessionState): void {
   setExternalLifecycleState(state);
   broadcast('chat:status', { sessionState: state });
+}
+
+type ExternalActivePair = NonNullable<ReturnType<typeof getExternalActivePair>>;
+type SteerCapableActivePair = {
+  runtime: ExternalActivePair['runtime'] & {
+    steerMessage: NonNullable<ExternalActivePair['runtime']['steerMessage']>;
+  };
+  process: ExternalActivePair['process'];
+};
+
+function getExternalActiveSteerPair(): SteerCapableActivePair | null {
+  const active = getExternalActivePair();
+  if (!active || active.process.exited || !active.runtime.steerMessage) return null;
+  if (getExternalLifecycleState() !== 'running') return null;
+  if (isExternalTurnCompleted() || getExternalTurnStartTime() === 0) return null;
+  return active as SteerCapableActivePair;
 }
 
 /** Reset all module-level state for a clean session transition.
@@ -2157,6 +2176,93 @@ export async function sendExternalMessage(
   }
 }
 
+async function steerExternalMessageForDesktop(input: {
+  queueId: string;
+  text: string;
+  images?: ImagePayload[];
+  context: ExternalSendContext;
+  userMsg: SessionMessage;
+}): Promise<{ queued: boolean; error?: string }> {
+  const active = getExternalActiveSteerPair();
+  if (!active) {
+    broadcast('queue:started', {
+      queueId: input.queueId,
+      userMessage: {
+        id: input.userMsg.id,
+        role: input.userMsg.role,
+        content: input.text,
+        timestamp: input.userMsg.timestamp,
+        attachments: input.userMsg.attachments,
+      },
+    });
+    return sendExternalMessage(
+      input.text,
+      input.images,
+      input.context.permissionMode,
+      input.context.model,
+      input.context,
+      input.userMsg,
+    );
+  }
+
+  let resolvedImages: ResolvedImagePayload[] | undefined;
+  try {
+    resolvedImages = resolveImagePayloads(input.context.sessionId, input.images);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error('[external-session] failed to resolve realtime steer image attachments:', err);
+    broadcast('queue:cancelled', { queueId: input.queueId });
+    return { queued: false, error: message };
+  }
+
+  pushExternalSessionMessage(input.userMsg);
+  try {
+    await persistExternalUserMessageAppend(
+      input.context.sessionId,
+      '[external-session] Failed to persist realtime steered user message',
+    );
+  } catch (err) {
+    removeMessageFromInMemoryHistory(input.userMsg.id);
+    broadcast('queue:cancelled', { queueId: input.queueId });
+    return { queued: false, error: err instanceof Error ? err.message : String(err) };
+  }
+
+  broadcast('queue:started', {
+    queueId: input.queueId,
+    userMessage: {
+      id: input.userMsg.id,
+      role: input.userMsg.role,
+      content: input.text,
+      timestamp: input.userMsg.timestamp,
+      attachments: input.userMsg.attachments,
+    },
+  });
+
+  try {
+    await active.runtime.steerMessage(
+      active.process,
+      input.text,
+      resolvedImages && resolvedImages.length > 0 ? resolvedImages : undefined,
+      { clientUserMessageId: input.userMsg.id },
+    );
+    return { queued: true };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.warn(`[external-session] realtime steer failed, retracting user message ${input.userMsg.id}: ${message}`);
+    try {
+      await removeAndPersistExternalSessionMessage(
+        input.context.sessionId,
+        input.userMsg.id,
+        '[external-session] Failed to retract rejected realtime steered user message',
+      );
+    } catch (persistErr) {
+      console.error('[external-session] failed to persist realtime steer retraction:', persistErr);
+    }
+    broadcast('chat:messages-retracted', { messageIds: [input.userMsg.id] });
+    return { queued: false, error: message };
+  }
+}
+
 /**
  * Desktop /chat/send entry — fire-and-forget dispatch with proper serialization.
  *
@@ -2185,14 +2291,29 @@ export function enqueueExternalSendForDesktop(
   permissionMode: string | undefined,
   model: string | undefined,
   context: ExternalSendContext,
-): { queued: boolean; queueId?: string; dispatch: Promise<{ queued: boolean; error?: string }> } {
-  // Mid-turn defer: external runtimes are turn-level (a send = a new turn), so while a turn
-  // is running (or items are already queued) HOLD this as a queue pill instead of surfacing
-  // an out-of-order bubble + starting a 2nd turn. The turn-end drain surfaces + sends it.
+): {
+  queued: boolean;
+  queueId?: string;
+  isInFlight?: boolean;
+  deliveryMode?: 'realtime' | 'turn';
+  dispatch: Promise<{ queued: boolean; error?: string }>;
+} {
+  const queueResponseMode = resolveChatQueueResponseMode(
+    loadAdminConfig().chatQueueResponseMode,
+    true,
+  );
+  const canSteerActiveTurn = getExternalActiveSteerPair() !== null;
+  // Mid-turn defer: turn-level external runtimes hold this as a queue pill
+  // instead of starting a 2nd turn. Codex app-server can append to the active
+  // turn via turn/steer, but only in realtime mode and only when no earlier
+  // queued work would be jumped.
   // Return the queueId SYNCHRONOUSLY so /chat/send can hand it back to the renderer, which
   // reconciles its optimistic `opt-` pill with this real queueId (exactly like the builtin
   // path) — without it the optimistic pill would orphan + a stray bubble would appear.
-  if (shouldQueueExternalDesktopSend(getExternalLifecycleState())) {
+  if (shouldQueueExternalDesktopSend(getExternalLifecycleState(), {
+    responseMode: queueResponseMode,
+    canSteerActiveTurn,
+  })) {
     const runtimeConfig = captureExternalRuntimeConfigSnapshot(model, permissionMode, context);
     const queued = enqueueExternalMessageOperation({
       text,
@@ -2204,8 +2325,37 @@ export function enqueueExternalSendForDesktop(
       return { queued: false, dispatch: Promise.resolve({ queued: false, error: queued.error }) };
     }
     const queueId = queued.queueId;
-    broadcast('queue:added', { queueId, messageText: text.slice(0, 100), isInFlight: false });
-    return { queued: true, queueId, dispatch: Promise.resolve({ queued: true }) };
+    broadcast('queue:added', { queueId, messageText: text.slice(0, 100), isInFlight: false, deliveryMode: 'turn' });
+    return { queued: true, queueId, deliveryMode: 'turn', dispatch: Promise.resolve({ queued: true }) };
+  }
+
+  if (queueResponseMode === 'realtime' && canSteerActiveTurn) {
+    const queueId = nextExternalQueueId();
+    const userMsg: SessionMessage = {
+      id: nextExternalUserMessageId(),
+      role: 'user',
+      content: text,
+      timestamp: new Date().toISOString(),
+      attachments: sessionMessageAttachmentsFromImages(context.sessionId, images),
+    };
+    broadcast('queue:added', { queueId, messageText: text.slice(0, 100), isInFlight: true, deliveryMode: 'realtime' });
+    const generation = getExternalOperationGeneration();
+    const dispatch = chainExternalDesktopSend(
+      () => steerExternalMessageForDesktop({
+        queueId,
+        text,
+        images,
+        context,
+        userMsg,
+      }),
+      generation,
+    ).catch((err) => {
+      if (isExternalQueueGenerationStaleError(err)) {
+        return { queued: false };
+      }
+      throw err;
+    });
+    return { queued: true, queueId, isInFlight: true, deliveryMode: 'realtime', dispatch };
   }
 
   // Idle path: surface + send immediately (unchanged behavior). No queueId — this becomes a

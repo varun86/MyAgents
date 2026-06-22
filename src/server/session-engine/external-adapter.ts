@@ -183,6 +183,8 @@ export function createExternalSessionEngine(): SessionEngine {
         success: true,
         queued: sent.queued,
         queueId: sent.queueId,
+        isInFlight: sent.isInFlight,
+        deliveryMode: sent.deliveryMode,
       };
     },
 

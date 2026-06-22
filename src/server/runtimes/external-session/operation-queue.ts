@@ -2,6 +2,7 @@ import type { ImagePayload } from '../types';
 import type { ExternalRuntimeConfigPatch, ExternalRuntimeConfigSnapshot } from '../types';
 import { canDrainExternalQueue, shouldQueueExternalSend } from '../external-queue-policy';
 import { mergeRuntimeConfigPatches } from '../../session-core/runtime-config-policy';
+import type { ChatQueueResponseMode } from '../../../shared/config-types';
 import type {
   ExternalConfigSource,
   ExternalQueuedConfigOperation,
@@ -65,8 +66,19 @@ export function hasQueuedExternalConfigOperation(): boolean {
   return externalOperationQueue.some((item) => item.kind === 'config');
 }
 
-export function shouldQueueExternalDesktopSend(state: ExternalSessionState): boolean {
-  return shouldQueueExternalSend(state, externalOperationQueue.length) || externalOperationDrainInFlight;
+export function shouldQueueExternalDesktopSend(
+  state: ExternalSessionState,
+  options?: {
+    responseMode?: ChatQueueResponseMode;
+    canSteerActiveTurn?: boolean;
+  },
+): boolean {
+  return shouldQueueExternalSend({
+    state,
+    queueLength: externalOperationQueue.length,
+    responseMode: options?.responseMode ?? 'turn',
+    canSteerActiveTurn: options?.canSteerActiveTurn === true,
+  }) || externalOperationDrainInFlight;
 }
 
 export function canDrainExternalOperations(state: ExternalSessionState): boolean {
@@ -75,6 +87,10 @@ export function canDrainExternalOperations(state: ExternalSessionState): boolean
 
 export function nextExternalUserMessageId(): string {
   return `user-${Date.now()}-${externalUserMsgSeq++}`;
+}
+
+export function nextExternalQueueId(): string {
+  return `xq-${Date.now()}-${externalQueueSeq++}`;
 }
 
 export function enqueueExternalMessageOperation(input: {
@@ -86,7 +102,7 @@ export function enqueueExternalMessageOperation(input: {
   if (queuedExternalMessageCount() >= EXTERNAL_MAX_QUEUE_SIZE) {
     return { queued: false, error: '排队消息已达上限，请稍后再发' };
   }
-  const queueId = `xq-${Date.now()}-${externalQueueSeq++}`;
+  const queueId = nextExternalQueueId();
   externalOperationQueue.push({
     kind: 'message',
     queueId,

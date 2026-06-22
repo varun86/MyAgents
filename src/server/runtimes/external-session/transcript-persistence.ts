@@ -131,6 +131,18 @@ export async function persistExternalUserMessageAppend(
   assertExternalSessionMessagesPersisted(saveResult, failureContext);
 }
 
+export async function removeAndPersistExternalSessionMessage(
+  sessionId: string,
+  messageId: string,
+  failureContext: string,
+): Promise<boolean> {
+  const removed = removeExternalSessionMessageById(messageId);
+  if (!removed) return false;
+  const saveResult = await saveSessionMessages(sessionId, allSessionMessages);
+  assertExternalSessionMessagesPersisted(saveResult, failureContext);
+  return true;
+}
+
 export async function truncateExternalTranscriptForRetry(
   sessionId: string,
   userMessageId: string,
