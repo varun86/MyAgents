@@ -53,9 +53,11 @@ function stripAnsi(text) {
 }
 
 function listProjectFiles(project) {
+  // File membership is what classification owns. Runtime test collection can
+  // hide credentialed tests when every case is skipIf(...) in a no-secret CI.
   const stdout = execFileSync(
     process.execPath,
-    [VITEST_BIN, 'list', '--project', project],
+    [VITEST_BIN, 'list', '--project', project, '--filesOnly'],
     { cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
   );
   const prefix = `[${project}] `;
