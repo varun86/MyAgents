@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.2.38] - 2026-06-23
 
-> 本版聚焦外部 Runtime 的连续对话控制与会话稳定性：Codex 现在能跟随“实时响应 / 轮次响应”的连续发送设置，IM / 定时任务 / 后台注入回合对成功与失败的判断更可靠；同时收紧 Provider / 上下文身份、Runtime CLI 检测和 Chat 欢迎页启动体验。
+> 本版聚焦外部 Runtime 的连续对话控制、会话稳定性和较大规模技术债清理：Codex 现在能跟随“实时响应 / 轮次响应”的连续发送设置，IM / 定时任务 / 后台注入回合对成功与失败的判断更可靠；同时完成 Session Engine、Sidecar owner 和前端巨型模块拆分，收紧 Provider / 上下文身份、Runtime CLI 检测和 Chat 欢迎页启动体验。
 
 ### Added
 
@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **会话运行时架构收敛**：内置 SDK 与外部 Runtime 的会话读取、配置同步、注入 turn、队列和会话操作统一到 Session Engine 路径，减少 IM、定时任务、后台任务和桌面会话之间的状态漂移。
+- **大规模技术债清理**：拆分 Sidecar / Cron / IM 的 Rust owner 模块、builtin / external runtime 的会话状态 owner，以及 Settings、DirectoryPanel、SimpleChatInput 等前端巨型入口；公共 facade 保留外部协议，内部职责边界更清晰，后续排查和迭代成本更低。
 - **外部 Runtime CLI 检测更可靠**：应用内置或 MyAgents 管理的 Claude Code / Codex / Gemini CLI 能被更稳定地识别，不再过度依赖用户 shell 环境。
 - **产品说明与截图更新**：README 和产品截图刷新，便于新用户理解工作区、任务、模型供应商和悬浮入口等核心能力。
 
