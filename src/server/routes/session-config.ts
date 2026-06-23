@@ -106,6 +106,8 @@ export async function handleSessionConfigRoute(
     try {
       const payload = await request.json() as {
         workspacePath?: string;
+        phase?: 'prepare' | 'commit' | 'rollback';
+        preparedSessionId?: string;
         snapshotPatch?: SessionEngineSnapshotMaterializePatch;
       };
       if (!payload?.workspacePath || typeof payload.workspacePath !== 'string') {
@@ -113,6 +115,8 @@ export async function handleSessionConfigRoute(
       }
       const result = await getSessionEngine().materializePendingDesktopSession({
         workspacePath: payload.workspacePath,
+        phase: payload.phase,
+        preparedSessionId: payload.preparedSessionId,
         snapshotPatch: payload.snapshotPatch,
       });
       return jsonResponse(

@@ -62,10 +62,14 @@ export interface SessionMetadata {
     reasoningEffort?: string;
     permissionMode?: string;
     mcpEnabledServers?: string[];
+    /** Snapshot Claude cc-plugin enabled list. */
+    enabledPluginIds?: string[];
     providerId?: string;
     /** Credentials — server redacts to '[redacted]' in PATCH response (zero-trust) */
     providerEnvJson?: string;
     configSnapshotAt?: string;
+    materializationState?: 'prepared';
+    materializationSourceSessionId?: string;
 
     /**
      * PRD 0.2.32 — 上一轮结束时的 context 用量快照（与实时环同一个计算结果，单一数据源）。
@@ -194,6 +198,7 @@ export async function updateSession(
         reasoningEffort?: string | null;
         permissionMode?: string | null;
         mcpEnabledServers?: string[] | null;
+        enabledPluginIds?: string[] | null;
         providerId?: string | null;
         providerEnvJson?: string | null;
     }

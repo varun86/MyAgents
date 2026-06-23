@@ -143,7 +143,31 @@ describe('handleSessionConfigRoute', () => {
     });
     expect(mocks.engine.materializePendingDesktopSession).toHaveBeenCalledWith({
       workspacePath: '/tmp/workspace',
+      phase: undefined,
+      preparedSessionId: undefined,
       snapshotPatch: { permissionMode: 'plan' },
+    });
+  });
+
+  it('passes pending materialize phase and prepared id through to the active engine', async () => {
+    const response = await handleSessionConfigRoute(
+      '/api/session/materialize',
+      new Request('http://local/api/session/materialize', {
+        method: 'POST',
+        body: JSON.stringify({
+          workspacePath: '/tmp/workspace',
+          phase: 'commit',
+          preparedSessionId: 'prepared-session',
+        }),
+      }),
+    );
+
+    expect(response?.status).toBe(200);
+    expect(mocks.engine.materializePendingDesktopSession).toHaveBeenCalledWith({
+      workspacePath: '/tmp/workspace',
+      phase: 'commit',
+      preparedSessionId: 'prepared-session',
+      snapshotPatch: undefined,
     });
   });
 });

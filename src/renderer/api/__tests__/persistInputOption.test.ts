@@ -61,6 +61,7 @@ describe('persistInputOptionChange — disk write fanout', () => {
     });
 
     expect(res.ok).toBe(false);
+    expect(res.snapshotWriteFailed).toBe(true);
     expect(res.errors[0]).toContain('session snapshot: session not materialized');
     expect(m.patchProject).not.toHaveBeenCalled();
     expect(m.patchAgentConfig).not.toHaveBeenCalled();
@@ -81,6 +82,7 @@ describe('persistInputOptionChange — disk write fanout', () => {
     });
 
     expect(res.ok).toBe(false);
+    expect(res.snapshotWriteFailed).toBe(true);
     expect(m.patchProject).toHaveBeenCalledWith('ws-1', { permissionMode: 'plan' });
     expect(m.patchAgentConfig).toHaveBeenCalledWith('agent-1', { permissionMode: 'plan' });
   });
@@ -250,6 +252,28 @@ describe('persistInputOptionChange — disk write fanout', () => {
     });
   });
 
+  it('writes Claude plugin enabled ids to project + agent + snapshot', async () => {
+    const m = makeMocks();
+    await persistInputOptionChange({
+      workspaceId: 'ws-1',
+      agentId: 'agent-1',
+      isExternalRuntime: false,
+      fields: { enabledPluginIds: ['planner@local', 'reviewer@local'] },
+      patchProject: m.patchProject,
+      patchAgentConfig: m.patchAgentConfig,
+      patchSnapshot: m.patchSnapshot,
+    });
+    expect(m.patchProject).toHaveBeenCalledWith('ws-1', {
+      enabledPluginIds: ['planner@local', 'reviewer@local'],
+    });
+    expect(m.patchAgentConfig).toHaveBeenCalledWith('agent-1', {
+      enabledPluginIds: ['planner@local', 'reviewer@local'],
+    });
+    expect(m.patchSnapshot).toHaveBeenCalledWith({
+      enabledPluginIds: ['planner@local', 'reviewer@local'],
+    });
+  });
+
   it('skips snapshot write when patchSnapshot is omitted (launcher mode)', async () => {
     const m = makeMocks();
     await persistInputOptionChange({
@@ -291,6 +315,7 @@ describe('persistInputOptionChange — disk write fanout', () => {
       patchAgentConfig: m.patchAgentConfig,
     });
     expect(res.ok).toBe(false);
+    expect(res.snapshotWriteFailed).toBe(false);
     expect(res.errors[0]).toContain('disk full');
     // Other writers still run — failure isolated.
     expect(m.patchAgentConfig).toHaveBeenCalled();

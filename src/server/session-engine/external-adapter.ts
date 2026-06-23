@@ -1,5 +1,6 @@
 import { broadcast } from '../sse';
 import {
+  freezeCurrentSessionMetadataForImDetach,
   getAgentState,
   getSessionId,
   materializeCurrentSessionMetadataForPublishedReset,
@@ -49,7 +50,7 @@ import type {
   SessionEngine,
 } from './types';
 import { decideExternalInjectedTurnResult } from '../session-core/turn-result-policy';
-import { getSessionData } from '../SessionStore';
+import { getSessionData, updateSessionMetadata } from '../SessionStore';
 import { getLatestAssistantResultFromMessages, NO_TEXT_RESPONSE } from '../inbox/latest-result';
 import type { SessionMessage } from '../types/session';
 
@@ -139,6 +140,14 @@ export function createExternalSessionEngine(): SessionEngine {
       };
     },
 
+    getHeldImConfigSnapshot() {
+      return {
+        model: getExternalSessionModel() ?? undefined,
+        permissionMode: getExternalSessionPermissionMode() ?? undefined,
+        reasoningEffort: getExternalSessionReasoningEffort() ?? undefined,
+      };
+    },
+
     getLiveSessionOverlay(sessionId: string) {
       if (sessionId !== getRuntimeSessionId()) {
         return { isActive: false };
@@ -203,6 +212,7 @@ export function createExternalSessionEngine(): SessionEngine {
           model: request.model,
           reasoningEffort: request.reasoningEffort,
           requestId: request.requestId,
+          metadataBirthPending: request.metadataBirthPending === true,
         },
       );
       if (!result.queued) {
@@ -334,15 +344,40 @@ export function createExternalSessionEngine(): SessionEngine {
     },
 
     async materializePendingDesktopSession(request) {
-      await awaitExternalSessionStarting();
-      if (isExternalSessionActive()) {
-        await stopExternalSession();
+      const runtimeSessionIdBefore = getExternalSessionId() || undefined;
+      if (request.phase === 'commit' || request.phase === undefined) {
+        await awaitExternalSessionStarting();
+        if (isExternalSessionActive()) {
+          await stopExternalSession();
+        }
       }
-      const result = await materializeBuiltinPendingDesktopSession(request.snapshotPatch);
-      if (result.success && result.sessionId) {
+      const result = await materializeBuiltinPendingDesktopSession({
+        phase: request.phase,
+        preparedSessionId: request.preparedSessionId,
+        snapshotPatch: request.snapshotPatch,
+      });
+      if ((request.phase === 'commit' || request.phase === undefined) && result.success && result.sessionId) {
+        if (runtimeSessionIdBefore && runtimeSessionIdBefore !== result.sessionId) {
+          const updated = await updateSessionMetadata(result.sessionId, { runtimeSessionId: runtimeSessionIdBefore });
+          if (!updated) {
+            console.warn(`[session-engine] external materialize: failed to preserve runtimeSessionId for ${result.sessionId}`);
+          }
+        }
         restoreExternalSessionState(result.sessionId, request.workspacePath, { type: 'desktop' });
       }
       return result;
+    },
+
+    freezeCurrentSessionForImDetach() {
+      const model = getExternalSessionModel() ?? undefined;
+      const permissionMode = getExternalSessionPermissionMode() ?? undefined;
+      const reasoningEffort = getExternalSessionReasoningEffort() ?? undefined;
+      return freezeCurrentSessionMetadataForImDetach({
+        runtime: getActiveRuntimeType(),
+        ...(model ? { model } : {}),
+        ...(permissionMode ? { permissionMode } : {}),
+        ...(reasoningEffort ? { reasoningEffort } : {}),
+      });
     },
 
     updateRuntimeConfig(patch, options) {
@@ -451,6 +486,18 @@ export function createExternalSessionEngine(): SessionEngine {
 
     async resetForNewImSession(workspacePath) {
       await awaitExternalSessionStarting();
+      const model = getExternalSessionModel() ?? undefined;
+      const permissionMode = getExternalSessionPermissionMode() ?? undefined;
+      const reasoningEffort = getExternalSessionReasoningEffort() ?? undefined;
+      const freeze = await freezeCurrentSessionMetadataForImDetach({
+        runtime: getActiveRuntimeType(),
+        ...(model ? { model } : {}),
+        ...(permissionMode ? { permissionMode } : {}),
+        ...(reasoningEffort ? { reasoningEffort } : {}),
+      });
+      if (!freeze.success) {
+        return { success: false, error: freeze.error ?? 'Failed to freeze current IM session before reset' };
+      }
       if (isExternalSessionActive()) {
         await stopExternalSession();
       }

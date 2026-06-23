@@ -109,10 +109,10 @@ export interface SessionSnapshotPatch {
   model?: string | null;
   /** #324 — persisted literally (incl. 'default', which meaningfully pins the
    *  session back to default over a non-default agent value). */
-  reasoningEffort?: string;
-  permissionMode?: string;
-  mcpEnabledServers?: string[];
-  enabledPluginIds?: string[];
+  reasoningEffort?: string | null;
+  permissionMode?: string | null;
+  mcpEnabledServers?: string[] | null;
+  enabledPluginIds?: string[] | null;
   /** #300 — credential snapshot. `null` clears it so the sidecar re-resolves the
    *  env live from `providerId`. Set to null whenever providerId changes (the old
    *  frozen env belongs to the OLD provider). Never sets a concrete value here —
@@ -133,8 +133,9 @@ export interface SessionSnapshotPatch {
  */
 export async function persistInputOptionChange(
   params: PersistInputOptionParams,
-): Promise<{ ok: boolean; errors: string[] }> {
+): Promise<{ ok: boolean; errors: string[]; snapshotWriteFailed: boolean }> {
   const errors: string[] = [];
+  let snapshotWriteFailed = false;
 
   const projectPatch = buildProjectPatch(params);
   const snapshotPatch = buildSnapshotPatch(params);
@@ -151,9 +152,10 @@ export async function persistInputOptionChange(
       }
       await params.patchSnapshot(snapshotPatch);
     } catch (e) {
+      snapshotWriteFailed = true;
       errors.push(`session snapshot: ${describe(e)}`);
       if (snapshotWriteMode === 'required') {
-        return { ok: false, errors };
+        return { ok: false, errors, snapshotWriteFailed };
       }
     }
   }
@@ -227,7 +229,7 @@ export async function persistInputOptionChange(
     }
   }
 
-  return { ok: errors.length === 0, errors };
+  return { ok: errors.length === 0, errors, snapshotWriteFailed };
 }
 
 // ─── builders ────────────────────────────────────────────────────────────
