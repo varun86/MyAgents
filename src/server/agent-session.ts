@@ -4555,23 +4555,29 @@ export async function materializePendingDesktopSession(
   if (!sessionId) {
     return { success: false, error: 'No active session.', status: 400 };
   }
-  if (!isPendingSessionId(sessionId)) {
-    const metadata = getSessionMetadata(sessionId);
-    return metadata
-      ? { success: true, sessionId, metadata }
-      : { success: false, error: 'Active session is not pending and has no metadata.', status: 404 };
-  }
 
   if (phase === 'commit') {
     const prepared = getPendingDesktopMaterialization();
     if (!prepared) {
+      const metadata = !isPendingSessionId(sessionId) ? getSessionMetadata(sessionId) : null;
+      if (
+        metadata &&
+        metadata.materializationState !== 'prepared' &&
+        (!request.preparedSessionId || request.preparedSessionId === sessionId)
+      ) {
+        return { success: true, sessionId, metadata };
+      }
       return { success: false, error: 'No prepared pending materialization to commit.', status: 409 };
     }
     if (request.preparedSessionId && request.preparedSessionId !== prepared.targetSessionId) {
       return { success: false, error: `Prepared session mismatch: expected ${prepared.targetSessionId}, got ${request.preparedSessionId}.`, status: 409 };
     }
-    if (sessionId !== prepared.priorSessionId) {
-      return { success: false, error: `Active session changed before materialize commit: expected ${prepared.priorSessionId}, got ${sessionId}.`, status: 409 };
+    if (sessionId !== prepared.priorSessionId && sessionId !== prepared.targetSessionId) {
+      return {
+        success: false,
+        error: `Active session changed before materialize commit: expected ${prepared.priorSessionId} or ${prepared.targetSessionId}, got ${sessionId}.`,
+        status: 409,
+      };
     }
     const meta = getSessionMetadata(prepared.targetSessionId);
     if (!meta) {
@@ -4719,6 +4725,16 @@ export async function materializePendingDesktopSession(
       };
     }
     clearPendingDesktopMaterialization();
+  }
+
+  if (!isPendingSessionId(sessionId)) {
+    const metadata = getSessionMetadata(sessionId);
+    if (metadata) {
+      return { success: true, sessionId, metadata };
+    }
+    if (!isLazySessionMaterializationAllowed()) {
+      return { success: false, error: 'Active session is not pending and has no metadata.', status: 404 };
+    }
   }
 
   const priorSessionId = sessionId;

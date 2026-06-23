@@ -6,19 +6,22 @@ vi.mock('../SessionStore', async (importOriginal) => {
     ...actual,
     deleteSession: vi.fn(async () => true),
     getSessionMetadata: vi.fn(),
+    saveSessionMetadata: vi.fn(async () => undefined),
     updateSessionMetadata: vi.fn(),
   };
 });
 
-import { deleteSession, getSessionMetadata, updateSessionMetadata } from '../SessionStore';
+import { deleteSession, getSessionMetadata, saveSessionMetadata, updateSessionMetadata } from '../SessionStore';
 import {
   resetSessionMaterializationState,
   setPendingDesktopMaterialization,
 } from '../builtin-session/materialization';
 import { initializeAgent, materializePendingDesktopSession } from '../agent-session';
+import type { SessionMetadata } from '../types/session';
 
 const mockedDeleteSession = vi.mocked(deleteSession);
 const mockedGetSessionMetadata = vi.mocked(getSessionMetadata);
+const mockedSaveSessionMetadata = vi.mocked(saveSessionMetadata);
 const mockedUpdateSessionMetadata = vi.mocked(updateSessionMetadata);
 
 describe('materializePendingDesktopSession rollback guard', () => {
@@ -188,5 +191,100 @@ describe('materializePendingDesktopSession rollback guard', () => {
       materializationState: 'prepared',
       materializationSourceSessionId: 'different-source',
     })).toBe(false);
+  });
+
+  it('prepares metadata for a lazy non-pending desktop session without showing a snapshot failure', async () => {
+    const savedMetadata = new Map<string, SessionMetadata>();
+    mockedSaveSessionMetadata.mockImplementation(async (meta) => {
+      savedMetadata.set(meta.id, meta);
+    });
+    mockedGetSessionMetadata.mockImplementation((id) => {
+      return savedMetadata.get(id) ?? null;
+    });
+
+    await initializeAgent('/tmp/workspace', null, undefined, { preWarmDisabled: true });
+
+    const result = await materializePendingDesktopSession({
+      phase: 'prepare',
+      snapshotPatch: { model: 'kimi-k2.6' },
+    });
+
+    expect(result.success).toBe(true);
+    expect(mockedSaveSessionMetadata).toHaveBeenCalledTimes(1);
+    expect(result.sessionId).toBe(mockedSaveSessionMetadata.mock.calls[0][0].id);
+    expect(result.metadata).toMatchObject({
+      model: 'kimi-k2.6',
+      materializationState: 'prepared',
+    });
+    expect(result.metadata?.materializationSourceSessionId).toBeTruthy();
+  });
+
+  it('commits a prepared row even when the active session id is already the prepared id', async () => {
+    await initializeAgent('/tmp/workspace', null, 'prepared-target', { preWarmDisabled: true });
+    setPendingDesktopMaterialization({
+      priorSessionId: 'pending-source',
+      targetSessionId: 'prepared-target',
+      reusingLiveSdkSession: true,
+      snapshotKind: 'owned',
+    });
+    const preparedMeta = {
+      id: 'prepared-target',
+      agentDir: '/tmp/workspace',
+      title: 'Prepared',
+      createdAt: '2026-06-23T00:00:00.000Z',
+      lastActiveAt: '2026-06-23T00:00:00.000Z',
+      materializationState: 'prepared' as const,
+      materializationSourceSessionId: 'pending-source',
+    };
+    const committedMeta = {
+      ...preparedMeta,
+      materializationState: undefined,
+      materializationSourceSessionId: undefined,
+    };
+    mockedGetSessionMetadata.mockReturnValue(preparedMeta);
+    mockedUpdateSessionMetadata.mockResolvedValue(committedMeta);
+
+    const result = await materializePendingDesktopSession({
+      phase: 'commit',
+      preparedSessionId: 'prepared-target',
+    });
+
+    expect(result).toMatchObject({
+      success: true,
+      sessionId: 'prepared-target',
+      metadata: committedMeta,
+    });
+    expect(mockedUpdateSessionMetadata).toHaveBeenCalledWith(
+      'prepared-target',
+      {
+        materializationState: undefined,
+        materializationSourceSessionId: undefined,
+      },
+      expect.any(Function),
+    );
+  });
+
+  it('treats duplicate commit after a completed materialization as idempotent', async () => {
+    await initializeAgent('/tmp/workspace', null, 'prepared-target', { preWarmDisabled: true });
+    const committedMeta = {
+      id: 'prepared-target',
+      agentDir: '/tmp/workspace',
+      title: 'Prepared',
+      createdAt: '2026-06-23T00:00:00.000Z',
+      lastActiveAt: '2026-06-23T00:00:00.000Z',
+    };
+    mockedGetSessionMetadata.mockReturnValue(committedMeta);
+
+    const result = await materializePendingDesktopSession({
+      phase: 'commit',
+      preparedSessionId: 'prepared-target',
+    });
+
+    expect(result).toMatchObject({
+      success: true,
+      sessionId: 'prepared-target',
+      metadata: committedMeta,
+    });
+    expect(mockedUpdateSessionMetadata).not.toHaveBeenCalled();
   });
 });
