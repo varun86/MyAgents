@@ -561,6 +561,7 @@ pub fn run() {
             task::cmd_task_get_run_stats,
             legacy_upgrade::cmd_task_upgrade_legacy_cron,
             // MyAgents Cloud Space
+            space_cloud::cmd_space_get_capability,
             space_cloud::cmd_space_get_session,
             space_cloud::cmd_space_auth_start,
             space_cloud::cmd_space_auth_poll,

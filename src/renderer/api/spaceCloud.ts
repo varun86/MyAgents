@@ -41,6 +41,13 @@ export interface SpaceSession {
   updatedAt: string;
 }
 
+export interface SpaceBuildCapability {
+  available: boolean;
+  baseUrl?: string | null;
+  publicClientId?: string | null;
+  reason?: string | null;
+}
+
 export interface SpaceTag {
   id: string;
   name: string;
@@ -117,6 +124,7 @@ export interface SpaceSkillDetail {
 
 export interface LocalRegisteredAgent {
   id: string;
+  baseUrl: string;
   spaceId: string;
   workspaceId?: string | null;
   displayName: string;
@@ -175,6 +183,10 @@ async function spaceApi<T>(method: string, path: string, body?: unknown): Promis
 
 export function spaceGetSession(): Promise<SpaceSession | null> {
   return inv('cmd_space_get_session');
+}
+
+export function spaceGetCapability(): Promise<SpaceBuildCapability> {
+  return inv('cmd_space_get_capability');
 }
 
 export function spaceAuthStart(): Promise<{ loginToken: string; authorizationUrl: string; expiresInSeconds: number }> {

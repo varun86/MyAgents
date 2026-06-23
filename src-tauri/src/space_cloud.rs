@@ -16,7 +16,11 @@ use crate::workspace_files::path_safety::{
 };
 use crate::{ulog_info, ulog_warn};
 
-const DEFAULT_BASE_URL: &str = "https://space.myagents.io";
+const SPACE_ENABLED_ENV: Option<&str> = option_env!("MYAGENTS_SPACE_ENABLED");
+const SPACE_BASE_URL_ENV: Option<&str> = option_env!("MYAGENTS_SPACE_BASE_URL");
+const SPACE_PUBLIC_CLIENT_ID_ENV: Option<&str> = option_env!("MYAGENTS_SPACE_PUBLIC_CLIENT_ID");
+const SPACE_LEGACY_CLIENT_ID_ENV: Option<&str> = option_env!("MYAGENTS_SPACE_CLIENT_ID");
+const SPACE_PUBLIC_CLIENT_ID_HEADER: &str = "X-MyAgents-Space-Client-Id";
 const SESSION_FILE: &str = "session.json";
 const LOCAL_AGENTS_FILE: &str = "registered_agents.json";
 const DISPATCH_LOG_FILE: &str = "dispatch_log.json";
@@ -53,6 +57,15 @@ pub struct SpaceSessionPublic {
     pub updated_at: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpaceBuildCapability {
+    pub available: bool,
+    pub base_url: Option<String>,
+    pub public_client_id: Option<String>,
+    pub reason: Option<String>,
+}
+
 impl From<SpaceSession> for SpaceSessionPublic {
     fn from(session: SpaceSession) -> Self {
         Self {
@@ -70,6 +83,8 @@ impl From<SpaceSession> for SpaceSessionPublic {
 #[serde(rename_all = "camelCase")]
 pub struct LocalRegisteredAgent {
     pub id: String,
+    #[serde(default)]
+    pub base_url: String,
     pub space_id: String,
     #[serde(default)]
     pub workspace_id: Option<String>,
@@ -87,6 +102,7 @@ pub struct LocalRegisteredAgent {
 #[serde(rename_all = "camelCase")]
 pub struct LocalRegisteredAgentPublic {
     pub id: String,
+    pub base_url: String,
     pub space_id: String,
     pub workspace_id: Option<String>,
     pub display_name: String,
@@ -102,6 +118,7 @@ impl From<LocalRegisteredAgent> for LocalRegisteredAgentPublic {
     fn from(agent: LocalRegisteredAgent) -> Self {
         Self {
             id: agent.id,
+            base_url: agent.base_url,
             space_id: agent.space_id,
             workspace_id: agent.workspace_id,
             display_name: agent.display_name,
@@ -248,6 +265,8 @@ struct SpaceDispatchLogFile {
 #[serde(rename_all = "camelCase")]
 struct SpaceDispatchLogEntry {
     dispatch_id: String,
+    #[serde(default)]
+    base_url: String,
     registered_agent_id: String,
     issue_id: String,
     local_task_id: String,
@@ -318,19 +337,28 @@ pub struct SpaceProcessDispatchResult {
 }
 
 #[tauri::command]
+pub async fn cmd_space_get_capability() -> Result<SpaceBuildCapability, String> {
+    Ok(space_build_capability())
+}
+
+#[tauri::command]
 pub async fn cmd_space_get_session() -> Result<Option<SpaceSessionPublic>, String> {
-    Ok(read_session()?.map(Into::into))
+    ensure_space_available()?;
+    Ok(read_current_session()?.map(Into::into))
 }
 
 #[tauri::command]
 pub async fn cmd_space_auth_start() -> Result<Value, String> {
-    let base_url = DEFAULT_BASE_URL.to_string();
+    let capability = ensure_space_available()?;
+    let base_url = capability_base_url(&capability)?;
     let client = http_client()?;
-    let response = client
-        .post(api_url(&base_url, "/api/auth/desktop/start")?)
-        .send()
-        .await
-        .map_err(|e| format!("Space auth start failed: {}", e))?;
+    let response = with_public_client_id_header(
+        client.post(api_url(&base_url, "/api/auth/desktop/start")?),
+        &capability,
+    )
+    .send()
+    .await
+    .map_err(|e| format!("Space auth start failed: {}", e))?;
     let data = parse_cloud_data::<Value>(response).await?;
     if let Some(url) = data.get("authorizationUrl").and_then(Value::as_str) {
         crate::browser::spawn_external_open(url);
@@ -340,17 +368,18 @@ pub async fn cmd_space_auth_start() -> Result<Value, String> {
 
 #[tauri::command]
 pub async fn cmd_space_auth_poll(input: SpaceAuthPollInput) -> Result<Value, String> {
-    let base_url = DEFAULT_BASE_URL.to_string();
+    let capability = ensure_space_available()?;
+    let base_url = capability_base_url(&capability)?;
     let client = http_client()?;
     let path = format!(
         "/api/auth/desktop/poll?token={}",
         url_component(&input.login_token)
     );
-    let response = client
-        .get(api_url(&base_url, &path)?)
-        .send()
-        .await
-        .map_err(|e| format!("Space auth poll failed: {}", e))?;
+    let response =
+        with_public_client_id_header(client.get(api_url(&base_url, &path)?), &capability)
+            .send()
+            .await
+            .map_err(|e| format!("Space auth poll failed: {}", e))?;
     let mut data = parse_cloud_data::<Value>(response).await?;
     if data.get("status").and_then(Value::as_str) == Some("done") {
         let token = data
@@ -380,26 +409,45 @@ pub async fn cmd_space_auth_poll(input: SpaceAuthPollInput) -> Result<Value, Str
 
 #[tauri::command]
 pub async fn cmd_space_auth_ack(input: SpaceAuthPollInput) -> Result<(), String> {
-    let base_url = DEFAULT_BASE_URL.to_string();
-    let response = http_client()?
-        .post(api_url(&base_url, "/api/auth/desktop/ack")?)
-        .json(&serde_json::json!({ "token": input.login_token }))
-        .send()
-        .await
-        .map_err(|e| format!("Space auth ack failed: {}", e))?;
+    let capability = ensure_space_available()?;
+    let base_url = capability_base_url(&capability)?;
+    let response = with_public_client_id_header(
+        http_client()?
+            .post(api_url(&base_url, "/api/auth/desktop/ack")?)
+            .json(&serde_json::json!({ "token": input.login_token })),
+        &capability,
+    )
+    .send()
+    .await
+    .map_err(|e| format!("Space auth ack failed: {}", e))?;
     let _ = parse_cloud_data::<Value>(response).await?;
     Ok(())
 }
 
 #[tauri::command]
 pub async fn cmd_space_logout() -> Result<(), String> {
-    if let Some(session) = read_session()? {
+    let capability = space_build_capability();
+    let session_to_revoke = capability
+        .available
+        .then(|| capability_base_url(&capability).ok())
+        .flatten()
+        .and_then(|configured_base_url| {
+            read_session()
+                .ok()
+                .flatten()
+                .filter(|session| space_base_urls_equal(&session.base_url, &configured_base_url))
+        });
+
+    if let Some(session) = session_to_revoke {
         let client = http_client()?;
-        let _ = client
-            .post(api_url(&session.base_url, "/api/logout")?)
-            .header(AUTHORIZATION, format!("Bearer {}", session.session_token))
-            .send()
-            .await;
+        let _ = with_public_client_id_header(
+            client
+                .post(api_url(&session.base_url, "/api/logout")?)
+                .header(AUTHORIZATION, format!("Bearer {}", session.session_token)),
+            &capability,
+        )
+        .send()
+        .await;
     }
     let path = session_path()?;
     match fs::remove_file(path) {
@@ -412,6 +460,7 @@ pub async fn cmd_space_logout() -> Result<(), String> {
 
 #[tauri::command]
 pub async fn cmd_space_api_request(input: SpaceApiRequestInput) -> Result<Value, String> {
+    ensure_space_available()?;
     let session = require_session()?;
     let client = http_client()?;
     let method = reqwest::Method::from_bytes(input.method.to_uppercase().as_bytes())
@@ -425,9 +474,12 @@ pub async fn cmd_space_api_request(input: SpaceApiRequestInput) -> Result<Value,
     ) {
         return Err("Unsupported Space API method".to_string());
     }
-    let mut req = client
-        .request(method, api_url(&session.base_url, &input.path)?)
-        .header(AUTHORIZATION, format!("Bearer {}", session.session_token));
+    let mut req = with_public_client_id_header(
+        client
+            .request(method, api_url(&session.base_url, &input.path)?)
+            .header(AUTHORIZATION, format!("Bearer {}", session.session_token)),
+        &space_build_capability(),
+    );
     if let Some(body) = input.body {
         req = req.json(&body);
     }
@@ -445,6 +497,7 @@ pub async fn cmd_space_api_request(input: SpaceApiRequestInput) -> Result<Value,
 pub async fn cmd_space_register_agent(
     input: SpaceRegisterAgentInput,
 ) -> Result<LocalRegisteredAgentPublic, String> {
+    ensure_space_available()?;
     let workspace_root = validate_workspace_root(&input.workspace_path)?;
     let workspace_path = workspace_root.to_string_lossy().to_string();
     let session = require_session()?;
@@ -476,6 +529,7 @@ pub async fn cmd_space_register_agent(
         .to_string();
     let agent = LocalRegisteredAgent {
         id: required_value_string(&registered, "id")?,
+        base_url: session.base_url.clone(),
         space_id: required_value_string(&registered, "spaceId")?,
         workspace_id: Some(input.workspace_id),
         display_name: required_value_string(&registered, "displayName")?,
@@ -496,8 +550,8 @@ pub async fn cmd_space_register_agent(
 
 #[tauri::command]
 pub async fn cmd_space_list_local_agents() -> Result<Vec<LocalRegisteredAgentPublic>, String> {
-    Ok(read_local_agents()?
-        .items
+    ensure_space_available()?;
+    Ok(read_current_local_agents()?
         .into_iter()
         .map(Into::into)
         .collect())
@@ -506,9 +560,7 @@ pub async fn cmd_space_list_local_agents() -> Result<Vec<LocalRegisteredAgentPub
 #[tauri::command]
 pub async fn cmd_space_poll_dispatches(input: SpacePollDispatchesInput) -> Result<Value, String> {
     let agent = require_local_agent(&input.registered_agent_id)?;
-    let session = read_session()?
-        .map(|s| s.base_url)
-        .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
+    let session = space_base_url()?;
     authorized_json_request(
         &session,
         "/api/registered-agents/me/dispatches?status=pending",
@@ -524,9 +576,7 @@ pub async fn cmd_space_mark_dispatch_delivered(
     input: SpaceMarkDispatchDeliveredInput,
 ) -> Result<Value, String> {
     let agent = require_local_agent(&input.registered_agent_id)?;
-    let session = read_session()?
-        .map(|s| s.base_url)
-        .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
+    let session = space_base_url()?;
     authorized_json_request(
         &session,
         &format!(
@@ -738,9 +788,7 @@ pub async fn cmd_space_download_attachment(
 ) -> Result<SpaceDownloadAttachmentResult, String> {
     let (base_url, token) = if let Some(agent_id) = input.registered_agent_id.as_deref() {
         let agent = require_local_agent(agent_id)?;
-        let base = read_session()?
-            .map(|s| s.base_url)
-            .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
+        let base = space_base_url()?;
         (base, agent.token)
     } else {
         let session = require_session()?;
@@ -838,11 +886,18 @@ pub async fn cmd_space_download_skill_zip(
 }
 
 pub fn start_space_connector() {
+    if !space_build_capability().available {
+        return;
+    }
     if SPACE_CONNECTOR_STARTED.swap(true, Ordering::SeqCst) {
         return;
     }
     tauri::async_runtime::spawn(async {
         loop {
+            if !team_space_runtime_enabled() {
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                continue;
+            }
             match process_pending_dispatches().await {
                 Ok(result) => {
                     if result.processed > 0 || !result.errors.is_empty() {
@@ -864,7 +919,7 @@ pub fn start_space_connector() {
 pub async fn space_cli_issue_get(input: SpaceCliIssueGetInput) -> Result<Value, String> {
     let agent =
         resolve_local_agent_for_cli(input.agent_id.as_deref(), input.workspace_path.as_deref())?;
-    let base_url = space_base_url();
+    let base_url = space_base_url()?;
     let mut path = format!(
         "/api/issues/{}?commentsLimit={}",
         url_component(input.issue_id.trim()),
@@ -884,7 +939,7 @@ pub async fn space_cli_issue_get(input: SpaceCliIssueGetInput) -> Result<Value, 
 pub async fn space_cli_issue_comment(input: SpaceCliIssueCommentInput) -> Result<Value, String> {
     let agent =
         resolve_local_agent_for_cli(input.agent_id.as_deref(), input.workspace_path.as_deref())?;
-    let base_url = space_base_url();
+    let base_url = space_base_url()?;
     authorized_json_data_request(
         &base_url,
         &format!(
@@ -901,7 +956,7 @@ pub async fn space_cli_issue_comment(input: SpaceCliIssueCommentInput) -> Result
 pub async fn space_cli_issue_status(input: SpaceCliIssueStatusInput) -> Result<Value, String> {
     let agent =
         resolve_local_agent_for_cli(input.agent_id.as_deref(), input.workspace_path.as_deref())?;
-    let base_url = space_base_url();
+    let base_url = space_base_url()?;
     authorized_json_data_request(
         &base_url,
         &format!(
@@ -920,7 +975,7 @@ pub async fn space_cli_attachment_download(
 ) -> Result<Value, String> {
     let agent =
         resolve_local_agent_for_cli(input.agent_id.as_deref(), input.workspace_path.as_deref())?;
-    let base_url = space_base_url();
+    let base_url = space_base_url()?;
     let result = download_attachment_with_token(
         &base_url,
         &agent.token,
@@ -936,8 +991,15 @@ pub async fn space_cli_attachment_download(
 }
 
 pub async fn process_pending_dispatches() -> Result<SpaceProcessDispatchResult, String> {
-    let agents = read_local_agents()?
-        .items
+    ensure_space_available()?;
+    if !team_space_runtime_enabled() {
+        return Ok(SpaceProcessDispatchResult {
+            processed: 0,
+            delivered: 0,
+            errors: Vec::new(),
+        });
+    }
+    let agents = read_current_local_agents()?
         .into_iter()
         .filter(|agent| agent.status == "active")
         .collect::<Vec<_>>();
@@ -948,7 +1010,7 @@ pub async fn process_pending_dispatches() -> Result<SpaceProcessDispatchResult, 
             errors: Vec::new(),
         });
     }
-    let base_url = space_base_url();
+    let base_url = space_base_url()?;
     let mut processed = 0usize;
     let mut delivered = 0usize;
     let mut errors = Vec::new();
@@ -1011,14 +1073,15 @@ async fn process_agent_dispatches(
         let issue_id = required_value_string(&issue_meta, "id")?;
         let title = required_value_string(&issue_meta, "title")?;
         let goal = required_value_string(&dispatch, "goalSnapshotMd")?;
-        let log = find_dispatch_log(&dispatch_id)?;
+        let log = find_dispatch_log(base_url, &dispatch_id)?;
         let task_id = if let Some(existing) = log {
-            maybe_run_logged_task(&existing.local_task_id).await?;
+            maybe_run_logged_task(base_url, &existing.local_task_id).await?;
             existing.local_task_id
         } else {
             let task = create_space_task(agent, workspace_id, &issue_id, &title, &goal).await?;
             upsert_dispatch_log(SpaceDispatchLogEntry {
                 dispatch_id: dispatch_id.clone(),
+                base_url: base_url.to_string(),
                 registered_agent_id: agent.id.clone(),
                 issue_id: issue_id.clone(),
                 local_task_id: task.id.clone(),
@@ -1028,11 +1091,11 @@ async fn process_agent_dispatches(
                 updated_at: chrono::Utc::now().to_rfc3339(),
             })?;
             let (_task, cron_id) = crate::management_api::run_task_by_id(&task.id).await?;
-            update_dispatch_log_run(&dispatch_id, Some(cron_id))?;
+            update_dispatch_log_run(base_url, &dispatch_id, Some(cron_id))?;
             task.id
         };
         mark_dispatch_delivered(base_url, agent, &dispatch_id, &task_id, None).await?;
-        update_dispatch_log_delivered(&dispatch_id)?;
+        update_dispatch_log_delivered(base_url, &dispatch_id)?;
         processed += 1;
         delivered += 1;
     }
@@ -1077,13 +1140,13 @@ async fn create_space_task(
         .await
 }
 
-async fn maybe_run_logged_task(task_id: &str) -> Result<(), String> {
+async fn maybe_run_logged_task(base_url: &str, task_id: &str) -> Result<(), String> {
     let store =
         crate::task::get_task_store().ok_or_else(|| "task store not initialized".to_string())?;
     if let Some(task) = store.get(task_id).await {
         if task.status == crate::task::TaskStatus::Todo {
             let (_task, cron_id) = crate::management_api::run_task_by_id(task_id).await?;
-            update_dispatch_log_run_by_task(task_id, Some(cron_id))?;
+            update_dispatch_log_run_by_task(base_url, task_id, Some(cron_id))?;
         }
     }
     Ok(())
@@ -1137,6 +1200,125 @@ fn http_client() -> Result<reqwest::Client, String> {
         .map_err(|e| format!("Failed to build Space HTTP client: {}", e))
 }
 
+fn space_enabled_flag() -> bool {
+    SPACE_ENABLED_ENV
+        .map(str::trim)
+        .map(|value| {
+            matches!(
+                value.to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn configured_public_client_id() -> Option<String> {
+    [SPACE_PUBLIC_CLIENT_ID_ENV, SPACE_LEGACY_CLIENT_ID_ENV]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .find(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+fn validate_configured_space_base_url(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("MYAGENTS_SPACE_BASE_URL is empty".to_string());
+    }
+    let url = reqwest::Url::parse(trimmed)
+        .map_err(|e| format!("Invalid MYAGENTS_SPACE_BASE_URL: {}", e))?;
+    if url.scheme() != "https" {
+        return Err("MYAGENTS_SPACE_BASE_URL must use https".to_string());
+    }
+    if url.host_str().is_none() {
+        return Err("MYAGENTS_SPACE_BASE_URL must include a host".to_string());
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("MYAGENTS_SPACE_BASE_URL must not include credentials".to_string());
+    }
+    let mut normalized = url;
+    if normalized.path() != "/" {
+        return Err("MYAGENTS_SPACE_BASE_URL must not include a path".to_string());
+    }
+    normalized.set_query(None);
+    normalized.set_fragment(None);
+    Ok(normalized.to_string().trim_end_matches('/').to_string())
+}
+
+pub fn space_build_capability() -> SpaceBuildCapability {
+    if !space_enabled_flag() {
+        return SpaceBuildCapability {
+            available: false,
+            base_url: None,
+            public_client_id: configured_public_client_id(),
+            reason: Some("Team Space is not enabled in this build".to_string()),
+        };
+    }
+    let base_url = match SPACE_BASE_URL_ENV {
+        Some(value) => match validate_configured_space_base_url(value) {
+            Ok(url) => url,
+            Err(error) => {
+                return SpaceBuildCapability {
+                    available: false,
+                    base_url: None,
+                    public_client_id: configured_public_client_id(),
+                    reason: Some(error),
+                };
+            }
+        },
+        None => {
+            return SpaceBuildCapability {
+                available: false,
+                base_url: None,
+                public_client_id: configured_public_client_id(),
+                reason: Some(
+                    "MYAGENTS_SPACE_BASE_URL is required when MYAGENTS_SPACE_ENABLED=true"
+                        .to_string(),
+                ),
+            };
+        }
+    };
+    SpaceBuildCapability {
+        available: true,
+        base_url: Some(base_url),
+        public_client_id: configured_public_client_id(),
+        reason: None,
+    }
+}
+
+fn ensure_space_available() -> Result<SpaceBuildCapability, String> {
+    let capability = space_build_capability();
+    if capability.available {
+        Ok(capability)
+    } else {
+        Err(capability
+            .reason
+            .unwrap_or_else(|| "Team Space is not available in this build".to_string()))
+    }
+}
+
+fn capability_base_url(capability: &SpaceBuildCapability) -> Result<String, String> {
+    capability
+        .base_url
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .map(ToString::to_string)
+        .ok_or_else(|| "Team Space build capability is missing baseUrl".to_string())
+}
+
+fn with_public_client_id_header(
+    request: reqwest::RequestBuilder,
+    capability: &SpaceBuildCapability,
+) -> reqwest::RequestBuilder {
+    match capability.public_client_id.as_deref() {
+        Some(client_id) if !client_id.trim().is_empty() => {
+            request.header(SPACE_PUBLIC_CLIENT_ID_HEADER, client_id.trim())
+        }
+        _ => request,
+    }
+}
+
 fn api_url(base_url: &str, path: &str) -> Result<String, String> {
     if !path.starts_with("/api/") && path != "/health" && path != "/" {
         return Err("Space API path must start with /api/".to_string());
@@ -1176,10 +1358,14 @@ async fn authorized_json_request(
     method: reqwest::Method,
     body: Option<Value>,
 ) -> Result<Value, String> {
+    let capability = ensure_space_available()?;
     let client = http_client()?;
-    let mut req = client
-        .request(method, api_url(base_url, path)?)
-        .header(AUTHORIZATION, format!("Bearer {}", token));
+    let mut req = with_public_client_id_header(
+        client
+            .request(method, api_url(base_url, path)?)
+            .header(AUTHORIZATION, format!("Bearer {}", token)),
+        &capability,
+    );
     if let Some(body) = body {
         req = req.json(&body);
     }
@@ -1200,10 +1386,14 @@ async fn authorized_json_data_request(
     method: reqwest::Method,
     body: Option<Value>,
 ) -> Result<Value, String> {
+    let capability = ensure_space_available()?;
     let client = http_client()?;
-    let mut req = client
-        .request(method, api_url(base_url, path)?)
-        .header(AUTHORIZATION, format!("Bearer {}", token));
+    let mut req = with_public_client_id_header(
+        client
+            .request(method, api_url(base_url, path)?)
+            .header(AUTHORIZATION, format!("Bearer {}", token)),
+        &capability,
+    );
     if let Some(body) = body {
         req = req.json(&body);
     }
@@ -1220,13 +1410,17 @@ async fn authorized_multipart_data_request(
     token: &str,
     form: reqwest::multipart::Form,
 ) -> Result<Value, String> {
-    let response = http_client()?
-        .post(api_url(base_url, path)?)
-        .header(AUTHORIZATION, format!("Bearer {}", token))
-        .multipart(form)
-        .send()
-        .await
-        .map_err(|e| format!("Space upload failed: {}", e))?;
+    let capability = ensure_space_available()?;
+    let response = with_public_client_id_header(
+        http_client()?
+            .post(api_url(base_url, path)?)
+            .header(AUTHORIZATION, format!("Bearer {}", token))
+            .multipart(form),
+        &capability,
+    )
+    .send()
+    .await
+    .map_err(|e| format!("Space upload failed: {}", e))?;
     parse_cloud_data::<Value>(response).await
 }
 
@@ -1235,12 +1429,16 @@ async fn authorized_raw_request(
     path: &str,
     token: &str,
 ) -> Result<reqwest::Response, String> {
-    let response = http_client()?
-        .get(api_url(base_url, path)?)
-        .header(AUTHORIZATION, format!("Bearer {}", token))
-        .send()
-        .await
-        .map_err(|e| format!("Space API request failed: {}", e))?;
+    let capability = ensure_space_available()?;
+    let response = with_public_client_id_header(
+        http_client()?
+            .get(api_url(base_url, path)?)
+            .header(AUTHORIZATION, format!("Bearer {}", token)),
+        &capability,
+    )
+    .send()
+    .await
+    .map_err(|e| format!("Space API request failed: {}", e))?;
     if !response.status().is_success() {
         let status = response.status();
         let text = response.text().await.unwrap_or_default();
@@ -1294,7 +1492,14 @@ fn read_session() -> Result<Option<SpaceSession>, String> {
 }
 
 fn require_session() -> Result<SpaceSession, String> {
-    read_session()?.ok_or_else(|| "Not logged in to MyAgents Space".to_string())
+    let configured_base_url = space_base_url()?;
+    let session = read_session()?.ok_or_else(|| "Not logged in to MyAgents Space".to_string())?;
+    if !space_base_urls_equal(&session.base_url, &configured_base_url) {
+        return Err(
+            "Space session belongs to a different Space service. Please log in again.".to_string(),
+        );
+    }
+    Ok(session)
 }
 
 fn read_local_agents() -> Result<LocalRegisteredAgentsFile, String> {
@@ -1309,20 +1514,37 @@ fn read_local_agents() -> Result<LocalRegisteredAgentsFile, String> {
     }
 }
 
+fn read_current_session() -> Result<Option<SpaceSession>, String> {
+    let configured_base_url = space_base_url()?;
+    Ok(read_session()?
+        .filter(|session| space_base_urls_equal(&session.base_url, &configured_base_url)))
+}
+
+fn read_current_local_agents() -> Result<Vec<LocalRegisteredAgent>, String> {
+    let configured_base_url = space_base_url()?;
+    Ok(read_local_agents()?
+        .items
+        .into_iter()
+        .filter(|agent| space_base_urls_equal(&agent.base_url, &configured_base_url))
+        .collect())
+}
+
 fn upsert_local_agent(agent: LocalRegisteredAgent) -> Result<(), String> {
     let path = registered_agents_path()?;
     let lock_path = path.clone();
     with_json_file_lock(&lock_path, move || {
         let mut file = read_local_agents_unlocked(&path)?;
-        file.items.retain(|existing| existing.id != agent.id);
+        file.items.retain(|existing| {
+            existing.id != agent.id || !space_base_urls_equal(&existing.base_url, &agent.base_url)
+        });
         file.items.push(agent);
         write_private_json_unlocked(&path, &file)
     })
 }
 
 fn require_local_agent(id: &str) -> Result<LocalRegisteredAgent, String> {
-    read_local_agents()?
-        .items
+    ensure_space_available()?;
+    read_current_local_agents()?
         .into_iter()
         .find(|agent| agent.id == id)
         .ok_or_else(|| format!("Registered Agent not found locally: {}", id))
@@ -1332,8 +1554,8 @@ fn resolve_local_agent_for_cli(
     agent_id: Option<&str>,
     workspace_path: Option<&str>,
 ) -> Result<LocalRegisteredAgent, String> {
-    let agents = read_local_agents()?
-        .items
+    ensure_space_available()?;
+    let agents = read_current_local_agents()?
         .into_iter()
         .filter(|agent| agent.status == "active")
         .collect::<Vec<_>>();
@@ -1398,11 +1620,13 @@ fn read_dispatch_log() -> Result<SpaceDispatchLogFile, String> {
     }
 }
 
-fn find_dispatch_log(dispatch_id: &str) -> Result<Option<SpaceDispatchLogEntry>, String> {
-    Ok(read_dispatch_log()?
-        .items
-        .into_iter()
-        .find(|entry| entry.dispatch_id == dispatch_id))
+fn find_dispatch_log(
+    base_url: &str,
+    dispatch_id: &str,
+) -> Result<Option<SpaceDispatchLogEntry>, String> {
+    Ok(read_dispatch_log()?.items.into_iter().find(|entry| {
+        entry.dispatch_id == dispatch_id && space_base_urls_equal(&entry.base_url, base_url)
+    }))
 }
 
 fn upsert_dispatch_log(entry: SpaceDispatchLogEntry) -> Result<(), String> {
@@ -1410,33 +1634,39 @@ fn upsert_dispatch_log(entry: SpaceDispatchLogEntry) -> Result<(), String> {
     let lock_path = path.clone();
     with_json_file_lock(&lock_path, move || {
         let mut file = read_dispatch_log_unlocked(&path)?;
-        file.items
-            .retain(|existing| existing.dispatch_id != entry.dispatch_id);
+        file.items.retain(|existing| {
+            existing.dispatch_id != entry.dispatch_id
+                || !space_base_urls_equal(&existing.base_url, &entry.base_url)
+        });
         file.items.push(entry);
         write_private_json_unlocked(&path, &file)
     })
 }
 
-fn update_dispatch_log_run(dispatch_id: &str, local_run_id: Option<String>) -> Result<(), String> {
-    update_dispatch_log(dispatch_id, move |entry| {
+fn update_dispatch_log_run(
+    base_url: &str,
+    dispatch_id: &str,
+    local_run_id: Option<String>,
+) -> Result<(), String> {
+    update_dispatch_log(base_url, dispatch_id, move |entry| {
         entry.local_run_id = local_run_id.clone();
     })
 }
 
 fn update_dispatch_log_run_by_task(
+    base_url: &str,
     task_id: &str,
     local_run_id: Option<String>,
 ) -> Result<(), String> {
     let path = dispatch_log_path()?;
+    let base_url = base_url.to_string();
     let task_id = task_id.to_string();
     let lock_path = path.clone();
     with_json_file_lock(&lock_path, move || {
         let mut file = read_dispatch_log_unlocked(&path)?;
-        if let Some(entry) = file
-            .items
-            .iter_mut()
-            .find(|entry| entry.local_task_id == task_id)
-        {
+        if let Some(entry) = file.items.iter_mut().find(|entry| {
+            entry.local_task_id == task_id && space_base_urls_equal(&entry.base_url, &base_url)
+        }) {
             entry.local_run_id = local_run_id.clone();
             entry.updated_at = chrono::Utc::now().to_rfc3339();
         }
@@ -1444,26 +1674,25 @@ fn update_dispatch_log_run_by_task(
     })
 }
 
-fn update_dispatch_log_delivered(dispatch_id: &str) -> Result<(), String> {
-    update_dispatch_log(dispatch_id, |entry| {
+fn update_dispatch_log_delivered(base_url: &str, dispatch_id: &str) -> Result<(), String> {
+    update_dispatch_log(base_url, dispatch_id, |entry| {
         entry.delivered_at = Some(chrono::Utc::now().to_rfc3339());
     })
 }
 
-fn update_dispatch_log<F>(dispatch_id: &str, mut update: F) -> Result<(), String>
+fn update_dispatch_log<F>(base_url: &str, dispatch_id: &str, mut update: F) -> Result<(), String>
 where
     F: FnMut(&mut SpaceDispatchLogEntry) + Send + 'static,
 {
     let path = dispatch_log_path()?;
+    let base_url = base_url.to_string();
     let dispatch_id = dispatch_id.to_string();
     let lock_path = path.clone();
     with_json_file_lock(&lock_path, move || {
         let mut file = read_dispatch_log_unlocked(&path)?;
-        if let Some(entry) = file
-            .items
-            .iter_mut()
-            .find(|entry| entry.dispatch_id == dispatch_id)
-        {
+        if let Some(entry) = file.items.iter_mut().find(|entry| {
+            entry.dispatch_id == dispatch_id && space_base_urls_equal(&entry.base_url, &base_url)
+        }) {
             update(entry);
             entry.updated_at = chrono::Utc::now().to_rfc3339();
         }
@@ -1527,12 +1756,28 @@ fn write_private_bytes_unlocked(path: &Path, bytes: &[u8]) -> Result<(), String>
     Ok(())
 }
 
-fn space_base_url() -> String {
-    read_session()
-        .ok()
-        .flatten()
-        .map(|s| s.base_url)
-        .unwrap_or_else(|| DEFAULT_BASE_URL.to_string())
+fn space_base_url() -> Result<String, String> {
+    capability_base_url(&ensure_space_available()?)
+}
+
+fn space_base_urls_equal(a: &str, b: &str) -> bool {
+    a.trim().trim_end_matches('/') == b.trim().trim_end_matches('/')
+}
+
+fn team_space_runtime_enabled() -> bool {
+    let Some(dir) = crate::app_dirs::myagents_data_dir() else {
+        return false;
+    };
+    let Ok(content) = fs::read_to_string(dir.join("config.json")) else {
+        return false;
+    };
+    let Ok(config) = serde_json::from_str::<Value>(crate::utils::bom::strip_bom(&content)) else {
+        return false;
+    };
+    config
+        .get("teamSpaceEnabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
 }
 
 fn required_value_string(value: &Value, key: &str) -> Result<String, String> {

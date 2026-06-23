@@ -28,6 +28,7 @@ import { useUpdater } from '@/hooks/useUpdater';
 import { useTrayEvents } from '@/hooks/useTrayEvents';
 import { useHelperAgentModelDefaults } from '@/hooks/useHelperAgentModelDefaults';
 import { useConfig } from '@/hooks/useConfig';
+import { useSpaceBuildCapability } from '@/hooks/useSpaceBuildCapability';
 import { useThemeEffect } from '@/hooks/useTheme';
 import { useTabSwipeGesture } from '@/hooks/useTabSwipeGesture';
 import Launcher from '@/pages/Launcher'; // eager: default first view → no cold-start fallback
@@ -327,6 +328,8 @@ export default function App() {
   // App config for tray behavior (shared via ConfigProvider — no CONFIG_CHANGED event needed)
   // Also get projects + CRUD actions for bug report (ensureSelfAwarenessWorkspace needs them)
   const { config, isLoading: configLoading, providers: appProviders, apiKeys: appApiKeys, providerVerifyStatus: appProviderVerifyStatus, projects: configProjects, addProject: configAddProject, patchProject: configPatchProject } = useConfig();
+  const spaceBuildCapability = useSpaceBuildCapability();
+  const teamSpaceAvailable = spaceBuildCapability.available && config.teamSpaceEnabled === true;
 
   // Helper Agent's persisted model defaults — used by BugReportOverlay for
   // initial picker selection + persist on pick. The LAUNCH_BUG_REPORT handler
@@ -411,7 +414,7 @@ export default function App() {
   }, [syncRendererCorrelationForTab]);
 
   useEffect(() => {
-    if (configLoading || config.teamSpaceEnabled === true) return;
+    if (configLoading || spaceBuildCapability.isLoading || teamSpaceAvailable) return;
 
     const currentTabs = tabsRef.current;
     if (!currentTabs.some((tab) => tab.view === 'space')) return;
@@ -425,7 +428,7 @@ export default function App() {
 
     setTabs(nextTabs);
     setActiveTabId(nextActiveId, nextTabs);
-  }, [configLoading, config.teamSpaceEnabled, setActiveTabId]);
+  }, [configLoading, spaceBuildCapability.isLoading, teamSpaceAvailable, setActiveTabId]);
 
   // Persist open chat tabs after every structural change (Issue #232). This is
   // a POST-COMMIT effect — it flushes shortly after each tabs/activeTabId change
@@ -2809,7 +2812,15 @@ export default function App() {
   }, [handleOpenTaskCenter]);
 
   const handleOpenSpace = useCallback(() => {
-    if (config.teamSpaceEnabled !== true) {
+    if (spaceBuildCapability.isLoading) {
+      toastRef.current.info('正在读取团队功能状态');
+      return;
+    }
+    if (!spaceBuildCapability.available) {
+      toastRef.current.info(spaceBuildCapability.reason ?? '当前构建未启用团队功能');
+      return;
+    }
+    if (!teamSpaceAvailable) {
       toastRef.current.info('团队功能尚未开放');
       return;
     }
@@ -2832,7 +2843,7 @@ export default function App() {
       sidecarConfigDisposition: 'push',
     };
     openNewTabDeferred(newTab);
-  }, [config.teamSpaceEnabled, openNewTabDeferred, setActiveTabId]);
+  }, [openNewTabDeferred, setActiveTabId, spaceBuildCapability.available, spaceBuildCapability.isLoading, spaceBuildCapability.reason, teamSpaceAvailable]);
 
   useEffect(() => {
     window.addEventListener(CUSTOM_EVENTS.OPEN_SPACE, handleOpenSpace);
@@ -3417,7 +3428,7 @@ export default function App() {
         updateInstalling={updateInstalling}
         updatePreparing={updatePreparing}
         onRestartAndUpdate={() => void handleRestartAndUpdate()}
-        teamSpaceEnabled={config.teamSpaceEnabled === true}
+        teamSpaceEnabled={teamSpaceAvailable}
         restoreCount={restorePillCount}
         onRestoreSession={handleRestoreLastSession}
         onDismissRestore={handleDismissRestore}
