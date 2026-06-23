@@ -379,6 +379,19 @@ pub async fn cmd_space_auth_poll(input: SpaceAuthPollInput) -> Result<Value, Str
 }
 
 #[tauri::command]
+pub async fn cmd_space_auth_ack(input: SpaceAuthPollInput) -> Result<(), String> {
+    let base_url = DEFAULT_BASE_URL.to_string();
+    let response = http_client()?
+        .post(api_url(&base_url, "/api/auth/desktop/ack")?)
+        .json(&serde_json::json!({ "token": input.login_token }))
+        .send()
+        .await
+        .map_err(|e| format!("Space auth ack failed: {}", e))?;
+    let _ = parse_cloud_data::<Value>(response).await?;
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn cmd_space_logout() -> Result<(), String> {
     if let Some(session) = read_session()? {
         let client = http_client()?;

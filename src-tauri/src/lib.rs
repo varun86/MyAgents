@@ -564,6 +564,7 @@ pub fn run() {
             space_cloud::cmd_space_get_session,
             space_cloud::cmd_space_auth_start,
             space_cloud::cmd_space_auth_poll,
+            space_cloud::cmd_space_auth_ack,
             space_cloud::cmd_space_logout,
             space_cloud::cmd_space_api_request,
             space_cloud::cmd_space_register_agent,

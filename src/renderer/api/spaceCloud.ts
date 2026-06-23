@@ -185,6 +185,10 @@ export function spaceAuthPoll(loginToken: string): Promise<Record<string, unknow
   return inv('cmd_space_auth_poll', { input: { loginToken } });
 }
 
+export function spaceAuthAck(loginToken: string): Promise<void> {
+  return inv('cmd_space_auth_ack', { input: { loginToken } });
+}
+
 export function spaceLogout(): Promise<void> {
   return inv('cmd_space_logout');
 }

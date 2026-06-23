@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Bot,
   Check,
@@ -22,6 +22,7 @@ import CustomSelect, { type SelectOption } from '@/components/CustomSelect';
 import OverlayBackdrop from '@/components/OverlayBackdrop';
 import { useToast } from '@/components/Toast';
 import {
+  spaceAuthAck,
   spaceAuthPoll,
   spaceAuthStart,
   spaceCommentIssue,
@@ -55,6 +56,8 @@ import type { Project } from '@/config/types';
 
 type ViewMode = 'issues' | 'skills' | 'agents';
 
+const AUTH_POLL_DELAY_MS = 2000;
+
 const STATUS_OPTIONS: SelectOption[] = [
   { value: '', label: '全部状态' },
   { value: 'open', label: 'Open' },
@@ -83,13 +86,18 @@ function issueStatusLabel(status: string): string {
   return status.replaceAll('_', ' ');
 }
 
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
 export default function Space({ isActive }: { isActive: boolean }) {
   const toast = useToast();
   const { projects } = useConfig();
   const [session, setSession] = useState<SpaceSession | null>(null);
   const [loading, setLoading] = useState(true);
   const [authBusy, setAuthBusy] = useState(false);
-  const [authToken, setAuthToken] = useState<string | null>(null);
+  const [authFlow, setAuthFlow] = useState<{ token: string; expiresAt: number } | null>(null);
+  const authPollWarningShownRef = useRef(false);
   const [mode, setMode] = useState<ViewMode>('issues');
   const [tags, setTags] = useState<SpaceTag[]>([]);
   const [issues, setIssues] = useState<SpaceIssue[]>([]);
@@ -171,31 +179,60 @@ export default function Space({ isActive }: { isActive: boolean }) {
   }, [loadIssues, loadLocalAgents, loadSkills, session]);
 
   useEffect(() => {
-    if (!authToken) return;
-    const timer = window.setInterval(async () => {
-      try {
-        const result = await spaceAuthPoll(authToken);
-        if (result.status === 'done') {
-          window.clearInterval(timer);
-          setAuthToken(null);
-          setAuthBusy(false);
-          toast.success('已登录 MyAgents社区');
-          await loadSession();
-        } else if (result.status === 'failed') {
-          window.clearInterval(timer);
-          setAuthToken(null);
-          setAuthBusy(false);
-          toast.error(String(result.error ?? '登录失败'));
+    if (!authFlow) return;
+    let cancelled = false;
+
+    const stopAuth = () => {
+      authPollWarningShownRef.current = false;
+      setAuthFlow(null);
+      setAuthBusy(false);
+    };
+
+    const poll = async () => {
+      while (!cancelled && Date.now() < authFlow.expiresAt) {
+        const startedAt = Date.now();
+        try {
+          const result = await spaceAuthPoll(authFlow.token);
+          if (cancelled) return;
+          if (result.status === 'done') {
+            stopAuth();
+            toast.success('已登录 MyAgents社区');
+            await loadSession();
+            void spaceAuthAck(authFlow.token).catch((error) => {
+              console.warn('[Space] auth ack failed:', errMessage(error));
+            });
+            return;
+          }
+          if (result.status === 'failed') {
+            stopAuth();
+            toast.error(String(result.error ?? '登录失败'));
+            void spaceAuthAck(authFlow.token).catch((error) => {
+              console.warn('[Space] auth ack failed:', errMessage(error));
+            });
+            return;
+          }
+        } catch (_error) {
+          if (cancelled) return;
+          if (!authPollWarningShownRef.current && Date.now() < authFlow.expiresAt) {
+            authPollWarningShownRef.current = true;
+            toast.warning('登录状态同步较慢，正在继续重试');
+          }
         }
-      } catch (error) {
-        window.clearInterval(timer);
-        setAuthToken(null);
-        setAuthBusy(false);
-        toast.error(errMessage(error));
+        const elapsed = Date.now() - startedAt;
+        await wait(Math.max(0, AUTH_POLL_DELAY_MS - elapsed));
       }
-    }, 2000);
-    return () => window.clearInterval(timer);
-  }, [authToken, loadSession, toast]);
+
+      if (!cancelled) {
+        stopAuth();
+        toast.error('登录等待超时，请重新发起 Google 登录');
+      }
+    };
+
+    void poll();
+    return () => {
+      cancelled = true;
+    };
+  }, [authFlow, loadSession, toast]);
 
   const processDispatches = useCallback(async () => {
     if (!session || localAgents.length === 0) return;
@@ -217,7 +254,11 @@ export default function Space({ isActive }: { isActive: boolean }) {
     setAuthBusy(true);
     try {
       const result = await spaceAuthStart();
-      setAuthToken(result.loginToken);
+      authPollWarningShownRef.current = false;
+      setAuthFlow({
+        token: result.loginToken,
+        expiresAt: Date.now() + result.expiresInSeconds * 1000,
+      });
       toast.info('已打开浏览器登录');
     } catch (error) {
       setAuthBusy(false);
