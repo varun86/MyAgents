@@ -28,6 +28,7 @@ import RuntimeDiagnosticsBanner from '@/components/RuntimeDiagnosticsBanner';
 import { UnifiedLogsPanel } from '@/components/UnifiedLogsPanel';
 import WorkspaceConfigPanel, { type Tab as WorkspaceTab } from '@/components/WorkspaceConfigPanel';
 import CronTaskSettingsModal from '@/components/cron/CronTaskSettingsModal';
+import { transitionChannelBoundSession } from '@/pages/chatChannelSession';
 import { useTabState, useTabActive } from '@/context/TabContext';
 import { useVirtuosoScroll } from '@/hooks/useVirtuosoScroll';
 import { useAgentStatuses } from '@/hooks/useAgentStatuses';
@@ -3687,10 +3688,19 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
 
     track('session_fork', {});
     apiPost('/sessions/fork', { messageId })
-      .then(res => {
+      .then(async res => {
         const r = res as { success?: boolean; newSessionId?: string; agentDir?: string; title?: string; error?: string } | undefined;
         if (r?.success && r.newSessionId && r.agentDir) {
-          onForkSession?.(r.newSessionId, r.agentDir, r.title || 'Fork');
+          if (!onForkSession) {
+            await deleteUnopenedForkSession(r.newSessionId);
+            toastRef.current.error('创建分支失败：无法打开新会话');
+            return;
+          }
+          const opened = await onForkSession(r.newSessionId, r.agentDir, r.title || 'Fork');
+          if (!opened) {
+            await deleteUnopenedForkSession(r.newSessionId);
+            toastRef.current.error('创建分支失败：无法打开新会话');
+          }
         } else {
           toastRef.current.error('创建分支失败：' + (r?.error || '未知错误'));
         }
@@ -3699,7 +3709,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
         console.error('[Chat] Fork failed:', err);
         toastRef.current.error('创建分支失败');
       });
-  }, [forkTarget, apiPost, onForkSession]);
+  }, [forkTarget, apiPost, onForkSession, deleteUnopenedForkSession]);
 
   // Handler for selecting a session from history dropdown
   const handleSelectSession = useCallback((id: string, historyEntrySource: HistoryEntrySource = 'chat_dropdown') => {
@@ -3776,44 +3786,22 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
    * SessionMenuButton's "新会话（保留绑定）" submenu item can drive the
    * exact same flow without re-running the unbound fallback paths.
    */
-  const newSessionKeepingBinding = useCallback(async () => {
+  const newSessionKeepingBinding = useCallback(async (
+    options: { allowPlainResetFallback?: boolean } = {},
+  ): Promise<boolean> => {
+    const allowPlainResetFallback = options.allowPlainResetFallback ?? true;
     const boundChannel = surfaces.channel;
-    if (!boundChannel || !sessionId) return;
-    try {
-      const { migrateChannelToNewSession } = await import('@/api/sessionHandoverClient');
-      const newSessionId = await migrateChannelToNewSession({
-        oldSessionId: sessionId,
-        sessionKey: boundChannel.sessionKey,
-      });
-      if (newSessionId) {
-        console.log(`[Chat] Channel-bound new conversation: ${sessionId.slice(0, 8)} → ${newSessionId.slice(0, 8)}`);
-        // CRITICAL: do NOT call resetSession() here.
-        //
-        // The Rust migrate already minted `newSessionId` on the running
-        // sidecar via /api/im/session/new AND rotated peer_sessions[*].session_id
-        // to it. If we additionally POST /chat/reset, the sidecar mints a
-        // SECOND id and the tab adopts the second mint — leaving the channel
-        // binding pointing at `newSessionId` while the tab is on a third id.
-        // Net effect: BOTH the old and new session lose the channel tag in
-        // the UI (peer_session never matches what the tab is showing). The
-        // dedicated soft-swap helper avoids the second mint.
-        const adopted = await adoptMigratedSession(newSessionId, { sidecarAlreadyMigrated: true });
-        if (!adopted) {
-          throw new Error(`Failed to adopt migrated channel session ${newSessionId}.`);
-        }
-        return;
-      }
-      // Migration returned null (handled error inside the client) — surface
-      // the failure to the user instead of silently no-op'ing, then still
-      // give them a fresh session so the menu click feels responsive.
-      console.warn('[Chat] migrateChannelToNewSession returned null; resetting without rebind');
-      toastRef.current.error('Channel 重绑失败，已就地重置');
-      await resetSession();
-    } catch (err) {
-      console.error('[Chat] Channel surface migration failed, falling back to plain reset:', err);
-      toastRef.current.error('Channel 重绑失败，已就地重置');
-      await resetSession();
-    }
+    if (!boundChannel || !sessionId) return false;
+    const { migrateChannelToNewSession } = await import('@/api/sessionHandoverClient');
+    return await transitionChannelBoundSession({
+      sessionId,
+      boundChannel,
+      migrateChannelToNewSession,
+      adoptMigratedSession,
+      resetSession,
+      reportError: (message) => toastRef.current.error(message),
+      allowPlainResetFallback,
+    });
   }, [surfaces.channel, sessionId, resetSession, adoptMigratedSession]);
 
   const showIntroductionOverlay = shouldShowIntroductionOverlay({
@@ -3831,10 +3819,9 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   // If AI is idle, falls back to resetSession (reuses Sidecar).
   // PRD 0.2.14: when current session is IM-channel-bound, migrate the binding
   // to the new session so the IM channel keeps routing here (matches IM `/new`).
-  const handleNewSession = useCallback(async () => {
+  const handleNewSession = useCallback(async (): Promise<boolean> => {
     if (surfaces.channel && sessionId) {
-      await newSessionKeepingBinding();
-      return;
+      return await newSessionKeepingBinding();
     }
 
     if (onNewSession) {
@@ -3842,7 +3829,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       if (handled) {
         // App.tsx started background completion and created new Sidecar
         // TabProvider will detect sessionId change and reconnect
-        return;
+        return true;
       }
     }
 
@@ -3854,7 +3841,15 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     } else {
       console.error('[Chat] Failed to start new session');
     }
+    return success;
   }, [onNewSession, resetSession, surfaces.channel, sessionId, newSessionKeepingBinding]);
+
+  const prepareCurrentSessionForDelete = useCallback(async (): Promise<boolean> => {
+    if (surfaces.channel && sessionId) {
+      return await newSessionKeepingBinding({ allowPlainResetFallback: false });
+    }
+    return await handleNewSession();
+  }, [handleNewSession, newSessionKeepingBinding, surfaces.channel, sessionId]);
 
   return (
     <div className="relative flex h-full flex-row overflow-hidden overscroll-none bg-[var(--paper-elevated)] text-[var(--ink)]">
@@ -3922,7 +3917,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
                 onShowContext={isExternalRuntime ? undefined : () => { void handleSendMessageRef.current('/context'); }}
                 onOpenRename={() => titleEditorRef.current?.openRename()}
                 onFavoriteChanged={(_, updated) => { if (updated) setSessionMeta(updated); }}
-                onDeleted={handleNewSession}
+                prepareCurrentSessionForDelete={prepareCurrentSessionForDelete}
               />
             )}
           </div>
@@ -3956,7 +3951,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
               currentSessionId={sessionId}
               onSelectSession={(id) => handleSelectSession(id, 'chat_dropdown')}
               onOpenInNewTab={onOpenSessionInNewTab}
-              onDeleteCurrentSession={handleNewSession}
+              prepareCurrentSessionForDelete={prepareCurrentSessionForDelete}
               isOpen={showHistory}
               onClose={() => setShowHistory(false)}
               triggerRef={historyBtnRef}

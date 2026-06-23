@@ -1845,15 +1845,26 @@ export default function App() {
     setTabs(prev => [...prev, newTab]);
     setLoadingTabs(prev => ({ ...prev, [newTab.id]: true }));
 
+    let ownerAcquired = false;
     try {
       const result = await ensureSessionSidecar(newSessionId, forkAgentDir, 'tab', newTab.id);
+      ownerAcquired = true;
       console.log(`[App] Fork tab ${newTab.id} sidecar ensured: port=${result.port}`);
+      if (!tabsRef.current.some(t => t.id === newTab.id)) {
+        await releaseSessionSidecar(newSessionId, 'tab', newTab.id).catch(() => {});
+        await deactivateSession(newSessionId).catch(() => {});
+        return false;
+      }
       await activateSession(newSessionId, newTab.id, null, result.port, forkAgentDir, false);
       setActiveTabId(newTab.id);
       return true;
     } catch (error) {
       console.error('[App] Failed to start sidecar for forked session:', error);
       setTabs(prev => prev.filter(t => t.id !== newTab.id));
+      if (ownerAcquired) {
+        await releaseSessionSidecar(newSessionId, 'tab', newTab.id).catch(() => {});
+        await deactivateSession(newSessionId).catch(() => {});
+      }
       return false;
     } finally {
       setLoadingTabs(prev => ({ ...prev, [newTab.id]: false }));
