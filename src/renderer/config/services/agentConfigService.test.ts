@@ -212,7 +212,7 @@ describe('resolveAgentMcpSelectionForConfig', () => {
     expect(JSON.parse(result.mcpServersJson!)).toEqual([legacyRemote]);
   });
 
-  it('globally enables an existing custom SSE server when an Agent selects it', () => {
+  it('does not globally enable a known custom SSE server that the user disabled globally', () => {
     const remoteSse = {
       id: 'remote-sse',
       name: 'Remote SSE',
@@ -239,6 +239,42 @@ describe('resolveAgentMcpSelectionForConfig', () => {
       agents: [agent],
       mcpServers: [remoteSse],
       mcpEnabledServers: [],
+    };
+
+    const result = resolveAgentMcpSelectionForConfig(cfg, agent, ['remote-sse']);
+
+    expect(result.config.mcpServers).toEqual([remoteSse]);
+    expect(result.config.mcpEnabledServers).toEqual([]);
+    expect(result.mcpServersJson).toBeUndefined();
+  });
+
+  it('builds runtime MCP JSON for an existing server only when the global gate is enabled', () => {
+    const remoteSse = {
+      id: 'remote-sse',
+      name: 'Remote SSE',
+      type: 'sse' as const,
+      url: 'https://mcp.example.com/sse',
+      isBuiltin: false,
+    };
+    const agent = {
+      id: 'agent-1',
+      name: 'Agent',
+      enabled: true,
+      workspacePath: '/tmp/workspace',
+      permissionMode: 'plan',
+      channels: [],
+    };
+    const cfg: AppConfig = {
+      defaultPermissionMode: 'plan',
+      theme: 'system',
+      minimizeToTray: true,
+      showDevTools: false,
+      autoStart: false,
+      osNotifications: true,
+      notificationSound: true,
+      agents: [agent],
+      mcpServers: [remoteSse],
+      mcpEnabledServers: ['remote-sse'],
     };
 
     const result = resolveAgentMcpSelectionForConfig(cfg, agent, ['remote-sse']);

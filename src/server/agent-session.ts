@@ -105,6 +105,7 @@ import {
   clearPendingDesktopMaterialization,
   getPendingDesktopMaterialization,
   isLazySessionMaterializationAllowed,
+  type PendingDesktopMaterialization,
   resetSessionMaterializationState,
   setLazySessionMaterializationAllowed,
   setPendingDesktopMaterialization,
@@ -4480,6 +4481,14 @@ export async function freezeCurrentSessionMetadataForImDetach(
   return { success: true, sessionId: targetSessionId, metadata: meta };
 }
 
+function preparedMaterializationOwnsMetadata(
+  prepared: PendingDesktopMaterialization,
+  meta: SessionMetadata,
+): boolean {
+  return meta.materializationState === 'prepared'
+    && meta.materializationSourceSessionId === prepared.priorSessionId;
+}
+
 export async function materializePendingDesktopSession(
   request: {
     phase?: 'prepare' | 'commit' | 'rollback';
@@ -4491,14 +4500,53 @@ export async function materializePendingDesktopSession(
 
   if (phase === 'rollback') {
     const prepared = getPendingDesktopMaterialization();
-    const target = request.preparedSessionId ?? prepared?.targetSessionId;
-    if (!target) {
+    if (!prepared) {
+      if (request.preparedSessionId) {
+        return { success: false, error: 'No prepared pending materialization to roll back.', status: 409 };
+      }
       return { success: true };
     }
-    if (prepared && prepared.targetSessionId !== target) {
+    const target = request.preparedSessionId ?? prepared.targetSessionId;
+    if (prepared.targetSessionId !== target) {
       return { success: false, error: `Prepared session mismatch: expected ${prepared.targetSessionId}, got ${target}.`, status: 409 };
     }
-    const deleted = await deleteSession(target);
+    const meta = getSessionMetadata(target);
+    if (!meta) {
+      clearPendingDesktopMaterialization();
+      console.log(`[agent] rolled back pending desktop materialization target=${target} deleted=false (metadata already gone)`);
+      return { success: true };
+    }
+    if (!preparedMaterializationOwnsMetadata(prepared, meta)) {
+      return {
+        success: false,
+        error: `Refusing to roll back non-owned materialization target ${target}.`,
+        status: 409,
+      };
+    }
+    const deleted = await deleteSession(
+      target,
+      (current) => preparedMaterializationOwnsMetadata(prepared, current),
+    );
+    if (!deleted) {
+      const latest = getSessionMetadata(target);
+      if (!latest) {
+        clearPendingDesktopMaterialization();
+        console.log(`[agent] rolled back pending desktop materialization target=${target} deleted=false (metadata already gone)`);
+        return { success: true };
+      }
+      if (!preparedMaterializationOwnsMetadata(prepared, latest)) {
+        return {
+          success: false,
+          error: `Refusing to roll back non-owned materialization target ${target}.`,
+          status: 409,
+        };
+      }
+      return {
+        success: false,
+        error: `Failed to delete prepared session ${target}.`,
+        status: 500,
+      };
+    }
     clearPendingDesktopMaterialization();
     console.log(`[agent] rolled back pending desktop materialization target=${target} deleted=${deleted}`);
     return { success: true };
@@ -4530,11 +4578,30 @@ export async function materializePendingDesktopSession(
       clearPendingDesktopMaterialization();
       return { success: false, error: `Prepared session ${prepared.targetSessionId} disappeared before commit.`, status: 404 };
     }
+    if (!preparedMaterializationOwnsMetadata(prepared, meta)) {
+      return {
+        success: false,
+        error: `Prepared session ${prepared.targetSessionId} is not owned by the pending materialization.`,
+        status: 409,
+      };
+    }
     const committedMeta = await updateSessionMetadata(prepared.targetSessionId, {
       materializationState: undefined,
       materializationSourceSessionId: undefined,
-    });
+    }, (current) => preparedMaterializationOwnsMetadata(prepared, current));
     if (!committedMeta) {
+      const latest = getSessionMetadata(prepared.targetSessionId);
+      if (!latest) {
+        clearPendingDesktopMaterialization();
+        return { success: false, error: `Prepared session ${prepared.targetSessionId} disappeared before commit.`, status: 404 };
+      }
+      if (!preparedMaterializationOwnsMetadata(prepared, latest)) {
+        return {
+          success: false,
+          error: `Prepared session ${prepared.targetSessionId} is not owned by the pending materialization.`,
+          status: 409,
+        };
+      }
       return {
         success: false,
         error: `Failed to durably commit prepared session ${prepared.targetSessionId}.`,
@@ -4602,10 +4669,37 @@ export async function materializePendingDesktopSession(
   if (pendingMaterialization) {
     const meta = getSessionMetadata(pendingMaterialization.targetSessionId);
     if (meta) {
+      if (!preparedMaterializationOwnsMetadata(pendingMaterialization, meta)) {
+        return {
+          success: false,
+          error: `Prepared session ${pendingMaterialization.targetSessionId} is not owned by the pending materialization.`,
+          status: 409,
+        };
+      }
       const snapshotPatch = buildDesktopSnapshotMetadataPatch(request.snapshotPatch);
       if (snapshotPatch) {
-        const updated = await updateSessionMetadata(pendingMaterialization.targetSessionId, snapshotPatch);
+        const updated = await updateSessionMetadata(
+          pendingMaterialization.targetSessionId,
+          snapshotPatch,
+          (current) => preparedMaterializationOwnsMetadata(pendingMaterialization, current),
+        );
         if (!updated) {
+          const latest = getSessionMetadata(pendingMaterialization.targetSessionId);
+          if (!latest) {
+            clearPendingDesktopMaterialization();
+            return {
+              success: false,
+              error: `Prepared session ${pendingMaterialization.targetSessionId} disappeared before prepare patch.`,
+              status: 404,
+            };
+          }
+          if (!preparedMaterializationOwnsMetadata(pendingMaterialization, latest)) {
+            return {
+              success: false,
+              error: `Prepared session ${pendingMaterialization.targetSessionId} is not owned by the pending materialization.`,
+              status: 409,
+            };
+          }
           return {
             success: false,
             error: `Failed to update prepared session ${pendingMaterialization.targetSessionId}.`,

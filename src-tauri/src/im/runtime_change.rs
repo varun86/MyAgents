@@ -96,7 +96,11 @@ fn enabled_mcp_ids_from_servers_json(raw: Option<&str>) -> Option<Vec<String>> {
         .map(|servers| {
             servers
                 .iter()
-                .filter(|s| s.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false))
+                // Renderer/runtime `mcpServersJson` is already the enabled
+                // definition list and does not carry an `enabled` field.
+                // Older/full-list writers that explicitly set enabled=false
+                // still opt out here.
+                .filter(|s| s.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true))
                 .filter_map(|s| s.get("id").and_then(|v| v.as_str()).map(String::from))
                 .collect::<Vec<_>>()
         })
@@ -118,8 +122,9 @@ pub async fn build_snapshot_from_agent_state(agent: &AgentInstance) -> OwnedSess
         runtime: agent.runtime.read().await.clone(),
         model: agent.current_model.read().await.clone(),
         permission_mode: Some(agent.permission_mode.read().await.clone()),
-        // mcp_servers_json is the FULL list-of-servers JSON; we only want
-        // the enabled ids (matches `snapshotForOwnedSession.mcpEnabledServers`).
+        // mcp_servers_json is the runtime payload: the selected server
+        // definitions already filtered by the global safety gate. Snapshot only
+        // stores ids, matching `snapshotForOwnedSession.mcpEnabledServers`.
         mcp_enabled_servers: enabled_mcp_ids_from_servers_json(mcp_servers_json.as_deref()),
         // provider_id / provider_env_json — see module-level note: provider_id
         // is currently NOT hot-reloaded into AgentInstance (no Arc<RwLock>),
@@ -664,5 +669,19 @@ mod tests {
 
         assert!(should_replace_notification_candidate(&existing, &newer));
         assert!(!should_replace_notification_candidate(&newer, &existing));
+    }
+
+    #[test]
+    fn mcp_snapshot_treats_runtime_json_as_enabled_definition_list() {
+        let raw = serde_json::json!([
+            { "id": "remote-http", "type": "http", "url": "https://example.test/mcp" },
+            { "id": "disabled-legacy", "enabled": false }
+        ])
+        .to_string();
+
+        assert_eq!(
+            enabled_mcp_ids_from_servers_json(Some(&raw)),
+            Some(vec!["remote-http".to_string()])
+        );
     }
 }

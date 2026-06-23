@@ -529,7 +529,7 @@ import {
   updateSessionMetadata,
   getAttachmentPath,
 } from './SessionStore';
-import { decodeProviderEnvSnapshot, findAgentByWorkspacePath, findProvider, getAllMcpServers, getEffectiveMcpServers, isProviderDisabled, loadConfig, resolveImProviderEnv, resolveProviderEnv } from './utils/admin-config';
+import { decodeProviderEnvSnapshot, findAgentByWorkspacePath, findProvider, getAllMcpServers, getEffectiveMcpServers, isProviderDisabled, loadConfig, resolveImProviderEnv, resolveProviderEnv, resolveWorkspaceConfig } from './utils/admin-config';
 import { snapshotForOwnedSession } from './utils/session-snapshot';
 import { resolveSessionConfig } from './utils/resolve-session-config';
 import { resolveLastRealUserMessagePreview, shrinkSessionMessagesForClient } from './utils/session-message-preview';
@@ -706,6 +706,33 @@ function getRuntimeConfigPermissionMode(
 ): string | undefined {
   const permissionMode = runtimeConfig?.permissionMode?.trim();
   return permissionMode ? coercePermissionModeForRuntime(permissionMode, runtime) : undefined;
+}
+
+function buildSnapshotRuntimeConfig(resolved: {
+  model?: string;
+  permissionMode?: string;
+  reasoningEffort?: string;
+}): RuntimeConfig {
+  return {
+    ...(resolved.model !== undefined ? { model: resolved.model } : {}),
+    ...(resolved.permissionMode !== undefined ? { permissionMode: resolved.permissionMode } : {}),
+    ...(resolved.reasoningEffort !== undefined ? { reasoningEffort: resolved.reasoningEffort } : {}),
+  };
+}
+
+function cloneProviderEnvForImContext(env: ProviderEnv | undefined): ProviderEnv | undefined {
+  return env ? {
+    providerId: env.providerId,
+    providerName: env.providerName,
+    baseUrl: env.baseUrl,
+    apiKey: env.apiKey,
+    authType: env.authType,
+    apiProtocol: env.apiProtocol,
+    maxOutputTokens: env.maxOutputTokens,
+    maxOutputTokensParamName: env.maxOutputTokensParamName,
+    upstreamFormat: env.upstreamFormat,
+    modelAliases: env.modelAliases,
+  } : undefined;
 }
 
 /**
@@ -7600,7 +7627,13 @@ async function main() {
               result.sessionId ? 500 : 400,
             );
           }
-          return jsonResponse({ success: true, sessionId: result.sessionId, metadata: result.metadata });
+          return jsonResponse({
+            success: true,
+            sessionId: result.sessionId,
+            metadata: result.metadata
+              ? redactSessionMetadata(result.metadata as { providerEnvJson?: string })
+              : undefined,
+          });
         } catch (error) {
           console.error('[api/session/freeze-current] Error:', error);
           return jsonResponse({ success: false, error: error instanceof Error ? error.message : 'Failed to freeze current session' }, 500);
@@ -7862,54 +7895,74 @@ async function main() {
           const snapshotOwnsConfig = Boolean(snapshotMetaForConfig?.configSnapshotAt);
           const configHeldByTab = payload.configHeldByTab === true && !snapshotOwnsConfig;
           const heldImConfig = configHeldByTab ? engine.getHeldImConfigSnapshot() : null;
+          const payloadRuntime = payload.runtime ?? getActiveRuntimeType();
+          const payloadRuntimeConfig = payload.runtimeConfig ?? null;
+          const snapshotResolvedConfig = snapshotOwnsConfig && snapshotMetaForConfig
+            ? resolveWorkspaceConfig(agentDir, snapshotMetaForConfig, { includeMcp: false })
+            : null;
+          const snapshotRuntimeConfig = snapshotResolvedConfig
+            ? buildSnapshotRuntimeConfig(snapshotResolvedConfig)
+            : null;
+          const effectiveRuntime = snapshotOwnsConfig
+            && snapshotMetaForConfig?.runtime
+            && (VALID_RUNTIMES as readonly string[]).includes(snapshotMetaForConfig.runtime)
+            ? snapshotMetaForConfig.runtime as RuntimeType
+            : payloadRuntime;
+          const activeRuntime = getActiveRuntimeType();
+          if (snapshotOwnsConfig && effectiveRuntime !== activeRuntime) {
+            imRequestRegistry.unregister(payload.requestId);
+            return jsonResponse(
+              {
+                success: false,
+                error: `Session runtime mismatch: snapshot=${effectiveRuntime}, sidecar=${activeRuntime}. Please reopen or rebind this channel session.`,
+              },
+              409,
+            );
+          }
 
           try {
 
           // Set IM cron context for the im-cron tool (parity with /api/im/chat)
           if (payload.botId && process.env.MYAGENTS_MANAGEMENT_PORT) {
-            const payloadRuntime = payload.runtime ?? getActiveRuntimeType();
-            const payloadRuntimeConfig = payload.runtimeConfig ?? null;
-            const imCronModel = payloadRuntime === 'builtin'
-              ? (heldImConfig?.model ?? snapshotMetaForConfig?.model ?? payload.model ?? getSessionModel())
-              : (heldImConfig?.model ?? getRuntimeConfigModel(payloadRuntimeConfig, payloadRuntime));
+            const imCronModel = snapshotResolvedConfig
+              ? snapshotResolvedConfig.model
+              : (effectiveRuntime === 'builtin'
+                ? (heldImConfig?.model ?? payload.model ?? getSessionModel())
+                : (heldImConfig?.model ?? getRuntimeConfigModel(payloadRuntimeConfig, effectiveRuntime)));
             // PRD 0.2.9 — Resolve providerId from the workspace agent so
             // the IM cron tool can create live-resolve crons. Only meaningful
             // for builtin runtime (external runtimes manage their own provider).
-            const imAgentForProvider = payloadRuntime === 'builtin'
+            const imAgentForProvider = effectiveRuntime === 'builtin' && !snapshotOwnsConfig
               ? findAgentByWorkspacePath(agentDir)
               : null;
-            const imProviderId = (imAgentForProvider?.providerId as string | undefined) ?? undefined;
+            const imProviderId = snapshotOwnsConfig
+              ? (snapshotMetaForConfig?.providerId ?? snapshotResolvedConfig?.providerEnv?.providerId)
+              : ((imAgentForProvider?.providerId as string | undefined) ?? undefined);
             setImCronContext({
               botId: payload.botId,
               chatId: payload.sourceId,
               platform: payload.source.split('_')[0],
               workspacePath: agentDir,
               model: imCronModel,
-              permissionMode: payloadRuntime === 'builtin'
-                ? (heldImConfig?.permissionMode ?? snapshotMetaForConfig?.permissionMode ?? payload.permissionMode)
-                : (heldImConfig?.permissionMode ?? getRuntimeConfigPermissionMode(payloadRuntimeConfig, payloadRuntime)),
+              permissionMode: snapshotResolvedConfig
+                ? snapshotResolvedConfig.permissionMode
+                : (effectiveRuntime === 'builtin'
+                  ? (heldImConfig?.permissionMode ?? payload.permissionMode)
+                  : (heldImConfig?.permissionMode ?? getRuntimeConfigPermissionMode(payloadRuntimeConfig, effectiveRuntime))),
               // Legacy frozen env (kept for back-compat); sidecar prefers
               // `providerId` when both are present.
-              providerEnv: payloadRuntime === 'builtin'
-                ? (() => {
-                    const env = heldImConfig?.providerEnv ?? payload.providerEnv;
-                    return env ? {
-                      providerId: env.providerId,
-                      providerName: env.providerName,
-                      baseUrl: env.baseUrl,
-                      apiKey: env.apiKey,
-                      authType: env.authType,
-                      apiProtocol: env.apiProtocol,
-                      maxOutputTokens: env.maxOutputTokens,
-                      maxOutputTokensParamName: env.maxOutputTokensParamName,
-                      upstreamFormat: env.upstreamFormat,
-                      modelAliases: env.modelAliases,
-                    } : undefined;
-                  })()
+              providerEnv: effectiveRuntime === 'builtin'
+                ? cloneProviderEnvForImContext(
+                    (snapshotResolvedConfig?.providerEnv as ProviderEnv | undefined)
+                    ?? heldImConfig?.providerEnv
+                    ?? payload.providerEnv,
+                  )
                 : undefined,
               providerId: imProviderId,
-              runtime: payloadRuntime,
-              runtimeConfig: payloadRuntime === 'builtin' ? undefined : payloadRuntimeConfig ?? undefined,
+              runtime: effectiveRuntime,
+              runtimeConfig: effectiveRuntime === 'builtin'
+                ? undefined
+                : (snapshotRuntimeConfig ?? payloadRuntimeConfig ?? undefined),
             });
             setImMediaContext({
               botId: payload.botId,
@@ -8036,19 +8089,21 @@ async function main() {
           // Dispatch to runtime through SessionEngine. The route keeps IM
           // payload shaping; the engine owns builtin/external admission.
           if (engine.kind === 'external') {
-            const payloadRuntime = payload.runtime ?? getActiveRuntimeType();
-            const runtimeConfig = payload.runtimeConfig ?? null;
-            if (payloadRuntime !== getActiveRuntimeType()) {
+            const runtimeConfig = snapshotRuntimeConfig ?? payloadRuntimeConfig;
+            if (payloadRuntime !== activeRuntime) {
               console.error(
-                `[im/enqueue] Runtime mismatch (Rust drift detection failed to catch): sidecar=${getActiveRuntimeType()} payload=${payloadRuntime}.`,
+                `[im/enqueue] Runtime mismatch (Rust drift detection failed to catch): sidecar=${activeRuntime} payload=${payloadRuntime}.`,
               );
             }
-            const resolvedExternalPermissionMode = heldImConfig?.permissionMode
-              ?? getRuntimeConfigPermissionMode(runtimeConfig, payloadRuntime);
-            const resolvedExternalModel = heldImConfig?.model
-              ?? getRuntimeConfigModel(runtimeConfig, payloadRuntime);
-            const resolvedExternalReasoningEffort = heldImConfig?.reasoningEffort
-              ?? getRuntimeConfigReasoningEffort(runtimeConfig, payloadRuntime);
+            const resolvedExternalPermissionMode = snapshotResolvedConfig?.permissionMode
+              ?? heldImConfig?.permissionMode
+              ?? getRuntimeConfigPermissionMode(runtimeConfig, effectiveRuntime);
+            const resolvedExternalModel = snapshotResolvedConfig
+              ? snapshotResolvedConfig.model
+              : (heldImConfig?.model ?? getRuntimeConfigModel(runtimeConfig, effectiveRuntime));
+            const resolvedExternalReasoningEffort = snapshotResolvedConfig
+              ? snapshotResolvedConfig.reasoningEffort
+              : (heldImConfig?.reasoningEffort ?? getRuntimeConfigReasoningEffort(runtimeConfig, effectiveRuntime));
             const result = await engine.enqueueImMessage({
               message: finalMessage,
               images: payload.images ?? undefined,
@@ -8086,6 +8141,7 @@ async function main() {
             // is a no-op for them and behavior matches v0.2.13.
             let resolvedPermissionMode: PermissionMode = (payload.permissionMode as PermissionMode) ?? 'plan';
             let resolvedModel: string | undefined = payload.model ?? undefined;
+            let resolvedReasoningEffort: string | undefined;
             // (#237) Re-resolve providerEnv from canonical `providerId` on disk
             // instead of trusting the blob Rust forwarded. Rust caches
             // `provider_env_json` as an Arc at bot start and replays it on every
@@ -8105,26 +8161,16 @@ async function main() {
               resolvedPermissionMode = (heldImConfig.permissionMode as PermissionMode | undefined) ?? resolvedPermissionMode;
               resolvedModel = heldImConfig.model ?? resolvedModel;
               resolvedProviderEnv = heldImConfig.providerEnv ?? resolvedProviderEnv;
+              resolvedReasoningEffort = heldImConfig.reasoningEffort ?? resolvedReasoningEffort;
             }
-            if (snapshotMetaForConfig?.configSnapshotAt) {
-              if (snapshotMetaForConfig.permissionMode) {
-                resolvedPermissionMode = snapshotMetaForConfig.permissionMode as PermissionMode;
-              }
-              if (snapshotMetaForConfig.model) {
-                resolvedModel = snapshotMetaForConfig.model;
-              }
-              if (snapshotMetaForConfig.providerEnvJson) {
-                // Desktop-handover snapshot wins over the fresh agent-disk
-                // resolve above: the user's intent at handover was "freeze
-                // this desktop session's provider"; re-resolving from current
-                // agent state would defeat that.
-                // Snapshot gate: if the desktop handover's providerId is now
-                // globally disabled, refuse the frozen snapshot — fall back to
-                // the live freshImProviderEnv / payload.providerEnv chain.
-                // decodeProviderEnvSnapshot enforces this.
-                const decoded = decodeProviderEnvSnapshot(snapshotMetaForConfig.providerEnvJson, snapshotMetaForConfig.providerId);
-                if (decoded) resolvedProviderEnv = decoded as ProviderEnv;
-              }
+            if (snapshotResolvedConfig) {
+              // Desktop-handover snapshots own the full config. Missing fields
+              // mean "use product/runtime default", not "fall back to live
+              // Agent/channel config".
+              resolvedPermissionMode = snapshotResolvedConfig.permissionMode as PermissionMode;
+              resolvedModel = snapshotResolvedConfig.model;
+              resolvedProviderEnv = snapshotResolvedConfig.providerEnv as ProviderEnv | undefined;
+              resolvedReasoningEffort = snapshotResolvedConfig.reasoningEffort;
             }
 
             applyBackgroundAgentPermissionModeFromDisk(); // #264 — IM/Cron self-resolve
@@ -8138,7 +8184,7 @@ async function main() {
               permissionMode: resolvedPermissionMode,
               model: resolvedModel,
               providerEnv: resolvedProviderEnv,
-              // reasoningEffort — IM turns keep the session's current value
+              reasoningEffort: resolvedReasoningEffort,
               metadataBirthPending: payload.metadataBirthPending === true,
               metadata,
             });

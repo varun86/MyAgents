@@ -311,7 +311,9 @@ function isPromotableRemoteMcpDefinition(server: unknown): server is McpServerDe
  * Older UI flows could leave HTTP/SSE definitions only in agent.mcpServersJson.
  * When the Agent subset is saved again, heal that legacy shape by promoting
  * selected custom definitions into the global catalogue and global enabled list
- * before rebuilding the runtime mcpServersJson payload.
+ * before rebuilding the runtime mcpServersJson payload. Known-but-globally
+ * disabled servers stay disabled; the global enabled list remains the safety
+ * gate outside the legacy-heal path.
  */
 export function resolveAgentMcpSelectionForConfig(
   config: AppConfig,
@@ -346,9 +348,9 @@ export function resolveAgentMcpSelectionForConfig(
 
   const globalEnabled = new Set(Array.isArray(nextConfig.mcpEnabledServers) ? nextConfig.mcpEnabledServers : []);
   let enabledChanged = false;
-  for (const id of requestedIds) {
-    if (knownIds.has(id) && !globalEnabled.has(id)) {
-      globalEnabled.add(id);
+  for (const server of legacyDefinitions) {
+    if (!globalEnabled.has(server.id)) {
+      globalEnabled.add(server.id);
       enabledChanged = true;
     }
   }

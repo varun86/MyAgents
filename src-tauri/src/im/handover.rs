@@ -518,8 +518,15 @@ pub async fn cmd_handover_session_to_channel<R: Runtime>(
         }
     }
 
-    {
-        let router = router_arc.lock().await;
+    // ----- 5. Mutate router atomically (snapshot prior + upsert under one lock).
+    //
+    // Use `target_port` from step 4 (the authoritative port returned by
+    // ensure_session_sidecar) rather than what step 3 read pre-ensure —
+    // `is_new=true` means the old sidecar was dead and a fresh one was minted
+    // on a different port; binding the IM channel to the stale port would
+    // route subsequent messages into a closed socket.
+    let (chat_id, prior_session_id, prior_sidecar_port, active_sessions_after_upsert) = {
+        let mut router = router_arc.lock().await;
         let current_prior = router.peer_session_snapshot(&target_session_key);
         let before_identity = prior_before_handover
             .as_ref()
@@ -530,22 +537,11 @@ pub async fn cmd_handover_session_to_channel<R: Runtime>(
         if before_identity != current_identity {
             let _ = release_session_sidecar(manager.inner(), &sessionId, &owner);
             ulog_warn!(
-                "[handover] step4b binding changed while freezing; target owner released key={}",
+                "[handover] step5 binding changed while freezing; target owner released key={}",
                 target_session_key
             );
             return Err("Channel binding changed during handover; please retry.".to_string());
         }
-    }
-
-    // ----- 5. Mutate router atomically (snapshot prior + upsert under one lock).
-    //
-    // Use `target_port` from step 4 (the authoritative port returned by
-    // ensure_session_sidecar) rather than what step 3 read pre-ensure —
-    // `is_new=true` means the old sidecar was dead and a fresh one was minted
-    // on a different port; binding the IM channel to the stale port would
-    // route subsequent messages into a closed socket.
-    let (chat_id, prior_session_id, prior_sidecar_port, active_sessions_after_upsert) = {
-        let mut router = router_arc.lock().await;
         let prior = prior_before_handover.clone();
         let prior_session_id = prior.as_ref().map(|p| p.session_id.clone());
         let prior_sidecar_port = prior.as_ref().map(|p| p.sidecar_port);

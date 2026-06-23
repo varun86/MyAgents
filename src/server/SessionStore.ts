@@ -291,7 +291,7 @@ function recoverSessionsIndexCandidates(): SessionMetadata[] {
     const corruptContent = existsSync(SESSIONS_FILE) ? readFileSync(SESSIONS_FILE, 'utf-8') : '';
     let recovered = recoverSessionsIndexFromContent(corruptContent);
     const tmpSessions = readTmpSessionsIndexStrict();
-    if (recovered.length === 0 && tmpSessions && tmpSessions.length > 0) {
+    if (tmpSessions && tmpSessions.length > 0) {
         recovered = tmpSessions;
     }
     return recovered;
@@ -545,9 +545,15 @@ export async function saveSessionMetadata(session: SessionMetadata): Promise<voi
 }
 
 /**
- * Delete session metadata and data
+ * Delete session metadata and data.
+ *
+ * `precondition`, when provided, is evaluated inside the sessions lock against
+ * the current metadata row before any files or index entries are removed.
  */
-export async function deleteSession(sessionId: string): Promise<boolean> {
+export async function deleteSession(
+    sessionId: string,
+    precondition?: (current: SessionMetadata) => boolean,
+): Promise<boolean> {
     ensureStorageDir();
 
     // Lock order matches saveSessionMessages: per-session file lock OUTER,
@@ -558,11 +564,16 @@ export async function deleteSession(sessionId: string): Promise<boolean> {
     // just-recreated one.
     return withSessionFileLock(sessionId, async () => withSessionsLock(async () => {
         const all = readSessionsIndexForWrite();
-        const filtered = all.filter(s => s.id !== sessionId);
+        const index = all.findIndex(s => s.id === sessionId);
 
-        if (filtered.length === all.length) {
+        if (index < 0) {
             return false; // Not found
         }
+        if (precondition && !precondition(all[index])) {
+            return false;
+        }
+
+        const filtered = all.filter(s => s.id !== sessionId);
 
         try {
             // Remove the data files FIRST, then the index entry. If we crash

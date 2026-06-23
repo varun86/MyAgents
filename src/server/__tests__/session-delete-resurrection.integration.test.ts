@@ -178,6 +178,26 @@ describe('issue #336 — delete vs persist resurrection', () => {
         expect(repaired.some(s => s.id === stale.id)).toBe(false);
     });
 
+    it('prefers a valid newer sessions.json.tmp over partial structural salvage', async () => {
+        const partial = sessionMeta('77777777-7777-7777-7777-777777777777', '/tmp/workspace-partial-main');
+        const tmpOnly = sessionMeta('88888888-8888-8888-8888-888888888888', '/tmp/workspace-newer-tmp');
+        writeFileSync(sessionsJson(), `[\n${JSON.stringify(partial, null, 2)},\n{"id":`, 'utf-8');
+        writeFileSync(sessionsTmpJson(), JSON.stringify([partial, tmpOnly], null, 2), 'utf-8');
+        const olderDate = new Date('2026-01-01T00:00:00.000Z');
+        const newerDate = new Date('2026-01-02T00:00:00.000Z');
+        utimesSync(sessionsJson(), olderDate, olderDate);
+        utimesSync(sessionsTmpJson(), newerDate, newerDate);
+
+        const meta = await store.createSession('/tmp/workspace-prefer-newer-tmp');
+
+        expect(store.getSessionMetadata(meta.id)?.id).toBe(meta.id);
+        expect(store.getSessionMetadata(tmpOnly.id)?.id).toBe(tmpOnly.id);
+        const repaired = JSON.parse(readFileSync(sessionsJson(), 'utf-8')) as Array<{ id: string }>;
+        expect(repaired.some(s => s.id === partial.id)).toBe(true);
+        expect(repaired.some(s => s.id === tmpOnly.id)).toBe(true);
+        expect(repaired.some(s => s.id === meta.id)).toBe(true);
+    });
+
     it('a post-delete persist must NOT resurrect the JSONL (the #336 race)', async () => {
         const meta = await store.createSession('/tmp/workspace-a');
         const history = [msg(0), msg(1)];
