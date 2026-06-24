@@ -224,10 +224,16 @@ export default function SessionHistoryDropdown({
         };
         void listenWithCleanup('agent:status-changed', refreshStatuses, ac.signal);
 
-        // Background completion → refresh background sessions
+        // Background completion is the global completion signal for turns that
+        // finished after this tab moved away from their sidecar. That turn can
+        // update session metadata (title, lastActiveAt, stats) without any
+        // tab-scoped SSE consumer, so refresh sessions along with the tag data.
         void listenWithCleanup('session:background-complete', () => {
             getBackgroundSessions()
                 .then(ids => { if (!ac.signal.aborted) setBackgroundSessionIds(ids); })
+                .catch(() => {});
+            getSessions(agentDir)
+                .then(data => { if (!ac.signal.aborted) setSessions(data); })
                 .catch(() => {});
         }, ac.signal);
 
