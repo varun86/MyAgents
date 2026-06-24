@@ -10,7 +10,6 @@ import {
   Loader2,
   LogIn,
   LogOut,
-  Maximize2,
   MessageSquare,
   Package,
   Paperclip,
@@ -19,40 +18,20 @@ import {
   Search,
   Send,
   Settings,
-  Terminal,
   UploadCloud,
   User,
   X,
+  Copy,
 } from 'lucide-react';
 
 import {
-  findProjectForAgent,
   spaceAuthAck,
   spaceAuthPoll,
   spaceAuthStart,
-  spaceCommentIssue,
-  spaceCreateIssue,
-  spaceDispatchIssue,
-  spaceGetIssue,
-  spaceGetOfficial,
-  spaceGetSession,
-  spaceGetSkill,
-  spaceGetSkillFile,
-  spaceInstallSkill,
-  spaceListIssues,
-  spaceListLocalAgents,
-  spaceListSkills,
-  spaceLogout,
-  spaceProcessDispatchesOnce,
-  spaceRegisterAgent,
-  spaceUploadIssueAttachments,
-  spaceUploadSkillZip,
   type LocalRegisteredAgent,
   type SpaceIssue,
-  type SpaceIssueDetail,
   type SpaceSession,
   type SpaceSkill,
-  type SpaceSkillDetail,
   type SpaceTag,
 } from '@/api/spaceCloud';
 import myagentsWebLogo from '@/assets/brand/myagents-web-logo.png';
@@ -62,6 +41,26 @@ import { useToast } from '@/components/Toast';
 import type { Project } from '@/config/types';
 import { useCloseLayer } from '@/hooks/useCloseLayer';
 import { useConfig } from '@/hooks/useConfig';
+import { copyPlainText } from '@/utils/markdownClipboard';
+import {
+  buildIssueCommandPrompt,
+  buildIssueQueryKey,
+  formatAgentSecondaryLabel,
+  getIssueStatusOptions,
+  isClosedIssue,
+  isSpaceAdmin,
+  issueStatusLabel,
+  type IssueQueryParams,
+} from '@/pages/space/spaceHelpers';
+import {
+  getIssueListState,
+  getSkillFileState,
+  SPACE_VISIBLE_REFRESH_TTL_MS,
+  type SpaceActions,
+  type SpaceIssueDetailState,
+  type SpaceSkillDetailState,
+} from '@/pages/space/spaceStore';
+import { useSpaceData } from '@/pages/space/useSpaceData';
 
 type ViewMode = 'issues' | 'skills' | 'agents';
 type SpaceId = 'community' | 'team';
@@ -79,8 +78,6 @@ const STATUS_FILTER_OPTIONS: SelectOption[] = [
   { value: 'closed', label: 'Closed' },
 ];
 
-const CLOSED_ISSUE_STATUSES = new Set(['resolved', 'closed', 'declined', 'duplicate', 'archived']);
-
 const PAPER_GRID_STYLE: CSSProperties = {
   backgroundImage:
     'linear-gradient(var(--line-subtle) 1px, var(--paper-a0) 1px), linear-gradient(90deg, var(--line-subtle) 1px, var(--paper-a0) 1px)',
@@ -94,14 +91,6 @@ const SPACE_BACKGROUND_STYLE: CSSProperties = {
 
 function errMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-function isAdmin(session: SpaceSession | null): boolean {
-  return session?.membership?.role === 'owner' || session?.membership?.role === 'admin';
-}
-
-function isClosedIssue(status: string): boolean {
-  return CLOSED_ISSUE_STATUSES.has(status);
 }
 
 function formatTime(value?: string | null): string {
@@ -135,8 +124,10 @@ function initials(value?: string | null): string {
   return source.slice(0, 2).toUpperCase();
 }
 
-function issueStatusLabel(status: string): string {
-  return status.replaceAll('_', ' ');
+function roleLabel(role: string): string {
+  if (role === 'owner') return 'owner';
+  if (role === 'admin') return 'admin';
+  return 'member';
 }
 
 function statusPillClass(status: string): string {
@@ -147,10 +138,8 @@ function statusPillClass(status: string): string {
   return 'bg-[var(--success-bg)] text-[var(--success)]';
 }
 
-function roleLabel(role: SpaceSession['membership']['role']): string {
-  if (role === 'owner') return 'Owner';
-  if (role === 'admin') return 'Admin';
-  return 'Member';
+function isAgentAssignable(agent: LocalRegisteredAgent): boolean {
+  return agent.status === 'active' || agent.status === 'online';
 }
 
 function wait(ms: number): Promise<void> {
@@ -160,28 +149,39 @@ function wait(ms: number): Promise<void> {
 export default function Space({ isActive }: { isActive: boolean }) {
   const toast = useToast();
   const { projects } = useConfig();
-  const [session, setSession] = useState<SpaceSession | null>(null);
-  const [loading, setLoading] = useState(true);
+  const spaceData = useSpaceData({ isActive });
+  const { actions } = spaceData;
   const [authBusy, setAuthBusy] = useState(false);
   const [authFlow, setAuthFlow] = useState<{ token: string; expiresAt: number } | null>(null);
   const authPollWarningShownRef = useRef(false);
   const [activeSpaceId, setActiveSpaceId] = useState<SpaceId>('community');
   const [mode, setMode] = useState<ViewMode>('issues');
-  const [tags, setTags] = useState<SpaceTag[]>([]);
-  const [issues, setIssues] = useState<SpaceIssue[]>([]);
   const [issueQ, setIssueQ] = useState('');
   const [selectedTag, setSelectedTag] = useState('');
   const [selectedStatus, setSelectedStatus] = useState('');
-  const [issuesLoading, setIssuesLoading] = useState(false);
   const [issueDetailId, setIssueDetailId] = useState<string | null>(null);
   const [createIssueOpen, setCreateIssueOpen] = useState(false);
-  const [skills, setSkills] = useState<SpaceSkill[]>([]);
-  const [skillsLoading, setSkillsLoading] = useState(false);
   const [selectedSkillId, setSelectedSkillId] = useState<string | null>(null);
-  const [localAgents, setLocalAgents] = useState<LocalRegisteredAgent[]>([]);
   const [registerOpen, setRegisterOpen] = useState(false);
 
-  const admin = isAdmin(session);
+  const session = spaceData.session;
+  const tags = spaceData.tags;
+  const issueQuery = useMemo<IssueQueryParams>(() => ({
+    q: issueQ,
+    tag: selectedTag,
+    status: selectedStatus,
+    limit: 50,
+  }), [issueQ, selectedStatus, selectedTag]);
+  const issueQueryRef = useRef(issueQuery);
+  const issueQueryKey = useMemo(() => buildIssueQueryKey(issueQuery), [issueQuery]);
+  const issueList = getIssueListState(issueQuery);
+  const issues = issueList.items;
+  const issuesLoading = issueList.isLoading || (spaceData.boot === 'ready' && issueList.lastFetchedAt === 0);
+  const skills = spaceData.skills.items;
+  const skillsLoading = spaceData.skills.isLoading || (spaceData.boot === 'ready' && spaceData.skills.lastFetchedAt === 0);
+  const effectiveSelectedSkillId = selectedSkillId ?? skills[0]?.id ?? null;
+  const localAgents = spaceData.localAgents.items;
+  const admin = isSpaceAdmin(session);
 
   const tagOptions = useMemo<SelectOption[]>(
     () => [{ value: '', label: '全部标签' }, ...tags.map((tag) => ({ value: tag.name, label: tag.name }))],
@@ -194,79 +194,45 @@ export default function Space({ isActive }: { isActive: boolean }) {
     return { open, inProgress, total: issues.length };
   }, [issues]);
 
-  const loadSession = useCallback(async () => {
-    setLoading(true);
-    try {
-      const next = await spaceGetSession();
-      setSession(next);
-      if (next) {
-        const official = await spaceGetOfficial();
-        setTags(official.tags);
-      } else {
-        setTags([]);
-        setIssues([]);
-        setSkills([]);
-        setLocalAgents([]);
+  useEffect(() => {
+    issueQueryRef.current = issueQuery;
+  }, [issueQuery]);
+
+  useEffect(() => {
+    if (spaceData.boot !== 'ready') return;
+    if (mode === 'issues') {
+      const handle = window.setTimeout(() => {
+        actions.refreshIssues(issueQuery, { maxAgeMs: SPACE_VISIBLE_REFRESH_TTL_MS }).catch((error) => toast.error(errMessage(error)));
+      }, 220);
+      return () => window.clearTimeout(handle);
+    }
+    if (mode === 'skills') {
+      void actions.refreshSkills({ maxAgeMs: SPACE_VISIBLE_REFRESH_TTL_MS }).catch((error) => toast.error(errMessage(error)));
+    }
+    if (mode === 'agents') {
+      void actions.refreshLocalAgents({ maxAgeMs: SPACE_VISIBLE_REFRESH_TTL_MS }).catch((error) => toast.error(errMessage(error)));
+    }
+  }, [actions, issueQuery, issueQueryKey, mode, spaceData.boot, toast]);
+
+  useEffect(() => {
+    if (spaceData.boot !== 'ready' || !isActive) return;
+    if (mode === 'issues') {
+      void actions.refreshIssues(issueQuery, { maxAgeMs: SPACE_VISIBLE_REFRESH_TTL_MS, silent: true }).catch((error) => toast.error(errMessage(error)));
+      if (issueDetailId) {
+        void actions.refreshIssueDetail(issueDetailId, { maxAgeMs: SPACE_VISIBLE_REFRESH_TTL_MS, silent: true }).catch((error) => toast.error(errMessage(error)));
+        void actions.refreshLocalAgents({ maxAgeMs: SPACE_VISIBLE_REFRESH_TTL_MS, silent: true }).catch((error) => toast.error(errMessage(error)));
       }
-    } catch (error) {
-      toast.error(errMessage(error));
-    } finally {
-      setLoading(false);
     }
-  }, [toast]);
-
-  const loadIssues = useCallback(async () => {
-    if (!session) return;
-    setIssuesLoading(true);
-    try {
-      const result = await spaceListIssues({ q: issueQ, tag: selectedTag, status: selectedStatus, limit: 50 });
-      setIssues(result.items);
-    } catch (error) {
-      toast.error(errMessage(error));
-    } finally {
-      setIssuesLoading(false);
+    if (mode === 'skills') {
+      void actions.refreshSkills({ maxAgeMs: SPACE_VISIBLE_REFRESH_TTL_MS, silent: true }).catch((error) => toast.error(errMessage(error)));
+      if (effectiveSelectedSkillId) {
+        void actions.refreshSkillDetail(effectiveSelectedSkillId, { maxAgeMs: SPACE_VISIBLE_REFRESH_TTL_MS, silent: true }).catch((error) => toast.error(errMessage(error)));
+      }
     }
-  }, [issueQ, selectedStatus, selectedTag, session, toast]);
-
-  const loadSkills = useCallback(async () => {
-    if (!session) return;
-    setSkillsLoading(true);
-    try {
-      const result = await spaceListSkills();
-      setSkills(result.items);
-      setSelectedSkillId((current) => current ?? result.items[0]?.id ?? null);
-    } catch (error) {
-      toast.error(errMessage(error));
-    } finally {
-      setSkillsLoading(false);
+    if (mode === 'agents') {
+      void actions.refreshLocalAgents({ maxAgeMs: SPACE_VISIBLE_REFRESH_TTL_MS, silent: true }).catch((error) => toast.error(errMessage(error)));
     }
-  }, [session, toast]);
-
-  const loadLocalAgents = useCallback(async () => {
-    try {
-      setLocalAgents(await spaceListLocalAgents());
-    } catch (error) {
-      toast.error(errMessage(error));
-    }
-  }, [toast]);
-
-  useEffect(() => {
-    if (isActive) void loadSession();
-  }, [isActive, loadSession]);
-
-  useEffect(() => {
-    if (!session) return;
-    void loadSkills();
-    void loadLocalAgents();
-  }, [loadLocalAgents, loadSkills, session]);
-
-  useEffect(() => {
-    if (!session || mode !== 'issues') return;
-    const handle = window.setTimeout(() => {
-      void loadIssues();
-    }, 220);
-    return () => window.clearTimeout(handle);
-  }, [loadIssues, mode, session]);
+  }, [actions, effectiveSelectedSkillId, isActive, issueDetailId, issueQuery, issueQueryKey, mode, spaceData.boot, toast]);
 
   useEffect(() => {
     if (!authFlow) return;
@@ -287,7 +253,7 @@ export default function Space({ isActive }: { isActive: boolean }) {
           if (result.status === 'done') {
             stopAuth();
             toast.success('已登录 MyAgents 社区');
-            await loadSession();
+            await actions.ensureBootstrapped({ force: true });
             void spaceAuthAck(authFlow.token).catch((error) => {
               console.warn('[Space] auth ack failed:', errMessage(error));
             });
@@ -322,19 +288,24 @@ export default function Space({ isActive }: { isActive: boolean }) {
     return () => {
       cancelled = true;
     };
-  }, [authFlow, loadSession, toast]);
+  }, [actions, authFlow, toast]);
 
   const runDispatchProcessing = useCallback(async () => {
     if (!session || localAgents.length === 0) return;
-    const result = await spaceProcessDispatchesOnce();
+    const result = await actions.processDispatchesOnce();
     if (result.processed > 0) toast.success(`已处理 ${result.processed} 个 Space 派发任务`);
     for (const error of result.errors) toast.error(error);
-  }, [localAgents.length, session, toast]);
+    if (result.processed > 0 || result.delivered > 0) {
+      await Promise.all([
+        actions.refreshIssues(issueQueryRef.current, { force: true, silent: true }),
+        actions.refreshLocalAgents({ force: true, silent: true }),
+      ]);
+    }
+  }, [actions, localAgents.length, session, toast]);
 
   const processDispatches = useCallback(async () => {
     await runDispatchProcessing();
-    await loadIssues();
-  }, [loadIssues, runDispatchProcessing]);
+  }, [runDispatchProcessing]);
 
   useEffect(() => {
     if (!isActive || !session || localAgents.length === 0) return;
@@ -368,32 +339,45 @@ export default function Space({ isActive }: { isActive: boolean }) {
   }, [toast]);
 
   const refreshCurrent = useCallback(async () => {
-    if (mode === 'issues') await loadIssues();
-    if (mode === 'skills') await loadSkills();
-    if (mode === 'agents') await loadLocalAgents();
+    if (mode === 'issues') await actions.refreshIssues(issueQuery, { force: true });
+    if (mode === 'skills') await actions.refreshSkills({ force: true });
+    if (mode === 'agents') await actions.refreshLocalAgents({ force: true });
     toast.success('已刷新');
-  }, [loadIssues, loadLocalAgents, loadSkills, mode, toast]);
+  }, [actions, issueQuery, mode, toast]);
 
   const logout = useCallback(async () => {
     try {
-      await spaceLogout();
-      setSession(null);
-      setTags([]);
-      setIssues([]);
-      setSkills([]);
-      setLocalAgents([]);
+      await actions.logout();
       setIssueDetailId(null);
       toast.success('已退出 Space');
     } catch (error) {
       toast.error(errMessage(error));
     }
-  }, [toast]);
+  }, [actions, toast]);
 
-  if (loading) {
+  if (spaceData.boot === 'idle' || spaceData.boot === 'loading') {
     return (
       <div className="flex h-full items-center justify-center bg-[var(--paper)] text-sm text-[var(--ink-muted)]">
         <Loader2 className="mr-2 h-4 w-4 animate-spin" />
         加载团队
+      </div>
+    );
+  }
+
+  if (spaceData.boot === 'error') {
+    return (
+      <div className="flex h-full items-center justify-center bg-[var(--paper)] text-sm text-[var(--ink-muted)]">
+        <div className="text-center">
+          <p>{spaceData.bootError ?? '团队数据加载失败'}</p>
+          <button
+            type="button"
+            onClick={() => void actions.ensureBootstrapped({ force: true }).catch((error) => toast.error(errMessage(error)))}
+            className="mt-3 inline-flex h-9 items-center gap-2 rounded-lg bg-[var(--button-secondary-bg)] px-3 text-sm font-semibold text-[var(--button-secondary-text)] hover:bg-[var(--button-secondary-bg-hover)]"
+          >
+            <RefreshCw className="h-4 w-4" />
+            重试
+          </button>
+        </div>
       </div>
     );
   }
@@ -428,7 +412,6 @@ export default function Space({ isActive }: { isActive: boolean }) {
               selectedStatus={selectedStatus}
               tagOptions={tagOptions}
               tags={tags}
-              localAgents={localAgents}
               activeIssueId={issueDetailId}
               onQueryChange={setIssueQ}
               onTagChange={setSelectedTag}
@@ -443,8 +426,10 @@ export default function Space({ isActive }: { isActive: boolean }) {
               admin={admin}
               skills={skills}
               loading={skillsLoading}
-              selectedSkillId={selectedSkillId}
+              selectedSkillId={effectiveSelectedSkillId}
               projects={projects}
+              actions={actions}
+              skillDetailState={effectiveSelectedSkillId ? spaceData.skillDetails[effectiveSelectedSkillId] : undefined}
               onSelectSkill={setSelectedSkillId}
               onRefresh={refreshCurrent}
               onUploaded={(id) => setSelectedSkillId(id)}
@@ -467,20 +452,24 @@ export default function Space({ isActive }: { isActive: boolean }) {
           issueId={issueDetailId}
           session={session}
           admin={admin}
+          projects={projects}
           localAgents={localAgents}
+          detailState={spaceData.issueDetails[issueDetailId]}
+          actions={actions}
           onClose={() => setIssueDetailId(null)}
-          onChanged={() => void loadIssues()}
+          onChanged={() => void actions.refreshIssues(issueQuery, { force: true, silent: true })}
         />
       )}
 
       {createIssueOpen && (
         <CreateIssueDialog
           tags={tags}
+          actions={actions}
+          issueQuery={issueQuery}
           onClose={() => setCreateIssueOpen(false)}
-          onCreated={(issueId) => {
-            setCreateIssueOpen(false);
-            setIssueDetailId(issueId);
-            void loadIssues();
+          onCreated={(keepOpen) => {
+            if (!keepOpen) setCreateIssueOpen(false);
+            void actions.refreshIssues(issueQuery, { force: true, silent: true });
           }}
         />
       )}
@@ -488,10 +477,11 @@ export default function Space({ isActive }: { isActive: boolean }) {
       {registerOpen && (
         <RegisterAgentDialog
           projects={projects}
+          actions={actions}
           onClose={() => setRegisterOpen(false)}
           onRegistered={() => {
             setRegisterOpen(false);
-            void loadLocalAgents();
+            void actions.refreshLocalAgents({ force: true, silent: true });
           }}
         />
       )}
@@ -686,7 +676,6 @@ function IssuesWorkspace({
   selectedStatus,
   tagOptions,
   tags,
-  localAgents,
   activeIssueId,
   onQueryChange,
   onTagChange,
@@ -704,7 +693,6 @@ function IssuesWorkspace({
   selectedStatus: string;
   tagOptions: SelectOption[];
   tags: SpaceTag[];
-  localAgents: LocalRegisteredAgent[];
   activeIssueId: string | null;
   onQueryChange: (value: string) => void;
   onTagChange: (value: string) => void;
@@ -735,7 +723,7 @@ function IssuesWorkspace({
           <RefreshCw className="h-4 w-4" />
           刷新
         </button>
-        {admin ? <IssueAdminMenu issueMetrics={issueMetrics} tags={tags} localAgents={localAgents} /> : <span />}
+        {admin ? <IssueAdminMenu issueMetrics={issueMetrics} tags={tags} /> : <span />}
         <button
           type="button"
           onClick={onCreate}
@@ -746,15 +734,27 @@ function IssuesWorkspace({
         </button>
       </section>
 
-      <main className="min-h-0 overflow-hidden px-5 pb-6 pt-4">
-        <section className="h-full min-h-0 overflow-hidden rounded-xl border border-[var(--line-subtle)] bg-[var(--paper-elevated)]/50 shadow-sm" aria-label="Issue list">
-          <div className="grid h-12 grid-cols-[minmax(0,1fr)_auto] items-center gap-3 border-b border-[var(--line-subtle)] px-4 text-xs font-semibold text-[var(--ink-muted)]">
-            <strong className="text-sm font-bold text-[var(--ink-secondary)]">{issues.length} issues</strong>
-            <span>按发布时间排序 · 点击查看详情</span>
+      <main className="min-h-0 overflow-y-auto px-6 pb-8 pt-5">
+        <section className="mx-auto max-w-[1280px]" aria-label="Issue list">
+          <div className="mb-3 grid min-h-9 grid-cols-[minmax(0,1fr)_auto] items-center gap-3 text-xs font-semibold text-[var(--ink-muted)]">
+            <strong className="text-base font-semibold text-[var(--ink-secondary)]">{issues.length} issues</strong>
+            <span className="inline-flex items-center gap-2">
+              {issuesLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+              按发布时间排序 · 点击查看详情
+            </span>
           </div>
-          <div className="h-[calc(100%-48px)] overflow-y-auto p-1.5">
-            {issues.length === 0 && !issuesLoading ? (
-              <div className="grid min-h-40 place-items-center rounded-xl border border-dashed border-[var(--line)] bg-[var(--paper-elevated)]/40 text-sm text-[var(--ink-muted)]">
+          <div className="border-y border-[var(--line-subtle)]">
+            {issues.length === 0 && issuesLoading ? (
+              <div className="grid gap-0">
+                {Array.from({ length: 4 }).map((_, index) => (
+                  <div key={index} className="min-h-[78px] border-b border-[var(--line-subtle)] py-4 last:border-b-0">
+                    <div className="h-4 w-44 rounded-md bg-[var(--paper-inset)]" />
+                    <div className="mt-3 h-3 w-72 rounded-md bg-[var(--paper-inset)]" />
+                  </div>
+                ))}
+              </div>
+            ) : issues.length === 0 ? (
+              <div className="grid min-h-44 place-items-center border-x border-dashed border-[var(--line-subtle)] text-sm text-[var(--ink-muted)]">
                 暂无匹配 Issue
               </div>
             ) : (
@@ -763,7 +763,6 @@ function IssuesWorkspace({
                   key={issue.id}
                   issue={issue}
                   active={activeIssueId === issue.id}
-                  localAgents={localAgents}
                   index={index}
                   onOpen={() => onOpenIssue(issue.id)}
                 />
@@ -779,11 +778,9 @@ function IssuesWorkspace({
 function IssueAdminMenu({
   issueMetrics,
   tags,
-  localAgents,
 }: {
   issueMetrics: { open: number; inProgress: number; total: number };
   tags: SpaceTag[];
-  localAgents: LocalRegisteredAgent[];
 }) {
   return (
     <div className="group relative">
@@ -811,7 +808,7 @@ function IssueAdminMenu({
                 <Send className="mt-0.5 h-4 w-4 text-[var(--accent-cool)]" />
                 <span>
                   <strong className="block text-sm font-semibold text-[var(--ink-secondary)]">派发队列</strong>
-                  <small className="mt-0.5 block text-xs leading-5 text-[var(--ink-muted)]">{localAgents.length} registered agents</small>
+                  <small className="mt-0.5 block text-xs leading-5 text-[var(--ink-muted)]">在 Agents 页登记后可派发</small>
                 </span>
               </div>
               <div className="grid grid-cols-[18px_minmax(0,1fr)] gap-2">
@@ -843,25 +840,22 @@ function MetricRow({ label, value }: { label: string; value: number }) {
 function IssueStreamRow({
   issue,
   active,
-  localAgents,
   index,
   onOpen,
 }: {
   issue: SpaceIssue;
   active: boolean;
-  localAgents: LocalRegisteredAgent[];
   index: number;
   onOpen: () => void;
 }) {
   const primaryTag = issue.tags?.[0] ?? null;
-  const assigneeLabel = issue.status === 'in_progress' ? localAgents[0]?.displayName : '';
   return (
     <button
       type="button"
       onClick={onOpen}
       style={{ animationDelay: `${index * 42}ms` }}
-      className={`grid min-h-[72px] w-full grid-cols-[minmax(0,1fr)_auto] items-start gap-3.5 rounded-lg px-4 py-3.5 text-left transition-colors first:border-t-0 [&+&]:border-t [&+&]:border-[var(--line-subtle)] ${
-        active ? 'bg-[var(--paper-elevated)]/70 shadow-[inset_0_0_0_1px_var(--line-subtle)]' : 'hover:bg-[var(--paper-elevated)]/70 hover:shadow-[inset_0_0_0_1px_var(--line-subtle)]'
+      className={`grid min-h-[78px] w-full grid-cols-[minmax(0,1fr)_auto] items-start gap-4 border-b border-[var(--line-subtle)] px-1 py-4 text-left transition-colors last:border-b-0 sm:px-3 ${
+        active ? 'bg-[var(--paper-elevated)]/70 shadow-[inset_3px_0_0_var(--accent-warm)]' : 'hover:bg-[var(--paper-elevated)]/60'
       }`}
     >
       <span className="min-w-0">
@@ -876,39 +870,41 @@ function IssueStreamRow({
           <span className="before:mr-2 before:text-[var(--line-strong)] before:content-['·']">{issue.commentCount ?? 0} 评论</span>
         </span>
       </span>
-      <span>
-        {assigneeLabel ? (
-          <span className="inline-flex min-h-[26px] items-center gap-1.5 rounded-full bg-[var(--accent-cool-subtle)] px-2.5 py-1 text-xs font-semibold text-[var(--accent-cool)]">
-            <Bot className="h-3.5 w-3.5" />
-            {assigneeLabel}
-          </span>
-        ) : (
-          <span className="text-sm font-semibold text-[var(--ink-subtle)]" />
-        )}
-      </span>
+      <span className="hidden pt-1 text-xs font-semibold text-[var(--ink-subtle)] sm:block">{formatTime(issue.updatedAt)}</span>
     </button>
   );
 }
 
 function CreateIssueDialog({
   tags,
+  actions,
+  issueQuery,
   onClose,
   onCreated,
 }: {
   tags: SpaceTag[];
+  actions: SpaceActions;
+  issueQuery: IssueQueryParams;
   onClose: () => void;
-  onCreated: (issueId: string) => void;
+  onCreated: (keepOpen: boolean) => void;
 }) {
   const toast = useToast();
+  const titleInputRef = useRef<HTMLInputElement | null>(null);
+  const submittingRef = useRef(false);
   const [title, setTitle] = useState('');
   const [body, setBody] = useState('');
   const [tag, setTag] = useState(tags[0]?.name ?? '');
   const [filePaths, setFilePaths] = useState<string[]>([]);
+  const [continuous, setContinuous] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   useCloseLayer(() => {
     onClose();
     return true;
   }, 220);
+
+  useEffect(() => {
+    window.setTimeout(() => titleInputRef.current?.focus(), 0);
+  }, []);
 
   const tagOptions = useMemo<SelectOption[]>(
     () => [{ value: '', label: '无标签' }, ...tags.map((item) => ({ value: item.name, label: item.name }))],
@@ -920,25 +916,39 @@ function CreateIssueDialog({
       const { open } = await import('@tauri-apps/plugin-dialog');
       const selected = await open({ multiple: true, directory: false, title: '选择 Issue 附件' });
       const next = Array.isArray(selected) ? selected : selected ? [selected] : [];
-      if (next.length > 0) setFilePaths(next);
+      if (next.length > 0) {
+        setFilePaths((current) => Array.from(new Set([...current, ...next])));
+      }
     } catch (error) {
       toast.error(errMessage(error));
     }
   };
 
   const submit = async () => {
+    if (submittingRef.current) return;
     if (!title.trim() || !body.trim()) return;
+    submittingRef.current = true;
     setSubmitting(true);
     try {
-      const result = await spaceCreateIssue({ title: title.trim(), body: body.trim(), tags: tag ? [tag] : [] });
+      const issue = await actions.createIssue({ title: title.trim(), body: body.trim(), tags: tag ? [tag] : [] });
       if (filePaths.length > 0) {
-        await spaceUploadIssueAttachments({ issueId: result.issue.id, filePaths });
+        await actions.uploadIssueAttachments(issue.id, filePaths);
       }
       toast.success(filePaths.length > 0 ? `已创建 Issue 并上传 ${filePaths.length} 个附件` : '已创建 Issue');
-      onCreated(result.issue.id);
+      await actions.refreshIssues(issueQuery, { force: true, silent: true });
+      if (continuous) {
+        setTitle('');
+        setBody('');
+        setFilePaths([]);
+        window.setTimeout(() => titleInputRef.current?.focus(), 0);
+        onCreated(true);
+      } else {
+        onCreated(false);
+      }
     } catch (error) {
       toast.error(errMessage(error));
     } finally {
+      submittingRef.current = false;
       setSubmitting(false);
     }
   };
@@ -964,14 +974,6 @@ function CreateIssueDialog({
           <div className="flex items-center gap-1.5">
             <button
               type="button"
-              onClick={() => toast.info('扩展为完整页面将在客户端中打开')}
-              className="grid h-8 w-8 place-items-center rounded-lg text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
-              aria-label="扩展"
-            >
-              <Maximize2 className="h-4 w-4" />
-            </button>
-            <button
-              type="button"
               onClick={onClose}
               className="grid h-8 w-8 place-items-center rounded-lg text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
               aria-label="关闭"
@@ -983,6 +985,7 @@ function CreateIssueDialog({
 
         <div className="grid content-start gap-4 px-2.5 pb-5 pt-12">
           <input
+            ref={titleInputRef}
             value={title}
             onChange={(event) => setTitle(event.target.value)}
             className="w-full border-0 bg-transparent text-3xl font-semibold leading-tight text-[var(--ink)] outline-none placeholder:text-[var(--ink-muted)]/60"
@@ -1000,6 +1003,14 @@ function CreateIssueDialog({
                 <span key={path} className="inline-flex items-center gap-1 rounded-full bg-[var(--paper-inset)] px-2 py-1 text-xs text-[var(--ink-secondary)]">
                   <Paperclip className="h-3.5 w-3.5" />
                   {basename(path)}
+                  <button
+                    type="button"
+                    onClick={() => setFilePaths((current) => current.filter((item) => item !== path))}
+                    className="ml-0.5 grid h-4 w-4 place-items-center rounded-full text-[var(--ink-muted)] hover:bg-[var(--paper-elevated)] hover:text-[var(--ink)]"
+                    aria-label={`移除 ${basename(path)}`}
+                  >
+                    <X className="h-3 w-3" />
+                  </button>
                 </span>
               ))}
             </div>
@@ -1007,41 +1018,33 @@ function CreateIssueDialog({
         </div>
 
         <div className="grid grid-cols-[minmax(0,1fr)_auto] items-end gap-4 max-lg:grid-cols-1">
-          <div>
-            <div className="mb-5 flex flex-wrap items-center gap-2">
-              <span className="inline-flex min-h-9 items-center gap-2 rounded-full border border-[var(--line)] bg-[var(--paper-elevated)]/70 px-3 text-sm font-medium text-[var(--ink-muted)] shadow-sm">
-                <Activity className="h-4 w-4" />
-                Backlog
-              </span>
-              <span className="inline-flex min-h-9 items-center gap-2 rounded-full border border-[var(--line)] bg-[var(--paper-elevated)]/70 px-3 text-sm font-medium text-[var(--ink-muted)] shadow-sm">
-                <span>---</span>
-                Priority
-              </span>
-              <span className="inline-flex min-h-9 items-center gap-2 rounded-full border border-[var(--line)] bg-[var(--paper-elevated)]/70 px-3 text-sm font-medium text-[var(--ink-muted)] shadow-sm">
-                <Hash className="h-4 w-4" />
-                <CustomSelect value={tag} options={tagOptions} onChange={setTag} compact className="w-28 [&>button]:border-0 [&>button]:bg-transparent [&>button]:p-0 [&>button]:shadow-none" />
-              </span>
-              <span className="inline-flex min-h-9 items-center gap-2 rounded-full border border-[var(--line)] bg-[var(--paper-elevated)]/70 px-3 text-sm font-medium text-[var(--ink-muted)] shadow-sm">
-                <Bot className="h-4 w-4" />
-                Agent 可见
-              </span>
-            </div>
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            <span className="inline-flex min-h-10 items-center gap-2 rounded-full border border-[var(--line)] bg-[var(--paper-elevated)]/70 px-3 text-sm font-medium text-[var(--ink-muted)] shadow-sm">
+              <Hash className="h-4 w-4" />
+              <CustomSelect value={tag} options={tagOptions} onChange={setTag} compact className="w-32 [&>button]:border-0 [&>button]:bg-transparent [&>button]:p-0 [&>button]:shadow-none" />
+            </span>
             <button
               type="button"
               onClick={() => void pickFiles()}
-              className="grid h-10 w-10 place-items-center rounded-full border border-[var(--line)] bg-[var(--paper-elevated)]/80 text-[var(--ink-muted)] shadow-sm transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+              className="inline-flex h-10 items-center gap-2 rounded-full border border-[var(--line)] bg-[var(--paper-elevated)]/80 px-3 text-sm font-semibold text-[var(--ink-muted)] shadow-sm transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
               aria-label="添加附件"
             >
               <Paperclip className="h-4 w-4" />
+              附件
             </button>
           </div>
           <div className="flex items-center gap-3.5 pb-0.5">
-            <span className="inline-flex items-center gap-2 text-sm font-medium text-[var(--ink-muted)]">
-              <span className="h-6 w-11 rounded-full bg-[var(--line-strong)] p-0.5">
-                <span className="block h-5 w-5 rounded-full bg-[var(--paper-elevated)] shadow-sm" />
+            <button
+              type="button"
+              aria-pressed={continuous}
+              onClick={() => setContinuous((value) => !value)}
+              className="inline-flex items-center gap-2 rounded-full px-1 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:text-[var(--ink)]"
+            >
+              <span className={`h-6 w-11 rounded-full p-0.5 transition-colors ${continuous ? 'bg-[var(--accent-warm)]' : 'bg-[var(--line-strong)]'}`}>
+                <span className={`block h-5 w-5 rounded-full bg-[var(--paper-elevated)] shadow-sm transition-transform ${continuous ? 'translate-x-5' : ''}`} />
               </span>
               持续创建
-            </span>
+            </button>
             <button
               type="submit"
               disabled={submitting || !title.trim() || !body.trim()}
@@ -1061,53 +1064,67 @@ function IssueDetailDrawer({
   issueId,
   session,
   admin,
+  projects,
   localAgents,
+  detailState,
+  actions,
   onClose,
   onChanged,
 }: {
   issueId: string;
   session: SpaceSession;
   admin: boolean;
+  projects: Project[];
   localAgents: LocalRegisteredAgent[];
+  detailState?: SpaceIssueDetailState;
+  actions: SpaceActions;
   onClose: () => void;
   onChanged: () => void;
 }) {
   const toast = useToast();
-  const [detail, setDetail] = useState<SpaceIssueDetail | null>(null);
   const [comment, setComment] = useState('');
-  const [agentId, setAgentId] = useState(localAgents[0]?.id ?? '');
   const [busy, setBusy] = useState(false);
   const [attachmentUploading, setAttachmentUploading] = useState(false);
+  const [statusMenuOpen, setStatusMenuOpen] = useState(false);
+  const [agentMenuOpen, setAgentMenuOpen] = useState(false);
+  const [statusBusy, setStatusBusy] = useState(false);
+  const [dispatchingAgentId, setDispatchingAgentId] = useState<string | null>(null);
+  const detail = detailState?.detail ?? null;
+  const loading = detailState?.isLoading ?? true;
+  const statusOptions = useMemo(
+    () => getIssueStatusOptions({ session, issue: detail?.issue ?? null }),
+    [detail?.issue, session],
+  );
+
   useCloseLayer(() => {
     onClose();
     return true;
   }, 230);
 
   useEffect(() => {
-    setAgentId((current) => current || localAgents[0]?.id || '');
-  }, [localAgents]);
+    void actions.refreshIssueDetail(issueId, { maxAgeMs: SPACE_VISIBLE_REFRESH_TTL_MS }).catch((error) => toast.error(errMessage(error)));
+    if (admin) {
+      void actions.refreshLocalAgents({ maxAgeMs: SPACE_VISIBLE_REFRESH_TTL_MS, silent: true }).catch((error) => toast.error(errMessage(error)));
+    }
+  }, [actions, admin, issueId, toast]);
 
-  const load = useCallback(async () => {
-    setDetail(await spaceGetIssue(issueId));
-  }, [issueId]);
-
-  useEffect(() => {
-    setDetail(null);
-    void load().catch((error) => toast.error(errMessage(error)));
-  }, [load, toast]);
-
-  const dispatch = async () => {
-    if (!agentId) return;
-    setBusy(true);
+  const changeStatus = async (option: { value: string; kind: 'set-status' | 'close-own' }) => {
+    if (!detail) return;
+    setStatusBusy(true);
     try {
-      await spaceDispatchIssue(issueId, agentId);
-      toast.success('已派发给 Registered Agent');
-      await load();
+      if (option.kind === 'close-own') {
+        await actions.closeOwnIssue(issueId);
+      } else {
+        await actions.setIssueStatus(issueId, option.value);
+      }
+      setStatusMenuOpen(false);
+      toast.success('Issue 状态已更新');
+      await actions.refreshIssueDetail(issueId, { force: true, silent: true });
       onChanged();
     } catch (error) {
       toast.error(errMessage(error));
     } finally {
-      setBusy(false);
+      setStatusBusy(false);
     }
   };
 
@@ -1115,9 +1132,9 @@ function IssueDetailDrawer({
     if (!comment.trim()) return;
     setBusy(true);
     try {
-      await spaceCommentIssue(issueId, comment.trim());
+      await actions.commentIssue(issueId, comment.trim());
       setComment('');
-      await load();
+      await actions.refreshIssueDetail(issueId, { force: true, silent: true });
       onChanged();
     } catch (error) {
       toast.error(errMessage(error));
@@ -1133,14 +1150,49 @@ function IssueDetailDrawer({
       const filePaths = Array.isArray(selected) ? selected : selected ? [selected] : [];
       if (filePaths.length === 0) return;
       setAttachmentUploading(true);
-      const result = await spaceUploadIssueAttachments({ issueId, filePaths });
-      toast.success(`已上传 ${result.attachments.length} 个附件`);
-      await load();
+      const attachments = await actions.uploadIssueAttachments(issueId, filePaths);
+      toast.success(`已上传 ${attachments.length} 个附件`);
+      await actions.refreshIssueDetail(issueId, { force: true, silent: true });
       onChanged();
     } catch (error) {
       toast.error(errMessage(error));
     } finally {
       setAttachmentUploading(false);
+    }
+  };
+
+  const assignAgent = async (agent: LocalRegisteredAgent) => {
+    if (!isAgentAssignable(agent)) return;
+    setDispatchingAgentId(agent.id);
+    try {
+      await actions.dispatchIssue(issueId, agent.id);
+      const result = await actions.processDispatchesOnce();
+      await Promise.all([
+        actions.refreshIssueDetail(issueId, { force: true, silent: true }),
+        actions.refreshLocalAgents({ force: true, silent: true }),
+      ]);
+      onChanged();
+      if (result.errors.length > 0) {
+        for (const error of result.errors) toast.error(error);
+      } else if (result.processed > 0) {
+        toast.success(`已指派给 ${agent.displayName}`);
+      } else {
+        toast.success(`已记录指派：${agent.displayName}`);
+      }
+      setAgentMenuOpen(false);
+    } catch (error) {
+      toast.error(errMessage(error));
+    } finally {
+      setDispatchingAgentId(null);
+    }
+  };
+
+  const copyIssueCommand = async () => {
+    try {
+      await copyPlainText(buildIssueCommandPrompt({ spaceName: session.space.name, issueId }));
+      toast.success('已复制 issue 口令');
+    } catch (error) {
+      toast.error(errMessage(error));
     }
   };
 
@@ -1153,19 +1205,54 @@ function IssueDetailDrawer({
           </button>
         </header>
 
-        {!detail ? (
+        {!detail && loading ? (
           <div className="flex h-full items-center justify-center text-sm text-[var(--ink-muted)]">
             <Loader2 className="mr-2 h-4 w-4 animate-spin" />
             加载 Issue
           </div>
+        ) : !detail ? (
+          <div className="flex h-full items-center justify-center text-sm text-[var(--ink-muted)]">
+            {detailState?.error ?? 'Issue 未找到'}
+          </div>
         ) : (
-          <section className="grid h-full min-h-0 grid-cols-[minmax(0,760px)_304px] content-start gap-[54px] overflow-y-auto px-[42px] py-[54px] pr-[34px] max-xl:grid-cols-1 max-xl:gap-7">
-            <div className="min-w-0 max-w-[760px] pb-7 max-xl:max-w-none">
-              <article className="pb-10">
-                <div className="mb-3 flex flex-wrap items-center gap-2 text-xs font-semibold text-[var(--ink-subtle)]">
-                  <span className={`rounded-md px-2 py-1 text-xs font-semibold ${statusPillClass(detail.issue.status)}`}>
-                  {issueStatusLabel(detail.issue.status)}
-                </span>
+          <section className="grid h-full min-h-0 grid-cols-[minmax(0,760px)_304px] content-start gap-[56px] overflow-y-auto px-[44px] py-[58px] pr-[34px] max-xl:grid-cols-1 max-xl:gap-8">
+            <div className="min-w-0 max-w-[760px] pb-8 max-xl:max-w-none">
+              <article className="pb-14">
+                <div className="mb-4 flex flex-wrap items-center gap-2 text-xs font-semibold text-[var(--ink-subtle)]">
+                  <span className="relative">
+                    {statusOptions.length > 0 ? (
+                      <button
+                        type="button"
+                        disabled={statusBusy}
+                        onClick={() => setStatusMenuOpen((value) => !value)}
+                        className={`inline-flex min-h-8 items-center gap-1.5 rounded-md px-2.5 text-xs font-semibold transition-colors ${statusPillClass(detail.issue.status)} disabled:cursor-wait disabled:opacity-70`}
+                      >
+                        {statusBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+                        {issueStatusLabel(detail.issue.status)}
+                        <ChevronDown className="h-3.5 w-3.5" />
+                      </button>
+                    ) : (
+                      <span className={`inline-flex min-h-8 items-center rounded-md px-2.5 text-xs font-semibold ${statusPillClass(detail.issue.status)}`}>
+                        {issueStatusLabel(detail.issue.status)}
+                      </span>
+                    )}
+                    {statusMenuOpen && statusOptions.length > 0 && (
+                      <div className="absolute left-0 top-full z-30 mt-2 w-48 rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-1.5 shadow-lg">
+                        {statusOptions.map((option) => (
+                          <button
+                            key={`${option.kind}:${option.value}`}
+                            type="button"
+                            onClick={() => void changeStatus(option)}
+                            className={`flex h-9 w-full items-center justify-between rounded-lg px-2.5 text-left text-sm font-semibold transition-colors hover:bg-[var(--paper-inset)] ${
+                              detail.issue.status === option.value ? 'text-[var(--accent-warm)]' : 'text-[var(--ink-secondary)]'
+                            }`}
+                          >
+                            {option.label}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </span>
                   {detail.issue.tags?.map((tag) => (
                     <span key={tag.id} className="rounded-md bg-[var(--accent-cool-subtle)] px-2 py-1 text-xs font-semibold text-[var(--accent-cool)]">
                       # {tag.name}
@@ -1177,22 +1264,22 @@ function IssueDetailDrawer({
                 <div className="mt-5 max-w-[66ch] whitespace-pre-wrap text-base leading-7 text-[var(--ink-secondary)]">{detail.issue.body}</div>
               </article>
 
-              <section className="border-t border-[var(--line-subtle)] pt-1">
-                <h3 className="mb-4 flex items-center justify-between gap-3 text-xs font-bold uppercase tracking-wider text-[var(--ink-muted)]">
-                  <span className="inline-flex items-center gap-2 normal-case tracking-normal">
+              <section className="pt-2">
+                <h3 className="mb-5 flex items-center justify-between gap-3 text-lg font-semibold text-[var(--ink)]">
+                  <span className="inline-flex items-center gap-2">
                     <MessageSquare className="h-4 w-4" />
                     评论与处理记录
                   </span>
                   <small className="text-xs font-semibold text-[var(--ink-subtle)]">{detail.comments.items.length} 条</small>
                 </h3>
-                <div className="grid gap-4">
+                <div className="divide-y divide-[var(--line-subtle)]">
                   {detail.comments.items.length === 0 ? (
-                    <div className="border-t border-dashed border-[var(--line)] py-4 text-sm text-[var(--ink-muted)]">
+                    <div className="py-3 text-sm text-[var(--ink-muted)]">
                       暂无评论。可以直接在底部补充信息。
                     </div>
                   ) : (
                     detail.comments.items.map((item) => (
-                      <article key={item.id} className="grid grid-cols-[34px_minmax(0,1fr)] gap-3">
+                      <article key={item.id} className="grid grid-cols-[34px_minmax(0,1fr)] gap-3 py-4 first:pt-0">
                         <div className="grid h-7 w-7 place-items-center rounded-lg bg-[var(--accent-cool-subtle)] text-xs font-bold text-[var(--accent-cool)]">
                           {initials(item.author.type)}
                         </div>
@@ -1215,12 +1302,7 @@ function IssueDetailDrawer({
                     className="min-h-[92px] w-full resize-none border-0 bg-transparent p-3 text-sm leading-6 text-[var(--ink)] outline-none placeholder:text-[var(--ink-muted)]"
                     placeholder="写一条评论，补充上下文或同步处理进展"
                   />
-                  <div className="grid grid-cols-[180px_auto_1fr_auto] items-center gap-2 border-t border-[var(--line-subtle)] p-2">
-                    <CustomSelect
-                      value="owner"
-                      options={[{ value: 'owner', label: `以 ${roleLabel(session.membership.role).toLowerCase()} 回复` }]}
-                      onChange={() => undefined}
-                    />
+                  <div className="grid grid-cols-[auto_1fr_auto] items-center gap-2 border-t border-[var(--line-subtle)] p-2">
                     <button
                       type="button"
                       disabled={attachmentUploading}
@@ -1234,11 +1316,12 @@ function IssueDetailDrawer({
                     <button
                       type="button"
                       disabled={busy || !comment.trim()}
-                      onClick={() => void sendComment()}
-                      className="flex h-9 items-center gap-2 rounded-xl bg-[var(--button-primary-bg)] px-3 text-sm font-semibold text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:cursor-wait disabled:opacity-70"
-                    >
-                      <Send className="h-4 w-4" />
-                      发送
+	                      onClick={() => void sendComment()}
+	                      className="grid h-9 w-9 place-items-center rounded-xl bg-[var(--button-primary-bg)] text-sm font-semibold text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:cursor-wait disabled:opacity-70"
+	                      aria-label="发送评论"
+	                      title="发送评论"
+	                    >
+                      {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
                     </button>
                   </div>
                 </div>
@@ -1277,43 +1360,64 @@ function IssueDetailDrawer({
                 )}
               </section>
 
-              {admin && (
-                <section className="border-t border-dashed border-[var(--line)] py-4">
-                  <h3 className="mb-2.5 flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-[var(--ink-muted)]">
-                    <Send className="h-4 w-4" />
-                    派发给 Agent
-                  </h3>
-                  {localAgents.length === 0 ? (
-                    <div className="border-t border-dashed border-[var(--line)] py-4 text-sm text-[var(--ink-muted)]">
-                      暂无 Registered Agent
-                    </div>
-                  ) : (
-                    <div className="space-y-2">
-                      <CustomSelect value={agentId} options={localAgents.map((agent) => ({ value: agent.id, label: agent.displayName }))} onChange={setAgentId} />
-                      <button
-                        type="button"
-                        disabled={busy || !agentId}
-                        onClick={() => void dispatch()}
+              <section className="border-t border-dashed border-[var(--line)] py-4">
+                <h3 className="mb-2.5 flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-[var(--ink-muted)]">
+                  {admin ? <Send className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
+                  {admin ? '派发给 Agent' : 'Issue 口令'}
+                </h3>
+                <div className="grid gap-2">
+                  {admin && (
+                    <div className="relative">
+	                      <button
+	                        type="button"
+	                        disabled={localAgents.length === 0 || dispatchingAgentId !== null}
+                        onClick={() => setAgentMenuOpen((value) => !value)}
                         className="flex h-9 w-full items-center justify-center gap-2 rounded-xl bg-[var(--button-secondary-bg)] px-3 text-sm font-semibold text-[var(--button-secondary-text)] transition-colors hover:bg-[var(--button-secondary-bg-hover)] disabled:cursor-wait disabled:opacity-70"
                       >
-                        {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Bot className="h-4 w-4" />}
-                        派发给本地工作区
+                        {dispatchingAgentId ? <Loader2 className="h-4 w-4 animate-spin" /> : <Bot className="h-4 w-4" />}
+                        指派 Agent
+                        <ChevronDown className="h-4 w-4" />
                       </button>
-                      <p className="text-xs leading-5 text-[var(--ink-muted)]">派发只写系统日志；Agent 收到 Goal、connector prompt 和 issue id 后，通过 CLI 拉取完整上下文。</p>
+                      {agentMenuOpen && (
+                        <div className="absolute left-0 right-0 top-full z-30 mt-2 max-h-72 overflow-auto rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-1.5 shadow-lg">
+                          {localAgents.length === 0 ? (
+                            <div className="px-3 py-3 text-sm text-[var(--ink-muted)]">暂无 Registered Agent</div>
+                          ) : (
+                            localAgents.map((agent) => (
+                              <button
+	                                key={agent.id}
+	                                type="button"
+	                                disabled={dispatchingAgentId !== null || !isAgentAssignable(agent)}
+	                                onClick={() => void assignAgent(agent)}
+	                                className="grid min-h-12 w-full grid-cols-[28px_minmax(0,1fr)_auto] items-center gap-2 rounded-lg px-2.5 text-left transition-colors hover:bg-[var(--paper-inset)] disabled:cursor-not-allowed disabled:opacity-55"
+	                              >
+                                <span className="grid h-7 w-7 place-items-center rounded-lg bg-[var(--accent-cool-subtle)] text-xs font-bold text-[var(--accent-cool)]">
+                                  {dispatchingAgentId === agent.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : initials(agent.displayName)}
+                                </span>
+                                <span className="min-w-0">
+	                                  <strong className="block truncate text-sm font-semibold text-[var(--ink)]">{agent.displayName}</strong>
+	                                  <small className="block truncate text-xs text-[var(--ink-muted)]">{formatAgentSecondaryLabel(agent, projects)}</small>
+	                                </span>
+	                                {!isAgentAssignable(agent) && (
+	                                  <span className="rounded-md bg-[var(--paper-inset)] px-2 py-1 text-xs font-semibold text-[var(--ink-muted)]">{agent.status}</span>
+	                                )}
+	                              </button>
+                            ))
+                          )}
+                        </div>
+                      )}
                     </div>
                   )}
-                </section>
-              )}
-
-              <details className="border-t border-dashed border-[var(--line)] py-4">
-                <summary className="flex min-h-8 cursor-pointer list-none items-center gap-2 text-xs font-bold uppercase tracking-wider text-[var(--ink-muted)] [&::-webkit-details-marker]:hidden">
-                  <Terminal className="h-4 w-4" />
-                  诊断与 CLI
-                </summary>
-                <pre className="mt-2 overflow-x-auto rounded-xl border border-[var(--line-subtle)] bg-[var(--paper-inset)]/30 p-3 font-mono text-xs leading-5 text-[var(--ink-secondary)]">
-                  {`myagents space issue pull --id ${detail.issue.id}\nmyagents space issue comment --id ${detail.issue.id}\nmyagents space issue status --id ${detail.issue.id} resolved`}
-                </pre>
-              </details>
+                  <button
+                    type="button"
+                    onClick={() => void copyIssueCommand()}
+                    className="flex h-9 w-full items-center justify-center gap-2 rounded-xl bg-[var(--button-secondary-bg)] px-3 text-sm font-semibold text-[var(--button-secondary-text)] transition-colors hover:bg-[var(--button-secondary-bg-hover)]"
+                  >
+                    <Copy className="h-4 w-4" />
+                    复制 issue 口令
+                  </button>
+                </div>
+              </section>
             </aside>
           </section>
         )}
@@ -1328,6 +1432,8 @@ function SkillsWorkspace({
   loading,
   selectedSkillId,
   projects,
+  actions,
+  skillDetailState,
   onSelectSkill,
   onRefresh,
   onUploaded,
@@ -1337,6 +1443,8 @@ function SkillsWorkspace({
   loading: boolean;
   selectedSkillId: string | null;
   projects: Project[];
+  actions: SpaceActions;
+  skillDetailState?: SpaceSkillDetailState;
   onSelectSkill: (id: string) => void;
   onRefresh: () => Promise<void>;
   onUploaded: (id: string) => void;
@@ -1358,10 +1466,10 @@ function SkillsWorkspace({
       });
       if (!selectedPath || Array.isArray(selectedPath)) return;
       setUploading(true);
-      const result = await spaceUploadSkillZip({ filePath: selectedPath });
-      toast.success(`已上传 ${result.skill.name}`);
-      await onRefresh();
-      onUploaded(result.skill.id);
+      const result = await actions.uploadSkillZip({ filePath: selectedPath });
+      toast.success(`已上传 ${result.name}`);
+      await actions.refreshSkills({ force: true, silent: true });
+      onUploaded(result.id);
       setScreen('detail');
       setDetailMode('overview');
     } catch (error) {
@@ -1458,6 +1566,8 @@ function SkillsWorkspace({
           skill={selected}
           mode={detailMode}
           projects={projects}
+          actions={actions}
+          detailState={skillDetailState}
           onModeChange={setDetailMode}
           onBack={() => setScreen('list')}
         />
@@ -1470,22 +1580,28 @@ function SkillDetailWorkspace({
   skill,
   mode,
   projects,
+  actions,
+  detailState,
   onModeChange,
   onBack,
 }: {
   skill: SpaceSkill;
   mode: SkillDetailMode;
   projects: Project[];
+  actions: SpaceActions;
+  detailState?: SpaceSkillDetailState;
   onModeChange: (mode: SkillDetailMode) => void;
   onBack: () => void;
 }) {
   const toast = useToast();
-  const [detail, setDetail] = useState<SpaceSkillDetail | null>(null);
   const [selectedPath, setSelectedPath] = useState('');
-  const [fileText, setFileText] = useState('');
-  const [fileLoading, setFileLoading] = useState(false);
   const [projectPath, setProjectPath] = useState(projects[0]?.path ?? '');
   const [installingTarget, setInstallingTarget] = useState<'global' | 'project' | null>(null);
+  const detail = detailState?.detail ?? null;
+  const detailLoading = detailState?.isLoading ?? true;
+  const fileState = selectedPath ? getSkillFileState(skill.id, selectedPath) : null;
+  const fileLoading = fileState?.isLoading ?? false;
+  const fileText = fileState?.text ?? '';
 
   const projectOptions = useMemo<SelectOption[]>(
     () => projects.map((project) => ({ value: project.path, label: project.displayName || project.name })),
@@ -1493,32 +1609,20 @@ function SkillDetailWorkspace({
   );
 
   useEffect(() => {
-    setDetail(null);
     setSelectedPath('');
-    setFileText('');
-    void spaceGetSkill(skill.id)
-      .then((next) => {
-        setDetail(next);
-        const firstReadable = next.files.find((file) => !file.isDir && file.name.toLowerCase() === 'skill.md') ?? next.files.find((file) => !file.isDir);
-        setSelectedPath(firstReadable?.path ?? '');
-      })
-      .catch((error) => toast.error(errMessage(error)));
-  }, [skill.id, toast]);
+    void actions.refreshSkillDetail(skill.id, { maxAgeMs: SPACE_VISIBLE_REFRESH_TTL_MS }).catch((error) => toast.error(errMessage(error)));
+  }, [actions, skill.id, toast]);
+
+  useEffect(() => {
+    if (!detail || selectedPath) return;
+    const firstReadable = detail.files.find((file) => !file.isDir && file.name.toLowerCase() === 'skill.md') ?? detail.files.find((file) => !file.isDir);
+    setSelectedPath(firstReadable?.path ?? '');
+  }, [detail, selectedPath]);
 
   useEffect(() => {
     if (!selectedPath || mode !== 'files') return;
-    setFileLoading(true);
-    void spaceGetSkillFile(skill.id, selectedPath)
-      .then((result) => {
-        if (result.binary) {
-          setFileText(`Binary file · ${result.mimeType ?? 'unknown'} · ${formatBytes(result.sizeBytes)}`);
-        } else {
-          setFileText(result.text ?? '');
-        }
-      })
-      .catch((error) => toast.error(errMessage(error)))
-      .finally(() => setFileLoading(false));
-  }, [mode, selectedPath, skill.id, toast]);
+    void actions.refreshSkillFile(skill.id, selectedPath, { maxAgeMs: SPACE_VISIBLE_REFRESH_TTL_MS }).catch((error) => toast.error(errMessage(error)));
+  }, [actions, mode, selectedPath, skill.id, toast]);
 
   const install = async (target: 'global' | 'project') => {
     const workspacePath = target === 'project' ? projectPath || projects[0]?.path : undefined;
@@ -1528,7 +1632,7 @@ function SkillDetailWorkspace({
     }
     setInstallingTarget(target);
     try {
-      const result = await spaceInstallSkill({
+      const result = await actions.installSkill({
         skillId: skill.id,
         skillName: skill.name,
         target,
@@ -1603,10 +1707,14 @@ function SkillDetailWorkspace({
           </div>
         </div>
 
-        {!detail ? (
+        {!detail && detailLoading ? (
           <div className="flex h-full items-center justify-center text-sm text-[var(--ink-muted)]">
             <Loader2 className="mr-2 h-4 w-4 animate-spin" />
             加载 Skill
+          </div>
+        ) : !detail ? (
+          <div className="flex h-full items-center justify-center text-sm text-[var(--ink-muted)]">
+            {detailState?.error ?? 'Skill 未找到'}
           </div>
         ) : mode === 'overview' ? (
           <div className="grid min-h-0 grid-cols-[minmax(0,1fr)_320px] gap-4 overflow-auto p-5 max-lg:grid-cols-1">
@@ -1659,7 +1767,7 @@ function SkillDetailWorkspace({
                   加载文件
                 </div>
               ) : (
-                <pre className="h-full overflow-auto whitespace-pre-wrap p-5 font-mono text-sm leading-7 text-[var(--ink-secondary)]">{fileText || 'Select a file'}</pre>
+                <pre className="h-full overflow-auto whitespace-pre-wrap p-5 font-mono text-sm leading-7 text-[var(--ink-secondary)]">{fileState?.error ?? (fileText || 'Select a file')}</pre>
               )}
             </section>
           </div>
@@ -1744,7 +1852,6 @@ function AgentsWorkspace({
             </div>
           <div className="grid max-w-[1180px] grid-cols-1 gap-3.5 lg:grid-cols-2">
             {agents.map((agent) => {
-              const project = findProjectForAgent(projects, agent);
               return (
                 <article key={agent.id} className="min-h-[238px] rounded-[20px] border border-[var(--line-subtle)] bg-[var(--paper-elevated)]/50 p-4">
                   <div className="grid grid-cols-[34px_minmax(0,1fr)_auto] items-center gap-2.5">
@@ -1753,7 +1860,7 @@ function AgentsWorkspace({
                     </span>
                     <div className="min-w-0 flex-1">
                       <h3 className="truncate text-sm font-semibold text-[var(--ink)]">{agent.displayName}</h3>
-                      <p className="truncate text-xs text-[var(--ink-muted)]">{project?.displayName || project?.name || agent.workspaceLabel || basename(agent.workspacePath)}</p>
+                      <p className="truncate text-xs text-[var(--ink-muted)]">{formatAgentSecondaryLabel(agent, projects)}</p>
                     </div>
                     <span className={`rounded-md px-2 py-1 text-xs font-semibold ${agent.status === 'active' || agent.status === 'online' ? 'bg-[var(--success-bg)] text-[var(--success)]' : 'bg-[var(--paper-inset)] text-[var(--ink-muted)]'}`}>{agent.status}</span>
                   </div>
@@ -1801,10 +1908,12 @@ function AgentStat({ label, value }: { label: string; value: string }) {
 
 function RegisterAgentDialog({
   projects,
+  actions,
   onClose,
   onRegistered,
 }: {
   projects: Project[];
+  actions: SpaceActions;
   onClose: () => void;
   onRegistered: () => void;
 }) {
@@ -1828,7 +1937,7 @@ function RegisterAgentDialog({
     if (!project || !displayName.trim() || !goalMd.trim()) return;
     setBusy(true);
     try {
-      await spaceRegisterAgent({
+      await actions.registerAgent({
         displayName: displayName.trim(),
         workspaceId: project.id,
         workspacePath: project.path,
