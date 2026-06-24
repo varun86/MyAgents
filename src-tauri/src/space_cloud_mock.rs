@@ -9,8 +9,9 @@ use serde_json::{json, Value};
 use crate::space_cloud::{
     LocalRegisteredAgent, LocalRegisteredAgentPublic, SpaceApiRequestInput,
     SpaceDownloadAttachmentResult, SpaceProcessDispatchResult, SpaceRegisterAgentInput,
-    SpaceSession, SpaceUploadIssueAttachmentsInput, SpaceUploadSkillInput,
-    MAX_ATTACHMENT_UPLOAD_BYTES, MAX_ATTACHMENT_UPLOAD_COUNT, MAX_SKILL_ZIP_BYTES,
+    SpaceSession, SpaceUpdateRegisteredAgentInput, SpaceUploadIssueAttachmentsInput,
+    SpaceUploadSkillInput, MAX_ATTACHMENT_UPLOAD_BYTES, MAX_ATTACHMENT_UPLOAD_COUNT,
+    MAX_SKILL_ZIP_BYTES,
 };
 use crate::workspace_files::path_safety::{
     atomic_write_file, resolve_inside_workspace, validate_workspace_root,
@@ -35,6 +36,7 @@ struct MockState {
     skills: Vec<MockSkillRecord>,
     agents: Vec<LocalRegisteredAgent>,
     dispatches: Vec<Value>,
+    events: Vec<Value>,
     seq: u64,
 }
 
@@ -173,6 +175,60 @@ pub fn register_agent(
     };
     state.agents.insert(0, agent.clone());
     Ok(agent.into())
+}
+
+pub fn update_agent(
+    input: SpaceUpdateRegisteredAgentInput,
+) -> Result<LocalRegisteredAgentPublic, String> {
+    let mut state = state().lock().expect("mock state poisoned");
+    let agent = state
+        .agents
+        .iter_mut()
+        .find(|agent| agent.id == input.id)
+        .ok_or_else(|| format!("Registered Agent not found locally: {}", input.id))?;
+    if let Some(display_name) = input.display_name {
+        let display_name = display_name.trim();
+        if display_name.is_empty() {
+            return Err("displayName is required".to_string());
+        }
+        agent.display_name = display_name.to_string();
+    }
+    if let Some(workspace_label) = input.workspace_label {
+        let workspace_label = workspace_label.trim();
+        agent.workspace_label = if workspace_label.is_empty() {
+            None
+        } else {
+            Some(workspace_label.to_string())
+        };
+    }
+    if let Some(goal_md) = input.goal_md {
+        let goal_md = goal_md.trim();
+        if goal_md.is_empty() {
+            return Err("goalMd is required".to_string());
+        }
+        agent.goal_md = goal_md.to_string();
+    }
+    if let Some(status) = input.status {
+        let status = status.trim();
+        if !matches!(status, "active" | "disabled") {
+            return Err("Registered Agent status must be active or disabled".to_string());
+        }
+        agent.status = status.to_string();
+    }
+    agent.updated_at = "2026-06-24T09:50:00.000Z".to_string();
+    Ok(agent.clone().into())
+}
+
+pub fn revoke_agent(id: &str) -> Result<LocalRegisteredAgentPublic, String> {
+    let mut state = state().lock().expect("mock state poisoned");
+    let agent = state
+        .agents
+        .iter_mut()
+        .find(|agent| agent.id == id)
+        .ok_or_else(|| format!("Registered Agent not found locally: {}", id))?;
+    agent.status = "revoked".to_string();
+    agent.updated_at = "2026-06-24T09:51:00.000Z".to_string();
+    Ok(agent.clone().into())
 }
 
 pub fn require_local_agent(id: &str) -> Result<LocalRegisteredAgent, String> {
@@ -526,6 +582,7 @@ fn handle_api_data_request(
             "membership": session().membership,
             "tags": state.tags
         })),
+        ("POST", ["api", "spaces", "official", "tags"]) => create_tag(&mut state, body),
         ("GET", ["api", "spaces", "official", "issues"]) => Ok(list_issues(&state, &query)),
         ("POST", ["api", "spaces", "official", "issues"]) => create_issue(&mut state, body),
         ("GET", ["api", "issues", issue_id]) => issue_detail(&state, issue_id, &query),
@@ -544,15 +601,32 @@ fn handle_api_data_request(
         ("GET", ["api", "spaces", "official", "skills"]) => Ok(json!({
             "items": state.skills.iter().map(|record| record.skill.clone()).collect::<Vec<_>>()
         })),
+        ("GET", ["api", "spaces", "official", "events"]) | ("GET", ["api", "events"]) => {
+            Ok(list_events(&state, &query))
+        }
         ("GET", ["api", "skills", skill_id]) => skill_detail(&state, skill_id),
         ("GET", ["api", "skills", skill_id, "file-content"]) => skill_file(
             &state,
             skill_id,
             query.get("path").map(String::as_str).unwrap_or(""),
         ),
+        ("DELETE", ["api", "skills", skill_id]) => delete_skill(&mut state, skill_id),
         ("GET", ["api", "registered-agents", "me", "dispatches"]) => {
             let items = state.dispatches.clone();
             Ok(json!({ "items": items }))
+        }
+        ("PATCH", ["api", "registered-agents", agent_id]) => {
+            update_agent_api(&mut state, agent_id, body)
+        }
+        ("POST", ["api", "registered-agents", agent_id, "revoke"]) => {
+            let agent = state
+                .agents
+                .iter_mut()
+                .find(|agent| agent.id == *agent_id)
+                .ok_or_else(|| format!("Registered Agent not found locally: {}", agent_id))?;
+            agent.status = "revoked".to_string();
+            agent.updated_at = "2026-06-24T09:51:00.000Z".to_string();
+            Ok(json!({ "revoked": true }))
         }
         ("POST", ["api", "dispatches", dispatch_id, "delivered"]) => {
             drop(state);
@@ -635,8 +709,106 @@ fn initial_state() -> MockState {
         comments.insert(id.to_string(), issue_comments);
         attachments.insert(id.to_string(), issue_attachments);
     }
+    let status_options = [
+        "open",
+        "triaged",
+        "in_progress",
+        "resolved",
+        "closed",
+        "declined",
+        "duplicate",
+        "archived",
+    ];
+    let generated_tag_sets: [&[&str]; 8] = [
+        &["bug"],
+        &["feature", "ux"],
+        &["runtime"],
+        &["docs"],
+        &["windows", "bug"],
+        &["needs-agent"],
+        &["ux", "docs"],
+        &["runtime", "needs-agent"],
+    ];
+    let generated_titles = [
+        "Agent 派发后的处理记录需要更清晰",
+        "Skill 安装到项目后应该展示目标路径",
+        "Issue 筛选输入连续变更时不能阻塞",
+        "附件下载失败时应保留右侧上下文",
+        "Space 审计记录需要支持长资源 id 截断",
+        "Registered Agent 列表要能扫读 pending 数量",
+        "评论区空态和首条评论间距需要稳定",
+        "多 tag issue 在窄屏下不能挤压标题",
+    ];
+    while issues.len() < 500 {
+        let idx = issues.len();
+        let offset = idx - 18;
+        let id = format!("iss_mock_bulk_{:03}", offset + 1);
+        let status = status_options[offset % status_options.len()];
+        let title = format!(
+            "{} #{}",
+            generated_titles[offset % generated_titles.len()],
+            offset + 1
+        );
+        let body = format!(
+            "这是 mock mode 生成的真实感 Issue，用于验证 500 条列表、筛选、搜索、状态和 tag 的稳定性。\n\n场景编号：{}。\n命令示例：myagents issue {}",
+            offset + 1,
+            id
+        );
+        let created = format!(
+            "2026-05-{:02}T{:02}:{:02}:00.000Z",
+            1 + (offset % 28),
+            8 + (offset % 10),
+            (offset * 3) % 60
+        );
+        let updated = format!(
+            "2026-06-{:02}T{:02}:{:02}:00.000Z",
+            1 + (offset % 24),
+            9 + (offset % 9),
+            (offset * 7) % 60
+        );
+        let tag_names = generated_tag_sets[offset % generated_tag_sets.len()].to_vec();
+        let issue_tags = tags_for(&tags, &tag_names);
+        let issue_comments = if offset % 9 == 0 {
+            vec![json!({
+                "id": format!("cmt_{}_seed", id),
+                "author": { "id": "usr_lin", "type": "user" },
+                "body": "补充：这个 mock issue 用来验证长列表下评论计数和详情刷新。",
+                "createdAt": updated.clone()
+            })]
+        } else {
+            Vec::new()
+        };
+        let issue_attachments = if offset % 13 == 0 {
+            vec![attachment(
+                &id,
+                &format!("diagnostic-{:03}.log", offset + 1),
+                8_192 + offset as u64,
+                "text/plain",
+            )]
+        } else {
+            Vec::new()
+        };
+        issues.push(json!({
+            "id": id,
+            "spaceId": MOCK_SPACE_ID,
+            "title": title,
+            "body": body,
+            "status": status,
+            "author": {
+                "id": if offset % 2 == 0 { "usr_ethan" } else { "usr_lin" },
+                "name": if offset % 2 == 0 { "Ethan" } else { "Lin Qiao" }
+            },
+            "tags": issue_tags,
+            "commentCount": issue_comments.len(),
+            "attachmentCount": issue_attachments.len(),
+            "createdAt": created,
+            "updatedAt": updated
+        }));
+        comments.insert(id.clone(), issue_comments);
+        attachments.insert(id, issue_attachments);
+    }
 
-    let skills = vec![
+    let mut skills = vec![
         skill_record(
             skill(
                 "skl_mock_issue_triage",
@@ -749,7 +921,25 @@ fn initial_state() -> MockState {
         ),
     ];
 
-    let agents = vec![
+    while skills.len() < 50 {
+        let idx = skills.len();
+        let id = format!("skl_mock_generated_{:02}", idx + 1);
+        let name = format!("Generated Space Skill {:02}", idx + 1);
+        let slug = format!("generated-space-skill-{:02}", idx + 1);
+        skills.push(skill_record(
+            skill(
+                &id,
+                &name,
+                &slug,
+                "Generated mock skill for testing dense Skill lists, file preview, install actions, and revision metadata.",
+                1 + (idx % 9) as u32,
+            ),
+            "Generated skill overview used by mock mode to validate dense lists and detail previews.",
+            "This generated skill exists only in mock mode and exercises realistic metadata.",
+        ));
+    }
+
+    let mut agents = vec![
         agent(
             "rag_mock_frontend",
             "Frontend Polisher",
@@ -791,6 +981,20 @@ fn initial_state() -> MockState {
             "Investigate multi-runtime failures and provider quirks.",
         ),
     ];
+    let generated_agent_statuses = ["active", "disabled", "offline", "error", "active"];
+    while agents.len() < 50 {
+        let idx = agents.len();
+        let status = generated_agent_statuses[idx % generated_agent_statuses.len()];
+        let workspace_label = format!("Workspace {}", idx + 1);
+        agents.push(agent(
+            &format!("rag_mock_generated_{:02}", idx + 1),
+            &format!("Generated Agent {:02}", idx + 1),
+            status,
+            &format!("/Users/ethan/MockWorkspaces/workspace-{:02}", idx + 1),
+            &workspace_label,
+            "Pick up assigned mock issues, read context first, and report next actions.",
+        ));
+    }
 
     let dispatches = vec![dispatch_item(
         "dsp_mock_001",
@@ -798,6 +1002,36 @@ fn initial_state() -> MockState {
         &issues[2],
         "pending",
     )];
+    let events = vec![
+        mock_event(
+            "evt_mock_001",
+            "issue.created",
+            "issue",
+            "iss_mock_001",
+            "2026-06-24T09:30:00.000Z",
+        ),
+        mock_event(
+            "evt_mock_002",
+            "comment.created",
+            "issue",
+            "iss_mock_002",
+            "2026-06-24T09:35:00.000Z",
+        ),
+        mock_event(
+            "evt_mock_003",
+            "skill.updated",
+            "skill",
+            "skl_mock_prd_writer",
+            "2026-06-24T09:40:00.000Z",
+        ),
+        mock_event(
+            "evt_mock_004",
+            "dispatch.created",
+            "dispatch",
+            "dsp_mock_001",
+            "2026-06-24T09:45:00.000Z",
+        ),
+    ];
 
     MockState {
         tags,
@@ -807,6 +1041,7 @@ fn initial_state() -> MockState {
         skills,
         agents,
         dispatches,
+        events,
         seq: 100,
     }
 }
@@ -872,10 +1107,17 @@ fn list_issues(state: &MockState, query: &HashMap<String, String>) -> Value {
                 .as_ref()
                 .map(|tag| {
                     tags.iter().any(|item| {
-                        item.get("name")
+                        let id_matches = item
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .map(|id| id.eq_ignore_ascii_case(tag))
+                            .unwrap_or(false);
+                        let name_matches = item
+                            .get("name")
                             .and_then(Value::as_str)
                             .map(|name| name.eq_ignore_ascii_case(tag))
-                            .unwrap_or(false)
+                            .unwrap_or(false);
+                        id_matches || name_matches
                     })
                 })
                 .unwrap_or(true);
@@ -922,7 +1164,7 @@ fn create_issue(state: &mut MockState, body: Option<Value>) -> Result<Value, Str
         .and_then(Value::as_str)
         .unwrap_or("")
         .trim();
-    let tag_names = body
+    let tag_identities = body
         .get("tags")
         .and_then(Value::as_array)
         .map(|items| items.iter().filter_map(Value::as_str).collect::<Vec<_>>())
@@ -935,7 +1177,7 @@ fn create_issue(state: &mut MockState, body: Option<Value>) -> Result<Value, Str
         "body": body_text,
         "status": "open",
         "author": { "id": "usr_mock_owner", "name": "Ethan" },
-        "tags": tags_for(&state.tags, &tag_names),
+        "tags": tags_for(&state.tags, &tag_identities),
         "commentCount": 0,
         "attachmentCount": 0,
         "createdAt": "2026-06-24T09:38:00.000Z",
@@ -945,6 +1187,98 @@ fn create_issue(state: &mut MockState, body: Option<Value>) -> Result<Value, Str
     state.attachments.insert(id, Vec::new());
     state.issues.insert(0, issue.clone());
     Ok(json!({ "issue": issue }))
+}
+
+fn list_events(state: &MockState, query: &HashMap<String, String>) -> Value {
+    let cursor = query.get("cursor").map(String::as_str);
+    let limit = query
+        .get("limit")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(50)
+        .min(100);
+    let filtered = state
+        .events
+        .iter()
+        .filter(|event| event_after_cursor(event, cursor))
+        .take(limit + 1)
+        .cloned()
+        .collect::<Vec<_>>();
+    let items = filtered.iter().take(limit).cloned().collect::<Vec<_>>();
+    let next_cursor = items
+        .last()
+        .and_then(encode_event_cursor)
+        .map(Value::String)
+        .unwrap_or(Value::Null);
+    json!({
+        "items": items,
+        "hasMore": filtered.len() > limit,
+        "nextCursor": next_cursor
+    })
+}
+
+fn event_after_cursor(event: &Value, cursor: Option<&str>) -> bool {
+    let Some(cursor) = cursor.map(str::trim).filter(|value| !value.is_empty()) else {
+        return true;
+    };
+    let (cursor_created_at, cursor_id) = cursor
+        .rsplit_once('|')
+        .filter(|(created_at, event_id)| !created_at.is_empty() && !event_id.is_empty())
+        .map(|(created_at, event_id)| (created_at, Some(event_id)))
+        .unwrap_or((cursor, None));
+    let Some(created_at) = event.get("createdAt").and_then(Value::as_str) else {
+        return false;
+    };
+    if created_at > cursor_created_at {
+        return true;
+    }
+    if created_at < cursor_created_at {
+        return false;
+    }
+    match cursor_id {
+        Some(cursor_id) => event
+            .get("id")
+            .and_then(Value::as_str)
+            .map(|event_id| event_id > cursor_id)
+            .unwrap_or(false),
+        None => false,
+    }
+}
+
+fn encode_event_cursor(event: &Value) -> Option<String> {
+    Some(format!(
+        "{}|{}",
+        event.get("createdAt")?.as_str()?,
+        event.get("id")?.as_str()?
+    ))
+}
+
+fn create_tag(state: &mut MockState, body: Option<Value>) -> Result<Value, String> {
+    let body = body.unwrap_or(Value::Null);
+    let name = body
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    if name.is_empty() {
+        return Err("Tag name is required".to_string());
+    }
+    let tag = json!({
+        "id": state.next_id("tag"),
+        "spaceId": MOCK_SPACE_ID,
+        "name": name,
+        "color": body.get("color").cloned().unwrap_or(Value::Null),
+        "description": body.get("description").cloned().unwrap_or(Value::Null),
+        "createdAt": "2026-06-24T09:37:00.000Z",
+        "updatedAt": "2026-06-24T09:37:00.000Z"
+    });
+    state.tags.push(tag.clone());
+    state.tags.sort_by(|a, b| {
+        a.get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .cmp(b.get("name").and_then(Value::as_str).unwrap_or(""))
+    });
+    Ok(json!({ "tag": tag }))
 }
 
 fn issue_detail(
@@ -1120,6 +1454,60 @@ fn skill_file(state: &MockState, skill_id: &str, path: &str) -> Result<Value, St
         .ok_or_else(|| format!("Skill file not found: {}", path))
 }
 
+fn delete_skill(state: &mut MockState, skill_id: &str) -> Result<Value, String> {
+    let before = state.skills.len();
+    state
+        .skills
+        .retain(|record| record.skill.get("id").and_then(Value::as_str) != Some(skill_id));
+    if state.skills.len() == before {
+        return Err(format!("Skill not found: {}", skill_id));
+    }
+    Ok(json!({ "deleted": true }))
+}
+
+fn update_agent_api(
+    state: &mut MockState,
+    agent_id: &str,
+    body: Option<Value>,
+) -> Result<Value, String> {
+    let body = body.unwrap_or(Value::Null);
+    let agent = state
+        .agents
+        .iter_mut()
+        .find(|agent| agent.id == agent_id)
+        .ok_or_else(|| format!("Registered Agent not found locally: {}", agent_id))?;
+    if let Some(display_name) = body.get("displayName").and_then(Value::as_str) {
+        let display_name = display_name.trim();
+        if display_name.is_empty() {
+            return Err("displayName is required".to_string());
+        }
+        agent.display_name = display_name.to_string();
+    }
+    if body.get("workspaceLabel").is_some() {
+        agent.workspace_label = body
+            .get("workspaceLabel")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string);
+    }
+    if let Some(goal_md) = body.get("goalMd").and_then(Value::as_str) {
+        let goal_md = goal_md.trim();
+        if goal_md.is_empty() {
+            return Err("goalMd is required".to_string());
+        }
+        agent.goal_md = goal_md.to_string();
+    }
+    if let Some(status) = body.get("status").and_then(Value::as_str) {
+        if !matches!(status, "active" | "disabled" | "revoked") {
+            return Err("Registered Agent status is invalid".to_string());
+        }
+        agent.status = status.to_string();
+    }
+    agent.updated_at = "2026-06-24T09:50:00.000Z".to_string();
+    Ok(json!({ "updated": true }))
+}
+
 fn refresh_issue_counts(state: &mut MockState, issue_id: &str) {
     let comment_count = state.comments.get(issue_id).map(Vec::len).unwrap_or(0);
     let attachment_count = state.attachments.get(issue_id).map(Vec::len).unwrap_or(0);
@@ -1147,16 +1535,23 @@ fn tag(name: &str, description: &str) -> Value {
     })
 }
 
-fn tags_for(tags: &[Value], names: &[&str]) -> Vec<Value> {
-    names
+fn tags_for(tags: &[Value], identities: &[&str]) -> Vec<Value> {
+    identities
         .iter()
-        .filter_map(|name| {
+        .filter_map(|identity| {
             tags.iter()
                 .find(|tag| {
-                    tag.get("name")
+                    let id_matches = tag
+                        .get("id")
                         .and_then(Value::as_str)
-                        .map(|value| value == *name)
-                        .unwrap_or(false)
+                        .map(|value| value == *identity)
+                        .unwrap_or(false);
+                    let name_matches = tag
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .map(|value| value == *identity)
+                        .unwrap_or(false);
+                    id_matches || name_matches
                 })
                 .cloned()
         })
@@ -1407,6 +1802,26 @@ fn dispatch_item(id: &str, agent: &LocalRegisteredAgent, issue: &Value, status: 
     })
 }
 
+fn mock_event(
+    id: &str,
+    event_type: &str,
+    resource_type: &str,
+    resource_id: &str,
+    created_at: &str,
+) -> Value {
+    json!({
+        "id": id,
+        "type": event_type,
+        "resourceType": resource_type,
+        "resourceId": resource_id,
+        "actorType": "user",
+        "actorId": "usr_mock_owner",
+        "targetRegisteredAgentId": null,
+        "payload": null,
+        "createdAt": created_at
+    })
+}
+
 fn mock_space() -> Value {
     json!({
         "id": MOCK_SPACE_ID,
@@ -1417,11 +1832,16 @@ fn mock_space() -> Value {
 }
 
 fn ok_envelope(data: Value) -> Value {
-    json!({ "success": true, "data": data })
+    json!({ "success": true, "data": data, "requestId": "req_mock_success" })
 }
 
 fn err_envelope(error: String) -> Value {
-    json!({ "success": false, "error": error })
+    json!({
+        "success": false,
+        "error": error,
+        "code": "MOCK_SPACE_ERROR",
+        "requestId": "req_mock_error"
+    })
 }
 
 fn parse_mock_url(path: &str) -> Result<reqwest::Url, String> {
@@ -1495,4 +1915,52 @@ fn title_case(value: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn initial_mock_state_has_commercial_fixture_volume() {
+        let state = initial_state();
+
+        assert!(state.issues.len() >= 500);
+        assert!(state.skills.len() >= 50);
+        assert!(state.agents.len() >= 50);
+        assert!(state.issues.iter().any(|issue| issue
+            .get("attachmentCount")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            > 0));
+        assert!(state.issues.iter().any(|issue| issue
+            .get("commentCount")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            > 0));
+    }
+
+    #[test]
+    fn event_cursor_advances_by_id_within_same_timestamp() {
+        let event = mock_event(
+            "evt_same_002",
+            "issue.commented",
+            "issue",
+            "iss_same",
+            "2026-06-24T10:00:00.000Z",
+        );
+
+        assert!(event_after_cursor(
+            &event,
+            Some("2026-06-24T10:00:00.000Z|evt_same_001")
+        ));
+        assert!(!event_after_cursor(
+            &event,
+            Some("2026-06-24T10:00:00.000Z|evt_same_002")
+        ));
+        assert!(!event_after_cursor(
+            &event,
+            Some("2026-06-24T10:00:00.000Z")
+        ));
+    }
 }

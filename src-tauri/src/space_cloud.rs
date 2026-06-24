@@ -166,6 +166,26 @@ pub struct SpaceRegisterAgentInput {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SpaceUpdateRegisteredAgentInput {
+    pub id: String,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub workspace_label: Option<String>,
+    #[serde(default)]
+    pub goal_md: Option<String>,
+    #[serde(default)]
+    pub status: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpaceRegisteredAgentIdInput {
+    pub id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SpacePollDispatchesInput {
     pub registered_agent_id: String,
 }
@@ -253,6 +273,12 @@ struct CloudEnvelope<T> {
     success: bool,
     data: Option<T>,
     error: Option<String>,
+    #[serde(default)]
+    code: Option<String>,
+    #[serde(default, rename = "requestId")]
+    request_id: Option<String>,
+    #[serde(default, rename = "recoveryHint")]
+    recovery_hint: Option<Value>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -519,9 +545,13 @@ pub async fn cmd_space_register_agent(
         "workspaceLabel": input.workspace_label,
         "goalMd": input.goal_md,
     });
+    let path = format!(
+        "/api/spaces/{}/registered-agents",
+        session_space_segment(&session)
+    );
     let response = authorized_json_request(
         &session.base_url,
-        "/api/spaces/official/registered-agents",
+        &path,
         &session.session_token,
         reqwest::Method::POST,
         Some(body),
@@ -557,6 +587,116 @@ pub async fn cmd_space_register_agent(
         created_at: required_value_string(&registered, "createdAt")?,
         updated_at: required_value_string(&registered, "updatedAt")?,
     };
+    upsert_local_agent(agent.clone())?;
+    Ok(agent.into())
+}
+
+#[tauri::command]
+pub async fn cmd_space_update_registered_agent(
+    input: SpaceUpdateRegisteredAgentInput,
+) -> Result<LocalRegisteredAgentPublic, String> {
+    if crate::space_cloud_mock::is_enabled() {
+        return crate::space_cloud_mock::update_agent(input);
+    }
+    ensure_space_available()?;
+    let session = require_session()?;
+    let mut agent = require_local_agent(&input.id)?;
+    let mut body = serde_json::Map::new();
+
+    if let Some(display_name) = input.display_name {
+        let display_name = display_name.trim();
+        if display_name.is_empty() {
+            return Err("displayName is required".to_string());
+        }
+        body.insert(
+            "displayName".to_string(),
+            Value::String(display_name.to_string()),
+        );
+        agent.display_name = display_name.to_string();
+    }
+    if let Some(workspace_label) = input.workspace_label {
+        let workspace_label = workspace_label.trim();
+        if workspace_label.is_empty() {
+            body.insert("workspaceLabel".to_string(), Value::Null);
+            agent.workspace_label = None;
+        } else {
+            body.insert(
+                "workspaceLabel".to_string(),
+                Value::String(workspace_label.to_string()),
+            );
+            agent.workspace_label = Some(workspace_label.to_string());
+        }
+    }
+    if let Some(goal_md) = input.goal_md {
+        let goal_md = goal_md.trim();
+        if goal_md.is_empty() {
+            return Err("goalMd is required".to_string());
+        }
+        body.insert("goalMd".to_string(), Value::String(goal_md.to_string()));
+        agent.goal_md = goal_md.to_string();
+    }
+    if let Some(status) = input.status {
+        let status = status.trim();
+        if !matches!(status, "active" | "disabled") {
+            return Err("Registered Agent status must be active or disabled".to_string());
+        }
+        body.insert("status".to_string(), Value::String(status.to_string()));
+        agent.status = status.to_string();
+    }
+
+    if body.is_empty() {
+        return Ok(agent.into());
+    }
+
+    let data = authorized_json_data_request(
+        &session.base_url,
+        &format!("/api/registered-agents/{}", url_component(&input.id)),
+        &session.session_token,
+        reqwest::Method::PATCH,
+        Some(Value::Object(body)),
+    )
+    .await?;
+    if let Some(registered) = data.get("registeredAgent") {
+        agent.display_name = required_value_string(registered, "displayName")?;
+        agent.workspace_label = registered
+            .get("workspaceLabel")
+            .and_then(Value::as_str)
+            .map(ToString::to_string);
+        agent.goal_md = required_value_string(registered, "goalMd")?;
+        agent.status = required_value_string(registered, "status")?;
+        agent.updated_at = required_value_string(registered, "updatedAt")?;
+    } else {
+        agent.updated_at = chrono::Utc::now().to_rfc3339();
+    }
+    upsert_local_agent(agent.clone())?;
+    Ok(agent.into())
+}
+
+#[tauri::command]
+pub async fn cmd_space_revoke_registered_agent(
+    input: SpaceRegisteredAgentIdInput,
+) -> Result<LocalRegisteredAgentPublic, String> {
+    if crate::space_cloud_mock::is_enabled() {
+        return crate::space_cloud_mock::revoke_agent(&input.id);
+    }
+    ensure_space_available()?;
+    let session = require_session()?;
+    let mut agent = require_local_agent(&input.id)?;
+    let data = authorized_json_data_request(
+        &session.base_url,
+        &format!("/api/registered-agents/{}/revoke", url_component(&input.id)),
+        &session.session_token,
+        reqwest::Method::POST,
+        None,
+    )
+    .await?;
+    if let Some(registered) = data.get("registeredAgent") {
+        agent.status = required_value_string(registered, "status")?;
+        agent.updated_at = required_value_string(registered, "updatedAt")?;
+    } else {
+        agent.status = "revoked".to_string();
+        agent.updated_at = chrono::Utc::now().to_rfc3339();
+    }
     upsert_local_agent(agent.clone())?;
     Ok(agent.into())
 }
@@ -749,7 +889,7 @@ pub async fn cmd_space_upload_skill(input: SpaceUploadSkillInput) -> Result<Valu
     let path = if let Some(skill_id) = input.skill_id.as_deref().filter(|s| !s.trim().is_empty()) {
         format!("/api/skills/{}/revisions", url_component(skill_id.trim()))
     } else {
-        "/api/spaces/official/skills".to_string()
+        format!("/api/spaces/{}/skills", session_space_segment(&session))
     };
     authorized_multipart_data_request(&session.base_url, &path, &session.session_token, form).await
 }
@@ -1394,6 +1534,17 @@ fn api_url(base_url: &str, path: &str) -> Result<String, String> {
         .map_err(|e| format!("Invalid Space API path: {}", e))
 }
 
+fn session_space_segment(session: &SpaceSession) -> String {
+    session
+        .space
+        .get("id")
+        .and_then(Value::as_str)
+        .or_else(|| session.space.get("slug").and_then(Value::as_str))
+        .filter(|value| !value.trim().is_empty())
+        .map(url_component)
+        .unwrap_or_else(|| "official".to_string())
+}
+
 async fn parse_cloud_data<T: for<'de> Deserialize<'de>>(
     response: reqwest::Response,
 ) -> Result<T, String> {
@@ -1403,9 +1554,25 @@ async fn parse_cloud_data<T: for<'de> Deserialize<'de>>(
         .await
         .map_err(|e| format!("Invalid Space API response: {}", e))?;
     if !status.is_success() || !envelope.success {
-        return Err(envelope
+        let mut message = envelope
             .error
-            .unwrap_or_else(|| format!("Space API request failed with {}", status)));
+            .unwrap_or_else(|| format!("Space API request failed with {}", status));
+        if let Some(code) = envelope.code.as_deref().filter(|value| !value.trim().is_empty()) {
+            message = format!("{} ({})", message, code);
+        }
+        if let Some(request_id) = envelope
+            .request_id
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            message = format!("{} [{}]", message, request_id);
+        }
+        if let Some(hint) = envelope.recovery_hint {
+            if let Some(text) = hint.get("message").and_then(Value::as_str) {
+                message = format!("{} · {}", message, text);
+            }
+        }
+        return Err(message);
     }
     envelope
         .data
@@ -2136,6 +2303,62 @@ mod tests {
             .unwrap_or(false));
         assert!(cmd_space_list_local_agents().await.expect("agents").len() >= 5);
 
+        let created_tag = cmd_space_api_request(SpaceApiRequestInput {
+            method: "POST".to_string(),
+            path: "/api/spaces/official/tags".to_string(),
+            body: Some(serde_json::json!({ "name": "qa-contract" })),
+        })
+        .await
+        .expect("custom tag should create");
+        let custom_tag_id = created_tag
+            .pointer("/data/tag/id")
+            .and_then(Value::as_str)
+            .expect("custom tag id")
+            .to_string();
+
+        let created_issue = cmd_space_api_request(SpaceApiRequestInput {
+            method: "POST".to_string(),
+            path: "/api/spaces/official/issues".to_string(),
+            body: Some(serde_json::json!({
+                "title": "Tag id contract",
+                "body": "Created with a tag id, not a tag name.",
+                "tags": [custom_tag_id]
+            })),
+        })
+        .await
+        .expect("issue should create with tag id");
+        let created_issue_id = created_issue
+            .pointer("/data/issue/id")
+            .and_then(Value::as_str)
+            .expect("created issue id")
+            .to_string();
+        assert_eq!(
+            created_issue
+                .pointer("/data/issue/tags/0/name")
+                .and_then(Value::as_str),
+            Some("qa-contract")
+        );
+
+        let filtered_by_tag_id = cmd_space_api_request(SpaceApiRequestInput {
+            method: "GET".to_string(),
+            path: format!(
+                "/api/spaces/official/issues?tag={}",
+                url_component(&custom_tag_id)
+            ),
+            body: None,
+        })
+        .await
+        .expect("issue list should filter by tag id");
+        assert!(filtered_by_tag_id
+            .pointer("/data/items")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .any(|item| item.get("id").and_then(Value::as_str) == Some(&created_issue_id))
+            })
+            .unwrap_or(false));
+
         let result = cmd_space_api_request(SpaceApiRequestInput {
             method: "POST".to_string(),
             path: "/api/issues/iss_mock_001/comments".to_string(),
@@ -2279,6 +2502,38 @@ mod tests {
         .await
         .expect("agent registration should succeed");
         assert_eq!(registered.display_name, "Mock Acceptance Agent");
+
+        let updated_agent = cmd_space_update_registered_agent(SpaceUpdateRegisteredAgentInput {
+            id: registered.id.clone(),
+            display_name: Some("Mock Acceptance Agent 2".to_string()),
+            workspace_label: None,
+            goal_md: None,
+            status: Some("disabled".to_string()),
+        })
+        .await
+        .expect("agent update should succeed");
+        assert_eq!(updated_agent.display_name, "Mock Acceptance Agent 2");
+        assert_eq!(updated_agent.status, "disabled");
+
+        let revoked_agent =
+            cmd_space_revoke_registered_agent(SpaceRegisteredAgentIdInput { id: registered.id })
+                .await
+                .expect("agent revoke should succeed");
+        assert_eq!(revoked_agent.status, "revoked");
+
+        let deleted_skill = cmd_space_api_request(SpaceApiRequestInput {
+            method: "DELETE".to_string(),
+            path: "/api/skills/skl_mock_issue_triage".to_string(),
+            body: None,
+        })
+        .await
+        .expect("skill delete should succeed");
+        assert_eq!(
+            deleted_skill
+                .pointer("/data/deleted")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
 
         let error = cmd_space_api_request(SpaceApiRequestInput {
             method: "TRACE".to_string(),

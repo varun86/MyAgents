@@ -64,6 +64,25 @@ describe('spaceCloud API errors', () => {
     await expect(spaceCommentIssue('iss_123', 'hello')).rejects.toThrow('评论发送失败：permission denied');
   });
 
+  it('uses structured Space error envelopes when available', async () => {
+    const { spaceCommentIssue, normalizeSpaceError } = await loadSpaceCloud();
+    const envelope = {
+      success: false,
+      error: 'Not authenticated',
+      code: 'NOT_AUTHENTICATED',
+      requestId: 'req_123',
+      recoveryHint: { message: 'Login with Google from MyAgents Cloud Space.' },
+    };
+    mocks.invoke.mockResolvedValueOnce(envelope);
+
+    await expect(spaceCommentIssue('iss_123', 'hello')).rejects.toThrow('评论发送失败：请重新登录 MyAgents 社区');
+
+    const normalized = normalizeSpaceError(envelope, { method: 'POST', path: '/api/issues/iss_123/comments' });
+    expect(normalized.userMessage).toBe('评论发送失败：请重新登录 MyAgents 社区');
+    expect(normalized.debugMessage).toContain('NOT_AUTHENTICATED');
+    expect(normalized.debugMessage).toContain('req_123');
+  });
+
   it('returns Space data from successful envelopes', async () => {
     const { spaceCommentIssue } = await loadSpaceCloud();
     const comment = {

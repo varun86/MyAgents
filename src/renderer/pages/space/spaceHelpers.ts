@@ -87,6 +87,11 @@ export function buildIssueCommandPrompt(args: { spaceName: string; issueId: stri
     '命令：',
     `myagents issue ${args.issueId}`,
     '',
+    '处理时可按需使用：',
+    `myagents issue ${args.issueId} comment "<和用户确认后的处理记录>"`,
+    `myagents issue ${args.issueId} status in_progress`,
+    `myagents issue ${args.issueId} attachments`,
+    '',
     '兼容命令：',
     `myagents space issue get ${args.issueId} --json`,
   ].join('\n');
