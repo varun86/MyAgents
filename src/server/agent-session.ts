@@ -880,6 +880,7 @@ let watchdogFired = false;
 // drop or surface B.
 
 const SUBSCRIPTION_PROVIDER_ANALYTICS: TurnProviderAnalytics = {
+  provider_id: 'anthropic-sub',
   provider_name: 'Anthropic (订阅)',
   api_protocol: 'anthropic',
   provider_base_url: 'https://api.anthropic.com',
@@ -890,6 +891,7 @@ function buildTurnProviderAnalytics(providerEnv: ProviderEnv | undefined): TurnP
   if (!providerEnv) return SUBSCRIPTION_PROVIDER_ANALYTICS;
   const protocol = providerEnv.apiProtocol ?? 'anthropic';
   return {
+    provider_id: providerEnv.providerId ?? null,
     provider_name: providerEnv.providerName ?? providerEnv.providerId ?? null,
     api_protocol: protocol,
     provider_base_url: providerEnv.baseUrl ?? 'https://api.anthropic.com',

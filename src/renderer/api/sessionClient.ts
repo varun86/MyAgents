@@ -23,7 +23,14 @@ export interface MessageUsage {
     outputTokens: number;
     cacheReadTokens?: number;
     cacheCreationTokens?: number;
+    providerId?: string;
     model?: string;
+    modelUsage?: Record<string, {
+        inputTokens: number;
+        outputTokens: number;
+        cacheReadTokens?: number;
+        cacheCreationTokens?: number;
+    }>;
 }
 
 export interface SessionMetadata {
@@ -112,6 +119,8 @@ export interface SessionDetailedStats {
         cacheReadTokens: number;
         cacheCreationTokens: number;
         count: number;
+        model?: string;
+        providerId?: string;
     }>;
     messageDetails: Array<{
         userQuery: string;
@@ -288,6 +297,8 @@ export interface GlobalStats {
         cacheReadTokens: number;
         cacheCreationTokens: number;
         count: number;
+        model?: string;
+        providerId?: string;
     }>;
 }
 

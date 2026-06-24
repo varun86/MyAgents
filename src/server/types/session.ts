@@ -160,6 +160,8 @@ export interface MessageUsage {
     outputTokens: number;
     cacheReadTokens?: number;
     cacheCreationTokens?: number;
+    /** Provider used for this turn. Legacy messages may omit it and fall back to session metadata. */
+    providerId?: string;
     /** Primary model (for backwards compatibility and simple display) */
     model?: string;
     /** Per-model breakdown (for detailed statistics) */

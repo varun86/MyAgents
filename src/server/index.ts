@@ -66,6 +66,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, extname, sep } 
 import { tmpdir, homedir } from 'os';
 import { randomUUID } from 'crypto';
 import { elapsedMs, emitPerfTrace, nowMs } from './utils/perf-trace';
+import { addMessageUsageToByModel, type UsageByModel } from './utils/usage-stats';
 // adm-zip lazy-loaded at its one call site below (/api/skill/upload with zip
 // content) — saves ~30ms of module-init cost when users never upload skills.
 import {
@@ -3355,13 +3356,7 @@ async function main() {
           // Single pass through messages: aggregate summary + daily + byModel together so
           // they're guaranteed to agree about what falls inside the range.
           const dailyMap: Record<string, { inputTokens: number; outputTokens: number; messageCount: number }> = {};
-          const byModel: Record<string, {
-            inputTokens: number;
-            outputTokens: number;
-            cacheReadTokens: number;
-            cacheCreationTokens: number;
-            count: number;
-          }> = {};
+          const byModel: UsageByModel = {};
 
           for (const s of sessions) {
             const sessionData = getSessionData(s.id);
@@ -3400,29 +3395,7 @@ async function main() {
               dailyMap[date].outputTokens += msg.usage.outputTokens ?? 0;
               dailyMap[date].messageCount++;
 
-              // byModel aggregation
-              if (msg.usage.modelUsage) {
-                for (const [model, mu] of Object.entries(msg.usage.modelUsage)) {
-                  if (!byModel[model]) {
-                    byModel[model] = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, count: 0 };
-                  }
-                  byModel[model].inputTokens += mu.inputTokens ?? 0;
-                  byModel[model].outputTokens += mu.outputTokens ?? 0;
-                  byModel[model].cacheReadTokens += mu.cacheReadTokens ?? 0;
-                  byModel[model].cacheCreationTokens += mu.cacheCreationTokens ?? 0;
-                  byModel[model].count++;
-                }
-              } else {
-                const model = msg.usage.model || 'unknown';
-                if (!byModel[model]) {
-                  byModel[model] = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, count: 0 };
-                }
-                byModel[model].inputTokens += msg.usage.inputTokens ?? 0;
-                byModel[model].outputTokens += msg.usage.outputTokens ?? 0;
-                byModel[model].cacheReadTokens += msg.usage.cacheReadTokens ?? 0;
-                byModel[model].cacheCreationTokens += msg.usage.cacheCreationTokens ?? 0;
-                byModel[model].count++;
-              }
+              addMessageUsageToByModel(byModel, msg, s.providerId);
             }
           }
 
@@ -3570,13 +3543,7 @@ async function main() {
         }
 
         // Group stats by model
-        const byModel: Record<string, {
-          inputTokens: number;
-          outputTokens: number;
-          cacheReadTokens: number;
-          cacheCreationTokens: number;
-          count: number;
-        }> = {};
+        const byModel: UsageByModel = {};
 
         // Build message details
         const messageDetails: Array<{
@@ -3597,42 +3564,7 @@ async function main() {
               ? msg.content.slice(0, 100)
               : JSON.stringify(msg.content).slice(0, 100);
           } else if (msg.role === 'assistant' && msg.usage) {
-            // Use modelUsage for per-model breakdown if available, fallback to single model
-            if (msg.usage.modelUsage) {
-              for (const [model, stats] of Object.entries(msg.usage.modelUsage)) {
-                if (!byModel[model]) {
-                  byModel[model] = {
-                    inputTokens: 0,
-                    outputTokens: 0,
-                    cacheReadTokens: 0,
-                    cacheCreationTokens: 0,
-                    count: 0,
-                  };
-                }
-                byModel[model].inputTokens += stats.inputTokens ?? 0;
-                byModel[model].outputTokens += stats.outputTokens ?? 0;
-                byModel[model].cacheReadTokens += stats.cacheReadTokens ?? 0;
-                byModel[model].cacheCreationTokens += stats.cacheCreationTokens ?? 0;
-                byModel[model].count++;
-              }
-            } else {
-              // Fallback for older messages without modelUsage
-              const model = msg.usage.model || 'unknown';
-              if (!byModel[model]) {
-                byModel[model] = {
-                  inputTokens: 0,
-                  outputTokens: 0,
-                  cacheReadTokens: 0,
-                  cacheCreationTokens: 0,
-                  count: 0,
-                };
-              }
-              byModel[model].inputTokens += msg.usage.inputTokens ?? 0;
-              byModel[model].outputTokens += msg.usage.outputTokens ?? 0;
-              byModel[model].cacheReadTokens += msg.usage.cacheReadTokens ?? 0;
-              byModel[model].cacheCreationTokens += msg.usage.cacheCreationTokens ?? 0;
-              byModel[model].count++;
-            }
+            addMessageUsageToByModel(byModel, msg, session.providerId);
 
             // Message details always use aggregate values
             messageDetails.push({
