@@ -31,7 +31,7 @@ Phase 2 为本地验证和自动化测试新增了显式 mock mode：
 | --- | --- | --- |
 | Rust | `src-tauri/src/space_cloud.rs` | Space session、HTTP proxy、registered agents、dispatch、Skill zip、附件上传下载 |
 | Renderer API | `src/renderer/api/spaceCloud.ts` | Tauri invoke typed wrapper；不直接 `fetch` Space 服务 |
-| Renderer UI | `src/renderer/pages/Space.tsx` | Issues / Skills / Agents 三个视图，登录轮询、创建/评论/派发、Skill 安装 |
+| Renderer UI | `src/renderer/pages/Space.tsx` + `src/renderer/pages/space/*` | Space shell 与 Issues / Skills / Agents 三个 workspace，登录轮询、创建/评论/派发、Skill 安装、本地缓存 |
 | CLI | `src/cli/myagents.ts` + `src-tauri/src/cli.rs` | Agent 可调用的 Space issue get/comment/status 与 attachment download 操作；dispatch 处理仍是 Rust/Tauri 内部链路 |
 
 ## 本地状态
