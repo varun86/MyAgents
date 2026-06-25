@@ -13,6 +13,7 @@ import {
   shouldResetModelOnProviderChange,
   shouldSkipSnapshotWrite,
 } from './optionResolve';
+import { SUBSCRIPTION_PROVIDER_ID } from '../../shared/config-types';
 
 describe('resolveCurrentProviderForSession (#401)', () => {
   const pinned = { id: 'zhipu' };
@@ -59,14 +60,17 @@ describe('resolveLegacyBuiltinSnapshotProviderId', () => {
   const providers = [
     {
       id: 'volcengine-api',
+      type: 'api' as const,
       models: [{ model: 'doubao-seed-2-0-pro-260215' }],
     },
     {
-      id: 'anthropic-sub',
+      id: SUBSCRIPTION_PROVIDER_ID,
+      type: 'subscription' as const,
       models: [{ model: 'claude-opus-4-7' }],
     },
     {
       id: 'anthropic-api',
+      type: 'api' as const,
       models: [{ model: 'claude-opus-4-7' }],
     },
   ];
@@ -79,22 +83,45 @@ describe('resolveLegacyBuiltinSnapshotProviderId', () => {
     })).toBe('deepseek');
   });
 
-  it('recovers a missing providerId when exactly one provider owns the snapshot model', () => {
+  it('recovers a missing providerId when exactly one credential-configured provider owns the snapshot model', () => {
     expect(resolveLegacyBuiltinSnapshotProviderId({
       snapshotModel: 'doubao-seed-2-0-pro-260215',
       providers,
+      apiKeys: { 'volcengine-api': 'secret' },
     })).toBe('volcengine-api');
   });
 
-  it('uses the current selected provider to break same-model family ambiguity', () => {
+  it('does not use the current selected provider to break same-model family ambiguity', () => {
     expect(resolveLegacyBuiltinSnapshotProviderId({
       snapshotModel: 'claude-opus-4-7',
       selectedProviderId: 'anthropic-api',
       providers,
-    })).toBe('anthropic-api');
+      apiKeys: { 'anthropic-api': 'secret' },
+      providerVerifyStatus: {
+        [SUBSCRIPTION_PROVIDER_ID]: {
+          status: 'invalid',
+          verifiedAt: '2026-01-01T00:00:00.000Z',
+          accountEmail: 'user@example.com',
+        },
+      },
+    })).toBeUndefined();
   });
 
-  it('does not guess when the model matches multiple providers and no selected provider helps', () => {
+  it('treats subscription account evidence as credential-configured', () => {
+    expect(resolveLegacyBuiltinSnapshotProviderId({
+      snapshotModel: 'claude-opus-4-7',
+      providers,
+      providerVerifyStatus: {
+        [SUBSCRIPTION_PROVIDER_ID]: {
+          status: 'invalid',
+          verifiedAt: '2026-01-01T00:00:00.000Z',
+          accountEmail: 'user@example.com',
+        },
+      },
+    })).toBe(SUBSCRIPTION_PROVIDER_ID);
+  });
+
+  it('does not guess when the model has no credential-configured provider', () => {
     expect(resolveLegacyBuiltinSnapshotProviderId({
       snapshotModel: 'claude-opus-4-7',
       providers,

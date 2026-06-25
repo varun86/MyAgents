@@ -21,6 +21,8 @@ Task 执行    =  每次 tick 派生 session（live re-derive）
 
 **术语边界**：本页的"配置模板"指 Agent 工作区里的运行配置（provider / model / runtime / permission / MCP），不是 Launcher 的工作区文件模板。`WorkspaceTemplate.agentDefaults` 只在新建 builtin project 或补齐历史 project 的 `AgentConfig` 时作为 seed；一旦 Tab 创建，仍按本页规则冻结快照，后续模板默认值变化不会反向改已存在的 Tab Session。
 
+**会话边界**：Task / Cron 持久层仍只存 `providerId + model` intent，不存 credential。执行层如果创建/冻结 builtin session snapshot，必须把 intent 写成 `ProviderRoute`（`{providerId, model}` 的 canonical 会话身份），并让 Sidecar 每次发送时从当前配置 materialize `ProviderEnv`；不得把 `provider_env` / `providerEnvJson` 作为新的 durable identity 写回。
+
 ## 2. 三层职责
 
 ```

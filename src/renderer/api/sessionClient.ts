@@ -9,6 +9,7 @@ import {
     isTauri,
 } from './tauriClient';
 import type { ContextUsage } from '../../shared/types/context-usage';
+import type { ProviderRoute } from '../../shared/providerRoute';
 
 export interface SessionStats {
     messageCount: number;
@@ -77,6 +78,8 @@ export interface SessionMetadata {
     /** Snapshot Claude cc-plugin enabled list. */
     enabledPluginIds?: string[];
     providerId?: string;
+    providerRoute?: ProviderRoute;
+    providerRouteRepairedAt?: string;
     /** Credentials — server redacts to '[redacted]' in PATCH response (zero-trust) */
     providerEnvJson?: string;
     configSnapshotAt?: string;
@@ -228,6 +231,7 @@ export async function updateSession(
         mcpEnabledServers?: string[] | null;
         enabledPluginIds?: string[] | null;
         providerId?: string | null;
+        providerRoute?: ProviderRoute | null;
         providerEnvJson?: string | null;
     }
 ): Promise<SessionMetadata | null> {

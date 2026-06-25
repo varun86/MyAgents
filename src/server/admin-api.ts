@@ -867,7 +867,7 @@ export function handleModelList(): AdminResponse {
       protocol: p.apiProtocol ? String(p.apiProtocol) : 'anthropic',
       enabled: p.enabled !== false,
       hasApiKey: !!apiKeys[id],
-      status: (verifyStatus[id] as Record<string, unknown>)?.status ?? 'not-set',
+      status: (verifyStatus[id] as unknown as Record<string, unknown>)?.status ?? 'not-set',
     };
   });
 

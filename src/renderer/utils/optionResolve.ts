@@ -10,19 +10,22 @@ import {
   type ProviderHistoryEnv,
   type ProviderHistoryPolicy,
 } from '../../shared/providerHistory';
+import type { ProviderVerifyStatus } from '../../shared/config-types';
+import {
+  isConcreteProviderRoute,
+  resolveLegacyModelOnlyProviderRoute,
+} from '../../shared/providerRoute';
 
 type ProviderWithModels = {
   id: string;
+  type?: 'api' | 'subscription';
+  enabled?: boolean;
   models?: ReadonlyArray<{ model?: string | null }>;
 };
 
 function nonEmpty(value?: string | null): string | undefined {
   const trimmed = value?.trim();
   return trimmed ? trimmed : undefined;
-}
-
-function providerHasModel(provider: ProviderWithModels | undefined, model: string): boolean {
-  return provider?.models?.some(m => m.model === model) ?? false;
 }
 
 /**
@@ -143,27 +146,31 @@ export function resolveLegacyBuiltinSnapshotProviderId(args: {
   snapshotModel?: string | null;
   selectedProviderId?: string | null;
   providers: ReadonlyArray<ProviderWithModels>;
+  apiKeys?: Record<string, string | null | undefined>;
+  providerVerifyStatus?: Record<string, ProviderVerifyStatus | undefined>;
 }): string | undefined {
   const explicitProviderId = nonEmpty(args.snapshotProviderId);
   if (explicitProviderId) return explicitProviderId;
 
   const model = nonEmpty(args.snapshotModel);
   if (!model) return undefined;
-
-  const selectedProviderId = nonEmpty(args.selectedProviderId);
-  if (selectedProviderId) {
-    const selectedProvider = args.providers.find(p => p.id === selectedProviderId);
-    if (providerHasModel(selectedProvider, model)) {
-      return selectedProviderId;
-    }
-  }
-
-  const matchingProviderIds = Array.from(new Set(
-    args.providers
-      .filter(provider => providerHasModel(provider, model))
-      .map(provider => provider.id),
-  ));
-  return matchingProviderIds.length === 1 ? matchingProviderIds[0] : undefined;
+  const route = resolveLegacyModelOnlyProviderRoute({
+    model,
+    providers: args.providers.map(provider => ({
+      ...provider,
+      type: provider.type ?? 'api',
+      models: provider.models?.map(entry => ({
+        model: entry.model ?? '',
+        modelName: entry.model ?? '',
+        modelSeries: entry.model ?? '',
+      })) ?? [],
+    })),
+    credentials: {
+      apiKeys: args.apiKeys,
+      verifyStatus: args.providerVerifyStatus,
+    },
+  });
+  return isConcreteProviderRoute(route) ? route.providerId : undefined;
 }
 
 /**

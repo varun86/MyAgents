@@ -912,6 +912,8 @@ export async function updateSessionMetadata(
         | 'mcpEnabledServers'
         | 'enabledPluginIds'
         | 'providerId'
+        | 'providerRoute'
+        | 'providerRouteRepairedAt'
         | 'providerEnvJson'
         | 'configSnapshotAt'
         | 'materializationState'
