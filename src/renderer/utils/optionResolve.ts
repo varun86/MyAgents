@@ -28,6 +28,10 @@ function nonEmpty(value?: string | null): string | undefined {
   return trimmed ? trimmed : undefined;
 }
 
+function providerHasModel(provider: ProviderWithModels, model: string): boolean {
+  return provider.models?.some(entry => entry.model === model) ?? false;
+}
+
 /**
  * #244 — permission mode for a builtin-runtime send/display.
  *
@@ -150,9 +154,16 @@ export function resolveLegacyBuiltinSnapshotProviderId(args: {
   providerVerifyStatus?: Record<string, ProviderVerifyStatus | undefined>;
 }): string | undefined {
   const explicitProviderId = nonEmpty(args.snapshotProviderId);
-  if (explicitProviderId) return explicitProviderId;
-
   const model = nonEmpty(args.snapshotModel);
+  if (explicitProviderId) {
+    const provider = args.providers.find(candidate => candidate.id === explicitProviderId);
+    if (!provider) return undefined;
+    if (model && (provider.models?.length ?? 0) > 0 && !providerHasModel(provider, model)) {
+      return undefined;
+    }
+    return explicitProviderId;
+  }
+
   if (!model) return undefined;
   const route = resolveLegacyModelOnlyProviderRoute({
     model,

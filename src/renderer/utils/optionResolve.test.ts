@@ -75,12 +75,30 @@ describe('resolveLegacyBuiltinSnapshotProviderId', () => {
     },
   ];
 
-  it('keeps an explicit snapshot providerId', () => {
+  it('keeps an explicit snapshot providerId when the provider owns the snapshot model', () => {
     expect(resolveLegacyBuiltinSnapshotProviderId({
-      snapshotProviderId: 'deepseek',
+      snapshotProviderId: 'volcengine-api',
       snapshotModel: 'doubao-seed-2-0-pro-260215',
       providers,
-    })).toBe('deepseek');
+    })).toBe('volcengine-api');
+  });
+
+  it('does not keep an explicit snapshot providerId when the model belongs to another provider', () => {
+    expect(resolveLegacyBuiltinSnapshotProviderId({
+      snapshotProviderId: 'anthropic-api',
+      snapshotModel: 'doubao-seed-2-0-pro-260215',
+      providers,
+    })).toBeUndefined();
+  });
+
+  it('keeps an explicit disabled providerId so the UI can report provider unavailable instead of guessing', () => {
+    expect(resolveLegacyBuiltinSnapshotProviderId({
+      snapshotProviderId: 'volcengine-api',
+      snapshotModel: 'doubao-seed-2-0-pro-260215',
+      providers: providers.map(provider => provider.id === 'volcengine-api'
+        ? { ...provider, enabled: false }
+        : provider),
+    })).toBe('volcengine-api');
   });
 
   it('recovers a missing providerId when exactly one credential-configured provider owns the snapshot model', () => {
