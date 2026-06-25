@@ -1,11 +1,13 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  canResumeProviderHistoryForSwitch,
   isExistingSessionSwitch,
   isPinnedProviderUnavailable,
   isResetSessionBirth,
   resolveBuiltinPermissionMode,
   resolveCurrentProviderForSession,
+  resolveLegacyBuiltinSnapshotProviderId,
   resolveLauncherProvider,
   shouldDegradedLoad,
   shouldResetModelOnProviderChange,
@@ -50,6 +52,85 @@ describe('resolveCurrentProviderForSession (#401)', () => {
         fallbackProvider: fallback,
       }),
     ).toBe(pinned);
+  });
+});
+
+describe('resolveLegacyBuiltinSnapshotProviderId', () => {
+  const providers = [
+    {
+      id: 'volcengine-api',
+      models: [{ model: 'doubao-seed-2-0-pro-260215' }],
+    },
+    {
+      id: 'anthropic-sub',
+      models: [{ model: 'claude-opus-4-7' }],
+    },
+    {
+      id: 'anthropic-api',
+      models: [{ model: 'claude-opus-4-7' }],
+    },
+  ];
+
+  it('keeps an explicit snapshot providerId', () => {
+    expect(resolveLegacyBuiltinSnapshotProviderId({
+      snapshotProviderId: 'deepseek',
+      snapshotModel: 'doubao-seed-2-0-pro-260215',
+      providers,
+    })).toBe('deepseek');
+  });
+
+  it('recovers a missing providerId when exactly one provider owns the snapshot model', () => {
+    expect(resolveLegacyBuiltinSnapshotProviderId({
+      snapshotModel: 'doubao-seed-2-0-pro-260215',
+      providers,
+    })).toBe('volcengine-api');
+  });
+
+  it('uses the current selected provider to break same-model family ambiguity', () => {
+    expect(resolveLegacyBuiltinSnapshotProviderId({
+      snapshotModel: 'claude-opus-4-7',
+      selectedProviderId: 'anthropic-api',
+      providers,
+    })).toBe('anthropic-api');
+  });
+
+  it('does not guess when the model matches multiple providers and no selected provider helps', () => {
+    expect(resolveLegacyBuiltinSnapshotProviderId({
+      snapshotModel: 'claude-opus-4-7',
+      providers,
+    })).toBeUndefined();
+  });
+});
+
+describe('canResumeProviderHistoryForSwitch', () => {
+  it('does not force a new session for unrecoverable legacy snapshot identity', () => {
+    expect(canResumeProviderHistoryForSwitch({
+      legacyCurrentProviderUnknown: true,
+      nextProviderEnv: {
+        providerId: 'deepseek',
+        baseUrl: 'https://api.deepseek.com/anthropic',
+        apiProtocol: 'anthropic',
+        model: 'deepseek-v4-pro',
+      },
+    })).toBe(true);
+  });
+
+  it('uses the normal provider-history whitelist once current provider identity is known', () => {
+    expect(canResumeProviderHistoryForSwitch({
+      legacyCurrentProviderUnknown: false,
+      currentProviderEnv: {
+        providerId: 'volcengine-api',
+        baseUrl: 'https://ark.cn-beijing.volces.com/api/compatible',
+        apiProtocol: 'openai',
+        model: 'doubao-seed-2-0-pro-260215',
+      },
+      nextProviderEnv: {
+        providerId: 'deepseek',
+        baseUrl: 'https://api.deepseek.com/anthropic',
+        apiProtocol: 'anthropic',
+        model: 'deepseek-v4-pro',
+      },
+    })).toBe(false);
   });
 });
 
