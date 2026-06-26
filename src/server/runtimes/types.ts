@@ -2,6 +2,7 @@
 // Defines the interface that all runtime implementations must satisfy
 
 import type { RuntimeType, RuntimeModelInfo, RuntimePermissionMode, RuntimeDetection, RuntimeDiagnostics, RuntimeEnvPolicy, RuntimeSource } from '../../shared/types/runtime';
+import type { McpServerDefinition } from '../../shared/config-types';
 import type { InteractionScenario } from '../system-prompt';
 import type { ModelUsageEntry } from '../types/session';
 import type { ToolAttachment } from '../../shared/types/tool-attachment';
@@ -73,6 +74,12 @@ export interface SessionStartOptions {
    * external CLI runtimes use the user's system CLI and native home directory.
    */
   runtimeSource?: RuntimeSource;
+  /**
+   * Effective MyAgents MCP servers for runtimes that accept MCP at process
+   * startup. The builtin SDK path owns live setMcpServers; managed Codex
+   * consumes this as app-server startup config.
+   */
+  mcpServers?: McpServerDefinition[];
 }
 
 /**

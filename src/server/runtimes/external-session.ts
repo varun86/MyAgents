@@ -49,7 +49,7 @@ import {
   type SessionMaterializationScenario,
 } from '../utils/session-materialization';
 import { isManagedCodexProviderReady } from '../utils/managed-codex-readiness';
-import { findAgentByWorkspacePath, isCliToolRegistryEnabled, loadConfig as loadAdminConfig } from '../utils/admin-config';
+import { findAgentByWorkspacePath, isCliToolRegistryEnabled, loadConfig as loadAdminConfig, resolveWorkspaceConfig } from '../utils/admin-config';
 import type { AgentConfig } from '../../shared/types/agent';
 import type { MessageUsage, SessionMessage, TurnAnalyticsSource } from '../types/session';
 import type { SystemInitInfo } from '../../shared/types/system';
@@ -1666,6 +1666,9 @@ async function _doStartExternalSession(options: {
   );
 
   const existingMetadataAtStart = getSessionMetadata(options.sessionId);
+  const managedCodexMcpServers = runtimeType === 'codex' && runtimeSource === 'managed-provider'
+    ? resolveWorkspaceConfig(options.workspacePath, existingMetadataAtStart, { includeMcp: true }).mcpServers
+    : undefined;
   if (shouldTrackPendingExternalSessionBirth({
     hasInitialMessage: Boolean(options.initialMessage),
     hasResumeSessionId: Boolean(options.resumeSessionId),
@@ -1786,6 +1789,7 @@ async function _doStartExternalSession(options: {
         resumeSessionId: resumeId,
         envPolicy: resolvedEnvPolicy,
         runtimeSource,
+        mcpServers: managedCodexMcpServers,
       },
       handleUnifiedEvent,
     );

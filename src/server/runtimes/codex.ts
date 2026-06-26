@@ -14,7 +14,9 @@ import type {
   RuntimeAuthStatus, RuntimeFeatureFlag, RuntimeMcpServerInfo, RuntimeAppInfo,
   RuntimeDiagnostics, RuntimeDiagnosticsStatus, RuntimeEffectiveEnv,
   RuntimeProxyPolicy, RuntimeDiagnosticIssue,
+  RuntimeSource,
 } from '../../shared/types/runtime';
+import type { McpServerDefinition } from '../../shared/config-types';
 import { CODEX_PERMISSION_MODES } from '../../shared/types/runtime';
 import { coerceFileChanges, formatFileChangeForResult } from '../../shared/fileChange';
 import type { AgentPlanTodo, AgentRuntime, RuntimeConfigCapabilities, RuntimeProcess, SessionStartOptions, UnifiedEvent, UnifiedEventCallback, ResolvedImagePayload, SubAgentScope } from './types';
@@ -23,6 +25,7 @@ import { mapCodexTokenUsage, type CodexThreadTokenUsage } from './codex-token-us
 import { stripAnsi } from './env-utils';
 import { resolveCodexCommandContext } from './codex-command-context';
 import { ensureDirSync } from '../utils/fs-utils';
+import { getBundledCusePath } from '../utils/runtime';
 import { killWithEscalation } from './utils/kill-with-escalation';
 import { withLogContext } from '../logger-context';
 import {
@@ -68,6 +71,323 @@ export function buildCodexInitializeParams(): Record<string, unknown> {
     clientInfo: { name: 'MyAgents', title: null, version: process.env.MYAGENTS_VERSION || '0.1.60' },
     capabilities: CODEX_INITIALIZE_CAPABILITIES,
   };
+}
+
+const CODEX_PROJECT_DOC_FALLBACK_CONFIG = 'project_doc_fallback_filenames=["CLAUDE.md"]';
+const CODEX_FILE_AUTH_CONFIG = 'cli_auth_credentials_store="file"';
+const CODEX_MCP_NO_PROXY_VAL = 'localhost,localhost.localdomain,127.0.0.1,127.0.0.0/8,::1,[::1]';
+const CODEX_MCP_PROXY_ENV_KEYS = [
+  'HTTP_PROXY',
+  'HTTPS_PROXY',
+  'ALL_PROXY',
+  'NO_PROXY',
+  'http_proxy',
+  'https_proxy',
+  'all_proxy',
+  'no_proxy',
+] as const;
+const CODEX_MCP_TEMPLATE_RE = /\{\{[A-Za-z_][A-Za-z0-9_]*\}\}/;
+const CODEX_MCP_ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const CODEX_MCP_SECRET_VALUE_RE = /\b(?:sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9_]{12,}|xox[baprs]-[A-Za-z0-9-]{12,})\b/i;
+const CODEX_MCP_INLINE_SECRET_RE = /(?:api[-_]?key|token|secret|password|authorization|access[-_]?token|refresh[-_]?token)\s*[:=]\s*[^,\s]+/i;
+const CODEX_MCP_SENSITIVE_FLAG_RE = /^-{1,2}(?:api[-_]?key|key|token|access[-_]?token|refresh[-_]?token|secret|password|passwd|pwd|authorization|auth-token)(?:$|[=:])/i;
+const CODEX_MCP_PARENT_ENV_DENY = new Set([
+  'PATH',
+  'HOME',
+  'USERPROFILE',
+  'APPDATA',
+  'LOCALAPPDATA',
+  'TMPDIR',
+  'TEMP',
+  'TMP',
+  'PWD',
+  'NODE_OPTIONS',
+  'NODE_PATH',
+  'LD_PRELOAD',
+  'DYLD_INSERT_LIBRARIES',
+  'DYLD_LIBRARY_PATH',
+  'MYAGENTS_RUNTIME_SOURCE',
+  'OPENAI_API_KEY',
+  'OPENAI_BASE_URL',
+  'OPENAI_ORG_ID',
+  'OPENAI_ORGANIZATION',
+]);
+
+function tomlString(value: string): string {
+  return JSON.stringify(value);
+}
+
+function tomlArray(values: readonly string[]): string {
+  return `[${values.map(tomlString).join(',')}]`;
+}
+
+function tomlKey(value: string): string {
+  return /^[A-Za-z0-9_-]+$/.test(value) ? value : tomlString(value);
+}
+
+function tomlInlineStringMap(values: Record<string, string>): string {
+  const entries = Object.entries(values);
+  return `{${entries.map(([key, value]) => `${tomlKey(key)}=${tomlString(value)}`).join(',')}}`;
+}
+
+function codexMcpServerName(id: string): string | null {
+  const normalized = id.replace(/[^A-Za-z0-9_-]/g, '_').replace(/^_+|_+$/g, '');
+  return normalized || null;
+}
+
+function codexMcpEnvVarName(serverName: string, key: string): string {
+  const safeServer = serverName.toUpperCase().replace(/[^A-Z0-9_]/g, '_');
+  const safeKey = key.toUpperCase().replace(/[^A-Z0-9_]/g, '_');
+  return `MYAGENTS_MCP_${safeServer}_${safeKey}`.slice(0, 180);
+}
+
+function uniqueCodexMcpEnvVarName(
+  serverName: string,
+  key: string,
+  used: Set<string>,
+): string {
+  const base = codexMcpEnvVarName(serverName, key);
+  let candidate = base;
+  let i = 2;
+  while (used.has(candidate)) {
+    const suffix = `_${i}`;
+    candidate = `${base.slice(0, Math.max(1, 180 - suffix.length))}${suffix}`;
+    i += 1;
+  }
+  used.add(candidate);
+  return candidate;
+}
+
+function hasCodexMcpTemplate(value: string): boolean {
+  return CODEX_MCP_TEMPLATE_RE.test(value);
+}
+
+function resolveMcpTemplateValue(
+  value: string,
+  env: Record<string, string> | undefined,
+): string | null {
+  let missing = false;
+  const resolved = value.replace(/\{\{([A-Za-z_][A-Za-z0-9_]*)\}\}/g, (_match, key: string) => {
+    const replacement = env?.[key];
+    if (replacement === undefined) {
+      missing = true;
+      return '';
+    }
+    return replacement;
+  });
+  return missing ? null : resolved;
+}
+
+function unsafeCodexMcpStdioValueReason(value: string): string | null {
+  if (hasCodexMcpTemplate(value)) return 'contains MyAgents env placeholder';
+  if (CODEX_MCP_SECRET_VALUE_RE.test(value)) return 'contains inline secret-looking value';
+  if (/bearer\s+\S+/i.test(value)) return 'contains inline bearer token';
+  if (CODEX_MCP_INLINE_SECRET_RE.test(value)) return 'contains inline credential assignment';
+  return null;
+}
+
+function unsafeCodexMcpStdioArgsReason(args: readonly string[]): string | null {
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i] ?? '';
+    const valueReason = unsafeCodexMcpStdioValueReason(arg);
+    if (valueReason) return `arg[${i}] ${valueReason}`;
+    if (CODEX_MCP_SENSITIVE_FLAG_RE.test(arg.trim())) {
+      return `arg[${i}] uses a credential flag`;
+    }
+    const previous = args[i - 1]?.trim();
+    if (previous && CODEX_MCP_SENSITIVE_FLAG_RE.test(previous)) {
+      return `arg[${i}] follows a credential flag`;
+    }
+  }
+  return null;
+}
+
+function unsafeCodexMcpUrlReason(rawUrl: string): string | null {
+  if (hasCodexMcpTemplate(rawUrl)) return 'contains MyAgents env placeholder';
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    return 'is not a valid URL';
+  }
+  if (parsed.username || parsed.password) return 'contains URL userinfo';
+  if (parsed.search || parsed.hash) {
+    return 'contains query string or fragment that would enter argv';
+  }
+  if (CODEX_MCP_SECRET_VALUE_RE.test(parsed.pathname)) {
+    return 'contains secret-looking path segment';
+  }
+  return null;
+}
+
+function canExposeMcpEnvKeyToCodexParent(key: string): boolean {
+  if (!CODEX_MCP_ENV_NAME_RE.test(key)) return false;
+  const upper = key.toUpperCase();
+  if (upper.startsWith('CODEX_') || upper.startsWith('OPENAI_')) return false;
+  if (CODEX_MCP_PARENT_ENV_DENY.has(upper)) return false;
+  if ((CODEX_MCP_PROXY_ENV_KEYS as readonly string[]).some(proxyKey => proxyKey.toUpperCase() === upper)) {
+    return false;
+  }
+  return true;
+}
+
+function pushCodexConfigArg(target: string[], key: string, valueToml: string): void {
+  target.push('-c', `${key}=${valueToml}`);
+}
+
+function buildManagedCodexMcpConfigArgs(
+  servers: readonly McpServerDefinition[] | undefined,
+  codexEnv: Record<string, string | undefined>,
+): string[] {
+  if (!servers || servers.length === 0) return [];
+
+  const args: string[] = [];
+  const usedNames = new Set<string>();
+  const usedGeneratedEnvNames = new Set<string>();
+  let skipped = 0;
+
+  codexEnv.NO_PROXY = CODEX_MCP_NO_PROXY_VAL;
+  codexEnv.no_proxy = CODEX_MCP_NO_PROXY_VAL;
+
+  for (const server of servers) {
+    const name = codexMcpServerName(server.id);
+    if (!name || usedNames.has(name)) {
+      skipped += 1;
+      console.warn(`[codex] managed MCP skipped id=${server.id}: invalid or duplicate Codex MCP server name`);
+      continue;
+    }
+
+    if (server.type === 'stdio') {
+      let command = server.command;
+      if (command === '__builtin__') {
+        skipped += 1;
+        console.warn(`[codex] managed MCP ${server.id} skipped: SDK in-process MCP cannot be passed to Codex app-server`);
+        continue;
+      }
+      if (command === '__bundled_cuse__') {
+        command = getBundledCusePath() ?? undefined;
+        if (!command) {
+          skipped += 1;
+          console.warn(`[codex] managed MCP ${server.id} skipped: bundled cuse binary not found`);
+          continue;
+        }
+      }
+      if (!command) {
+        skipped += 1;
+        console.warn(`[codex] managed MCP ${server.id} skipped: missing stdio command`);
+        continue;
+      }
+      const commandReason = unsafeCodexMcpStdioValueReason(command);
+      if (commandReason) {
+        skipped += 1;
+        console.warn(`[codex] managed MCP ${server.id} skipped: stdio command ${commandReason}`);
+        continue;
+      }
+      const stdioArgs = Array.isArray(server.args) ? server.args : [];
+      const argsReason = unsafeCodexMcpStdioArgsReason(stdioArgs);
+      if (argsReason) {
+        skipped += 1;
+        console.warn(`[codex] managed MCP ${server.id} skipped: stdio args unsafe for Codex argv (${argsReason})`);
+        continue;
+      }
+
+      const serverEnv = Object.entries(server.env ?? {});
+      const unsafeEnvKeys = serverEnv
+        .map(([key]) => key)
+        .filter(key => !canExposeMcpEnvKeyToCodexParent(key));
+      if (unsafeEnvKeys.length > 0) {
+        skipped += 1;
+        console.warn(`[codex] managed MCP ${server.id} skipped: env keys cannot be exposed to Codex parent process (${unsafeEnvKeys.join(', ')})`);
+        continue;
+      }
+
+      usedNames.add(name);
+      pushCodexConfigArg(args, `mcp_servers.${name}.command`, tomlString(command));
+      pushCodexConfigArg(args, `mcp_servers.${name}.args`, tomlArray(stdioArgs));
+
+      const envVars = new Set<string>();
+      for (const key of CODEX_MCP_PROXY_ENV_KEYS) {
+        if (codexEnv[key]) envVars.add(key);
+      }
+      envVars.add('NO_PROXY');
+      envVars.add('no_proxy');
+      for (const [key, value] of serverEnv) {
+        if (!key || value === undefined) continue;
+        codexEnv[key] = value;
+        envVars.add(key);
+      }
+      pushCodexConfigArg(args, `mcp_servers.${name}.env_vars`, tomlArray([...envVars].sort()));
+      continue;
+    }
+
+    if (server.type === 'http') {
+      if (!server.url) {
+        skipped += 1;
+        console.warn(`[codex] managed MCP ${server.id} skipped: missing HTTP MCP URL`);
+        continue;
+      }
+      const urlReason = unsafeCodexMcpUrlReason(server.url);
+      if (urlReason) {
+        skipped += 1;
+        console.warn(`[codex] managed MCP ${server.id} skipped: HTTP MCP URL unsafe for Codex argv (${urlReason})`);
+        continue;
+      }
+
+      const envHeaderMap: Record<string, string> = {};
+      const pendingHeaderEnv: Record<string, string> = {};
+      let headerConfigInvalid = false;
+      if (server.headers && Object.keys(server.headers).length > 0) {
+        for (const [header, value] of Object.entries(server.headers)) {
+          if (!header || value === undefined) continue;
+          const resolvedHeaderValue = resolveMcpTemplateValue(value, server.env);
+          if (resolvedHeaderValue === null) {
+            skipped += 1;
+            console.warn(`[codex] managed MCP ${server.id} skipped: HTTP header ${header} references missing env placeholder`);
+            headerConfigInvalid = true;
+            break;
+          }
+          const envName = uniqueCodexMcpEnvVarName(name, header, usedGeneratedEnvNames);
+          pendingHeaderEnv[envName] = resolvedHeaderValue;
+          envHeaderMap[header] = envName;
+        }
+      }
+      if (headerConfigInvalid) continue;
+
+      usedNames.add(name);
+      Object.assign(codexEnv, pendingHeaderEnv);
+      pushCodexConfigArg(args, `mcp_servers.${name}.url`, tomlString(server.url));
+      if (Object.keys(envHeaderMap).length > 0) {
+        pushCodexConfigArg(args, `mcp_servers.${name}.env_http_headers`, tomlInlineStringMap(envHeaderMap));
+      }
+      continue;
+    }
+
+    skipped += 1;
+    console.warn(`[codex] managed MCP ${server.id} skipped: Codex app-server does not support MyAgents MCP type ${server.type}`);
+  }
+
+  if (args.length > 0 || skipped > 0) {
+    console.log(`[codex] managed MCP startup config: injected=${usedNames.size} skipped=${skipped}`);
+  }
+  return args;
+}
+
+export function buildCodexAppServerArgs(args: {
+  commandPath: string;
+  runtimeSource: RuntimeSource;
+  codexEnv: Record<string, string | undefined>;
+  mcpServers?: readonly McpServerDefinition[];
+}): string[] {
+  const codexArgs = [
+    args.commandPath,
+    '-c', CODEX_PROJECT_DOC_FALLBACK_CONFIG,
+  ];
+  if (args.runtimeSource === 'managed-provider') {
+    codexArgs.push('-c', CODEX_FILE_AUTH_CONFIG);
+    codexArgs.push(...buildManagedCodexMcpConfigArgs(args.mcpServers, args.codexEnv));
+  }
+  codexArgs.push('app-server');
+  return codexArgs;
 }
 
 export const KNOWN_CODEX_SERVER_REQUEST_METHODS = Object.freeze([
@@ -1839,14 +2159,12 @@ export class CodexRuntime implements AgentRuntime {
     // consults `$PWD` (vs. the kernel-level cwd Rust's spawn passes) sees the
     // workspace, not the sidecar's launch directory. Codex review SM finding.
     codexEnv.PWD = options.workspacePath;
-    const codexArgs = [
-      context.commandPath,
-      '-c', 'project_doc_fallback_filenames=["CLAUDE.md"]',
-      ...(runtimeSource === 'managed-provider'
-        ? ['-c', 'cli_auth_credentials_store="file"']
-        : []),
-      'app-server',
-    ];
+    const codexArgs = buildCodexAppServerArgs({
+      commandPath: context.commandPath,
+      runtimeSource,
+      codexEnv,
+      mcpServers: options.mcpServers,
+    });
     console.log(
       `[codex] spawn source=${runtimeSource} version=${context.version ?? 'system-cli'} ` +
       `platform=${context.platform ?? process.platform} codexHome=${context.codexHome ? '<managed>' : '<default>'}`,

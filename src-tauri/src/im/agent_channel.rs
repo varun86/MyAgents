@@ -1,5 +1,12 @@
 use super::*;
 
+fn filter_legacy_provider_command_providers(
+    mut providers: Vec<serde_json::Value>,
+) -> Vec<serde_json::Value> {
+    providers.retain(|p| p.get("id").and_then(|id| id.as_str()) != Some("codex-sub"));
+    providers
+}
+
 /// Shutdown a single bot instance (extracted from stop_im_bot for reuse by agent commands).
 /// Does NOT lock any global state — caller is responsible for removing the instance first.
 pub(super) async fn shutdown_bot_instance(
@@ -1159,6 +1166,7 @@ pub(super) async fn create_bot_instance<R: Runtime>(
                                         .await.ok().flatten();
                                     ap.as_ref()
                                         .and_then(|json| serde_json::from_str(json).ok())
+                                        .map(filter_legacy_provider_command_providers)
                                         .unwrap_or_default()
                                 };
                                 let current_env = current_provider_env_for_loop.read().await;
@@ -1303,6 +1311,7 @@ pub(super) async fn create_bot_instance<R: Runtime>(
                                 .await.ok().flatten();
                             ap.as_ref()
                                 .and_then(|json| serde_json::from_str(json).ok())
+                                .map(filter_legacy_provider_command_providers)
                                 .unwrap_or_default()
                         };
 

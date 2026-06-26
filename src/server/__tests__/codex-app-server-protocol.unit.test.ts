@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import {
   buildCodexFileChangeResultContent,
+  buildCodexAppServerArgs,
   buildCodexInitializeParams,
   buildCodexSandboxPolicy,
   buildCodexTurnStartParams,
@@ -46,6 +47,143 @@ describe('Codex app-server protocol helpers', () => {
       'applyPatchApproval',
       'execCommandApproval',
     ]);
+  });
+
+  it('keeps system-cli Codex app-server startup free of managed provider MCP config', () => {
+    const env: Record<string, string | undefined> = {};
+    expect(buildCodexAppServerArgs({
+      commandPath: '/usr/local/bin/codex',
+      runtimeSource: 'system-cli',
+      codexEnv: env,
+      mcpServers: [{
+        id: 'fs',
+        name: 'Filesystem',
+        type: 'stdio',
+        command: 'node',
+        args: ['server.js'],
+        env: { FS_TOKEN: 'secret-token' },
+        isBuiltin: false,
+      }],
+    })).toEqual([
+      '/usr/local/bin/codex',
+      '-c',
+      'project_doc_fallback_filenames=["CLAUDE.md"]',
+      'app-server',
+    ]);
+    expect(env.FS_TOKEN).toBeUndefined();
+  });
+
+  it('injects managed Codex MCP servers through app-server config args without argv secrets', () => {
+    const env: Record<string, string | undefined> = { HTTPS_PROXY: 'http://127.0.0.1:7890' };
+    const args = buildCodexAppServerArgs({
+      commandPath: '/managed/codex',
+      runtimeSource: 'managed-provider',
+      codexEnv: env,
+      mcpServers: [
+        {
+          id: 'fs.tool',
+          name: 'Filesystem',
+          type: 'stdio',
+          command: 'node',
+          args: ['server.js'],
+          env: { FS_TOKEN: 'secret-token' },
+          isBuiltin: false,
+        },
+        {
+          id: 'remote-http',
+          name: 'Remote',
+          type: 'http',
+          url: 'https://example.com/mcp',
+          headers: { Authorization: 'Bearer {{REMOTE_TOKEN}}' },
+          env: { REMOTE_TOKEN: 'remote-secret' },
+          isBuiltin: false,
+        },
+      ],
+    });
+
+    expect(args).toContain('cli_auth_credentials_store="file"');
+    expect(args).toContain('mcp_servers.fs_tool.command="node"');
+    expect(args).toContain('mcp_servers.fs_tool.args=["server.js"]');
+    expect(args).toContain('mcp_servers.fs_tool.env_vars=["FS_TOKEN","HTTPS_PROXY","NO_PROXY","no_proxy"]');
+    expect(args).toContain('mcp_servers.remote-http.url="https://example.com/mcp"');
+    expect(args).toContain('mcp_servers.remote-http.env_http_headers={Authorization="MYAGENTS_MCP_REMOTE_HTTP_AUTHORIZATION"}');
+    expect(args.join('\n')).not.toContain('secret-token');
+    expect(args.join('\n')).not.toContain('remote-secret');
+    expect(env.FS_TOKEN).toBe('secret-token');
+    expect(env.MYAGENTS_MCP_REMOTE_HTTP_AUTHORIZATION).toBe('Bearer remote-secret');
+    expect(env.REMOTE_TOKEN).toBeUndefined();
+    expect(env.NO_PROXY).toContain('127.0.0.1');
+  });
+
+  it('skips managed Codex MCP entries that cannot be represented safely', () => {
+    const env: Record<string, string | undefined> = {};
+    const args = buildCodexAppServerArgs({
+      commandPath: '/managed/codex',
+      runtimeSource: 'managed-provider',
+      codexEnv: env,
+      mcpServers: [
+        {
+          id: 'builtin-image',
+          name: 'Builtin image',
+          type: 'stdio',
+          command: '__builtin__',
+          args: [],
+          isBuiltin: true,
+        },
+        {
+          id: 'arg-secret',
+          name: 'Arg Secret',
+          type: 'stdio',
+          command: 'node',
+          args: ['server.js', '--api-key', 'sk-test-secret-value'],
+          isBuiltin: false,
+        },
+        {
+          id: 'env-openai',
+          name: 'OpenAI env',
+          type: 'stdio',
+          command: 'node',
+          args: ['server.js'],
+          env: { OPENAI_API_KEY: 'must-not-leak' },
+          isBuiltin: false,
+        },
+        {
+          id: 'url-secret',
+          name: 'URL Secret',
+          type: 'http',
+          url: 'https://example.com/mcp?key={{TOKEN}}',
+          env: { TOKEN: 'secret-token' },
+          isBuiltin: false,
+        },
+        {
+          id: 'legacy-sse',
+          name: 'Legacy SSE',
+          type: 'sse',
+          url: 'https://example.com/sse',
+          isBuiltin: false,
+        },
+        {
+          id: 'url-query',
+          name: 'URL Query',
+          type: 'http',
+          url: 'https://example.com/mcp?transport=streamable',
+          isBuiltin: false,
+        },
+      ],
+    });
+
+    expect(args).toEqual([
+      '/managed/codex',
+      '-c',
+      'project_doc_fallback_filenames=["CLAUDE.md"]',
+      '-c',
+      'cli_auth_credentials_store="file"',
+      'app-server',
+    ]);
+    expect(env.TOKEN).toBeUndefined();
+    expect(env.OPENAI_API_KEY).toBeUndefined();
+    expect(args.join('\n')).not.toContain('sk-test-secret-value');
+    expect(args.join('\n')).not.toContain('must-not-leak');
   });
 
   it('passes cwd, approvalPolicy, sandboxPolicy, model, and summary to turn/start', () => {
