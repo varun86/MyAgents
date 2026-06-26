@@ -1,10 +1,9 @@
 /**
  * CustomTitleBar - Chrome-style titlebar with integrated tabs
  *
- * Key insight: titlebar drag affordances must live on SPECIFIC spacer
- * elements, not on the parent container. On macOS those spacers use
- * TitlebarDragRegion's nil-safe native path instead of Tauri's injected
- * data-tauri-drag-region path.
+ * Key insight: data-tauri-drag-region must be on SPECIFIC draggable elements,
+ * not just the parent container. Also, -webkit-app-region CSS CONFLICTS with
+ * Tauri's mechanism on macOS WebKit.
  *
  * Windows: Custom window controls (minimize, maximize, close) are added since
  * we use decorations: false on Windows for custom title bar styling.
@@ -15,7 +14,6 @@ import { type CSSProperties, type ReactNode, useCallback, useEffect, useRef, use
 import { isTauri } from '@/api/tauriClient';
 import { CUSTOM_EVENTS } from '@/../shared/constants';
 import FeedbackPopover from './FeedbackPopover';
-import TitlebarDragRegion from './TitlebarDragRegion';
 
 interface CustomTitleBarProps {
     children: ReactNode;  // TabBar component
@@ -56,9 +54,10 @@ const isWindows = typeof navigator !== 'undefined' && navigator.platform?.includ
 
 function TitlebarDragSpacer({ className = '', style }: { className?: string; style?: CSSProperties }) {
     return (
-        <TitlebarDragRegion
+        <div
             className={`h-full flex-shrink-0 ${className}`}
             style={style}
+            data-tauri-drag-region
             aria-hidden="true"
         />
     );
@@ -178,17 +177,19 @@ export default function CustomTitleBar({
         >
             {/* macOS traffic lights spacer - DRAGGABLE (hidden on Windows) */}
             {!isWindows && !isFullscreen && (
-                <TitlebarDragSpacer
+                <div
                     className="h-full flex-shrink-0"
                     style={{ width: MACOS_TRAFFIC_LIGHTS_WIDTH }}
+                    data-tauri-drag-region
                 />
             )}
 
             {/* Windows: keep a reliable left-edge drag target even when tabs fill the bar. */}
             {isWindows && (
-                <TitlebarDragSpacer
+                <div
                     className="h-full flex-shrink-0"
                     style={{ width: EDGE_DRAG_REGION_WIDTH }}
+                    data-tauri-drag-region
                 />
             )}
 

@@ -26,7 +26,6 @@ import { List, Plus } from 'lucide-react';
 import SortableTabItem from '@/components/SortableTabItem';
 import { TAB_BAR_BUTTON_WIDTH_PX, TAB_BAR_GAP_PX, getTabStripIdealWidth } from '@/components/tabBarLayout';
 import { TabPointerSensor, TAB_POINTER_SENSOR_OPTIONS } from '@/components/tabPointerSensor';
-import TitlebarDragRegion from '@/components/TitlebarDragRegion';
 import { Popover } from '@/components/ui/Popover';
 import { useCloseLayer } from '@/hooks/useCloseLayer';
 import { type Tab, MAX_TABS, getFolderName } from '@/types/tab';
@@ -337,7 +336,7 @@ export default memo(function TabBar({
                 )}
             </div>
 
-            <TitlebarDragRegion className="h-full min-w-0 flex-1" aria-hidden="true" />
+            <div className="h-full min-w-0 flex-1" data-tauri-drag-region aria-hidden="true" />
         </div>
     );
 });

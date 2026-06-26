@@ -108,7 +108,7 @@ objc2-web-kit = { version = "0.3.2", features = ["WKWebView", "block2"] }
 # (see module docstring). Same crate version (0.3.2) as the other objc2-*
 # deps above; transitively pulled already by wry — adding it directly so we
 # can import the AppKit types.
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSWindow", "NSView", "NSResponder", "NSButton", "NSControl", "NSApplication", "NSEvent", "NSGraphicsContext", "std"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSWindow", "NSView", "NSResponder", "NSButton", "NSControl", "std"] }
 
 # Windows platform APIs:
 # - pid-liveness/start-time probes via PROCESS_QUERY_LIMITED_INFORMATION
