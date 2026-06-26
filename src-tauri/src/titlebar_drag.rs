@@ -1,12 +1,9 @@
 #[cfg(target_os = "macos")]
-use core::ffi::c_float;
-
-#[cfg(target_os = "macos")]
 use crate::ulog_warn;
 #[cfg(target_os = "macos")]
 use objc2::rc::Retained;
 #[cfg(target_os = "macos")]
-use objc2_app_kit::{NSApp, NSEvent, NSEventModifierFlags, NSEventType, NSWindow};
+use objc2_app_kit::{NSApp, NSEvent, NSEventType, NSWindow};
 #[cfg(target_os = "macos")]
 use objc2_foundation::{MainThreadMarker, NSInteger, NSTimeInterval};
 #[cfg(target_os = "macos")]
@@ -46,10 +43,8 @@ fn perform_safe_drag<R: Runtime>(window: &WebviewWindow<R>) -> Result<(), String
     let app = NSApp(mtm);
     let source_event = app.currentEvent().or_else(|| ns_window.currentEvent());
     let drag_event = match source_event {
-        Some(event) if event.r#type() == NSEventType::LeftMouseDown => event,
-        Some(event) => synthesize_left_mouse_down(ns_window, Some(&event))
-            .ok_or_else(|| "failed to synthesize left-mouse-down drag event".to_string())?,
-        None => synthesize_left_mouse_down(ns_window, None)
+        Some(event) if is_reusable_drag_event(&event) => event,
+        _ => synthesize_left_mouse_down(ns_window)
             .ok_or_else(|| "failed to synthesize left-mouse-down drag event".to_string())?,
     };
 
@@ -58,34 +53,44 @@ fn perform_safe_drag<R: Runtime>(window: &WebviewWindow<R>) -> Result<(), String
 }
 
 #[cfg(target_os = "macos")]
-fn synthesize_left_mouse_down(
-    window: &NSWindow,
-    source: Option<&NSEvent>,
-) -> Option<Retained<NSEvent>> {
-    let flags = source
-        .map(NSEvent::modifierFlags)
-        .unwrap_or_else(NSEvent::modifierFlags_class);
-    let timestamp: NSTimeInterval = source.map(NSEvent::timestamp).unwrap_or(0.0);
-    let window_number: NSInteger = source
-        .map(NSEvent::windowNumber)
-        .filter(|value| *value != 0)
-        .unwrap_or_else(|| window.windowNumber());
-    let click_count: NSInteger = source
-        .map(NSEvent::clickCount)
-        .filter(|value| *value > 0)
-        .unwrap_or(1);
-    let pressure: c_float = source.map(NSEvent::pressure).unwrap_or(0.0);
-    let flags: NSEventModifierFlags = flags;
+fn is_reusable_drag_event(event: &NSEvent) -> bool {
+    is_reusable_drag_event_type(event.r#type())
+}
+
+#[cfg(target_os = "macos")]
+fn is_reusable_drag_event_type(event_type: NSEventType) -> bool {
+    event_type == NSEventType::LeftMouseDown
+}
+
+#[cfg(target_os = "macos")]
+fn synthesize_left_mouse_down(window: &NSWindow) -> Option<Retained<NSEvent>> {
+    // `currentEvent` can be a key, system, or tracking event by the time this
+    // command reaches AppKit. Mouse-only selectors such as `clickCount` throw
+    // Objective-C exceptions for those event types, which aborts the process.
+    let timestamp: NSTimeInterval = 0.0;
+    let window_number: NSInteger = window.windowNumber();
 
     NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
         NSEventType::LeftMouseDown,
         NSEvent::mouseLocation(),
-        flags,
+        NSEvent::modifierFlags_class(),
         timestamp,
         window_number,
         None,
         0,
-        click_count,
-        pressure,
+        1,
+        0.0,
     )
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_left_mouse_down_is_reused_for_window_drag() {
+        assert!(is_reusable_drag_event_type(NSEventType::LeftMouseDown));
+        assert!(!is_reusable_drag_event_type(NSEventType::LeftMouseUp));
+        assert!(!is_reusable_drag_event_type(NSEventType::KeyDown));
+    }
 }
