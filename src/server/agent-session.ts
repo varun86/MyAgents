@@ -1,5 +1,5 @@
 import { randomUUID } from 'crypto';
-import { existsSync, readdirSync, symlinkSync, lstatSync, readFileSync, readlinkSync, rmSync } from 'fs';
+import { existsSync, readdirSync, symlinkSync, lstatSync, readFileSync, readlinkSync, rmSync, writeFileSync } from 'fs';
 import { dirname, join, resolve, sep } from 'path';
 import { createRequire } from 'module';
 import { query, getSessionMessages as sdkGetSessionMessages, forkSession as sdkForkSession, deleteSession as sdkDeleteSession, type Query, type SDKUserMessage, type AgentDefinition, type HookInput, type HookJSONOutput, type PreToolUseHookInput, type PostToolUseHookInput, type PermissionRequestHookInput, type SlashCommand as SdkSlashCommand } from '@anthropic-ai/claude-agent-sdk';
@@ -5019,6 +5019,73 @@ function sealCcAuthEnv(env: NodeJS.ProcessEnv): void {
   }
 }
 
+const WINDOWS_UTF8_BASH_ENV_SENTINEL = 'MYAGENTS_WINDOWS_UTF8';
+const WINDOWS_UTF8_BASH_ENV_FILENAME = 'windows-utf8-bash-env.sh';
+const WINDOWS_UTF8_BASH_ENV_CONTENT = [
+  '# MyAgents-managed Bash prelude for Windows SDK tool output.',
+  `if [ -n "\${MYAGENTS_ORIGINAL_BASH_ENV:-}" ] && [ "\${MYAGENTS_ORIGINAL_BASH_ENV}" != "\${BASH_ENV:-}" ] && [ -r "\${MYAGENTS_ORIGINAL_BASH_ENV}" ]; then`,
+  '  . "${MYAGENTS_ORIGINAL_BASH_ENV}"',
+  'fi',
+  `export ${WINDOWS_UTF8_BASH_ENV_SENTINEL}=1`,
+  'export LANG=C.UTF-8',
+  'export LC_ALL=C.UTF-8',
+  'export PYTHONUTF8=1',
+  'export PYTHONIOENCODING=utf-8',
+  'export LESSCHARSET=utf-8',
+  'chcp.com 65001 >/dev/null 2>&1 || true',
+  '',
+].join('\n');
+
+function ensureWindowsUtf8BashEnvScript(home: string): string | undefined {
+  if (!home) return undefined;
+  const scriptDir = resolve(home, '.myagents', 'runtime');
+  const scriptPath = resolve(scriptDir, WINDOWS_UTF8_BASH_ENV_FILENAME);
+  try {
+    ensureDirSync(scriptDir);
+    if (!existsSync(scriptPath) || readFileSync(scriptPath, 'utf-8') !== WINDOWS_UTF8_BASH_ENV_CONTENT) {
+      writeFileSync(scriptPath, WINDOWS_UTF8_BASH_ENV_CONTENT, 'utf-8');
+    }
+    return scriptPath;
+  } catch (err) {
+    console.warn(`[env] Failed to prepare Windows UTF-8 Bash prelude at ${scriptPath}: ${err instanceof Error ? err.message : String(err)}`);
+    return undefined;
+  }
+}
+
+function toGitBashEnvPath(path: string): string {
+  return path.replace(/\\/g, '/');
+}
+
+export function applyWindowsUtf8SubprocessEnv(
+  env: NodeJS.ProcessEnv,
+  options: { platform?: NodeJS.Platform; useBashEnvPrelude?: boolean; home?: string } = {},
+): void {
+  const platform = options.platform ?? process.platform;
+  if (platform !== 'win32') return;
+
+  // The SDK serializes tool output as UTF-8 strings. On Windows, many child
+  // tools choose the system ANSI/OEM code page unless the process environment
+  // says otherwise, so force UTF-8 before bytes reach the SDK transport.
+  env.LANG = 'C.UTF-8';
+  env.LC_ALL = 'C.UTF-8';
+  env.PYTHONUTF8 = '1';
+  env.PYTHONIOENCODING = 'utf-8';
+  env.LESSCHARSET = 'utf-8';
+
+  if (!options.useBashEnvPrelude) return;
+
+  const bashEnvScript = ensureWindowsUtf8BashEnvScript(options.home ?? '');
+  if (!bashEnvScript) return;
+
+  const bashEnvScriptForShell = toGitBashEnvPath(bashEnvScript);
+  const existingBashEnv = env.BASH_ENV;
+  const existingBashEnvForShell = existingBashEnv ? toGitBashEnvPath(existingBashEnv) : undefined;
+  if (existingBashEnvForShell && existingBashEnvForShell !== bashEnvScriptForShell) {
+    env.MYAGENTS_ORIGINAL_BASH_ENV = existingBashEnvForShell;
+  }
+  env.BASH_ENV = bashEnvScriptForShell;
+}
+
 /**
  * Build the env map passed to the Claude Agent SDK subprocess.
  *
@@ -5280,6 +5347,12 @@ export function buildClaudeSessionEnv(
     }
     env.CLAUDE_CODE_GIT_BASH_PATH = resolvedGitBash;
   }
+
+  applyWindowsUtf8SubprocessEnv(env, {
+    platform: process.platform,
+    useBashEnvPrelude: isWindows,
+    home,
+  });
 
   // Use provided providerEnv or fall back to configState.currentProviderEnv
   const effectiveProviderEnv = providerEnv ?? configState.currentProviderEnv;

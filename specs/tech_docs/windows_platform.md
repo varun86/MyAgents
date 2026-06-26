@@ -57,6 +57,12 @@ export function getPlatformPaths() {
 | 应用数据 | `APPDATA` | `~/.config` |
 | 路径分隔符 | `;` | `:` |
 
+### SDK Shell 输出编码
+
+Claude Agent SDK 的 Bash 工具输出最终会以 UTF-8 字符串进入 MyAgents session JSONL / SSE。Windows 上不少子进程会默认按系统 ANSI/OEM code page（如 CP936/GBK）写 stdout/stderr；一旦 SDK 按 UTF-8 解码成字符串，后续在 renderer 或 SessionStore 已无法可靠恢复原始字节。
+
+`src/server/agent-session.ts::buildClaudeSessionEnv()` 因此在 Windows SDK subprocess env 中统一设置 `LANG=C.UTF-8`、`LC_ALL=C.UTF-8`、`PYTHONUTF8=1`、`PYTHONIOENCODING=utf-8`、`LESSCHARSET=utf-8`。同时写入 MyAgents 管理的 `BASH_ENV` prelude；只要 SDK 使用 Git Bash（无论来自 `CLAUDE_CODE_GIT_BASH_PATH` 还是 PATH fallback），Bash 命令启动前都会执行 `chcp.com 65001`。PowerShell 会忽略 `BASH_ENV`。不要使用 `CLAUDE_CODE_SHELL_PREFIX` 注入 inline shell 片段：SDK 将它当作包装命令而不是 source prelude。也不要把这个逻辑挪到 tool_result 渲染或历史恢复层；那里拿到的已经是 SDK 字符串，不是可逆字节流。
+
 ---
 
 ## 🔧 进程管理

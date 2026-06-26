@@ -1,7 +1,9 @@
+import { mkdtempSync, readFileSync, rmSync } from 'fs';
+import { tmpdir } from 'os';
 import { delimiter, resolve } from 'path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { buildClaudeSessionEnv } from '../agent-session';
+import { applyWindowsUtf8SubprocessEnv, buildClaudeSessionEnv } from '../agent-session';
 
 describe('buildClaudeSessionEnv npm prefix isolation', () => {
   afterEach(() => {
@@ -30,6 +32,107 @@ describe('buildClaudeSessionEnv npm prefix isolation', () => {
     expect(env.PREFIX).toBeUndefined();
     expect(env.MYAGENTS_NPM_GLOBAL_PREFIX).toBe(prefix);
     expect(pathValue.split(delimiter)).toContain(binDir);
+  });
+});
+
+describe('Windows SDK subprocess UTF-8 env', () => {
+  const tempHomes: string[] = [];
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+    for (const home of tempHomes.splice(0)) {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('is a no-op outside Windows', () => {
+    const env: NodeJS.ProcessEnv = {};
+
+    applyWindowsUtf8SubprocessEnv(env, { platform: 'darwin', useBashEnvPrelude: true });
+
+    expect(env.LANG).toBeUndefined();
+    expect(env.BASH_ENV).toBeUndefined();
+  });
+
+  it('sets UTF-8 locale and Python stdio env on Windows', () => {
+    const env: NodeJS.ProcessEnv = {};
+
+    applyWindowsUtf8SubprocessEnv(env, { platform: 'win32', useBashEnvPrelude: false });
+
+    expect(env.LANG).toBe('C.UTF-8');
+    expect(env.LC_ALL).toBe('C.UTF-8');
+    expect(env.PYTHONUTF8).toBe('1');
+    expect(env.PYTHONIOENCODING).toBe('utf-8');
+    expect(env.LESSCHARSET).toBe('utf-8');
+    expect(env.BASH_ENV).toBeUndefined();
+  });
+
+  it('installs a Git Bash UTF-8 BASH_ENV prelude without touching an existing shell prefix', () => {
+    const home = mkdtempSync(resolve(tmpdir(), 'myagents-env-home-'));
+    tempHomes.push(home);
+    const env: NodeJS.ProcessEnv = {
+      BASH_ENV: 'C:\\custom\\bash-env.sh',
+      CLAUDE_CODE_SHELL_PREFIX: 'echo existing;',
+    };
+
+    applyWindowsUtf8SubprocessEnv(env, { platform: 'win32', useBashEnvPrelude: true, home });
+
+    expect(env.BASH_ENV).toContain('windows-utf8-bash-env.sh');
+    expect(env.MYAGENTS_ORIGINAL_BASH_ENV).toBe('C:/custom/bash-env.sh');
+    expect(env.CLAUDE_CODE_SHELL_PREFIX).toBe('echo existing;');
+    const prelude = readFileSync(env.BASH_ENV!, 'utf-8');
+    expect(prelude).toContain('MYAGENTS_WINDOWS_UTF8');
+    expect(prelude).toContain('MYAGENTS_ORIGINAL_BASH_ENV');
+    expect(prelude).toContain('chcp.com 65001');
+  });
+
+  it('does not replace the BASH_ENV prelude when applied repeatedly', () => {
+    const home = mkdtempSync(resolve(tmpdir(), 'myagents-env-home-'));
+    tempHomes.push(home);
+    const env: NodeJS.ProcessEnv = {};
+
+    applyWindowsUtf8SubprocessEnv(env, { platform: 'win32', useBashEnvPrelude: true, home });
+    const once = env.BASH_ENV;
+    applyWindowsUtf8SubprocessEnv(env, { platform: 'win32', useBashEnvPrelude: true, home });
+
+    expect(env.BASH_ENV).toBe(once);
+  });
+
+  it('applies the UTF-8 env contract from buildClaudeSessionEnv when Windows Git Bash is resolved', () => {
+    const home = mkdtempSync(resolve(tmpdir(), 'myagents-env-home-'));
+    tempHomes.push(home);
+    const inheritedGitBashPath = resolve(process.cwd(), 'package.json');
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+    vi.stubEnv('USERPROFILE', home);
+    vi.stubEnv('CLAUDE_CODE_GIT_BASH_PATH', inheritedGitBashPath);
+    vi.stubEnv('CLAUDE_CODE_SHELL_PREFIX', 'echo existing;');
+
+    const env = buildClaudeSessionEnv();
+
+    expect(env.CLAUDE_CODE_GIT_BASH_PATH).toBe(inheritedGitBashPath);
+    expect(env.LANG).toBe('C.UTF-8');
+    expect(env.LC_ALL).toBe('C.UTF-8');
+    expect(env.PYTHONUTF8).toBe('1');
+    expect(env.PYTHONIOENCODING).toBe('utf-8');
+    expect(env.LESSCHARSET).toBe('utf-8');
+    expect(env.BASH_ENV).toContain('windows-utf8-bash-env.sh');
+    expect(readFileSync(env.BASH_ENV!, 'utf-8')).toContain('chcp.com 65001');
+    expect(env.CLAUDE_CODE_SHELL_PREFIX).toBe('echo existing;');
+  });
+
+  it('keeps the BASH_ENV prelude when Git Bash falls back to SDK PATH lookup', () => {
+    const home = mkdtempSync(resolve(tmpdir(), 'myagents-env-home-'));
+    tempHomes.push(home);
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+    vi.stubEnv('USERPROFILE', home);
+    vi.stubEnv('CLAUDE_CODE_GIT_BASH_PATH', resolve(home, 'missing-bash.exe'));
+
+    const env = buildClaudeSessionEnv();
+
+    expect(env.CLAUDE_CODE_GIT_BASH_PATH).toBe('');
+    expect(env.BASH_ENV).toContain('windows-utf8-bash-env.sh');
+    expect(readFileSync(env.BASH_ENV!, 'utf-8')).toContain('chcp.com 65001');
   });
 });
 
