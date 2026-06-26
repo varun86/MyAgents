@@ -21,6 +21,7 @@ pub mod logger;
 mod macos_arrow_filter;
 #[cfg(target_os = "macos")]
 mod macos_traffic_light;
+pub mod managed_codex;
 pub mod management_api;
 pub mod notification;
 pub mod perf_trace;
@@ -331,6 +332,11 @@ pub fn run() {
             commands::cmd_remove_bot_workspace,
             // Agent Runtime detection (v0.1.59)
             commands::cmd_detect_runtimes,
+            managed_codex::cmd_managed_codex_status,
+            managed_codex::cmd_managed_codex_download,
+            managed_codex::cmd_managed_codex_check_update,
+            managed_codex::cmd_managed_codex_login,
+            managed_codex::cmd_managed_codex_logout,
             // Workspace template commands
             commands::cmd_create_workspace_from_template,
             commands::cmd_create_workspace_from_bundled_template,

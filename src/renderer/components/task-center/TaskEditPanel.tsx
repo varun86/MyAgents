@@ -35,6 +35,7 @@ import ConfirmDialog from '@/components/ConfirmDialog';
 import NotificationConfigEditor from '@/components/task-center/NotificationConfigEditor';
 import TaskDocBlock from '@/components/task-center/TaskDocBlock';
 import { useToast } from '@/components/Toast';
+import { useConfig } from '@/hooks/useConfig';
 import type {
   EndConditions,
   NotificationConfig,
@@ -50,6 +51,7 @@ import {
 import { ExecutionModeEditor } from './editors/ExecutionModeEditor';
 import { INPUT_CLS, toLocalDateTimeString } from './editors/controls';
 import { TaskAdvancedConfigEditor } from './editors/TaskAdvancedConfigEditor';
+import { projectTaskExecutionOverrides } from './taskProviderProjection';
 import {
   FormSection,
   PanelFooter,
@@ -174,6 +176,7 @@ export function TaskEditPanel({
   // Discard-confirmation dialog when the draft is dirty.
   const [showDiscardConfirm, setShowDiscardConfirm] = useState(false);
   const toast = useToast();
+  const { providers } = useConfig();
 
   // Refs for `focusDoc` — scroll-into-view + caret focus on open. Effect
   // runs on mount only (focusDoc is an intent, not a live mode). For
@@ -386,6 +389,13 @@ export function TaskEditPanel({
     // mode-incompatible fields when `executionMode` flips (PRD §9.4
     // hygiene), so we just forward the draft.
     const payload: TaskUpdateInput = { id: task.id };
+    const projectedExecution = projectTaskExecutionOverrides({
+      providers,
+      runtime: draft.runtime,
+      providerId: draft.providerId,
+      model: draft.model,
+      runtimeConfig: draft.runtimeConfig,
+    });
     if (draft.name.trim() !== task.name) payload.name = draft.name.trim();
     if (draft.description.trim() !== (task.description ?? ''))
       payload.description = draft.description.trim();
@@ -444,8 +454,8 @@ export function TaskEditPanel({
     // flag so atomicity is server-enforced (Rust validator catches half-state).
     const initialProviderId = task.providerId ?? '';
     const initialModel = task.model ?? '';
-    const draftProviderId = draft.providerId ?? '';
-    const draftModel = draft.model ?? '';
+    const draftProviderId = projectedExecution.providerId ?? '';
+    const draftModel = projectedExecution.model ?? '';
     const providerOrModelChanged =
       initialProviderId !== draftProviderId || initialModel !== draftModel;
     if (providerOrModelChanged) {
@@ -468,21 +478,21 @@ export function TaskEditPanel({
     // `clearProviderOverride`) so the round-trip is unambiguous on both
     // sides.
     const initialRuntime = task.runtime ?? '';
-    const draftRuntime = draft.runtime ?? '';
+    const draftRuntime = projectedExecution.runtime ?? '';
     const initialRuntimeConfig = JSON.stringify(task.runtimeConfig ?? null);
-    const nextRuntimeConfig = JSON.stringify(draft.runtimeConfig ?? null);
+    const nextRuntimeConfig = JSON.stringify(projectedExecution.runtimeConfig ?? null);
     const runtimeChanged = initialRuntime !== draftRuntime;
     const runtimeConfigChanged = initialRuntimeConfig !== nextRuntimeConfig;
     if (runtimeChanged || runtimeConfigChanged) {
-      const goingToFollowRuntime = !draftRuntime && !draft.runtimeConfig;
+      const goingToFollowRuntime = !draftRuntime && !projectedExecution.runtimeConfig;
       if (goingToFollowRuntime) {
         payload.clearRuntimeOverride = true;
       } else {
-        if (runtimeChanged) payload.runtime = draft.runtime;
+        if (runtimeChanged) payload.runtime = projectedExecution.runtime;
         if (runtimeConfigChanged) {
           // RuntimeConfig vs RuntimeConfigSnapshot — structurally compatible,
           // see DispatchTaskDialog for the cast rationale.
-          payload.runtimeConfig = draft.runtimeConfig as Record<string, unknown> | undefined;
+          payload.runtimeConfig = projectedExecution.runtimeConfig as Record<string, unknown> | undefined;
         }
       }
     }
@@ -558,6 +568,7 @@ export function TaskEditPanel({
     errors,
     saving,
     task,
+    providers,
     buildEndConditions,
     isScheduled,
     isRecurring,

@@ -86,4 +86,106 @@ describe('snapshotForOwnedSession — reasoning effort capture (#324)', () => {
     const snap = snapshotForImSession(makeAgent({ reasoningEffort: 'max' }));
     expect('reasoningEffort' in snap).toBe(false);
   });
+
+  it('Managed Codex provider snapshots runtime-backed identity instead of builtin provider env', () => {
+    const snap = snapshotForOwnedSession(makeAgent({
+      providerId: 'codex-sub',
+      model: 'gpt-5.4-codex',
+      runtimeConfig: {
+        model: 'stale-runtime-model',
+        permissionMode: 'no-restrictions',
+        reasoningEffort: 'high',
+      },
+      mcpEnabledServers: ['myagents'],
+    }), { managedCodexProviderReady: true });
+
+    expect(snap).toMatchObject({
+      runtime: 'codex',
+      runtimeSource: 'managed-provider',
+      providerId: 'codex-sub',
+      model: 'gpt-5.4-codex',
+      providerExecutionIdentity: {
+        kind: 'runtime-backed-provider',
+        providerId: 'codex-sub',
+        runtime: 'codex',
+        runtimeSource: 'managed-provider',
+        model: 'gpt-5.4-codex',
+      },
+      permissionMode: 'no-restrictions',
+      reasoningEffort: 'high',
+      mcpEnabledServers: ['myagents'],
+    });
+    expect(snap.providerRoute).toBeUndefined();
+    expect(snap.providerEnvJson).toBeUndefined();
+  });
+
+  it('Managed Codex provider defaults are ignored until readiness is explicit', () => {
+    const snap = snapshotForOwnedSession(makeAgent({
+      providerId: 'codex-sub',
+      model: 'gpt-5.4-codex',
+      runtimeConfig: {
+        model: 'gpt-5.5-codex',
+        source: 'managed-provider',
+      },
+      providerEnvJson: '{"apiKey":"stale"}',
+    }));
+
+    expect(snap.runtime).toBe('builtin');
+    expect(snap.runtimeSource).toBeUndefined();
+    expect(snap.providerId).toBeUndefined();
+    expect(snap.providerRoute).toBeUndefined();
+    expect(snap.providerExecutionIdentity).toBeUndefined();
+    expect(snap.model).toBeUndefined();
+    expect(snap.providerEnvJson).toBeUndefined();
+  });
+
+  it('explicit runtime override is not hijacked by stale Managed Codex provider defaults', () => {
+    const builtinSnap = snapshotForOwnedSession(makeAgent({
+      providerId: 'codex-sub',
+      model: 'gpt-5.4-codex',
+      runtimeConfig: { model: 'gpt-5.5-codex', source: 'system-cli' },
+    }), { runtimeOverride: 'builtin' });
+
+    expect(builtinSnap.runtime).toBe('builtin');
+    expect(builtinSnap.runtimeSource).toBeUndefined();
+    expect(builtinSnap.providerId).toBeUndefined();
+    expect(builtinSnap.providerRoute).toBeUndefined();
+    expect(builtinSnap.providerExecutionIdentity).toBeUndefined();
+    expect(builtinSnap.model).toBeUndefined();
+    expect(builtinSnap.providerEnvJson).toBeUndefined();
+
+    const systemCliSnap = snapshotForOwnedSession(makeAgent({
+      providerId: 'codex-sub',
+      model: 'gpt-5.4-codex',
+      runtimeConfig: { model: 'gpt-5.5-codex', source: 'system-cli' },
+    }), { runtimeOverride: 'codex' });
+
+    expect(systemCliSnap.runtime).toBe('codex');
+    expect(systemCliSnap.runtimeSource).toBe('system-cli');
+    expect(systemCliSnap.providerExecutionIdentity).toBeUndefined();
+    expect(systemCliSnap.providerId).toBeUndefined();
+    expect(systemCliSnap.model).toBeUndefined();
+  });
+
+  it('Managed Codex IM snapshot freezes only the runtime identity', () => {
+    expect(snapshotForImSession(makeAgent({
+      providerId: 'codex-sub',
+      model: 'gpt-5.4-codex',
+      permissionMode: 'fullAgency',
+    }), { managedCodexProviderReady: true })).toEqual({
+      runtime: 'codex',
+      runtimeSource: 'managed-provider',
+    });
+  });
+
+  it('Managed Codex IM snapshot also respects explicit runtime override', () => {
+    expect(snapshotForImSession(makeAgent({
+      providerId: 'codex-sub',
+      model: 'gpt-5.4-codex',
+      runtimeConfig: { source: 'system-cli' },
+    }), { runtimeOverride: 'codex' })).toEqual({
+      runtime: 'codex',
+      runtimeSource: 'system-cli',
+    });
+  });
 });

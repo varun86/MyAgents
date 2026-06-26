@@ -20,7 +20,8 @@ import { coerceFileChanges, formatFileChangeForResult } from '../../shared/fileC
 import type { AgentPlanTodo, AgentRuntime, RuntimeConfigCapabilities, RuntimeProcess, SessionStartOptions, UnifiedEvent, UnifiedEventCallback, ResolvedImagePayload, SubAgentScope } from './types';
 import { StaleRuntimeSessionError } from './types';
 import { mapCodexTokenUsage, type CodexThreadTokenUsage } from './codex-token-usage';
-import { augmentedProcessEnv, resolveCommand, stripAnsi } from './env-utils';
+import { stripAnsi } from './env-utils';
+import { resolveCodexCommandContext } from './codex-command-context';
 import { ensureDirSync } from '../utils/fs-utils';
 import { killWithEscalation } from './utils/kill-with-escalation';
 import { withLogContext } from '../logger-context';
@@ -1406,6 +1407,7 @@ async function collectCodexDiagnostics(
   threadId: string | null,
   proxyPolicy: RuntimeProxyPolicy = 'myagents',
   sandboxPolicy?: CodexSandboxPolicy,
+  runtimeSource: import('../../shared/types/runtime').RuntimeSource = 'system-cli',
 ): Promise<RuntimeDiagnostics> {
   const status: RuntimeDiagnosticsStatus = {};
   const issues: RuntimeDiagnosticIssue[] = [];
@@ -1468,7 +1470,9 @@ async function collectCodexDiagnostics(
         severity: 'error',
         title: 'Codex requires login',
         message: 'Codex reported no active auth method for this runtime session.',
-        hint: 'Run `codex login` in a terminal, then retry from MyAgents.',
+        hint: runtimeSource === 'managed-provider'
+          ? 'Open Settings → Model Providers → Codex (订阅), then log in again.'
+          : 'Run `codex login` in a terminal, then retry from MyAgents.',
       });
     }
   } else if (authR[0] === 'unsupported') {
@@ -1623,6 +1627,7 @@ async function collectCodexDiagnostics(
 
   return {
     runtime: 'codex',
+    runtimeSource,
     effectiveEnv,
     auth,
     features,
@@ -1641,12 +1646,13 @@ export class CodexRuntime implements AgentRuntime {
 
   async detect(): Promise<RuntimeDetection> {
     try {
-      const command = resolveCommand('codex');
+      const context = resolveCodexCommandContext({ source: 'system-cli' });
+      const command = context.commandPath;
       const proc = spawn([command, '--version'], {
         stdout: 'pipe',
         stderr: 'pipe',
         stdin: 'ignore',
-        env: augmentedProcessEnv(),
+        env: context.env,
       });
       const text = await new Response(proc.stdout).text();
       const code = await proc.exited;
@@ -1680,11 +1686,12 @@ export class CodexRuntime implements AgentRuntime {
 
   private async queryModelsViaAppServer(): Promise<RuntimeModelInfo[]> {
     // Spawn a temporary app-server to query model/list
-    const proc = spawn([resolveCommand('codex'), 'app-server'], {
+    const context = resolveCodexCommandContext({ source: 'system-cli' });
+    const proc = spawn([context.commandPath, 'app-server'], {
       stdout: 'pipe',
       stderr: 'pipe',
       stdin: 'pipe',
-      env: augmentedProcessEnv(),
+      env: context.env,
     });
 
     const rpc = new JsonRpcClient(proc);
@@ -1752,10 +1759,11 @@ export class CodexRuntime implements AgentRuntime {
     workspacePath?: string,
     envPolicy?: import('../../shared/types/runtime').RuntimeEnvPolicy,
   ): Promise<RuntimeDiagnostics> {
-    const env = augmentedProcessEnv(envPolicy);
+    const context = resolveCodexCommandContext({ source: 'system-cli', envPolicy });
+    const env = context.env;
     const cwd = workspacePath || env.HOME || process.cwd();
 
-    const proc = spawn([resolveCommand('codex'), 'app-server'], {
+    const proc = spawn([context.commandPath, 'app-server'], {
       stdout: 'pipe',
       stderr: 'pipe',
       stdin: 'pipe',
@@ -1798,6 +1806,7 @@ export class CodexRuntime implements AgentRuntime {
         null,
         envPolicy?.proxy ?? 'myagents',
         buildCodexSandboxPolicy('workspace-write', cwd),
+        'system-cli',
       );
     } finally {
       rpc.destroy();
@@ -1820,16 +1829,29 @@ export class CodexRuntime implements AgentRuntime {
     // Capture the env we hand to Codex so the diagnostic snapshot reflects what
     // the subprocess actually saw (issue #194). The env policy is resolved by
     // the session caller from the agent's runtimeConfig.envPolicy.
-    const codexEnv = augmentedProcessEnv(options.envPolicy);
+    const runtimeSource = options.runtimeSource ?? 'system-cli';
+    const context = resolveCodexCommandContext({
+      source: runtimeSource,
+      envPolicy: options.envPolicy,
+    });
+    const codexEnv = context.env;
     // Issue #194 — pin PWD to workspacePath so any Codex-internal tool that
     // consults `$PWD` (vs. the kernel-level cwd Rust's spawn passes) sees the
     // workspace, not the sidecar's launch directory. Codex review SM finding.
     codexEnv.PWD = options.workspacePath;
-    const proc = spawn([
-      resolveCommand('codex'),
+    const codexArgs = [
+      context.commandPath,
       '-c', 'project_doc_fallback_filenames=["CLAUDE.md"]',
+      ...(runtimeSource === 'managed-provider'
+        ? ['-c', 'cli_auth_credentials_store="file"']
+        : []),
       'app-server',
-    ], {
+    ];
+    console.log(
+      `[codex] spawn source=${runtimeSource} version=${context.version ?? 'system-cli'} ` +
+      `platform=${context.platform ?? process.platform} codexHome=${context.codexHome ? '<managed>' : '<default>'}`,
+    );
+    const proc = spawn(codexArgs, {
       stdout: 'pipe',
       stderr: 'pipe',
       stdin: 'pipe',
@@ -1863,7 +1885,7 @@ export class CodexRuntime implements AgentRuntime {
         if (sessionCompleteEmitted) return; // Already emitted, skip duplicate
         sessionCompleteEmitted = true;
       }
-      withLogContext({ runtime: 'codex' }, () => onEvent(event));
+      withLogContext({ runtime: 'codex', runtimeSource }, () => onEvent(event));
     };
 
     // Wire up notification handler to emit UnifiedEvents
@@ -1912,7 +1934,9 @@ export class CodexRuntime implements AgentRuntime {
           const thread = p?.thread as Record<string, unknown> | undefined;
           if (thread?.id) detail = ` threadId=${thread.id}`;
         }
-        console.log(`[codex] ${method}${detail}`);
+            withLogContext({ runtime: 'codex', runtimeSource }, () => {
+              console.log(`[codex] ${method}${detail}`);
+            });
       }
       const result = this.parseNotification(codexProc, method, params, wrappedOnEvent);
       if (!result) return;
@@ -1985,7 +2009,9 @@ export class CodexRuntime implements AgentRuntime {
             const raw = decoder.decode(value, { stream: true }).trim();
             if (!raw) continue;
             const text = stripAnsi(raw);
-            console.error(`[codex-stderr] ${text}`);
+            withLogContext({ runtime: 'codex', runtimeSource }, () => {
+              console.error(`[codex-stderr] ${text}`);
+            });
             classifyAndForwardCodexStderr(text, wrappedOnEvent);
           }
         } catch { /* ignore */ } finally {
@@ -2085,6 +2111,7 @@ export class CodexRuntime implements AgentRuntime {
             codexProc.threadId,
             options.envPolicy?.proxy ?? 'myagents',
             buildCodexSandboxPolicy(sandbox, options.workspacePath),
+            runtimeSource,
           );
           // Session-life gate: tab close / runtime teardown can race against
           // the 5–10s diagnostic fan-out. Without this guard, a diagnostic

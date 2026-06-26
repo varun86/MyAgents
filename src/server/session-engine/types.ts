@@ -1,5 +1,5 @@
 import type { BackgroundAgentPermissionMode } from '../../shared/config-types';
-import type { RuntimeConfig } from '../../shared/types/runtime';
+import type { RuntimeConfig, RuntimeSource } from '../../shared/types/runtime';
 import type { RuntimeType } from '../../shared/types/runtime';
 import type { McpServerDefinition } from '../../shared/config-types';
 import type { EnqueueResult, PermissionMode, ProviderEnv, QueueCancelResult } from '../agent-session';
@@ -10,6 +10,7 @@ import type { ExternalRuntimeConfigPatch, ImagePayload } from '../runtimes/types
 import type { ExternalConfigSource } from '../runtimes/external-session';
 import type { InboxTurnMeta } from '../inbox/types';
 import type { ProviderRoute } from '../../shared/providerRoute';
+import type { RuntimeBackedProviderIdentity } from '../../shared/providerExecution';
 
 export type SessionEngineKind = 'builtin' | 'external';
 
@@ -122,6 +123,7 @@ export type QueueStatusItem = { id: string; messagePreview: string };
 export type SessionEngineRuntimeIdentity = {
   kind: SessionEngineKind;
   runtime: RuntimeType;
+  runtimeSource?: RuntimeSource;
   sessionId: string;
   boundSessionId?: string;
 };
@@ -168,12 +170,14 @@ export type SessionEngineStreamReplaySnapshot = {
 export type SessionEngineConfigSnapshot = {
   success: true;
   runtime: RuntimeType;
+  runtimeSource?: RuntimeSource;
   model: string | null;
   mcpServerIds: string[] | null;
   agentNames: string[] | null;
   permissionMode: string | null;
   providerId: string | null;
   providerRoute?: ProviderRoute | null;
+  providerExecutionIdentity?: RuntimeBackedProviderIdentity | null;
   reasoningEffort: string | null;
 };
 
@@ -192,6 +196,7 @@ export type SessionEngineSnapshotMaterializePatch = {
   enabledPluginIds?: string[] | null;
   providerId?: string | null;
   providerRoute?: ProviderRoute | null;
+  providerExecutionIdentity?: RuntimeBackedProviderIdentity | null;
   providerEnvJson?: string | null;
 };
 

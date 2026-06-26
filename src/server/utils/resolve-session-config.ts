@@ -1,7 +1,8 @@
 import type { AgentConfig, ChannelConfig } from '../../shared/types/agent';
 import { resolveEffectiveConfig } from '../../shared/types/agent';
+import { CODEX_SUBSCRIPTION_PROVIDER_ID } from '../../shared/config-types';
 import type { SessionMetadata } from '../types/session';
-import type { RuntimeType } from '../../shared/types/runtime';
+import type { RuntimeSource, RuntimeType } from '../../shared/types/runtime';
 import { coerceModelForRuntime, coercePermissionModeForRuntime } from '../../shared/types/runtime';
 import type { ProviderRoute } from '../../shared/providerRoute';
 
@@ -14,6 +15,7 @@ import type { ProviderRoute } from '../../shared/providerRoute';
  */
 export interface ResolvedSessionConfig {
   runtime: RuntimeType;
+  runtimeSource: RuntimeSource | undefined;
   model: string | undefined;
   permissionMode: string | undefined;
   mcpEnabledServers: string[] | undefined;
@@ -32,6 +34,10 @@ export interface ResolvedSessionConfig {
  * structurally 'owned'.
  */
 export type SessionOwnerKind = 'im' | 'owned';
+
+export interface ResolveSessionConfigOptions {
+  managedCodexProviderReady?: boolean;
+}
 
 /**
  * Resolve the effective config for one query (D2, D4, D7, Option C).
@@ -54,7 +60,9 @@ export function resolveSessionConfig(
   agent: AgentConfig,
   channel: ChannelConfig | undefined,
   ownerKind: SessionOwnerKind,
+  options: ResolveSessionConfigOptions = {},
 ): ResolvedSessionConfig {
+  const managedCodexProviderReady = options.managedCodexProviderReady === true;
   if (ownerKind === 'im') {
     if (!channel) {
       // Defensive: IM path without a channel shouldn't happen at runtime, but
@@ -62,6 +70,9 @@ export function resolveSessionConfig(
       // probes from face-planting on a half-initialized peer).
       return {
         runtime: agent.runtime ?? 'builtin',
+        runtimeSource: agent.runtime && agent.runtime !== 'builtin'
+          ? (agent.runtimeConfig?.source ?? 'system-cli')
+          : undefined,
         model: agent.model,
         permissionMode: agent.permissionMode,
         mcpEnabledServers: agent.mcpEnabledServers,
@@ -71,8 +82,21 @@ export function resolveSessionConfig(
       };
     }
     const eff = resolveEffectiveConfig(agent, channel);
+    if (managedCodexProviderReady && eff.providerId === CODEX_SUBSCRIPTION_PROVIDER_ID && eff.model) {
+      return {
+        runtime: 'codex',
+        runtimeSource: 'managed-provider',
+        model: eff.model,
+        permissionMode: eff.runtimeConfig?.permissionMode,
+        mcpEnabledServers: eff.mcpEnabledServers,
+        providerId: undefined,
+        providerRoute: undefined,
+        providerEnvJson: undefined,
+      };
+    }
     return {
       runtime: eff.runtime,
+      runtimeSource: eff.runtime !== 'builtin' ? (eff.runtimeConfig?.source ?? 'system-cli') : undefined,
       model: eff.model,
       permissionMode: eff.permissionMode,
       mcpEnabledServers: eff.mcpEnabledServers,
@@ -88,7 +112,16 @@ export function resolveSessionConfig(
   // Agent defaults (#395/#396), because that makes old conversations drift when
   // the Agent template changes.
   const snapshotOwnsConfig = Boolean(meta?.configSnapshotAt);
-  const runtime = meta?.runtime ?? agent.runtime ?? 'builtin';
+  const agentUsesManagedCodexProvider = agent.providerId === CODEX_SUBSCRIPTION_PROVIDER_ID
+    && managedCodexProviderReady
+    && typeof agent.model === 'string'
+    && agent.model.trim().length > 0;
+  const runtime = meta?.runtime ?? (agentUsesManagedCodexProvider ? 'codex' : agent.runtime) ?? 'builtin';
+  const runtimeSource = runtime === 'builtin'
+    ? undefined
+    : (meta?.runtimeSource
+      ?? (agentUsesManagedCodexProvider ? 'managed-provider' : agent.runtimeConfig?.source)
+      ?? 'system-cli');
   // Snapshot vs agent-fallback for model. For external runtimes the snapshot
   // and agent fallback target different fields — snapshot holds the runtime
   // model (set by interactive writes + the runtime-aware snapshot helper),
@@ -98,7 +131,9 @@ export function resolveSessionConfig(
   // hand it to Codex → 400 (issue #224).
   const rawModel = runtime === 'builtin'
     ? (snapshotOwnsConfig ? meta?.model : (meta?.model ?? agent.model))
-    : (snapshotOwnsConfig ? meta?.model : (meta?.model ?? agent.runtimeConfig?.model));
+    : (snapshotOwnsConfig
+      ? meta?.model
+      : (meta?.model ?? (agentUsesManagedCodexProvider ? agent.model : agent.runtimeConfig?.model)));
   // Coerce obviously-foreign models out before they reach the runtime CLI.
   // Heals existing stale snapshots written by the pre-fix snapshot helper
   // (e.g. cron tasks created on App ≤ 0.2.19 with runtime=codex but
@@ -132,6 +167,7 @@ export function resolveSessionConfig(
 
   return {
     runtime,
+    runtimeSource,
     model,
     permissionMode,
     mcpEnabledServers: snapshotOwnsConfig ? meta?.mcpEnabledServers : (meta?.mcpEnabledServers ?? agent.mcpEnabledServers),

@@ -15,7 +15,10 @@ import {
     type ProxySettings,
     PRESET_PROVIDERS,
     PROXY_DEFAULTS,
+    MANAGED_CODEX_REQUIRED_RUNTIME,
+    applyManagedCodexProviderReadiness,
     applyProviderEnablementAndOrder,
+    withManagedCodexProviderCatalog,
 } from './types';
 import {
     loadAppConfig,
@@ -95,6 +98,19 @@ function migrateToolGroups(config: AppConfig): boolean {
     return changed;
 }
 
+function shouldAutoUpdateManagedCodexRuntime(config: AppConfig): boolean {
+    if (config.managedCodexProviderDevGate !== true) return false;
+    const install = config.managedCodexRuntimeInstall;
+    const userEngaged =
+        config.managedCodexProviderEnabled === true
+        || Boolean(install?.installedVersion || install?.installedAt);
+    if (!userEngaged || !install) return false;
+    if (install.status === 'downloading' || install.status === 'checking') return false;
+    if (install.status === 'update-required') return true;
+    return install.status === 'installed'
+        && install.installedVersion !== MANAGED_CODEX_REQUIRED_RUNTIME.version;
+}
+
 // ============= Context Types =============
 
 export interface ConfigDataValue {
@@ -165,14 +181,18 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
 
     // Derived: merge preset custom models + apply user primary model overrides
     const providers = useMemo(() => {
-        const merged = mergePresetCustomModels(rawProviders, config.presetCustomModels, config.presetRemovedModels);
+        const catalog = withManagedCodexProviderCatalog(rawProviders, config);
+        const merged = mergePresetCustomModels(catalog, config.presetCustomModels, config.presetRemovedModels);
         const providerOrderSettings = {
             providerOrder: config.providerOrder,
             disabledProviderIds: config.disabledProviderIds,
         };
         const overrides = config.providerPrimaryModels;
         if (!overrides || Object.keys(overrides).length === 0) {
-            return applyProviderEnablementAndOrder(merged, providerOrderSettings);
+            return applyManagedCodexProviderReadiness(
+                applyProviderEnablementAndOrder(merged, providerOrderSettings),
+                config,
+            );
         }
         // Apply user's primaryModel override directly on the Provider object
         // so ALL consumers see the correct value without needing getEffectivePrimaryModel()
@@ -181,18 +201,18 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
             if (!userPrimary || !p.models?.some(m => m.model === userPrimary)) return p;
             return { ...p, primaryModel: userPrimary };
         });
-        return applyProviderEnablementAndOrder(withPrimaryOverrides, providerOrderSettings);
+        return applyManagedCodexProviderReadiness(
+            applyProviderEnablementAndOrder(withPrimaryOverrides, providerOrderSettings),
+            config,
+        );
     }, [
+        config,
         rawProviders,
-        config.presetCustomModels,
-        config.presetRemovedModels,
-        config.providerPrimaryModels,
-        config.providerOrder,
-        config.disabledProviderIds,
     ]);
 
     // Mount guard
     const isMountedRef = useRef(true);
+    const managedCodexAutoUpdateRef = useRef(false);
     useEffect(() => {
         isMountedRef.current = true;
         return () => { isMountedRef.current = false; };
@@ -347,6 +367,31 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
     useEffect(() => {
         void load();
     }, [load]);
+
+    useEffect(() => {
+        if (!isTauriEnvironment()) return;
+        if (isLoading) return;
+        if (managedCodexAutoUpdateRef.current) return;
+        if (!shouldAutoUpdateManagedCodexRuntime(config)) return;
+
+        managedCodexAutoUpdateRef.current = true;
+        (async () => {
+            try {
+                const { invoke } = await import('@tauri-apps/api/core');
+                console.log('[ConfigProvider] Managed Codex runtime update required — downloading pinned runtime');
+                await invoke('cmd_managed_codex_download');
+            } catch (err) {
+                console.warn('[ConfigProvider] Managed Codex runtime auto-update failed:', err);
+            } finally {
+                managedCodexAutoUpdateRef.current = false;
+                await load();
+            }
+        })();
+    }, [
+        config,
+        isLoading,
+        load,
+    ]);
 
     // ============= Listen for im:bot-config-changed =============
 

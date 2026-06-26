@@ -14,6 +14,7 @@ import {
   awaitExternalSessionStarting,
   enqueueExternalSendForDesktop,
   forceExecuteExternalQueueItem,
+  getActiveRuntimeSource,
   getActiveRuntimeType,
   getCurrentBoundSessionId,
   getExternalLiveAssistantMessage,
@@ -98,6 +99,7 @@ export function createExternalSessionEngine(): SessionEngine {
       return {
         kind: 'external',
         runtime: getActiveRuntimeType(),
+        runtimeSource: getActiveRuntimeSource(),
         sessionId: getRuntimeSessionId(),
         ...(boundSessionId ? { boundSessionId } : {}),
       };
@@ -128,15 +130,19 @@ export function createExternalSessionEngine(): SessionEngine {
     },
 
     getSessionConfigSnapshot() {
+      const runtimeSessionId = getRuntimeSessionId();
+      const session = runtimeSessionId ? getSessionData(runtimeSessionId) : null;
       return {
         success: true,
         runtime: getActiveRuntimeType(),
+        runtimeSource: getActiveRuntimeSource(),
         model: getExternalSessionModel(),
         mcpServerIds: null,
         agentNames: null,
         permissionMode: getExternalSessionPermissionMode(),
-        providerId: null,
+        providerId: session?.providerExecutionIdentity?.providerId ?? null,
         providerRoute: null,
+        providerExecutionIdentity: session?.providerExecutionIdentity ?? null,
         reasoningEffort: getExternalSessionReasoningEffort() ?? 'default',
       };
     },

@@ -1,6 +1,6 @@
 // RuntimeFactory — creates and caches AgentRuntime instances (v0.1.59)
 
-import type { RuntimeType } from '../../shared/types/runtime';
+import type { RuntimeSource, RuntimeType } from '../../shared/types/runtime';
 import type { AgentRuntime } from './types';
 import { ClaudeCodeRuntime } from './claude-code';
 import { CodexRuntime } from './codex';
@@ -64,4 +64,17 @@ export function getCurrentRuntimeType(): RuntimeType {
   const env = process.env.MYAGENTS_RUNTIME;
   if (env === 'claude-code' || env === 'codex' || env === 'gemini') return env;
   return 'builtin';
+}
+
+/**
+ * Get the current runtime source from environment.
+ *
+ * Missing source on existing external runtime sessions is intentionally
+ * interpreted as system-cli for backward compatibility.
+ */
+export function getCurrentRuntimeSource(): RuntimeSource | undefined {
+  if (!isExternalRuntime(getCurrentRuntimeType())) return undefined;
+  return process.env.MYAGENTS_RUNTIME_SOURCE === 'managed-provider'
+    ? 'managed-provider'
+    : 'system-cli';
 }

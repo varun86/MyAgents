@@ -80,6 +80,7 @@ const mocks = vi.hoisted(() => {
       dispatch: Promise.resolve({ queued: true }),
     })),
     forceExecuteExternalQueueItem: vi.fn(async () => true),
+    getActiveRuntimeSource: vi.fn(() => 'system-cli' as const),
     getActiveRuntimeType: vi.fn(() => 'codex'),
     getCurrentBoundSessionId: vi.fn<() => string | null>(() => null),
     getExternalLiveAssistantMessage: vi.fn<() => { id: string; role: 'user' | 'assistant'; content: string; timestamp: string } | null>(() => null),
@@ -162,6 +163,7 @@ vi.mock('../runtimes/external-session', () => ({
   didLastTurnSucceed: mocks.didLastTurnSucceed,
   enqueueExternalSendForDesktop: mocks.enqueueExternalSendForDesktop,
   forceExecuteExternalQueueItem: mocks.forceExecuteExternalQueueItem,
+  getActiveRuntimeSource: mocks.getActiveRuntimeSource,
   getActiveRuntimeType: mocks.getActiveRuntimeType,
   getCurrentBoundSessionId: mocks.getCurrentBoundSessionId,
   getExternalLiveAssistantMessage: mocks.getExternalLiveAssistantMessage,
@@ -314,18 +316,21 @@ describe('session-engine selector and adapters', () => {
     expect(engine.getRuntimeIdentity()).toEqual({
       kind: 'external',
       runtime: 'codex',
+      runtimeSource: 'system-cli',
       sessionId: 'external-session',
       boundSessionId: 'bound-session',
     });
     expect(engine.getSessionConfigSnapshot()).toEqual({
       success: true,
       runtime: 'codex',
+      runtimeSource: 'system-cli',
       model: 'gpt-5',
       mcpServerIds: null,
       agentNames: null,
       permissionMode: 'no-restrictions',
       providerId: null,
       providerRoute: null,
+      providerExecutionIdentity: null,
       reasoningEffort: 'medium',
     });
     expect(engine.getHeldImConfigSnapshot()).toEqual({

@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+    CODEX_SUBSCRIPTION_PROVIDER_ID,
     DEFAULT_CONFIG,
+    MANAGED_CODEX_PROVIDER,
     applyProviderEnablementAndOrder,
     type Provider,
 } from '../types';
@@ -73,5 +75,19 @@ describe('provider availability with enablement', () => {
 
         expect(selection?.provider.id).toBe('beta');
         expect(selection?.model).toBe('beta-primary');
+    });
+
+    it('requires runtime-backed providers to be explicitly marked ready by catalogue readiness', () => {
+        expect(isProviderAvailable(
+            MANAGED_CODEX_PROVIDER,
+            {},
+            { [CODEX_SUBSCRIPTION_PROVIDER_ID]: { status: 'valid', verifiedAt: '2026-06-26T00:00:00.000Z' } },
+        )).toBe(false);
+
+        expect(isProviderAvailable(
+            { ...MANAGED_CODEX_PROVIDER, enabled: true },
+            {},
+            { [CODEX_SUBSCRIPTION_PROVIDER_ID]: { status: 'valid', verifiedAt: '2026-06-26T00:00:00.000Z' } },
+        )).toBe(true);
     });
 });

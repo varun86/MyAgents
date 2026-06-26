@@ -25,6 +25,10 @@ import type { PermissionMode, Project, McpServerDefinition } from '@/config/type
 import type { AgentConfig } from '@/../shared/types/agent';
 import type { RuntimeConfig } from '@/../shared/types/runtime';
 import { createConcreteProviderRoute, type ProviderRoute } from '@/../shared/providerRoute';
+import {
+  runtimeConfigForRuntimeBackedProvider,
+  type RuntimeBackedProviderIdentity,
+} from '@/../shared/providerExecution';
 
 export interface BuiltinModelSelection {
   providerId: string;
@@ -50,6 +54,11 @@ export interface InputOptionFields {
   builtinModel?: string | null;
   /** Selected model when on an external runtime (Codex/CC/Gemini). */
   runtimeModel?: string | null;
+  /** Provider-shaped selection whose execution is owned by an external runtime
+   *  (currently Codex 订阅). This is intentionally separate from
+   *  `builtinSelection`: the user picked a Provider, but the running session
+   *  must carry runtime/source identity. */
+  runtimeBackedProviderSelection?: RuntimeBackedProviderIdentity;
   /** Permission mode — split between `agent.permissionMode` (builtin) and
    *  `agent.runtimeConfig.permissionMode` (external) at the storage layer. */
   permissionMode?: PermissionMode | string;
@@ -124,6 +133,7 @@ export interface PersistInputOptionParams {
 export interface SessionSnapshotPatch {
   providerId?: string | null;
   providerRoute?: ProviderRoute | null;
+  providerExecutionIdentity?: RuntimeBackedProviderIdentity | null;
   model?: string | null;
   /** #324 — persisted literally (incl. 'default', which meaningfully pins the
    *  session back to default over a non-default agent value). */
@@ -234,11 +244,17 @@ export async function persistInputOptionChange(
   if (
     params.isExternalRuntime &&
     params.pushRuntimeConfigToSidecar &&
-    (params.fields.runtimeModel !== undefined || params.fields.permissionMode !== undefined)
+    (
+      params.fields.runtimeModel !== undefined
+      || params.fields.permissionMode !== undefined
+      || params.fields.runtimeBackedProviderSelection !== undefined
+    )
   ) {
     try {
       const runtimeConfig: Pick<RuntimeConfig, 'model' | 'permissionMode'> = {};
-      if (params.fields.runtimeModel !== undefined) {
+      if (params.fields.runtimeBackedProviderSelection) {
+        runtimeConfig.model = params.fields.runtimeBackedProviderSelection.model;
+      } else if (params.fields.runtimeModel !== undefined) {
         runtimeConfig.model = params.fields.runtimeModel ?? undefined;
       }
       if (params.fields.permissionMode !== undefined) {
@@ -261,7 +277,10 @@ function buildProjectPatch(
   const patch: Partial<Omit<Project, 'id'>> = {};
   const { fields, isExternalRuntime } = params;
 
-  if (!isExternalRuntime && fields.builtinSelection !== undefined) {
+  if (fields.runtimeBackedProviderSelection !== undefined) {
+    patch.providerId = fields.runtimeBackedProviderSelection.providerId;
+    patch.model = fields.runtimeBackedProviderSelection.model;
+  } else if (!isExternalRuntime && fields.builtinSelection !== undefined) {
     patch.providerId = fields.builtinSelection.providerId;
     patch.model = fields.builtinSelection.model;
   } else if (fields.providerId !== undefined) {
@@ -290,14 +309,22 @@ function buildSnapshotPatch(params: PersistInputOptionParams): SessionSnapshotPa
   const patch: SessionSnapshotPatch = {};
   const { fields, isExternalRuntime } = params;
 
-  if (!isExternalRuntime && fields.builtinSelection !== undefined) {
+  if (fields.runtimeBackedProviderSelection !== undefined) {
+    patch.providerId = fields.runtimeBackedProviderSelection.providerId;
+    patch.providerRoute = null;
+    patch.providerExecutionIdentity = fields.runtimeBackedProviderSelection;
+    patch.model = fields.runtimeBackedProviderSelection.model;
+    patch.providerEnvJson = null;
+  } else if (!isExternalRuntime && fields.builtinSelection !== undefined) {
     patch.providerId = fields.builtinSelection.providerId;
     patch.providerRoute = routeFromBuiltinSelection(fields.builtinSelection);
+    patch.providerExecutionIdentity = null;
     patch.model = fields.builtinSelection.model;
     patch.providerEnvJson = null;
   } else if (fields.providerId !== undefined) {
     patch.providerId = fields.providerId;
     patch.providerRoute = null;
+    patch.providerExecutionIdentity = null;
     // #300: the session's frozen `providerEnvJson` was captured for the OLD
     // provider. Once providerId changes it is stale credentials (e.g. a deepseek
     // baseUrl/apiKey/modelAliases blob living under a skywork-ai providerId).
@@ -314,7 +341,9 @@ function buildSnapshotPatch(params: PersistInputOptionParams): SessionSnapshotPa
   // `handleRuntimeModelChange`) silently bypass the snapshot and consumers
   // reading `snapshot.model` (sidecar restore, IM bot bridge) see stale
   // builtin values.
-  if (isExternalRuntime) {
+  if (fields.runtimeBackedProviderSelection !== undefined) {
+    patch.model = fields.runtimeBackedProviderSelection.model;
+  } else if (isExternalRuntime) {
     if (fields.runtimeModel !== undefined) patch.model = fields.runtimeModel;
   } else if (fields.builtinSelection !== undefined) {
     patch.model = fields.builtinSelection.model;
@@ -343,7 +372,10 @@ function buildAgentPatch(
   const patch: Partial<Omit<AgentConfig, 'id'>> = {};
   const { fields, isExternalRuntime, currentRuntimeConfig } = params;
 
-  if (!isExternalRuntime && fields.builtinSelection !== undefined) {
+  if (fields.runtimeBackedProviderSelection !== undefined) {
+    patch.providerId = fields.runtimeBackedProviderSelection.providerId;
+    patch.model = fields.runtimeBackedProviderSelection.model;
+  } else if (!isExternalRuntime && fields.builtinSelection !== undefined) {
     patch.providerId = fields.builtinSelection.providerId;
   } else if (fields.providerId !== undefined) {
     patch.providerId = fields.providerId ?? undefined;
@@ -363,6 +395,13 @@ function buildAgentPatch(
   if (isExternalRuntime) {
     const next: Partial<RuntimeConfig> = { ...(currentRuntimeConfig ?? {}) };
     let runtimeConfigDirty = false;
+    if (fields.runtimeBackedProviderSelection !== undefined) {
+      Object.assign(
+        next,
+        runtimeConfigForRuntimeBackedProvider(fields.runtimeBackedProviderSelection, next),
+      );
+      runtimeConfigDirty = true;
+    }
     if (fields.permissionMode !== undefined) {
       next.permissionMode = fields.permissionMode;
       runtimeConfigDirty = true;

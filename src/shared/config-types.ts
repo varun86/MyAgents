@@ -1,6 +1,7 @@
 // Provider and permission configuration types
 
 import type { HeartbeatConfig, MemoryAutoUpdateConfig } from './types/im';
+import type { RuntimeSource, RuntimeType } from './types/runtime';
 
 /**
  * Permission mode for agent behavior
@@ -222,15 +223,25 @@ export type ProviderAuthType = 'auth_token' | 'api_key' | 'both' | 'auth_token_c
  */
 export type ApiProtocol = 'anthropic' | 'openai';
 
+export type ProviderExecution =
+  | { kind: 'builtin' }
+  | {
+      kind: 'runtime-backed';
+      runtime: Exclude<RuntimeType, 'builtin'>;
+      source: Extract<RuntimeSource, 'managed-provider'>;
+    };
+
 /**
  * Service provider configuration
  */
 export interface Provider {
   id: string;
   name: string;
+  subtitle?: string;
   vendor: string;           // 厂商名: 'Anthropic', 'DeepSeek', etc.
   cloudProvider: string;    // 云服务商: '模型官方', '云服务商', etc.
   type: 'subscription' | 'api';
+  execution?: ProviderExecution; // undefined == { kind: 'builtin' }
   primaryModel: string;     // 默认模型 API 代码
   isBuiltin: boolean;
   enabled?: boolean;        // Runtime-derived: false when globally disabled by the user
@@ -459,6 +470,42 @@ export const VERIFY_EXPIRY_DAYS = 30;
 /** Subscription provider ID for verification caching */
 export const SUBSCRIPTION_PROVIDER_ID = 'anthropic-sub';
 
+/** Runtime-backed Codex subscription provider ID. */
+export const CODEX_SUBSCRIPTION_PROVIDER_ID = 'codex-sub';
+
+export type ManagedCodexInstallStatus =
+  | 'not-installed'
+  | 'checking'
+  | 'downloading'
+  | 'installed'
+  | 'update-required'
+  | 'error';
+
+export interface ManagedCodexRuntimeInstallState {
+  status: ManagedCodexInstallStatus;
+  requiredVersion?: string;
+  installedVersion?: string;
+  platform?: string;
+  installedAt?: string;
+  lastCheckedAt?: string;
+  error?: string;
+}
+
+export interface ManagedCodexAuthState {
+  status: 'unknown' | 'valid' | 'invalid' | 'logging-in' | 'logged-out' | 'error';
+  authMethod?: 'chatgpt' | 'api-key' | 'access-token';
+  accountEmail?: string;
+  verifiedAt?: string;
+  error?: string;
+}
+
+export const MANAGED_CODEX_REQUIRED_RUNTIME = {
+  component: 'codex',
+  version: '0.142.2',
+  manifestUrl: 'https://download.myagents.io/runtimes/codex/by-app/0.2.43/manifest-v1.json',
+  manifestPublicKeyId: 'myagents-runtime-manifest-ed25519-2026-06',
+} as const;
+
 /** Check if verification has expired */
 export function isVerifyExpired(verifiedAt: string): boolean {
   const verifiedDate = new Date(verifiedAt);
@@ -650,6 +697,14 @@ export interface AppConfig {
   // Provider IDs hidden from selectors and runtime resolution without deleting their settings.
   disabledProviderIds?: string[];
 
+  // ===== Managed Codex Provider (PRD 0.2.43) =====
+  // Developer gate controls visibility only; release-grade security remains required.
+  managedCodexProviderDevGate?: boolean;
+  // User intent to expose Codex (订阅) in provider-selecting surfaces once ready.
+  managedCodexProviderEnabled?: boolean;
+  managedCodexRuntimeInstall?: ManagedCodexRuntimeInstallState;
+  managedCodexAuth?: ManagedCodexAuthState;
+
   // ===== MCP Configuration =====
   // Custom MCP servers added by user (merged with presets)
   mcpServers?: McpServerDefinition[];
@@ -784,6 +839,145 @@ const MIMO_MODELS: ModelEntity[] = [
 ];
 
 const MIMO_ALIASES = { sonnet: 'mimo-v2.5-pro', opus: 'mimo-v2.5-pro', haiku: 'mimo-v2.5' } as const;
+
+export const MANAGED_CODEX_MODELS: ModelEntity[] = [
+  {
+    model: 'gpt-5.4-codex',
+    modelName: 'GPT-5.4 Codex',
+    modelSeries: 'codex',
+    inputModalities: ['text', 'image'],
+    outputModalities: ['text'],
+  },
+];
+
+export const MANAGED_CODEX_PROVIDER: Provider = {
+  id: CODEX_SUBSCRIPTION_PROVIDER_ID,
+  name: 'Codex (订阅)',
+  subtitle: '使用 ChatGPT Codex 订阅账户',
+  vendor: 'OpenAI',
+  cloudProvider: 'ChatGPT Subscription',
+  type: 'subscription',
+  execution: { kind: 'runtime-backed', runtime: 'codex', source: 'managed-provider' },
+  primaryModel: MANAGED_CODEX_MODELS[0].model,
+  isBuiltin: true,
+  config: {},
+  models: MANAGED_CODEX_MODELS,
+};
+
+export type ManagedCodexProviderReadinessReason =
+  | 'developer-gate-off'
+  | 'runtime-not-installed'
+  | 'runtime-downloading'
+  | 'runtime-update-required'
+  | 'runtime-error'
+  | 'auth-missing'
+  | 'auth-logging-in'
+  | 'auth-invalid'
+  | 'auth-error'
+  | 'provider-disabled'
+  | 'ready';
+
+export interface ManagedCodexProviderReadiness {
+  visible: boolean;
+  selectable: boolean;
+  reason: ManagedCodexProviderReadinessReason;
+  requiredVersion: string;
+}
+
+type ManagedCodexConfigLike = Pick<AppConfig,
+  | 'managedCodexProviderDevGate'
+  | 'managedCodexProviderEnabled'
+  | 'managedCodexRuntimeInstall'
+  | 'managedCodexAuth'
+>;
+
+export function isManagedCodexRequiredRuntimeInstalled(
+  state: ManagedCodexRuntimeInstallState | undefined,
+): boolean {
+  if (!state || state.status !== 'installed') return false;
+  const requiredVersion = state.requiredVersion ?? MANAGED_CODEX_REQUIRED_RUNTIME.version;
+  return requiredVersion === MANAGED_CODEX_REQUIRED_RUNTIME.version
+    && state.installedVersion === MANAGED_CODEX_REQUIRED_RUNTIME.version;
+}
+
+export function isManagedCodexSubscriptionAuthValid(
+  state: ManagedCodexAuthState | undefined,
+): boolean {
+  return state?.status === 'valid'
+    && (state.authMethod === 'chatgpt' || state.authMethod === 'access-token');
+}
+
+export function getManagedCodexProviderReadiness(
+  config: ManagedCodexConfigLike,
+): ManagedCodexProviderReadiness {
+  const requiredVersion = MANAGED_CODEX_REQUIRED_RUNTIME.version;
+  if (config.managedCodexProviderDevGate !== true) {
+    return {
+      visible: false,
+      selectable: false,
+      reason: 'developer-gate-off',
+      requiredVersion,
+    };
+  }
+
+  const install = config.managedCodexRuntimeInstall;
+  if (!isManagedCodexRequiredRuntimeInstalled(install)) {
+    let reason: ManagedCodexProviderReadinessReason = 'runtime-not-installed';
+    if (install?.status === 'downloading' || install?.status === 'checking') {
+      reason = 'runtime-downloading';
+    } else if (
+      install?.status === 'update-required'
+      || (install?.installedVersion && install.installedVersion !== requiredVersion)
+    ) {
+      reason = 'runtime-update-required';
+    } else if (install?.status === 'error') {
+      reason = 'runtime-error';
+    }
+    return { visible: true, selectable: false, reason, requiredVersion };
+  }
+
+  const auth = config.managedCodexAuth;
+  if (!isManagedCodexSubscriptionAuthValid(auth)) {
+    let reason: ManagedCodexProviderReadinessReason = 'auth-missing';
+    if (auth?.status === 'logging-in') {
+      reason = 'auth-logging-in';
+    } else if (auth?.status === 'invalid' || auth?.status === 'logged-out') {
+      reason = 'auth-invalid';
+    } else if (auth?.status === 'error') {
+      reason = 'auth-error';
+    }
+    return { visible: true, selectable: false, reason, requiredVersion };
+  }
+
+  if (config.managedCodexProviderEnabled !== true) {
+    return { visible: true, selectable: false, reason: 'provider-disabled', requiredVersion };
+  }
+
+  return { visible: true, selectable: true, reason: 'ready', requiredVersion };
+}
+
+export function withManagedCodexProviderCatalog(
+  providers: readonly Provider[],
+  config: Pick<AppConfig, 'managedCodexProviderDevGate'>,
+): Provider[] {
+  const withoutManagedCodex = providers.filter(provider => provider.id !== CODEX_SUBSCRIPTION_PROVIDER_ID);
+  if (config.managedCodexProviderDevGate !== true) return withoutManagedCodex;
+  return [...withoutManagedCodex, MANAGED_CODEX_PROVIDER];
+}
+
+export function applyManagedCodexProviderReadiness(
+  providers: readonly Provider[],
+  config: ManagedCodexConfigLike,
+): Provider[] {
+  const readiness = getManagedCodexProviderReadiness(config);
+  return providers.map(provider => {
+    if (provider.id !== CODEX_SUBSCRIPTION_PROVIDER_ID) return provider;
+    return {
+      ...provider,
+      enabled: readiness.selectable && provider.enabled !== false,
+    };
+  });
+}
 
 export const PRESET_PROVIDERS: Provider[] = [
   {

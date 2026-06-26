@@ -7,7 +7,9 @@ import {
 } from '../../shared/types/runtime';
 import { coerceReasoningEffortSettingForRuntime } from '../../shared/reasoningEffort';
 import type { SessionMetadata } from '../types/session';
+import { CODEX_SUBSCRIPTION_PROVIDER_ID } from '../../shared/config-types';
 import { createConcreteProviderRoute, type ProviderRoute } from '../../shared/providerRoute';
+import { createRuntimeBackedProviderIdentity } from '../../shared/providerExecution';
 
 /**
  * Session config snapshot helpers (v0.1.69).
@@ -46,6 +48,7 @@ import { createConcreteProviderRoute, type ProviderRoute } from '../../shared/pr
 export type OwnedSessionSnapshot = Pick<
   SessionMetadata,
   | 'runtime'
+  | 'runtimeSource'
   | 'model'
   | 'reasoningEffort'
   | 'permissionMode'
@@ -53,6 +56,7 @@ export type OwnedSessionSnapshot = Pick<
   | 'enabledPluginIds'
   | 'providerId'
   | 'providerRoute'
+  | 'providerExecutionIdentity'
   | 'providerEnvJson'
 >;
 // #324 — `reasoningEffort` is a DOCUMENTED divergence from the Rust mirror
@@ -83,6 +87,11 @@ interface SessionSnapshotRuntimeOptions {
    * session as part of a runtime switch before the AgentConfig patch is written.
    */
   runtimeOverride?: RuntimeType;
+  /**
+   * Caller-owned readiness decision for provider-backed Managed Codex. Snapshot
+   * helpers stay pure and do not read config.json themselves.
+   */
+  managedCodexProviderReady?: boolean;
 }
 
 function agentForSnapshotRuntime(
@@ -101,13 +110,39 @@ function agentForSnapshotRuntime(
   };
 }
 
+function shouldSnapshotManagedCodexProvider(
+  agent: AgentConfig,
+  options?: SessionSnapshotRuntimeOptions,
+): agent is AgentConfig & {
+  providerId: typeof CODEX_SUBSCRIPTION_PROVIDER_ID;
+  model: string;
+} {
+  // runtimeOverride is an explicit runtime operation (runtime switch, prepared
+  // runtime birth, etc.). Do not let a stale Agent.providerId=codex-sub turn
+  // that operation back into a provider-owned managed Codex session. Callers
+  // that really want managed Codex pass providerExecutionIdentity explicitly.
+  return options?.runtimeOverride === undefined
+    && options?.managedCodexProviderReady === true
+    && agent.providerId === CODEX_SUBSCRIPTION_PROVIDER_ID
+    && typeof agent.model === 'string'
+    && agent.model.trim().length > 0;
+}
+
 export function snapshotForImSession(
   agent: AgentConfig,
   options?: SessionSnapshotRuntimeOptions,
 ): Partial<SessionMetadata> {
+  if (shouldSnapshotManagedCodexProvider(agent, options)) {
+    return {
+      runtime: 'codex',
+      runtimeSource: 'managed-provider',
+    };
+  }
   const snapshotAgent = agentForSnapshotRuntime(agent, options);
+  const runtime = snapshotAgent.runtime ?? 'builtin';
   return {
-    runtime: snapshotAgent.runtime ?? 'builtin',
+    runtime,
+    runtimeSource: runtime !== 'builtin' ? (snapshotAgent.runtimeConfig?.source ?? 'system-cli') : undefined,
   };
 }
 
@@ -142,18 +177,48 @@ export function snapshotForOwnedSession(
   agent: AgentConfig,
   options?: SessionSnapshotRuntimeOptions,
 ): OwnedSessionSnapshot & Pick<SessionMetadata, 'configSnapshotAt'> {
+  if (shouldSnapshotManagedCodexProvider(agent, options)) {
+    const providerExecutionIdentity = createRuntimeBackedProviderIdentity({
+      providerId: CODEX_SUBSCRIPTION_PROVIDER_ID,
+      model: agent.model,
+    });
+    return {
+      runtime: providerExecutionIdentity.runtime,
+      runtimeSource: providerExecutionIdentity.runtimeSource,
+      model: providerExecutionIdentity.model,
+      reasoningEffort: coerceReasoningEffortSettingForRuntime(
+        agent.runtimeConfig?.reasoningEffort,
+        providerExecutionIdentity.runtime,
+      ),
+      permissionMode: coercePermissionModeForRuntime(
+        agent.runtimeConfig?.permissionMode,
+        providerExecutionIdentity.runtime,
+      ),
+      mcpEnabledServers: agent.mcpEnabledServers ? [...agent.mcpEnabledServers] : undefined,
+      enabledPluginIds: agent.enabledPluginIds ? [...agent.enabledPluginIds] : undefined,
+      providerId: providerExecutionIdentity.providerId,
+      providerRoute: undefined,
+      providerExecutionIdentity,
+      providerEnvJson: undefined,
+      configSnapshotAt: new Date().toISOString(),
+    };
+  }
   const snapshotAgent = agentForSnapshotRuntime(agent, options);
   const runtime = snapshotAgent.runtime ?? 'builtin';
   const isExternal = runtime !== 'builtin';
+  const hasStaleManagedProviderId = snapshotAgent.providerId === CODEX_SUBSCRIPTION_PROVIDER_ID;
+  const builtinProviderId = !isExternal && !hasStaleManagedProviderId
+    ? snapshotAgent.providerId
+    : undefined;
   const model = isExternal
     ? coerceModelForRuntime(snapshotAgent.runtimeConfig?.model, runtime)
-    : snapshotAgent.model;
-  const providerId = isExternal ? undefined : snapshotAgent.providerId;
-  const providerRoute: ProviderRoute | undefined = providerId && model
-    ? createConcreteProviderRoute(providerId, model)
+    : (hasStaleManagedProviderId ? undefined : snapshotAgent.model);
+  const providerRoute: ProviderRoute | undefined = builtinProviderId && model
+    ? createConcreteProviderRoute(builtinProviderId, model)
     : undefined;
   return {
     runtime,
+    runtimeSource: isExternal ? (snapshotAgent.runtimeConfig?.source ?? 'system-cli') : undefined,
     model,
     // #324 — same runtime-aware dispatch as model (issue #224 rationale).
     reasoningEffort: isExternal
@@ -164,9 +229,12 @@ export function snapshotForOwnedSession(
       : snapshotAgent.permissionMode,
     mcpEnabledServers: snapshotAgent.mcpEnabledServers ? [...snapshotAgent.mcpEnabledServers] : undefined,
     enabledPluginIds: snapshotAgent.enabledPluginIds ? [...snapshotAgent.enabledPluginIds] : undefined,
-    providerId,
+    providerId: builtinProviderId,
     providerRoute,
-    providerEnvJson: isExternal || providerRoute ? undefined : snapshotAgent.providerEnvJson,
+    providerExecutionIdentity: undefined,
+    providerEnvJson: isExternal || providerRoute || hasStaleManagedProviderId
+      ? undefined
+      : snapshotAgent.providerEnvJson,
     configSnapshotAt: new Date().toISOString(),
   };
 }

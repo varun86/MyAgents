@@ -1672,7 +1672,15 @@ const FORBIDDEN_SYSTEM_DIRS: &[&str] = &[
     "/private/etc",
     "/private/var",
 ];
-const CREDENTIAL_SUBDIRS: &[&str] = &[".ssh", ".gnupg", ".aws", ".kube", ".docker", ".config/op"];
+const CREDENTIAL_SUBDIRS: &[&str] = &[
+    ".ssh",
+    ".gnupg",
+    ".aws",
+    ".kube",
+    ".docker",
+    ".config/op",
+    ".myagents/codex",
+];
 #[cfg(target_os = "macos")]
 const MAC_SENSITIVE_SUBDIRS: &[&str] = &[
     "Library/Keychains",

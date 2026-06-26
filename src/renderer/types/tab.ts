@@ -3,6 +3,7 @@
 import type { ImageAttachment } from '@/components/SimpleChatInput';
 import type { PermissionMode } from '@/config/types';
 import type { CronSchedule, CronEndConditions, CronDelivery } from '@/types/cronTask';
+import type { RuntimeBackedProviderIdentity } from '../../shared/providerExecution';
 
 /** Cron settings drafted in the launcher input. Sent forward via
  *  `InitialMessage.cron` and consumed by Chat's `autoSend` to switch from
@@ -67,6 +68,8 @@ export interface InitialMessage {
     builtinSelection?: { providerId: string; model: string };
     /** External runtime 的 model — 没有 provider 概念 */
     runtimeModel?: string;
+    /** Provider-facing runtime-backed identity, e.g. Managed Codex Provider. */
+    providerExecutionIdentity?: RuntimeBackedProviderIdentity;
     /** #324 — 推理强度 setting ('default' | level)。手递（hand-carry）进新 Tab：
      *  launcher 的 agent-config 写盘是异步的，handoff 不能赌它赢过 sidecar 启动
      *  自解析；与 builtinSelection/runtimeModel 同理。 */

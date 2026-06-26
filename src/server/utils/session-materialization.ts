@@ -12,7 +12,7 @@ export function isLiveFollowScenario(scenario: SessionMaterializationScenario): 
 export function snapshotForMaterializedSession(
   agent: AgentConfig,
   scenario: SessionMaterializationScenario,
-  options?: { runtimeOverride?: RuntimeType },
+  options?: { runtimeOverride?: RuntimeType; managedCodexProviderReady?: boolean },
 ): Partial<SessionMetadata> {
   return isLiveFollowScenario(scenario)
     ? snapshotForImSession(agent, options)
@@ -25,18 +25,21 @@ export function createMaterializedSessionMetadata(params: {
   scenario: SessionMaterializationScenario;
   agent?: AgentConfig;
   runtimeOverride?: RuntimeType;
+  managedCodexProviderReady?: boolean;
   fallbackRuntime?: RuntimeType;
   title?: string;
 }): SessionMetadata {
   const snapshot = params.agent
     ? snapshotForMaterializedSession(params.agent, params.scenario, {
         runtimeOverride: params.runtimeOverride,
+        managedCodexProviderReady: params.managedCodexProviderReady,
       })
     : undefined;
   const meta = createSessionMetadata(params.agentDir, snapshot);
   const fallbackRuntime = params.runtimeOverride ?? params.fallbackRuntime;
   if (!params.agent && fallbackRuntime) {
     meta.runtime = fallbackRuntime;
+    meta.runtimeSource = fallbackRuntime !== 'builtin' ? 'system-cli' : undefined;
   }
   meta.id = params.sessionId;
   meta.title = params.title ?? 'New Chat';

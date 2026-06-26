@@ -70,7 +70,7 @@ import { getAllCronTasks, getTabCronTask, updateCronTaskTab } from '@/api/cronTa
 import { type CronRecoverySummaryPayload, type CronTaskRecoveredPayload, CRON_EVENTS } from '@/types/cronEvents';
 import { isBrowserDevMode, isTauriEnvironment } from '@/utils/browserMock';
 import { apiGetJson } from '@/api/apiFetch';
-import { getSessions, updateSession } from '@/api/sessionClient';
+import { createSession, getSessions, updateSession } from '@/api/sessionClient';
 import { dismissTopmost } from '@/utils/closeLayer';
 import { dispatchAppShortcut } from '@/utils/appShortcuts';
 import { handleSelectAllKeydown } from '@/utils/selectAllRouter';
@@ -87,7 +87,12 @@ import type { CapabilityInitialSelect } from '../shared/skillsTypes';
 import { ensureSelfAwarenessWorkspace, resolveBuiltinSelection, pairBuiltinSelection, isProviderAvailable } from '@/config/configService';
 import { getAgentByWorkspacePath, getAgentById } from '@/config/services/agentConfigService';
 import type { SessionMetadata } from '@/api/sessionClient';
-import type { RuntimeType } from '../shared/types/runtime';
+import type { RuntimeSource, RuntimeType } from '../shared/types/runtime';
+import {
+  isRuntimeBackedProvider,
+  toProviderExecutionIntent,
+  type RuntimeBackedProviderIdentity,
+} from '../shared/providerExecution';
 
 // ============================================================
 // User Support Prompt Builder
@@ -105,23 +110,58 @@ function buildSupportPrompt(description: string, appVersion: string): string {
   ].join('\n');
 }
 
+interface SessionRuntimeOpenIdentity {
+  runtime: RuntimeType;
+  runtimeSource?: RuntimeSource;
+}
+
+function fallbackRuntimeForOpen(
+  fallbackRuntime: RuntimeType,
+  multiAgentRuntime: boolean | undefined,
+): RuntimeType {
+  return multiAgentRuntime ? fallbackRuntime : 'builtin';
+}
+
+function normalizeRuntimeSourceForOpen(
+  runtime: RuntimeType,
+  runtimeSource: RuntimeSource | undefined,
+): RuntimeSource | undefined {
+  if (runtime === 'builtin') return undefined;
+  return runtimeSource ?? 'system-cli';
+}
+
+async function resolveSessionRuntimeIdentityForOpen(
+  sessionId: string | null | undefined,
+  fallbackRuntime: RuntimeType,
+  multiAgentRuntime: boolean | undefined,
+): Promise<SessionRuntimeOpenIdentity> {
+  const fallback = fallbackRuntimeForOpen(fallbackRuntime, multiAgentRuntime);
+  if (!sessionId || isPendingSessionId(sessionId)) {
+    return { runtime: fallback, runtimeSource: normalizeRuntimeSourceForOpen(fallback, undefined) };
+  }
+  try {
+    const meta = await apiGetJson<{ success: boolean; session?: SessionMetadata }>(`/sessions/${encodeURIComponent(sessionId)}?limit=1`);
+    const runtime = meta.session?.runtime
+      ? normalizeRuntime(meta.session.runtime)
+      : fallback;
+    return {
+      runtime,
+      runtimeSource: normalizeRuntimeSourceForOpen(runtime, meta.session?.runtimeSource),
+    };
+  } catch (error) {
+    // Non-fatal: sidecar spawn/switch paths remain authoritative. Falling
+    // back only affects whether the UI opens a new tab proactively.
+    console.warn(`[App] Failed to resolve runtime for session ${sessionId}, using fallback ${fallback}:`, error);
+    return { runtime: fallback, runtimeSource: normalizeRuntimeSourceForOpen(fallback, undefined) };
+  }
+}
+
 async function resolveSessionRuntimeForOpen(
   sessionId: string | null | undefined,
   fallbackRuntime: RuntimeType,
   multiAgentRuntime: boolean | undefined,
 ): Promise<RuntimeType> {
-  if (!multiAgentRuntime || !sessionId || isPendingSessionId(sessionId)) {
-    return fallbackRuntime;
-  }
-  try {
-    const meta = await apiGetJson<{ success: boolean; session?: SessionMetadata }>(`/sessions/${encodeURIComponent(sessionId)}?limit=1`);
-    return normalizeRuntime(meta.session?.runtime ?? fallbackRuntime);
-  } catch (error) {
-    // Non-fatal: sidecar spawn/switch paths remain authoritative. Falling
-    // back only affects whether the UI opens a new tab proactively.
-    console.warn(`[App] Failed to resolve runtime for session ${sessionId}, using fallback ${fallbackRuntime}:`, error);
-    return fallbackRuntime;
-  }
+  return (await resolveSessionRuntimeIdentityForOpen(sessionId, fallbackRuntime, multiAgentRuntime)).runtime;
 }
 
 export interface LaunchProjectAnalyticsContext {
@@ -1458,16 +1498,18 @@ export default function App() {
           ? normalizeRuntime(getAgentByWorkspacePath(cfg, activeTab.agentDir)?.runtime)
           : targetAgentRuntime;
         const [
-          targetRuntime,
-          resolvedCurrentRuntime,
+          targetRuntimeIdentity,
+          resolvedCurrentRuntimeIdentity,
           activation,
           currentTabCronTask,
         ] = await Promise.all([
-          resolveSessionRuntimeForOpen(sessionId, targetAgentRuntime, cfg?.multiAgentRuntime),
-          resolveSessionRuntimeForOpen(activeTab?.sessionId, currentAgentRuntime, cfg?.multiAgentRuntime),
+          resolveSessionRuntimeIdentityForOpen(sessionId, targetAgentRuntime, cfg?.multiAgentRuntime),
+          resolveSessionRuntimeIdentityForOpen(activeTab?.sessionId, currentAgentRuntime, cfg?.multiAgentRuntime),
           getSessionActivation(sessionId),
           getTabCronTask(activeTabId),
         ]);
+        const targetRuntime = targetRuntimeIdentity.runtime;
+        const resolvedCurrentRuntime = resolvedCurrentRuntimeIdentity.runtime;
         // history_open analytics (cross-review C2): report the session's FROZEN
         // runtime (targetRuntime, from session metadata) — matches the sidecar
         // spawn runtime and thus server-side ai_turn_complete.runtime — rather
@@ -1485,6 +1527,8 @@ export default function App() {
           multiAgentRuntime: !!cfg?.multiAgentRuntime,
           currentRuntime,
           targetRuntime,
+          currentRuntimeIdentity: activeTab?.sessionId ? resolvedCurrentRuntimeIdentity : targetRuntimeIdentity,
+          targetRuntimeIdentity,
           targetActivation: activation,
           currentTabCronRunning: currentTabCronTask?.status === 'running',
         });
@@ -1627,9 +1671,33 @@ export default function App() {
         await deactivateSession(oldSessionForLaunch);
       }
 
-      // For new sessions (no sessionId), generate a temporary session ID
-      // The actual session ID will be created by the backend when the session starts
-      const effectiveSessionId = sessionId ?? createPendingSessionId(targetTabId);
+      // For ordinary new sessions (no sessionId), generate a temporary session ID;
+      // the sidecar materializes it later. Runtime-backed providers are different:
+      // Rust must read runtime/runtimeSource from sessions.json before spawning, so
+      // create a real session metadata row before ensureSessionSidecar.
+      let effectiveSessionId = sessionId ?? createPendingSessionId(targetTabId);
+      if (!sessionId && initialMessage?.providerExecutionIdentity) {
+        try {
+          const identity = initialMessage.providerExecutionIdentity;
+          const prepared = await createSession(project.path, identity.runtime, {
+            runtimeSource: identity.runtimeSource,
+            providerExecutionIdentity: identity,
+            providerId: identity.providerId,
+            model: identity.model,
+            permissionMode: initialMessage.permissionMode,
+            reasoningEffort: initialMessage.reasoningEffort,
+            mcpEnabledServers: initialMessage.mcpEnabledServers,
+            enabledPluginIds: initialMessage.enabledPluginIds,
+          });
+          effectiveSessionId = prepared.id;
+        } catch (err) {
+          console.error('[App] Failed to create runtime-backed provider session:', err);
+          setTabErrors((prev) => ({ ...prev, [targetTabId]: '创建 Codex 会话失败' }));
+          setLoadingTabs((prev) => ({ ...prev, [targetTabId]: false }));
+          launchingTabRef.current = null;
+          return;
+        }
+      }
 
       // Ensure Sidecar is running for this Session, Tab as owner.
       //
@@ -2090,16 +2158,18 @@ export default function App() {
       : 'builtin';
 
     const [
-      targetRuntime,
-      resolvedCurrentRuntime,
+      targetRuntimeIdentity,
+      resolvedCurrentRuntimeIdentity,
       activation,
       currentTabCronTask,
     ] = await Promise.all([
-      resolveSessionRuntimeForOpen(sessionId, currentAgentRuntime, cfg?.multiAgentRuntime),
-      resolveSessionRuntimeForOpen(currentTab?.sessionId, currentAgentRuntime, cfg?.multiAgentRuntime),
+      resolveSessionRuntimeIdentityForOpen(sessionId, currentAgentRuntime, cfg?.multiAgentRuntime),
+      resolveSessionRuntimeIdentityForOpen(currentTab?.sessionId, currentAgentRuntime, cfg?.multiAgentRuntime),
       getSessionActivation(sessionId),
       getTabCronTask(tabId),
     ]);
+    const targetRuntime = targetRuntimeIdentity.runtime;
+    const resolvedCurrentRuntime = resolvedCurrentRuntimeIdentity.runtime;
     // When the current Tab has no session yet (fresh chat), there's no "current
     // session runtime" to compare against — treat target's runtime as current,
     // so cross-runtime check doesn't false-positive on an empty Tab. Mirrors
@@ -2112,6 +2182,8 @@ export default function App() {
       multiAgentRuntime: !!cfg?.multiAgentRuntime,
       currentRuntime,
       targetRuntime,
+      currentRuntimeIdentity: currentTab?.sessionId ? resolvedCurrentRuntimeIdentity : targetRuntimeIdentity,
+      targetRuntimeIdentity,
       targetActivation: activation,
       currentTabCronRunning: currentTabCronTask?.status === 'running',
     });
@@ -3034,9 +3106,20 @@ export default function App() {
           content,
         ].join('\n');
 
+        const alignmentProviderIntent = isRuntimeBackedProvider(sel.provider)
+          ? toProviderExecutionIntent(sel.provider, sel.model)
+          : undefined;
+        const alignmentProviderExecutionIdentity = alignmentProviderIntent?.kind === 'runtime-backed-provider'
+          ? alignmentProviderIntent
+          : undefined;
         const initialMessage: InitialMessage = {
           text: alignmentPrompt,
-          builtinSelection: { providerId: sel.provider.id, model: sel.model },
+          ...(alignmentProviderExecutionIdentity
+            ? {
+                providerExecutionIdentity: alignmentProviderExecutionIdentity,
+                runtimeModel: alignmentProviderExecutionIdentity.model,
+              }
+            : { builtinSelection: { providerId: sel.provider.id, model: sel.model } }),
         };
 
         // Pre-seed the tab as a Chat tab before awaiting sidecar startup.
@@ -3047,16 +3130,20 @@ export default function App() {
         // resolves to the same id and its later setTabs is a no-op for
         // view/agentDir/sessionId.
         const newTab = createNewTab();
-        const seeded = {
-          ...newTab,
-          view: 'chat' as const,
-          agentDir: workspace.path,
-          sessionId: createPendingSessionId(newTab.id),
-          title: '任务讨论',
-          initialMessage,
-        };
-        setTabs((prev) => [...prev, seeded]);
-        setActiveTabId(newTab.id);
+        if (initialMessage.providerExecutionIdentity) {
+          openLaunchTabNow(newTab);
+        } else {
+          const seeded = {
+            ...newTab,
+            view: 'chat' as const,
+            agentDir: workspace.path,
+            sessionId: createPendingSessionId(newTab.id),
+            title: '任务讨论',
+            initialMessage,
+          };
+          setTabs((prev) => [...prev, seeded]);
+          setActiveTabId(newTab.id);
+        }
 
         await handleLaunchProject(
           workspace,
@@ -3282,10 +3369,11 @@ export default function App() {
         //      provider-unavailable: resolve via priority chain
         //      (helperAgent → helperProject → defaultProviderId → first available),
         //      each layer guarded by isProviderAvailable.
-        // Always pass an explicit builtinSelection (when any provider is available)
+        // Always pass an explicit execution identity (when any provider is available)
         // so Chat tab autoSend doesn't race against the invalid-model correction
         // useEffect when helper Agent's persisted (provider, model) has gone stale.
         let builtinSelection: { providerId: string; model: string } | undefined;
+        let providerExecutionIdentity: RuntimeBackedProviderIdentity | undefined;
         if (providerId) {
           const provider = appProvidersRef.current.find(p => p.id === providerId);
           if (provider && isProviderAvailable(
@@ -3293,10 +3381,18 @@ export default function App() {
             appApiKeysRef.current,
             appProviderVerifyStatusRef.current,
           )) {
-            builtinSelection = pairBuiltinSelection(provider, model);
+            const targetModel = model ?? provider.primaryModel;
+            if (isRuntimeBackedProvider(provider)) {
+              const intent = toProviderExecutionIntent(provider, targetModel);
+              if (intent.kind === 'runtime-backed-provider') {
+                providerExecutionIdentity = intent;
+              }
+            } else {
+              builtinSelection = pairBuiltinSelection(provider, model);
+            }
           }
         }
-        if (!builtinSelection) {
+        if (!builtinSelection && !providerExecutionIdentity) {
           const helperAgent = project.agentId && configRef.current
             ? getAgentById(configRef.current, project.agentId)
             : undefined;
@@ -3308,7 +3404,14 @@ export default function App() {
             appProviderVerifyStatusRef.current,
           );
           if (sel) {
-            builtinSelection = { providerId: sel.provider.id, model: sel.model };
+            if (isRuntimeBackedProvider(sel.provider)) {
+              const intent = toProviderExecutionIntent(sel.provider, sel.model);
+              if (intent.kind === 'runtime-backed-provider') {
+                providerExecutionIdentity = intent;
+              }
+            } else {
+              builtinSelection = { providerId: sel.provider.id, model: sel.model };
+            }
           }
           // else: no provider available system-wide — let Chat tab show its
           // empty-state guidance ("请先设置模型服务").
@@ -3317,6 +3420,10 @@ export default function App() {
         const initialMessage: InitialMessage = {
           text: buildSupportPrompt(description, appVersion),
           ...(builtinSelection ? { builtinSelection } : {}),
+          ...(providerExecutionIdentity ? {
+            providerExecutionIdentity,
+            runtimeModel: providerExecutionIdentity.model,
+          } : {}),
           images: event.detail.images,
         };
 

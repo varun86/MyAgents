@@ -923,6 +923,8 @@ pub async fn monitor_session_sidecars(
         /// config; Tab/Cron → read session metadata), producing different
         /// runtimes across hash-random restarts. See cross-review Codex #2.
         runtime: Option<String>,
+        /// Snapshot of MYAGENTS_RUNTIME_SOURCE captured with `runtime`.
+        runtime_source: Option<String>,
         failures: u32,
     }
     let mut recovery: HashMap<String, RecoveryEntry> = HashMap::new();
@@ -947,6 +949,7 @@ pub async fn monitor_session_sidecars(
                             workspace: sc.workspace_path.clone(),
                             owners: sc.owners.iter().cloned().collect(),
                             runtime: sc.runtime.clone(),
+                            runtime_source: sc.runtime_source.clone(),
                             failures: 0,
                         },
                     );
@@ -1009,18 +1012,20 @@ pub async fn monitor_session_sidecars(
             // HashSet the owner type is non-deterministic when a session has
             // mixed owners. See cross-review Codex #2.
             let pinned_runtime = entry.runtime.clone();
+            let pinned_runtime_source = entry.runtime_source.clone();
             let mgr = manager.clone();
             let app = app_handle.clone();
             let sid = session_id.clone();
 
             match tokio::task::spawn_blocking(move || {
-                ensure_session_sidecar_with_runtime_override(
+                ensure_session_sidecar_with_runtime_identity_override(
                     &app,
                     &mgr,
                     &sid,
                     &workspace,
                     first_owner,
                     pinned_runtime,
+                    pinned_runtime_source,
                 )
             })
             .await

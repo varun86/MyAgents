@@ -25,6 +25,7 @@ import { workspacePathsEqual } from '../../shared/workspacePath';
 import { promoteAgentMcpJsonToGlobal } from '../../shared/mcpConfig';
 import type { McpServerDefinition, ProviderVerifyStatus } from '../../shared/config-types';
 import { applyProviderEnablementAndOrder, isProviderEnabled, PRESET_MCP_SERVERS, PRESET_PROVIDERS } from '../../shared/config-types';
+import { isRuntimeBackedProvider } from '../../shared/providerExecution';
 import {
   coerceModelForRuntime,
   coercePermissionModeForRuntime,
@@ -874,9 +875,15 @@ export function resolveWorkspaceConfig(
     }
   }
 
-  const resolvedRuntime: RuntimeType = normalizeRuntime(
-    (sessionMeta?.runtime as string | undefined) ?? (agent?.runtime as string | undefined),
-  );
+  const agentProvider = agent?.providerId
+    ? findEffectiveProvider(agent.providerId as string, config)
+    : undefined;
+  const agentUsesRuntimeBackedProvider = Boolean(agentProvider && isRuntimeBackedProvider(agentProvider));
+  const resolvedRuntime: RuntimeType = agentUsesRuntimeBackedProvider && !sessionMeta?.runtime
+    ? 'codex'
+    : normalizeRuntime(
+        (sessionMeta?.runtime as string | undefined) ?? (agent?.runtime as string | undefined),
+      );
   const agentRuntimeConfig = agent?.runtimeConfig as {
     model?: string;
     permissionMode?: string;
@@ -929,7 +936,9 @@ export function resolveWorkspaceConfig(
     ? (snapshotOwnsConfig
       ? (isConcreteProviderRoute(providerRoute) ? providerRoute.model : sessionMeta?.model)
       : (sessionMeta?.model ?? (agent?.model as string | undefined) ?? undefined))
-    : (snapshotOwnsConfig ? sessionMeta?.model : (sessionMeta?.model ?? agentRuntimeConfig?.model));
+    : (snapshotOwnsConfig
+      ? sessionMeta?.model
+      : (sessionMeta?.model ?? (agentUsesRuntimeBackedProvider ? agent?.model as string | undefined : agentRuntimeConfig?.model)));
   let model = coerceModelForRuntime(rawModel, resolvedRuntime);
   if (resolvedRuntime !== 'builtin'
       && typeof rawModel === 'string'

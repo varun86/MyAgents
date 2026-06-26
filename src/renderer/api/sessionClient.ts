@@ -10,6 +10,8 @@ import {
 } from './tauriClient';
 import type { ContextUsage } from '../../shared/types/context-usage';
 import type { ProviderRoute } from '../../shared/providerRoute';
+import type { RuntimeBackedProviderIdentity } from '../../shared/providerExecution';
+import type { RuntimeSource } from '../../shared/types/runtime';
 
 export interface SessionStats {
     messageCount: number;
@@ -64,6 +66,8 @@ export interface SessionMetadata {
     forkFrom?: { sourceSessionId: string; messageUuid?: string };
     /** Runtime that created this session. Absent = pre-v0.1.60 session → treat as 'builtin' */
     runtime?: string;
+    /** Runtime source. Missing external Codex history is treated as 'system-cli'. */
+    runtimeSource?: RuntimeSource;
     /** Runtime's native session/thread ID (Codex threadId, CC session_id from hook) */
     runtimeSessionId?: string;
 
@@ -79,6 +83,8 @@ export interface SessionMetadata {
     enabledPluginIds?: string[];
     providerId?: string;
     providerRoute?: ProviderRoute;
+    /** Provider-facing identity for runtime-backed providers such as Managed Codex. */
+    providerExecutionIdentity?: RuntimeBackedProviderIdentity;
     providerRouteRepairedAt?: string;
     /** Credentials — server redacts to '[redacted]' in PATCH response (zero-trust) */
     providerEnvJson?: string;
@@ -154,13 +160,31 @@ export async function getSessions(agentDir?: string): Promise<SessionMetadata[]>
 export async function createSession(
     agentDir: string,
     runtime?: string,
-    opts?: { seedMaxPermission?: boolean },
+    opts?: {
+        seedMaxPermission?: boolean;
+        runtimeSource?: RuntimeSource;
+        providerExecutionIdentity?: RuntimeBackedProviderIdentity;
+        providerId?: string;
+        model?: string;
+        permissionMode?: string;
+        reasoningEffort?: string;
+        mcpEnabledServers?: string[];
+        enabledPluginIds?: string[];
+    },
 ): Promise<SessionMetadata> {
     const result = await apiPostJson<{ success: boolean; session: SessionMetadata }>(
         '/sessions',
         {
             agentDir,
             ...(runtime ? { runtime } : {}),
+            ...(opts?.runtimeSource ? { runtimeSource: opts.runtimeSource } : {}),
+            ...(opts?.providerExecutionIdentity ? { providerExecutionIdentity: opts.providerExecutionIdentity } : {}),
+            ...(opts?.providerId ? { providerId: opts.providerId } : {}),
+            ...(opts?.model !== undefined ? { model: opts.model } : {}),
+            ...(opts?.permissionMode !== undefined ? { permissionMode: opts.permissionMode } : {}),
+            ...(opts?.reasoningEffort !== undefined ? { reasoningEffort: opts.reasoningEffort } : {}),
+            ...(opts?.mcpEnabledServers !== undefined ? { mcpEnabledServers: opts.mcpEnabledServers } : {}),
+            ...(opts?.enabledPluginIds !== undefined ? { enabledPluginIds: opts.enabledPluginIds } : {}),
             // PRD 0.2.34 §14 D14：桌面渠道创建时由服务端原子地种「最宽松权限 per
             // runtime」（getMaxPermissionForRuntime），避免创建后再 PATCH 的吞错窗口。
             ...(opts?.seedMaxPermission ? { seedMaxPermission: true } : {}),
@@ -232,6 +256,7 @@ export async function updateSession(
         enabledPluginIds?: string[] | null;
         providerId?: string | null;
         providerRoute?: ProviderRoute | null;
+        providerExecutionIdentity?: RuntimeBackedProviderIdentity | null;
         providerEnvJson?: string | null;
     }
 ): Promise<SessionMetadata | null> {

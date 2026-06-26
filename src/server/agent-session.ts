@@ -86,6 +86,7 @@ import {
   isLiveFollowScenario,
   type SessionMaterializationScenario,
 } from './utils/session-materialization';
+import { isManagedCodexProviderReady } from './utils/managed-codex-readiness';
 import { findAgentByWorkspacePath, isCliToolRegistryEnabled, loadConfig as loadAdminConfig } from './utils/admin-config';
 import type { AgentConfig } from '../shared/types/agent';
 import { broadcast } from './sse';
@@ -4309,6 +4310,7 @@ function createMetadataForSessionId(
     scenario,
     agent,
     runtimeOverride: getCurrentRuntimeType(),
+    managedCodexProviderReady: isManagedCodexProviderReady(loadAdminConfig()),
     fallbackRuntime: getCurrentRuntimeType(),
     title,
   });

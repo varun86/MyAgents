@@ -3,11 +3,19 @@ import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_CLAUDE_TRANSCRIPT_CLEANUP_PERIOD_DAYS,
   DEFAULT_CONFIG,
+  CODEX_SUBSCRIPTION_PROVIDER_ID,
+  MANAGED_CODEX_PROVIDER,
+  MANAGED_CODEX_REQUIRED_RUNTIME,
   PRESET_PROVIDERS,
+  applyManagedCodexProviderReadiness,
+  getManagedCodexProviderReadiness,
+  isManagedCodexRequiredRuntimeInstalled,
+  isManagedCodexSubscriptionAuthValid,
   normalizeChatQueueResponseMode,
   normalizeClaudeTranscriptCleanupPeriodDays,
   normalizeProviderOrder,
   splitProviderModelInput,
+  withManagedCodexProviderCatalog,
 } from './config-types';
 
 // normalizeProviderOrder reconciles a persisted provider order against the set
@@ -110,5 +118,81 @@ describe('desktop pet defaults', () => {
 describe('CLI tool registry defaults', () => {
   it('keeps the experimental registry off by default', () => {
     expect(DEFAULT_CONFIG.cliToolRegistryEnabled).toBe(false);
+  });
+});
+
+describe('Managed Codex provider readiness', () => {
+  it('keeps the provider out of the catalogue while the developer gate is off', () => {
+    expect(withManagedCodexProviderCatalog([MANAGED_CODEX_PROVIDER], {
+      managedCodexProviderDevGate: false,
+    }).some(provider => provider.id === CODEX_SUBSCRIPTION_PROVIDER_ID)).toBe(false);
+  });
+
+  it('shows the provider card behind the developer gate but keeps it unselectable until ready', () => {
+    const catalog = withManagedCodexProviderCatalog([], {
+      managedCodexProviderDevGate: true,
+    });
+    const providers = applyManagedCodexProviderReadiness(catalog, {
+      managedCodexProviderDevGate: true,
+      managedCodexProviderEnabled: true,
+    });
+
+    expect(catalog.map(provider => provider.id)).toEqual([CODEX_SUBSCRIPTION_PROVIDER_ID]);
+    expect(providers[0].enabled).toBe(false);
+    expect(getManagedCodexProviderReadiness({
+      managedCodexProviderDevGate: true,
+      managedCodexProviderEnabled: true,
+    }).reason).toBe('runtime-not-installed');
+  });
+
+  it('requires exact runtime version, subscription auth, and user enablement', () => {
+    const runtime = {
+      status: 'installed' as const,
+      installedVersion: MANAGED_CODEX_REQUIRED_RUNTIME.version,
+      requiredVersion: MANAGED_CODEX_REQUIRED_RUNTIME.version,
+    };
+    const auth = {
+      status: 'valid' as const,
+      authMethod: 'chatgpt' as const,
+    };
+
+    expect(isManagedCodexRequiredRuntimeInstalled(runtime)).toBe(true);
+    expect(isManagedCodexSubscriptionAuthValid(auth)).toBe(true);
+    expect(getManagedCodexProviderReadiness({
+      managedCodexProviderDevGate: true,
+      managedCodexProviderEnabled: true,
+      managedCodexRuntimeInstall: runtime,
+      managedCodexAuth: auth,
+    })).toMatchObject({
+      visible: true,
+      selectable: true,
+      reason: 'ready',
+    });
+  });
+
+  it('does not treat Codex API-key auth as subscription readiness', () => {
+    expect(isManagedCodexSubscriptionAuthValid({
+      status: 'valid',
+      authMethod: 'api-key',
+    })).toBe(false);
+  });
+
+  it('preserves explicit provider disablement even after readiness succeeds', () => {
+    const providers = applyManagedCodexProviderReadiness([
+      { ...MANAGED_CODEX_PROVIDER, enabled: false },
+    ], {
+      managedCodexProviderDevGate: true,
+      managedCodexProviderEnabled: true,
+      managedCodexRuntimeInstall: {
+        status: 'installed',
+        installedVersion: MANAGED_CODEX_REQUIRED_RUNTIME.version,
+      },
+      managedCodexAuth: {
+        status: 'valid',
+        authMethod: 'chatgpt',
+      },
+    });
+
+    expect(providers[0].enabled).toBe(false);
   });
 });

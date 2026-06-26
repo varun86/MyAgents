@@ -3690,10 +3690,7 @@ mod tests {
         input.mcp_enabled_servers = Some(vec!["removed".to_string()]);
         let created = store.create_direct(input).await.unwrap();
 
-        let updated = store
-            .remove_mcp_server_references("removed")
-            .await
-            .unwrap();
+        let updated = store.remove_mcp_server_references("removed").await.unwrap();
         assert_eq!(updated, 1);
 
         let task = store.get(&created.id).await.unwrap();

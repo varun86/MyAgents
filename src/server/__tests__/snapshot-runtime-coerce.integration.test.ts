@@ -157,6 +157,41 @@ describe('resolveSessionConfig — runtime-aware coercion (issue #224)', () => {
     expect(r.model).toBe('gpt-5.5-codex');
   });
 
+  it('legacy managed Codex provider fallback reads provider model and managed source', () => {
+    const r = resolveSessionConfig(meta({
+      runtime: undefined,
+      runtimeSource: undefined,
+      model: undefined,
+    }), makeAgent({
+      providerId: 'codex-sub',
+      model: 'gpt-5.4-codex',
+      runtimeConfig: { model: 'stale-system-cli-model' },
+    }), undefined, 'owned', { managedCodexProviderReady: true });
+
+    expect(r.runtime).toBe('codex');
+    expect(r.runtimeSource).toBe('managed-provider');
+    expect(r.model).toBe('gpt-5.4-codex');
+    expect(r.providerId).toBeUndefined();
+    expect(r.providerEnvJson).toBeUndefined();
+  });
+
+  it('legacy managed Codex provider fallback is ignored when provider is not ready', () => {
+    const r = resolveSessionConfig(meta({
+      runtime: undefined,
+      runtimeSource: undefined,
+      model: undefined,
+    }), makeAgent({
+      providerId: 'codex-sub',
+      model: 'gpt-5.4-codex',
+      runtimeConfig: { model: 'stale-system-cli-model' },
+    }), undefined, 'owned');
+
+    expect(r.runtime).toBe('builtin');
+    expect(r.runtimeSource).toBeUndefined();
+    expect(r.model).toBe('gpt-5.4-codex');
+    expect(r.providerId).toBe('codex-sub');
+  });
+
   it('owned/external: missing snapshot model uses runtime default instead of agent fallback', () => {
     const r = resolveSessionConfig(meta({
       runtime: 'codex',

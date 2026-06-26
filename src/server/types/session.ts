@@ -1,8 +1,9 @@
 import { randomUUID } from 'crypto';
-import type { RuntimeType } from '../../shared/types/runtime';
+import type { RuntimeSource, RuntimeType } from '../../shared/types/runtime';
 import type { ContextUsage } from '../../shared/types/context-usage';
 import { deriveSessionTitle } from '../../shared/sessionTitle';
 import type { ProviderRoute } from '../../shared/providerRoute';
+import type { RuntimeBackedProviderIdentity } from '../../shared/providerExecution';
 
 /**
  * Session statistics for tracking usage
@@ -59,6 +60,8 @@ export interface SessionMetadata {
     };
     /** Which runtime created this session. Absent = 'builtin' (backward compatible) */
     runtime?: RuntimeType;
+    /** Runtime source. Missing external Codex history is treated as 'system-cli'. */
+    runtimeSource?: RuntimeSource;
     /** Runtime's own session/thread ID (Codex: threadId, CC: session_id from hook).
      *  Different from our session `id` — used for resume across Sidecar restarts. */
     runtimeSessionId?: string;
@@ -94,6 +97,8 @@ export interface SessionMetadata {
     providerId?: string;
     /** Snapshot provider/model route identity. This is the canonical builtin provider identity. */
     providerRoute?: ProviderRoute;
+    /** Provider-facing identity for runtime-backed providers such as Managed Codex. */
+    providerExecutionIdentity?: RuntimeBackedProviderIdentity;
     /** Last time a legacy route was deterministically repaired. Diagnostic only. */
     providerRouteRepairedAt?: string;
     /** Snapshot provider env JSON (credentials). For owned sessions, undefined means re-resolve from providerId. */

@@ -41,6 +41,7 @@ describe('persistInputOptionChange — disk write fanout', () => {
     expect(m.patchSnapshot).toHaveBeenCalledWith({
       providerId: 'deepseek',
       providerRoute: null,
+      providerExecutionIdentity: null,
       model: 'deepseek-chat',
       providerEnvJson: null,
     });
@@ -104,6 +105,7 @@ describe('persistInputOptionChange — disk write fanout', () => {
     expect(m.patchSnapshot).toHaveBeenCalledWith({
       providerId: 'skywork-ai',
       providerRoute: null,
+      providerExecutionIdentity: null,
       model: 'skywork-ai/skyclaw-v1',
       providerEnvJson: null,
     });
@@ -138,6 +140,7 @@ describe('persistInputOptionChange — disk write fanout', () => {
     expect(m.patchSnapshot).toHaveBeenCalledWith({
       providerId: 'zhipu',
       providerRoute: { kind: 'provider', providerId: 'zhipu', model: 'glm-4.7-air' },
+      providerExecutionIdentity: null,
       model: 'glm-4.7-air',
       permissionMode: 'fullAgency',
       providerEnvJson: null,
@@ -162,6 +165,7 @@ describe('persistInputOptionChange — disk write fanout', () => {
     expect(m.patchSnapshot).toHaveBeenCalledWith({
       providerId: 'deepseek',
       providerRoute: { kind: 'provider', providerId: 'deepseek', model: 'deepseek-v4-pro' },
+      providerExecutionIdentity: null,
       model: 'deepseek-v4-pro',
       providerEnvJson: null,
     });
@@ -184,8 +188,62 @@ describe('persistInputOptionChange — disk write fanout', () => {
     expect(m.patchSnapshot).toHaveBeenCalledWith({
       providerId: 'anthropic-sub',
       providerRoute: { kind: 'subscription', providerId: 'anthropic-sub', model: 'claude-sonnet-4-6' },
+      providerExecutionIdentity: null,
       model: 'claude-sonnet-4-6',
       providerEnvJson: null,
+    });
+  });
+
+  it('writes runtime-backed provider selection as provider identity plus runtime model push', async () => {
+    const m = makeMocks();
+    const identity = {
+      kind: 'runtime-backed-provider' as const,
+      providerId: 'codex-sub' as const,
+      runtime: 'codex' as const,
+      runtimeSource: 'managed-provider' as const,
+      model: 'gpt-5.4-codex',
+    };
+
+    await persistInputOptionChange({
+      workspaceId: 'ws-1',
+      agentId: 'agent-1',
+      isExternalRuntime: true,
+      currentRuntimeConfig: { envPolicy: { proxy: 'terminal' } },
+      fields: {
+        runtimeBackedProviderSelection: identity,
+        permissionMode: 'full-auto',
+      },
+      patchProject: m.patchProject,
+      patchAgentConfig: m.patchAgentConfig,
+      patchSnapshot: m.patchSnapshot,
+      pushRuntimeConfigToSidecar: m.pushRuntimeConfigToSidecar,
+    });
+
+    expect(m.patchProject).toHaveBeenCalledWith('ws-1', {
+      providerId: 'codex-sub',
+      model: 'gpt-5.4-codex',
+    });
+    expect(m.patchAgentConfig).toHaveBeenCalledWith('agent-1', {
+      providerId: 'codex-sub',
+      model: 'gpt-5.4-codex',
+      runtimeConfig: {
+        envPolicy: { proxy: 'terminal' },
+        source: 'managed-provider',
+        model: 'gpt-5.4-codex',
+        permissionMode: 'full-auto',
+      },
+    });
+    expect(m.patchSnapshot).toHaveBeenCalledWith({
+      providerId: 'codex-sub',
+      providerRoute: null,
+      providerExecutionIdentity: identity,
+      model: 'gpt-5.4-codex',
+      providerEnvJson: null,
+      permissionMode: 'full-auto',
+    });
+    expect(m.pushRuntimeConfigToSidecar).toHaveBeenCalledWith({
+      model: 'gpt-5.4-codex',
+      permissionMode: 'full-auto',
     });
   });
 

@@ -29,7 +29,58 @@ describe('planSessionOpen', () => {
       reason: 'runtime-mismatch',
       currentRuntime: 'claude-code',
       targetRuntime: 'codex',
+      currentRuntimeSource: 'system-cli',
+      targetRuntimeSource: 'system-cli',
     });
+  });
+
+  test('opens a new tab when Codex runtime source changes', () => {
+    expect(planSessionOpen({
+      tabs: [{ id: 'tab-a', sessionId: 'session-a' }],
+      targetSessionId: 'session-b',
+      multiAgentRuntime: true,
+      currentRuntimeIdentity: { runtime: 'codex', runtimeSource: 'system-cli' },
+      targetRuntimeIdentity: { runtime: 'codex', runtimeSource: 'managed-provider' },
+      targetActivation: null,
+      currentTabCronRunning: false,
+    })).toEqual({
+      type: 'open-new-tab',
+      reason: 'runtime-mismatch',
+      currentRuntime: 'codex',
+      targetRuntime: 'codex',
+      currentRuntimeSource: 'system-cli',
+      targetRuntimeSource: 'managed-provider',
+    });
+  });
+
+  test('keeps Managed Codex runtime-source boundary active when Labs runtime mode is disabled', () => {
+    expect(planSessionOpen({
+      tabs: [{ id: 'tab-a', sessionId: 'session-a' }],
+      targetSessionId: 'session-b',
+      multiAgentRuntime: false,
+      currentRuntimeIdentity: { runtime: 'builtin' },
+      targetRuntimeIdentity: { runtime: 'codex', runtimeSource: 'managed-provider' },
+      targetActivation: null,
+      currentTabCronRunning: false,
+    })).toEqual({
+      type: 'open-new-tab',
+      reason: 'runtime-mismatch',
+      currentRuntime: 'builtin',
+      targetRuntime: 'codex',
+      targetRuntimeSource: 'managed-provider',
+    });
+  });
+
+  test('allows Managed Codex model/session switches within the same runtime source', () => {
+    expect(planSessionOpen({
+      tabs: [{ id: 'tab-a', sessionId: 'session-a' }],
+      targetSessionId: 'session-b',
+      multiAgentRuntime: false,
+      currentRuntimeIdentity: { runtime: 'codex', runtimeSource: 'managed-provider' },
+      targetRuntimeIdentity: { runtime: 'codex', runtimeSource: 'managed-provider' },
+      targetActivation: null,
+      currentTabCronRunning: false,
+    })).toEqual({ type: 'switch-current-tab' });
   });
 
   test('attaches to an existing cron sidecar before checking the current tab cron state', () => {
@@ -61,7 +112,8 @@ describe('planSessionOpen', () => {
 
   test('does not produce a runtime-mismatch plan when multi-agent runtime is disabled', () => {
     // Single-runtime mode collapses everything to `builtin`; cross-runtime
-    // tabs cannot exist, so a hot-swap in current tab is the right path.
+    // tabs cannot exist for user-managed CLI runtimes, so a hot-swap in current
+    // tab is the right path. Managed provider sources are covered separately.
     expect(planSessionOpen({
       tabs: [{ id: 'tab-a', sessionId: 'session-a' }],
       targetSessionId: 'session-b',

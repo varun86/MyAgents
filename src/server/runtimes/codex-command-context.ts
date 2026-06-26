@@ -1,0 +1,270 @@
+import { existsSync, readFileSync, statSync } from 'fs';
+import { homedir, tmpdir } from 'os';
+import { join } from 'path';
+
+import {
+  MANAGED_CODEX_REQUIRED_RUNTIME,
+} from '../../shared/config-types';
+import type { RuntimeEnvPolicy, RuntimeSource } from '../../shared/types/runtime';
+import { ensureDirSync } from '../utils/fs-utils';
+import { augmentedProcessEnv, resolveCommand } from './env-utils';
+
+export interface CodexCommandContext {
+  source: RuntimeSource;
+  commandPath: string;
+  env: Record<string, string | undefined>;
+  codexHome?: string;
+  version?: string;
+  platform?: string;
+}
+
+interface ManagedCodexInstalledJson {
+  version?: string;
+  platform?: string;
+  executableRelativePath?: string;
+}
+
+const PROXY_ENV_KEYS = [
+  'HTTP_PROXY',
+  'HTTPS_PROXY',
+  'ALL_PROXY',
+  'NO_PROXY',
+  'http_proxy',
+  'https_proxy',
+  'all_proxy',
+  'no_proxy',
+] as const;
+
+const MANAGED_SAFE_ENV_KEYS = [
+  'PATH',
+  'Path',
+  'HOME',
+  'USERPROFILE',
+  'USER',
+  'USERNAME',
+  'TMPDIR',
+  'TEMP',
+  'TMP',
+  'SystemRoot',
+  'WINDIR',
+  'ComSpec',
+  'PATHEXT',
+  'APPDATA',
+  'LOCALAPPDATA',
+  'LANG',
+  'LC_ALL',
+  'LC_CTYPE',
+  'SSL_CERT_FILE',
+  'SSL_CERT_DIR',
+  'NODE_EXTRA_CA_CERTS',
+  'MYAGENTS_PROXY_INJECTED',
+  ...PROXY_ENV_KEYS,
+] as const;
+
+const AUTH_ENV_PREFIXES = [
+  'OPENAI_',
+  'ANTHROPIC_',
+  'GOOGLE_',
+  'GEMINI_',
+  'DEEPSEEK_',
+  'MOONSHOT_',
+  'MISTRAL_',
+  'XAI_',
+  'GROQ_',
+  'DASHSCOPE_',
+  'ARK_',
+  'VOLCENGINE_',
+  'AWS_',
+  'AZURE_',
+  'CLAUDE_',
+  'CODEX_',
+] as const;
+
+const AUTH_ENV_NAMES = new Set([
+  'API_KEY',
+  'AUTH_TOKEN',
+  'ACCESS_TOKEN',
+  'REFRESH_TOKEN',
+  'BEARER_TOKEN',
+  'TOKEN',
+]);
+
+function managedCodexPlatform(): string | null {
+  if (process.platform === 'darwin') {
+    if (process.arch === 'arm64') return 'darwin-arm64';
+    if (process.arch === 'x64') return 'darwin-x64';
+    return null;
+  }
+  if (process.platform === 'win32') {
+    if (process.arch === 'x64') return 'win32-x64';
+    return null;
+  }
+  return null;
+}
+
+export function getManagedCodexHome(): string {
+  return join(homedir(), '.myagents', 'codex');
+}
+
+export function getManagedCodexRuntimeRoot(): string {
+  return join(homedir(), '.myagents', 'runtimes', 'codex');
+}
+
+function managedCodexInstallDir(platform: string): string {
+  return join(
+    getManagedCodexRuntimeRoot(),
+    MANAGED_CODEX_REQUIRED_RUNTIME.version,
+    platform,
+  );
+}
+
+function managedCodexInstalledJsonPath(): string {
+  return join(getManagedCodexRuntimeRoot(), 'installed.json');
+}
+
+function isExecutableFile(path: string): boolean {
+  try {
+    return statSync(path).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function readManagedCodexInstalledJson(): ManagedCodexInstalledJson | null {
+  try {
+    return JSON.parse(readFileSync(managedCodexInstalledJsonPath(), 'utf8')) as ManagedCodexInstalledJson;
+  } catch {
+    return null;
+  }
+}
+
+function safeManagedCodexRelativePath(raw: string | undefined): string | null {
+  if (!raw || raw.includes('\0') || raw.includes('\\') || raw.startsWith('/')) return null;
+  if (/^[a-zA-Z]:/.test(raw)) return null;
+  const segments = raw.split('/');
+  if (segments.length === 0 || segments.length > 64) return null;
+  for (const segment of segments) {
+    if (!segment || segment === '.' || segment === '..' || segment.includes(':')) return null;
+    if (/[ .]$/.test(segment)) return null;
+  }
+  return join(...segments);
+}
+
+export function resolveManagedCodexCommandPath(): string {
+  const platform = managedCodexPlatform();
+  if (!platform) {
+    throw new Error(`Managed Codex is not supported on ${process.platform}-${process.arch}`);
+  }
+
+  const installDir = managedCodexInstallDir(platform);
+  const installed = readManagedCodexInstalledJson();
+  if (
+    installed?.version === MANAGED_CODEX_REQUIRED_RUNTIME.version
+    && installed.platform === platform
+  ) {
+    const rel = safeManagedCodexRelativePath(installed.executableRelativePath);
+    if (rel) {
+      const commandPath = join(installDir, rel);
+      if (isExecutableFile(commandPath)) return commandPath;
+    }
+  }
+
+  const candidates = process.platform === 'win32'
+    ? [
+        join(installDir, 'codex.exe'),
+        join(installDir, 'codex.cmd'),
+        join(installDir, 'bin', 'codex.exe'),
+        join(installDir, 'bin', 'codex.cmd'),
+      ]
+    : [
+        join(installDir, 'codex'),
+        join(installDir, 'bin', 'codex'),
+      ];
+  const commandPath = candidates.find(isExecutableFile);
+  if (!commandPath) {
+    throw new Error(
+      `Managed Codex runtime ${MANAGED_CODEX_REQUIRED_RUNTIME.version} is not installed for ${platform}`,
+    );
+  }
+  return commandPath;
+}
+
+function looksLikeAuthEnvName(name: string): boolean {
+  const upper = name.toUpperCase();
+  if (AUTH_ENV_NAMES.has(upper)) return true;
+  if (AUTH_ENV_PREFIXES.some(prefix => upper.startsWith(prefix))) return true;
+  return /(API|AUTH|ACCESS|REFRESH|BEARER).*?(KEY|TOKEN|SECRET|PASSWORD)/.test(upper)
+    || /(KEY|TOKEN|SECRET|PASSWORD)$/.test(upper);
+}
+
+function buildManagedCodexEnv(
+  policy?: RuntimeEnvPolicy,
+): Record<string, string | undefined> {
+  const base = augmentedProcessEnv(policy);
+  const env: Record<string, string | undefined> = {};
+
+  for (const key of MANAGED_SAFE_ENV_KEYS) {
+    const value = base[key];
+    if (value !== undefined) env[key] = value;
+  }
+
+  // Defense-in-depth: the allow-list above intentionally omits provider auth,
+  // but keep an explicit scrub so future safe-key additions cannot accidentally
+  // leak credentials into the managed Codex process.
+  for (const key of Object.keys(env)) {
+    if (looksLikeAuthEnvName(key)) delete env[key];
+  }
+
+  const managedHome = getManagedCodexHome();
+  ensureDirSync(managedHome);
+  ensureDirSync(join(managedHome, 'logs'));
+  ensureDirSync(join(managedHome, 'sessions'));
+  ensureDirSync(join(managedHome, 'myagents'));
+
+  env.CODEX_HOME = managedHome;
+  env.HOME = env.HOME || homedir();
+  if (process.platform === 'win32') {
+    env.USERPROFILE = env.USERPROFILE || homedir();
+    env.TEMP = env.TEMP || tmpdir();
+    env.TMP = env.TMP || tmpdir();
+  } else {
+    env.TMPDIR = env.TMPDIR || tmpdir();
+  }
+  env.MYAGENTS_RUNTIME_SOURCE = 'managed-provider';
+  return env;
+}
+
+export function resolveCodexCommandContext(args: {
+  source?: RuntimeSource;
+  envPolicy?: RuntimeEnvPolicy;
+} = {}): CodexCommandContext {
+  const source = args.source ?? 'system-cli';
+  if (source === 'managed-provider') {
+    const platform = managedCodexPlatform();
+    const commandPath = resolveManagedCodexCommandPath();
+    return {
+      source,
+      commandPath,
+      env: buildManagedCodexEnv(args.envPolicy),
+      codexHome: getManagedCodexHome(),
+      version: MANAGED_CODEX_REQUIRED_RUNTIME.version,
+      platform: platform ?? undefined,
+    };
+  }
+
+  return {
+    source: 'system-cli',
+    commandPath: resolveCommand('codex'),
+    env: augmentedProcessEnv(args.envPolicy),
+  };
+}
+
+export function isManagedCodexRuntimeInstalled(): boolean {
+  if (!existsSync(getManagedCodexRuntimeRoot())) return false;
+  try {
+    resolveManagedCodexCommandPath();
+    return true;
+  } catch {
+    return false;
+  }
+}

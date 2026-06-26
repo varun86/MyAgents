@@ -3,8 +3,18 @@ import { exists, readDir, readTextFile, remove } from '@tauri-apps/plugin-fs';
 import { join } from '@tauri-apps/api/path';
 
 import type { Provider, ProviderVerifyStatus, AppConfig, Project } from '../types';
-import { PRESET_PROVIDERS, applyProviderEnablementAndOrder, isProviderEnabled } from '../types';
+import {
+    PRESET_PROVIDERS,
+    applyManagedCodexProviderReadiness,
+    applyProviderEnablementAndOrder,
+    isProviderEnabled,
+    withManagedCodexProviderCatalog,
+} from '../types';
 import type { AgentConfig } from '../../../shared/types/agent';
+import {
+    isBuiltinExecutionProvider,
+    isRuntimeBackedProvider,
+} from '../../../shared/providerExecution';
 import {
     isBrowserDevMode,
     ensureConfigDir,
@@ -86,12 +96,13 @@ export async function loadCustomProviders(): Promise<Provider[]> {
 }
 
 export async function getAllProviders(): Promise<Provider[]> {
+    const config = await loadAppConfig();
     if (isBrowserDevMode()) {
-        return PRESET_PROVIDERS;
+        return withManagedCodexProviderCatalog(PRESET_PROVIDERS, config);
     }
 
     const customProviders = await loadCustomProviders();
-    return [...PRESET_PROVIDERS, ...customProviders];
+    return withManagedCodexProviderCatalog([...PRESET_PROVIDERS, ...customProviders], config);
 }
 
 export async function saveCustomProvider(provider: Provider): Promise<void> {
@@ -208,11 +219,14 @@ export async function rebuildAndPersistAvailableProviders(): Promise<void> {
         ]);
         const verifyStatus = config.providerVerifyStatus ?? {};
 
-        const mergedProviders = applyProviderEnablementAndOrder(
-            mergePresetCustomModels(
-                allProviders,
-                config.presetCustomModels,
-                config.presetRemovedModels as Record<string, string[]> | undefined,
+        const mergedProviders = applyManagedCodexProviderReadiness(
+            applyProviderEnablementAndOrder(
+                mergePresetCustomModels(
+                    allProviders,
+                    config.presetCustomModels,
+                    config.presetRemovedModels as Record<string, string[]> | undefined,
+                ),
+                config,
             ),
             config,
         );
@@ -220,7 +234,7 @@ export async function rebuildAndPersistAvailableProviders(): Promise<void> {
         const primaryOverrides = config.providerPrimaryModels as Record<string, string> | undefined;
         // Only include providers with valid credentials (see isProviderAvailable)
         const availableProviders = mergedProviders
-            .filter(p => isProviderAvailable(p, apiKeys, verifyStatus))
+            .filter(p => isBuiltinExecutionProvider(p) && isProviderAvailable(p, apiKeys, verifyStatus))
             .map(p => {
                 const userPrimary = primaryOverrides?.[p.id];
                 const effectivePrimary = (userPrimary && p.models?.some(m => m.model === userPrimary))
@@ -260,6 +274,10 @@ export function isProviderAvailable(
     verifyStatus: Record<string, ProviderVerifyStatus>,
 ): boolean {
     if (!isProviderEnabled(provider)) return false;
+    if (isRuntimeBackedProvider(provider)) {
+        const result = verifyStatus[provider.id];
+        return provider.enabled === true && result?.status === 'valid';
+    }
     if (provider.type === 'subscription') {
         // Issue #203: `accountEmail` is enrichment only — a valid SDK verify
         // already proves the OAuth token works. Users who only ran

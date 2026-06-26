@@ -53,6 +53,7 @@ chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10"
 futures = "0.3"
 base64 = "0.22"
+minisign-verify = "0.2.5"
 dirs = "6.0"
 uuid = { version = "1.11", features = ["v4"] }
 tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
@@ -71,6 +72,7 @@ notify-debouncer-full = "0.6"
 sysinfo = { version = "0.33", default-features = false, features = ["system"] }
 trash = "5.2.3"
 image = { version = "0.25.10", default-features = false, features = ["png", "webp"] }
+sha2 = "0.10"
 zip = { version = "2.4.2", default-features = false, features = ["deflate-zlib"] }
 
 # Pattern 5: stale-lock recovery needs `kill(pid, 0)` for liveness probing on Unix.

@@ -26,7 +26,12 @@ import { messageAttachmentsFromImagePayloads, resolveImagePayloads } from './ima
 import { maybeSpill } from '../utils/large-value-store';
 import type { AskUserQuestionInput, AskUserQuestion } from '../../shared/types/askUserQuestion';
 import { withQuestionTextAnswerKeys } from '../../shared/types/askUserQuestion';
-import { getExternalRuntime, getCurrentRuntimeType, isExternalRuntime } from './factory';
+import {
+  getExternalRuntime,
+  getCurrentRuntimeSource,
+  getCurrentRuntimeType,
+  isExternalRuntime,
+} from './factory';
 import { resolveCodexWorkspaceInstructions } from './workspace-instructions';
 import { RUNTIME_DISPLAY_NAMES, type RuntimeType } from '../../shared/types/runtime';
 import { deriveSessionTitle } from '../../shared/sessionTitle';
@@ -43,6 +48,7 @@ import {
   createMaterializedSessionMetadata,
   type SessionMaterializationScenario,
 } from '../utils/session-materialization';
+import { isManagedCodexProviderReady } from '../utils/managed-codex-readiness';
 import { findAgentByWorkspacePath, isCliToolRegistryEnabled, loadConfig as loadAdminConfig } from '../utils/admin-config';
 import type { AgentConfig } from '../../shared/types/agent';
 import type { MessageUsage, SessionMessage, TurnAnalyticsSource } from '../types/session';
@@ -779,6 +785,7 @@ async function ensureExternalSessionMetadataForRealUserTurn(params: {
     scenario: materializationScenarioFromInteraction(scenario),
     agent,
     runtimeOverride: getCurrentRuntimeType(),
+    managedCodexProviderReady: isManagedCodexProviderReady(loadAdminConfig()),
     fallbackRuntime: getCurrentRuntimeType(),
     title,
   });
@@ -1450,6 +1457,10 @@ export function getActiveRuntimeType(): RuntimeType {
   return getCurrentRuntimeType();
 }
 
+export function getActiveRuntimeSource(): ReturnType<typeof getCurrentRuntimeSource> {
+  return getCurrentRuntimeSource();
+}
+
 /**
  * Wait for external session to become idle.
  * Detects two idle patterns:
@@ -1578,6 +1589,7 @@ async function _doStartExternalSession(options: {
 }): Promise<void> {
 
   const runtimeType = getCurrentRuntimeType();
+  const runtimeSource = getCurrentRuntimeSource();
   const runtime = getExternalRuntime(runtimeType);
   setExternalActiveRuntime(runtime);
 
@@ -1773,6 +1785,7 @@ async function _doStartExternalSession(options: {
         scenario: options.scenario,
         resumeSessionId: resumeId,
         envPolicy: resolvedEnvPolicy,
+        runtimeSource,
       },
       handleUnifiedEvent,
     );

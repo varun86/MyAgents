@@ -11,6 +11,12 @@
 export type RuntimeType = 'builtin' | 'claude-code' | 'codex' | 'gemini';
 
 /**
+ * Distinguishes user-managed CLI runtimes from product-managed runtime-backed
+ * providers. Missing source is treated as `system-cli` for existing sessions.
+ */
+export type RuntimeSource = 'system-cli' | 'managed-provider';
+
+/**
  * Canonical runtime type list — single source of truth.
  *
  * Used by:
@@ -239,6 +245,7 @@ export interface RuntimeEnvPolicy {
  * Runtime-specific configuration stored in AgentConfig
  */
 export interface RuntimeConfig {
+  source?: RuntimeSource;    // Runtime binary/state owner; missing == system-cli
   model?: string;            // Runtime-specific model selection
   permissionMode?: string;   // Runtime-specific permission mode
   /** #324 — reasoning effort setting ('default' | level). Vocabulary is
@@ -701,6 +708,7 @@ export interface RuntimeEffectiveEnv {
  */
 export interface RuntimeDiagnostics {
   runtime: RuntimeType;
+  runtimeSource?: RuntimeSource;
   effectiveEnv: RuntimeEffectiveEnv;
   auth?: RuntimeAuthStatus;
   features?: RuntimeFeatureFlag[];

@@ -111,7 +111,7 @@ import { isPendingSessionId } from '../shared/constants';
 import { parseAgentFrontmatter, parseFullAgentContent, serializeAgentContent } from '../shared/agentCommands';
 import { scanAgents, readWorkspaceConfig, writeWorkspaceConfig, loadEnabledAgents, readAgentMeta, writeAgentMeta, findAgent } from './agents/agent-loader';
 import type { AgentFrontmatter, AgentMeta, AgentWorkspaceConfig } from '../shared/agentTypes';
-import { SUBSCRIPTION_PROVIDER_ID, type McpServerDefinition, type BackgroundAgentPermissionMode } from '../shared/config-types';
+import { CODEX_SUBSCRIPTION_PROVIDER_ID, SUBSCRIPTION_PROVIDER_ID, type McpServerDefinition, type BackgroundAgentPermissionMode } from '../shared/config-types';
 import { ensureDirSync, ensureDir, isDirEntry } from './utils/fs-utils';
 import {
   setCronTaskContext,
@@ -532,6 +532,10 @@ import {
 } from './SessionStore';
 import { decodeProviderEnvSnapshot, findAgentByWorkspacePath, findProvider, getAllMcpServers, getEffectiveMcpServers, getEnabledMcpServerIds, isProviderDisabled, loadConfig, resolveImProviderEnv, resolveProviderEnv, resolveWorkspaceConfig } from './utils/admin-config';
 import { snapshotForOwnedSession } from './utils/session-snapshot';
+import {
+  isManagedCodexProviderReady,
+  managedCodexNotReadyMessage,
+} from './utils/managed-codex-readiness';
 import { buildSessionSnapshotPatchUpdates } from './utils/session-snapshot-patch';
 import { resolveSessionConfig } from './utils/resolve-session-config';
 import { resolveLastRealUserMessagePreview, shrinkSessionMessagesForClient } from './utils/session-message-preview';
@@ -596,7 +600,8 @@ import {
   getMaxPermissionForRuntime,
 } from '../shared/types/runtime';
 import { coerceReasoningEffortForRuntime } from '../shared/reasoningEffort';
-import type { RuntimeConfig, RuntimeType } from '../shared/types/runtime';
+import type { RuntimeConfig, RuntimeSource, RuntimeType } from '../shared/types/runtime';
+import type { RuntimeBackedProviderIdentity } from '../shared/providerExecution';
 import type { InteractionScenario } from './system-prompt';
 // PRD 0.2.18 Session Inbox — sanitize helper for cron envelope wrapping
 import { neutralizeInboxStructuralTags, sanitizeInboxLabel } from './inbox/sanitize-label';
@@ -712,6 +717,29 @@ function getRuntimeConfigPermissionMode(
   return permissionMode ? coercePermissionModeForRuntime(permissionMode, runtime) : undefined;
 }
 
+function getRuntimeConfigSource(
+  runtimeConfig?: RuntimeConfig | null,
+): RuntimeSource | undefined {
+  const source = runtimeConfig?.source;
+  return source === 'managed-provider' || source === 'system-cli' ? source : undefined;
+}
+
+function runtimeBackedProviderIdentityFromCronPayload(
+  runtime: RuntimeType,
+  runtimeConfig?: RuntimeConfig | null,
+): RuntimeBackedProviderIdentity | undefined {
+  const source = getRuntimeConfigSource(runtimeConfig);
+  const model = runtimeConfig?.model?.trim();
+  if (runtime !== 'codex' || source !== 'managed-provider' || !model) return undefined;
+  return {
+    kind: 'runtime-backed-provider',
+    providerId: CODEX_SUBSCRIPTION_PROVIDER_ID,
+    runtime: 'codex',
+    runtimeSource: 'managed-provider',
+    model,
+  };
+}
+
 function buildSnapshotRuntimeConfig(resolved: {
   model?: string;
   permissionMode?: string;
@@ -784,6 +812,11 @@ function resolveCronProviderRouting(
   if (isProviderDisabled(providerId)) {
     throw new Error(
       `Provider '${providerId}' is disabled — re-enable it in 设置 → 模型供应商 → 启用和排序, or re-select a provider in 任务编辑 → 高级配置.`,
+    );
+  }
+  if (providerId === CODEX_SUBSCRIPTION_PROVIDER_ID) {
+    throw new Error(
+      `Provider '${providerId}' is runtime-backed — re-select it so the task can run through its managed runtime identity.`,
     );
   }
   if (provider.type === 'subscription') {
@@ -2609,6 +2642,7 @@ async function main() {
           //   2. payload.providerIntent (legacy #119 path) — kept for in-flight
           //      cron tasks persisted by 0.2.8 and earlier.
           //   3. neither — followAgent (snapshot resolve from session meta).
+          const managedCodexReady = isManagedCodexProviderReady(loadConfig());
           const intent = payload.providerIntent ?? 'followAgent';
           let effectiveModel = model;
           let effectiveProviderEnv: ProviderEnv | 'subscription' | undefined = providerEnv;
@@ -2646,7 +2680,9 @@ async function main() {
               const sessionMeta = getSessionMetadata(currentSessionId);
               const agent = findAgentByWorkspacePath(agentDir) as AgentConfig | undefined;
               if (sessionMeta && agent) {
-                const resolved = resolveSessionConfig(sessionMeta, agent, undefined, 'owned');
+                const resolved = resolveSessionConfig(sessionMeta, agent, undefined, 'owned', {
+                  managedCodexProviderReady: managedCodexReady,
+                });
                 if (resolved.model !== undefined) effectiveModel = resolved.model;
                 if (isConcreteProviderRoute(resolved.providerRoute)) {
                   effectiveProviderRoute = resolved.providerRoute;
@@ -2712,6 +2748,7 @@ async function main() {
                   // the runtime CLI 404s on the wrong model id.
                   effectiveRuntimeConfig = {
                     ...(payload.runtimeConfig ?? {}),
+                    source: payload.runtimeConfig?.source ?? resolved.runtimeSource ?? effectiveRuntimeConfig?.source,
                     model: payload.runtimeConfig?.model ?? payload.model ?? resolved.model,
                     permissionMode: payload.runtimeConfig?.permissionMode ?? payload.permissionMode ?? resolved.permissionMode,
                   };
@@ -2770,6 +2807,13 @@ async function main() {
           // undefined and empty string. PRD 0.2.5 R2 / regression of 07bc560d.
           const engine = getSessionEngine();
           const cronRuntimeType: RuntimeType = engine.kind === 'external' ? getActiveRuntimeType() : 'builtin';
+          if (getRuntimeConfigSource(effectiveRuntimeConfig ?? null) === 'managed-provider' && !managedCodexReady) {
+            const errMsg = managedCodexNotReadyMessage('cron task execution');
+            console.error(`[cron] execute managed Codex runtimeConfig rejected: ${errMsg}`);
+            clearCronTaskContext(currentSessionId);
+            resetInteractionScenario();
+            return jsonResponse({ success: false, error: errMsg }, 400);
+          }
           const effectivePermissionMode = resolveCronPermissionMode(
             payload.permissionMode,
             effectiveRuntimeConfig?.permissionMode,
@@ -2845,6 +2889,7 @@ async function main() {
         // Handle session setup based on runMode
         const effectiveRunMode = runMode ?? 'single_session';
         const { agentDir } = getAgentState();
+        const managedCodexReady = isManagedCodexProviderReady(loadConfig());
 
         // Clear any existing cron context before switching sessions
         // This prevents context pollution when sessions change
@@ -2861,8 +2906,36 @@ async function main() {
           const cronAgent = findAgentByWorkspacePath(agentDir) as AgentConfig | undefined;
           const overrideRuntime = payload.runtime ?? getActiveRuntimeType();
           const cronSnapshot: Partial<SessionMetadata> = cronAgent
-            ? snapshotForOwnedSession(cronAgent, { runtimeOverride: overrideRuntime })
+            ? snapshotForOwnedSession(cronAgent, {
+                runtimeOverride: overrideRuntime,
+                managedCodexProviderReady: managedCodexReady,
+              })
             : { runtime: overrideRuntime };
+          const overrideRuntimeType = VALID_RUNTIMES.includes(overrideRuntime as RuntimeType)
+            ? overrideRuntime as RuntimeType
+            : 'builtin';
+          const overrideRuntimeSource = getRuntimeConfigSource(payload.runtimeConfig ?? null);
+          if (overrideRuntimeType !== 'builtin' && overrideRuntimeSource) {
+            cronSnapshot.runtimeSource = overrideRuntimeSource;
+          }
+          const runtimeBackedIdentity = runtimeBackedProviderIdentityFromCronPayload(
+            overrideRuntimeType,
+            payload.runtimeConfig ?? null,
+          );
+          if (runtimeBackedIdentity) {
+            if (!managedCodexReady) {
+              const errMsg = managedCodexNotReadyMessage('cron task execution');
+              console.error(`[cron] execute-sync managed Codex not ready: ${errMsg}`);
+              clearCronTaskContext(sessionId);
+              resetInteractionScenario();
+              return jsonResponse({ success: false, error: errMsg }, 400);
+            }
+            cronSnapshot.providerExecutionIdentity = runtimeBackedIdentity;
+            cronSnapshot.providerId = runtimeBackedIdentity.providerId;
+            cronSnapshot.providerRoute = undefined;
+            cronSnapshot.providerEnvJson = undefined;
+            cronSnapshot.model = runtimeBackedIdentity.model;
+          }
           // PRD #119: stamp the cron's explicit routing intent into the
           // freshly-built snapshot. For Subscription / Explicit intents,
           // the snapshot reflects the cron's own provider — NOT the agent's
@@ -2877,7 +2950,7 @@ async function main() {
           // BEFORE the legacy intent path below so a corrupt payload
           // carrying both `providerId` and `providerEnv` can't poison the
           // snapshot with the latter (Codex P2.1 finding).
-          if (payload.providerId) {
+          if (payload.providerId && !runtimeBackedIdentity) {
             cronSnapshot.providerId = payload.providerId;
             cronSnapshot.providerEnvJson = undefined;
             if (payload.model) {
@@ -2887,7 +2960,7 @@ async function main() {
               cronSnapshot.model = undefined;
               cronSnapshot.providerRoute = undefined;
             }
-          } else {
+          } else if (!runtimeBackedIdentity) {
             const cronIntent = payload.providerIntent ?? 'followAgent';
             if (cronIntent === 'subscription') {
               cronSnapshot.providerId = SUBSCRIPTION_PROVIDER_ID;
@@ -3031,7 +3104,9 @@ async function main() {
             const sessionMeta = getSessionMetadata(snapshotSessionId);
             const agent = findAgentByWorkspacePath(agentDir) as AgentConfig | undefined;
             if (sessionMeta && agent) {
-              const resolved = resolveSessionConfig(sessionMeta, agent, undefined, 'owned');
+              const resolved = resolveSessionConfig(sessionMeta, agent, undefined, 'owned', {
+                managedCodexProviderReady: managedCodexReady,
+              });
               if (resolved.model !== undefined) effectiveModel = resolved.model;
               if (isConcreteProviderRoute(resolved.providerRoute)) {
                 effectiveProviderRoute = resolved.providerRoute;
@@ -3091,6 +3166,7 @@ async function main() {
                 // the runtime CLI 404s on the wrong model id.
                 effectiveRuntimeConfig = {
                   ...(payload.runtimeConfig ?? {}),
+                  source: payload.runtimeConfig?.source ?? resolved.runtimeSource ?? effectiveRuntimeConfig?.source,
                   model: payload.runtimeConfig?.model ?? payload.model ?? resolved.model,
                   permissionMode: payload.runtimeConfig?.permissionMode ?? payload.permissionMode ?? resolved.permissionMode,
                 };
@@ -3169,6 +3245,14 @@ async function main() {
             ...(effectiveRuntimeConfig ?? {}),
             permissionMode: payload.permissionMode,
           };
+        }
+
+        if (getRuntimeConfigSource(effectiveRuntimeConfig ?? null) === 'managed-provider' && !managedCodexReady) {
+          const errMsg = managedCodexNotReadyMessage('cron task execution');
+          console.error(`[cron] execute-sync managed Codex runtimeConfig rejected: ${errMsg}`);
+          clearCronTaskContext(effectiveSessionId);
+          resetInteractionScenario();
+          return jsonResponse({ success: false, error: errMsg }, 400);
         }
 
         // Set cron task context so the exit_cron_task tool knows which task is running
@@ -3520,9 +3604,22 @@ async function main() {
 
       // POST /sessions - Create a new session
       if (pathname === '/sessions' && request.method === 'POST') {
-        let payload: { agentDir: string; runtime?: string; seedMaxPermission?: boolean };
+        type CreateSessionPayload = {
+          agentDir: string;
+          runtime?: string;
+          runtimeSource?: RuntimeSource;
+          seedMaxPermission?: boolean;
+          providerExecutionIdentity?: RuntimeBackedProviderIdentity;
+          providerId?: string;
+          model?: string;
+          permissionMode?: string;
+          reasoningEffort?: string;
+          mcpEnabledServers?: string[];
+          enabledPluginIds?: string[];
+        };
+        let payload: CreateSessionPayload;
         try {
-          payload = (await request.json()) as { agentDir: string; runtime?: string; seedMaxPermission?: boolean };
+          payload = (await request.json()) as CreateSessionPayload;
         } catch {
           return jsonResponse({ success: false, error: 'Invalid JSON payload.' }, 400);
         }
@@ -3538,13 +3635,39 @@ async function main() {
         const runtimeValue = (VALID_RUNTIMES as readonly string[]).includes(payload?.runtime as string)
           ? (payload.runtime as import('../shared/types/runtime').RuntimeType)
           : undefined;
+        const runtimeSourceValue: RuntimeSource | undefined =
+          payload.runtimeSource === 'managed-provider' || payload.runtimeSource === 'system-cli'
+            ? payload.runtimeSource
+            : undefined;
+        const managedCodexReady = isManagedCodexProviderReady(loadConfig());
+        if (
+          runtimeSourceValue === 'managed-provider'
+          || payload.providerExecutionIdentity?.runtimeSource === 'managed-provider'
+          || payload.providerId === CODEX_SUBSCRIPTION_PROVIDER_ID
+        ) {
+          if (!managedCodexReady) {
+            return jsonResponse({
+              success: false,
+              error: managedCodexNotReadyMessage('session creation'),
+            }, 400);
+          }
+          if (runtimeSourceValue === 'managed-provider' && !payload.providerExecutionIdentity) {
+            return jsonResponse({
+              success: false,
+              error: 'Managed Codex session creation requires providerExecutionIdentity.',
+            }, 400);
+          }
+        }
         // v0.1.69 Desktop session = owned snapshot. Capture model/permission/mcp/provider
         // from AgentConfig so the session is self-contained from creation onward.
         // The frontend's runtime override (payload.runtime) wins over agent.runtime — Tab UI
         // can pin a session to a specific runtime independent of the Agent's default.
         const agent = findAgentByWorkspacePath(agentDirValue) as AgentConfig | undefined;
         const baseSnapshot: Partial<SessionMetadata> = agent
-          ? snapshotForOwnedSession(agent, { runtimeOverride: runtimeValue })
+          ? snapshotForOwnedSession(agent, {
+              runtimeOverride: runtimeValue,
+              managedCodexProviderReady: managedCodexReady,
+            })
           : (runtimeValue ? { runtime: runtimeValue } : {});
         // PRD 0.2.34 §14 D14/D15 — 桌面渠道（悬浮球）创建 owned session 时把权限
         // 种成该 runtime 的「最宽松」档（发完就走渠道默认无脑执行）。原子地在快照
@@ -3556,6 +3679,42 @@ async function main() {
             (baseSnapshot.runtime ?? 'builtin') as RuntimeType,
           );
         }
+        if (runtimeSourceValue && (baseSnapshot.runtime ?? runtimeValue) !== 'builtin') {
+          baseSnapshot.runtimeSource = runtimeSourceValue;
+        }
+        if (payload.providerExecutionIdentity) {
+          baseSnapshot.providerExecutionIdentity = payload.providerExecutionIdentity;
+          baseSnapshot.providerId = payload.providerExecutionIdentity.providerId;
+          baseSnapshot.model = payload.providerExecutionIdentity.model;
+          baseSnapshot.providerRoute = undefined;
+          baseSnapshot.providerEnvJson = undefined;
+        } else {
+          if (payload.providerId !== undefined || payload.model !== undefined) {
+            baseSnapshot.providerExecutionIdentity = undefined;
+            baseSnapshot.providerEnvJson = undefined;
+          }
+          if (payload.providerId !== undefined) {
+            baseSnapshot.providerId = payload.providerId;
+            baseSnapshot.providerRoute = undefined;
+          }
+          if (payload.model !== undefined) {
+            baseSnapshot.model = payload.model;
+          }
+          if (
+            (baseSnapshot.runtime ?? runtimeValue ?? 'builtin') === 'builtin'
+            && baseSnapshot.providerId
+            && baseSnapshot.model
+          ) {
+            baseSnapshot.providerRoute = createConcreteProviderRoute(
+              baseSnapshot.providerId,
+              baseSnapshot.model,
+            );
+          }
+        }
+        if (payload.permissionMode !== undefined) baseSnapshot.permissionMode = payload.permissionMode;
+        if (payload.reasoningEffort !== undefined) baseSnapshot.reasoningEffort = payload.reasoningEffort;
+        if (payload.mcpEnabledServers !== undefined) baseSnapshot.mcpEnabledServers = payload.mcpEnabledServers;
+        if (payload.enabledPluginIds !== undefined) baseSnapshot.enabledPluginIds = payload.enabledPluginIds;
         const session = await createSession(agentDirValue, baseSnapshot);
         return jsonResponse({ success: true, session });
       }
@@ -3700,6 +3859,7 @@ async function main() {
           enabledPluginIds?: string[] | null;
           providerId?: string | null;
           providerRoute?: ProviderRoute | null;
+          providerExecutionIdentity?: RuntimeBackedProviderIdentity | null;
           providerEnvJson?: string | null;
         }
 
@@ -3725,6 +3885,7 @@ async function main() {
           'enabledPluginIds',
           'providerId',
           'providerRoute',
+          'providerExecutionIdentity',
           'providerEnvJson',
         ]);
         const touchedRecencyField = (Object.keys(payload) as Array<keyof PatchPayload>)
@@ -3769,7 +3930,10 @@ async function main() {
             : (() => {
               const agent = findAgentByWorkspacePath(existingMeta.agentDir) as AgentConfig | undefined;
               return agent
-                ? snapshotForOwnedSession(agent, { runtimeOverride: existingMeta.runtime as RuntimeType | undefined })
+                ? snapshotForOwnedSession(agent, {
+                    runtimeOverride: existingMeta.runtime as RuntimeType | undefined,
+                    managedCodexProviderReady: isManagedCodexProviderReady(loadConfig()),
+                  })
                 : undefined;
             })();
           Object.assign(updates, buildSessionSnapshotPatchUpdates({

@@ -71,6 +71,12 @@ import { coerceReasoningEffortForRuntime, reasoningEffortChoices } from '../../s
 import type { ProviderHistoryEnv } from '../../shared/providerHistory';
 import { createConcreteProviderRoute, hasProviderRouteCredential, isConcreteProviderRoute } from '../../shared/providerRoute';
 import type { ProviderRoute } from '../../shared/providerRoute';
+import {
+  isRuntimeBackedProvider,
+  toProviderExecutionIntent,
+  type RuntimeBackedProviderIdentity,
+  type ProviderExecutionIntent,
+} from '../../shared/providerExecution';
 import type { CapabilityInitialSelect } from '../../shared/skillsTypes';
 import {
   buildRuntimeChangePatch,
@@ -92,6 +98,7 @@ import {
   resolveCurrentProviderForSession,
   resolveLegacyBuiltinSnapshotProviderId,
   isPinnedProviderUnavailable,
+  shouldBlockSendForLabsDisabledExternalRuntime,
   shouldResetModelOnProviderChange,
   shouldSkipSnapshotWrite,
 } from '@/utils/optionResolve';
@@ -137,7 +144,20 @@ function getRuntimeDisplayLabel(runtime: RuntimeType | undefined): string {
 
 function buildBuiltinProviderRoute(provider: Provider | undefined, model: string | undefined): ProviderRoute | undefined {
   if (!provider || !model) return undefined;
+  if (isRuntimeBackedProvider(provider)) return undefined;
   return createConcreteProviderRoute(provider.id, model);
+}
+
+function buildProviderExecutionIntent(
+  provider: Pick<Provider, 'id' | 'execution'> | undefined,
+  model: string | undefined,
+): ProviderExecutionIntent | undefined {
+  if (!provider || !model) return undefined;
+  return toProviderExecutionIntent(provider, model);
+}
+
+function isRuntimeBackedIntent(intent: ProviderExecutionIntent | undefined): boolean {
+  return intent?.kind === 'runtime-backed-provider';
 }
 
 function coerceExternalRuntimeModelForUi(model: string | undefined, runtime: RuntimeType): string | undefined {
@@ -369,15 +389,19 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   const selectedProviderExact = effectiveSelectedProviderId ? providers.find(p => p.id === effectiveSelectedProviderId) : undefined;
   const selectedProviderAvailable = selectedProviderExact
     ? (
-      sessionSnapshotOwnsConfig && selectedProviderExact.type === 'subscription'
+      isRuntimeBackedProvider(selectedProviderExact)
+        ? isProviderAvailable(selectedProviderExact, apiKeys, providerVerifyStatus)
+        : sessionSnapshotOwnsConfig && selectedProviderExact.type === 'subscription'
         ? hasProviderRouteCredential(selectedProviderExact, { apiKeys, verifyStatus: providerVerifyStatus })
         : isProviderAvailable(selectedProviderExact, apiKeys, providerVerifyStatus)
     )
     : false;
   const availableProviderIdsForInput = useMemo(() => providers
-    .filter(provider => provider.type === 'subscription'
-      ? provider.enabled !== false && hasProviderRouteCredential(provider, { apiKeys, verifyStatus: providerVerifyStatus })
-      : isProviderAvailable(provider, apiKeys, providerVerifyStatus))
+    .filter(provider => isRuntimeBackedProvider(provider)
+      ? isProviderAvailable(provider, apiKeys, providerVerifyStatus)
+      : provider.type === 'subscription'
+        ? provider.enabled !== false && hasProviderRouteCredential(provider, { apiKeys, verifyStatus: providerVerifyStatus })
+        : isProviderAvailable(provider, apiKeys, providerVerifyStatus))
     .map(provider => provider.id), [providers, apiKeys, providerVerifyStatus]);
   const fallbackProvider = resolveProvider(effectiveSelectedProviderId, providers, apiKeys, providerVerifyStatus);
   const currentProvider = resolveCurrentProviderForSession({
@@ -855,6 +879,20 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   const [selectedModel, setSelectedModel] = useState<string | undefined>(
     currentAgent?.model ?? currentProject?.model ?? currentProvider?.primaryModel
   );
+  const currentProviderExecutionIntent = useMemo(
+    () => sessionMeta?.providerExecutionIdentity
+      ?? buildProviderExecutionIntent(currentProviderForHistory, selectedModel),
+    [
+      sessionMeta?.providerExecutionIdentity,
+      currentProviderForHistory,
+      selectedModel,
+    ],
+  );
+  const currentRuntimeSource = sessionMeta?.runtimeSource
+    ?? (currentProviderExecutionIntent?.kind === 'runtime-backed-provider'
+      ? currentProviderExecutionIntent.runtimeSource
+      : undefined);
+  const managedProviderRuntimeActive = currentRuntimeSource === 'managed-provider';
   // #324 — 推理强度 setting ('default' | level). ONE state for both runtimes
   // (the storage location splits on isExternalRuntime at persist time, like
   // model). Lifecycle mirrors selectedModel: seeded from agent, restored from
@@ -1098,7 +1136,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   const [codexModels, setCodexModels] = useState<typeof CC_MODELS>([]);
   const [geminiModels, setGeminiModels] = useState<typeof CC_MODELS>([]);
   useEffect(() => {
-    if (!multiAgentRuntimeEnabled || currentRuntime !== 'codex') return;
+    if ((!multiAgentRuntimeEnabled && !managedProviderRuntimeActive) || currentRuntime !== 'codex') return;
     let cancelled = false;
     // AbortController so a tab-close (effect cleanup) silences the
     // proxyFetch "Sidecar gone" warning that would otherwise fire when
@@ -1112,7 +1150,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       if (!cancelled && data?.models?.length) setCodexModels(data.models);
     }).catch(() => {});
     return () => { cancelled = true; controller.abort(); };
-  }, [multiAgentRuntimeEnabled, currentRuntime, apiGet]);
+  }, [multiAgentRuntimeEnabled, managedProviderRuntimeActive, currentRuntime, apiGet]);
   useEffect(() => {
     if (!multiAgentRuntimeEnabled || currentRuntime !== 'gemini') return;
     let cancelled = false;
@@ -1142,7 +1180,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   // serializes the two calls.
   const prewarmedKeyRef = useRef<string | null>(null);
   useEffect(() => {
-    if (!multiAgentRuntimeEnabled) return;
+    if (!multiAgentRuntimeEnabled && !managedProviderRuntimeActive) return;
     if (currentRuntime !== 'gemini' && currentRuntime !== 'codex') return;
     if (!isActive || !isConnected || !sessionId) return;
     // Only a 'push' tab prewarms the sidecar with ITS config (model/permission).
@@ -1208,7 +1246,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     // the new settings. Re-firing pre-warm on every keystroke-driven option
     // change would thrash the subprocess.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [multiAgentRuntimeEnabled, currentRuntime, isActive, isConnected, sessionId, sessionRuntime, apiPost, configPending]);
+  }, [multiAgentRuntimeEnabled, managedProviderRuntimeActive, currentRuntime, isActive, isConnected, sessionId, sessionRuntime, apiPost, configPending]);
 
   const runtimeModels = currentRuntime === 'claude-code' ? CC_MODELS
     : currentRuntime === 'codex' ? codexModels
@@ -1256,6 +1294,10 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   const buildCronRuntimeConfig = useCallback((): RuntimeConfig | undefined => {
     if (!isExternalRuntime) return undefined;
     const base = { ...((currentAgent?.runtimeConfig as RuntimeConfig | undefined) ?? {}) };
+    if (currentProviderExecutionIntent?.kind === 'runtime-backed-provider') {
+      base.source = currentProviderExecutionIntent.runtimeSource;
+      base.model = currentProviderExecutionIntent.model;
+    }
     const persistedModel = coerceExternalRuntimeModelForUi(base.model, currentRuntime);
     if (persistedModel) {
       base.model = persistedModel;
@@ -1277,7 +1319,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       base.permissionMode = selectedPermission;
     }
     return Object.keys(base).length > 0 ? base : undefined;
-  }, [isExternalRuntime, currentAgent?.runtimeConfig, runtimeModel, effectiveRuntimePermissionMode, currentRuntime]);
+  }, [isExternalRuntime, currentAgent?.runtimeConfig, currentProviderExecutionIntent, runtimeModel, effectiveRuntimePermissionMode, currentRuntime]);
 
   // Callback to refresh workspace (exposed to SimpleChatInput)
   const triggerWorkspaceRefresh = useCallback(() => {
@@ -1309,6 +1351,12 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
 
   useEffect(() => {
     if (!initialMessage) return;
+    if (
+      initialMessage.providerExecutionIdentity
+      && currentRuntime !== initialMessage.providerExecutionIdentity.runtime
+    ) {
+      return;
+    }
     // Wait for SSE connection (sidecar reachable) instead of non-pending sessionId.
     // The sessionId upgrades from pending only after the first message is processed,
     // but the first message IS the auto-send — so checking isPendingSessionId would deadlock.
@@ -2099,6 +2147,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   const persistTabConfigChange = useCallback(async (patch: {
     builtinSelection?: BuiltinModelSelection;
     builtinProviderEnvPolicy?: BuiltinProviderEnvPolicy;
+    runtimeBackedProviderSelection?: RuntimeBackedProviderIdentity;
     providerId?: string;
     /** Builtin model. Use `runtimeModel` instead for external runtimes. */
     model?: string | null;
@@ -2121,6 +2170,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       fields: {
         builtinSelection: patch.builtinSelection,
         builtinProviderEnvPolicy: patch.builtinProviderEnvPolicy,
+        runtimeBackedProviderSelection: patch.runtimeBackedProviderSelection,
         providerId: patch.providerId,
         builtinModel: patch.model,
         runtimeModel: patch.runtimeModel,
@@ -2749,20 +2799,27 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
         const currentProviderHistoryEnv = currentProviderForHistory
           ? toProviderHistoryEnv(currentProviderForHistory, selectedModel)
           : undefined;
+        const nextIntent = buildProviderExecutionIntent(currentProviderForHistory, targetModel);
         const canResumeProviderHistory = canResumeProviderHistoryForSwitch({
+          currentIntent: currentProviderExecutionIntent,
+          nextIntent,
           currentProviderEnv: currentProviderHistoryEnv,
           nextProviderEnv: currentProviderForHistory
             ? toProviderHistoryEnv(currentProviderForHistory, targetModel)
             : undefined,
           legacyCurrentProviderUnknown: builtinSnapshotProviderHistoryUnknown,
         });
-        if (!canResumeProviderHistory && messagesRef.current.length > 0) {
+        if (!canResumeProviderHistory && (messagesRef.current.length > 0 || isRuntimeBackedIntent(currentProviderExecutionIntent) || isRuntimeBackedIntent(nextIntent))) {
           setPendingProviderSwitch({ providerId, model: targetModel });
           return;
         }
         const persisted = await persistTabConfigChange({
-          builtinSelection: { providerId, model: targetModel },
-          builtinProviderEnvPolicy: 'preserve-provider-env',
+          ...(nextIntent?.kind === 'runtime-backed-provider'
+            ? { runtimeBackedProviderSelection: nextIntent }
+            : {
+                builtinSelection: { providerId, model: targetModel },
+                builtinProviderEnvPolicy: 'preserve-provider-env' as const,
+              }),
           permissionMode: effectivePermissionMode,
         });
         if (!persisted) return;
@@ -2776,7 +2833,10 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
 
     const newProvider = providers.find(p => p.id === providerId);
     const model = targetModel ?? newProvider?.primaryModel;
+    const nextIntent = buildProviderExecutionIntent(newProvider, model);
     const canResumeProviderHistory = canResumeProviderHistoryForSwitch({
+      currentIntent: currentProviderExecutionIntent,
+      nextIntent,
       currentProviderEnv: currentProviderForHistory
         ? toProviderHistoryEnv(currentProviderForHistory, selectedModel)
         : undefined,
@@ -2787,7 +2847,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     // Existing SDK transcripts only need a new tab when crossing provider-history
     // families. Ordinary third-party providers share a portable protocol family;
     // entries in providerHistory's isolated set intentionally do not.
-    if (!canResumeProviderHistory && messagesRef.current.length > 0) {
+    if (!canResumeProviderHistory && (messagesRef.current.length > 0 || isRuntimeBackedIntent(currentProviderExecutionIntent) || isRuntimeBackedIntent(nextIntent))) {
       setPendingProviderSwitch({ providerId, model });
       return;  // Don't update state — dialog will handle it
     }
@@ -2797,8 +2857,12 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     // the user's latest preference (PRD v0.1.69 §4.3 rule 2 dual-write).
     if (!model) return;
     const persisted = await persistTabConfigChange({
-      builtinSelection: { providerId, model },
-      builtinProviderEnvPolicy: 'clear-stale-provider-env',
+      ...(nextIntent?.kind === 'runtime-backed-provider'
+        ? { runtimeBackedProviderSelection: nextIntent }
+        : {
+            builtinSelection: { providerId, model },
+            builtinProviderEnvPolicy: 'clear-stale-provider-env' as const,
+          }),
       permissionMode: effectivePermissionMode,
     });
     if (!persisted) return;
@@ -2822,6 +2886,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     currentProviderForHistory?.type,
     currentProviderForHistory?.config.baseUrl,
     currentProviderForHistory?.apiProtocol,
+    currentProviderExecutionIntent,
     builtinSnapshotProviderHistoryUnknown,
     effectivePermissionMode,
     persistTabConfigChange,
@@ -2844,7 +2909,10 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     // Track model_switch event
     track('model_switch', { model });
 
+    const nextIntent = buildProviderExecutionIntent(currentProviderForHistory, model);
     const canResumeProviderHistory = canResumeProviderHistoryForSwitch({
+      currentIntent: currentProviderExecutionIntent,
+      nextIntent,
       currentProviderEnv: currentProviderForHistory
         ? toProviderHistoryEnv(currentProviderForHistory, selectedModel)
         : undefined,
@@ -2854,15 +2922,19 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       legacyCurrentProviderUnknown: builtinSnapshotProviderHistoryUnknown,
     });
     const currentProviderId = effectiveSelectedProviderId ?? currentProvider?.id;
-    if (!canResumeProviderHistory && messagesRef.current.length > 0 && currentProviderId) {
+    if (!canResumeProviderHistory && (messagesRef.current.length > 0 || isRuntimeBackedIntent(currentProviderExecutionIntent) || isRuntimeBackedIntent(nextIntent)) && currentProviderId) {
       setPendingProviderSwitch({ providerId: currentProviderId, model });
       return;
     }
 
     if (!currentProviderId) return;
     const persisted = await persistTabConfigChange({
-      builtinSelection: { providerId: currentProviderId, model },
-      builtinProviderEnvPolicy: 'preserve-provider-env',
+      ...(nextIntent?.kind === 'runtime-backed-provider'
+        ? { runtimeBackedProviderSelection: nextIntent }
+        : {
+            builtinSelection: { providerId: currentProviderId, model },
+            builtinProviderEnvPolicy: 'preserve-provider-env' as const,
+          }),
       permissionMode: effectivePermissionMode,
     });
     if (!persisted) return;
@@ -2874,6 +2946,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     currentProviderForHistory?.type,
     currentProviderForHistory?.config.baseUrl,
     currentProviderForHistory?.apiProtocol,
+    currentProviderExecutionIntent,
     effectiveSelectedProviderId,
     currentProvider?.id,
     builtinSnapshotProviderHistoryUnknown,
@@ -2978,9 +3051,11 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   // needed. The previous formula `sessionRuntime !== currentRuntime` was wrong
   // because it compared session-actual against agent-preference, which forced an
   // unnecessary fork every time the user changed agent.runtime in another tab.
-  const isCrossRuntimeSession = sessionRuntime !== null
-    && sessionRuntime !== 'builtin'
-    && !multiAgentRuntimeEnabled;
+  const isCrossRuntimeSession = shouldBlockSendForLabsDisabledExternalRuntime({
+    sessionRuntime,
+    sessionRuntimeSource: currentRuntimeSource,
+    multiAgentRuntimeEnabled,
+  });
   const [pendingCrossRuntimeMessage, setPendingCrossRuntimeMessage] = useState<{
     text: string;
     images: ImageAttachment[];
@@ -3015,6 +3090,10 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     }
     if (builtinSnapshotProviderSelectionIncomplete) {
       toastRef.current.warning('这个历史会话缺少 Provider 信息，请先在模型选择器里重新选择一次模型。');
+      return false;
+    }
+    if (!isExternalRuntime && isRuntimeBackedProvider(currentProviderRef.current)) {
+      toastRef.current.warning('Codex 订阅需要新开 Codex 会话后使用，请先在模型选择器中切换并确认创建新会话。');
       return false;
     }
 
@@ -3346,20 +3425,44 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     const priorAgentProviderId = currentAgent?.providerId;
     const priorAgentModel = currentAgent?.model;
     let forkTabOpened = false;
+    const newProvider = providers.find(p => p.id === pending.providerId);
+    const targetModel = pending.model ?? newProvider?.primaryModel;
+    const targetIntent = buildProviderExecutionIntent(newProvider, targetModel);
+
+    if (!newProvider || !targetModel || !targetIntent) {
+      toastRef.current.error('创建新会话失败：目标 Provider 不可用');
+      return;
+    }
 
     try {
       // 1. Save provider + model to project config so the new tab picks it up
       if (currentProject) {
-        await patchProject(currentProject.id, { providerId: pending.providerId, model: pending.model ?? null });
+        await patchProject(currentProject.id, { providerId: pending.providerId, model: targetModel });
         if (currentProject?.agentId) {
-          await patchAgentConfig(currentProject.agentId, { providerId: pending.providerId, model: pending.model ?? undefined });
+          await patchAgentConfig(currentProject.agentId, { providerId: pending.providerId, model: targetModel });
         }
       }
       await refreshConfig();  // Sync React state so new tab sees updated provider
-      // 2. Create a new session and open in new Tab (pass runtime to avoid cross-runtime mismatch)
+      // 2. Create a new session and open in new Tab. Runtime-backed providers
+      // must be born with their runtime/source identity before Rust ensures a
+      // sidecar; builtin providers stay on the builtin runtime.
       const { createSession } = await import('@/api/sessionClient');
-      const session = await createSession(agentDir, currentRuntime);
-      const newProvider = providers.find(p => p.id === pending.providerId);
+      const session = await createSession(
+        agentDir,
+        targetIntent.kind === 'runtime-backed-provider' ? targetIntent.runtime : 'builtin',
+        targetIntent.kind === 'runtime-backed-provider'
+          ? {
+              runtimeSource: targetIntent.runtimeSource,
+              providerExecutionIdentity: targetIntent,
+              providerId: targetIntent.providerId,
+              model: targetIntent.model,
+              permissionMode: effectivePermissionMode,
+              reasoningEffort,
+              mcpEnabledServers: workspaceMcpEnabled,
+              enabledPluginIds: workspaceEnabledPlugins,
+            }
+          : undefined,
+      );
       const opened = await onForkSession(session.id, agentDir, `${newProvider?.name ?? 'Claude'} 会话`);
       if (!opened) {
         await deleteUnopenedForkSession(session.id);
@@ -3374,7 +3477,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       // Roll back the agent / project config so workspace default stays on
       // the provider the user actually got to keep using.
       try {
-        if (currentProject && priorProviderId !== undefined) {
+        if (currentProject) {
           await patchProject(currentProject.id, { providerId: priorProviderId, model: priorModel ?? null });
           if (currentProject?.agentId) {
             await patchAgentConfig(currentProject.agentId, {
@@ -3394,7 +3497,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       );
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed to .id/.agentId
-  }, [pendingProviderSwitch, agentDir, onForkSession, currentProject?.id, currentProject?.agentId, patchProject, refreshConfig, providers, currentRuntime, currentProject?.providerId, currentProject?.model, currentAgent?.providerId, currentAgent?.model, transferBindingToForkedSession, deleteUnopenedForkSession]);
+  }, [pendingProviderSwitch, agentDir, onForkSession, currentProject?.id, currentProject?.agentId, patchProject, refreshConfig, providers, currentProject?.providerId, currentProject?.model, currentAgent?.providerId, currentAgent?.model, transferBindingToForkedSession, deleteUnopenedForkSession, effectivePermissionMode, reasoningEffort, workspaceMcpEnabled, workspaceEnabledPlugins]);
 
   // Cross-runtime confirm: create new session in new tab and send the pending message
   const confirmCrossRuntimeSend = useCallback(async () => {

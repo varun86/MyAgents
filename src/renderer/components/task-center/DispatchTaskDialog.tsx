@@ -45,6 +45,7 @@ import { ExecutionModeEditor } from './editors/ExecutionModeEditor';
 import { EndConditionsEditor, type EndConditionMode } from './editors/EndConditionsEditor';
 import { INPUT_CLS, toLocalDateTimeString } from './editors/controls';
 import { TaskAdvancedConfigEditor } from './editors/TaskAdvancedConfigEditor';
+import { projectTaskExecutionOverrides } from './taskProviderProjection';
 import {
   FormSection,
   PanelFooter,
@@ -83,7 +84,7 @@ export function DispatchTaskDialog({
 }: Props) {
   const isFromThought = !!thought;
   const toast = useToast();
-  const { projects } = useConfig();
+  const { projects, providers } = useConfig();
   useCloseLayer(() => {
     onClose();
     return true;
@@ -251,6 +252,13 @@ export function DispatchTaskDialog({
           })()
         : undefined;
       const advancedCron = cronExpression.trim();
+      const executionOverrides = projectTaskExecutionOverrides({
+        providers,
+        runtime: advRuntime,
+        providerId: advProviderId,
+        model: advModel,
+        runtimeConfig: advRuntimeConfig,
+      });
       const task = await taskCreateDirect({
         name: name.trim(),
         executor: 'agent',
@@ -268,15 +276,15 @@ export function DispatchTaskDialog({
         // Advanced overrides — `undefined` is forwarded as "follow Agent".
         // PRD 0.2.9 — providerId / model are paired (validated server-side),
         // and external-runtime model lives on runtimeConfig.model.
-        runtime: advRuntime,
-        providerId: advProviderId,
-        model: advModel,
+        runtime: executionOverrides.runtime,
+        providerId: executionOverrides.providerId,
+        model: executionOverrides.model,
         // RuntimeConfig (renderer/runtime.ts) and RuntimeConfigSnapshot (shared
         // task DTO) are structurally compatible; the latter just adds an
         // open-ended `[key: string]: unknown` index signature for
         // forward-compat. Cast here to avoid leaking that index sig into
         // the renderer's RuntimeConfig type.
-        runtimeConfig: advRuntimeConfig as Record<string, unknown> | undefined,
+        runtimeConfig: executionOverrides.runtimeConfig as Record<string, unknown> | undefined,
         permissionMode: advPermissionMode,
         mcpEnabledServers: advMcpEnabledServers,
         sourceThoughtId: thought?.id,
@@ -335,6 +343,7 @@ export function DispatchTaskDialog({
     runMode,
     thought?.id,
     notification,
+    providers,
     toast,
     onDispatched,
     advRuntime,

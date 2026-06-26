@@ -1,7 +1,7 @@
 // AgentRuntime abstraction types (v0.1.59)
 // Defines the interface that all runtime implementations must satisfy
 
-import type { RuntimeType, RuntimeModelInfo, RuntimePermissionMode, RuntimeDetection, RuntimeDiagnostics, RuntimeEnvPolicy } from '../../shared/types/runtime';
+import type { RuntimeType, RuntimeModelInfo, RuntimePermissionMode, RuntimeDetection, RuntimeDiagnostics, RuntimeEnvPolicy, RuntimeSource } from '../../shared/types/runtime';
 import type { InteractionScenario } from '../system-prompt';
 import type { ModelUsageEntry } from '../types/session';
 import type { ToolAttachment } from '../../shared/types/tool-attachment';
@@ -68,6 +68,11 @@ export interface SessionStartOptions {
    * behaviour, preserving backwards compat.
    */
   envPolicy?: RuntimeEnvPolicy;
+  /**
+   * Runtime binary/state owner. Missing keeps historical behaviour:
+   * external CLI runtimes use the user's system CLI and native home directory.
+   */
+  runtimeSource?: RuntimeSource;
 }
 
 /**

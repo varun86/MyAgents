@@ -38,6 +38,10 @@ import { persistInputOptionChange } from '@/api/persistInputOption';
 import { createCronTask, startCronTask, startCronScheduler } from '@/api/cronTaskClient';
 import type { RuntimeType, RuntimeModelInfo, RuntimePermissionMode, RuntimeDetections } from '../../shared/types/runtime';
 import { CC_MODELS, CC_PERMISSION_MODES, CODEX_PERMISSION_MODES, GEMINI_PERMISSION_MODES, buildRuntimeChangePatch } from '../../shared/types/runtime';
+import {
+    isRuntimeBackedProvider,
+    toProviderExecutionIntent,
+} from '../../shared/providerExecution';
 import { apiGetJson } from '@/api/apiFetch';
 import { isBrowserDevMode, pickFolderForDialog } from '@/utils/browserMock';
 import { resolveLauncherProvider } from '@/utils/optionResolve';
@@ -421,6 +425,9 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
     const handleLauncherModelChange = useCallback((model: string | undefined) => {
         setLauncherSelectedModel(model);
         if (selectedWorkspace) {
+            const providerExecutionIntent = !isExternalRuntime && launcherProvider && model
+                ? toProviderExecutionIntent(launcherProvider, model)
+                : undefined;
             void persistInputOptionChange({
                 workspaceId: selectedWorkspace.id,
                 agentId: selectedWorkspace.agentId ?? null,
@@ -428,13 +435,15 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
                 currentRuntimeConfig: runtimeConfigRef.current,
                 fields: isExternalRuntime
                     ? { runtimeModel: model ?? null }
-                    : { builtinModel: model ?? null },
+                    : providerExecutionIntent?.kind === 'runtime-backed-provider'
+                        ? { runtimeBackedProviderSelection: providerExecutionIntent }
+                        : { builtinModel: model ?? null },
                 patchProject,
                 patchAgentConfig,
             });
         }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed deps; runtimeConfigRef is a ref
-    }, [selectedWorkspace?.id, patchProject, isExternalRuntime]);
+    }, [selectedWorkspace?.id, patchProject, isExternalRuntime, launcherProvider]);
 
     // #324 — 推理强度 write-back. Same dual-write shape as model/permission;
     // no live sidecar in launcher, so disk persistence is the whole job (the
@@ -486,14 +495,21 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
             setLauncherSelectedModel(model);
         }
         if (selectedWorkspace) {
+            const providerExecutionIntent = newProvider && model
+                ? toProviderExecutionIntent(newProvider, model)
+                : undefined;
             void persistInputOptionChange({
                 workspaceId: selectedWorkspace.id,
                 agentId: selectedWorkspace.agentId ?? null,
                 isExternalRuntime,
                 currentRuntimeConfig: runtimeConfigRef.current,
                 fields: {
-                    providerId: providerId ?? undefined,
-                    builtinModel: model ?? undefined,
+                    ...(providerExecutionIntent?.kind === 'runtime-backed-provider'
+                        ? { runtimeBackedProviderSelection: providerExecutionIntent }
+                        : {
+                            providerId: providerId ?? undefined,
+                            builtinModel: model ?? undefined,
+                        }),
                 },
                 patchProject,
                 patchAgentConfig,
@@ -541,10 +557,19 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
         // pairBuiltinSelection enforces model ∈ provider.models — closing the
         // "stale agent.model paired with first-available fallback provider" hole when the
         // primary provider's key was deleted between agent setup and send.
-        const builtinSelection = (!isExternalRuntime && launcherProvider)
+        const launcherModelForProvider = launcherSelectedModel ?? launcherProvider?.primaryModel;
+        const providerExecutionIntent = (!isExternalRuntime && launcherProvider && launcherModelForProvider)
+            ? toProviderExecutionIntent(launcherProvider, launcherModelForProvider)
+            : undefined;
+        const runtimeBackedProviderIdentity = providerExecutionIntent?.kind === 'runtime-backed-provider'
+            ? providerExecutionIntent
+            : undefined;
+        const builtinSelection = (!isExternalRuntime && launcherProvider && !isRuntimeBackedProvider(launcherProvider))
             ? pairBuiltinSelection(launcherProvider, launcherSelectedModel)
             : undefined;
-        const runtimeModel = isExternalRuntime ? launcherSelectedModel : undefined;
+        const runtimeModel = isExternalRuntime
+            ? launcherSelectedModel
+            : runtimeBackedProviderIdentity?.model;
         // PRD 0.2.17 — only carry plugins that are still globally visible
         // (Settings 开关 ON) to avoid silently re-enabling hidden plugins
         // when Launcher's last-used list is older than the current visibility
@@ -566,6 +591,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
             ...(carriedEnabledPlugins.length > 0 ? { enabledPluginIds: carriedEnabledPlugins } : {}),
             ...(builtinSelection ? { builtinSelection } : {}),
             ...(runtimeModel ? { runtimeModel } : {}),
+            ...(runtimeBackedProviderIdentity ? { providerExecutionIdentity: runtimeBackedProviderIdentity } : {}),
             // #324 — hand-carry: don't bet the async agent-config write wins
             // the race against the new tab's mount/seed.
             ...(launcherReasoningEffort !== 'default' ? { reasoningEffort: launcherReasoningEffort } : {}),
@@ -862,15 +888,23 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
         }
         setAgentOverlay(null);
         // PRD 0.2.3 + cross-review: same builtin/external split as handleBrandSend.
-        const builtinSelection = !isExternalRuntime
+        const initModelForProvider = launcherSelectedModel ?? effectiveProvider.primaryModel;
+        const providerExecutionIntent = !isExternalRuntime && initModelForProvider
+            ? toProviderExecutionIntent(effectiveProvider, initModelForProvider)
+            : undefined;
+        const runtimeBackedProviderIdentity = providerExecutionIntent?.kind === 'runtime-backed-provider'
+            ? providerExecutionIntent
+            : undefined;
+        const builtinSelection = !isExternalRuntime && !isRuntimeBackedProvider(effectiveProvider)
             ? pairBuiltinSelection(effectiveProvider, launcherSelectedModel)
             : undefined;
-        const runtimeModel = isExternalRuntime ? launcherSelectedModel : undefined;
+        const runtimeModel = isExternalRuntime ? launcherSelectedModel : runtimeBackedProviderIdentity?.model;
         const initialMessage: InitialMessage = {
             text: '/init',
             permissionMode: launcherPermissionMode,
             ...(builtinSelection ? { builtinSelection } : {}),
             ...(runtimeModel ? { runtimeModel } : {}),
+            ...(runtimeBackedProviderIdentity ? { providerExecutionIdentity: runtimeBackedProviderIdentity } : {}),
         };
         onLaunchProject(
             project,

@@ -125,21 +125,11 @@ export function TaskAdvancedConfigEditor(props: Props) {
     return config?.agents?.find((a) => workspacePathsEqual(a.workspacePath, workspacePath)) ?? null;
   }, [workspacePath, config]);
 
-  // Multi-Agent Runtime feature gate (Settings → 实验室). When OFF, this editor
-  // behaves as if external runtimes don't exist:
-  //   - Runtime selector is hidden entirely
-  //   - effectiveRuntime is forced to 'builtin' for THIS UI's purposes, so
-  //     model/permission/MCP fields render as the builtin variant regardless
-  //     of what's persisted on `runtime` / `workspaceAgent.runtime`
-  //   - Persisted values on disk (`task.runtime`, `agent.runtime`) are NOT
-  //     touched — flipping the gate back on restores the prior selection,
-  //     matching the round-trip semantics in Chat / Launcher / Agent settings.
-  // The single residual gap: a task with `runtime='claude-code'` saved when
-  // the gate was on will still spawn an external runtime sidecar at cron
-  // execution time even with the gate off, because that path is in Rust and
-  // doesn't read the gate. Acceptable until the gate is removed entirely
-  // (planned for a few versions out — at which point external runtimes are
-  // universally available and the behavior becomes correct by definition).
+  // Multi-Agent Runtime feature gate (Settings → 实验室) gates user-managed
+  // external runtimes only. Managed Codex Provider tasks carry
+  // runtimeConfig.source='managed-provider' and must keep rendering as Codex
+  // even when Labs is off; otherwise editing a valid managed-provider task
+  // would collapse it into a builtin/provider shape.
   const multiAgentRuntimeEnabled = !!config?.multiAgentRuntime;
 
   // Effective runtime that this task will run under (in this UI's view):
@@ -147,9 +137,11 @@ export function TaskAdvancedConfigEditor(props: Props) {
   // External runtimes self-manage model/permission/MCP, so all three
   // sub-fields are gated on `effectiveRuntime === 'builtin'`.
   const agentRuntime: RuntimeType = workspaceAgent?.runtime ?? 'builtin';
-  const effectiveRuntime: RuntimeType = multiAgentRuntimeEnabled
-    ? (runtime ?? agentRuntime)
-    : 'builtin';
+  const rawEffectiveRuntime: RuntimeType = runtime ?? agentRuntime;
+  const managedProviderRuntimeActive =
+    rawEffectiveRuntime === 'codex' && runtimeConfig?.source === 'managed-provider';
+  const runtimeUiEnabled = multiAgentRuntimeEnabled || managedProviderRuntimeActive;
+  const effectiveRuntime: RuntimeType = runtimeUiEnabled ? rawEffectiveRuntime : 'builtin';
   const isBuiltin = effectiveRuntime === 'builtin';
   const agentRuntimeLabel = RUNTIME_DISPLAY_NAMES[agentRuntime] ?? agentRuntime;
   const effectiveRuntimeLabel = RUNTIME_DISPLAY_NAMES[effectiveRuntime] ?? effectiveRuntime;
@@ -296,13 +288,13 @@ export function TaskAdvancedConfigEditor(props: Props) {
   const [codexModels, setCodexModels] = useState<RuntimeModelInfo[]>([]);
   const [geminiModels, setGeminiModels] = useState<RuntimeModelInfo[]>([]);
   useEffect(() => {
-    if (!multiAgentRuntimeEnabled || effectiveRuntime !== 'codex') return;
+    if ((!multiAgentRuntimeEnabled && !managedProviderRuntimeActive) || effectiveRuntime !== 'codex') return;
     let cancelled = false;
     apiGetJson<{ models?: RuntimeModelInfo[] }>(`/api/runtime/models?type=codex`)
       .then((res) => { if (!cancelled && res?.models?.length) setCodexModels(res.models); })
       .catch(() => {});
     return () => { cancelled = true; };
-  }, [multiAgentRuntimeEnabled, effectiveRuntime]);
+  }, [multiAgentRuntimeEnabled, managedProviderRuntimeActive, effectiveRuntime]);
   useEffect(() => {
     if (!multiAgentRuntimeEnabled || effectiveRuntime !== 'gemini') return;
     let cancelled = false;
