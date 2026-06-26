@@ -46,9 +46,6 @@ export function IssuesWorkspace({
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const searchActive = searchOpen || issueQ.trim().length > 0;
-  const statusFilterOptions = STATUS_FILTER_OPTIONS.map((option) => (
-    option.value === selectedStatus ? { ...option, label: `${option.label} ${issues.length}` } : option
-  ));
 
   useEffect(() => {
     recordSpaceMetric('space_issue_list_render_count', { count: issues.length });
@@ -103,7 +100,7 @@ export function IssuesWorkspace({
             >
               <Search className="h-4 w-4" />
             </button>
-            <CustomSelect value={selectedStatus} options={statusFilterOptions} onChange={onStatusChange} size="toolbar" className="w-40 min-w-0 max-xl:w-36" />
+            <CustomSelect value={selectedStatus} options={STATUS_FILTER_OPTIONS} onChange={onStatusChange} size="toolbar" className="w-40 min-w-0 max-xl:w-36" />
             <CustomSelect value={selectedTag} options={tagOptions} onChange={onTagChange} size="toolbar" className="w-40 min-w-0 max-xl:w-36" />
             <button
               type="button"
@@ -185,12 +182,13 @@ function IssueStreamRow({
 }) {
   const displayTitle = issueDisplayTitle(issue);
   const visibleTags = issue.tags ?? [];
+  const authorName = issue.author?.name ?? issue.author?.id ?? 'owner';
   return (
     <button
       type="button"
       onClick={onOpen}
       style={{ animationDelay: `${index * 42}ms` }}
-      className={`grid min-h-[78px] w-full grid-cols-[minmax(0,1fr)_auto] items-start gap-4 border-b border-[var(--line-subtle)] px-1 py-4 text-left transition-colors last:border-b-0 sm:px-3 ${
+      className={`grid min-h-[78px] w-full border-b border-[var(--line-subtle)] px-1 py-4 text-left transition-colors last:border-b-0 sm:px-3 ${
         active ? 'bg-[var(--paper-elevated)]/70 shadow-[inset_3px_0_0_var(--accent-warm)]' : 'hover:bg-[var(--paper-elevated)]/60'
       }`}
     >
@@ -200,7 +198,9 @@ function IssueStreamRow({
           <span className="truncate text-base font-semibold leading-6 text-[var(--ink)]">{displayTitle}</span>
         </span>
         <span className="mt-2 flex flex-wrap items-center gap-2 text-xs font-semibold text-[var(--ink-subtle)]">
-          <span>{issue.author?.name ?? issue.author?.id ?? 'owner'}</span>
+          <span>{authorName}</span>
+          <span className="text-[var(--line-strong)]">·</span>
+          <span>{formatTime(issue.createdAt)}</span>
           <span className="text-[var(--line-strong)]">·</span>
           <span>{issue.commentCount ?? 0} 评论</span>
           {visibleTags.length > 0 && <span className="text-[var(--line-strong)]">·</span>}
@@ -211,7 +211,6 @@ function IssueStreamRow({
           ))}
         </span>
       </span>
-      <span className="hidden pt-1 text-xs font-semibold text-[var(--ink-subtle)] sm:block">{formatTime(issue.createdAt)}</span>
     </button>
   );
 }

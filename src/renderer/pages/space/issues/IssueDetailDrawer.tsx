@@ -263,6 +263,7 @@ export function IssueDetailDrawer({
       toast.error(spaceErrorMessage(error));
     }
   };
+  const issueAuthorName = detail?.issue.author?.name ?? detail?.issue.author?.id ?? 'owner';
 
   return (
     <OverlayBackdrop onClose={onClose} className="z-[230] items-stretch justify-end bg-black/20 backdrop-blur-sm">
@@ -283,9 +284,9 @@ export function IssueDetailDrawer({
             {detailState?.error ?? 'Issue 未找到'}
           </div>
         ) : (
-          <section className="grid h-full min-h-0 grid-cols-[minmax(0,760px)_304px] content-start gap-[56px] overflow-y-auto px-[44px] py-[58px] pr-[34px] max-xl:grid-cols-1 max-xl:gap-8">
-            <div className="min-w-0 max-w-[760px] pb-8 max-xl:max-w-none">
-              <article className="pb-14">
+          <section className="h-full min-h-0 overflow-y-auto px-[56px] py-[58px] max-lg:px-8 max-sm:px-5">
+            <div className="mx-auto max-w-[840px] pb-10">
+              <article className="pb-8">
                 <div className="mb-4 flex flex-wrap items-center gap-2 text-xs font-semibold text-[var(--ink-subtle)]">
                   <span ref={statusMenuRef} className="relative">
                     {statusOptions.length > 0 ? (
@@ -321,22 +322,168 @@ export function IssueDetailDrawer({
                       </div>
                     )}
                   </span>
+                  <span>{issueAuthorName}</span>
+                  <span className="text-[var(--line-strong)]">·</span>
+                  <span>{formatTime(detail.issue.createdAt)}</span>
                   {detail.issue.tags?.map((tag) => (
                     <span key={tag.id} className="rounded-md bg-[var(--accent-cool-subtle)] px-2 py-1 text-xs font-semibold text-[var(--accent-cool)]">
                       # {tag.name}
                     </span>
                   ))}
-                  <span>{formatTime(detail.issue.createdAt)}</span>
                 </div>
                 <h2 className="max-w-[68ch] text-2xl font-semibold leading-snug text-[var(--ink)]">{issueDisplayTitle(detail.issue)}</h2>
                 <div className="mt-5 max-w-[66ch] whitespace-pre-wrap text-base leading-7 text-[var(--ink-secondary)]">{detail.issue.body}</div>
               </article>
 
-              <section className="pt-2">
+              <section className="mb-12 grid gap-6 border-y border-[var(--line-subtle)] py-6">
+                <section>
+                  <div className="mb-3 flex items-center justify-between gap-3">
+                    <h3 className="flex items-center gap-2 text-sm font-semibold text-[var(--ink)]">
+                      <Paperclip className="h-4 w-4" />
+                      附件
+                    </h3>
+                    <button
+                      type="button"
+                      disabled={attachmentUploading}
+                      onClick={() => void uploadAttachments()}
+                      className="grid h-8 w-8 place-items-center rounded-lg text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] disabled:cursor-wait disabled:opacity-70"
+                      title="上传附件"
+                    >
+                      {attachmentUploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <UploadCloud className="h-4 w-4" />}
+                    </button>
+                  </div>
+                  {detail.attachments.length === 0 ? (
+                    <div className="border-y border-dashed border-[var(--line-subtle)] py-4 text-sm text-[var(--ink-muted)]">暂无附件</div>
+                  ) : (
+                    <div>
+                      {detail.attachments.map((attachment) => (
+                        <div key={attachment.id} className="grid min-h-12 grid-cols-[20px_minmax(0,1fr)_auto] items-center gap-3 border-b border-dashed border-[var(--line-subtle)] py-2 text-sm text-[var(--ink-secondary)] first:border-t">
+                          <Paperclip className="h-4 w-4 text-[var(--ink-muted)]" />
+                          <span className="min-w-0">
+                            <span className="block truncate">{attachment.name}</span>
+                            <small className="block text-xs text-[var(--ink-subtle)]">{formatBytes(attachment.sizeBytes)}</small>
+                          </span>
+                          <span
+                            ref={downloadTargetAttachmentId === attachment.id ? downloadMenuRef : undefined}
+                            className="relative flex items-center gap-1"
+                          >
+                            <button
+                              type="button"
+                              disabled={downloadingAttachmentId !== null}
+                              onClick={() => requestAttachmentDownload(attachment)}
+                              className="grid h-8 w-8 place-items-center rounded-lg text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] disabled:cursor-not-allowed disabled:opacity-55"
+                              aria-label={`下载附件 ${attachment.name}`}
+                              title={projects.length > 1 ? '选择下载工作区' : '下载附件'}
+                            >
+                              {downloadingAttachmentId === attachment.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+                            </button>
+                            {downloadTargetAttachmentId === attachment.id && projects.length > 1 && (
+                              <div className="absolute right-0 top-full z-30 mt-2 w-56 rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-1.5 shadow-lg">
+                                <div className="px-2 pb-1 text-xs font-semibold text-[var(--ink-muted)]">下载到 Agent 工作区</div>
+                                {projects.map((project) => (
+                                  <button
+                                    key={project.path}
+                                    type="button"
+                                    disabled={downloadingAttachmentId !== null}
+                                    onClick={() => void downloadAttachment(attachment, project.path)}
+                                    className="block h-9 w-full truncate rounded-lg px-2.5 text-left text-sm font-semibold text-[var(--ink-secondary)] transition-colors hover:bg-[var(--paper-inset)] disabled:cursor-wait disabled:opacity-60"
+                                  >
+                                    {project.displayName || project.name || basename(project.path)}
+                                  </button>
+                                ))}
+                              </div>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => void copyAttachmentCommand(attachment)}
+                              className="grid h-8 w-8 place-items-center rounded-lg text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+                              aria-label={`复制附件下载命令 ${attachment.name}`}
+                              title="复制 CLI 下载命令"
+                            >
+                              <Copy className="h-4 w-4" />
+                            </button>
+                            <button
+                              type="button"
+                              disabled={!downloadedAttachmentPaths[attachment.id]}
+                              onClick={() => void copyDownloadedAttachmentPath(attachment)}
+                              className="grid h-8 w-8 place-items-center rounded-lg text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] disabled:cursor-not-allowed disabled:opacity-45"
+                              aria-label={`复制附件本地路径 ${attachment.name}`}
+                              title="复制本地路径"
+                            >
+                              <FileText className="h-4 w-4" />
+                            </button>
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </section>
+
+                <section className="border-t border-dashed border-[var(--line-subtle)] pt-5">
+                  <h3 className="mb-3 flex items-center gap-2 text-sm font-semibold text-[var(--ink)]">
+                    {admin ? <Send className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
+                    {admin ? '派发给 Agent' : 'Issue 口令'}
+                  </h3>
+                  <div className="grid gap-2 sm:max-w-[360px]">
+                    {admin && (
+                      <div ref={agentMenuRef} className="relative">
+                        <button
+                          type="button"
+                          disabled={registeredAgents.length === 0 || dispatchingAgentId !== null}
+                          onClick={() => setAgentMenuOpen((value) => !value)}
+                          className="flex h-9 w-full items-center justify-center gap-2 rounded-xl bg-[var(--button-secondary-bg)] px-3 text-sm font-semibold text-[var(--button-secondary-text)] transition-colors hover:bg-[var(--button-secondary-bg-hover)] disabled:cursor-wait disabled:opacity-70"
+                        >
+                          {dispatchingAgentId ? <Loader2 className="h-4 w-4 animate-spin" /> : <Bot className="h-4 w-4" />}
+                          指派 Agent
+                          <ChevronDown className="h-4 w-4" />
+                        </button>
+                        {agentMenuOpen && (
+                          <div className="absolute left-0 right-0 top-full z-30 mt-2 max-h-72 overflow-auto rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-1.5 shadow-lg">
+                            {registeredAgents.length === 0 ? (
+                              <div className="px-3 py-3 text-sm text-[var(--ink-muted)]">暂无 Registered Agent</div>
+                            ) : (
+                              registeredAgents.map((agent) => (
+                                <button
+                                  key={agent.id}
+                                  type="button"
+                                  disabled={dispatchingAgentId !== null || !isRegisteredAgentAssignable(agent)}
+                                  onClick={() => void assignAgent(agent)}
+                                  className="grid min-h-12 w-full grid-cols-[28px_minmax(0,1fr)_auto] items-center gap-2 rounded-lg px-2.5 text-left transition-colors hover:bg-[var(--paper-inset)] disabled:cursor-not-allowed disabled:opacity-55"
+                                >
+                                  <span className="grid h-7 w-7 place-items-center rounded-lg bg-[var(--accent-cool-subtle)] text-xs font-bold text-[var(--accent-cool)]">
+                                    {dispatchingAgentId === agent.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : initials(agent.displayName)}
+                                  </span>
+                                  <span className="min-w-0">
+                                    <strong className="block truncate text-sm font-semibold text-[var(--ink)]">{agent.displayName}</strong>
+                                    <small className="block truncate text-xs text-[var(--ink-muted)]">{formatRegisteredAgentSecondaryLabel(agent)}</small>
+                                  </span>
+                                  {!isRegisteredAgentAssignable(agent) && (
+                                    <span className="rounded-md bg-[var(--paper-inset)] px-2 py-1 text-xs font-semibold text-[var(--ink-muted)]">{agent.status}</span>
+                                  )}
+                                </button>
+                              ))
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => void copyIssueCommand()}
+                      className="flex h-9 w-full items-center justify-center gap-2 rounded-xl bg-[var(--button-secondary-bg)] px-3 text-sm font-semibold text-[var(--button-secondary-text)] transition-colors hover:bg-[var(--button-secondary-bg-hover)]"
+                    >
+                      <Copy className="h-4 w-4" />
+                      复制 issue 口令
+                    </button>
+                  </div>
+                </section>
+              </section>
+
+              <section>
                 <h3 className="mb-5 flex items-center justify-between gap-3 text-lg font-semibold text-[var(--ink)]">
                   <span className="inline-flex items-center gap-2">
                     <MessageSquare className="h-4 w-4" />
-                    评论与处理记录
+                    评论
                   </span>
                   <small className="text-xs font-semibold text-[var(--ink-subtle)]">{detail.comments.items.length} 条</small>
                 </h3>
@@ -347,17 +494,12 @@ export function IssueDetailDrawer({
                     </div>
                   ) : (
                     detail.comments.items.map((item) => (
-                      <article key={item.id} className="grid grid-cols-[34px_minmax(0,1fr)] gap-3 py-4 first:pt-0">
-                        <div className="grid h-7 w-7 place-items-center rounded-lg bg-[var(--accent-cool-subtle)] text-xs font-bold text-[var(--accent-cool)]">
-                          {initials(item.author.type)}
+                      <article key={item.id} className="py-5 first:pt-0">
+                        <div className="mb-2 flex items-baseline gap-2 text-sm font-semibold text-[var(--ink-subtle)]">
+                          <strong className="text-[var(--ink)]">{item.author.type}</strong>
+                          <span>{formatTime(item.createdAt)}</span>
                         </div>
-                        <div>
-                          <div className="mb-1 flex items-baseline gap-2 text-xs font-semibold text-[var(--ink-subtle)]">
-                            <strong className="text-[var(--ink-secondary)]">{item.author.type}</strong>
-                            <span>{formatTime(item.createdAt)}</span>
-                          </div>
-                          <div className="max-w-[66ch] whitespace-pre-wrap text-sm leading-7 text-[var(--ink-secondary)]">{item.body}</div>
-                        </div>
+                        <div className="max-w-[66ch] whitespace-pre-wrap text-base leading-7 text-[var(--ink-secondary)]">{item.body}</div>
                       </article>
                     ))
                   )}
@@ -367,10 +509,10 @@ export function IssueDetailDrawer({
                   <textarea
                     value={comment}
                     onChange={(event) => setComment(event.target.value)}
-                    className="min-h-[92px] w-full resize-none border-0 bg-transparent p-3 text-sm leading-6 text-[var(--ink)] outline-none placeholder:text-[var(--ink-muted)]"
-                    placeholder="写一条评论，补充上下文或同步处理进展"
+                    className="min-h-[104px] w-full resize-none border-0 bg-transparent p-4 text-base leading-7 text-[var(--ink)] outline-none placeholder:text-[var(--ink-muted)]"
+                    placeholder="说说你的想法"
                   />
-                  <div className="grid grid-cols-[auto_1fr_auto] items-center gap-2 border-t border-[var(--line-subtle)] p-2">
+                  <div className="grid grid-cols-[auto_1fr_auto] items-center gap-2 px-2.5 pb-2.5">
                     <button
                       type="button"
                       disabled={attachmentUploading}
@@ -395,150 +537,6 @@ export function IssueDetailDrawer({
                 </div>
               </section>
             </div>
-
-            <aside className="min-w-0 pt-2">
-              <section className="pb-4">
-                <div className="flex items-center justify-between pb-2.5">
-                  <h3 className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-[var(--ink-muted)]">
-                    <Paperclip className="h-4 w-4" />
-                    附件
-                  </h3>
-                  <button
-                    type="button"
-                    disabled={attachmentUploading}
-                    onClick={() => void uploadAttachments()}
-                    className="grid h-8 w-8 place-items-center rounded-lg text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] disabled:cursor-wait disabled:opacity-70"
-                    title="上传附件"
-                  >
-                    {attachmentUploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <UploadCloud className="h-4 w-4" />}
-                  </button>
-                </div>
-                {detail.attachments.length === 0 ? (
-                  <div className="border-t border-dashed border-[var(--line)] py-4 text-sm text-[var(--ink-muted)]">暂无附件</div>
-                ) : (
-                  <div>
-                    {detail.attachments.map((attachment) => (
-                      <div key={attachment.id} className="grid min-h-[48px] grid-cols-[18px_minmax(0,1fr)_auto] items-center gap-2 border-b border-dashed border-[var(--line-subtle)] py-1.5 text-sm text-[var(--ink-secondary)] first:border-t">
-                        <Paperclip className="h-4 w-4" />
-                        <span className="min-w-0">
-                          <span className="block truncate">{attachment.name}</span>
-                          <small className="block text-xs text-[var(--ink-subtle)]">{formatBytes(attachment.sizeBytes)}</small>
-                        </span>
-                        <span
-                          ref={downloadTargetAttachmentId === attachment.id ? downloadMenuRef : undefined}
-                          className="relative flex items-center gap-1"
-                        >
-                          <button
-                            type="button"
-                            disabled={downloadingAttachmentId !== null}
-                            onClick={() => requestAttachmentDownload(attachment)}
-                            className="grid h-8 w-8 place-items-center rounded-lg text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] disabled:cursor-not-allowed disabled:opacity-55"
-                            aria-label={`下载附件 ${attachment.name}`}
-                            title={projects.length > 1 ? '选择下载工作区' : '下载附件'}
-                          >
-                            {downloadingAttachmentId === attachment.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
-                          </button>
-                          {downloadTargetAttachmentId === attachment.id && projects.length > 1 && (
-                            <div className="absolute right-0 top-full z-30 mt-2 w-56 rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-1.5 shadow-lg">
-                              <div className="px-2 pb-1 text-xs font-semibold text-[var(--ink-muted)]">下载到 Agent 工作区</div>
-                              {projects.map((project) => (
-                                <button
-                                  key={project.path}
-                                  type="button"
-                                  disabled={downloadingAttachmentId !== null}
-                                  onClick={() => void downloadAttachment(attachment, project.path)}
-                                  className="block h-9 w-full truncate rounded-lg px-2.5 text-left text-sm font-semibold text-[var(--ink-secondary)] transition-colors hover:bg-[var(--paper-inset)] disabled:cursor-wait disabled:opacity-60"
-                                >
-                                  {project.displayName || project.name || basename(project.path)}
-                                </button>
-                              ))}
-                            </div>
-                          )}
-                          <button
-                            type="button"
-                            onClick={() => void copyAttachmentCommand(attachment)}
-                            className="grid h-8 w-8 place-items-center rounded-lg text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
-                            aria-label={`复制附件下载命令 ${attachment.name}`}
-                            title="复制 CLI 下载命令"
-                          >
-                            <Copy className="h-4 w-4" />
-                          </button>
-                          <button
-                            type="button"
-                            disabled={!downloadedAttachmentPaths[attachment.id]}
-                            onClick={() => void copyDownloadedAttachmentPath(attachment)}
-                            className="grid h-8 w-8 place-items-center rounded-lg text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] disabled:cursor-not-allowed disabled:opacity-45"
-                            aria-label={`复制附件本地路径 ${attachment.name}`}
-                            title="复制本地路径"
-                          >
-                            <FileText className="h-4 w-4" />
-                          </button>
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </section>
-
-              <section className="border-t border-dashed border-[var(--line)] py-4">
-                <h3 className="mb-2.5 flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-[var(--ink-muted)]">
-                  {admin ? <Send className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
-                  {admin ? '派发给 Agent' : 'Issue 口令'}
-                </h3>
-                <div className="grid gap-2">
-                  {admin && (
-                    <div ref={agentMenuRef} className="relative">
-                      <button
-                        type="button"
-                        disabled={registeredAgents.length === 0 || dispatchingAgentId !== null}
-                        onClick={() => setAgentMenuOpen((value) => !value)}
-                        className="flex h-9 w-full items-center justify-center gap-2 rounded-xl bg-[var(--button-secondary-bg)] px-3 text-sm font-semibold text-[var(--button-secondary-text)] transition-colors hover:bg-[var(--button-secondary-bg-hover)] disabled:cursor-wait disabled:opacity-70"
-                      >
-                        {dispatchingAgentId ? <Loader2 className="h-4 w-4 animate-spin" /> : <Bot className="h-4 w-4" />}
-                        指派 Agent
-                        <ChevronDown className="h-4 w-4" />
-                      </button>
-                      {agentMenuOpen && (
-                        <div className="absolute left-0 right-0 top-full z-30 mt-2 max-h-72 overflow-auto rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-1.5 shadow-lg">
-                          {registeredAgents.length === 0 ? (
-                            <div className="px-3 py-3 text-sm text-[var(--ink-muted)]">暂无 Registered Agent</div>
-                          ) : (
-                            registeredAgents.map((agent) => (
-                              <button
-                                key={agent.id}
-                                type="button"
-                                disabled={dispatchingAgentId !== null || !isRegisteredAgentAssignable(agent)}
-                                onClick={() => void assignAgent(agent)}
-                                className="grid min-h-12 w-full grid-cols-[28px_minmax(0,1fr)_auto] items-center gap-2 rounded-lg px-2.5 text-left transition-colors hover:bg-[var(--paper-inset)] disabled:cursor-not-allowed disabled:opacity-55"
-                              >
-                                <span className="grid h-7 w-7 place-items-center rounded-lg bg-[var(--accent-cool-subtle)] text-xs font-bold text-[var(--accent-cool)]">
-                                  {dispatchingAgentId === agent.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : initials(agent.displayName)}
-                                </span>
-                                <span className="min-w-0">
-                                  <strong className="block truncate text-sm font-semibold text-[var(--ink)]">{agent.displayName}</strong>
-                                  <small className="block truncate text-xs text-[var(--ink-muted)]">{formatRegisteredAgentSecondaryLabel(agent)}</small>
-                                </span>
-                                {!isRegisteredAgentAssignable(agent) && (
-                                  <span className="rounded-md bg-[var(--paper-inset)] px-2 py-1 text-xs font-semibold text-[var(--ink-muted)]">{agent.status}</span>
-                                )}
-                              </button>
-                            ))
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  )}
-                  <button
-                    type="button"
-                    onClick={() => void copyIssueCommand()}
-                    className="flex h-9 w-full items-center justify-center gap-2 rounded-xl bg-[var(--button-secondary-bg)] px-3 text-sm font-semibold text-[var(--button-secondary-text)] transition-colors hover:bg-[var(--button-secondary-bg-hover)]"
-                  >
-                    <Copy className="h-4 w-4" />
-                    复制 issue 口令
-                  </button>
-                </div>
-              </section>
-            </aside>
           </section>
         )}
       </aside>

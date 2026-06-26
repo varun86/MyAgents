@@ -357,9 +357,6 @@ export default function Space({ isActive }: { isActive: boolean }) {
         <SpaceSidebar
           session={session}
           mode={mode}
-          issueCount={issues.length}
-          skillCount={skills.length}
-          agentCount={localAgents.length}
           onSpaceTabChange={selectSpaceTab}
           onLogout={logout}
         />

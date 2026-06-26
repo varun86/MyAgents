@@ -53,17 +53,11 @@ export function SpaceLogin({
 export function SpaceSidebar({
   session,
   mode,
-  issueCount,
-  skillCount,
-  agentCount,
   onSpaceTabChange,
   onLogout,
 }: {
   session: SpaceSession;
   mode: SpaceViewMode;
-  issueCount: number;
-  skillCount: number;
-  agentCount: number;
   onSpaceTabChange: (mode: SpaceViewMode) => void;
   onLogout: () => void;
 }) {
@@ -74,10 +68,10 @@ export function SpaceSidebar({
     return true;
   }, 20);
 
-  const communityItems: Array<{ mode: SpaceViewMode; label: string; count?: number; icon: typeof MessageSquare }> = [
-    { mode: 'issues', label: 'Issues', count: issueCount, icon: MessageSquare },
-    { mode: 'skills', label: 'Skills', count: skillCount, icon: Package },
-    { mode: 'agents', label: 'Agents', count: agentCount, icon: Bot },
+  const communityItems: Array<{ mode: SpaceViewMode; label: string; icon: typeof MessageSquare }> = [
+    { mode: 'issues', label: 'Issues', icon: MessageSquare },
+    { mode: 'skills', label: 'Skills', icon: Package },
+    { mode: 'agents', label: 'Agents', icon: Bot },
   ];
 
   return (
@@ -94,7 +88,6 @@ export function SpaceSidebar({
                 </span>
               </span>
               <span className="mt-0.5 flex items-center gap-1.5 text-xs font-medium text-[var(--ink-muted)]">
-                <span className="h-1.5 w-1.5 rounded-full bg-[var(--success)] ring-4 ring-[var(--success-bg)]" />
                 <span>Official Space</span>
                 <span>开放加入</span>
               </span>
@@ -110,7 +103,7 @@ export function SpaceSidebar({
                   key={item.mode}
                   type="button"
                   onClick={() => onSpaceTabChange(item.mode)}
-                  className={`grid min-h-8 w-full grid-cols-[16px_minmax(0,1fr)_auto] items-center gap-2 rounded-lg px-2.5 text-left text-xs font-semibold transition-colors ${
+                  className={`grid min-h-8 w-full grid-cols-[16px_minmax(0,1fr)] items-center gap-2 rounded-lg px-2.5 text-left text-xs font-semibold transition-colors ${
                     selected
                       ? 'bg-[var(--accent-warm-subtle)] text-[var(--accent-warm)]'
                       : 'text-[var(--ink-muted)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]'
@@ -118,9 +111,6 @@ export function SpaceSidebar({
                 >
                   <Icon className="h-3.5 w-3.5 shrink-0" />
                   <span className="truncate">{item.label}</span>
-                  {typeof item.count === 'number' && (
-                    <span className="rounded-md bg-[var(--paper-inset)] px-1.5 py-0.5 text-xs font-semibold text-[var(--ink-muted)]">{item.count}</span>
-                  )}
                 </button>
               );
             })}
