@@ -36,6 +36,7 @@ pub mod system_binary;
 pub mod task;
 pub mod terminal;
 pub mod thought;
+mod titlebar_drag;
 mod tray;
 mod updater;
 pub mod utils;
@@ -458,6 +459,8 @@ pub fn run() {
             commands::cmd_probe_proxy,
             // Model discovery
             commands::cmd_fetch_provider_models,
+            // Main-window chrome
+            titlebar_drag::cmd_macos_safe_drag_window,
             // Terminal commands (embedded PTY)
             terminal::cmd_terminal_create,
             terminal::cmd_terminal_write,
