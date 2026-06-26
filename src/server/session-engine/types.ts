@@ -255,7 +255,7 @@ export interface SessionEngine {
     preparedSessionId?: string;
     snapshotPatch?: SessionEngineSnapshotMaterializePatch;
   }): Promise<SessionEngineMaterializePendingResult>;
-  freezeCurrentSessionForImDetach(): Promise<{
+  freezeCurrentSessionForImDetach(options?: { metadataBirthPending?: boolean }): Promise<{
     success: boolean;
     sessionId?: string;
     metadata?: unknown;
@@ -293,5 +293,8 @@ export interface SessionEngine {
     getSessionMetadata: (sessionId: string) => { runtime?: RuntimeType } | null | undefined,
   ): Promise<{ success: boolean; sessionId?: string; error?: string; status?: number }>;
   resetForNewDesktopSession(workspacePath: string): Promise<{ success: boolean; sessionId?: string; error?: string }>;
-  resetForNewImSession(workspacePath: string): Promise<{ success: boolean; sessionId?: string; error?: string }>;
+  resetForNewImSession(
+    workspacePath: string,
+    options?: { metadataBirthPending?: boolean },
+  ): Promise<{ success: boolean; sessionId?: string; error?: string }>;
 }

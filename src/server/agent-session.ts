@@ -4481,6 +4481,7 @@ function buildOwnedFreezeSnapshotPatch(overrides?: OwnedFreezeSnapshotPatch): Ow
 
 export async function freezeCurrentSessionMetadataForImDetach(
   overrides?: OwnedFreezeSnapshotPatch,
+  options?: { allowMissingMetadata?: boolean },
 ): Promise<{ success: boolean; sessionId?: string; metadata?: SessionMetadata; error?: string }> {
   const targetSessionId = sessionId;
   if (!targetSessionId) {
@@ -4502,6 +4503,14 @@ export async function freezeCurrentSessionMetadataForImDetach(
     setLazySessionMaterializationAllowed(false);
     console.log(`[agent] froze IM-bound session ${targetSessionId} as owned before binding transfer`);
     return { success: true, sessionId: targetSessionId, metadata: updated };
+  }
+
+  if (!options?.allowMissingMetadata) {
+    return {
+      success: false,
+      sessionId: targetSessionId,
+      error: `Session metadata not found for non-birth-pending IM session ${targetSessionId}.`,
+    };
   }
 
   const meta = createSessionMetadata(agentDir, patch);

@@ -376,6 +376,8 @@ pub struct ImActiveSession {
     pub last_sender_name: Option<String>,
     pub workspace_path: String,
     pub message_count: u32,
+    #[serde(default)]
+    pub metadata_birth_pending: bool,
     pub last_active: String,
 }
 

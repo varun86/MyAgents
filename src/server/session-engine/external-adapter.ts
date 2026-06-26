@@ -369,16 +369,21 @@ export function createExternalSessionEngine(): SessionEngine {
       return result;
     },
 
-    freezeCurrentSessionForImDetach() {
+    freezeCurrentSessionForImDetach(options) {
       const model = getExternalSessionModel() ?? undefined;
       const permissionMode = getExternalSessionPermissionMode() ?? undefined;
       const reasoningEffort = getExternalSessionReasoningEffort() ?? undefined;
-      return freezeCurrentSessionMetadataForImDetach({
-        runtime: getActiveRuntimeType(),
-        ...(model ? { model } : {}),
-        ...(permissionMode ? { permissionMode } : {}),
-        ...(reasoningEffort ? { reasoningEffort } : {}),
-      });
+      return freezeCurrentSessionMetadataForImDetach(
+        {
+          runtime: getActiveRuntimeType(),
+          ...(model ? { model } : {}),
+          ...(permissionMode ? { permissionMode } : {}),
+          ...(reasoningEffort ? { reasoningEffort } : {}),
+        },
+        {
+          allowMissingMetadata: options?.metadataBirthPending === true,
+        },
+      );
     },
 
     updateRuntimeConfig(patch, options) {
@@ -485,17 +490,22 @@ export function createExternalSessionEngine(): SessionEngine {
       return { success: true, sessionId: newSessionId };
     },
 
-    async resetForNewImSession(workspacePath) {
+    async resetForNewImSession(workspacePath, options) {
       await awaitExternalSessionStarting();
       const model = getExternalSessionModel() ?? undefined;
       const permissionMode = getExternalSessionPermissionMode() ?? undefined;
       const reasoningEffort = getExternalSessionReasoningEffort() ?? undefined;
-      const freeze = await freezeCurrentSessionMetadataForImDetach({
-        runtime: getActiveRuntimeType(),
-        ...(model ? { model } : {}),
-        ...(permissionMode ? { permissionMode } : {}),
-        ...(reasoningEffort ? { reasoningEffort } : {}),
-      });
+      const freeze = await freezeCurrentSessionMetadataForImDetach(
+        {
+          runtime: getActiveRuntimeType(),
+          ...(model ? { model } : {}),
+          ...(permissionMode ? { permissionMode } : {}),
+          ...(reasoningEffort ? { reasoningEffort } : {}),
+        },
+        {
+          allowMissingMetadata: options?.metadataBirthPending === true,
+        },
+      );
       if (!freeze.success) {
         return { success: false, error: freeze.error ?? 'Failed to freeze current IM session before reset' };
       }

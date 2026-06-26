@@ -631,6 +631,9 @@ describe('session-engine selector and adapters', () => {
 
     expect(result).toEqual({ success: true, sessionId: 'builtin-session' });
     expect(mocks.freezeCurrentSessionMetadataForImDetach).toHaveBeenCalledTimes(1);
+    expect(mocks.freezeCurrentSessionMetadataForImDetach).toHaveBeenCalledWith(undefined, {
+      allowMissingMetadata: false,
+    });
     expect(mocks.resetSession).toHaveBeenCalledTimes(1);
     expect(mocks.materializeCurrentSessionMetadataForPublishedReset).toHaveBeenCalledTimes(1);
     expect(mocks.freezeCurrentSessionMetadataForImDetach.mock.invocationCallOrder[0])
@@ -651,12 +654,17 @@ describe('session-engine selector and adapters', () => {
 
     expect(result).toEqual({ success: true, sessionId: 'builtin-session' });
     expect(mocks.awaitExternalSessionStarting).toHaveBeenCalledTimes(1);
-    expect(mocks.freezeCurrentSessionMetadataForImDetach).toHaveBeenCalledWith({
-      runtime: 'codex',
-      model: 'gpt-5',
-      permissionMode: 'no-restrictions',
-      reasoningEffort: 'medium',
-    });
+    expect(mocks.freezeCurrentSessionMetadataForImDetach).toHaveBeenCalledWith(
+      {
+        runtime: 'codex',
+        model: 'gpt-5',
+        permissionMode: 'no-restrictions',
+        reasoningEffort: 'medium',
+      },
+      {
+        allowMissingMetadata: false,
+      },
+    );
     expect(mocks.freezeCurrentSessionMetadataForImDetach.mock.invocationCallOrder[0])
       .toBeLessThan(mocks.stopExternalSession.mock.invocationCallOrder[0]);
     expect(mocks.stopExternalSession.mock.invocationCallOrder[0])
@@ -667,15 +675,22 @@ describe('session-engine selector and adapters', () => {
   it('freezes the current external IM session through the engine facade', async () => {
     mocks.state.useExternal = true;
 
-    const result = await getSessionEngine().freezeCurrentSessionForImDetach();
+    const result = await getSessionEngine().freezeCurrentSessionForImDetach({
+      metadataBirthPending: true,
+    });
 
     expect(result).toEqual({ success: true, sessionId: 'old-im-session' });
-    expect(mocks.freezeCurrentSessionMetadataForImDetach).toHaveBeenCalledWith({
-      runtime: 'codex',
-      model: 'gpt-5',
-      permissionMode: 'no-restrictions',
-      reasoningEffort: 'medium',
-    });
+    expect(mocks.freezeCurrentSessionMetadataForImDetach).toHaveBeenCalledWith(
+      {
+        runtime: 'codex',
+        model: 'gpt-5',
+        permissionMode: 'no-restrictions',
+        reasoningEffort: 'medium',
+      },
+      {
+        allowMissingMetadata: true,
+      },
+    );
   });
 
   it('routes permission responses by external liveness compatibility', () => {

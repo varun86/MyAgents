@@ -101,12 +101,14 @@ fn short_id(s: &str) -> String {
     s.chars().take(8).collect()
 }
 
-async fn freeze_current_via_sidecar(port: u16) -> Result<(), String> {
+async fn freeze_current_via_sidecar(port: u16, metadata_birth_pending: bool) -> Result<(), String> {
     let client = crate::local_http::json_client(Duration::from_secs(30));
     let url = format!("http://127.0.0.1:{}/api/session/freeze-current", port);
     let resp = client
         .post(&url)
-        .json(&json!({}))
+        .json(&json!({
+            "metadataBirthPending": metadata_birth_pending,
+        }))
         .send()
         .await
         .map_err(|e| format!("freeze-current HTTP send failed: {}", e))?;
@@ -489,21 +491,38 @@ pub async fn cmd_handover_session_to_channel<R: Runtime>(
     if let Some(prior) = prior_before_handover.as_ref() {
         if prior.session_id != sessionId {
             let freeze_result = if prior.sidecar_port != 0 {
-                freeze_current_via_sidecar(prior.sidecar_port).await.map(|_| {
-                    ulog_info!(
-                        "[handover] step4b froze prior session {} via sidecar port {}",
-                        short_id(&prior.session_id),
-                        prior.sidecar_port
-                    );
-                })
-            } else {
-                runtime_change::freeze_via_file_lock(&prior.session_id, &fallback_snapshot)
+                freeze_current_via_sidecar(prior.sidecar_port, prior.metadata_birth_pending)
                     .await
                     .map(|_| {
                         ulog_info!(
-                            "[handover] step4b froze idle prior session {} via file lock",
-                            short_id(&prior.session_id)
+                            "[handover] step4b froze prior session {} via sidecar port {}",
+                            short_id(&prior.session_id),
+                            prior.sidecar_port
                         );
+                    })
+            } else {
+                runtime_change::freeze_via_file_lock_status(&prior.session_id, &fallback_snapshot)
+                    .await
+                    .and_then(|outcome| {
+                        runtime_change::resolve_peer_file_lock_freeze_outcome(
+                            outcome,
+                            prior.metadata_birth_pending,
+                            &prior.session_id,
+                        )
+                    })
+                    .map(|disposition| match disposition {
+                        runtime_change::PeerFileLockFreezeDisposition::Frozen => {
+                            ulog_info!(
+                                "[handover] step4b froze idle prior session {} via file lock",
+                                short_id(&prior.session_id)
+                            );
+                        }
+                        runtime_change::PeerFileLockFreezeDisposition::MissingBirthPending => {
+                            ulog_info!(
+                                "[handover] step4b skipped freeze for birth-pending prior session {} missing from SessionStore",
+                                short_id(&prior.session_id)
+                            );
+                        }
                     })
             };
             if let Err(e) = freeze_result {

@@ -413,8 +413,10 @@ export function createBuiltinSessionEngine(): SessionEngine {
       });
     },
 
-    freezeCurrentSessionForImDetach() {
-      return freezeCurrentSessionMetadataForImDetach();
+    freezeCurrentSessionForImDetach(options) {
+      return freezeCurrentSessionMetadataForImDetach(undefined, {
+        allowMissingMetadata: options?.metadataBirthPending === true,
+      });
     },
 
     async updateRuntimeConfig() {
@@ -488,8 +490,10 @@ export function createBuiltinSessionEngine(): SessionEngine {
       return { success: true, sessionId: getSessionId() };
     },
 
-    async resetForNewImSession() {
-      const freeze = await freezeCurrentSessionMetadataForImDetach();
+    async resetForNewImSession(_workspacePath, options) {
+      const freeze = await freezeCurrentSessionMetadataForImDetach(undefined, {
+        allowMissingMetadata: options?.metadataBirthPending === true,
+      });
       if (!freeze.success) {
         return { success: false, error: freeze.error ?? 'Failed to freeze current IM session before reset' };
       }

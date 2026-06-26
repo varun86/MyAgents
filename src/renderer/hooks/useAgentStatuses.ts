@@ -12,6 +12,7 @@ export interface ActiveSessionData {
   lastSenderName?: string;
   workspacePath: string;
   messageCount: number;
+  metadataBirthPending?: boolean;
   lastActive: string;
 }
 
