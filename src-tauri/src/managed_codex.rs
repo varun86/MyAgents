@@ -22,13 +22,16 @@ const REQUIRED_VERSION: &str = "0.142.2";
 const REQUIRED_APP_RUNTIME_SET: &str = "0.2.43";
 const MANIFEST_URL: &str =
     "https://download.myagents.io/runtimes/codex/by-app/0.2.43/manifest-v1.json";
+const MANIFEST_SIGNATURE_URL: &str =
+    "https://download.myagents.io/runtimes/codex/by-app/0.2.43/manifest-v1.json.sig";
 // Keep this in sync with `src-tauri/tauri.conf.json > plugins.updater.pubkey`.
-// Managed runtime artifacts use the same minisign trust root as app updates.
+// Managed runtime manifests and artifacts use the same minisign trust root as app updates.
 const MYAGENTS_MINISIGN_PUBKEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEY3RkQ5QjIzMTE4RTgyRTkKUldUcGdvNFJJNXY5OTB3T2pnUzVUbjFrV203Zk5ZTDg0NVJRdGI0UVRranJzTUsvM0hGcmFlc0IK";
 const MANIFEST_SCHEMA_VERSION: u32 = 1;
 const DOWNLOAD_HOST: &str = "download.myagents.io";
 const DOWNLOAD_PATH_PREFIX: &str = "/runtimes/codex/";
 const MAX_MANIFEST_BYTES: u64 = 256 * 1024;
+const MAX_MANIFEST_SIGNATURE_BYTES: u64 = 16 * 1024;
 const MAX_ARCHIVE_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_UNPACKED_BYTES: u64 = 900 * 1024 * 1024;
 const MAX_ARCHIVE_ENTRIES: usize = 4096;
@@ -491,15 +494,22 @@ fn managed_minisign_public_key() -> Result<PublicKey, String> {
         .map_err(|e| format!("[managed-codex] Invalid minisign public key: {}", e))
 }
 
-fn managed_minisign_signature(signature: &str) -> Result<Signature, String> {
-    let decoded = base64_to_string(signature, "artifact signature")?;
-    Signature::decode(&decoded)
-        .map_err(|e| format!("[managed-codex] Invalid artifact signature: {}", e))
+fn managed_minisign_signature(signature: &str, label: &str) -> Result<Signature, String> {
+    let decoded = base64_to_string(signature, label)?;
+    Signature::decode(&decoded).map_err(|e| format!("[managed-codex] Invalid {}: {}", label, e))
+}
+
+fn verify_minisign_bytes(bytes: &[u8], signature: &str, label: &str) -> Result<(), String> {
+    let public_key = managed_minisign_public_key()?;
+    let signature = managed_minisign_signature(signature, label)?;
+    public_key
+        .verify(bytes, &signature, true)
+        .map_err(|e| format!("[managed-codex] {} signature mismatch: {}", label, e))
 }
 
 fn verify_minisign_file(path: &Path, signature: &str) -> Result<(), String> {
     let public_key = managed_minisign_public_key()?;
-    let signature = managed_minisign_signature(signature)?;
+    let signature = managed_minisign_signature(signature, "artifact signature")?;
     match public_key.verify_stream(&signature) {
         Ok(mut verifier) => {
             let mut file = File::open(path)
@@ -530,6 +540,27 @@ fn verify_minisign_file(path: &Path, signature: &str) -> Result<(), String> {
             e
         )),
     }
+}
+
+fn fetch_verified_manifest(
+    client: &reqwest::blocking::Client,
+) -> Result<ManagedCodexManifest, String> {
+    let manifest_bytes = fetch_limited_bytes(client, MANIFEST_URL, MAX_MANIFEST_BYTES, "manifest")?;
+    let signature_bytes = fetch_limited_bytes(
+        client,
+        MANIFEST_SIGNATURE_URL,
+        MAX_MANIFEST_SIGNATURE_BYTES,
+        "manifest signature",
+    )?;
+    let signature = String::from_utf8(signature_bytes)
+        .map_err(|e| format!("[managed-codex] Manifest signature is not UTF-8: {}", e))?;
+    let signature = signature.trim();
+    if signature.is_empty() {
+        return Err("[managed-codex] Managed Codex manifest signature is required".to_string());
+    }
+    verify_minisign_bytes(&manifest_bytes, signature, "manifest signature")?;
+    serde_json::from_slice(&manifest_bytes)
+        .map_err(|e| format!("[managed-codex] Invalid manifest JSON: {}", e))
 }
 
 fn zip_entry_is_symlink(mode: Option<u32>) -> bool {
@@ -1264,10 +1295,7 @@ pub async fn cmd_managed_codex_download() -> Result<ManagedCodexStatus, String> 
 
             let result = (|| -> Result<ManagedCodexStatus, String> {
                 let client = external_http_client(Duration::from_secs(15 * 60))?;
-                let manifest_bytes =
-                    fetch_limited_bytes(&client, MANIFEST_URL, MAX_MANIFEST_BYTES, "manifest")?;
-                let manifest: ManagedCodexManifest = serde_json::from_slice(&manifest_bytes)
-                    .map_err(|e| format!("[managed-codex] Invalid manifest JSON: {}", e))?;
+                let manifest = fetch_verified_manifest(&client)?;
                 let artifact = validate_manifest_for_platform(manifest, platform)?;
 
                 let root = runtime_root()?;

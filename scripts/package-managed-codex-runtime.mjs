@@ -120,11 +120,11 @@ function zipPackage(packageDir, zipPath) {
   };
 }
 
-function signArtifact(zipPath, allowUnsigned) {
+function signFile(filePath, allowUnsigned, label) {
   const key = process.env.TAURI_SIGNING_PRIVATE_KEY;
   if (!key) {
     if (allowUnsigned) return '';
-    throw new Error('TAURI_SIGNING_PRIVATE_KEY is required to sign Managed Codex artifacts');
+    throw new Error(`TAURI_SIGNING_PRIVATE_KEY is required to sign Managed Codex ${label}`);
   }
   const keyPath = join(tmpdir(), `myagents-managed-codex-key-${randomUUID()}`);
   writeFileSync(keyPath, key);
@@ -134,13 +134,13 @@ function signArtifact(zipPath, allowUnsigned) {
     if (process.env.TAURI_SIGNING_PRIVATE_KEY_PASSWORD) {
       args.push('-p', process.env.TAURI_SIGNING_PRIVATE_KEY_PASSWORD);
     }
-    args.push(zipPath);
+    args.push(filePath);
     run('tauri', args, { stdio: 'inherit' });
   } finally {
     rmSync(keyPath, { force: true });
   }
 
-  const sigPath = `${zipPath}.sig`;
+  const sigPath = `${filePath}.sig`;
   if (!existsSync(sigPath)) throw new Error(`tauri signer did not create ${sigPath}`);
   return readFileSync(sigPath, 'utf8').trim();
 }
@@ -162,7 +162,7 @@ function main() {
       const archiveStats = zipPackage(packageDir, zipPath);
       const sha256 = sha256File(zipPath);
       writeFileSync(`${zipPath}.sha256`, `${sha256}  ${zipName}\n`);
-      const signature = signArtifact(zipPath, args.allowUnsigned);
+      const signature = signFile(zipPath, args.allowUnsigned, 'artifact');
       artifacts[platform] = {
         url: `${args.baseUrl}/${args.appVersion}/artifacts/${zipName}`,
         sha256,
@@ -186,6 +186,10 @@ function main() {
   };
   const manifestPath = join(appOutDir, 'manifest-v1.json');
   writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+  const manifestSignature = signFile(manifestPath, args.allowUnsigned, 'manifest');
+  if (manifestSignature) {
+    writeFileSync(`${manifestPath}.sig`, `${manifestSignature}\n`);
+  }
   console.log(`[managed-codex] wrote ${manifestPath}`);
   console.log(`[managed-codex] upload ${appOutDir}/ to R2 path runtimes/codex/by-app/${args.appVersion}/`);
 }
