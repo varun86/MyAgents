@@ -2429,7 +2429,11 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                         aria-pressed={config.managedCodexProviderEnabled === true}
                         onClick={() => {
                             if (!canToggleProvider) return;
-                            updateConfig({ managedCodexProviderEnabled: config.managedCodexProviderEnabled !== true });
+                            const nextEnabled = config.managedCodexProviderEnabled !== true;
+                            console.info(
+                                `[managed-codex] provider toggle requested runtime=codex runtimeSource=managed-provider enabled=${nextEnabled} readiness=${managedCodexReadiness.reason}`,
+                            );
+                            updateConfig({ managedCodexProviderEnabled: nextEnabled });
                         }}
                         className={`relative h-6 w-11 shrink-0 rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${config.managedCodexProviderEnabled === true && managedCodexReadiness.reason === 'ready' ? 'bg-[var(--accent)]' : 'bg-[var(--line-strong)]'
                             }`}
@@ -3737,7 +3741,13 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                                     </p>
                                                 </div>
                                                 <button
-                                                    onClick={() => updateConfig({ managedCodexProviderDevGate: config.managedCodexProviderDevGate !== true })}
+                                                    onClick={() => {
+                                                        const nextEnabled = config.managedCodexProviderDevGate !== true;
+                                                        console.info(
+                                                            `[managed-codex] developer gate toggle requested runtime=codex runtimeSource=managed-provider enabled=${nextEnabled}`,
+                                                        );
+                                                        updateConfig({ managedCodexProviderDevGate: nextEnabled });
+                                                    }}
                                                     aria-pressed={config.managedCodexProviderDevGate === true}
                                                     className={`relative h-6 w-11 shrink-0 cursor-pointer rounded-full transition-colors ${config.managedCodexProviderDevGate === true ? 'bg-[var(--accent)]' : 'bg-[var(--line-strong)]'
                                                         }`}

@@ -242,19 +242,17 @@ pub fn cmd_can_restore_session(sessionId: String, agentDir: String) -> bool {
 ///   (b) Session metadata was mutated post-creation (shouldn't happen)
 ///   (c) Two sessions with different runtimes ended up sharing a sidecar entry
 ///
-/// We log loudly with `[sidecar][runtime-drift-on-reuse]` so the bug surfaces
-/// in `grep` of unified logs, but do NOT kill the sidecar. Killing here could
-/// orphan shared desktop owners whose SSE streams depend on it — the
-/// invariant violation is worth investigating, not worth amplifying into a
-/// user-visible regression. The IM-router drift check at
-/// `kill_sidecar_if_runtime_differs` is still the correct place to kill, and
-/// only fires when all owners are Agent-type.
+/// We log loudly with `[sidecar][runtime-drift-on-reuse]` and return an error
+/// to the reuse path. For runtimeSource-aware Codex, reusing the wrong source
+/// means using the wrong binary, CODEX_HOME, and auth owner, so the correct
+/// recovery is to reject reuse and let ensure create a fresh sidecar for the
+/// session identity.
 pub(super) fn validate_sidecar_runtime_invariant(
     session_id: &str,
     sidecar_runtime: Option<&str>,
     sidecar_runtime_source: Option<&str>,
     site: &str,
-) {
+) -> Result<(), String> {
     let sidecar_rt = sidecar_runtime.unwrap_or("builtin");
     let sidecar_source = normalize_runtime_source_name(sidecar_rt, sidecar_runtime_source);
     let session_identity = resolve_session_runtime_identity_full(session_id);
@@ -267,11 +265,17 @@ pub(super) fn validate_sidecar_runtime_invariant(
         .map(|identity| identity.runtime_source_label())
         .unwrap_or("builtin");
     if sidecar_rt != session_rt_str || sidecar_source != session_source {
-        ulog_error!(
-            "[sidecar][runtime-drift-on-reuse] session={} site={} sidecar_runtime={} sidecar_runtime_source={} session_runtime={} session_runtime_source={} — runtime identity gate may have missed a case; not killing to avoid orphaning shared owners",
+        let message = format!(
+            "session={} site={} sidecar_runtime={} sidecar_runtime_source={} session_runtime={} session_runtime_source={}",
             session_id, site, sidecar_rt, sidecar_source, session_rt_str, session_source
         );
+        ulog_error!(
+            "[sidecar][runtime-drift-on-reuse] {} — rejecting reuse",
+            message
+        );
+        return Err(message);
     }
+    Ok(())
 }
 
 #[cfg(test)]

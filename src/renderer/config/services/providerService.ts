@@ -14,6 +14,7 @@ import type { AgentConfig } from '../../../shared/types/agent';
 import {
     isBuiltinExecutionProvider,
     isRuntimeBackedProvider,
+    isRuntimeBackedProviderId,
 } from '../../../shared/providerExecution';
 import {
     isBrowserDevMode,
@@ -315,6 +316,7 @@ export function resolveProvider(
     if (providerId) {
         const exact = providers.find(p => p.id === providerId);
         if (exact && isProviderAvailable(exact, apiKeys, verifyStatus)) return exact;
+        if (isRuntimeBackedProviderId(providerId) || isRuntimeBackedProvider(exact)) return undefined;
     }
     return getFirstAvailableProvider(providers, apiKeys, verifyStatus);
 }

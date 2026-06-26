@@ -11,6 +11,7 @@ import {
     getFirstAvailableProvider,
     isProviderAvailable,
     resolveBuiltinSelection,
+    resolveProvider,
 } from './providerService';
 
 const makeProvider = (id: string, primaryModel = `${id}-model`): Provider => ({
@@ -89,5 +90,19 @@ describe('provider availability with enablement', () => {
             {},
             { [CODEX_SUBSCRIPTION_PROVIDER_ID]: { status: 'valid', verifiedAt: '2026-06-26T00:00:00.000Z' } },
         )).toBe(true);
+    });
+
+    it('does not fallback from an unavailable runtime-backed provider to an API provider', () => {
+        const providers = [
+            { ...MANAGED_CODEX_PROVIDER, enabled: false },
+            makeProvider('deepseek'),
+        ];
+
+        expect(resolveProvider(
+            CODEX_SUBSCRIPTION_PROVIDER_ID,
+            providers,
+            { deepseek: 'deepseek-key' },
+            {},
+        )).toBeUndefined();
     });
 });

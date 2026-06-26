@@ -1,8 +1,8 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{ErrorKind, Read, Write};
 use std::path::{Component, Path, PathBuf};
-use std::process::{ChildStderr, ChildStdout, Stdio};
+use std::process::{ChildStderr, ChildStdout, Output, Stdio};
 use std::thread;
 use std::time::Duration;
 
@@ -20,10 +20,7 @@ use crate::{ulog_error, ulog_info, ulog_warn};
 const CODEX_PROVIDER_ID: &str = "codex-sub";
 const REQUIRED_VERSION: &str = "0.142.2";
 const REQUIRED_APP_RUNTIME_SET: &str = "0.2.43";
-const MANIFEST_URL: &str =
-    "https://download.myagents.io/runtimes/codex/by-app/0.2.43/manifest-v1.json";
-const MANIFEST_SIGNATURE_URL: &str =
-    "https://download.myagents.io/runtimes/codex/by-app/0.2.43/manifest-v1.json.sig";
+const MANIFEST_BASE_URL: &str = "https://download.myagents.io/runtimes/codex/by-app/0.2.43";
 // Keep this in sync with `src-tauri/tauri.conf.json > plugins.updater.pubkey`.
 // Managed runtime manifests and artifacts use the same minisign trust root as app updates.
 const MYAGENTS_MINISIGN_PUBKEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEY3RkQ5QjIzMTE4RTgyRTkKUldUcGdvNFJJNXY5OTB3T2pnUzVUbjFrV203Zk5ZTDg0NVJRdGI0UVRranJzTUsvM0hGcmFlc0IK";
@@ -74,6 +71,9 @@ struct InstalledJson {
     version: String,
     platform: String,
     sha256: Option<String>,
+    manifest_signature: Option<String>,
+    artifact_signature_verified: Option<bool>,
+    platform_signature: Option<ManagedCodexSigningVerification>,
     installed_at: Option<String>,
     source_url: Option<String>,
     executable_relative_path: Option<String>,
@@ -85,6 +85,8 @@ struct ManagedCodexManifest {
     schema_version: u32,
     app_version: String,
     codex_version: String,
+    #[serde(default)]
+    platform: Option<String>,
     artifacts: HashMap<String, ManagedCodexArtifact>,
 }
 
@@ -94,7 +96,11 @@ struct ManagedCodexArtifact {
     url: String,
     sha256: String,
     signature: String,
+    #[serde(default)]
+    signing: Option<ManagedCodexArtifactSigning>,
     executable_relative_path: String,
+    #[serde(default)]
+    file_allowlist: Vec<String>,
     #[serde(default = "default_archive_type")]
     archive_type: String,
     #[serde(default)]
@@ -103,6 +109,41 @@ struct ManagedCodexArtifact {
     unpacked_size_bytes: Option<u64>,
     #[serde(default)]
     entry_count: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ManagedCodexArtifactSigning {
+    #[serde(rename = "type")]
+    kind: String,
+    #[serde(default)]
+    team_id: Option<String>,
+    #[serde(default)]
+    signing_identity: Option<String>,
+    #[serde(default)]
+    publisher: Option<String>,
+    #[serde(default)]
+    certificate_sha256: Option<String>,
+    #[serde(default)]
+    notarization: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ManagedCodexSigningVerification {
+    #[serde(rename = "type")]
+    kind: String,
+    verified_at: String,
+    #[serde(default)]
+    team_id: Option<String>,
+    #[serde(default)]
+    signing_identity: Option<String>,
+    #[serde(default)]
+    publisher: Option<String>,
+    #[serde(default)]
+    certificate_sha256: Option<String>,
+    #[serde(default)]
+    notarization: Option<String>,
 }
 
 fn now_iso() -> String {
@@ -120,6 +161,14 @@ fn platform_key() -> Option<&'static str> {
         ("windows", "x86_64") => Some("win32-x64"),
         _ => None,
     }
+}
+
+fn manifest_url_for_platform(platform: &str) -> String {
+    format!("{}/{}/manifest-v1.json", MANIFEST_BASE_URL, platform)
+}
+
+fn manifest_signature_url_for_platform(platform: &str) -> String {
+    format!("{}/{}/manifest-v1.json.sig", MANIFEST_BASE_URL, platform)
 }
 
 fn data_dir() -> Result<PathBuf, String> {
@@ -191,6 +240,17 @@ fn normalize_sha256_hex(value: &str) -> Result<String, String> {
         ));
     }
     Ok(trimmed.to_ascii_lowercase())
+}
+
+fn non_empty_trimmed(value: Option<&str>) -> Option<String> {
+    value.and_then(|raw| {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
 }
 
 fn is_windows_reserved_segment(segment: &str) -> bool {
@@ -280,6 +340,53 @@ fn validate_relative_archive_path(raw: &str) -> Result<PathBuf, String> {
     Ok(out)
 }
 
+fn archive_key_from_path(path: &Path) -> Result<String, String> {
+    let mut parts = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(segment) => {
+                let segment = segment
+                    .to_str()
+                    .ok_or_else(|| "Archive allowlist path is not valid UTF-8".to_string())?;
+                parts.push(segment.to_string());
+            }
+            _ => return Err("Archive allowlist path must be normalized relative path".to_string()),
+        }
+    }
+    if parts.is_empty() {
+        return Err("Archive allowlist path is empty".to_string());
+    }
+    Ok(parts.join("/"))
+}
+
+fn validate_artifact_file_allowlist(
+    artifact: &ManagedCodexArtifact,
+) -> Result<HashSet<String>, String> {
+    if artifact.file_allowlist.is_empty() {
+        return Err("Managed Codex artifact fileAllowlist is required".to_string());
+    }
+    let mut allowed = HashSet::new();
+    for raw in &artifact.file_allowlist {
+        if raw.ends_with('/') {
+            return Err(format!(
+                "Managed Codex fileAllowlist entries must be files, got {}",
+                raw
+            ));
+        }
+        let path = validate_relative_archive_path(raw)?;
+        allowed.insert(archive_key_from_path(&path)?);
+    }
+    let executable_path = validate_executable_relative_path(&artifact.executable_relative_path)?;
+    let executable_key = archive_key_from_path(&executable_path)?;
+    if !allowed.contains(&executable_key) {
+        return Err(format!(
+            "Managed Codex fileAllowlist does not contain executable {}",
+            artifact.executable_relative_path
+        ));
+    }
+    Ok(allowed)
+}
+
 fn validate_executable_relative_path(raw: &str) -> Result<PathBuf, String> {
     if raw.ends_with('/') {
         return Err("Managed Codex executable path must point to a file".to_string());
@@ -325,6 +432,60 @@ fn validate_download_url(raw: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_platform_signing(
+    platform: &str,
+    signing: Option<&ManagedCodexArtifactSigning>,
+) -> Result<(), String> {
+    let signing = signing.ok_or_else(|| {
+        format!(
+            "Managed Codex artifact signing metadata is required for {}",
+            platform
+        )
+    })?;
+    match platform {
+        "darwin-arm64" | "darwin-x64" => {
+            if signing.kind != "codesign" {
+                return Err(format!(
+                    "Managed Codex macOS artifact must use codesign signing metadata, got {}",
+                    signing.kind
+                ));
+            }
+            if non_empty_trimmed(signing.team_id.as_deref()).is_none() {
+                return Err(
+                    "Managed Codex macOS artifact signing metadata requires teamId".to_string(),
+                );
+            }
+            if signing.notarization.as_deref() != Some("spctl-assess") {
+                return Err(
+                    "Managed Codex macOS artifact signing metadata requires notarization=spctl-assess"
+                        .to_string(),
+                );
+            }
+        }
+        "win32-x64" => {
+            if signing.kind != "authenticode" {
+                return Err(format!(
+                    "Managed Codex Windows artifact must use authenticode signing metadata, got {}",
+                    signing.kind
+                ));
+            }
+            let certificate_sha256 = non_empty_trimmed(signing.certificate_sha256.as_deref())
+                .ok_or_else(|| {
+                    "Managed Codex Windows artifact signing metadata requires certificateSha256"
+                        .to_string()
+                })?;
+            normalize_sha256_hex(&certificate_sha256)?;
+        }
+        _ => {
+            return Err(format!(
+                "Managed Codex platform signing metadata is unsupported for {}",
+                platform
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_manifest_for_platform(
     manifest: ManagedCodexManifest,
     platform: &str,
@@ -347,6 +508,14 @@ fn validate_manifest_for_platform(
             REQUIRED_VERSION, manifest.codex_version
         ));
     }
+    if let Some(manifest_platform) = manifest.platform.as_deref() {
+        if manifest_platform != platform {
+            return Err(format!(
+                "Managed Codex manifest platform mismatch: expected {}, got {}",
+                platform, manifest_platform
+            ));
+        }
+    }
     let artifact = manifest
         .artifacts
         .get(platform)
@@ -361,9 +530,11 @@ fn validate_manifest_for_platform(
     validate_download_url(&artifact.url)?;
     normalize_sha256_hex(&artifact.sha256)?;
     validate_executable_relative_path(&artifact.executable_relative_path)?;
+    validate_artifact_file_allowlist(&artifact)?;
     if artifact.signature.trim().is_empty() {
         return Err("Managed Codex artifact signature is required".to_string());
     }
+    validate_platform_signing(platform, artifact.signing.as_ref())?;
     if let Some(size) = artifact.archive_size_bytes {
         if size == 0 || size > MAX_ARCHIVE_BYTES {
             return Err(format!(
@@ -542,13 +713,301 @@ fn verify_minisign_file(path: &Path, signature: &str) -> Result<(), String> {
     }
 }
 
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn truncate_command_output(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(bytes).trim().to_string();
+    if text.chars().count() <= MAX_CAPTURED_OUTPUT_CHARS {
+        return text;
+    }
+    let mut truncated = text
+        .chars()
+        .take(MAX_CAPTURED_OUTPUT_CHARS)
+        .collect::<String>();
+    truncated.push_str("...<truncated>");
+    truncated
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn command_failure(label: &str, output: &Output) -> String {
+    let stdout = truncate_command_output(&output.stdout);
+    let stderr = truncate_command_output(&output.stderr);
+    let detail = if !stderr.is_empty() {
+        stderr
+    } else if !stdout.is_empty() {
+        stdout
+    } else {
+        output.status.to_string()
+    };
+    format!("[managed-codex] {} failed: {}", label, detail)
+}
+
+#[cfg(target_os = "macos")]
+fn parse_keyed_line(output: &str, prefix: &str) -> Option<String> {
+    output.lines().find_map(|line| {
+        line.strip_prefix(prefix)
+            .map(str::trim)
+            .and_then(|value| non_empty_trimmed(Some(value)))
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn first_authority(output: &str) -> Option<String> {
+    output.lines().find_map(|line| {
+        line.strip_prefix("Authority=")
+            .map(str::trim)
+            .and_then(|value| non_empty_trimmed(Some(value)))
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn verify_macos_platform_signature(
+    executable: &Path,
+    signing: &ManagedCodexArtifactSigning,
+) -> Result<ManagedCodexSigningVerification, String> {
+    let verify_output = crate::process_cmd::new("/usr/bin/codesign")
+        .args(["--verify", "--deep", "--strict", "--verbose=2"])
+        .arg(executable)
+        .output()
+        .map_err(|e| format!("[managed-codex] Failed to spawn codesign verify: {}", e))?;
+    if !verify_output.status.success() {
+        return Err(command_failure("codesign verify", &verify_output));
+    }
+
+    let details_output = crate::process_cmd::new("/usr/bin/codesign")
+        .args(["-dv", "--verbose=4"])
+        .arg(executable)
+        .output()
+        .map_err(|e| format!("[managed-codex] Failed to spawn codesign details: {}", e))?;
+    let details = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&details_output.stdout),
+        String::from_utf8_lossy(&details_output.stderr)
+    );
+    if !details_output.status.success() {
+        return Err(command_failure("codesign details", &details_output));
+    }
+
+    let actual_team_id = parse_keyed_line(&details, "TeamIdentifier=").ok_or_else(|| {
+        "[managed-codex] codesign output did not include TeamIdentifier".to_string()
+    })?;
+    let expected_team_id = non_empty_trimmed(signing.team_id.as_deref())
+        .ok_or_else(|| "[managed-codex] manifest signing metadata missing teamId".to_string())?;
+    if actual_team_id != expected_team_id {
+        return Err(format!(
+            "[managed-codex] codesign Team ID mismatch: expected {}, got {}",
+            expected_team_id, actual_team_id
+        ));
+    }
+    let signing_identity = first_authority(&details);
+    if let Some(expected_identity) = non_empty_trimmed(signing.signing_identity.as_deref()) {
+        let actual = signing_identity.as_deref().unwrap_or("");
+        if !actual.contains(&expected_identity) {
+            return Err(format!(
+                "[managed-codex] codesign identity mismatch: expected {}, got {}",
+                expected_identity, actual
+            ));
+        }
+    }
+
+    let assess_output = crate::process_cmd::new("/usr/sbin/spctl")
+        .args(["--assess", "--type", "execute", "--verbose=4"])
+        .arg(executable)
+        .output()
+        .map_err(|e| format!("[managed-codex] Failed to spawn spctl assess: {}", e))?;
+    if !assess_output.status.success() {
+        return Err(command_failure("spctl assess", &assess_output));
+    }
+
+    Ok(ManagedCodexSigningVerification {
+        kind: "codesign".to_string(),
+        verified_at: now_iso(),
+        team_id: Some(actual_team_id),
+        signing_identity,
+        publisher: None,
+        certificate_sha256: None,
+        notarization: Some("spctl-assess".to_string()),
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn verify_macos_platform_signature(
+    _executable: &Path,
+    _signing: &ManagedCodexArtifactSigning,
+) -> Result<ManagedCodexSigningVerification, String> {
+    Err("[managed-codex] macOS codesign verification can only run on macOS".to_string())
+}
+
+#[cfg(target_os = "windows")]
+fn encode_powershell(script: &str) -> String {
+    let mut utf16le = Vec::with_capacity(script.len() * 2);
+    for c in script.encode_utf16() {
+        utf16le.extend_from_slice(&c.to_le_bytes());
+    }
+    general_purpose::STANDARD.encode(utf16le)
+}
+
+#[cfg(target_os = "windows")]
+fn powershell_path() -> PathBuf {
+    if let Some(path) = crate::system_binary::find("powershell.exe")
+        .or_else(|| crate::system_binary::find("powershell"))
+    {
+        return path;
+    }
+    let system_root = std::env::var_os("SystemRoot")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+    system_root
+        .join("System32")
+        .join("WindowsPowerShell")
+        .join("v1.0")
+        .join("powershell.exe")
+}
+
+#[cfg(target_os = "windows")]
+fn verify_windows_platform_signature(
+    executable: &Path,
+    signing: &ManagedCodexArtifactSigning,
+) -> Result<ManagedCodexSigningVerification, String> {
+    let executable_utf8 = executable
+        .to_str()
+        .ok_or_else(|| "[managed-codex] executable path is not UTF-8".to_string())?;
+    let encoded_path = general_purpose::STANDARD.encode(executable_utf8.as_bytes());
+    let script = format!(
+        r#"
+$ErrorActionPreference = 'Stop'
+$path = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{encoded_path}'))
+$sig = Get-AuthenticodeSignature -LiteralPath $path
+$cert = $sig.SignerCertificate
+$sha256 = $null
+if ($cert -ne $null) {{
+  $sha256 = [System.BitConverter]::ToString($cert.GetCertHash('SHA256')).Replace('-', '').ToLowerInvariant()
+}}
+[ordered]@{{
+  status = [string]$sig.Status
+  statusMessage = [string]$sig.StatusMessage
+  subject = if ($cert -ne $null) {{ [string]$cert.Subject }} else {{ $null }}
+  sha256 = $sha256
+}} | ConvertTo-Json -Compress
+"#
+    );
+    let encoded = encode_powershell(&script);
+    let shell = powershell_path();
+    let output = crate::process_cmd::new(shell.as_os_str())
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-EncodedCommand",
+            &encoded,
+        ])
+        .output()
+        .map_err(|e| format!("[managed-codex] Failed to spawn PowerShell: {}", e))?;
+    if !output.status.success() {
+        return Err(command_failure("Get-AuthenticodeSignature", &output));
+    }
+    let stdout = String::from_utf8(output.stdout)
+        .map_err(|e| format!("[managed-codex] Authenticode output is not UTF-8: {}", e))?;
+    let parsed: Value = serde_json::from_str(stdout.trim())
+        .map_err(|e| format!("[managed-codex] Authenticode JSON parse failed: {}", e))?;
+    let status = parsed
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if status != "Valid" {
+        let message = parsed
+            .get("statusMessage")
+            .and_then(Value::as_str)
+            .unwrap_or(status);
+        return Err(format!(
+            "[managed-codex] Authenticode status is not Valid: {}",
+            message
+        ));
+    }
+
+    let actual_sha = parsed
+        .get("sha256")
+        .and_then(Value::as_str)
+        .and_then(|v| non_empty_trimmed(Some(v)))
+        .ok_or_else(|| {
+            "[managed-codex] Authenticode signer certificate SHA-256 missing".to_string()
+        })?;
+    let actual_sha = normalize_sha256_hex(&actual_sha)?;
+    let expected_sha = signing
+        .certificate_sha256
+        .as_deref()
+        .ok_or_else(|| {
+            "[managed-codex] manifest signing metadata missing certificateSha256".to_string()
+        })
+        .and_then(normalize_sha256_hex)?;
+    if actual_sha != expected_sha {
+        return Err(format!(
+            "[managed-codex] Authenticode certificate SHA-256 mismatch: expected {}, got {}",
+            expected_sha, actual_sha
+        ));
+    }
+
+    let publisher = parsed
+        .get("subject")
+        .and_then(Value::as_str)
+        .and_then(|v| non_empty_trimmed(Some(v)));
+    if let Some(expected_publisher) = non_empty_trimmed(signing.publisher.as_deref()) {
+        let actual = publisher.as_deref().unwrap_or("").to_ascii_lowercase();
+        if !actual.contains(&expected_publisher.to_ascii_lowercase()) {
+            return Err(format!(
+                "[managed-codex] Authenticode publisher mismatch: expected {}, got {}",
+                expected_publisher,
+                publisher.as_deref().unwrap_or("<none>")
+            ));
+        }
+    }
+
+    Ok(ManagedCodexSigningVerification {
+        kind: "authenticode".to_string(),
+        verified_at: now_iso(),
+        team_id: None,
+        signing_identity: None,
+        publisher,
+        certificate_sha256: Some(actual_sha),
+        notarization: None,
+    })
+}
+
+#[cfg(not(target_os = "windows"))]
+fn verify_windows_platform_signature(
+    _executable: &Path,
+    _signing: &ManagedCodexArtifactSigning,
+) -> Result<ManagedCodexSigningVerification, String> {
+    Err("[managed-codex] Windows Authenticode verification can only run on Windows".to_string())
+}
+
+fn verify_platform_signature(
+    platform: &str,
+    executable: &Path,
+    signing: &ManagedCodexArtifactSigning,
+) -> Result<ManagedCodexSigningVerification, String> {
+    validate_platform_signing(platform, Some(signing))?;
+    match platform {
+        "darwin-arm64" | "darwin-x64" => verify_macos_platform_signature(executable, signing),
+        "win32-x64" => verify_windows_platform_signature(executable, signing),
+        _ => Err(format!(
+            "[managed-codex] Managed Codex does not support platform signing for {}",
+            platform
+        )),
+    }
+}
+
 fn fetch_verified_manifest(
     client: &reqwest::blocking::Client,
-) -> Result<ManagedCodexManifest, String> {
-    let manifest_bytes = fetch_limited_bytes(client, MANIFEST_URL, MAX_MANIFEST_BYTES, "manifest")?;
+    platform: &str,
+) -> Result<(ManagedCodexManifest, String), String> {
+    let manifest_url = manifest_url_for_platform(platform);
+    let manifest_signature_url = manifest_signature_url_for_platform(platform);
+    let manifest_bytes =
+        fetch_limited_bytes(client, &manifest_url, MAX_MANIFEST_BYTES, "manifest")?;
     let signature_bytes = fetch_limited_bytes(
         client,
-        MANIFEST_SIGNATURE_URL,
+        &manifest_signature_url,
         MAX_MANIFEST_SIGNATURE_BYTES,
         "manifest signature",
     )?;
@@ -559,8 +1018,9 @@ fn fetch_verified_manifest(
         return Err("[managed-codex] Managed Codex manifest signature is required".to_string());
     }
     verify_minisign_bytes(&manifest_bytes, signature, "manifest signature")?;
-    serde_json::from_slice(&manifest_bytes)
-        .map_err(|e| format!("[managed-codex] Invalid manifest JSON: {}", e))
+    let manifest = serde_json::from_slice(&manifest_bytes)
+        .map_err(|e| format!("[managed-codex] Invalid manifest JSON: {}", e))?;
+    Ok((manifest, signature.to_string()))
 }
 
 fn zip_entry_is_symlink(mode: Option<u32>) -> bool {
@@ -591,6 +1051,7 @@ fn extract_managed_codex_zip(
             ));
         }
     }
+    let file_allowlist = validate_artifact_file_allowlist(artifact)?;
 
     fs::create_dir_all(destination)
         .map_err(|e| format!("[managed-codex] Failed to create staging dir: {}", e))?;
@@ -601,6 +1062,24 @@ fn extract_managed_codex_zip(
             .map_err(|e| format!("[managed-codex] Failed to read zip entry: {}", e))?;
         let raw_name = file.name().to_string();
         let rel_path = validate_relative_archive_path(raw_name.trim_end_matches('/'))?;
+        let rel_key = archive_key_from_path(&rel_path)?;
+        if file.is_dir() || raw_name.ends_with('/') {
+            let prefix = format!("{}/", rel_key);
+            if !file_allowlist
+                .iter()
+                .any(|allowed| allowed.starts_with(&prefix))
+            {
+                return Err(format!(
+                    "[managed-codex] Directory is not in artifact fileAllowlist: {}",
+                    raw_name
+                ));
+            }
+        } else if !file_allowlist.contains(&rel_key) {
+            return Err(format!(
+                "[managed-codex] File is not in artifact fileAllowlist: {}",
+                raw_name
+            ));
+        }
         if zip_entry_is_symlink(file.unix_mode()) {
             return Err(format!(
                 "[managed-codex] Symlinks are not allowed in runtime artifact: {}",
@@ -744,6 +1223,7 @@ fn install_verified_artifact(
     artifact: &ManagedCodexArtifact,
     archive_path: &Path,
     sha256: &str,
+    manifest_signature: &str,
 ) -> Result<(), String> {
     let root = runtime_root()?;
     fs::create_dir_all(&root)
@@ -768,6 +1248,26 @@ fn install_verified_artifact(
             return Err(err);
         }
     };
+    let signing = artifact
+        .signing
+        .as_ref()
+        .ok_or_else(|| "[managed-codex] artifact signing metadata missing".to_string())?;
+    let platform_signature =
+        match verify_platform_signature(platform, &staging.join(&executable_rel), signing) {
+            Ok(result) => result,
+            Err(err) => {
+                let _ = fs::remove_dir_all(&staging);
+                return Err(err);
+            }
+        };
+    ulog_info!(
+        "[managed-codex] platform signature verified runtime=codex runtimeSource=managed-provider platform={} kind={} teamId={} certificateSha256={} notarization={}",
+        platform,
+        platform_signature.kind,
+        platform_signature.team_id.as_deref().unwrap_or("<none>"),
+        platform_signature.certificate_sha256.as_deref().unwrap_or("<none>"),
+        platform_signature.notarization.as_deref().unwrap_or("<none>")
+    );
 
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent)
@@ -787,16 +1287,26 @@ fn install_verified_artifact(
             e
         ));
     }
-    let _ = remove_path_entry(&backup);
-
-    write_installed_json(&InstalledJson {
+    let installed_json = InstalledJson {
         version: REQUIRED_VERSION.to_string(),
         platform: platform.to_string(),
         sha256: Some(sha256.to_string()),
+        manifest_signature: Some(manifest_signature.to_string()),
+        artifact_signature_verified: Some(true),
+        platform_signature: Some(platform_signature),
         installed_at: Some(now_iso()),
         source_url: Some(artifact.url.clone()),
         executable_relative_path: Some(executable_rel.to_string_lossy().to_string()),
-    })
+    };
+    if let Err(err) = write_installed_json(&installed_json) {
+        let _ = remove_path_entry(&target);
+        if has_path_entry(&backup).unwrap_or(false) {
+            let _ = fs::rename(&backup, &target);
+        }
+        return Err(err);
+    }
+    let _ = remove_path_entry(&backup);
+    Ok(())
 }
 
 fn with_runtime_install_lock<F, T>(f: F) -> Result<T, String>
@@ -813,6 +1323,38 @@ where
         f().map_err(|e| FileLockError::Io(std::io::Error::other(e)))
     })
     .map_err(String::from)
+}
+
+fn installed_meta_has_required_security(meta: &InstalledJson, platform: &str) -> bool {
+    let Some(signature) = meta.manifest_signature.as_deref() else {
+        return false;
+    };
+    if signature.trim().is_empty() || meta.artifact_signature_verified != Some(true) {
+        return false;
+    }
+    let Some(platform_signature) = meta.platform_signature.as_ref() else {
+        return false;
+    };
+    match platform {
+        "darwin-arm64" | "darwin-x64" => {
+            platform_signature.kind == "codesign"
+                && platform_signature
+                    .team_id
+                    .as_deref()
+                    .map(|v| !v.trim().is_empty())
+                    .unwrap_or(false)
+                && platform_signature.notarization.as_deref() == Some("spctl-assess")
+        }
+        "win32-x64" => {
+            platform_signature.kind == "authenticode"
+                && platform_signature
+                    .certificate_sha256
+                    .as_deref()
+                    .and_then(|v| normalize_sha256_hex(v).ok())
+                    .is_some()
+        }
+        _ => false,
+    }
 }
 
 fn runtime_install_state() -> ManagedCodexRuntimeInstallState {
@@ -836,7 +1378,11 @@ fn runtime_install_state() -> ManagedCodexRuntimeInstallState {
     let installed = read_installed_json();
     let binary = managed_codex_binary_path(platform);
     match (installed, binary) {
-        (Some(meta), Some(_)) if meta.version == REQUIRED_VERSION && meta.platform == platform => {
+        (Some(meta), Some(_))
+            if meta.version == REQUIRED_VERSION
+                && meta.platform == platform
+                && installed_meta_has_required_security(&meta, platform) =>
+        {
             ManagedCodexRuntimeInstallState {
                 status: "installed".to_string(),
                 required_version: Some(REQUIRED_VERSION.to_string()),
@@ -847,15 +1393,26 @@ fn runtime_install_state() -> ManagedCodexRuntimeInstallState {
                 error: None,
             }
         }
-        (Some(meta), Some(_)) => ManagedCodexRuntimeInstallState {
-            status: "update-required".to_string(),
-            required_version: Some(REQUIRED_VERSION.to_string()),
-            installed_version: Some(meta.version),
-            platform: Some(platform.to_string()),
-            installed_at: meta.installed_at,
-            last_checked_at: checked_at,
-            error: None,
-        },
+        (Some(meta), Some(_)) => {
+            let needs_security_refresh =
+                meta.platform == platform && meta.version == REQUIRED_VERSION;
+            ManagedCodexRuntimeInstallState {
+                status: "update-required".to_string(),
+                required_version: Some(REQUIRED_VERSION.to_string()),
+                installed_version: Some(meta.version),
+                platform: Some(platform.to_string()),
+                installed_at: meta.installed_at,
+                last_checked_at: checked_at,
+                error: if needs_security_refresh {
+                    Some(
+                        "Managed Codex runtime requires refreshed signed install metadata"
+                            .to_string(),
+                    )
+                } else {
+                    None
+                },
+            }
+        }
         (Some(meta), None) => ManagedCodexRuntimeInstallState {
             status: "error".to_string(),
             required_version: Some(REQUIRED_VERSION.to_string()),
@@ -956,6 +1513,52 @@ fn harden_managed_auth_file_permissions() {
             );
         }
     }
+    #[cfg(target_os = "windows")]
+    {
+        let Some(auth_path) = auth_file.to_str() else {
+            ulog_warn!("[managed-codex] failed to harden auth file permissions: non-UTF8 path");
+            return;
+        };
+        let encoded_path = general_purpose::STANDARD.encode(auth_path.as_bytes());
+        let script = format!(
+            r#"
+$ErrorActionPreference = 'Stop'
+$path = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{encoded_path}'))
+$acl = Get-Acl -LiteralPath $path
+$acl.SetAccessRuleProtection($true, $false)
+$sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+$rule = New-Object System.Security.AccessControl.FileSystemAccessRule($sid, 'FullControl', 'Allow')
+$acl.SetAccessRule($rule)
+Set-Acl -LiteralPath $path -AclObject $acl
+"#
+        );
+        let encoded = encode_powershell(&script);
+        let output = crate::process_cmd::new(powershell_path().as_os_str())
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-EncodedCommand",
+                &encoded,
+            ])
+            .output();
+        match output {
+            Ok(out) if out.status.success() => {}
+            Ok(out) => {
+                ulog_warn!(
+                    "[managed-codex] failed to harden auth file ACL: {}",
+                    String::from_utf8_lossy(&out.stderr).trim()
+                );
+            }
+            Err(err) => {
+                ulog_warn!(
+                    "[managed-codex] failed to spawn ACL hardening command: {}",
+                    err
+                );
+            }
+        }
+    }
 }
 
 fn read_child_stdout(mut stdout: ChildStdout) -> thread::JoinHandle<String> {
@@ -1033,8 +1636,41 @@ fn run_codex_capture(args: &[&str], timeout: Duration) -> Result<(bool, String, 
 }
 
 fn redact_managed_codex_output(raw: &str) -> String {
+    let mut scrubbed = String::with_capacity(raw.len());
+    let mut redact_next = false;
+    for segment in raw.split_inclusive(|c: char| c.is_whitespace() || matches!(c, ',' | '{' | '}'))
+    {
+        let lower = segment.to_lowercase();
+        let sensitive_key = lower.contains("access_token")
+            || lower.contains("refresh_token")
+            || lower.contains("id_token")
+            || lower.contains("authorization")
+            || lower.contains("auth_token")
+            || lower.contains("api_key")
+            || lower.contains("apikey");
+        if sensitive_key {
+            if let Some((prefix, _)) = segment.split_once(':') {
+                scrubbed.push_str(prefix);
+                scrubbed.push_str(":<redacted>");
+            } else if let Some((prefix, _)) = segment.split_once('=') {
+                scrubbed.push_str(prefix);
+                scrubbed.push_str("=<redacted>");
+            } else {
+                scrubbed.push_str("<redacted>");
+            }
+            redact_next = !segment.contains(':') && !segment.contains('=');
+            continue;
+        }
+        if redact_next {
+            scrubbed.push_str("<redacted>");
+            redact_next = false;
+            continue;
+        }
+        scrubbed.push_str(segment);
+    }
+
     let mut redacted = String::new();
-    for line in raw.lines() {
+    for line in scrubbed.lines() {
         if !redacted.is_empty() {
             redacted.push('\n');
         }
@@ -1042,8 +1678,11 @@ fn redact_managed_codex_output(raw: &str) -> String {
             if idx > 0 {
                 redacted.push(' ');
             }
+            let lower = token.to_lowercase();
             if token.starts_with("http://") || token.starts_with("https://") {
                 redacted.push_str("<redacted-url>");
+            } else if lower == "bearer" {
+                redacted.push_str("Bearer <redacted>");
             } else if token.len() >= 24
                 && token
                     .chars()
@@ -1076,6 +1715,28 @@ fn combine_sanitized_output(stdout: String, stderr: String) -> String {
     )
 }
 
+fn login_status_auth_method_from_output(output: &str) -> Option<&'static str> {
+    let lower = output.to_lowercase();
+    if lower.contains("api key") || lower.contains("apikey") {
+        return Some("api-key");
+    }
+    if lower.contains("chatgpt")
+        || lower.contains("chat gpt")
+        || lower.contains("subscription")
+        || lower.contains("chat.openai.com")
+    {
+        return Some("chatgpt");
+    }
+    None
+}
+
+fn login_status_indicates_logged_out(output: &str) -> bool {
+    let lower = output.to_lowercase();
+    lower.contains("not logged in")
+        || lower.contains("not authenticated")
+        || lower.contains("logged out")
+}
+
 fn auth_state_from_login_status() -> ManagedCodexAuthState {
     if runtime_install_state().status != "installed" {
         return ManagedCodexAuthState {
@@ -1099,30 +1760,35 @@ fn auth_state_from_login_status() -> ManagedCodexAuthState {
         Duration::from_secs(15),
     ) {
         Ok((true, stdout, stderr)) => {
-            let combined = format!("{}\n{}", stdout, stderr).to_lowercase();
-            if combined.contains("api key") {
-                ManagedCodexAuthState {
+            let combined = format!("{}\n{}", stdout, stderr);
+            match login_status_auth_method_from_output(&combined) {
+                Some("api-key") => ManagedCodexAuthState {
                     status: "invalid".to_string(),
                     auth_method: Some("api-key".to_string()),
                     account_email: None,
                     verified_at: Some(now_iso()),
                     error: Some("Managed Codex Provider requires ChatGPT subscription login, not API key auth".to_string()),
-                }
-            } else {
-                ManagedCodexAuthState {
+                },
+                Some("chatgpt") => ManagedCodexAuthState {
                     status: "valid".to_string(),
                     auth_method: Some("chatgpt".to_string()),
                     account_email: None,
                     verified_at: Some(now_iso()),
                     error: None,
-                }
+                },
+                _ => ManagedCodexAuthState {
+                    status: "invalid".to_string(),
+                    auth_method: None,
+                    account_email: None,
+                    verified_at: Some(now_iso()),
+                    error: Some(
+                        "Managed Codex could not verify ChatGPT subscription login from Codex status output".to_string(),
+                    ),
+                },
             }
         }
         Ok((false, stdout, stderr)) => ManagedCodexAuthState {
-            status: if format!("{}\n{}", stdout, stderr)
-                .to_lowercase()
-                .contains("not logged in")
-            {
+            status: if login_status_indicates_logged_out(&format!("{}\n{}", stdout, stderr)) {
                 "logged-out".to_string()
             } else {
                 "invalid".to_string()
@@ -1266,7 +1932,7 @@ pub async fn cmd_managed_codex_download() -> Result<ManagedCodexStatus, String> 
                 "[managed-codex] download requested runtime=codex runtimeSource=managed-provider version={} platform={} manifest={}",
                 REQUIRED_VERSION,
                 platform,
-                MANIFEST_URL
+                manifest_url_for_platform(platform)
             );
 
             let installed = runtime_install_state();
@@ -1295,7 +1961,7 @@ pub async fn cmd_managed_codex_download() -> Result<ManagedCodexStatus, String> 
 
             let result = (|| -> Result<ManagedCodexStatus, String> {
                 let client = external_http_client(Duration::from_secs(15 * 60))?;
-                let manifest = fetch_verified_manifest(&client)?;
+                let (manifest, manifest_signature) = fetch_verified_manifest(&client, platform)?;
                 let artifact = validate_manifest_for_platform(manifest, platform)?;
 
                 let root = runtime_root()?;
@@ -1336,7 +2002,13 @@ pub async fn cmd_managed_codex_download() -> Result<ManagedCodexStatus, String> 
                         ));
                     }
                     verify_minisign_file(&archive_path, &artifact.signature)?;
-                    install_verified_artifact(platform, &artifact, &archive_path, &actual_sha)?;
+                    install_verified_artifact(
+                        platform,
+                        &artifact,
+                        &archive_path,
+                        &actual_sha,
+                        &manifest_signature,
+                    )?;
                     ulog_info!(
                         "[managed-codex] download installed runtime=codex runtimeSource=managed-provider version={} platform={} bytes={} sha256={}",
                         REQUIRED_VERSION,
@@ -1493,7 +2165,20 @@ mod tests {
             url: "https://download.myagents.io/runtimes/codex/releases/v0.142.2/codex-darwin-arm64.zip".to_string(),
             sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
             signature: "placeholder-signature".to_string(),
+            signing: Some(ManagedCodexArtifactSigning {
+                kind: "codesign".to_string(),
+                team_id: Some("ABCDE12345".to_string()),
+                signing_identity: Some("Developer ID Application".to_string()),
+                publisher: None,
+                certificate_sha256: None,
+                notarization: Some("spctl-assess".to_string()),
+            }),
             executable_relative_path: "bin/codex".to_string(),
+            file_allowlist: vec![
+                "package.json".to_string(),
+                "bin/codex".to_string(),
+                "README.md".to_string(),
+            ],
             archive_type: "zip".to_string(),
             archive_size_bytes: Some(10 * 1024 * 1024),
             unpacked_size_bytes: Some(20 * 1024 * 1024),
@@ -1506,6 +2191,7 @@ mod tests {
             schema_version: MANIFEST_SCHEMA_VERSION,
             app_version: REQUIRED_APP_RUNTIME_SET.to_string(),
             codex_version: REQUIRED_VERSION.to_string(),
+            platform: Some(platform.to_string()),
             artifacts: HashMap::from([(platform.to_string(), valid_artifact())]),
         }
     }
@@ -1533,10 +2219,57 @@ mod tests {
     }
 
     #[test]
+    fn installed_metadata_requires_signature_verification_fields() {
+        let mut meta = InstalledJson {
+            version: REQUIRED_VERSION.to_string(),
+            platform: "darwin-arm64".to_string(),
+            sha256: Some(
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
+            ),
+            manifest_signature: None,
+            artifact_signature_verified: Some(true),
+            platform_signature: Some(ManagedCodexSigningVerification {
+                kind: "codesign".to_string(),
+                verified_at: now_iso(),
+                team_id: Some("ABCDE12345".to_string()),
+                signing_identity: None,
+                publisher: None,
+                certificate_sha256: None,
+                notarization: Some("spctl-assess".to_string()),
+            }),
+            installed_at: Some(now_iso()),
+            source_url: None,
+            executable_relative_path: Some("bin/codex".to_string()),
+        };
+        assert!(!installed_meta_has_required_security(&meta, "darwin-arm64"));
+        meta.manifest_signature = Some("manifest.sig".to_string());
+        assert!(installed_meta_has_required_security(&meta, "darwin-arm64"));
+        meta.artifact_signature_verified = Some(false);
+        assert!(!installed_meta_has_required_security(&meta, "darwin-arm64"));
+    }
+
+    #[test]
     fn auth_status_requires_chatgpt_not_api_key() {
-        let fake_api_key_output = "Logged in with API key";
-        let combined = fake_api_key_output.to_lowercase();
-        assert!(combined.contains("api key"));
+        assert_eq!(
+            login_status_auth_method_from_output("Logged in with ChatGPT subscription"),
+            Some("chatgpt")
+        );
+        assert_eq!(
+            login_status_auth_method_from_output("Logged in with API key"),
+            Some("api-key")
+        );
+        assert_eq!(login_status_auth_method_from_output("Logged in"), None);
+        assert!(login_status_indicates_logged_out("Not logged in"));
+    }
+
+    #[test]
+    fn redaction_handles_json_and_bearer_secrets() {
+        let raw = r#"{"access_token":"abc123secretvalue","refresh_token":"def456secretvalue"} Authorization: Bearer ghijklmnopqrstuvwxyz123456"#;
+        let redacted = redact_managed_codex_output(raw);
+        assert!(!redacted.contains("abc123secretvalue"));
+        assert!(!redacted.contains("def456secretvalue"));
+        assert!(!redacted.contains("ghijklmnopqrstuvwxyz123456"));
+        assert!(redacted.contains("<redacted>"));
     }
 
     #[test]
@@ -1546,6 +2279,40 @@ mod tests {
                 .expect("valid manifest");
         assert_eq!(artifact.archive_type, "zip");
         assert_eq!(artifact.executable_relative_path, "bin/codex");
+    }
+
+    #[test]
+    fn manifest_requires_file_allowlist_covering_executable() {
+        let mut manifest = valid_manifest("darwin-arm64");
+        manifest
+            .artifacts
+            .get_mut("darwin-arm64")
+            .unwrap()
+            .file_allowlist = vec!["package.json".to_string()];
+        assert!(validate_manifest_for_platform(manifest, "darwin-arm64")
+            .unwrap_err()
+            .contains("does not contain executable"));
+    }
+
+    #[test]
+    fn extraction_rejects_files_outside_manifest_allowlist() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive_path = dir.path().join("codex.zip");
+        let file = File::create(&archive_path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        zip.start_file("bin/codex", options).unwrap();
+        zip.write_all(b"codex").unwrap();
+        zip.start_file("evil.dll", options).unwrap();
+        zip.write_all(b"evil").unwrap();
+        zip.finish().unwrap();
+
+        let mut artifact = valid_artifact();
+        artifact.file_allowlist = vec!["bin/codex".to_string()];
+        artifact.entry_count = Some(2);
+        let err = extract_managed_codex_zip(&archive_path, &dir.path().join("out"), &artifact)
+            .unwrap_err();
+        assert!(err.contains("fileAllowlist"));
     }
 
     #[test]
@@ -1561,8 +2328,54 @@ mod tests {
         assert!(
             validate_manifest_for_platform(valid_manifest("darwin-arm64"), "win32-x64")
                 .unwrap_err()
+                .contains("platform mismatch")
+        );
+
+        let mut missing_artifact = valid_manifest("darwin-arm64");
+        missing_artifact.platform = None;
+        assert!(
+            validate_manifest_for_platform(missing_artifact, "win32-x64")
+                .unwrap_err()
                 .contains("no artifact")
         );
+    }
+
+    #[test]
+    fn manifest_rejects_missing_or_wrong_platform_signing() {
+        let mut missing = valid_manifest("darwin-arm64");
+        missing.artifacts.get_mut("darwin-arm64").unwrap().signing = None;
+        assert!(validate_manifest_for_platform(missing, "darwin-arm64")
+            .unwrap_err()
+            .contains("signing metadata is required"));
+
+        let mut wrong_kind = valid_manifest("darwin-arm64");
+        wrong_kind
+            .artifacts
+            .get_mut("darwin-arm64")
+            .unwrap()
+            .signing
+            .as_mut()
+            .unwrap()
+            .kind = "authenticode".to_string();
+        assert!(validate_manifest_for_platform(wrong_kind, "darwin-arm64")
+            .unwrap_err()
+            .contains("codesign"));
+
+        let mut windows = valid_manifest("win32-x64");
+        let artifact = windows.artifacts.get_mut("win32-x64").unwrap();
+        artifact.executable_relative_path = "codex.exe".to_string();
+        artifact.file_allowlist = vec!["codex.exe".to_string()];
+        artifact.signing = Some(ManagedCodexArtifactSigning {
+            kind: "authenticode".to_string(),
+            team_id: None,
+            signing_identity: None,
+            publisher: Some("OpenAI".to_string()),
+            certificate_sha256: None,
+            notarization: None,
+        });
+        assert!(validate_manifest_for_platform(windows, "win32-x64")
+            .unwrap_err()
+            .contains("certificateSha256"));
     }
 
     #[test]

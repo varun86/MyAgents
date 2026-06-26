@@ -425,6 +425,29 @@ if ($uploadFailed -gt 0) {
 Write-Host ""
 
 # ========================================
+# 打包并上传 Managed Codex runtime
+# ========================================
+$ManagedCodexRuntimePublished = $false
+$ManagedCodexRuntimeDir = Join-Path $ProjectDir "dist\managed-codex\by-app\$Version"
+Write-Host "[Managed Codex] 打包并上传 runtime..." -ForegroundColor Blue
+& node (Join-Path $ProjectDir "scripts\package-managed-codex-runtime.mjs") --app-version $Version
+if ($LASTEXITCODE -ne 0) {
+    throw "Managed Codex runtime 打包失败"
+}
+$managedManifests = @(Get-ChildItem -Path $ManagedCodexRuntimeDir -Filter "manifest-v1.json" -Recurse -File -ErrorAction SilentlyContinue)
+$managedManifestSigs = @(Get-ChildItem -Path $ManagedCodexRuntimeDir -Filter "manifest-v1.json.sig" -Recurse -File -ErrorAction SilentlyContinue)
+if ($managedManifests.Count -eq 0 -or $managedManifestSigs.Count -eq 0) {
+    throw "Managed Codex runtime manifest 或签名缺失"
+}
+& $rclonePath --config=$rcloneConfig copy "$ManagedCodexRuntimeDir/" "r2:$R2Bucket/runtimes/codex/by-app/$Version/" --s3-no-check-bucket --progress
+if ($LASTEXITCODE -ne 0) {
+    throw "Managed Codex runtime 上传失败"
+}
+$ManagedCodexRuntimePublished = $true
+Write-Host "[OK] Managed Codex runtime 已上传" -ForegroundColor Green
+Write-Host ""
+
+# ========================================
 # 上传清单
 # ========================================
 Write-Host "[7/7] 上传更新清单..." -ForegroundColor Blue
@@ -452,6 +475,12 @@ if ($CfZoneId -and $CfApiToken) {
         "$DownloadBaseUrl/update/windows-x86_64.json",
         "$DownloadBaseUrl/update/latest_win.json"
     )
+    if ($ManagedCodexRuntimePublished -and $ManagedCodexRuntimeDir) {
+        Get-ChildItem -Path $ManagedCodexRuntimeDir -File -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
+            $relative = $_.FullName.Substring($ManagedCodexRuntimeDir.Length).TrimStart([char[]]@('\', '/')) -replace '\\', '/'
+            $purgeUrls += "$DownloadBaseUrl/runtimes/codex/by-app/$Version/$relative"
+        }
+    }
 
     if ($NsisExe) {
         $purgeUrls += "$DownloadBaseUrl/releases/v$Version/$($NsisExe.Name)"

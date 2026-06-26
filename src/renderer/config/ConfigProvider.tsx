@@ -378,10 +378,15 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
         (async () => {
             try {
                 const { invoke } = await import('@tauri-apps/api/core');
-                console.log('[ConfigProvider] Managed Codex runtime update required — downloading pinned runtime');
+                console.info(
+                    `[managed-codex] auto update start runtime=codex runtimeSource=managed-provider requiredVersion=${MANAGED_CODEX_REQUIRED_RUNTIME.version}`,
+                );
                 await invoke('cmd_managed_codex_download');
             } catch (err) {
-                console.warn('[ConfigProvider] Managed Codex runtime auto-update failed:', err);
+                console.warn(
+                    `[managed-codex] auto update failed runtime=codex runtimeSource=managed-provider requiredVersion=${MANAGED_CODEX_REQUIRED_RUNTIME.version}`,
+                    err,
+                );
             } finally {
                 managedCodexAutoUpdateRef.current = false;
                 await load();
