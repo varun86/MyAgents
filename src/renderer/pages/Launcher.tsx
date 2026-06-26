@@ -24,7 +24,7 @@ import { BrandSection, LauncherRightRail, TemplateLibraryDialog, WorkspaceEditDi
 const WorkspaceConfigPanel = lazy(() => import('@/components/WorkspaceConfigPanel'));
 import { useConfig } from '@/hooks/useConfig';
 import { useTaskCenterData } from '@/hooks/useTaskCenterData';
-import { type Project, type PermissionMode, type McpServerDefinition, type WorkspaceTemplate, isProviderEnabled, isProjectVisibleToUser, isSystemPresetProject } from '@/config/types';
+import { CODEX_SUBSCRIPTION_PROVIDER_ID, type Project, type PermissionMode, type McpServerDefinition, type WorkspaceTemplate, isProviderEnabled, isProjectVisibleToUser, isSystemPresetProject } from '@/config/types';
 import { CUSTOM_EVENTS } from '../../shared/constants';
 import { normalizeWorkspacePathIdentity, workspacePathsEqual } from '../../shared/workspacePath';
 import {
@@ -36,7 +36,7 @@ import {
 import { patchAgentConfig, getAgentById } from '@/config/services/agentConfigService';
 import { persistInputOptionChange } from '@/api/persistInputOption';
 import { createCronTask, startCronTask, startCronScheduler } from '@/api/cronTaskClient';
-import type { RuntimeType, RuntimeModelInfo, RuntimePermissionMode, RuntimeDetections } from '../../shared/types/runtime';
+import type { RuntimeType, RuntimeModelInfo, RuntimePermissionMode, RuntimeDetections, RuntimeConfig } from '../../shared/types/runtime';
 import { CC_MODELS, CC_PERMISSION_MODES, CODEX_PERMISSION_MODES, GEMINI_PERMISSION_MODES, buildRuntimeChangePatch } from '../../shared/types/runtime';
 import {
     isRuntimeBackedProvider,
@@ -229,7 +229,13 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
     runtimeConfigRef.current = selectedAgent?.runtimeConfig;
 
     // Runtime-aware model/permission lists — adapts input bar for external runtimes
-    const launcherRuntime: RuntimeType = multiAgentRuntimeEnabled
+    const selectedAgentRuntimeConfig = selectedAgent?.runtimeConfig as RuntimeConfig | undefined;
+    const selectedAgentUsesManagedCodexProvider =
+        selectedAgent?.providerId === CODEX_SUBSCRIPTION_PROVIDER_ID
+        || selectedAgentRuntimeConfig?.source === 'managed-provider';
+    const launcherRuntime: RuntimeType = selectedAgentUsesManagedCodexProvider
+        ? 'builtin'
+        : multiAgentRuntimeEnabled
         ? ((selectedAgent?.runtime as RuntimeType) || 'builtin') : 'builtin';
     const isExternalRuntime = launcherRuntime !== 'builtin';
 

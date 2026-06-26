@@ -59,11 +59,13 @@ const SUBSCRIPTION_PROVIDER_ID: &str = "anthropic-sub";
 /// helper below.
 pub struct OwnedSessionSnapshot {
     runtime: String,
+    runtime_source: Option<String>,
     model: Option<String>,
     permission_mode: Option<String>,
     mcp_enabled_servers: Option<Vec<String>>,
     provider_id: Option<String>,
     provider_route: Option<Value>,
+    provider_execution_identity: Option<Value>,
     provider_env_json: Option<String>,
 }
 
@@ -75,6 +77,9 @@ impl OwnedSessionSnapshot {
         // committed (not when Rust composed the payload).
         let mut obj = serde_json::Map::new();
         obj.insert("runtime".into(), json!(self.runtime));
+        if let Some(ref source) = self.runtime_source {
+            obj.insert("runtimeSource".into(), json!(source));
+        }
         if let Some(ref m) = self.model {
             obj.insert("model".into(), json!(m));
         }
@@ -89,6 +94,9 @@ impl OwnedSessionSnapshot {
         }
         if let Some(ref route) = self.provider_route {
             obj.insert("providerRoute".into(), route.clone());
+        }
+        if let Some(ref identity) = self.provider_execution_identity {
+            obj.insert("providerExecutionIdentity".into(), identity.clone());
         }
         if self.provider_route.is_none() {
             if let Some(ref penv) = self.provider_env_json {
@@ -108,6 +116,31 @@ fn provider_route_json(provider_id: Option<&str>, model: Option<&str>) -> Option
     Some(json!({
         "kind": if provider_id == SUBSCRIPTION_PROVIDER_ID { "subscription" } else { "provider" },
         "providerId": provider_id,
+        "model": model,
+    }))
+}
+
+fn runtime_source_from_config(runtime_config: Option<&serde_json::Value>) -> Option<String> {
+    match runtime_config
+        .and_then(|v| v.get("source"))
+        .and_then(|v| v.as_str())
+    {
+        Some("managed-provider") => Some("managed-provider".to_string()),
+        Some("system-cli") => Some("system-cli".to_string()),
+        _ => None,
+    }
+}
+
+fn managed_codex_identity_json(model: Option<&str>) -> Option<Value> {
+    let model = model?;
+    if model.is_empty() {
+        return None;
+    }
+    Some(json!({
+        "kind": "runtime-backed-provider",
+        "providerId": "codex-sub",
+        "runtime": "codex",
+        "runtimeSource": "managed-provider",
         "model": model,
     }))
 }
@@ -139,6 +172,7 @@ fn enabled_mcp_ids_from_servers_json(raw: Option<&str>) -> Option<Vec<String>> {
 /// RwLocks) and pass it to `freeze_and_rotate_for_runtime_change`.
 pub async fn build_snapshot_from_agent_state(agent: &AgentInstance) -> OwnedSessionSnapshot {
     let runtime_value = agent.runtime.read().await.clone();
+    let runtime_config_value = agent.runtime_config.read().await.clone();
     let mcp_servers_json = agent.mcp_servers_json.read().await.clone();
     let model_value = agent.current_model.read().await.clone();
     let provider_env_value = agent.current_provider_env.read().await.clone();
@@ -159,8 +193,15 @@ pub async fn build_snapshot_from_agent_state(agent: &AgentInstance) -> OwnedSess
             }
         })
     };
+    let runtime_source = runtime_source_from_config(runtime_config_value.as_ref());
+    let provider_execution_identity = if runtime_source.as_deref() == Some("managed-provider") {
+        managed_codex_identity_json(model_value.as_deref())
+    } else {
+        None
+    };
     OwnedSessionSnapshot {
         runtime: runtime_value,
+        runtime_source,
         model: model_value.clone(),
         permission_mode: Some(agent.permission_mode.read().await.clone()),
         // mcp_servers_json is the runtime payload: the selected server
@@ -174,6 +215,7 @@ pub async fn build_snapshot_from_agent_state(agent: &AgentInstance) -> OwnedSess
             provider_id_for_snapshot.as_deref(),
             model_value.as_deref(),
         ),
+        provider_execution_identity,
         provider_env_json: if is_external {
             None
         } else {
@@ -193,10 +235,12 @@ pub async fn build_snapshot_from_channel_state(
     current_model: &tokio::sync::RwLock<Option<String>>,
     permission_mode: &tokio::sync::RwLock<String>,
     mcp_servers_json: &tokio::sync::RwLock<Option<String>>,
+    runtime_config: &tokio::sync::RwLock<Option<serde_json::Value>>,
     _provider_id: Option<String>,
     current_provider_env: &tokio::sync::RwLock<Option<Value>>,
 ) -> OwnedSessionSnapshot {
     let runtime_value = runtime.read().await.clone();
+    let runtime_config_value = runtime_config.read().await.clone();
     let model_value = current_model.read().await.clone();
     let mcp_servers_json_value = mcp_servers_json.read().await.clone();
     let provider_env_value = current_provider_env.read().await.clone();
@@ -222,13 +266,21 @@ pub async fn build_snapshot_from_channel_state(
     } else {
         provider_route_json(provider_id_for_snapshot.as_deref(), model_value.as_deref())
     };
+    let runtime_source = runtime_source_from_config(runtime_config_value.as_ref());
+    let provider_execution_identity = if runtime_source.as_deref() == Some("managed-provider") {
+        managed_codex_identity_json(model_value.as_deref())
+    } else {
+        None
+    };
     OwnedSessionSnapshot {
         runtime: runtime_value,
-        model: model_value,
+        runtime_source,
+        model: model_value.clone(),
         permission_mode: Some(permission_mode.read().await.clone()),
         mcp_enabled_servers: enabled_mcp_ids_from_servers_json(mcp_servers_json_value.as_deref()),
         provider_id: provider_id_for_snapshot,
         provider_route: route,
+        provider_execution_identity,
         provider_env_json: if is_external {
             None
         } else {

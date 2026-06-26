@@ -375,6 +375,18 @@ function buildAgentPatch(
   if (fields.runtimeBackedProviderSelection !== undefined) {
     patch.providerId = fields.runtimeBackedProviderSelection.providerId;
     patch.model = fields.runtimeBackedProviderSelection.model;
+    patch.runtime = fields.runtimeBackedProviderSelection.runtime;
+    const nextRuntimeConfig: RuntimeConfig = runtimeConfigForRuntimeBackedProvider(
+      fields.runtimeBackedProviderSelection,
+      currentRuntimeConfig,
+    );
+    if (fields.permissionMode !== undefined) {
+      nextRuntimeConfig.permissionMode = fields.permissionMode;
+    }
+    if (fields.reasoningEffort !== undefined) {
+      nextRuntimeConfig.reasoningEffort = fields.reasoningEffort;
+    }
+    patch.runtimeConfig = nextRuntimeConfig;
   } else if (!isExternalRuntime && fields.builtinSelection !== undefined) {
     patch.providerId = fields.builtinSelection.providerId;
   } else if (fields.providerId !== undefined) {
@@ -392,16 +404,11 @@ function buildAgentPatch(
   // when the runtime was external (Codex/CC/Gemini), where the canonical
   // location is `agent.runtimeConfig.permissionMode`. Launcher already had
   // the correct branch — this helper is the unified version.
-  if (isExternalRuntime) {
+  if (fields.runtimeBackedProviderSelection !== undefined) {
+    // Runtime-backed providers already wrote their runtime-owned fields above.
+  } else if (isExternalRuntime) {
     const next: Partial<RuntimeConfig> = { ...(currentRuntimeConfig ?? {}) };
     let runtimeConfigDirty = false;
-    if (fields.runtimeBackedProviderSelection !== undefined) {
-      Object.assign(
-        next,
-        runtimeConfigForRuntimeBackedProvider(fields.runtimeBackedProviderSelection, next),
-      );
-      runtimeConfigDirty = true;
-    }
     if (fields.permissionMode !== undefined) {
       next.permissionMode = fields.permissionMode;
       runtimeConfigDirty = true;

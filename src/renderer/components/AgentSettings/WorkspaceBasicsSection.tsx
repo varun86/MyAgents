@@ -10,14 +10,15 @@ import { getAllMcpServers, getEnabledMcpServerIds } from '@/config/configService
 import { patchAgentConfig } from '@/config/services/agentConfigService';
 import { isProviderAvailable } from '@/config/services/providerService';
 import { CUSTOM_EVENTS } from '@/../shared/constants';
-import { PERMISSION_MODES, type Project, type McpServerDefinition } from '@/config/types';
+import { CODEX_SUBSCRIPTION_PROVIDER_ID, PERMISSION_MODES, type Project, type McpServerDefinition } from '@/config/types';
 import type { AgentConfig } from '../../../shared/types/agent';
 import { reasoningEffortChoices, REASONING_EFFORT_DESCRIPTIONS } from '@/../shared/reasoningEffort';
 import { ALL_WORKSPACE_ICON_IDS, DEFAULT_WORKSPACE_ICON } from '@/assets/workspace-icons';
 import WorkspaceIcon from '../launcher/WorkspaceIcon';
 import RuntimeSelector from '../RuntimeSelector';
-import type { RuntimeType, RuntimeDetections } from '../../../shared/types/runtime';
+import type { RuntimeType, RuntimeDetections, RuntimeConfig } from '../../../shared/types/runtime';
 import { buildRuntimeChangePatch } from '../../../shared/types/runtime';
+import { runtimeConfigForRuntimeBackedProvider, toProviderExecutionIntent } from '../../../shared/providerExecution';
 import { invoke } from '@tauri-apps/api/core';
 import { useToast } from '@/components/Toast';
 
@@ -53,7 +54,13 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
     'gemini': { installed: false },
   });
   // When multiAgentRuntime is off, treat as builtin regardless of agent config (方案 C)
-  const currentRuntime: RuntimeType = config.multiAgentRuntime
+  const agentRuntimeConfig = agent?.runtimeConfig as RuntimeConfig | undefined;
+  const agentUsesManagedCodexProvider =
+    agent?.providerId === CODEX_SUBSCRIPTION_PROVIDER_ID
+    || agentRuntimeConfig?.source === 'managed-provider';
+  const currentRuntime: RuntimeType = agentUsesManagedCodexProvider
+    ? 'builtin'
+    : config.multiAgentRuntime
     ? ((agent?.runtime as RuntimeType) || 'builtin')
     : 'builtin';
 
@@ -133,7 +140,7 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
 
   // Save AI config (model, provider, permission, mcp, plugins).
   // AgentConfig is the single source of truth when available; fallback to Project for non-agent workspaces.
-  const saveAgentConfig = useCallback(async (updates: Partial<Pick<AgentConfig, 'providerId' | 'model' | 'permissionMode' | 'mcpEnabledServers' | 'enabledPluginIds' | 'reasoningEffort'>>) => {
+  const saveAgentConfig = useCallback(async (updates: Partial<Omit<AgentConfig, 'id'>>) => {
     if (agent) {
       // patchAgentConfig auto-resolves providerEnvJson when providerId changes
       await patchAgentConfig(agent.id, updates);
@@ -167,9 +174,27 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
   }, [saveProjectMeta]);
 
   const handleModelSelect = useCallback((providerId: string, model: string) => {
-    void saveAgentConfig({ providerId, model });
+    const provider = availableProviders.find(p => p.id === providerId) ?? providers.find(p => p.id === providerId);
+    if (!provider) return;
+    const intent = toProviderExecutionIntent(provider, model);
+    if (intent.kind === 'runtime-backed-provider') {
+      void saveAgentConfig({
+        providerId,
+        model,
+        runtime: intent.runtime,
+        runtimeConfig: runtimeConfigForRuntimeBackedProvider(intent, agent?.runtimeConfig as RuntimeConfig | undefined),
+      });
+    } else {
+      void saveAgentConfig({
+        providerId,
+        model,
+        ...(agentUsesManagedCodexProvider
+          ? buildRuntimeChangePatch(agent?.runtimeConfig as RuntimeConfig | undefined, 'builtin')
+          : {}),
+      });
+    }
     setOpenPopup(null);
-  }, [saveAgentConfig]);
+  }, [agent?.runtimeConfig, agentUsesManagedCodexProvider, availableProviders, providers, saveAgentConfig]);
 
   const handlePermissionSelect = useCallback((mode: string) => {
     void saveAgentConfig({ permissionMode: mode });

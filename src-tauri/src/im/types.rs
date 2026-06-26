@@ -792,6 +792,8 @@ pub struct ChannelOverrides {
     pub provider_id: Option<String>,
     pub provider_env_json: Option<String>,
     pub model: Option<String>,
+    pub runtime: Option<String>,
+    pub runtime_config: Option<serde_json::Value>,
     pub permission_mode: Option<String>,
     pub tools_deny: Option<Vec<String>>,
 }
@@ -1001,8 +1003,12 @@ impl ChannelConfigRust {
                 .or_else(|| self.provider_env_json.clone())
                 .or_else(|| agent.provider_env_json.clone()),
             mcp_servers_json: agent.mcp_servers_json.clone(),
-            runtime: agent.runtime.clone(),
-            runtime_config: agent.runtime_config.clone(),
+            runtime: overrides
+                .and_then(|o| o.runtime.clone())
+                .or_else(|| agent.runtime.clone()),
+            runtime_config: overrides
+                .and_then(|o| o.runtime_config.clone())
+                .or_else(|| agent.runtime_config.clone()),
             heartbeat_config: agent.heartbeat.clone(),
             group_permissions: self.group_permissions.clone(),
             group_activation: self.group_activation.clone(),

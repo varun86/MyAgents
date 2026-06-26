@@ -73,6 +73,7 @@ import { createConcreteProviderRoute, hasProviderRouteCredential, isConcreteProv
 import type { ProviderRoute } from '../../shared/providerRoute';
 import {
   isRuntimeBackedProvider,
+  runtimeConfigForRuntimeBackedProvider,
   toProviderExecutionIntent,
   type RuntimeBackedProviderIdentity,
   type ProviderExecutionIntent,
@@ -3424,6 +3425,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     const priorModel = currentProject?.model;
     const priorAgentProviderId = currentAgent?.providerId;
     const priorAgentModel = currentAgent?.model;
+    const priorAgentRuntime = currentAgent?.runtime;
+    const priorAgentRuntimeConfig = currentAgent?.runtimeConfig;
     let forkTabOpened = false;
     const newProvider = providers.find(p => p.id === pending.providerId);
     const targetModel = pending.model ?? newProvider?.primaryModel;
@@ -3439,7 +3442,25 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       if (currentProject) {
         await patchProject(currentProject.id, { providerId: pending.providerId, model: targetModel });
         if (currentProject?.agentId) {
-          await patchAgentConfig(currentProject.agentId, { providerId: pending.providerId, model: targetModel });
+          const shouldReturnToBuiltinRuntime = isRuntimeBackedIntent(currentProviderExecutionIntent)
+            || ((currentAgent?.runtimeConfig as RuntimeConfig | undefined)?.source === 'managed-provider');
+          await patchAgentConfig(currentProject.agentId, targetIntent.kind === 'runtime-backed-provider'
+            ? {
+                providerId: pending.providerId,
+                model: targetModel,
+                runtime: targetIntent.runtime,
+                runtimeConfig: runtimeConfigForRuntimeBackedProvider(
+                  targetIntent,
+                  currentAgent?.runtimeConfig as RuntimeConfig | undefined,
+                ),
+              }
+            : {
+                providerId: pending.providerId,
+                model: targetModel,
+                ...(shouldReturnToBuiltinRuntime
+                  ? buildRuntimeChangePatch(currentAgent?.runtimeConfig as RuntimeConfig | undefined, 'builtin')
+                  : {}),
+              });
         }
       }
       await refreshConfig();  // Sync React state so new tab sees updated provider
@@ -3483,6 +3504,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
             await patchAgentConfig(currentProject.agentId, {
               providerId: priorAgentProviderId,
               model: priorAgentModel,
+              runtime: priorAgentRuntime,
+              runtimeConfig: priorAgentRuntimeConfig,
             });
           }
           await refreshConfig();
@@ -3497,7 +3520,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       );
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed to .id/.agentId
-  }, [pendingProviderSwitch, agentDir, onForkSession, currentProject?.id, currentProject?.agentId, patchProject, refreshConfig, providers, currentProject?.providerId, currentProject?.model, currentAgent?.providerId, currentAgent?.model, transferBindingToForkedSession, deleteUnopenedForkSession, effectivePermissionMode, reasoningEffort, workspaceMcpEnabled, workspaceEnabledPlugins]);
+  }, [pendingProviderSwitch, agentDir, onForkSession, currentProject?.id, currentProject?.agentId, patchProject, refreshConfig, providers, currentProject?.providerId, currentProject?.model, currentAgent?.providerId, currentAgent?.model, currentAgent?.runtime, currentAgent?.runtimeConfig, currentProviderExecutionIntent, transferBindingToForkedSession, deleteUnopenedForkSession, effectivePermissionMode, reasoningEffort, workspaceMcpEnabled, workspaceEnabledPlugins]);
 
   // Cross-runtime confirm: create new session in new tab and send the pending message
   const confirmCrossRuntimeSend = useCallback(async () => {

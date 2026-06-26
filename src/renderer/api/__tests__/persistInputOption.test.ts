@@ -226,6 +226,7 @@ describe('persistInputOptionChange — disk write fanout', () => {
     expect(m.patchAgentConfig).toHaveBeenCalledWith('agent-1', {
       providerId: 'codex-sub',
       model: 'gpt-5.4-codex',
+      runtime: 'codex',
       runtimeConfig: {
         envPolicy: { proxy: 'terminal' },
         source: 'managed-provider',
@@ -244,6 +245,43 @@ describe('persistInputOptionChange — disk write fanout', () => {
     expect(m.pushRuntimeConfigToSidecar).toHaveBeenCalledWith({
       model: 'gpt-5.4-codex',
       permissionMode: 'full-auto',
+    });
+  });
+
+  it('writes managed codex runtime identity even when selected from the builtin provider picker', async () => {
+    const m = makeMocks();
+    const identity = {
+      kind: 'runtime-backed-provider' as const,
+      providerId: 'codex-sub' as const,
+      runtime: 'codex' as const,
+      runtimeSource: 'managed-provider' as const,
+      model: 'gpt-5.4-codex',
+    };
+
+    await persistInputOptionChange({
+      workspaceId: 'ws-1',
+      agentId: 'agent-1',
+      isExternalRuntime: false,
+      currentRuntimeConfig: { envPolicy: { proxy: 'myagents' } },
+      fields: {
+        runtimeBackedProviderSelection: identity,
+        permissionMode: 'plan',
+      },
+      patchProject: m.patchProject,
+      patchAgentConfig: m.patchAgentConfig,
+      patchSnapshot: m.patchSnapshot,
+    });
+
+    expect(m.patchAgentConfig).toHaveBeenCalledWith('agent-1', {
+      providerId: 'codex-sub',
+      model: 'gpt-5.4-codex',
+      runtime: 'codex',
+      runtimeConfig: {
+        envPolicy: { proxy: 'myagents' },
+        source: 'managed-provider',
+        model: 'gpt-5.4-codex',
+        permissionMode: 'plan',
+      },
     });
   });
 

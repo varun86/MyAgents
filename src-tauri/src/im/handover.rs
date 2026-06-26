@@ -192,6 +192,7 @@ pub async fn cmd_session_new_with_surface_migration<R: Runtime>(
                     &ch.bot_instance.current_model,
                     &ch.bot_instance.permission_mode,
                     &ch.bot_instance.mcp_servers_json,
+                    &ch.bot_instance.runtime_config,
                     ch.bot_instance.config.provider_id.clone(),
                     &ch.bot_instance.current_provider_env,
                 )
@@ -331,6 +332,7 @@ pub async fn cmd_handover_session_to_channel<R: Runtime>(
             &channel.bot_instance.current_model,
             &channel.bot_instance.permission_mode,
             &channel.bot_instance.mcp_servers_json,
+            &channel.bot_instance.runtime_config,
             channel.bot_instance.config.provider_id.clone(),
             &channel.bot_instance.current_provider_env,
         )

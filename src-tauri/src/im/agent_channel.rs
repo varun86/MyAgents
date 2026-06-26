@@ -936,6 +936,7 @@ pub(super) async fn create_bot_instance<R: Runtime>(
                             &current_model_for_loop,
                             &permission_mode_for_loop,
                             &mcp_servers_json_for_loop,
+                            &runtime_config_for_loop,
                             provider_id_for_loop.clone(),
                             &current_provider_env_for_loop,
                         ).await;

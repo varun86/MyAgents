@@ -31,6 +31,8 @@ export interface ChannelOverrides {
   providerId?: string;
   providerEnvJson?: string;
   model?: string;
+  runtime?: RuntimeType;
+  runtimeConfig?: RuntimeConfig;
   permissionMode?: string;
   toolsDeny?: string[];
 }

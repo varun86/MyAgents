@@ -14,9 +14,12 @@ import { isTauriEnvironment } from '@/utils/browserMock';
 import { listenWithCleanup } from '@/utils/tauriListen';
 import { useToast } from '@/components/Toast';
 import { useConfig } from '@/hooks/useConfig';
-import { getEffectiveModelAliases, getProviderModels, isProviderEnabled } from '@/config/types';
+import { CODEX_SUBSCRIPTION_PROVIDER_ID, getEffectiveModelAliases, getProviderModels, isProviderEnabled } from '@/config/types';
+import { isProviderAvailable } from '@/config/services/providerService';
 import { patchAgentConfig, invokeStartAgentChannel, stopAndDisableAgentChannel, startAndEnableAgentChannel, channelHasCredentials } from '@/config/services/agentConfigService';
 import { resolveEffectiveConfig } from '../../../../shared/types/agent';
+import type { RuntimeConfig } from '../../../../shared/types/runtime';
+import { runtimeConfigForRuntimeBackedProvider, toProviderExecutionIntent } from '../../../../shared/providerExecution';
 import BotTokenInput from '../../ImSettings/components/BotTokenInput';
 import FeishuCredentialInput from '../../ImSettings/components/FeishuCredentialInput';
 import DingtalkCredentialInput from '../../ImSettings/components/DingtalkCredentialInput';
@@ -134,7 +137,7 @@ export default function ChannelDetailView({
     onBack,
     onChanged,
 }: ChannelDetailViewProps) {
-    const { config, providers, apiKeys, refreshConfig } = useConfig();
+    const { config, providers, apiKeys, providerVerifyStatus, refreshConfig } = useConfig();
     const toast = useToast();
     const toastRef = useRef(toast);
     toastRef.current = toast;
@@ -410,13 +413,13 @@ export default function ChannelDetailView({
         const options = [{ value: '', label: '默认 (继承 Agent)' }];
         for (const p of providers) {
             if (!isProviderEnabled(p)) continue;
-            if (p.type === 'subscription') continue;
-            if (p.type === 'api' && apiKeys[p.id]) {
+            if (p.type === 'subscription' && p.id !== CODEX_SUBSCRIPTION_PROVIDER_ID) continue;
+            if (isProviderAvailable(p, apiKeys, providerVerifyStatus)) {
                 options.push({ value: p.id, label: p.name });
             }
         }
         return options;
-    }, [providers, apiKeys]);
+    }, [providers, apiKeys, providerVerifyStatus]);
 
     const overrideProviderId = channel?.overrides?.providerId ?? '';
     const effectiveProviderId = effective?.providerId || 'anthropic-sub';
@@ -1179,11 +1182,33 @@ export default function ChannelDetailView({
                             onProviderChange={async (providerId) => {
                                 if (!providerId) {
                                     // Clear override → inherit from agent
-                                    await patchOverrides({ providerId: undefined, providerEnvJson: undefined, model: undefined });
+                                    await patchOverrides({
+                                        providerId: undefined,
+                                        providerEnvJson: undefined,
+                                        model: undefined,
+                                        runtime: undefined,
+                                        runtimeConfig: undefined,
+                                    });
                                     return;
                                 }
                                 const provider = providers.find(p => p.id === providerId);
                                 const newModel = provider ? provider.primaryModel : undefined;
+                                if (provider && newModel) {
+                                    const intent = toProviderExecutionIntent(provider, newModel);
+                                    if (intent.kind === 'runtime-backed-provider') {
+                                        await patchOverrides({
+                                            providerId,
+                                            providerEnvJson: undefined,
+                                            model: newModel,
+                                            runtime: intent.runtime,
+                                            runtimeConfig: runtimeConfigForRuntimeBackedProvider(
+                                                intent,
+                                                channel?.overrides?.runtimeConfig as RuntimeConfig | undefined,
+                                            ),
+                                        });
+                                        return;
+                                    }
+                                }
                                 let providerEnvJson: string | undefined;
                                 if (provider && provider.type !== 'subscription') {
                                     const aliases = getEffectiveModelAliases(provider, config.providerModelAliases);
@@ -1199,9 +1224,35 @@ export default function ChannelDetailView({
                                         ...(aliases ? { modelAliases: aliases } : {}),
                                     });
                                 }
-                                await patchOverrides({ providerId, providerEnvJson, model: newModel });
+                                await patchOverrides({
+                                    providerId,
+                                    providerEnvJson,
+                                    model: newModel,
+                                    runtime: undefined,
+                                    runtimeConfig: undefined,
+                                });
                             }}
                             onModelChange={async (model) => {
+                                const provider = channel?.overrides?.providerId
+                                    ? providers.find(p => p.id === channel.overrides?.providerId)
+                                    : undefined;
+                                if (provider) {
+                                    const fallbackModel = model || provider.primaryModel;
+                                    const intent = fallbackModel
+                                        ? toProviderExecutionIntent(provider, fallbackModel)
+                                        : undefined;
+                                    if (intent?.kind === 'runtime-backed-provider') {
+                                        await patchOverrides({
+                                            model: model || undefined,
+                                            runtime: intent.runtime,
+                                            runtimeConfig: runtimeConfigForRuntimeBackedProvider(
+                                                intent,
+                                                channel?.overrides?.runtimeConfig as RuntimeConfig | undefined,
+                                            ),
+                                        });
+                                        return;
+                                    }
+                                }
                                 await patchOverrides({ model: model || undefined });
                             }}
                         />
