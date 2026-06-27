@@ -69,6 +69,11 @@ const MAP: Record<TerminalReason, TerminalReasonInfo> = {
     detail: '部分工具调用被延迟处理，本轮已返回。',
     severity: 'info',
   },
+  background_requested: {
+    label: '已转入后台执行',
+    detail: 'SDK 已把后续工作转为后台任务，本轮前台响应已结束。可在后台任务通知中查看进展。',
+    severity: 'info',
+  },
   stop_hook_prevented: {
     label: '被 Stop Hook 阻止结束',
     detail: '项目配置的 Stop Hook 主动阻止了会话结束。请检查 Hook 逻辑或 settings.json。',
