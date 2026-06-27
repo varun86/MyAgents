@@ -133,6 +133,38 @@ type WireMessageAttachment = {
     isImage?: boolean;
 };
 
+type WireMessageUsage = NonNullable<Message['usage']>;
+
+type WireSessionMessage = {
+    id: string;
+    role: 'user' | 'assistant';
+    content: string | ContentBlock[];
+    timestamp: string;
+    sdkUuid?: string;
+    metadata?: Message['metadata'];
+    attachments?: WireMessageAttachment[];
+    usage?: WireMessageUsage;
+    toolCount?: number;
+    durationMs?: number | null;
+};
+
+function normalizeFiniteNumber(value: number | null | undefined): number | undefined {
+    return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+function normalizeTurnDurationMs(value: number | null | undefined): number | undefined {
+    return normalizeFiniteNumber(value);
+}
+
+function getAssistantTurnMetrics(msg: Pick<WireSessionMessage, 'role' | 'usage' | 'toolCount' | 'durationMs'>): Pick<Message, 'usage' | 'toolCount' | 'durationMs'> {
+    if (msg.role !== 'assistant') return {};
+    return {
+        usage: msg.usage,
+        toolCount: typeof msg.toolCount === 'number' && Number.isFinite(msg.toolCount) ? msg.toolCount : undefined,
+        durationMs: normalizeTurnDurationMs(msg.durationMs),
+    };
+}
+
 function normalizeWireAttachments(
     attachments: WireMessageAttachment[] | undefined,
 ): MessageAttachment[] | undefined {
@@ -1483,7 +1515,7 @@ export default function TabProvider({
             }
 
             case 'chat:message-replay': {
-                const payload = data as { message: { id: string; role: 'user' | 'assistant'; content: string | ContentBlock[]; timestamp: string; sdkUuid?: string; metadata?: Message['metadata']; attachments?: WireMessageAttachment[] }; replayKind?: 'cold-history' } | null;
+                const payload = data as { message: WireSessionMessage; replayKind?: 'cold-history' } | null;
                 if (!payload?.message) break;
                 const msg = payload.message;
                 // `chat:message-replay` is OVERLOADED: the SSE-connect backfill carries
@@ -1534,12 +1566,17 @@ export default function TabProvider({
                     }
                 }
 
-                setHistoryMessages(prev => [...prev, {
-                    ...msg,
+                const replayMessage: Message = {
+                    id: msg.id,
+                    role: msg.role,
                     content: replayContent,
                     timestamp: new Date(msg.timestamp),
+                    sdkUuid: msg.sdkUuid,
                     attachments,
-                }]);
+                    metadata: msg.metadata,
+                    ...getAssistantTurnMetrics(msg),
+                };
+                setHistoryMessages(prev => [...prev, replayMessage]);
                 break;
             }
 
@@ -2203,23 +2240,56 @@ export default function TabProvider({
                     });
                 }
 
-                // Apply backend's real message ID + sdkUuid to the just-moved history message.
+                const inputTokens = normalizeFiniteNumber(completePayload?.input_tokens);
+                const outputTokens = normalizeFiniteNumber(completePayload?.output_tokens);
+                const cacheReadTokens = normalizeFiniteNumber(completePayload?.cache_read_tokens);
+                const cacheCreationTokens = normalizeFiniteNumber(completePayload?.cache_creation_tokens);
+                const hasUsagePayload =
+                    inputTokens !== undefined ||
+                    outputTokens !== undefined ||
+                    cacheReadTokens !== undefined ||
+                    cacheCreationTokens !== undefined;
+                const completedUsage: Message['usage'] | undefined = hasUsagePayload
+                    ? {
+                        inputTokens: inputTokens ?? 0,
+                        outputTokens: outputTokens ?? 0,
+                        cacheReadTokens,
+                        cacheCreationTokens,
+                        model: completePayload?.model,
+                    }
+                    : undefined;
+                const completedToolCount = normalizeFiniteNumber(completePayload?.tool_count);
+                const completedDurationMs = normalizeTurnDurationMs(completePayload?.duration_ms);
+
+                // Apply backend's real message ID/sdkUuid plus turn metrics to the just-moved history message.
                 // Streaming messages use Date.now() IDs that don't match backend's messageSequence IDs.
                 // Without this, fork/rewind pass the wrong ID to the backend.
-                if (completePayload?.assistant_sdk_uuid || completePayload?.assistant_message_id) {
-                    const uuid = completePayload.assistant_sdk_uuid;
-                    const realId = completePayload.assistant_message_id;
+                if (
+                    completePayload?.assistant_sdk_uuid ||
+                    completePayload?.assistant_message_id ||
+                    completedUsage ||
+                    completedToolCount !== undefined ||
+                    completedDurationMs !== undefined
+                ) {
+                    const uuid = completePayload?.assistant_sdk_uuid;
+                    const realId = completePayload?.assistant_message_id;
                     setHistoryMessages(prev => {
                         if (prev.length === 0) return prev;
                         const last = prev[prev.length - 1];
                         if (last.role !== 'assistant') return prev;
                         const needsUuid = uuid && last.sdkUuid !== uuid;
                         const needsId = realId && last.id !== realId;
-                        if (!needsUuid && !needsId) return prev;
+                        const needsUsage = completedUsage && last.usage !== completedUsage;
+                        const needsToolCount = completedToolCount !== undefined && last.toolCount !== completedToolCount;
+                        const needsDuration = completedDurationMs !== undefined && last.durationMs !== completedDurationMs;
+                        if (!needsUuid && !needsId && !needsUsage && !needsToolCount && !needsDuration) return prev;
                         return [...prev.slice(0, -1), {
                             ...last,
                             ...(needsId ? { id: realId } : {}),
                             ...(needsUuid ? { sdkUuid: uuid } : {}),
+                            ...(completedUsage ? { usage: completedUsage } : {}),
+                            ...(completedToolCount !== undefined ? { toolCount: completedToolCount } : {}),
+                            ...(completedDurationMs !== undefined ? { durationMs: completedDurationMs } : {}),
                         }];
                     });
                 }
@@ -3624,7 +3694,7 @@ export default function TabProvider({
             // startReached handler pulls older history lazily via `?before=<id>`
             // as the user scrolls up. Keeps first-paint JSON body tiny on 600+
             // message sessions.
-            const response = await apiGetJson<{ success: boolean; session?: SessionMetadata & { liveSessionState?: SessionState; liveStreamingMessage?: { id: string; role: 'assistant'; content: string; timestamp: string; sdkUuid?: string }; messages: Array<{ id: string; role: 'user' | 'assistant'; content: string; timestamp: string; sdkUuid?: string; attachments?: Array<{ id: string; name: string; mimeType: string; path: string; previewUrl?: string }>; metadata?: Message['metadata'] }>; totalCount?: number; hasMoreBefore?: boolean } }>(`/sessions/${targetSessionId}?limit=${INITIAL_PAGE_SIZE}`);
+            const response = await apiGetJson<{ success: boolean; session?: SessionMetadata & { liveSessionState?: SessionState; liveStreamingMessage?: WireSessionMessage | null; messages: WireSessionMessage[]; totalCount?: number; hasMoreBefore?: boolean } }>(`/sessions/${targetSessionId}?limit=${INITIAL_PAGE_SIZE}`);
 
             if (!response.success || !response.session) {
                 // Session not found is not necessarily an error - it may have been deleted
@@ -3682,19 +3752,24 @@ export default function TabProvider({
                     content: parsedContent,
                     timestamp: new Date(msg.timestamp),
                     sdkUuid: msg.sdkUuid,
-                    attachments: msg.attachments?.map((att: { id: string; name: string; mimeType: string; path: string; previewUrl?: string }) => ({
+                    attachments: msg.attachments?.map((att) => ({
                         id: att.id,
                         name: att.name,
                         size: 0,
                         mimeType: att.mimeType,
-                        savedPath: att.path,
-                        relativePath: att.path,
+                        savedPath: att.path ?? att.savedPath,
+                        relativePath: att.path ?? att.relativePath ?? att.savedPath,
                         // Server no longer embeds base64 previews — resolve to
                         // `myagents://` (Tauri) or `/api/attachment/*` (dev).
-                        previewUrl: resolveAttachmentUrl({ savedPath: att.path, previewUrl: att.previewUrl }),
+                        previewUrl: resolveAttachmentUrl({
+                            savedPath: att.path ?? att.savedPath ?? att.relativePath,
+                            relativePath: att.relativePath,
+                            previewUrl: att.previewUrl,
+                        }),
                         isImage: att.mimeType.startsWith('image/'),
                     })),
                     metadata: msg.metadata,
+                    ...getAssistantTurnMetrics(msg),
                 };
             });
 
@@ -3715,6 +3790,7 @@ export default function TabProvider({
                     content: parsedLiveContent,
                     timestamp: new Date(liveMsg.timestamp),
                     sdkUuid: liveMsg.sdkUuid,
+                    ...getAssistantTurnMetrics(liveMsg),
                 };
             }
 
@@ -3864,15 +3940,7 @@ export default function TabProvider({
             const resp = await apiGetJson<{
                 success: boolean;
                 session?: {
-                    messages: Array<{
-                        id: string;
-                        role: 'user' | 'assistant';
-                        content: string;
-                        timestamp: string;
-                        sdkUuid?: string;
-                        attachments?: Array<{ id: string; name: string; mimeType: string; path: string }>;
-                        metadata?: Message['metadata'];
-                    }>;
+                    messages: WireSessionMessage[];
                     hasMoreBefore?: boolean;
                 };
             }>(`/sessions/${encodeURIComponent(sid)}?limit=${OLDER_PAGE_SIZE}&before=${encodeURIComponent(oldest.id)}`);
@@ -3901,12 +3969,17 @@ export default function TabProvider({
                         name: att.name,
                         size: 0,
                         mimeType: att.mimeType,
-                        savedPath: att.path,
-                        relativePath: att.path,
-                        previewUrl: resolveAttachmentUrl({ savedPath: att.path }),
+                        savedPath: att.path ?? att.savedPath,
+                        relativePath: att.path ?? att.relativePath ?? att.savedPath,
+                        previewUrl: resolveAttachmentUrl({
+                            savedPath: att.path ?? att.savedPath ?? att.relativePath,
+                            relativePath: att.relativePath,
+                            previewUrl: att.previewUrl,
+                        }),
                         isImage: att.mimeType.startsWith('image/'),
                     })),
                     metadata: msg.metadata,
+                    ...getAssistantTurnMetrics(msg),
                 };
             });
 

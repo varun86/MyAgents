@@ -11,6 +11,7 @@ import { parseWidgetTags, hasWidgetTags } from '@/components/tools/widgetTagPars
 import Tip from '@/components/Tip';
 import ToolAttachmentGallery from '@/components/tools/ToolAttachmentGallery';
 import { buildReplyMarkdown, downloadMarkdown, localDateStr } from '@/utils/markdownExport';
+import { formatDuration, formatTokens } from '@/utils/formatTokens';
 import { groupContentBlocksForDisplay } from '@/utils/contentBlockDisplay';
 import { useImagePreview } from '@/context/ImagePreviewContext';
 import type { ContentBlock, Message as MessageType } from '@/types/chat';
@@ -33,6 +34,34 @@ interface MessageProps {
 function formatTimestamp(date: Date): string {
   const pad = (n: number) => String(n).padStart(2, '0');
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+function areMessageUsagesEqual(a: MessageType['usage'], b: MessageType['usage']): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return a.inputTokens === b.inputTokens
+    && a.outputTokens === b.outputTokens
+    && a.cacheReadTokens === b.cacheReadTokens
+    && a.cacheCreationTokens === b.cacheCreationTokens
+    && a.providerId === b.providerId
+    && a.model === b.model;
+}
+
+function getTurnMetaLabel(message: MessageType): string | null {
+  const parts: string[] = [];
+  if (typeof message.durationMs === 'number' && Number.isFinite(message.durationMs) && message.durationMs > 0) {
+    parts.push(`本轮耗时 ${formatDuration(message.durationMs)}`);
+  }
+
+  const usage = message.usage;
+  if (usage) {
+    const totalTokens = (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0);
+    if (totalTokens > 0) {
+      parts.push(`${formatTokens(totalTokens)} tokens`);
+    }
+  }
+
+  return parts.length > 0 ? parts.join(' · ') : null;
 }
 
 /**
@@ -67,6 +96,10 @@ function areMessagesEqual(prev: MessageProps, next: MessageProps): boolean {
 
   // Tail-fade gating depends on this flag even when content/id are unchanged.
   if (prevMsg.streamingTextActive !== nextMsg.streamingTextActive) return false;
+
+  if (prevMsg.durationMs !== nextMsg.durationMs) return false;
+  if (prevMsg.toolCount !== nextMsg.toolCount) return false;
+  if (!areMessageUsagesEqual(prevMsg.usage, nextMsg.usage)) return false;
 
   // For streaming messages, check content changes
   if (typeof prevMsg.content === 'string' && typeof nextMsg.content === 'string') {
@@ -154,6 +187,7 @@ function AssistantActions({ message, onRetry, onFork, className = '' }: {
   }, []);
 
   const text = extractAssistantText(message.content);
+  const turnMetaLabel = getTurnMetaLabel(message);
 
   const handleExport = async () => {
     // In-flight guard against double-click → duplicate download + toast.
@@ -169,7 +203,7 @@ function AssistantActions({ message, onRetry, onFork, className = '' }: {
   };
 
   return (
-    <div className={`flex items-center gap-2 -ml-1 pt-1 ${className}`}>
+    <div className={`group/actions flex min-h-7 w-full items-center gap-2 -ml-1 pt-1 ${className}`}>
       <Tip label={copied ? '已复制' : '复制'}>
         <button type="button"
           aria-label="复制"
@@ -211,6 +245,14 @@ function AssistantActions({ message, onRetry, onFork, className = '' }: {
             <GitBranch className="size-3.5" />
           </button>
         </Tip>
+      )}
+      {turnMetaLabel && (
+        <span
+          className="ml-2 min-w-0 flex-1 truncate text-xs text-[var(--ink-muted)]/60 opacity-0 transition-opacity duration-150 group-hover/actions:opacity-100 group-focus-within/actions:opacity-100"
+          title={turnMetaLabel}
+        >
+          {turnMetaLabel}
+        </span>
       )}
     </div>
   );
