@@ -21,6 +21,7 @@ import { FeishuStreamingSession } from './streaming-adapter';
 import { createMcpHandler } from './mcp-handler';
 import { getPendingDispatch, resolvePendingDispatch, rejectPendingDispatch, clearAllPendingDispatches } from './pending-dispatch';
 import { buildFunctionalHealth, buildReadyHealth, type GatewayRuntimeStatus } from './gateway-health';
+import { redactPluginBridgeSecrets } from './secret-redaction';
 import { serve as honoServe } from '@hono/node-server';
 import { readFile, mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
@@ -471,14 +472,8 @@ async function loadPlugin() {
 
   currentAccount = account; // Share with /restart-gateway and sendText/sendMedia closures
 
-  // Log account with secrets redacted
-  const redactedAccount = Object.fromEntries(
-    Object.entries(account).map(([k, v]) =>
-      /secret|token|password|key/i.test(k) && typeof v === 'string'
-        ? [k, v.slice(0, 4) + '***']
-        : [k, v]
-    )
-  );
+  // Log account with secrets redacted, including nested plugin config.
+  const redactedAccount = redactPluginBridgeSecrets(account);
   console.log(`[plugin-bridge] Resolved account:`, JSON.stringify(redactedAccount));
 
   // Wrap outbound.sendText/sendMedia if top-level handlers are missing
