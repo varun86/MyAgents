@@ -1,0 +1,10 @@
+{
+  "input": {
+    "launcherPlaceholder": "今天，想干点啥？",
+    "placeholder": "输入消息，使用 @ 引用文件，/ 使用技能...",
+    "companionPlaceholder": "问问 Mino，或者派个活…",
+    "addScreenshot": "添加屏幕截图",
+    "send": "发送",
+    "stop": "停止"
+  }
+}

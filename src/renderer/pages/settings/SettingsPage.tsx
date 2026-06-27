@@ -1,6 +1,7 @@
 import { Check, ChevronDown, Copy, Download, FolderOpen, KeyRound, Link, Loader2, Plus, RefreshCw, SlidersHorizontal, Square, Trash2, Unlink, X, AlertCircle, Globe, ExternalLink as ExternalLinkIcon, Settings2 } from 'lucide-react';
 import { ExternalLink } from '@/components/ExternalLink';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { getVersion } from '@tauri-apps/api/app';
 import { invoke } from '@tauri-apps/api/core';
 import { listenWithCleanup } from '@/utils/tauriListen';
@@ -78,6 +79,7 @@ import ShortcutRecorder from '@/components/ShortcutRecorder';
 import { VISIBLE_APP_SHORTCUTS } from '@/utils/appShortcuts';
 import { shouldDebounceAutoVerify } from '@/utils/apiKeyAutoVerify';
 import { DEFAULT_SUMMON_ACCELERATOR } from '../../../shared/config-types';
+import type { UiLanguage } from '../../../shared/i18n';
 import { workspacePathsEqual } from '../../../shared/workspacePath';
 import ProviderEnableOrderDialog from '@/components/ProviderEnableOrderDialog';
 import FloatingBallPetSettings from '@/components/FloatingBallPetSettings';
@@ -212,6 +214,8 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
     } = useConfig();
     const spaceBuildCapability = useSpaceBuildCapability();
     const toast = useToast();
+    const { t: tSettings } = useTranslation('settings');
+    const { t: tCommon } = useTranslation('common');
     // Stabilize toast reference to avoid unnecessary effect re-runs
     const toastRef = useRef(toast);
     toastRef.current = toast;
@@ -222,6 +226,11 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
         () => normalizeClaudeTranscriptCleanupPeriodDays(config.claudeTranscriptCleanupPeriodDays),
         [config.claudeTranscriptCleanupPeriodDays],
     );
+    const languageOptions = useMemo(() => [
+        { value: 'system', label: tCommon('language.system') },
+        { value: 'zh-CN', label: tCommon('language.zhCN') },
+        { value: 'en-US', label: tCommon('language.enUS') },
+    ], [tCommon]);
     const [claudeTranscriptCleanupDaysDraft, setClaudeTranscriptCleanupDaysDraft] = useState(
         String(DEFAULT_CLAUDE_TRANSCRIPT_CLEANUP_PERIOD_DAYS),
     );
@@ -3761,10 +3770,31 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                     {activeSection === 'general' && (
                         <div className="space-y-6">
                             <div>
-                                <h2 className="text-lg font-semibold text-[var(--ink)]">通用设置</h2>
+                                <h2 className="text-lg font-semibold text-[var(--ink)]">{tSettings('general.title')}</h2>
                                 <p className="mt-1 text-xs text-[var(--ink-muted)]">
-                                    配置应用程序的通用行为
+                                    {tSettings('general.description')}
                                 </p>
+                            </div>
+
+                            <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
+                                <div className="flex items-center justify-between gap-4">
+                                    <div className="flex-1 pr-4">
+                                        <p className="text-sm font-medium text-[var(--ink)]">{tSettings('general.languageTitle')}</p>
+                                        <p className="text-xs text-[var(--ink-muted)]">
+                                            {tSettings('general.languageDescription')}
+                                        </p>
+                                    </div>
+                                    <CustomSelect
+                                        value={config.uiLanguage ?? 'system'}
+                                        options={languageOptions}
+                                        onChange={async (value) => {
+                                            await updateConfig({ uiLanguage: value as UiLanguage });
+                                            toast.success(tSettings('general.languageChanged'));
+                                        }}
+                                        triggerIcon={<Globe className="h-3.5 w-3.5" />}
+                                        className="w-[220px]"
+                                    />
+                                </div>
                             </div>
 
                             {/* Startup Settings */}

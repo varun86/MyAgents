@@ -53,6 +53,7 @@ import { migrateImBotConfigsToAgents, persistAgents, ensureAllProjectsHaveAgent,
 import { isTauriEnvironment } from '@/utils/browserMock';
 import { listenWithCleanup } from '@/utils/tauriListen';
 import { workspacePathsEqual } from '../../shared/workspacePath';
+import { normalizeUiLanguage, type SupportedLocale, type UiLanguage } from '../../shared/i18n';
 
 /**
  * Normalize agents loaded from disk: ensure every agent has a `channels` array.
@@ -237,11 +238,15 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
 
     // Mount guard
     const isMountedRef = useRef(true);
+    const configRef = useRef<AppConfig>(DEFAULT_CONFIG);
     const managedCodexAutoUpdateRef = useRef(false);
     useEffect(() => {
         isMountedRef.current = true;
         return () => { isMountedRef.current = false; };
     }, []);
+    useEffect(() => {
+        configRef.current = config;
+    }, [config]);
 
     // ============= Load All Data =============
 
@@ -371,6 +376,7 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
             }
 
             if (!isMountedRef.current) return;
+            configRef.current = loadedConfig;
             setConfig(loadedConfig);
             setProjects(loadedProjects);
             setRawProviders(loadedProviders);
@@ -447,53 +453,97 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
         managedCodexModelListKey,
     ]);
 
+    const syncNativeUiLanguageFromConfig = useCallback(async () => {
+        if (!isTauriEnvironment()) return;
+        try {
+            const { invoke } = await import('@tauri-apps/api/core');
+            await invoke('cmd_sync_ui_language_from_config');
+        } catch (err) {
+            console.warn('[ConfigProvider] Failed to sync native UI language:', err);
+        }
+    }, []);
+
+    const refreshConfigFromDisk = useCallback(async (
+        reason: string,
+        options: { syncNativeUiLanguage: boolean },
+    ) => {
+        try {
+            const previousUiLanguage = normalizeUiLanguage(configRef.current.uiLanguage);
+            const latest = await loadAppConfig();
+            normalizeAgents(latest);
+            const nextUiLanguage = normalizeUiLanguage(latest.uiLanguage);
+            if (isMountedRef.current) {
+                configRef.current = latest;
+                setConfig(latest);
+            }
+            if (options.syncNativeUiLanguage && previousUiLanguage !== nextUiLanguage) {
+                await syncNativeUiLanguageFromConfig();
+            }
+        } catch (err) {
+            console.error(`[ConfigProvider] Failed to refresh config after ${reason}:`, err);
+        }
+    }, [syncNativeUiLanguageFromConfig]);
+
     // ============= Listen for im:bot-config-changed =============
 
     useEffect(() => {
         if (!isTauriEnvironment()) return;
         const ac = new AbortController();
 
-        const refreshOnEvent = () => {
+        const refreshOnConfigEvent = () => {
             if (!isMountedRef.current) return;
-            loadAppConfig().then(latest => {
-                normalizeAgents(latest);
-                if (isMountedRef.current) setConfig(latest);
-            }).catch(err => {
-                console.error('[ConfigProvider] Failed to refresh config after config-changed:', err);
-            });
+            void refreshConfigFromDisk('config-changed', { syncNativeUiLanguage: true });
+        };
+        const refreshOnUiLanguageEvent = () => {
+            if (!isMountedRef.current) return;
+            void refreshConfigFromDisk('ui-language-changed', { syncNativeUiLanguage: false });
         };
 
-        void listenWithCleanup<{ botId: string }>('im:bot-config-changed', refreshOnEvent, ac.signal);
-        void listenWithCleanup('agent:config-changed', refreshOnEvent, ac.signal);
+        void listenWithCleanup<{ botId: string }>('im:bot-config-changed', refreshOnConfigEvent, ac.signal);
+        void listenWithCleanup('agent:config-changed', refreshOnConfigEvent, ac.signal);
         // PRD 0.2.35 — the Rust `cmd_set_force_wake_lock` command (called from
         // Settings.tsx OR triggered by the tray CheckMenuItem click) writes
         // disk and emits this event. We re-read disk so the React state
         // matches the durable truth. Without this, a tray-side toggle would
         // leave Settings.tsx stuck on its last-rendered value.
-        void listenWithCleanup<boolean>('force-wake-lock-changed', refreshOnEvent, ac.signal);
+        void listenWithCleanup<boolean>('force-wake-lock-changed', refreshOnConfigEvent, ac.signal);
+        void listenWithCleanup<{ uiLanguage: UiLanguage; locale: SupportedLocale }>('ui-language-changed', refreshOnUiLanguageEvent, ac.signal);
 
         return () => ac.abort();
-    }, []);
+    }, [refreshConfigFromDisk]);
 
     // ============= Listen for Admin CLI config changes (via SSE → window event) =============
 
     useEffect(() => {
         const handler = () => {
             if (!isMountedRef.current) return;
-            loadAppConfig().then(latest => {
-                normalizeAgents(latest);
-                if (isMountedRef.current) setConfig(latest);
-            }).catch(err => {
-                console.error('[ConfigProvider] Failed to refresh config after admin CLI change:', err);
-            });
+            void refreshConfigFromDisk('admin CLI change', { syncNativeUiLanguage: true });
         };
         window.addEventListener('myagents:config-changed', handler);
         return () => window.removeEventListener('myagents:config-changed', handler);
-    }, []);
+    }, [refreshConfigFromDisk]);
 
     // ============= Actions =============
 
     const updateConfig = useCallback(async (updates: Partial<AppConfig>) => {
+        if ('uiLanguage' in updates) {
+            const value = normalizeUiLanguage(updates.uiLanguage);
+            const { uiLanguage: _, ...rest } = updates;
+            if (isTauriEnvironment()) {
+                try {
+                    const { invoke } = await import('@tauri-apps/api/core');
+                    await invoke('cmd_set_ui_language', { value });
+                    setConfig(prev => ({ ...prev, uiLanguage: value }));
+                } catch (err) {
+                    console.error('[ConfigProvider] cmd_set_ui_language failed:', err);
+                    throw err;
+                }
+                if (Object.keys(rest).length === 0) return;
+                updates = rest;
+            } else {
+                updates = { ...rest, uiLanguage: value };
+            }
+        }
         // PRD 0.2.35 D2 — `forceWakeLock` has OS-level side effects (acquire /
         // drop an IOPMAssertion-class lock, sync the tray CheckMenuItem, emit
         // to all renderers). Going through atomicModifyConfig writes disk
@@ -548,14 +598,8 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
     }, []);
 
     const refreshConfig = useCallback(async () => {
-        try {
-            const latest = await loadAppConfig();
-            normalizeAgents(latest);
-            if (isMountedRef.current) setConfig(latest);
-        } catch (err) {
-            console.error('[ConfigProvider] Failed to refresh config:', err);
-        }
-    }, []);
+        await refreshConfigFromDisk('manual refresh', { syncNativeUiLanguage: true });
+    }, [refreshConfigFromDisk]);
 
     const refreshProviderData = useCallback(async () => {
         try {

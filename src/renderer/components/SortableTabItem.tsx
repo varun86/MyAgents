@@ -11,9 +11,11 @@ import { memo, type CSSProperties } from 'react';
 import { useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import { X } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 
 import { TAB_ITEM_MAX_WIDTH_PX, TAB_ITEM_MIN_WIDTH_PX } from '@/components/tabBarLayout';
 import { type Tab, getFolderName } from '@/types/tab';
+import { getFixedTabChromeTitle } from '@/utils/tabChromeTitle';
 
 interface SortableTabItemProps {
     tab: Tab;
@@ -30,6 +32,7 @@ export default memo(function SortableTabItem({
     onSelectTab,
     onCloseTab,
 }: SortableTabItemProps) {
+    const { t } = useTranslation('app');
     const {
         attributes,
         listeners,
@@ -49,11 +52,14 @@ export default memo(function SortableTabItem({
         flex: `1 1 ${TAB_ITEM_MAX_WIDTH_PX}px`,
     };
 
-    // Prefer session title (auto/user) over folder name, fallback to folder name or tab.title
+    const fixedViewTitle = getFixedTabChromeTitle(tab.view, t);
+
+    // Prefer session title (auto/user) over folder name, fallback to folder name or tab title.
+    // Fixed product tabs are chrome, not user content, so they follow UI language.
     const hasSessionTitle = tab.title && tab.title !== 'New Tab' && tab.title !== 'New Chat';
-    const displayTitle = hasSessionTitle
+    const displayTitle = fixedViewTitle ?? (hasSessionTitle
         ? tab.title
-        : (tab.agentDir ? getFolderName(tab.agentDir) : tab.title);
+        : (tab.agentDir ? getFolderName(tab.agentDir) : tab.title));
     const tooltipTitle = tab.agentDir ? getFolderName(tab.agentDir) : undefined;
 
     return (
@@ -95,13 +101,13 @@ export default memo(function SortableTabItem({
                         <span className="absolute inset-0 rounded-full bg-[var(--success)]" />
                         <span className="absolute inset-0 rounded-full bg-[var(--success)] animate-[tab-dot-pulse_1.6s_cubic-bezier(.22,.61,.36,1)_infinite]" />
                     </span>
-                    <span className="sr-only">AI 正在输出</span>
+                    <span className="sr-only">{t('tabs.generating')}</span>
                 </>
             )}
             {!isActive && !tab.isGenerating && tab.hasUnread && (
                 <>
                     <span className="ml-1 h-1.5 w-1.5 flex-shrink-0 rounded-full bg-[var(--accent-warm)]" aria-hidden="true" />
-                    <span className="sr-only">有未读消息</span>
+                    <span className="sr-only">{t('tabs.unread')}</span>
                 </>
             )}
 
@@ -119,7 +125,7 @@ export default memo(function SortableTabItem({
                     e.stopPropagation();
                     onCloseTab(tab.id);
                 }}
-                title={`关闭标签页 (${navigator.platform.toLowerCase().includes('mac') ? '⌘W' : 'Ctrl+W'})`}
+                title={`${t('tabs.closeTab')} (${navigator.platform.toLowerCase().includes('mac') ? '⌘W' : 'Ctrl+W'})`}
             >
                 <X className="h-3 w-3" />
             </button>

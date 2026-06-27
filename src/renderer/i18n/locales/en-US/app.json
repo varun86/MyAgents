@@ -1,0 +1,16 @@
+{
+  "tabs": {
+    "allTabs": "All tabs",
+    "openTabs": "Open tabs",
+    "genericTab": "Tab",
+    "settings": "Settings",
+    "taskCenter": "Task Center",
+    "team": "Team",
+    "launcher": "Launcher",
+    "newTab": "New tab",
+    "closeTab": "Close tab",
+    "generating": "AI is responding",
+    "unread": "Unread messages",
+    "switchTo": "Switch to {{title}}"
+  }
+}

@@ -26,6 +26,7 @@ import {
 import { normalizeStringifiedJsonFields, promoteAgentMcpJsonToGlobal } from './configNormalize';
 import { workspacePathsEqual } from '../../../shared/workspacePath';
 import { type ImBotConfig, DEFAULT_IM_BOT_CONFIG } from '../../../shared/types/im';
+import { normalizeUiLanguage } from '../../../shared/i18n';
 // Agent migration is triggered from ConfigProvider after both config + projects are loaded
 import { isDebugMode } from '@/utils/debug';
 
@@ -107,9 +108,20 @@ export function migrateImBotConfig(config: AppConfig): AppConfig {
 }
 
 function normalizeDeveloperSettings(config: AppConfig): AppConfig {
+    config.uiLanguage = normalizeUiLanguage(config.uiLanguage);
     config.claudeTranscriptCleanupPeriodDays = normalizeClaudeTranscriptCleanupPeriodDays(
         config.claudeTranscriptCleanupPeriodDays,
     );
+    return config;
+}
+
+export function migrateUiLanguageField(config: AppConfig): AppConfig {
+    const raw = config as unknown as Record<string, unknown>;
+    if (!('uiLanguage' in raw)) {
+        config.uiLanguage = 'zh-CN';
+        return config;
+    }
+    config.uiLanguage = normalizeUiLanguage(raw['uiLanguage']);
     return config;
 }
 
@@ -130,6 +142,9 @@ export async function loadAppConfig(): Promise<AppConfig> {
     if (isBrowserDevMode()) {
         console.log('[configService] Browser mode: loading from localStorage');
         const loaded = mockLoadConfig();
+        if (Object.keys(loaded).length > 0) {
+            migrateUiLanguageField(loaded);
+        }
         return normalizeLoadedConfig({ ...dynamicDefault, ...loaded });
     }
 
@@ -140,6 +155,7 @@ export async function loadAppConfig(): Promise<AppConfig> {
 
         const loaded = await safeLoadJson<AppConfig>(configPath, isValidAppConfig);
         if (loaded) {
+            migrateUiLanguageField(loaded);
             // Run the cronNotifications migration BEFORE the dynamicDefault
             // merge — once the default supplies `osNotifications: true`, the
             // legacy field is masked and we can no longer distinguish "user

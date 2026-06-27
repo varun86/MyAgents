@@ -1,0 +1,10 @@
+{
+  "input": {
+    "launcherPlaceholder": "What do you want to do today?",
+    "placeholder": "Message MyAgents, use @ for files and / for skills...",
+    "companionPlaceholder": "Ask Mino or delegate a task...",
+    "addScreenshot": "Add screenshot",
+    "send": "Send",
+    "stop": "Stop"
+  }
+}

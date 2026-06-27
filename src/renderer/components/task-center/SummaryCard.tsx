@@ -11,6 +11,7 @@
 // own local state (async cronstrue load) that's cleanest kept local.
 
 import { useCallback, useEffect, useMemo, useState, type ComponentType, type ReactNode } from 'react';
+import { useTranslation } from 'react-i18next';
 import {
   Calendar,
   ChevronDown,
@@ -29,6 +30,7 @@ import {
 import { relativeTime } from '@/utils/taskCenterUtils';
 import { workspacePathsEqual } from '@/../shared/workspacePath';
 import type { Task, TaskExecutionMode, TaskRunStats } from '@/../shared/types/task';
+import { isSupportedLocale } from '@/../shared/i18n';
 
 interface Props {
   task: Task;
@@ -44,6 +46,8 @@ const MODE_META: Record<TaskExecutionMode, { icon: IconComp; label: string }> = 
 };
 
 export function SummaryCard({ task, stats }: Props) {
+  const { i18n } = useTranslation();
+  const locale = isSupportedLocale(i18n.language) ? i18n.language : 'zh-CN';
   const { projects } = useConfig();
   const { statuses } = useAgentStatuses();
   const workspace = useMemo(
@@ -66,13 +70,13 @@ export function SummaryCard({ task, stats }: Props) {
   const nextExecutionAt = stats?.nextExecutionAt;
   useEffect(() => {
     let cancelled = false;
-    void summarizeSchedule(task, nextExecutionAt).then((s) => {
+    void summarizeSchedule(task, nextExecutionAt, locale).then((s) => {
       if (!cancelled) setSchedule(s);
     });
     return () => {
       cancelled = true;
     };
-  }, [task, nextExecutionAt]);
+  }, [task, nextExecutionAt, locale]);
 
   const modeMeta = MODE_META[task.executionMode];
   const ScheduleIcon = modeMeta.icon;
@@ -92,16 +96,17 @@ export function SummaryCard({ task, stats }: Props) {
     if (!task.lastExecutedAt) return null;
     return (
       <span className="flex flex-wrap items-center gap-x-2">
-        <span>{relativeTime(task.lastExecutedAt)}</span>
+        <span>{relativeTime(task.lastExecutedAt, locale)}</span>
         {stats?.lastSuccess === true && (
-          <span className="text-[var(--success)]">成功</span>
+          <span className="text-[var(--success)]">{locale === 'zh-CN' ? '成功' : 'Succeeded'}</span>
         )}
         {stats?.lastSuccess === false && (
-          <span className="text-[var(--error)]">失败</span>
+          <span className="text-[var(--error)]">{locale === 'zh-CN' ? '失败' : 'Failed'}</span>
         )}
         {stats?.lastDurationMs != null && (
           <span className="text-[var(--ink-muted)]">
-            · 耗时 {(stats.lastDurationMs / 1000).toFixed(1)}s
+            {locale === 'zh-CN' ? '· 耗时 ' : '· Duration '}
+            {(stats.lastDurationMs / 1000).toFixed(1)}s
           </span>
         )}
       </span>

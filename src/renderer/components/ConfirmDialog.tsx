@@ -1,6 +1,7 @@
 import { useEffect, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { Loader2 } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 
 import { useCloseLayer } from '@/hooks/useCloseLayer';
 import OverlayBackdrop from '@/components/OverlayBackdrop';
@@ -41,12 +42,13 @@ export default function ConfirmDialog({
     onConfirm,
     onCancel
 }: ConfirmDialogProps) {
+    const { t } = useTranslation('common');
     // Cmd+W dismissal: z-[300] matches the component's CSS z-index
     useCloseLayer(() => { onCancel(); return true; }, 300);
 
     // Support both old and new props
-    const finalConfirmText = confirmText || confirmLabel || '确认';
-    const finalCancelText = cancelText || cancelLabel || '取消';
+    const finalConfirmText = confirmText || confirmLabel || t('actions.confirm');
+    const finalCancelText = cancelText || cancelLabel || t('actions.cancel');
     const isDanger = confirmVariant === 'danger' || danger;
 
     // Keyboard: Enter to confirm (unless disabled), Escape to cancel
@@ -109,4 +111,3 @@ export default function ConfirmDialog({
         document.body,
     );
 }
-

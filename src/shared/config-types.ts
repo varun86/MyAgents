@@ -2,6 +2,7 @@
 
 import type { HeartbeatConfig, MemoryAutoUpdateConfig } from './types/im';
 import type { RuntimeModelInfo, RuntimeSource, RuntimeType } from './types/runtime';
+import type { UiLanguage } from './i18n';
 
 /**
  * Permission mode for agent behavior
@@ -592,6 +593,9 @@ export interface AppConfig {
   backgroundAgentPermissionMode?: BackgroundAgentPermissionMode;
   // UI preferences
   theme: 'light' | 'dark' | 'system';
+  /** Product UI language. Existing pre-i18n configs missing this field migrate
+   *  to `zh-CN`; new installs default to `system`. */
+  uiLanguage?: UiLanguage;
   minimizeToTray: boolean;
   /** 全局「始终阻止电脑睡眠」开关（PRD 0.2.35）。
    *  默认 `false` ⇒ 沿用「智能模式」：AI 跑中由 sidecar.rs / cron_task.rs 各自持锁。
@@ -1658,6 +1662,7 @@ export const DEFAULT_CONFIG: AppConfig = {
   defaultPermissionMode: 'auto',
   backgroundAgentPermissionMode: 'inherit', // background agents inherit granted perms; nothing wider (#264)
   theme: 'system',
+  uiLanguage: 'system',
   minimizeToTray: true,   // 默认开启最小化到托盘
   forceWakeLock: false,   // 默认关闭常开阻睡（智能模式仍在跑，覆盖 AI 工作期间）
   chatQueueResponseMode: 'realtime',

@@ -6,10 +6,13 @@ import AppErrorBoundary from './components/AppErrorBoundary';
 import { ConfigProvider } from './config/ConfigProvider';
 import { ToastProvider } from './components/Toast';
 import { ImagePreviewProvider } from './context/ImagePreviewContext';
+import { FloatingI18nBootstrap } from './i18n/FloatingI18nBootstrap';
+import { I18nLanguageSync } from './i18n/I18nLanguageSync';
 import { initFrontendLogger, setLogServerUrl, setRendererLogLabel } from './utils/frontendLogger';
 import { installMacFunctionKeyGuard } from './utils/macFunctionKeyGuard';
 import { installOverlayScrollbarActivity, isWindowsRendererPlatform } from './utils/overlayScrollbarActivity';
 
+import './i18n';
 import './index.css';
 
 // Initialize frontend logger to capture React console logs
@@ -96,9 +99,11 @@ if (tauriWindowLabel === 'fb-ball') {
   document.documentElement.classList.add('fb-transparent');
   root.render(
     <AppErrorBoundary>
-      <React.Suspense fallback={null}>
-        <BallWindow />
-      </React.Suspense>
+      <FloatingI18nBootstrap>
+        <React.Suspense fallback={null}>
+          <BallWindow />
+        </React.Suspense>
+      </FloatingI18nBootstrap>
     </AppErrorBoundary>
   );
 } else if (tauriWindowLabel === 'fb-companion') {
@@ -108,13 +113,15 @@ if (tauriWindowLabel === 'fb-ball') {
   document.documentElement.classList.add('fb-transparent');
   root.render(
     <AppErrorBoundary>
-      <ToastProvider>
-        <ImagePreviewProvider>
-          <React.Suspense fallback={null}>
-            <CompanionWindow />
-          </React.Suspense>
-        </ImagePreviewProvider>
-      </ToastProvider>
+      <FloatingI18nBootstrap>
+        <ToastProvider>
+          <ImagePreviewProvider>
+            <React.Suspense fallback={null}>
+              <CompanionWindow />
+            </React.Suspense>
+          </ImagePreviewProvider>
+        </ToastProvider>
+      </FloatingI18nBootstrap>
     </AppErrorBoundary>
   );
 } else {
@@ -124,6 +131,7 @@ if (tauriWindowLabel === 'fb-ball') {
   root.render(
     <AppErrorBoundary>
       <ConfigProvider>
+        <I18nLanguageSync />
         <ToastProvider>
           <ImagePreviewProvider>
             <React.Suspense fallback={null}>

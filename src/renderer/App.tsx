@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState, useRef, memo, lazy, Suspense } from 'react';
 import { flushSync } from 'react-dom';
+import { useTranslation } from 'react-i18next';
 import ChatBootOverlay from '@/components/ChatBootOverlay';
 import { arrayMove } from '@dnd-kit/sortable';
 
@@ -82,6 +83,7 @@ import { getSessionDisplayText } from '@/utils/sessionDisplay';
 import { listenWithCleanup } from '@/utils/tauriListen';
 import { migrateFloatingBallSessionBinding } from '@/floating-ball/sessionBinding';
 import { CUSTOM_EVENTS, createPendingSessionId, isPendingSessionId } from '../shared/constants';
+import type { OfficialToolId } from '../shared/official-tools';
 import { workspacePathsEqual } from '../shared/workspacePath';
 import type { CapabilityInitialSelect } from '../shared/skillsTypes';
 import { ensureSelfAwarenessWorkspace, resolveBuiltinSelection, pairBuiltinSelection, isProviderAvailable } from '@/config/configService';
@@ -221,6 +223,7 @@ interface TabContentProps {
   isDeferredMount: boolean;
   settingsInitialSection: string | undefined;
   settingsInitialMcpId: string | undefined;
+  settingsInitialOfficialToolId: OfficialToolId | undefined;
   settingsInitialSelect: CapabilityInitialSelect | undefined;
   // Launcher callbacks
   onLaunchProject: (project: Project, sessionId?: string, initialMessage?: InitialMessage, analyticsContext?: LaunchProjectAnalyticsContext, sessionBirthHint?: LaunchSessionBirthHint) => void;
@@ -261,7 +264,7 @@ export const MemoizedTabContent = memo(function TabContent({
   onLaunchProject, onBack, onSwitchSession, onOpenSessionInNewTab, onNewSession,
   onUpdateGenerating, onUpdateTitle, onUpdateUnread, onRenameSession, onForkSession, onUpdateSessionId, onClearInitialMessage,
   onSidecarConfigAdopted, onFilePreviewIntentConsumed,
-  settingsInitialSection, settingsInitialMcpId, settingsInitialSelect, onSettingsSectionChange,
+  settingsInitialSection, settingsInitialMcpId, settingsInitialOfficialToolId, settingsInitialSelect, onSettingsSectionChange,
   updateReady, updateVersion, updateChecking, updateDownloading, updateInstalling, updatePreparing,
   onCheckForUpdate, onRestartAndUpdate,
   taskCenterPendingIntent,
@@ -291,6 +294,7 @@ export const MemoizedTabContent = memo(function TabContent({
           <Settings
             initialSection={settingsInitialSection}
             initialMcpId={settingsInitialMcpId}
+            initialOfficialToolId={settingsInitialOfficialToolId}
             initialSelect={settingsInitialSelect}
             onSectionChange={onSettingsSectionChange}
             isActive={isActive}
@@ -363,6 +367,7 @@ export const MemoizedTabContent = memo(function TabContent({
     prev.isDeferredMount === next.isDeferredMount &&
     prev.settingsInitialSection === next.settingsInitialSection &&
     prev.settingsInitialMcpId === next.settingsInitialMcpId &&
+    prev.settingsInitialOfficialToolId === next.settingsInitialOfficialToolId &&
     prev.settingsInitialSelect === next.settingsInitialSelect &&
     prev.updateReady === next.updateReady &&
     prev.updateVersion === next.updateVersion &&
@@ -382,6 +387,7 @@ export const MemoizedTabContent = memo(function TabContent({
 });
 
 export default function App() {
+  const { t } = useTranslation('app');
   // Auto-update state (silent background updates)
   const { updateReady, updateVersion, restartAndUpdate, checking: updateChecking, downloading: updateDownloading, installing: updateInstalling, preparing: updatePreparing, checkForUpdate, pendingUpdateOnStartup, dismissPendingUpdate } = useUpdater();
 
@@ -411,6 +417,7 @@ export default function App() {
   // Settings initial section state (for deep linking to specific section)
   const [settingsInitialSection, setSettingsInitialSection] = useState<string | undefined>(undefined);
   const [settingsInitialMcpId, setSettingsInitialMcpId] = useState<string | undefined>(undefined);
+  const [settingsInitialOfficialToolId, setSettingsInitialOfficialToolId] = useState<OfficialToolId | undefined>(undefined);
   const [settingsInitialSelect, setSettingsInitialSelect] = useState<CapabilityInitialSelect | undefined>(undefined);
 
   // Bug report overlay state (triggered from titlebar feedback button)
@@ -2880,6 +2887,7 @@ export default function App() {
     initialSection?: string,
     mcpServerId?: string,
     initialSelect?: CapabilityInitialSelect,
+    officialToolId?: OfficialToolId,
   ) => {
     // Track settings_open event
     track('settings_open', { section: initialSection ?? null });
@@ -2887,6 +2895,7 @@ export default function App() {
     // Set initial section for Settings component
     setSettingsInitialSection(initialSection);
     setSettingsInitialMcpId(mcpServerId);
+    setSettingsInitialOfficialToolId(officialToolId);
     setSettingsInitialSelect(initialSelect);
 
     // Check if there's already a Settings tab
@@ -2915,22 +2924,23 @@ export default function App() {
       agentDir: null,
       sessionId: null,
       view: 'settings',
-      title: '设置',
+      title: t('tabs.settings'),
       sidecarConfigDisposition: 'push',
     };
     openNewTabDeferred(newTab);
 
     // Global Sidecar is now started on App mount, no need to start here
-  }, [openNewTabDeferred, setActiveTabId]);
+  }, [openNewTabDeferred, setActiveTabId, t]);
 
   // Listen for OPEN_SETTINGS custom event from child components
   useEffect(() => {
     const handleOpenSettingsEvent = (event: CustomEvent<{
       section?: string;
       mcpServerId?: string;
+      officialToolId?: OfficialToolId;
       selectItem?: CapabilityInitialSelect;
     }>) => {
-      handleOpenSettings(event.detail?.section, event.detail?.mcpServerId, event.detail?.selectItem);
+      handleOpenSettings(event.detail?.section, event.detail?.mcpServerId, event.detail?.selectItem, event.detail?.officialToolId);
     };
     window.addEventListener(CUSTOM_EVENTS.OPEN_SETTINGS, handleOpenSettingsEvent as EventListener);
     return () => {
@@ -2956,11 +2966,11 @@ export default function App() {
       agentDir: null,
       sessionId: null,
       view: 'taskcenter',
-      title: '任务中心',
+      title: t('tabs.taskCenter'),
       sidecarConfigDisposition: 'push',
     };
     openNewTabDeferred(newTab);
-  }, [openNewTabDeferred, setActiveTabId]);
+  }, [openNewTabDeferred, setActiveTabId, t]);
 
   // Intent carried across `OPEN_TASK_CENTER` — the event dispatcher
   // (Launcher "我的任务" tab's search icon) wants more than just "open
@@ -3036,11 +3046,11 @@ export default function App() {
       agentDir: null,
       sessionId: null,
       view: 'space',
-      title: '团队',
+      title: t('tabs.team'),
       sidecarConfigDisposition: 'push',
     };
     openNewTabDeferred(newTab);
-  }, [openNewTabDeferred, setActiveTabId, spaceBuildCapability.available, spaceBuildCapability.isLoading, spaceBuildCapability.reason, teamSpaceAvailable]);
+  }, [openNewTabDeferred, setActiveTabId, spaceBuildCapability.available, spaceBuildCapability.isLoading, spaceBuildCapability.reason, teamSpaceAvailable, t]);
 
   useEffect(() => {
     window.addEventListener(CUSTOM_EVENTS.OPEN_SPACE, handleOpenSpace);
@@ -3713,6 +3723,7 @@ export default function App() {
             onFilePreviewIntentConsumed={handleFilePreviewIntentConsumed}
             settingsInitialSection={tab.view === 'settings' ? settingsInitialSection : undefined}
             settingsInitialMcpId={tab.view === 'settings' ? settingsInitialMcpId : undefined}
+            settingsInitialOfficialToolId={tab.view === 'settings' ? settingsInitialOfficialToolId : undefined}
             settingsInitialSelect={tab.view === 'settings' ? settingsInitialSelect : undefined}
             onSettingsSectionChange={handleSettingsSectionChange}
             updateReady={updateReady}

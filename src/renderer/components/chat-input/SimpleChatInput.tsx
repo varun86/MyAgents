@@ -1,5 +1,6 @@
 import { AlertCircle, ChevronRight, ChevronUp, Gauge, Loader, Paperclip, Plus, Send, Square, X, FileText, AtSign, Wrench, Timer, Settings2, Unlock } from 'lucide-react';
 import { memo, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState, forwardRef } from 'react';
+import { useTranslation } from 'react-i18next';
 
 import Tip from '@/components/Tip';
 import { useToast } from '@/components/Toast';
@@ -153,6 +154,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   workspacePath = null,
   sessionId = null,
 }, ref) {
+  const { t } = useTranslation('chat');
   const isLauncherMode = mode === 'launcher';
   // Launcher-vs-Chat minimum row count, referenced by both the auto-resize
   // effect and the textarea `rows` / min/max style props. Keep as a single
@@ -1317,8 +1319,8 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
               onCompositionEnd={handleCompositionEnd}
               placeholder={
                 isLauncherMode
-                  ? '今天，想干点啥？'
-                  : '输入消息，使用 @ 引用文件，/ 使用技能...'
+                  ? t('input.launcherPlaceholder')
+                  : t('input.placeholder')
               }
               rows={effectiveMinLines}
               className="block w-full resize-none bg-transparent text-base leading-relaxed text-[var(--ink)] outline-none placeholder:text-[var(--ink-muted)]"

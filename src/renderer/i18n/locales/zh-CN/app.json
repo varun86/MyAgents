@@ -1,0 +1,16 @@
+{
+  "tabs": {
+    "allTabs": "所有标签页",
+    "openTabs": "打开的标签页",
+    "genericTab": "标签页",
+    "settings": "设置",
+    "taskCenter": "任务中心",
+    "team": "团队",
+    "launcher": "启动页",
+    "newTab": "新建标签页",
+    "closeTab": "关闭标签页",
+    "generating": "AI 正在输出",
+    "unread": "有未读消息",
+    "switchTo": "切换到 {{title}}"
+  }
+}

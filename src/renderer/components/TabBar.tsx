@@ -22,6 +22,7 @@ import {
     horizontalListSortingStrategy,
 } from '@dnd-kit/sortable';
 import { List, Plus } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 
 import SortableTabItem from '@/components/SortableTabItem';
 import { TAB_BAR_BUTTON_WIDTH_PX, TAB_BAR_GAP_PX, getTabStripIdealWidth } from '@/components/tabBarLayout';
@@ -29,6 +30,7 @@ import { TabPointerSensor, TAB_POINTER_SENSOR_OPTIONS } from '@/components/tabPo
 import { Popover } from '@/components/ui/Popover';
 import { useCloseLayer } from '@/hooks/useCloseLayer';
 import { type Tab, MAX_TABS, getFolderName } from '@/types/tab';
+import { getFixedTabChromeTitle } from '@/utils/tabChromeTitle';
 
 interface TabBarProps {
     tabs: Tab[];
@@ -47,6 +49,7 @@ export default memo(function TabBar({
     onNewTab,
     onReorderTabs,
 }: TabBarProps) {
+    const { t } = useTranslation('app');
     const canAddTab = tabs.length < MAX_TABS;
     const scrollContainerRef = useRef<HTMLDivElement>(null);
     const overflowButtonRef = useRef<HTMLButtonElement>(null);
@@ -226,7 +229,7 @@ export default memo(function TabBar({
                                     scrollbarWidth: 'none',
                                     msOverflowStyle: 'none',
                                 }}
-                                aria-label="打开的标签页"
+                                aria-label={t('tabs.openTabs')}
                                 onWheel={handleWheel}
                             >
                                 {tabs.map((tab) => (
@@ -253,8 +256,8 @@ export default memo(function TabBar({
                             }`}
                             style={{ width: TAB_BAR_BUTTON_WIDTH_PX, height: TAB_BAR_BUTTON_WIDTH_PX }}
                             onClick={() => setMenuOpen((open) => !open)}
-                            aria-label="所有标签页"
-                            title="所有标签页"
+                            aria-label={t('tabs.allTabs')}
+                            title={t('tabs.allTabs')}
                         >
                             <List className="h-4 w-4" />
                         </button>
@@ -266,30 +269,31 @@ export default memo(function TabBar({
                             className="max-h-96 w-72 overflow-y-auto py-1"
                         >
                             <div className="px-3 py-2 text-xs font-semibold tracking-[0.04em] text-[var(--ink-muted)]/60">
-                                标签页
+                                {t('tabs.genericTab')}
                             </div>
                             {tabs.map((tab) => {
+                                const fixedViewTitle = getFixedTabChromeTitle(tab.view, t);
                                 const hasSessionTitle = tab.title && tab.title !== 'New Tab' && tab.title !== 'New Chat';
-                                const displayTitle = hasSessionTitle
+                                const displayTitle = fixedViewTitle ?? (hasSessionTitle
                                     ? tab.title
                                     : tab.agentDir
                                       ? getFolderName(tab.agentDir)
-                                      : tab.title;
+                                      : tab.title);
                                 const subtitle = tab.agentDir
                                     ? getFolderName(tab.agentDir)
                                     : tab.view === 'settings'
-                                      ? '设置'
+                                      ? t('tabs.settings')
                                       : tab.view === 'taskcenter'
-                                        ? '任务中心'
+                                        ? t('tabs.taskCenter')
                                         : tab.view === 'space'
-                                          ? '团队'
-                                          : '启动页';
+                                          ? t('tabs.team')
+                                          : t('tabs.launcher');
                                 const isActive = tab.id === activeTabId;
                                 return (
                                     <button
                                         key={tab.id}
                                         type="button"
-                                        aria-label={`切换到 ${displayTitle}`}
+                                        aria-label={t('tabs.switchTo', { title: displayTitle })}
                                         aria-current={isActive ? 'page' : undefined}
                                         className={`flex w-full items-center gap-2 px-3 py-2 text-left transition-colors ${
                                             isActive
@@ -329,7 +333,7 @@ export default memo(function TabBar({
                         className="flex flex-shrink-0 items-center justify-center rounded-md transition-all duration-150 text-[var(--ink-muted)] hover:bg-[var(--paper-inset)]/60 hover:text-[var(--ink)]"
                         style={{ width: TAB_BAR_BUTTON_WIDTH_PX, height: TAB_BAR_BUTTON_WIDTH_PX }}
                         onClick={onNewTab}
-                        title={`新建标签页 (${navigator.platform.toLowerCase().includes('mac') ? '⌘T' : 'Ctrl+T'})`}
+                        title={`${t('tabs.newTab')} (${navigator.platform.toLowerCase().includes('mac') ? '⌘T' : 'Ctrl+T'})`}
                     >
                         <Plus className="h-4 w-4" />
                     </button>

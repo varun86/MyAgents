@@ -1,0 +1,25 @@
+{
+  "sidebar": {
+    "title": "设置",
+    "logsTitle": "查看 Rust 日志",
+    "nav": {
+      "providers": "模型供应商",
+      "skills": "技能 Skills",
+      "plugins": "插件 Plugins",
+      "tools": "工具箱",
+      "bots": "聊天机器人 Bot",
+      "floatingBall": "桌面宠物",
+      "usageStats": "使用统计",
+      "general": "通用设置",
+      "shortcuts": "快捷键",
+      "about": "关于&反馈"
+    }
+  },
+  "general": {
+    "title": "通用设置",
+    "description": "配置应用程序的通用行为",
+    "languageTitle": "界面语言",
+    "languageDescription": "切换 MyAgents 界面文案语言，不影响 AI 回复语言",
+    "languageChanged": "界面语言已更新"
+  }
+}

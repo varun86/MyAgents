@@ -11,6 +11,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { AlertCircle, Brain, Image as ImageIcon, Loader2, Settings as SettingsIcon, StopCircle, XCircle } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 
 import { listenWithCleanup } from '@/utils/tauriListen';
 import Markdown from '@/components/Markdown';
@@ -249,6 +250,7 @@ function shotToImageDraft(shot: FbShot): FbImageDraft {
 }
 
 export default function CompanionWindow() {
+    const { t } = useTranslation('chat');
     // `mode` drives rendering; `modeRef` mirrors it for event handlers and the
     // session hook. The ref is written ONLY inside applyMode (every mode
     // transition funnels through it) — never during render (react-hooks/refs).
@@ -1328,7 +1330,7 @@ export default function CompanionWindow() {
                         ref={inputRef}
                         rows={1}
                         value={input}
-                        placeholder="问问 Mino，或者派个活…"
+                        placeholder={t('input.companionPlaceholder')}
                         onChange={(e) => {
                             setInput(e.target.value);
                             // IME 组合期间不写 style（#123：触发 WebKit 候选窗重排卡顿）
@@ -1339,16 +1341,16 @@ export default function CompanionWindow() {
                         onCompositionStart={composerKeydown.onCompositionStart}
                         onCompositionEnd={composerKeydown.onCompositionEnd}
                     />
-                    <button className="cam" onClick={() => void onShot()} title="添加屏幕截图">
+                    <button className="cam" onClick={() => void onShot()} title={t('input.addScreenshot')}>
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" /><circle cx="12" cy="13" r="4" /></svg>
                     </button>
                     {/* 与主对话框同语义：运行中 = 停止（方块），否则 = 发送（箭头） */}
                     {session.busy ? (
-                        <button className="send stop" onClick={() => void session.stop()} title="停止">
+                        <button className="send stop" onClick={() => void session.stop()} title={t('input.stop')}>
                             <svg viewBox="0 0 24 24" fill="currentColor"><rect x="7" y="7" width="10" height="10" rx="1.5" /></svg>
                         </button>
                     ) : (
-                        <button className={`send${sendReady ? ' ready' : ''}`} onClick={() => void doSend()} title="发送">
+                        <button className={`send${sendReady ? ' ready' : ''}`} onClick={() => void doSend()} title={t('input.send')}>
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M12 19V5M5 12l7-7 7 7" /></svg>
                         </button>
                     )}

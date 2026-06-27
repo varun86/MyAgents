@@ -11,6 +11,7 @@ pub mod cron_task;
 pub mod floating_ball;
 pub mod floating_ball_pets;
 mod global_shortcut;
+pub mod i18n;
 pub mod im;
 pub mod inbox;
 pub mod legacy_upgrade;
@@ -326,6 +327,9 @@ pub fn run() {
             // Platform & device info
             commands::cmd_get_platform,
             commands::cmd_get_device_id,
+            i18n::cmd_get_ui_language_state,
+            i18n::cmd_sync_ui_language_from_config,
+            i18n::cmd_set_ui_language,
             // Bundled workspace initialization
             commands::cmd_initialize_bundled_workspace,
             commands::cmd_create_bot_workspace,

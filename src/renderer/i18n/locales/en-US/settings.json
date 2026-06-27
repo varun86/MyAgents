@@ -1,0 +1,25 @@
+{
+  "sidebar": {
+    "title": "Settings",
+    "logsTitle": "View Rust logs",
+    "nav": {
+      "providers": "Model Providers",
+      "skills": "Skills",
+      "plugins": "Plugins",
+      "tools": "Toolbox",
+      "bots": "Chat Bots",
+      "floatingBall": "Desktop Pet",
+      "usageStats": "Usage",
+      "general": "General",
+      "shortcuts": "Shortcuts",
+      "about": "About & Feedback"
+    }
+  },
+  "general": {
+    "title": "General",
+    "description": "Configure general application behavior",
+    "languageTitle": "Interface language",
+    "languageDescription": "Switch MyAgents interface copy. This does not change AI reply language.",
+    "languageChanged": "Interface language updated"
+  }
+}
