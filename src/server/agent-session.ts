@@ -77,6 +77,7 @@ import {
 } from './utils/context-occupancy';
 import type { SystemInitInfo } from '../shared/types/system';
 import type { SlashCommand as UiSlashCommand } from '../shared/slashCommands';
+import type { OfficialToolId } from '../shared/official-tools';
 import { deleteSession, saveSessionMetadata, updateSessionTitleFromMessage, updateSessionMetadata, getSessionMetadata, getSessionData } from './SessionStore';
 import { firePostTurnTitleHook } from './turn-hooks';
 import { createSessionMetadata, type SessionMetadata, type SessionMessage, type MessageAttachment, type SessionSource, type TurnAnalyticsSource } from './types/session';
@@ -87,7 +88,7 @@ import {
   type SessionMaterializationScenario,
 } from './utils/session-materialization';
 import { isManagedCodexProviderReady } from './utils/managed-codex-readiness';
-import { findAgentByWorkspacePath, isCliToolRegistryEnabled, loadConfig as loadAdminConfig } from './utils/admin-config';
+import { findAgentByWorkspacePath, getDefaultEnabledOfficialToolIdsForWorkspace, getEffectiveOfficialToolIdsForSession, isCliToolRegistryEnabled, loadConfig as loadAdminConfig } from './utils/admin-config';
 import type { AgentConfig } from '../shared/types/agent';
 import { broadcast } from './sse';
 import {
@@ -253,6 +254,7 @@ import {
   setProviderEnv as configSetProviderEnv,
   setReasoningEffort as configSetReasoningEffort,
   scheduleDeferredRestart as configScheduleDeferredRestart,
+  setSessionEnabledOfficialToolIds as configSetSessionEnabledOfficialToolIds,
   setSessionEnabledPluginIds as configSetSessionEnabledPluginIds,
   shouldApplyConfigUpdate,
   configState,
@@ -2236,6 +2238,30 @@ export function setSessionEnabledPluginIds(ids: string[] | null): void {
 
 export function getSessionEnabledPluginIds(): readonly string[] | null {
   return configState.currentEnabledPluginIds;
+}
+
+/**
+ * Per-Tab override for MyAgents official CLI tools. This only changes the
+ * next session/pre-warm system prompt; the current SDK subprocess cannot have
+ * its system prompt mutated in place.
+ */
+export function setSessionEnabledOfficialToolIds(ids: OfficialToolId[] | null): void {
+  const current = configState.currentEnabledOfficialToolIds;
+  if (current === null && ids === null) return;
+  if (
+    current !== null &&
+    ids !== null &&
+    current.length === ids.length &&
+    current.every((id, i) => id === ids[i])
+  ) {
+    return;
+  }
+  configSetSessionEnabledOfficialToolIds(ids);
+  forceReloadActiveSession('official-tools');
+}
+
+export function getSessionEnabledOfficialToolIds(): readonly OfficialToolId[] | null {
+  return configState.currentEnabledOfficialToolIds;
 }
 
 /**
@@ -4343,7 +4369,7 @@ async function materializeInitialPromptSessionMetadata(initialPromptText: string
 
 type DesktopSnapshotPatch = Pick<
   SessionMetadata,
-  'model' | 'reasoningEffort' | 'permissionMode' | 'mcpEnabledServers' | 'enabledPluginIds' | 'providerId' | 'providerRoute' | 'providerEnvJson'
+  'model' | 'reasoningEffort' | 'permissionMode' | 'mcpEnabledServers' | 'enabledPluginIds' | 'enabledOfficialToolIds' | 'providerId' | 'providerRoute' | 'providerEnvJson'
 >;
 type OwnedFreezeSnapshotPatch = Partial<Pick<
   SessionMetadata,
@@ -4370,6 +4396,7 @@ function applyDesktopSnapshotPatch(
   apply('permissionMode', patch.permissionMode);
   apply('mcpEnabledServers', patch.mcpEnabledServers);
   apply('enabledPluginIds', patch.enabledPluginIds);
+  apply('enabledOfficialToolIds', patch.enabledOfficialToolIds);
   apply('providerId', patch.providerId);
   apply('providerRoute', patch.providerRoute);
   apply('providerEnvJson', patch.providerEnvJson);
@@ -4398,6 +4425,7 @@ function buildDesktopSnapshotMetadataPatch(
   apply('permissionMode', patch.permissionMode);
   apply('mcpEnabledServers', patch.mcpEnabledServers);
   apply('enabledPluginIds', patch.enabledPluginIds);
+  apply('enabledOfficialToolIds', patch.enabledOfficialToolIds);
   apply('providerId', patch.providerId);
   apply('providerRoute', patch.providerRoute);
   apply('providerEnvJson', patch.providerEnvJson);
@@ -4415,6 +4443,7 @@ async function restoreBuiltinConfigFromOwnedMetadata(meta: SessionMetadata): Pro
   configSetProviderEnv(resolved.providerEnv);
   configSetReasoningEffort(normalizeReasoningEffort(resolved.reasoningEffort));
   configSetSessionEnabledPluginIds(meta.enabledPluginIds ? [...meta.enabledPluginIds] : []);
+  configSetSessionEnabledOfficialToolIds(meta.enabledOfficialToolIds ? [...meta.enabledOfficialToolIds] : []);
   if (resolved.permissionMode) {
     const restored = computeRestoredPlanState(resolved.permissionMode as PermissionMode);
     setPermissionPlanState(restored);
@@ -4467,6 +4496,7 @@ function buildOwnedFreezeSnapshotPatch(overrides?: OwnedFreezeSnapshotPatch): Ow
     ...(configState.currentPermissionMode ? { permissionMode: configState.currentPermissionMode } : {}),
     ...(currentMcpServers !== null ? { mcpEnabledServers: currentMcpServers.map(server => server.id) } : {}),
     ...(configState.currentEnabledPluginIds !== null ? { enabledPluginIds: [...configState.currentEnabledPluginIds] } : {}),
+    ...(configState.currentEnabledOfficialToolIds !== null ? { enabledOfficialToolIds: [...configState.currentEnabledOfficialToolIds] } : {}),
     ...(currentProviderId ? { providerId: currentProviderId } : {}),
     ...(currentProviderRoute ? { providerRoute: currentProviderRoute } : {}),
     ...overrides,
@@ -4479,6 +4509,9 @@ function buildOwnedFreezeSnapshotPatch(overrides?: OwnedFreezeSnapshotPatch): Ow
     delete patch.enabledPluginIds;
   } else if (patch.enabledPluginIds === undefined) {
     patch.enabledPluginIds = getDefaultEnabledPluginIdsForWorkspace(agentDir ?? '');
+  }
+  if (patch.enabledOfficialToolIds === undefined) {
+    patch.enabledOfficialToolIds = getDefaultEnabledOfficialToolIdsForWorkspace(agentDir ?? '');
   }
   return patch;
 }
@@ -9702,6 +9735,11 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     const sdkEffort = configState.currentProviderEnv?.apiProtocol !== 'openai' && isSdkEffortLevel(configState.currentReasoningEffort)
       ? configState.currentReasoningEffort
       : ('high' as const);
+    const enabledOfficialToolIds = getEffectiveOfficialToolIdsForSession(
+      agentDir,
+      getSessionMetadata(sessionId),
+      configState.currentEnabledOfficialToolIds,
+    );
 
     const commonQueryOptions = {
       enableFileCheckpointing: true,
@@ -9776,6 +9814,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           // same prompt now. Single CLI, single source of truth across all runtimes.
           cliToolsEnabled: true,
           userCliToolsEnabled: cliToolRegistryEnabled,
+          enabledOfficialToolIds,
         }),
       },
       cwd: agentDir,

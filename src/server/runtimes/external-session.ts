@@ -49,7 +49,7 @@ import {
   type SessionMaterializationScenario,
 } from '../utils/session-materialization';
 import { isManagedCodexProviderReady } from '../utils/managed-codex-readiness';
-import { findAgentByWorkspacePath, isCliToolRegistryEnabled, loadConfig as loadAdminConfig, resolveWorkspaceConfig } from '../utils/admin-config';
+import { findAgentByWorkspacePath, getEffectiveOfficialToolIdsForSession, isCliToolRegistryEnabled, loadConfig as loadAdminConfig, resolveWorkspaceConfig } from '../utils/admin-config';
 import type { AgentConfig } from '../../shared/types/agent';
 import type { MessageUsage, SessionMessage, TurnAnalyticsSource } from '../types/session';
 import type { SystemInitInfo } from '../../shared/types/system';
@@ -1418,6 +1418,10 @@ export function getExternalSessionId(): string {
   return getExternalLifecycleSessionId();
 }
 
+export function getExternalSessionWorkspacePath(): string {
+  return getExternalLifecycleWorkspacePath();
+}
+
 /** The session this Sidecar is bound to right now — either already committed
  *  (lastSessionId, set by restoreExternalSessionState at boot or by a completed
  *  start) or about to be committed by an in-flight prewarm/start (startingSessionId).
@@ -1619,10 +1623,16 @@ async function _doStartExternalSession(options: {
   //
   // Generative-UI widget guidance is universal (no MCP equivalent) and is
   // injected unconditionally for desktop scenarios via buildWidgetSection().
+  const existingMetadataAtStart = getSessionMetadata(options.sessionId);
+  const enabledOfficialToolIds = getEffectiveOfficialToolIdsForSession(
+    options.workspacePath,
+    existingMetadataAtStart,
+  );
   const baseSystemPrompt = buildSystemPromptAppend(options.scenario, {
     runtime: runtimeType,
     cliToolsEnabled: true,
     userCliToolsEnabled: isCliToolRegistryEnabled(),
+    enabledOfficialToolIds,
   });
 
   // Cross-runtime workspace protocol: append workspace instruction files
@@ -1671,7 +1681,6 @@ async function _doStartExternalSession(options: {
     options.sessionId,
   );
 
-  const existingMetadataAtStart = getSessionMetadata(options.sessionId);
   const managedCodexMcpServers = runtimeType === 'codex' && runtimeSource === 'managed-provider'
     ? resolveWorkspaceConfig(options.workspacePath, existingMetadataAtStart, { includeMcp: true }).mcpServers
     : undefined;

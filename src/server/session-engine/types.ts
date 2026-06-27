@@ -11,6 +11,7 @@ import type { ExternalConfigSource } from '../runtimes/external-session';
 import type { InboxTurnMeta } from '../inbox/types';
 import type { ProviderRoute } from '../../shared/providerRoute';
 import type { RuntimeBackedProviderIdentity } from '../../shared/providerExecution';
+import type { OfficialToolId } from '../../shared/official-tools';
 
 export type SessionEngineKind = 'builtin' | 'external';
 
@@ -174,11 +175,19 @@ export type SessionEngineConfigSnapshot = {
   model: string | null;
   mcpServerIds: string[] | null;
   agentNames: string[] | null;
+  enabledOfficialToolIds: OfficialToolId[] | null;
   permissionMode: string | null;
   providerId: string | null;
   providerRoute?: ProviderRoute | null;
   providerExecutionIdentity?: RuntimeBackedProviderIdentity | null;
   reasoningEffort: string | null;
+};
+
+export type SessionEngineCurrentContext = {
+  runtime: RuntimeType;
+  sessionId: string | null;
+  workspacePath: string | null;
+  sessionMeta?: import('../types/session').SessionMetadata | null;
 };
 
 export type SessionEngineHeldImConfigSnapshot = {
@@ -194,6 +203,7 @@ export type SessionEngineSnapshotMaterializePatch = {
   permissionMode?: string | null;
   mcpEnabledServers?: string[] | null;
   enabledPluginIds?: string[] | null;
+  enabledOfficialToolIds?: OfficialToolId[] | null;
   providerId?: string | null;
   providerRoute?: ProviderRoute | null;
   providerExecutionIdentity?: RuntimeBackedProviderIdentity | null;
@@ -238,6 +248,7 @@ export interface SessionEngine {
   getLatestAssistantResult(): SessionEngineLatestResult;
   getStreamReplaySnapshot(): SessionEngineStreamReplaySnapshot;
   getSessionConfigSnapshot(): SessionEngineConfigSnapshot;
+  getCurrentSessionContext(): SessionEngineCurrentContext;
   getHeldImConfigSnapshot(): SessionEngineHeldImConfigSnapshot;
   getLiveSessionOverlay(sessionId: string): SessionEngineLiveOverlay;
   sendDesktopMessage(request: DesktopMessageRequest): Promise<DesktopAdmissionResult>;
@@ -254,6 +265,7 @@ export interface SessionEngine {
   updateModel(model: string, opts?: { imConfigSync?: boolean }): Promise<{ success: boolean; error?: string }>;
   updatePermissionMode(mode: string): Promise<{ success: boolean; error?: string }>;
   updateReasoningEffort(effort: string): Promise<{ success: boolean; error?: string }>;
+  updateOfficialToolIds(ids: OfficialToolId[] | null): Promise<{ success: boolean; error?: string; skipped?: string }>;
   materializePendingDesktopSession(request: {
     workspacePath: string;
     phase?: 'prepare' | 'commit' | 'rollback';

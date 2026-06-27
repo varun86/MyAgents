@@ -7,6 +7,7 @@ import {
   type RuntimeSource,
   type RuntimeType,
 } from '../../shared/types/runtime';
+import type { OfficialToolId } from '../../shared/official-tools';
 
 export type ProviderSwitchSessionBirth = {
   runtime: RuntimeType;
@@ -19,6 +20,7 @@ export type ProviderSwitchSessionBirth = {
     reasoningEffort?: string;
     mcpEnabledServers?: string[];
     enabledPluginIds?: string[];
+    enabledOfficialToolIds?: OfficialToolId[];
   };
 };
 
@@ -30,12 +32,14 @@ export function buildProviderSwitchSessionBirth(args: {
   reasoningEffort: string;
   mcpEnabledServers: string[];
   enabledPluginIds: string[];
+  enabledOfficialToolIds?: OfficialToolId[];
 }): ProviderSwitchSessionBirth {
   const common = {
     permissionMode: args.permissionMode,
     reasoningEffort: args.reasoningEffort,
     mcpEnabledServers: args.mcpEnabledServers,
     enabledPluginIds: args.enabledPluginIds,
+    ...(args.enabledOfficialToolIds !== undefined ? { enabledOfficialToolIds: args.enabledOfficialToolIds } : {}),
   };
 
   if (args.targetIntent.kind === 'runtime-backed-provider') {
@@ -73,6 +77,7 @@ export function buildRuntimeBackedInitialSessionBirth(args: {
   reasoningEffort?: string;
   mcpEnabledServers?: string[];
   enabledPluginIds?: string[];
+  enabledOfficialToolIds?: OfficialToolId[];
 }): ProviderSwitchSessionBirth {
   const permissionMode =
     args.permissionMode !== undefined
@@ -93,6 +98,7 @@ export function buildRuntimeBackedInitialSessionBirth(args: {
       ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
       ...(args.mcpEnabledServers !== undefined ? { mcpEnabledServers: args.mcpEnabledServers } : {}),
       ...(args.enabledPluginIds !== undefined ? { enabledPluginIds: args.enabledPluginIds } : {}),
+      ...(args.enabledOfficialToolIds !== undefined ? { enabledOfficialToolIds: args.enabledOfficialToolIds } : {}),
     },
   };
 }

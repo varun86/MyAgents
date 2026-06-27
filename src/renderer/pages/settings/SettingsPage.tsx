@@ -1,4 +1,4 @@
-import { Check, ChevronDown, Copy, Download, FolderOpen, KeyRound, Link, Loader2, Plus, RefreshCw, SlidersHorizontal, Square, Trash2, Unlink, X, AlertCircle, Globe, ExternalLink as ExternalLinkIcon, Settings2 } from 'lucide-react';
+import { Check, ChevronDown, Copy, Download, FolderOpen, ImageIcon, KeyRound, Link, Loader2, Plus, RefreshCw, SlidersHorizontal, Square, Trash2, Unlink, X, AlertCircle, Globe, ExternalLink as ExternalLinkIcon, Settings2 } from 'lucide-react';
 import { ExternalLink } from '@/components/ExternalLink';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -79,8 +79,16 @@ import ShortcutRecorder from '@/components/ShortcutRecorder';
 import { VISIBLE_APP_SHORTCUTS } from '@/utils/appShortcuts';
 import { shouldDebounceAutoVerify } from '@/utils/apiKeyAutoVerify';
 import { DEFAULT_SUMMON_ACCELERATOR } from '../../../shared/config-types';
-import type { UiLanguage } from '../../../shared/i18n';
+import {
+    IMAGE_UNDERSTANDING_TOOL_ID,
+    OFFICIAL_TOOLS,
+    isImageUnderstandingToolConfigured,
+    normalizeOfficialToolIds,
+    type OfficialToolDefinition,
+} from '../../../shared/official-tools';
+import { isRuntimeBackedProvider } from '../../../shared/providerExecution';
 import { workspacePathsEqual } from '../../../shared/workspacePath';
+import type { UiLanguage } from '../../../shared/i18n';
 import ProviderEnableOrderDialog from '@/components/ProviderEnableOrderDialog';
 import FloatingBallPetSettings from '@/components/FloatingBallPetSettings';
 import {
@@ -133,6 +141,23 @@ const EMPTY_MANAGED_CODEX_LOGIN_STATE: ManagedCodexLoginAttemptState = {
     startedAt: null,
     error: null,
 };
+
+function visionModelOptionValue(providerId: string, model: string): string {
+    return JSON.stringify([providerId, model]);
+}
+
+function parseVisionModelOptionValue(value: string): { providerId: string; model: string } | null {
+    try {
+        const parsed = JSON.parse(value) as unknown;
+        if (!Array.isArray(parsed) || parsed.length !== 2) return null;
+        const [providerId, model] = parsed;
+        if (typeof providerId !== 'string' || typeof model !== 'string') return null;
+        if (!providerId.trim() || !model.trim()) return null;
+        return { providerId, model };
+    } catch {
+        return null;
+    }
+}
 
 function normalizeManagedCodexLoginState(raw: unknown): ManagedCodexLoginAttemptState {
     if (!raw || typeof raw !== 'object') return EMPTY_MANAGED_CODEX_LOGIN_STATE;
@@ -188,7 +213,7 @@ function isSubscriptionLoginActiveStatus(status: SubscriptionLoginStatus): boole
     return status === 'starting' || status === 'waiting';
 }
 
-export default function Settings({ initialSection, initialMcpId, initialSelect, onSectionChange, isActive, updateReady: propUpdateReady, updateVersion: propUpdateVersion, updateChecking, updateDownloading, updateInstalling, updatePreparing, onCheckForUpdate, onRestartAndUpdate }: SettingsProps) {
+export default function Settings({ initialSection, initialMcpId, initialOfficialToolId, initialSelect, onSectionChange, isActive, updateReady: propUpdateReady, updateVersion: propUpdateVersion, updateChecking, updateDownloading, updateInstalling, updatePreparing, onCheckForUpdate, onRestartAndUpdate }: SettingsProps) {
     const {
         apiKeys,
         saveApiKey,
@@ -737,6 +762,43 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
     // Track which MCP servers need configuration (missing required fields)
     const [mcpNeedsConfig, setMcpNeedsConfig] = useState<Record<string, boolean>>({});
 
+    // Official MyAgents CLI tools shown in the same Toolbox list as MCP.
+    const [officialToolEnabling, setOfficialToolEnabling] = useState<Record<string, boolean>>({});
+    const [visionToolSettingsOpen, setVisionToolSettingsOpen] = useState(false);
+    const [visionToolDraftValue, setVisionToolDraftValue] = useState('');
+
+    const officialEnabledIds = useMemo(
+        () => normalizeOfficialToolIds(config.enabledOfficialToolIds ?? []),
+        [config.enabledOfficialToolIds],
+    );
+
+    const visionModelOptions = useMemo(() => {
+        return providers
+            .filter(provider =>
+                isProviderAvailable(provider, apiKeys, providerVerifyStatus)
+                && !isRuntimeBackedProvider(provider),
+            )
+            .flatMap(provider =>
+                provider.models
+                    .filter(model => Array.isArray(model.inputModalities) && model.inputModalities.includes('image'))
+                    .map(model => ({
+                        value: visionModelOptionValue(provider.id, model.model),
+                        label: `${provider.name} / ${model.modelName || model.model}`,
+                    })),
+            );
+    }, [providers, apiKeys, providerVerifyStatus]);
+
+    const savedVisionModelValue = useMemo(() => {
+        const saved = config.officialToolSettings?.imageUnderstanding;
+        return saved?.providerId && saved.model
+            ? visionModelOptionValue(saved.providerId, saved.model)
+            : '';
+    }, [config.officialToolSettings?.imageUnderstanding]);
+    const savedVisionModelStillValid = !!savedVisionModelValue
+        && visionModelOptions.some(option => option.value === savedVisionModelValue);
+    const visionToolNeedsConfig = !isImageUnderstandingToolConfigured(config.officialToolSettings)
+        || !savedVisionModelStillValid;
+
     // Builtin MCP settings dialog state
     const [builtinMcpSettings, setBuiltinMcpSettings] = useState<{
         server: McpServerDefinition;
@@ -911,6 +973,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
         if (showProviderOrderDialog) { setShowProviderOrderDialog(false); return true; }
         if (showCustomForm) { setShowCustomForm(false); return true; }
         if (showMcpForm) { setShowMcpForm(false); setEditingMcpId(null); return true; }
+        if (visionToolSettingsOpen) { setVisionToolSettingsOpen(false); return true; }
         if (builtinMcpSettings) { setBuiltinMcpSettings(null); return true; }
         if (geminiImageSettings) { setGeminiImageSettings(null); return true; }
         if (playwrightSettings) { setPlaywrightSettings(null); return true; }
@@ -1046,6 +1109,61 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
             setMcpEnabling(prev => ({ ...prev, [server.id]: false }));
         }
     };
+
+    const openOfficialToolSettings = useCallback((tool: OfficialToolDefinition) => {
+        if (tool.id !== IMAGE_UNDERSTANDING_TOOL_ID) return;
+        const initial = savedVisionModelStillValid
+            ? savedVisionModelValue
+            : (visionModelOptions[0]?.value ?? '');
+        setVisionToolDraftValue(initial);
+        setVisionToolSettingsOpen(true);
+    }, [savedVisionModelStillValid, savedVisionModelValue, visionModelOptions]);
+
+    const handleOfficialToolToggle = useCallback(async (tool: OfficialToolDefinition, enabled: boolean) => {
+        setOfficialToolEnabling(prev => ({ ...prev, [tool.id]: true }));
+        try {
+            await atomicModifyConfig(current => {
+                const existing = normalizeOfficialToolIds(current.enabledOfficialToolIds ?? []);
+                const next = enabled
+                    ? normalizeOfficialToolIds([...existing, tool.id])
+                    : existing.filter(id => id !== tool.id);
+                return { ...current, enabledOfficialToolIds: next };
+            });
+            await refreshConfig();
+            toast.success(enabled ? '工具已启用' : '工具已禁用');
+            if (enabled && tool.id === IMAGE_UNDERSTANDING_TOOL_ID && visionToolNeedsConfig) {
+                openOfficialToolSettings(tool);
+            }
+        } catch (err) {
+            console.error('[Settings] Failed to toggle official tool:', err);
+            toast.error('工具开关保存失败');
+        } finally {
+            setOfficialToolEnabling(prev => ({ ...prev, [tool.id]: false }));
+        }
+    }, [openOfficialToolSettings, refreshConfig, toast, visionToolNeedsConfig]);
+
+    const saveVisionToolSettings = useCallback(async () => {
+        const parsed = parseVisionModelOptionValue(visionToolDraftValue);
+        if (!parsed) {
+            toast.error('请选择支持图片理解的模型');
+            return;
+        }
+        try {
+            await atomicModifyConfig(current => ({
+                ...current,
+                officialToolSettings: {
+                    ...(current.officialToolSettings ?? {}),
+                    imageUnderstanding: parsed,
+                },
+            }));
+            await refreshConfig();
+            setVisionToolSettingsOpen(false);
+            toast.success('图片理解模型已保存');
+        } catch (err) {
+            console.error('[Settings] Failed to save vision tool settings:', err);
+            toast.error('保存失败');
+        }
+    }, [refreshConfig, toast, visionToolDraftValue]);
 
     const resetMcpForm = () => {
         setEditingMcpId(null);
@@ -1630,6 +1748,13 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
         notifySectionChange();
         // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally only triggers on initialMcpId change
     }, [initialMcpId, mcpServers]);
+
+    useEffect(() => {
+        if (!initialOfficialToolId) return;
+        const tool = OFFICIAL_TOOLS.find(item => item.id === initialOfficialToolId);
+        if (tool) openOfficialToolSettings(tool);
+        notifySectionChange();
+    }, [initialOfficialToolId, openOfficialToolSettings, notifySectionChange]);
 
     // Add custom MCP server - auto-install after adding
     const handleAddMcp = async () => {
@@ -3626,10 +3751,16 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                         mcpEnabledIds={mcpEnabledIds}
                         mcpEnabling={mcpEnabling}
                         mcpNeedsConfig={mcpNeedsConfig}
+                        officialTools={OFFICIAL_TOOLS}
+                        officialEnabledIds={officialEnabledIds}
+                        officialToolEnabling={officialToolEnabling}
+                        officialToolNeedsConfig={{ [IMAGE_UNDERSTANDING_TOOL_ID]: visionToolNeedsConfig }}
                         onAddMcp={() => { resetMcpForm(); setShowMcpForm(true); }}
                         onEditMcp={handleEditMcp}
                         onEditBuiltinMcp={handleEditBuiltinMcp}
                         onToggleMcp={handleMcpToggle}
+                        onEditOfficialTool={openOfficialToolSettings}
+                        onToggleOfficialTool={handleOfficialToolToggle}
                     />
                 )}
 
@@ -4765,6 +4896,67 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
 
                 </div>
             </div>
+
+            {/* Official image understanding tool settings */}
+            {visionToolSettingsOpen && (
+                <OverlayBackdrop onClose={() => setVisionToolSettingsOpen(false)} className="z-50">
+                    <div className="mx-4 flex max-h-[85vh] w-full max-w-lg flex-col rounded-2xl bg-[var(--paper-elevated)] shadow-xl">
+                        <div className="flex items-center justify-between border-b border-[var(--line)] px-6 py-4">
+                            <div className="min-w-0 flex-1">
+                                <h2 className="flex items-center gap-2 text-lg font-semibold text-[var(--ink)]">
+                                    <ImageIcon className="h-4 w-4 text-[var(--accent-warm)]" />
+                                    图片理解设置
+                                </h2>
+                                <p className="mt-0.5 text-xs text-[var(--ink-muted)]">
+                                    选择一个已配置、且明确支持图片输入的模型作为读图驱动
+                                </p>
+                            </div>
+                            <button
+                                onClick={() => setVisionToolSettingsOpen(false)}
+                                className="shrink-0 rounded-lg p-1 text-[var(--ink-muted)] hover:bg-[var(--paper-inset)]"
+                            >
+                                <X className="h-5 w-5" />
+                            </button>
+                        </div>
+
+                        <div className="space-y-4 overflow-y-auto p-6">
+                            <div>
+                                <label className="mb-2 block text-sm font-medium text-[var(--ink)]">
+                                    图片理解模型
+                                </label>
+                                <CustomSelect
+                                    value={visionToolDraftValue}
+                                    options={visionModelOptions}
+                                    onChange={setVisionToolDraftValue}
+                                    placeholder={visionModelOptions.length > 0 ? '选择模型' : '暂无可用图片模型'}
+                                    size="md"
+                                />
+                                {visionModelOptions.length === 0 && (
+                                    <p className="mt-2 text-xs text-[var(--warning)]">
+                                        请先在模型供应商中配置 API Key，并确保至少一个模型声明支持 image 输入。
+                                    </p>
+                                )}
+                            </div>
+                        </div>
+
+                        <div className="flex justify-end gap-2 border-t border-[var(--line)] px-6 py-4">
+                            <button
+                                onClick={() => setVisionToolSettingsOpen(false)}
+                                className="rounded-lg border border-[var(--line)] px-4 py-2 text-sm text-[var(--ink-muted)] hover:bg-[var(--paper-inset)]"
+                            >
+                                取消
+                            </button>
+                            <button
+                                onClick={() => void saveVisionToolSettings()}
+                                disabled={!parseVisionModelOptionValue(visionToolDraftValue)}
+                                className="rounded-lg bg-[var(--button-primary-bg)] px-4 py-2 text-sm font-medium text-[var(--button-primary-text)] hover:bg-[var(--button-primary-bg-hover)] disabled:cursor-not-allowed disabled:opacity-50"
+                            >
+                                保存
+                            </button>
+                        </div>
+                    </div>
+                </OverlayBackdrop>
+            )}
 
             {/* Builtin MCP Settings Modal */}
             {builtinMcpSettings && (

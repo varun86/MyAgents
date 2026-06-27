@@ -30,6 +30,7 @@ import {
   runtimeBackedProviderPermissionMode,
   type RuntimeBackedProviderIdentity,
 } from '@/../shared/providerExecution';
+import type { OfficialToolId } from '@/../shared/official-tools';
 
 export interface BuiltinModelSelection {
   providerId: string;
@@ -72,6 +73,8 @@ export interface InputOptionFields {
   /** PRD 0.2.17 — Claude plugin ids enabled at the workspace level. Mirrors
    *  mcpEnabledServers exactly (project + agent + snapshot dual-write). */
   enabledPluginIds?: string[];
+  /** MyAgents official CLI tool ids enabled at the workspace level. */
+  enabledOfficialToolIds?: OfficialToolId[];
 }
 
 export interface PersistInputOptionParams {
@@ -124,6 +127,9 @@ export interface PersistInputOptionParams {
    *  session restart picks up the new plugin selection immediately. */
   pushPluginsToSidecar?: (enabledIds: string[]) => Promise<unknown>;
 
+  /** Live sidecar push for MyAgents official CLI tool enabled set. */
+  pushOfficialToolsToSidecar?: (enabledIds: OfficialToolId[]) => Promise<unknown>;
+
   /** Live sidecar push for external runtime model / permission-mode changes.
    *  Chat-tab only. Launcher has no active Sidecar; the next session reads disk. */
   pushRuntimeConfigToSidecar?: (
@@ -144,6 +150,7 @@ export interface SessionSnapshotPatch {
   permissionMode?: string | null;
   mcpEnabledServers?: string[] | null;
   enabledPluginIds?: string[] | null;
+  enabledOfficialToolIds?: OfficialToolId[] | null;
   /** #300/#401 — credential snapshot. `null` clears it so the sidecar re-resolves
    *  the env live from `providerId`. Same-provider builtin model edits must not
    *  clear it because owned sessions treat frozen env as part of exact identity. */
@@ -244,6 +251,14 @@ export async function persistInputOptionChange(
     }
   }
 
+  if (params.pushOfficialToolsToSidecar && params.fields.enabledOfficialToolIds !== undefined) {
+    try {
+      await params.pushOfficialToolsToSidecar(params.fields.enabledOfficialToolIds);
+    } catch (e) {
+      errors.push(`sidecar official tools push: ${describe(e)}`);
+    }
+  }
+
   if (
     params.isExternalRuntime &&
     params.pushRuntimeConfigToSidecar &&
@@ -309,6 +324,9 @@ function buildProjectPatch(
   }
   if (fields.enabledPluginIds !== undefined) {
     patch.enabledPluginIds = fields.enabledPluginIds;
+  }
+  if (fields.enabledOfficialToolIds !== undefined) {
+    patch.enabledOfficialToolIds = fields.enabledOfficialToolIds;
   }
   return patch;
 }
@@ -376,6 +394,9 @@ function buildSnapshotPatch(params: PersistInputOptionParams): SessionSnapshotPa
   if (fields.enabledPluginIds !== undefined) {
     patch.enabledPluginIds = fields.enabledPluginIds;
   }
+  if (fields.enabledOfficialToolIds !== undefined) {
+    patch.enabledOfficialToolIds = fields.enabledOfficialToolIds;
+  }
   return patch;
 }
 
@@ -423,6 +444,9 @@ function buildAgentPatch(
   }
   if (fields.enabledPluginIds !== undefined) {
     patch.enabledPluginIds = fields.enabledPluginIds;
+  }
+  if (fields.enabledOfficialToolIds !== undefined) {
+    patch.enabledOfficialToolIds = fields.enabledOfficialToolIds;
   }
 
   // Permission mode + model split by runtime. The historical Chat.tsx bug

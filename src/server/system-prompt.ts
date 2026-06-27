@@ -11,6 +11,7 @@
  */
 
 import type { RuntimeType } from '../shared/types/runtime';
+import type { OfficialToolId } from '../shared/official-tools';
 import { buildCliToolsAppend, buildWidgetSection, buildSessionInboxSection } from './system-prompt-cli-tools';
 
 // ===== Scenario types =====
@@ -127,6 +128,8 @@ export interface SystemPromptOptions {
    * an experimental feature gate.
    */
   userCliToolsEnabled?: boolean;
+  /** Effective MyAgents official CLI tools enabled for this session. */
+  enabledOfficialToolIds?: readonly OfficialToolId[];
 }
 
 export function buildSystemPromptAppend(scenario: InteractionScenario, options?: SystemPromptOptions): string {
@@ -197,6 +200,7 @@ export function buildSystemPromptAppend(scenario: InteractionScenario, options?:
   if (options?.cliToolsEnabled) {
     const cliTools = buildCliToolsAppend(scenario, {
       includeUserTools: options.userCliToolsEnabled === true,
+      enabledOfficialToolIds: options.enabledOfficialToolIds,
     });
     if (cliTools) parts.push(cliTools);
   }

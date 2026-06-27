@@ -7,6 +7,10 @@ const mocks = vi.hoisted(() => ({
       success: true,
       servers: servers.map(server => server.id),
     })),
+    updateOfficialToolIds: vi.fn(async (enabledIds: unknown) => ({
+      success: true,
+      enabledIds,
+    })),
     updateAgents: vi.fn(async () => ({ success: true })),
     updateProviderEnv: vi.fn(async () => ({ success: true, skipped: 'external-runtime' })),
     updatePermissionMode: vi.fn(async () => ({ success: true })),
@@ -21,6 +25,7 @@ const mocks = vi.hoisted(() => ({
       model: 'gpt-5',
       mcpServerIds: null,
       agentNames: null,
+      enabledOfficialToolIds: ['image-understanding'],
       permissionMode: 'no-restrictions',
       providerId: null,
       reasoningEffort: 'medium',
@@ -47,6 +52,10 @@ describe('handleSessionConfigRoute', () => {
       servers: servers.map(server => server.id),
     }));
     mocks.engine.updateAgents.mockResolvedValue({ success: true });
+    mocks.engine.updateOfficialToolIds.mockImplementation(async (enabledIds: unknown) => ({
+      success: true,
+      enabledIds,
+    }));
     mocks.engine.updateProviderEnv.mockResolvedValue({ success: true, skipped: 'external-runtime' });
     mocks.engine.updatePermissionMode.mockResolvedValue({ success: true });
     mocks.engine.materializePendingDesktopSession.mockResolvedValue({
@@ -90,6 +99,23 @@ describe('handleSessionConfigRoute', () => {
     expect(mocks.engine.updateMcpServers).toHaveBeenCalledWith([{ id: 'fs' }, { id: 'git' }]);
   });
 
+  it('applies official tool updates through the active engine', async () => {
+    const response = await handleSessionConfigRoute(
+      '/api/official-tools/session-enable',
+      new Request('http://local/api/official-tools/session-enable', {
+        method: 'POST',
+        body: JSON.stringify({ enabledIds: ['image-understanding', 'unknown'] }),
+      }),
+    );
+
+    expect(response?.status).toBe(200);
+    expect(await readJson(response as Response)).toEqual({
+      success: true,
+      enabledIds: ['image-understanding'],
+    });
+    expect(mocks.engine.updateOfficialToolIds).toHaveBeenCalledWith(['image-understanding']);
+  });
+
   it('preserves the legacy provider route response shape even when the engine skips mutation', async () => {
     const response = await handleSessionConfigRoute(
       '/api/provider/set',
@@ -117,6 +143,7 @@ describe('handleSessionConfigRoute', () => {
       model: 'gpt-5',
       mcpServerIds: null,
       agentNames: null,
+      enabledOfficialToolIds: ['image-understanding'],
       permissionMode: 'no-restrictions',
       providerId: null,
       reasoningEffort: 'medium',

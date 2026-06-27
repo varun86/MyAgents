@@ -23,6 +23,7 @@
 
 import type { InteractionScenario } from './system-prompt';
 import { getUserToolsPromptSection } from './utils/cli-tools-registry';
+import { IMAGE_UNDERSTANDING_TOOL_ID, type OfficialToolId } from '../shared/official-tools';
 
 // ===== Capability sections =====
 //
@@ -119,6 +120,32 @@ works identically across platforms. Tag inline with \`#xxx\` inside
 the content itself — there's no separate --tag flag on create.
 </myagents-cli-thought>`;
 
+const SECTION_VISION = `<myagents-cli-vision>
+MyAgents has an official image-understanding CLI tool for sessions where the
+main model may not accept image input. Use it when the user asks about an image,
+screenshot, chart, UI, photo, or visual attachment and you need visual details
+before answering.
+
+Command:
+  myagents vision analyze --image <path> [--image <path> ...] [--prompt "..."] [--json]
+
+Use paths that are available in the current workspace, especially
+\`@myagents_files/...\` references shown in the conversation. The CLI resolves
+those paths inside the current MyAgents workspace and sends the images to the
+vision model configured by the user in Settings.
+
+If you need specific information, pass a concise \`--prompt\` describing what to
+extract. If you omit \`--prompt\`, MyAgents uses a default prompt that asks for a
+faithful, structured visual description with text/OCR, layout, objects, and any
+task-relevant details.
+
+Before first use in a session, you may run:
+  myagents vision readme
+
+Do not use this tool for arbitrary file reading or URL fetching. It accepts
+local image paths only.
+</myagents-cli-vision>`;
+
 /**
  * Single source of truth for the widget trigger rule. Embedded into both the
  * system prompt's `SECTION_WIDGET` (always-on guidance) and the CLI's
@@ -198,7 +225,7 @@ export function buildSessionInboxSection(_scenario: InteractionScenario): string
  */
 export function buildCliToolsAppend(
   scenario: InteractionScenario,
-  options?: { includeUserTools?: boolean },
+  options?: { includeUserTools?: boolean; enabledOfficialToolIds?: readonly OfficialToolId[] },
 ): string {
   const parts: string[] = [];
 
@@ -220,6 +247,10 @@ export function buildCliToolsAppend(
   // human user to capture for, so the section is suppressed there.
   if (scenario.type === 'desktop' || scenario.type === 'im' || scenario.type === 'agent-channel') {
     parts.push(SECTION_THOUGHT);
+  }
+
+  if (options?.enabledOfficialToolIds?.includes(IMAGE_UNDERSTANDING_TOOL_ID)) {
+    parts.push(SECTION_VISION);
   }
 
   // User-registered CLI tools — universal (PRD 0.2.36 cli_first_tool_registry).

@@ -8,6 +8,7 @@ type SessionSnapshotPatchKey =
   | 'permissionMode'
   | 'mcpEnabledServers'
   | 'enabledPluginIds'
+  | 'enabledOfficialToolIds'
   | 'providerId'
   | 'providerRoute'
   | 'providerExecutionIdentity'
@@ -23,6 +24,7 @@ const SNAPSHOT_KEYS = [
   'permissionMode',
   'mcpEnabledServers',
   'enabledPluginIds',
+  'enabledOfficialToolIds',
   'providerId',
   'providerRoute',
   'providerExecutionIdentity',

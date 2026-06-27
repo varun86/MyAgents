@@ -68,6 +68,13 @@ import { patchAgentConfig, getAgentById } from '@/config/services/agentConfigSer
 import { BrowserPanelContext } from '@/context/BrowserPanelContext';
 import { BROWSER_BLANK_URL } from '@/components/browserConstants';
 import { CUSTOM_EVENTS, isPendingSessionId } from '../../shared/constants';
+import {
+  IMAGE_UNDERSTANDING_TOOL_ID,
+  OFFICIAL_TOOLS,
+  isImageUnderstandingToolConfigured,
+  normalizeOfficialToolIds,
+  type OfficialToolId,
+} from '../../shared/official-tools';
 import { workspacePathsEqual } from '../../shared/workspacePath';
 import { coerceReasoningEffortForRuntime, reasoningEffortChoices } from '../../shared/reasoningEffort';
 import type { ProviderHistoryEnv } from '../../shared/providerHistory';
@@ -1074,6 +1081,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   // choice; autoSend clears it after its MCP block, handing later config-change
   // re-pushes back to the mount effect. (codex review: dual MCP-push race.)
   const launcherOwnsInitialMcpRef = useRef(hadInitialMessage.current);
+  const launcherOwnsInitialOfficialToolsRef = useRef(hadInitialMessage.current);
   const [launcherMcpFallbackRevision, setLauncherMcpFallbackRevision] = useState(0);
   const projectSyncedRef = useRef(false);
 
@@ -1591,6 +1599,14 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
           });
         }
 
+        if (launchMessage.enabledOfficialToolIds !== undefined) {
+          setWorkspaceOfficialToolEnabled(normalizeOfficialToolIds(launchMessage.enabledOfficialToolIds));
+          await apiPost('/api/official-tools/session-enable', {
+            enabledIds: launchMessage.enabledOfficialToolIds,
+          });
+        }
+        launcherOwnsInitialOfficialToolsRef.current = false;
+
         // 3. Update local UI state to reflect Launcher choices
         if (launchMessage.permissionMode) {
           // External runtime has its own permission mode state (runtimePermissionMode),
@@ -1992,6 +2008,26 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   const [workspaceEnabledPlugins, setWorkspaceEnabledPlugins] = useState<string[]>(
     currentAgent?.enabledPluginIds ?? currentProject?.enabledPluginIds ?? []
   );
+  const [workspaceOfficialToolEnabled, setWorkspaceOfficialToolEnabled] = useState<OfficialToolId[]>(
+    normalizeOfficialToolIds(currentAgent?.enabledOfficialToolIds ?? currentProject?.enabledOfficialToolIds ?? [])
+  );
+  const globalOfficialToolEnabled = useMemo(
+    () => normalizeOfficialToolIds(config.enabledOfficialToolIds ?? []),
+    [config.enabledOfficialToolIds],
+  );
+  const imageUnderstandingConfiguredForInput = useMemo(() => {
+    if (!isImageUnderstandingToolConfigured(config.officialToolSettings)) return false;
+    const selection = config.officialToolSettings?.imageUnderstanding;
+    const provider = providers.find(item => item.id === selection?.providerId);
+    if (!provider || isRuntimeBackedProvider(provider)) return false;
+    if (!isProviderAvailable(provider, apiKeys, providerVerifyStatus)) return false;
+    const model = provider.models.find(item => item.model === selection?.model);
+    return Array.isArray(model?.inputModalities) && model.inputModalities.includes('image');
+  }, [apiKeys, config.officialToolSettings, providerVerifyStatus, providers]);
+  const officialToolNeedsConfig = useMemo(
+    () => ({ [IMAGE_UNDERSTANDING_TOOL_ID]: !imageUnderstandingConfiguredForInput }),
+    [imageUnderstandingConfiguredForInput],
+  );
 
   // Track which session's cron task state has been loaded
   const cronLoadedSessionRef = useRef<string | null>(null);
@@ -2176,6 +2212,30 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     launcherMcpFallbackRevision,
   ]);
 
+  useEffect(() => {
+    const syncOfficialTools = async () => {
+      if (configDispositionRef.current !== 'push') return;
+      if (!isConnected || isSessionLoading) return;
+      if (launcherOwnsInitialOfficialToolsRef.current) return;
+      try {
+        await apiPost('/api/official-tools/session-enable', {
+          enabledIds: workspaceOfficialToolEnabled,
+        });
+      } catch (err) {
+        console.error('[Chat] Failed to sync official tools:', err);
+      }
+    };
+    void syncOfficialTools();
+  }, [
+    apiPost,
+    configPending,
+    isConnected,
+    isSessionLoading,
+    workspaceOfficialToolEnabled,
+    config?.enabledOfficialToolIds,
+    config?.officialToolSettings,
+  ]);
+
   // Load enabled agents and sync to backend
   const loadAndSyncAgents = useCallback(async () => {
     try {
@@ -2254,6 +2314,12 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       setWorkspaceMcpEnabled(currentProject.mcpEnabledServers);
     }
   }, [currentProject?.mcpEnabledServers, sessionMeta?.configSnapshotAt]);
+
+  useEffect(() => {
+    if (sessionMeta?.configSnapshotAt) return;
+    const next = currentAgent?.enabledOfficialToolIds ?? currentProject?.enabledOfficialToolIds;
+    if (next) setWorkspaceOfficialToolEnabled(normalizeOfficialToolIds(next));
+  }, [currentAgent?.enabledOfficialToolIds, currentProject?.enabledOfficialToolIds, sessionMeta?.configSnapshotAt]);
 
   // v0.1.69 — owned (Desktop/Cron) sessions lock config via SessionMetadata snapshot
   // (configSnapshotAt stamped at creation per `snapshotForOwnedSession`). Tab-level UI
@@ -2359,6 +2425,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     reasoningEffort?: string;
     mcpEnabledServers?: string[];
     enabledPluginIds?: string[];
+    enabledOfficialToolIds?: OfficialToolId[];
   }) => {
     if (!currentProject) return false;
     const result = await persistInputOptionChange({
@@ -2378,6 +2445,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
         reasoningEffort: patch.reasoningEffort,
         mcpEnabledServers: patch.mcpEnabledServers,
         enabledPluginIds: patch.enabledPluginIds,
+        enabledOfficialToolIds: patch.enabledOfficialToolIds,
       },
       patchProject,
       patchAgentConfig,
@@ -2407,6 +2475,10 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       pushPluginsToSidecar: async (enabledIds) => {
         if (configDispositionRef.current === 'pending') return; // defer while unresolved; disk write still happens
         await apiPost('/api/cc-plugin/session-enable', { enabledIds });
+      },
+      pushOfficialToolsToSidecar: async (enabledIds) => {
+        if (configDispositionRef.current === 'pending') return;
+        await apiPost('/api/official-tools/session-enable', { enabledIds });
       },
       pushRuntimeConfigToSidecar: async (runtimeConfig) => {
         if (configDispositionRef.current === 'pending') return; // defer while unresolved; disk write still happens
@@ -2464,6 +2536,20 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       setWorkspaceEnabledPlugins(workspaceEnabledPlugins);
     }
   }, [workspaceEnabledPlugins, persistTabConfigChange, guardCronConfigMutation]);
+
+  const handleWorkspaceOfficialToolToggle = useCallback(async (toolId: OfficialToolId, enabled: boolean) => {
+    if (guardCronConfigMutation()) return;
+    const newEnabled = normalizeOfficialToolIds(
+      enabled
+        ? [...workspaceOfficialToolEnabled, toolId]
+        : workspaceOfficialToolEnabled.filter(id => id !== toolId),
+    );
+    setWorkspaceOfficialToolEnabled(newEnabled);
+    const persisted = await persistTabConfigChange({ enabledOfficialToolIds: newEnabled });
+    if (!persisted) {
+      setWorkspaceOfficialToolEnabled(workspaceOfficialToolEnabled);
+    }
+  }, [workspaceOfficialToolEnabled, persistTabConfigChange, guardCronConfigMutation]);
 
   // Sync selectedModel when provider changes (skip initial mount to preserve project-stored model)
   const providerInitRef = useRef(true);
@@ -2605,6 +2691,9 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     const plugins = snapshotOwnsConfig
       ? (sessionMeta.enabledPluginIds ?? [])
       : (sessionMeta.enabledPluginIds ?? currentAgent?.enabledPluginIds ?? currentProject?.enabledPluginIds ?? []);
+    const officialTools = snapshotOwnsConfig
+      ? (sessionMeta.enabledOfficialToolIds ?? [])
+      : normalizeOfficialToolIds(sessionMeta.enabledOfficialToolIds ?? currentAgent?.enabledOfficialToolIds ?? currentProject?.enabledOfficialToolIds ?? []);
     // #324 — snapshot effort wins over agent default; a persisted 'default'
     // is meaningful (session explicitly reverted) and flows through as-is.
     // UNCONDITIONAL set (`?? 'default'`, unlike model's `if (model)`): effort's
@@ -2643,6 +2732,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     }
     if (mcp) setWorkspaceMcpEnabled(mcp);
     setWorkspaceEnabledPlugins(plugins);
+    setWorkspaceOfficialToolEnabled(normalizeOfficialToolIds(officialTools));
   // eslint-disable-next-line react-hooks/exhaustive-deps -- currentAgent derived from config, listening to its identity would re-fire on unrelated agent changes
   }, [sessionMeta, configPending, selectedProviderId, providers]);
 
@@ -2796,6 +2886,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
           runtime?: RuntimeType;
           model?: string | null;
           mcpServerIds?: string[] | null;
+          enabledOfficialToolIds?: OfficialToolId[] | null;
           permissionMode?: string | null;
           providerId?: string | null;
           reasoningEffort?: string | null;
@@ -2829,6 +2920,9 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
           if (Array.isArray(config.mcpServerIds)) {
             setWorkspaceMcpEnabled(config.mcpServerIds);
           }
+          if (Array.isArray(config.enabledOfficialToolIds)) {
+            setWorkspaceOfficialToolEnabled(normalizeOfficialToolIds(config.enabledOfficialToolIds));
+          }
           // #324 — server returns 'default' when unset, so truthiness works.
           if (config.reasoningEffort) {
             setReasoningEffort(config.reasoningEffort);
@@ -2842,6 +2936,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
             providerId: config.providerId,
             permissionMode: config.permissionMode,
             mcpServerIds: config.mcpServerIds,
+            enabledOfficialToolIds: config.enabledOfficialToolIds,
           });
         }
       } catch (err) {
@@ -3736,6 +3831,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
         reasoningEffort,
         mcpEnabledServers: workspaceMcpEnabled,
         enabledPluginIds: workspaceEnabledPlugins,
+        enabledOfficialToolIds: workspaceOfficialToolEnabled,
       });
       const session = await createSession(
         agentDir,
@@ -3788,7 +3884,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
           : '创建新会话失败',
       );
     }
-  }, [pendingProviderSwitch, agentDir, onForkSession, providers, transferBindingToForkedSession, deleteUnopenedForkSession, inputChromePermissionMode, reasoningEffort, workspaceMcpEnabled, workspaceEnabledPlugins, currentProject, currentAgent, patchProject, refreshConfig, guardCronConfigMutation]);
+  }, [pendingProviderSwitch, agentDir, onForkSession, providers, transferBindingToForkedSession, deleteUnopenedForkSession, inputChromePermissionMode, reasoningEffort, workspaceMcpEnabled, workspaceEnabledPlugins, workspaceOfficialToolEnabled, currentProject, currentAgent, patchProject, refreshConfig, guardCronConfigMutation]);
 
   // Cross-runtime confirm: create new session in new tab and send the pending message
   const confirmCrossRuntimeSend = useCallback(async () => {
@@ -4830,6 +4926,11 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
             globalMcpEnabled={globalMcpEnabled}
             mcpServers={mcpServers}
             onWorkspaceMcpToggle={handleWorkspaceMcpToggle}
+            officialTools={OFFICIAL_TOOLS}
+            workspaceOfficialToolEnabled={workspaceOfficialToolEnabled}
+            globalOfficialToolEnabled={globalOfficialToolEnabled}
+            officialToolNeedsConfig={officialToolNeedsConfig}
+            onWorkspaceOfficialToolToggle={handleWorkspaceOfficialToolToggle}
             // PRD 0.2.17 — Claude plugins. globallyVisiblePlugins is the
             // Layer 1 (Settings 开关 ON) candidate list; workspaceEnabledPlugins
             // is the Layer 2 actually-enabled subset for this workspace.

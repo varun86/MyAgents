@@ -35,7 +35,7 @@ const mocks = vi.hoisted(() => {
     }>>(async () => ({ queued: true, queueId: 'q1', isInFlight: false, deliveryMode: 'queue' as const })),
     forceExecuteQueueItem: vi.fn(async () => true),
     getAndClearLastAgentError: vi.fn<() => string | null>(() => null),
-    getAgentState: vi.fn<() => Record<string, unknown>>(() => ({ sessionState: 'idle' })),
+    getAgentState: vi.fn<() => Record<string, unknown>>(() => ({ sessionState: 'idle', agentDir: '/workspace' })),
     getAgents: vi.fn(() => ({ helper: { name: 'helper' } })),
     getLastBuiltinAssistantText: vi.fn(() => 'builtin latest'),
     getMcpServers: vi.fn(() => [{ id: 'fs' }]),
@@ -45,6 +45,7 @@ const mocks = vi.hoisted(() => {
     getSessionId: vi.fn(() => 'builtin-session'),
     getSessionModel: vi.fn(() => 'claude-sonnet'),
     getSessionPermissionMode: vi.fn(() => 'auto'),
+    getSessionEnabledOfficialToolIds: vi.fn(() => ['image-understanding']),
     getSessionProviderEnv: vi.fn(() => undefined),
     getSessionProviderId: vi.fn(() => 'sensenova'),
     getSessionReasoningEffort: vi.fn(() => 'default'),
@@ -65,6 +66,7 @@ const mocks = vi.hoisted(() => {
     setMcpServers: vi.fn(),
     setSessionModel: vi.fn(),
     setSessionPermissionMode: vi.fn(),
+    setSessionEnabledOfficialToolIds: vi.fn(),
     setSessionProviderEnv: vi.fn(),
     setSessionReasoningEffort: vi.fn(),
     stripPlaywrightResults: vi.fn((message: string) => message),
@@ -91,6 +93,7 @@ const mocks = vi.hoisted(() => {
     getExternalSessionPermissionMode: vi.fn(() => 'no-restrictions'),
     getExternalSessionReasoningEffort: vi.fn(() => 'medium'),
     getExternalSessionState: vi.fn(() => 'idle'),
+    getExternalSessionWorkspacePath: vi.fn(() => '/workspace'),
     getExternalSystemInitPayload: vi.fn(() => null),
     getLastExternalAssistantText: vi.fn(() => 'external answer'),
     hasPendingExternalAskUserQuestion: vi.fn((requestId: string) => Boolean(requestId) && state.pendingExternalAsk),
@@ -108,6 +111,30 @@ const mocks = vi.hoisted(() => {
     stopExternalSession: vi.fn(async () => true),
     updateExternalRuntimeConfig: vi.fn(async () => ({ success: true })),
     waitForExternalSessionIdle: vi.fn(async () => true),
+    getSessionData: vi.fn((sessionId: string) => ({
+      id: sessionId,
+      agentDir: '/workspace',
+      title: 'Test',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      lastActiveAt: '2026-01-01T00:00:00.000Z',
+      enabledOfficialToolIds: ['image-understanding'],
+      messages: [],
+    })),
+    updateSessionMetadata: vi.fn(async (sessionId: string, updates: Record<string, unknown>) => ({
+      id: sessionId,
+      agentDir: '/workspace',
+      title: 'Test',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      lastActiveAt: '2026-01-01T00:00:00.000Z',
+      ...updates,
+      messages: [],
+    })),
+    getEffectiveOfficialToolIdsForSession: vi.fn((_workspacePath: string, sessionMeta?: { enabledOfficialToolIds?: string[] } | null, overrideIds?: readonly string[] | null) => (
+      overrideIds !== null && overrideIds !== undefined
+        ? [...overrideIds]
+        : (sessionMeta?.enabledOfficialToolIds ? [...sessionMeta.enabledOfficialToolIds] : [])
+    )),
+    materializeProviderRouteEnv: vi.fn(() => undefined),
   };
 });
 
@@ -129,6 +156,7 @@ vi.mock('../agent-session', () => ({
   getSessionId: mocks.getSessionId,
   getSessionModel: mocks.getSessionModel,
   getSessionPermissionMode: mocks.getSessionPermissionMode,
+  getSessionEnabledOfficialToolIds: mocks.getSessionEnabledOfficialToolIds,
   getSessionProviderEnv: mocks.getSessionProviderEnv,
   getSessionProviderId: mocks.getSessionProviderId,
   getSessionReasoningEffort: mocks.getSessionReasoningEffort,
@@ -149,6 +177,7 @@ vi.mock('../agent-session', () => ({
   setMcpServers: mocks.setMcpServers,
   setSessionModel: mocks.setSessionModel,
   setSessionPermissionMode: mocks.setSessionPermissionMode,
+  setSessionEnabledOfficialToolIds: mocks.setSessionEnabledOfficialToolIds,
   setSessionProviderEnv: mocks.setSessionProviderEnv,
   setSessionReasoningEffort: mocks.setSessionReasoningEffort,
   stripPlaywrightResults: mocks.stripPlaywrightResults,
@@ -174,6 +203,7 @@ vi.mock('../runtimes/external-session', () => ({
   getExternalSessionPermissionMode: mocks.getExternalSessionPermissionMode,
   getExternalSessionReasoningEffort: mocks.getExternalSessionReasoningEffort,
   getExternalSessionState: mocks.getExternalSessionState,
+  getExternalSessionWorkspacePath: mocks.getExternalSessionWorkspacePath,
   getExternalSystemInitPayload: mocks.getExternalSystemInitPayload,
   getLastExternalAssistantText: mocks.getLastExternalAssistantText,
   hasPendingExternalAskUserQuestion: mocks.hasPendingExternalAskUserQuestion,
@@ -191,6 +221,16 @@ vi.mock('../runtimes/external-session', () => ({
   stopExternalSession: mocks.stopExternalSession,
   updateExternalRuntimeConfig: mocks.updateExternalRuntimeConfig,
   waitForExternalSessionIdle: mocks.waitForExternalSessionIdle,
+}));
+
+vi.mock('../utils/admin-config', () => ({
+  getEffectiveOfficialToolIdsForSession: mocks.getEffectiveOfficialToolIdsForSession,
+  materializeProviderRouteEnv: mocks.materializeProviderRouteEnv,
+}));
+
+vi.mock('../SessionStore', () => ({
+  getSessionData: mocks.getSessionData,
+  updateSessionMetadata: mocks.updateSessionMetadata,
 }));
 
 vi.mock('../sse', () => ({
@@ -288,6 +328,7 @@ describe('session-engine selector and adapters', () => {
       model: 'claude-sonnet',
       mcpServerIds: ['fs'],
       agentNames: ['helper'],
+      enabledOfficialToolIds: ['image-understanding'],
       permissionMode: 'auto',
       providerId: 'sensenova',
       providerRoute: { kind: 'provider', providerId: 'sensenova', model: 'claude-sonnet' },
@@ -327,6 +368,7 @@ describe('session-engine selector and adapters', () => {
       model: 'gpt-5',
       mcpServerIds: null,
       agentNames: null,
+      enabledOfficialToolIds: ['image-understanding'],
       permissionMode: 'no-restrictions',
       providerId: null,
       providerRoute: null,
@@ -587,6 +629,38 @@ describe('session-engine selector and adapters', () => {
         metadataBirthPending: true,
       }),
     );
+  });
+
+  it('updates official tool ids through the builtin engine owner', async () => {
+    const result = await getSessionEngine().updateOfficialToolIds(['image-understanding']);
+
+    expect(result).toEqual({ success: true });
+    expect(mocks.setSessionEnabledOfficialToolIds).toHaveBeenCalledWith(['image-understanding']);
+    expect(mocks.updateSessionMetadata).toHaveBeenCalledWith(
+      'builtin-session',
+      expect.objectContaining({
+        enabledOfficialToolIds: ['image-understanding'],
+        configSnapshotAt: expect.any(String),
+      }),
+    );
+  });
+
+  it('updates official tool ids through the external engine owner', async () => {
+    mocks.state.useExternal = true;
+    mocks.state.externalActive = true;
+    mocks.getExternalSessionState.mockReturnValueOnce('idle');
+
+    const result = await getSessionEngine().updateOfficialToolIds([]);
+
+    expect(result).toEqual({ success: true });
+    expect(mocks.updateSessionMetadata).toHaveBeenCalledWith(
+      'external-session',
+      expect.objectContaining({
+        enabledOfficialToolIds: [],
+        configSnapshotAt: expect.any(String),
+      }),
+    );
+    expect(mocks.stopExternalSession).toHaveBeenCalledTimes(1);
   });
 
   it('stops the external runtime when an injected turn times out', async () => {

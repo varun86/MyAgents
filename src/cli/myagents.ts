@@ -33,7 +33,7 @@ const rawArgs = process.argv.slice(2);
 function parseArgs(args: string[]): { positional: string[]; flags: Record<string, unknown> } {
   const positional: string[] = [];
   const flags: Record<string, unknown> = {};
-  const repeatable = new Set(['args', 'env', 'headers', 'models', 'model-names']);
+  const repeatable = new Set(['args', 'env', 'headers', 'models', 'model-names', 'image']);
 
   // PRD 0.2.18 cross-review fix (Codex): added short-flag → long-flag mapping
   // so `myagents session send <sid> -p "..."` works as documented in PRD §3.1
@@ -194,6 +194,7 @@ Usage: myagents <command> [options]
 
 Commands:
   mcp       Manage MCP tool servers
+  vision    Official image-understanding CLI tool
   tool      Manage registered CLI tools (Lab-gated; enable in Settings first)
   model     Manage model providers
   agent     Manage agents & channels (+ 'agent show <id>' for effective defaults)
@@ -228,6 +229,8 @@ Examples:
   myagents mcp enable playwright --scope both
   myagents mcp oauth discover notion-mcp
   myagents mcp oauth start notion-mcp
+  myagents vision readme
+  myagents vision analyze --image myagents_files/screenshot.png --prompt "Summarize the UI state"
   myagents model list
   myagents model set-key deepseek sk-xxx
   myagents skill list
@@ -560,6 +563,16 @@ function printResult(group: string, action: string, result: Record<string, unkno
   }
   if (group === 'runtime' && action === 'diagnose') {
     printRuntimeDiagnose(result.data as Record<string, unknown>);
+    return;
+  }
+  if (group === 'vision' && action === 'analyze') {
+    const data = result.data as Record<string, unknown> | undefined;
+    const text = typeof data?.text === 'string' ? data.text : '';
+    if (text.trim()) {
+      console.log(text);
+    } else {
+      console.log('\u2713 vision analyze completed');
+    }
     return;
   }
   if (group === 'diagnose') {
@@ -1942,6 +1955,35 @@ function buildRequestBody(
   rest: string[],
   flags: Record<string, unknown>,
 ): Record<string, unknown> {
+  // Official image understanding tool. Unlike the user-defined CLI tool
+  // registry, this is a built-in product capability backed by AppConfig model
+  // settings, so it routes directly to the official vision admin handlers.
+  if (group === 'vision') {
+    if (action === 'readme') return {};
+    if (action === 'analyze') {
+      const images = [
+        ...((flags.image as string[] | undefined) ?? []),
+        ...rest,
+      ].filter((value): value is string => typeof value === 'string' && value.trim().length > 0);
+      if (typeof flags.promptFile === 'string') {
+        console.error('Error: vision analyze does not support --prompt-file. Use --prompt "<short instruction>".');
+        process.exit(3);
+      }
+      const invalidImageValue = images.find(value => value.startsWith('-'));
+      if (invalidImageValue) {
+        console.error(`Error: --image requires a path value; got "${invalidImageValue}".`);
+        process.exit(1);
+      }
+      const prompt = typeof flags.prompt === 'string' ? flags.prompt : undefined;
+      if (images.length === 0) {
+        console.error('Error: vision analyze requires at least one --image <path> (or positional image path).');
+        process.exit(1);
+      }
+      return { images, prompt };
+    }
+    return {};
+  }
+
   // CLI tool registry commands (PRD 0.2.36)
   if (group === 'tool') {
     if (action === 'add') {

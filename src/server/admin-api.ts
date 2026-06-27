@@ -17,6 +17,7 @@ import { promisify } from 'node:util';
 import { splitProviderModelInput, type McpServerDefinition } from '../shared/config-types';
 import { deriveCliToolKind, type CliToolRegistryEntry } from '../shared/types/cliTools';
 import { workspacePathsEqual } from '../shared/workspacePath';
+import { IMAGE_UNDERSTANDING_TOOL_ID } from '../shared/official-tools';
 import { removeCustomMcpServerCascade, McpRemovalError } from './services/mcp-removal';
 import { SDK_RESERVED_MCP_NAMES } from './agent-session';
 import {
@@ -56,6 +57,7 @@ import { buildCronScope } from './utils/cron-scope';
 import { readLoopbackJson } from './utils/loopback-response';
 import { ADMIN_LOOPBACK_TIMEOUT_MS, managementApi } from './utils/management-api-client';
 import { getCuseDiagnostics } from './utils/cuse-diagnostics';
+import { getSessionEngine } from './session-engine';
 
 // Long-running sidecar operations need their own budget. Anchored to the
 // sidecar's internal `FETCH_TIMEOUT_MS` (300s for tarball download) plus a
@@ -788,6 +790,47 @@ export async function handleMcpOAuthRevoke(payload: { id: string }): Promise<Adm
     return { success: true, data: { id }, hint: 'OAuth authorization revoked.' };
   } catch (err) {
     return { success: false, error: `OAuth revoke failed: ${err instanceof Error ? err.message : String(err)}` };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Official Vision CLI Tool Handlers
+// ---------------------------------------------------------------------------
+
+export async function handleVisionReadme(): Promise<AdminResponse> {
+  const { getVisionToolReadme } = await import('./official-tools/vision');
+  return { success: true, data: { text: getVisionToolReadme() } };
+}
+
+export async function handleVisionAnalyze(payload: {
+  images?: unknown;
+  image?: unknown;
+  prompt?: unknown;
+}): Promise<AdminResponse> {
+  const rawImages = Array.isArray(payload.images)
+    ? payload.images
+    : (payload.image !== undefined ? [payload.image] : []);
+  const images = rawImages.filter((value): value is string => typeof value === 'string' && value.trim().length > 0);
+  const prompt = typeof payload.prompt === 'string' ? payload.prompt : undefined;
+  const { analyzeImages, visionErrorResponse } = await import('./official-tools/vision');
+  try {
+    const sessionContext = getSessionEngine().getCurrentSessionContext();
+    const result = await analyzeImages({
+      workspacePath: sessionContext.workspacePath ?? getCurrentWorkspacePath(),
+      sessionMeta: sessionContext.sessionMeta ?? null,
+      images,
+      prompt,
+    });
+    trackServer('official_tool_vision_analyze', {
+      tool_id: IMAGE_UNDERSTANDING_TOOL_ID,
+      image_count: result.images.length,
+      provider_id: result.providerId,
+      model: result.model,
+    });
+    return { success: true, data: result };
+  } catch (error) {
+    const { status, error: message } = visionErrorResponse(error);
+    return { success: false, error: message, data: { status } };
   }
 }
 

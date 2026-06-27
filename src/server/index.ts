@@ -1426,6 +1426,10 @@ async function routeAdminApi(pathname: string, payload: Record<string, unknown>)
   if (route === 'tool/readme') return await api.handleToolReadme(payload as Parameters<typeof api.handleToolReadme>[0]);
   if (route === 'tool/env') return await api.handleToolEnv(payload as Parameters<typeof api.handleToolEnv>[0]);
 
+  // Official MyAgents CLI tools
+  if (route === 'vision/readme') return await api.handleVisionReadme();
+  if (route === 'vision/analyze') return await api.handleVisionAnalyze(payload as Parameters<typeof api.handleVisionAnalyze>[0]);
+
   // Model commands
   if (route === 'model/list') return api.handleModelList();
   if (route === 'model/add') return api.handleModelAdd(payload as Parameters<typeof api.handleModelAdd>[0]);
@@ -3628,6 +3632,7 @@ async function main() {
           reasoningEffort?: string;
           mcpEnabledServers?: string[];
           enabledPluginIds?: string[];
+          enabledOfficialToolIds?: import('../shared/official-tools').OfficialToolId[];
         };
         let payload: CreateSessionPayload;
         try {
@@ -3736,6 +3741,7 @@ async function main() {
         if (payloadReasoningEffort !== undefined) baseSnapshot.reasoningEffort = payloadReasoningEffort;
         if (payload.mcpEnabledServers !== undefined) baseSnapshot.mcpEnabledServers = payload.mcpEnabledServers;
         if (payload.enabledPluginIds !== undefined) baseSnapshot.enabledPluginIds = payload.enabledPluginIds;
+        if (payload.enabledOfficialToolIds !== undefined) baseSnapshot.enabledOfficialToolIds = payload.enabledOfficialToolIds;
         const session = await createSession(agentDirValue, baseSnapshot);
         return jsonResponse({ success: true, session });
       }
@@ -3878,6 +3884,7 @@ async function main() {
           permissionMode?: string | null;
           mcpEnabledServers?: string[] | null;
           enabledPluginIds?: string[] | null;
+          enabledOfficialToolIds?: import('../shared/official-tools').OfficialToolId[] | null;
           providerId?: string | null;
           providerRoute?: ProviderRoute | null;
           providerExecutionIdentity?: RuntimeBackedProviderIdentity | null;
@@ -3904,6 +3911,7 @@ async function main() {
           'permissionMode',
           'mcpEnabledServers',
           'enabledPluginIds',
+          'enabledOfficialToolIds',
           'providerId',
           'providerRoute',
           'providerExecutionIdentity',
@@ -7843,6 +7851,10 @@ async function main() {
               (v): v is string => typeof v === 'string',
             );
             patch.enabledPluginIds = ids;
+          }
+          if (Array.isArray(snapshot.enabledOfficialToolIds)) {
+            const { normalizeOfficialToolIds } = await import('../shared/official-tools');
+            patch.enabledOfficialToolIds = normalizeOfficialToolIds(snapshot.enabledOfficialToolIds);
           }
           if (typeof snapshot.providerId === 'string') {
             patch.providerId = snapshot.providerId;

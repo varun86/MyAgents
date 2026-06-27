@@ -912,6 +912,7 @@ export async function updateSessionMetadata(
         | 'permissionMode'
         | 'mcpEnabledServers'
         | 'enabledPluginIds'
+        | 'enabledOfficialToolIds'
         | 'providerId'
         | 'providerRoute'
         | 'providerExecutionIdentity'

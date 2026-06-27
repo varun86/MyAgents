@@ -27,6 +27,7 @@ import { CUSTOM_EVENTS } from '@/../shared/constants';
 import { type Project, type Provider, type PermissionMode, type ProviderVerifyStatus } from '@/config/types';
 import type { RuntimeType, RuntimeModelInfo, RuntimePermissionMode } from '../../../shared/types/runtime';
 import type { Thought } from '../../../shared/types/thought';
+import type { OfficialToolDefinition, OfficialToolId } from '../../../shared/official-tools';
 
 interface BrandSectionProps {
     // Workspace
@@ -68,6 +69,11 @@ interface BrandSectionProps {
     globalMcpEnabled?: string[];
     mcpServers?: Array<{ id: string; name: string; description?: string }>;
     onWorkspaceMcpToggle?: (serverId: string, enabled: boolean) => void;
+    officialTools?: readonly OfficialToolDefinition[];
+    workspaceOfficialToolEnabled?: OfficialToolId[];
+    globalOfficialToolEnabled?: OfficialToolId[];
+    officialToolNeedsConfig?: Partial<Record<OfficialToolId, boolean>>;
+    onWorkspaceOfficialToolToggle?: (toolId: OfficialToolId, enabled: boolean) => void;
     // PRD 0.2.17 — Claude Plugins (passthrough to SimpleChatInput).
     globallyVisiblePlugins?: Array<{ id: string; name: string; description?: string }>;
     workspaceEnabledPlugins?: string[];
@@ -115,6 +121,11 @@ export default memo(function BrandSection({
     globalMcpEnabled,
     mcpServers,
     onWorkspaceMcpToggle,
+    officialTools,
+    workspaceOfficialToolEnabled,
+    globalOfficialToolEnabled,
+    officialToolNeedsConfig,
+    onWorkspaceOfficialToolToggle,
     globallyVisiblePlugins,
     workspaceEnabledPlugins,
     onWorkspacePluginToggle,
@@ -519,6 +530,11 @@ export default memo(function BrandSection({
                                 globalMcpEnabled={globalMcpEnabled}
                                 mcpServers={mcpServers}
                                 onWorkspaceMcpToggle={onWorkspaceMcpToggle}
+                                officialTools={officialTools}
+                                workspaceOfficialToolEnabled={workspaceOfficialToolEnabled}
+                                globalOfficialToolEnabled={globalOfficialToolEnabled}
+                                officialToolNeedsConfig={officialToolNeedsConfig}
+                                onWorkspaceOfficialToolToggle={onWorkspaceOfficialToolToggle}
                                 globallyVisiblePlugins={globallyVisiblePlugins}
                                 workspaceEnabledPlugins={workspaceEnabledPlugins}
                                 onWorkspacePluginToggle={onWorkspacePluginToggle}

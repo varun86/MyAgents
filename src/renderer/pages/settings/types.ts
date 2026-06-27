@@ -1,4 +1,5 @@
 import type { CapabilityInitialSelect } from '../../../shared/skillsTypes';
+import type { OfficialToolId } from '../../../shared/official-tools';
 import type { SubscriptionStatusWithVerify } from '@/types/subscription';
 
 export type SubscriptionStatus = SubscriptionStatusWithVerify;
@@ -28,6 +29,7 @@ export interface ProviderVerifyError {
 export interface SettingsProps {
   initialSection?: string;
   initialMcpId?: string;
+  initialOfficialToolId?: OfficialToolId;
   initialSelect?: CapabilityInitialSelect;
   onSectionChange?: () => void;
   isActive?: boolean;

@@ -32,6 +32,7 @@ import { normalizeWorkspacePathIdentity, workspacePathsEqual } from '../../share
 import {
     getAllMcpServers,
     getEnabledMcpServerIds,
+    isProviderAvailable,
     resolveProvider,
     pairBuiltinSelection,
 } from '@/config/configService';
@@ -44,6 +45,13 @@ import {
     isRuntimeBackedProvider,
     toProviderExecutionIntent,
 } from '../../shared/providerExecution';
+import {
+    IMAGE_UNDERSTANDING_TOOL_ID,
+    OFFICIAL_TOOLS,
+    isImageUnderstandingToolConfigured,
+    normalizeOfficialToolIds,
+    type OfficialToolId,
+} from '../../shared/official-tools';
 import { apiGetJson } from '@/api/apiFetch';
 import { isBrowserDevMode, pickFolderForDialog } from '@/utils/browserMock';
 import { resolveLauncherProvider } from '@/utils/optionResolve';
@@ -220,6 +228,11 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
     // from launcherLastUsed once config loads (effect below); transient
     // selection is carried into the new Tab via InitialMessage.
     const [launcherEnabledPlugins, setLauncherEnabledPlugins] = useState<string[]>([]);
+    const [launcherOfficialToolEnabled, setLauncherOfficialToolEnabled] = useState<OfficialToolId[]>([]);
+    const launcherGlobalOfficialToolEnabled = useMemo(
+        () => normalizeOfficialToolIds(config.enabledOfficialToolIds ?? []),
+        [config.enabledOfficialToolIds],
+    );
 
     // Resolve AgentConfig for selected workspace (source of truth for AI settings)
     const selectedAgent = useMemo(() => {
@@ -275,6 +288,19 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
         const id = launcherProviderId ?? selectedAgent?.providerId ?? selectedWorkspace?.providerId ?? config.defaultProviderId;
         return resolveProvider(id, providers, apiKeys, providerVerifyStatus);
     }, [launcherProviderId, selectedAgent, selectedWorkspace, config.defaultProviderId, providers, apiKeys, providerVerifyStatus]);
+    const imageUnderstandingConfiguredForInput = useMemo(() => {
+        if (!isImageUnderstandingToolConfigured(config.officialToolSettings)) return false;
+        const selection = config.officialToolSettings?.imageUnderstanding;
+        const provider = providers.find(item => item.id === selection?.providerId);
+        if (!provider || isRuntimeBackedProvider(provider)) return false;
+        if (!isProviderAvailable(provider, apiKeys, providerVerifyStatus)) return false;
+        const model = provider.models.find(item => item.model === selection?.model);
+        return Array.isArray(model?.inputModalities) && model.inputModalities.includes('image');
+    }, [apiKeys, config.officialToolSettings, providerVerifyStatus, providers]);
+    const launcherOfficialToolNeedsConfig = useMemo(
+        () => ({ [IMAGE_UNDERSTANDING_TOOL_ID]: !imageUnderstandingConfiguredForInput }),
+        [imageUnderstandingConfiguredForInput],
+    );
 
     // Load MCP servers when workspace changes
     useEffect(() => {
@@ -323,6 +349,28 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
             enabled ? [...prev, pluginId] : prev.filter(id => id !== pluginId),
         );
     }, []);
+
+    const handleLauncherOfficialToolToggle = useCallback((toolId: OfficialToolId, enabled: boolean) => {
+        setLauncherOfficialToolEnabled(prev => {
+            const newEnabled = normalizeOfficialToolIds(
+                enabled ? [...prev, toolId] : prev.filter(id => id !== toolId),
+            );
+            if (selectedWorkspace) {
+                void persistInputOptionChange({
+                    workspaceId: selectedWorkspace.id,
+                    agentId: selectedWorkspace.agentId ?? null,
+                    isExternalRuntime,
+                    currentRuntimeConfig: runtimeConfigRef.current,
+                    currentProviderId: selectedAgent?.providerId ?? selectedWorkspace.providerId,
+                    fields: { enabledOfficialToolIds: newEnabled },
+                    patchProject,
+                    patchAgentConfig,
+                });
+            }
+            return newEnabled;
+        });
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only re-create when workspace ID changes, not on every property change
+    }, [selectedWorkspace?.id, patchProject, isExternalRuntime]);
 
     // Handle workspace MCP toggle — delegates to the shared dual-write helper
     // (PRD 0.2.7) so launcher and chat-tab persist identical fields.
@@ -378,6 +426,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
         if (resolved.model) setLauncherSelectedModel(resolved.model);
         if (lastUsed.mcpEnabledServers) setLauncherWorkspaceMcpEnabled(lastUsed.mcpEnabledServers);
         if (lastUsed.enabledPluginIds) setLauncherEnabledPlugins(lastUsed.enabledPluginIds);
+        if (lastUsed.enabledOfficialToolIds) setLauncherOfficialToolEnabled(normalizeOfficialToolIds(lastUsed.enabledOfficialToolIds));
     // eslint-disable-next-line react-hooks/exhaustive-deps -- one-time restore; selected agent/workspace read at apply time, intentionally not deps
     }, [isLoading, config.launcherLastUsed]);
 
@@ -411,8 +460,9 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
         }
         setLauncherProviderId(selectedAgent?.providerId ?? selectedWorkspace.providerId ?? undefined);
         setLauncherWorkspaceMcpEnabled(selectedAgent?.mcpEnabledServers ?? selectedWorkspace.mcpEnabledServers ?? []);
+        setLauncherOfficialToolEnabled(normalizeOfficialToolIds(selectedAgent?.enabledOfficialToolIds ?? selectedWorkspace.enabledOfficialToolIds ?? []));
     // eslint-disable-next-line react-hooks/exhaustive-deps -- depend on specific agent/project fields, not object ref
-    }, [isLoading, selectedWorkspace?.id, selectedAgent?.permissionMode, selectedAgent?.model, selectedAgent?.providerId, selectedAgent?.mcpEnabledServers, selectedAgent?.runtime, selectedAgent?.reasoningEffort, agentRuntimeModel, agentRuntimePermMode, agentRuntimeReasoningEffort, selectedWorkspace?.permissionMode, selectedWorkspace?.model, selectedWorkspace?.providerId, selectedWorkspace?.mcpEnabledServers, config.defaultPermissionMode, multiAgentRuntimeEnabled, isExternalRuntime]);
+    }, [isLoading, selectedWorkspace?.id, selectedAgent?.permissionMode, selectedAgent?.model, selectedAgent?.providerId, selectedAgent?.mcpEnabledServers, selectedAgent?.enabledOfficialToolIds, selectedAgent?.runtime, selectedAgent?.reasoningEffort, agentRuntimeModel, agentRuntimePermMode, agentRuntimeReasoningEffort, selectedWorkspace?.permissionMode, selectedWorkspace?.model, selectedWorkspace?.providerId, selectedWorkspace?.mcpEnabledServers, selectedWorkspace?.enabledOfficialToolIds, config.defaultPermissionMode, multiAgentRuntimeEnabled, isExternalRuntime]);
 
     // Write-back handlers: persist Launcher setting changes to the selected project
 
@@ -596,6 +646,10 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
         const carriedEnabledPlugins = launcherEnabledPlugins.filter(id =>
             launcherVisiblePluginIds.has(id),
         );
+        const carriedOfficialTools = launcherOfficialToolEnabled.filter(id =>
+            launcherGlobalOfficialToolEnabled.includes(id)
+            && (id !== IMAGE_UNDERSTANDING_TOOL_ID || imageUnderstandingConfiguredForInput),
+        );
 
         const initialMessage: InitialMessage = {
             text,
@@ -603,6 +657,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
             permissionMode: launcherPermissionMode,
             mcpEnabledServers: launcherWorkspaceMcpEnabled.filter(id => launcherGlobalMcpEnabled.includes(id)),
             ...(carriedEnabledPlugins.length > 0 ? { enabledPluginIds: carriedEnabledPlugins } : {}),
+            enabledOfficialToolIds: carriedOfficialTools,
             ...(builtinSelection ? { builtinSelection } : {}),
             ...(runtimeModel ? { runtimeModel } : {}),
             ...(runtimeBackedProviderIdentity ? { providerExecutionIdentity: runtimeBackedProviderIdentity } : {}),
@@ -620,6 +675,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
                 permissionMode: launcherPermissionMode,
                 mcpEnabledServers: launcherWorkspaceMcpEnabled,
                 enabledPluginIds: launcherEnabledPlugins,
+                enabledOfficialToolIds: launcherOfficialToolEnabled,
             },
         }).catch(err => console.warn('[Launcher] Failed to save launcherLastUsed:', err));
 
@@ -727,7 +783,8 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
         );
     }, [selectedWorkspace, launcherProvider, launcherPermissionMode,
         launcherSelectedModel, launcherReasoningEffort, launcherWorkspaceMcpEnabled, launcherGlobalMcpEnabled,
-        launcherEnabledPlugins, config.plugins, config.enabledPlugins,
+        launcherEnabledPlugins, launcherOfficialToolEnabled, launcherGlobalOfficialToolEnabled,
+        imageUnderstandingConfiguredForInput, config.plugins, config.enabledPlugins,
         isExternalRuntime, launcherRuntime, providers,
         touchProject, onLaunchProject, updateConfig]);
 
@@ -770,6 +827,10 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
                     reasoningEffort: launcherReasoningEffort,
                     mcpEnabledServers: launcherWorkspaceMcpEnabled.filter(id => launcherGlobalMcpEnabled.includes(id)),
                     enabledPluginIds: launcherEnabledPlugins.filter(id => visiblePluginIds.has(id)),
+                    enabledOfficialToolIds: launcherOfficialToolEnabled.filter(id =>
+                        launcherGlobalOfficialToolEnabled.includes(id)
+                        && (id !== IMAGE_UNDERSTANDING_TOOL_ID || imageUnderstandingConfiguredForInput),
+                    ),
                 };
             }
         }
@@ -794,6 +855,9 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
         launcherWorkspaceMcpEnabled,
         launcherGlobalMcpEnabled,
         launcherEnabledPlugins,
+        launcherOfficialToolEnabled,
+        launcherGlobalOfficialToolEnabled,
+        imageUnderstandingConfiguredForInput,
         config.plugins,
         config.enabledPlugins,
     ]);
@@ -1041,6 +1105,11 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
                         globalMcpEnabled={launcherGlobalMcpEnabled}
                         mcpServers={launcherMcpServers}
                         onWorkspaceMcpToggle={handleWorkspaceMcpToggle}
+                        officialTools={OFFICIAL_TOOLS}
+                        workspaceOfficialToolEnabled={launcherOfficialToolEnabled}
+                        globalOfficialToolEnabled={launcherGlobalOfficialToolEnabled}
+                        officialToolNeedsConfig={launcherOfficialToolNeedsConfig}
+                        onWorkspaceOfficialToolToggle={handleLauncherOfficialToolToggle}
                         // PRD 0.2.17 — same plugin props as Chat. Source from
                         // AppConfig (Layer 1 visibility gate); Layer 2 is
                         // Launcher's transient selection (handed off to new

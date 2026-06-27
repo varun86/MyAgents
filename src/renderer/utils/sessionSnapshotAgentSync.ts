@@ -12,6 +12,7 @@ export type AgentSyncSessionSnapshot = {
   reasoningEffort?: string;
   permissionMode?: string;
   mcpEnabledServers?: string[];
+  enabledOfficialToolIds?: import('../../shared/official-tools').OfficialToolId[];
   providerId?: string;
   runtimeSource?: RuntimeSource;
   providerExecutionIdentity?: RuntimeBackedProviderIdentity;
@@ -51,6 +52,7 @@ export function buildAgentPatchFromSessionSnapshot(
         },
       ),
       mcpEnabledServers: session.mcpEnabledServers,
+      enabledOfficialToolIds: session.enabledOfficialToolIds,
     };
   }
 
@@ -58,6 +60,7 @@ export function buildAgentPatchFromSessionSnapshot(
     model: session.model,
     permissionMode: session.permissionMode,
     mcpEnabledServers: session.mcpEnabledServers,
+    enabledOfficialToolIds: session.enabledOfficialToolIds,
     providerId: session.providerId,
   };
   const currentAgentUsesManagedCodexProvider =

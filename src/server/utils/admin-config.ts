@@ -27,6 +27,13 @@ import type { McpServerDefinition, ProviderVerifyStatus } from '../../shared/con
 import { applyProviderEnablementAndOrder, isProviderEnabled, PRESET_MCP_SERVERS, PRESET_PROVIDERS } from '../../shared/config-types';
 import { isRuntimeBackedProvider } from '../../shared/providerExecution';
 import {
+  IMAGE_UNDERSTANDING_TOOL_ID,
+  isImageUnderstandingToolConfigured,
+  normalizeOfficialToolIds,
+  type OfficialToolId,
+  type OfficialToolSettings,
+} from '../../shared/official-tools';
+import {
   coerceModelForRuntime,
   coercePermissionModeForRuntime,
   getDefaultRuntimePermissionMode,
@@ -100,6 +107,9 @@ export interface AdminAppConfig {
   cliToolEnv?: Record<string, Record<string, string>>;
   // Experimental gate for user-registered CLI tools. Omitted means disabled.
   cliToolRegistryEnabled?: boolean;
+  // MyAgents official CLI tools
+  enabledOfficialToolIds?: OfficialToolId[];
+  officialToolSettings?: OfficialToolSettings;
   // Provider
   defaultProviderId?: string;
   providerApiKeys?: Record<string, string>;
@@ -126,6 +136,7 @@ export interface AgentConfigSlim {
   channels?: ChannelConfigSlim[];
   /** PRD 0.2.17 — plugins this Agent enables (subset of globally-visible). */
   enabledPluginIds?: string[];
+  enabledOfficialToolIds?: OfficialToolId[];
   [key: string]: unknown;
 }
 
@@ -149,6 +160,7 @@ export interface ProjectSlim {
   name: string;
   path: string;
   mcpEnabledServers?: string[];
+  enabledOfficialToolIds?: OfficialToolId[];
   model?: string;
   permissionMode?: string;
   [key: string]: unknown;
@@ -406,6 +418,73 @@ export function getAllMcpServers(config?: AdminAppConfig): McpServerDefinition[]
 export function getEnabledMcpServerIds(config?: AdminAppConfig): string[] {
   const c = config ?? loadConfig();
   return c.mcpEnabledServers ?? [];
+}
+
+export function getGloballyEnabledOfficialToolIds(config?: AdminAppConfig): OfficialToolId[] {
+  const c = config ?? loadConfig();
+  return normalizeOfficialToolIds(c.enabledOfficialToolIds);
+}
+
+export function isImageUnderstandingGloballyConfigured(config?: AdminAppConfig): boolean {
+  const c = config ?? loadConfig();
+  return isImageUnderstandingToolConfigured(c.officialToolSettings);
+}
+
+function configuredOfficialToolSet(config: AdminAppConfig): Set<OfficialToolId> {
+  const configured = new Set<OfficialToolId>();
+  if (isImageUnderstandingGloballyConfigured(config)) {
+    configured.add(IMAGE_UNDERSTANDING_TOOL_ID);
+  }
+  return configured;
+}
+
+function filterEffectiveOfficialToolIds(
+  config: AdminAppConfig,
+  requested: unknown,
+): OfficialToolId[] {
+  const globalEnabled = new Set(getGloballyEnabledOfficialToolIds(config));
+  const configured = configuredOfficialToolSet(config);
+  return normalizeOfficialToolIds(requested).filter(
+    id => globalEnabled.has(id) && configured.has(id),
+  );
+}
+
+export function getDefaultEnabledOfficialToolIdsForWorkspace(
+  agentDir: string | undefined | null,
+  config?: AdminAppConfig,
+): OfficialToolId[] {
+  if (!agentDir) return [];
+  const c = config ?? loadConfig();
+  const agents = (c.agents ?? []) as Array<Record<string, unknown>>;
+  const agent = agents.find(a =>
+    typeof a.workspacePath === 'string' && workspacePathsEqual(a.workspacePath, agentDir)
+  );
+  const project = loadProjects().find(p =>
+    typeof p.path === 'string' && workspacePathsEqual(p.path, agentDir)
+  );
+  return filterEffectiveOfficialToolIds(
+    c,
+    agent?.enabledOfficialToolIds ?? project?.enabledOfficialToolIds,
+  );
+}
+
+export function getEffectiveOfficialToolIdsForSession(
+  agentDir: string | undefined | null,
+  sessionMeta?: SessionMetadata | null,
+  overrideIds?: readonly OfficialToolId[] | null,
+  config?: AdminAppConfig,
+): OfficialToolId[] {
+  const c = config ?? loadConfig();
+  if (overrideIds !== null && overrideIds !== undefined) {
+    return filterEffectiveOfficialToolIds(c, overrideIds);
+  }
+  if (sessionMeta?.configSnapshotAt) {
+    return filterEffectiveOfficialToolIds(c, sessionMeta.enabledOfficialToolIds);
+  }
+  if (sessionMeta?.enabledOfficialToolIds !== undefined) {
+    return filterEffectiveOfficialToolIds(c, sessionMeta.enabledOfficialToolIds);
+  }
+  return getDefaultEnabledOfficialToolIdsForWorkspace(agentDir, c);
 }
 
 /**
@@ -797,6 +876,7 @@ export function decodeProviderEnvSnapshot(
 /** Result of self-resolution for a workspace */
 export interface WorkspaceResolvedConfig {
   mcpServers: McpServerDefinition[];
+  enabledOfficialToolIds: OfficialToolId[];
   providerEnv: ResolvedProviderEnv | undefined;
   providerRoute: ProviderRoute | undefined;
   model: string | undefined;
@@ -874,6 +954,23 @@ export function resolveWorkspaceConfig(
       mcpServers = getEffectiveMcpServers(agentDir);
     }
   }
+
+  // --- Resolve MyAgents official CLI tools ---
+  const globalOfficialTools = new Set(getGloballyEnabledOfficialToolIds(config));
+  const configuredOfficialTools = new Set<OfficialToolId>();
+  if (isImageUnderstandingGloballyConfigured(config)) {
+    configuredOfficialTools.add(IMAGE_UNDERSTANDING_TOOL_ID);
+  }
+  const requestedOfficialTools = snapshotOwnsConfig
+    ? normalizeOfficialToolIds(sessionMeta?.enabledOfficialToolIds)
+    : normalizeOfficialToolIds(
+      sessionMeta?.enabledOfficialToolIds
+      ?? agent?.enabledOfficialToolIds
+      ?? project?.enabledOfficialToolIds,
+    );
+  const enabledOfficialToolIds = requestedOfficialTools.filter(
+    id => globalOfficialTools.has(id) && configuredOfficialTools.has(id),
+  );
 
   const agentProvider = agent?.providerId
     ? findEffectiveProvider(agent.providerId as string, config)
@@ -1021,14 +1118,15 @@ export function resolveWorkspaceConfig(
   // which now always resolves to a non-empty string ('auto' fallback) and would
   // make this log fire on every call (incl. no-match). Stay silent when nothing
   // resolved, as before.
-  if (mcpServers.length > 0 || providerEnv || model || agent) {
+  if (mcpServers.length > 0 || enabledOfficialToolIds.length > 0 || providerEnv || model || agent) {
     const source = sessionMeta?.configSnapshotAt ? 'session-snapshot' : 'agent';
     console.log(
       `[admin-config] resolveWorkspaceConfig (${source}): ` +
       `provider=${providerId ?? 'subscription'}, model=${model ?? 'default'}, ` +
-      `permission=${permissionMode}, mcp=${mcpServers.length} server(s)${agent ? '' : ' (no agent match)'}`
+      `permission=${permissionMode}, mcp=${mcpServers.length} server(s), ` +
+      `officialTools=${enabledOfficialToolIds.join(',') || 'none'}${agent ? '' : ' (no agent match)'}`
     );
   }
 
-  return { mcpServers, providerEnv, providerRoute, model, permissionMode, reasoningEffort };
+  return { mcpServers, enabledOfficialToolIds, providerEnv, providerRoute, model, permissionMode, reasoningEffort };
 }

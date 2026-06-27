@@ -4,6 +4,7 @@ import type { ImageAttachment } from '@/components/SimpleChatInput';
 import type { PermissionMode } from '@/config/types';
 import type { CronSchedule, CronEndConditions, CronDelivery } from '@/types/cronTask';
 import type { RuntimeBackedProviderIdentity } from '../../shared/providerExecution';
+import type { OfficialToolId } from '../../shared/official-tools';
 
 /** Cron settings drafted in the launcher input. Sent forward via
  *  `InitialMessage.cron` and consumed by Chat's `autoSend` to switch from
@@ -64,6 +65,7 @@ export interface InitialMessage {
      *  workspaceEnabledPlugins from this); mirrors mcpEnabledServers
      *  semantics exactly. */
     enabledPluginIds?: string[];
+    enabledOfficialToolIds?: OfficialToolId[];
     /** Builtin runtime 的 (provider, model) 选择 — 类型上强制成对 */
     builtinSelection?: { providerId: string; model: string };
     /** External runtime 的 model — 没有 provider 概念 */
@@ -87,6 +89,7 @@ export interface LaunchSessionBirthHint {
     permissionMode?: PermissionMode | string;
     mcpEnabledServers?: string[];
     enabledPluginIds?: string[];
+    enabledOfficialToolIds?: OfficialToolId[];
     builtinSelection?: { providerId: string; model: string };
     runtimeModel?: string;
     providerExecutionIdentity?: RuntimeBackedProviderIdentity;

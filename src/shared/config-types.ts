@@ -3,6 +3,7 @@
 import type { HeartbeatConfig, MemoryAutoUpdateConfig } from './types/im';
 import type { RuntimeModelInfo, RuntimeSource, RuntimeType } from './types/runtime';
 import type { UiLanguage } from './i18n';
+import type { OfficialToolId, OfficialToolSettings } from './official-tools';
 
 /**
  * Permission mode for agent behavior
@@ -322,6 +323,8 @@ export interface Project {
   /** PRD 0.2.17 — Claude plugins enabled for this workspace (subset of globally
    *  visible plugins). Mirrors mcpEnabledServers semantics exactly. */
   enabledPluginIds?: string[];
+  /** MyAgents official CLI tools enabled for this workspace. Separate from MCP ids. */
+  enabledOfficialToolIds?: OfficialToolId[];
   /** Internal projects (e.g. ~/.myagents diagnostic workspace) hidden from Launcher */
   internal?: boolean;
   /** Custom emoji icon for display, defaults to FolderOpen if absent */
@@ -732,6 +735,11 @@ export interface AppConfig {
   // without re-registration.
   cliToolEnv?: Record<string, Record<string, string>>;
 
+  // ===== Official CLI Tools =====
+  // Global visibility gate for MyAgents-owned CLI tools (not user registry tools).
+  enabledOfficialToolIds?: OfficialToolId[];
+  officialToolSettings?: OfficialToolSettings;
+
   // ===== Network Proxy (General) =====
   // HTTP/SOCKS5 proxy settings for external network requests
   proxySettings?: ProxySettings;
@@ -750,6 +758,7 @@ export interface AppConfig {
     mcpEnabledServers?: string[];
     /** PRD 0.2.17 — last-selected plugin set in Launcher, restored on next open. */
     enabledPluginIds?: string[];
+    enabledOfficialToolIds?: OfficialToolId[];
   };
 
   // ===== Agent Configuration (v0.1.41) =====

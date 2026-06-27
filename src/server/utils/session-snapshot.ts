@@ -54,6 +54,7 @@ export type OwnedSessionSnapshot = Pick<
   | 'permissionMode'
   | 'mcpEnabledServers'
   | 'enabledPluginIds'
+  | 'enabledOfficialToolIds'
   | 'providerId'
   | 'providerRoute'
   | 'providerExecutionIdentity'
@@ -196,6 +197,7 @@ export function snapshotForOwnedSession(
       ),
       mcpEnabledServers: agent.mcpEnabledServers ? [...agent.mcpEnabledServers] : undefined,
       enabledPluginIds: agent.enabledPluginIds ? [...agent.enabledPluginIds] : undefined,
+      enabledOfficialToolIds: agent.enabledOfficialToolIds ? [...agent.enabledOfficialToolIds] : undefined,
       providerId: providerExecutionIdentity.providerId,
       providerRoute: undefined,
       providerExecutionIdentity,
@@ -229,6 +231,7 @@ export function snapshotForOwnedSession(
       : snapshotAgent.permissionMode,
     mcpEnabledServers: snapshotAgent.mcpEnabledServers ? [...snapshotAgent.mcpEnabledServers] : undefined,
     enabledPluginIds: snapshotAgent.enabledPluginIds ? [...snapshotAgent.enabledPluginIds] : undefined,
+    enabledOfficialToolIds: snapshotAgent.enabledOfficialToolIds ? [...snapshotAgent.enabledOfficialToolIds] : undefined,
     providerId: builtinProviderId,
     providerRoute,
     providerExecutionIdentity: undefined,

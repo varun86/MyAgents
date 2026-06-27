@@ -12,6 +12,7 @@ import type { ContextUsage } from '../../shared/types/context-usage';
 import type { ProviderRoute } from '../../shared/providerRoute';
 import type { RuntimeBackedProviderIdentity } from '../../shared/providerExecution';
 import type { RuntimeSource } from '../../shared/types/runtime';
+import type { OfficialToolId } from '../../shared/official-tools';
 
 export interface SessionStats {
     messageCount: number;
@@ -81,6 +82,8 @@ export interface SessionMetadata {
     mcpEnabledServers?: string[];
     /** Snapshot Claude cc-plugin enabled list. */
     enabledPluginIds?: string[];
+    /** Snapshot MyAgents official CLI tool enabled list. */
+    enabledOfficialToolIds?: OfficialToolId[];
     providerId?: string;
     providerRoute?: ProviderRoute;
     /** Provider-facing identity for runtime-backed providers such as Managed Codex. */
@@ -170,6 +173,7 @@ export async function createSession(
         reasoningEffort?: string;
         mcpEnabledServers?: string[];
         enabledPluginIds?: string[];
+        enabledOfficialToolIds?: OfficialToolId[];
     },
 ): Promise<SessionMetadata> {
     const result = await apiPostJson<{ success: boolean; session: SessionMetadata }>(
@@ -185,6 +189,7 @@ export async function createSession(
             ...(opts?.reasoningEffort !== undefined ? { reasoningEffort: opts.reasoningEffort } : {}),
             ...(opts?.mcpEnabledServers !== undefined ? { mcpEnabledServers: opts.mcpEnabledServers } : {}),
             ...(opts?.enabledPluginIds !== undefined ? { enabledPluginIds: opts.enabledPluginIds } : {}),
+            ...(opts?.enabledOfficialToolIds !== undefined ? { enabledOfficialToolIds: opts.enabledOfficialToolIds } : {}),
             // PRD 0.2.34 §14 D14：桌面渠道创建时由服务端原子地种「最宽松权限 per
             // runtime」（getMaxPermissionForRuntime），避免创建后再 PATCH 的吞错窗口。
             ...(opts?.seedMaxPermission ? { seedMaxPermission: true } : {}),
@@ -254,6 +259,7 @@ export async function updateSession(
         permissionMode?: string | null;
         mcpEnabledServers?: string[] | null;
         enabledPluginIds?: string[] | null;
+        enabledOfficialToolIds?: OfficialToolId[] | null;
         providerId?: string | null;
         providerRoute?: ProviderRoute | null;
         providerExecutionIdentity?: RuntimeBackedProviderIdentity | null;

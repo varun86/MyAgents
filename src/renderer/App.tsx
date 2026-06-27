@@ -83,7 +83,7 @@ import { getSessionDisplayText } from '@/utils/sessionDisplay';
 import { listenWithCleanup } from '@/utils/tauriListen';
 import { migrateFloatingBallSessionBinding } from '@/floating-ball/sessionBinding';
 import { CUSTOM_EVENTS, createPendingSessionId, isPendingSessionId } from '../shared/constants';
-import type { OfficialToolId } from '../shared/official-tools';
+import { normalizeOfficialToolIds, type OfficialToolId } from '../shared/official-tools';
 import { workspacePathsEqual } from '../shared/workspacePath';
 import type { CapabilityInitialSelect } from '../shared/skillsTypes';
 import { ensureSelfAwarenessWorkspace, resolveBuiltinSelection, pairBuiltinSelection, isProviderAvailable } from '@/config/configService';
@@ -223,7 +223,7 @@ interface TabContentProps {
   isDeferredMount: boolean;
   settingsInitialSection: string | undefined;
   settingsInitialMcpId: string | undefined;
-  settingsInitialOfficialToolId: OfficialToolId | undefined;
+  settingsInitialOfficialToolId?: OfficialToolId;
   settingsInitialSelect: CapabilityInitialSelect | undefined;
   // Launcher callbacks
   onLaunchProject: (project: Project, sessionId?: string, initialMessage?: InitialMessage, analyticsContext?: LaunchProjectAnalyticsContext, sessionBirthHint?: LaunchSessionBirthHint) => void;
@@ -1789,6 +1789,11 @@ export default function App() {
               ?? sessionBirthHint?.enabledPluginIds
               ?? (identityResolvedFromCurrentConfig
                 ? cloneStringArray(agentForLaunchBirth?.enabledPluginIds ?? project.enabledPluginIds)
+                : undefined),
+            enabledOfficialToolIds: initialMessage?.enabledOfficialToolIds
+              ?? sessionBirthHint?.enabledOfficialToolIds
+              ?? (identityResolvedFromCurrentConfig
+                ? normalizeOfficialToolIds(agentForLaunchBirth?.enabledOfficialToolIds ?? project.enabledOfficialToolIds ?? [])
                 : undefined),
           });
           console.log(
@@ -3590,6 +3595,7 @@ export default function App() {
   const handleSettingsSectionChange = useCallback(() => {
     setSettingsInitialSection(undefined);
     setSettingsInitialMcpId(undefined);
+    setSettingsInitialOfficialToolId(undefined);
     setSettingsInitialSelect(undefined);
   }, []);
 

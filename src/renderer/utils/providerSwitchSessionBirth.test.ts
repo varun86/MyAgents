@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import { CODEX_SUBSCRIPTION_PROVIDER_ID } from '@/config/types';
 import { createConcreteProviderRoute } from '../../shared/providerRoute';
+import { IMAGE_UNDERSTANDING_TOOL_ID } from '../../shared/official-tools';
 import type { ProviderExecutionIntent } from '../../shared/providerExecution';
 import {
   buildProviderSwitchSessionBirth,
@@ -66,6 +67,24 @@ describe('buildProviderSwitchSessionBirth', () => {
         enabledPluginIds: [],
       },
     });
+  });
+
+  it('carries official CLI tool selections into the new session snapshot', () => {
+    const targetIntent: ProviderExecutionIntent = {
+      kind: 'builtin-provider',
+      route: createConcreteProviderRoute('anthropic', 'claude-sonnet-4-6'),
+    };
+
+    expect(buildProviderSwitchSessionBirth({
+      targetIntent,
+      providerId: 'anthropic',
+      model: 'claude-sonnet-4-6',
+      permissionMode: 'auto',
+      reasoningEffort: 'default',
+      mcpEnabledServers: [],
+      enabledPluginIds: [],
+      enabledOfficialToolIds: [IMAGE_UNDERSTANDING_TOOL_ID],
+    }).opts.enabledOfficialToolIds).toEqual([IMAGE_UNDERSTANDING_TOOL_ID]);
   });
 
   it('keeps target-runtime permission and effort values for managed Codex session birth', () => {

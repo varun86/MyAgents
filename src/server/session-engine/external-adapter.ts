@@ -25,6 +25,7 @@ import {
   getExternalSessionPermissionMode,
   getExternalSessionReasoningEffort,
   getExternalSessionState,
+  getExternalSessionWorkspacePath,
   getExternalSystemInitPayload,
   getLastExternalAssistantText,
   isExternalSessionActive,
@@ -51,12 +52,18 @@ import type {
   SessionEngine,
 } from './types';
 import { decideExternalInjectedTurnResult } from '../session-core/turn-result-policy';
+import { getEffectiveOfficialToolIdsForSession } from '../utils/admin-config';
 import { getSessionData, updateSessionMetadata } from '../SessionStore';
 import { getLatestAssistantResultFromMessages, NO_TEXT_RESPONSE } from '../inbox/latest-result';
 import type { SessionMessage } from '../types/session';
+import type { OfficialToolId } from '../../shared/official-tools';
 
 function getRuntimeSessionId(): string {
   return getExternalSessionId() || getCurrentBoundSessionId() || getSessionId();
+}
+
+function getRuntimeWorkspacePath(): string {
+  return getExternalSessionWorkspacePath() || getAgentState().agentDir || '';
 }
 
 function getLatestExternalResult(): string {
@@ -69,6 +76,14 @@ function getLatestExternalResult(): string {
       : NO_TEXT_RESPONSE;
   }
   return latestResult.trim() || NO_TEXT_RESPONSE;
+}
+
+async function persistOfficialToolIdsForSession(sessionId: string | null, ids: OfficialToolId[] | null): Promise<void> {
+  if (!sessionId) return;
+  await updateSessionMetadata(sessionId, {
+    enabledOfficialToolIds: ids === null ? [] : [...ids],
+    configSnapshotAt: new Date().toISOString(),
+  });
 }
 
 function externalLiveMessageToSessionMessage(message: SessionMessage): SessionMessage {
@@ -132,6 +147,7 @@ export function createExternalSessionEngine(): SessionEngine {
     getSessionConfigSnapshot() {
       const runtimeSessionId = getRuntimeSessionId();
       const session = runtimeSessionId ? getSessionData(runtimeSessionId) : null;
+      const workspacePath = getRuntimeWorkspacePath();
       return {
         success: true,
         runtime: getActiveRuntimeType(),
@@ -139,11 +155,24 @@ export function createExternalSessionEngine(): SessionEngine {
         model: getExternalSessionModel(),
         mcpServerIds: null,
         agentNames: null,
+        enabledOfficialToolIds: workspacePath
+          ? getEffectiveOfficialToolIdsForSession(workspacePath, session)
+          : [],
         permissionMode: getExternalSessionPermissionMode(),
         providerId: session?.providerExecutionIdentity?.providerId ?? null,
         providerRoute: null,
         providerExecutionIdentity: session?.providerExecutionIdentity ?? null,
         reasoningEffort: getExternalSessionReasoningEffort() ?? 'default',
+      };
+    },
+
+    getCurrentSessionContext() {
+      const sessionId = getRuntimeSessionId();
+      return {
+        runtime: getActiveRuntimeType(),
+        sessionId: sessionId || null,
+        workspacePath: getRuntimeWorkspacePath() || null,
+        sessionMeta: sessionId ? getSessionData(sessionId) : null,
       };
     },
 
@@ -348,6 +377,15 @@ export function createExternalSessionEngine(): SessionEngine {
 
     updateReasoningEffort(effort) {
       return setExternalReasoningEffort(effort);
+    },
+
+    async updateOfficialToolIds(ids) {
+      const sessionId = getRuntimeSessionId();
+      await persistOfficialToolIdsForSession(sessionId, ids);
+      if (isExternalSessionActive() && getExternalSessionState() !== 'running') {
+        await stopExternalSession();
+      }
+      return { success: true };
     },
 
     async materializePendingDesktopSession(request) {

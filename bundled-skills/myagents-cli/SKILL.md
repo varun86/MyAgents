@@ -8,7 +8,7 @@ description: >-
   典型触发场景：用户说"每天 X 点帮我 Y"（→ cron）、"记一下这个想法"（→ thought）、"派发成任务"（→ task）、
   "接个 X 工具进来"（→ mcp）、"配 X 模型/Provider"（→ model）、"在飞书/钉钉/Telegram 里跟我聊"（→ agent channel）、
   "装个 X 插件 / 装个 X skill"（→ plugin / skill）、"处理 Space Issue / 下载附件 / 回复 Issue"（→ space）、
-  "把图发到 IM 里"（→ im send-media）、"做个图表/仪表盘"
+  "把图发到 IM 里"（→ im send-media）、"用已配置的读图模型理解图片"（→ vision analyze）、"做个图表/仪表盘"
   （→ widget readme）、"看下我有啥任务/定时/Runtime/版本"（→ list / status / version）、"改下应用设置"（→ config）。
   即使用户没说"用 MyAgents 做"几个字，只要意图能映射到上述能力之一，就该走这个 skill。
   反向边界：纯业务任务（写代码、查资料、读文件）不归这里；用户自己会话里给 AI 排任务用 im-cron MCP，不是这里。
@@ -108,6 +108,25 @@ myagents tool env <name> delete KEY      # 删
 - 工具报缺 API key（退出码 3）→ `tool env <name> set KEY=<用户提供的值>`
 - 注册名撞系统命令会被打回（`~/.myagents/bin` 在 PATH 前列，重名会遮蔽系统命令）→ 换带领域前缀的名字
 - 注册成功后 MUST 在回复中告知用户：工具名 + 干什么 + 可在 设置 → 工具箱 管理
+
+### 官方图片理解工具（vision）
+
+这是 MyAgents 内置官方 CLI 工具，不属于 MCP，也不属于用户注册 `tool` 实验功能。它用于在当前会话启用“图片理解”工具时，让不支持多模态的主模型把本地工作区图片交给用户在「设置 → 工具箱」里配置好的读图模型分析。
+
+```bash
+myagents vision readme
+myagents vision analyze --image <path> [--image <path> ...] [--prompt "what to inspect"]
+myagents vision analyze --image @myagents_files/screenshot.png --prompt "Extract the error text and UI state"
+```
+
+**约束：**
+- 只接受当前 MyAgents 工作区内的本地图片路径；不要传 URL。
+- `--prompt` 是短指令；vision 不支持 `--prompt-file`。
+- 如果报“not enabled / not configured”，让用户在「设置 → 工具箱」启用图片理解并选择支持图片输入的模型。
+
+**何时用：**
+- 当前主模型不支持图片，但会话里出现截图 / 图片附件，并且系统提示里说明 vision 工具可用。
+- 用户要求“看这张图 / 截图里写了什么 / 读一下错误信息”，先 `vision analyze` 拿文字观察，再基于观察继续回答。
 
 ### 模型 Provider（model）
 

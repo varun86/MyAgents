@@ -113,6 +113,11 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   inputRef,
   workspaceMcpEnabled = [],
   globalMcpEnabled = [],
+  officialTools = [],
+  workspaceOfficialToolEnabled = [],
+  globalOfficialToolEnabled = [],
+  officialToolNeedsConfig = {},
+  onWorkspaceOfficialToolToggle,
   globallyVisiblePlugins = [],
   workspaceEnabledPlugins = [],
   onWorkspacePluginToggle,
@@ -307,6 +312,25 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   const modeMenuOpen = showModeMenu && !configControlsLocked;
   const modelMenuOpen = showModelMenu && !configControlsLocked;
   const toolMenuOpen = showToolMenu && !configControlsLocked;
+  const visibleOfficialTools = useMemo(
+    () => officialTools.filter(
+      tool =>
+        globalOfficialToolEnabled.includes(tool.id) &&
+        !officialToolNeedsConfig[tool.id],
+    ),
+    [globalOfficialToolEnabled, officialToolNeedsConfig, officialTools],
+  );
+  const effectiveToolCount = useMemo(() => {
+    const effectiveMcpCount = isExternalRuntime
+      ? 0
+      : workspaceMcpEnabled.filter(
+        id => globalMcpEnabled.includes(id) && mcpServers.some(s => s.id === id),
+      ).length;
+    const effectiveOfficialCount = workspaceOfficialToolEnabled.filter(
+      id => visibleOfficialTools.some(tool => tool.id === id),
+    ).length;
+    return effectiveMcpCount + effectiveOfficialCount;
+  }, [globalMcpEnabled, isExternalRuntime, mcpServers, visibleOfficialTools, workspaceMcpEnabled, workspaceOfficialToolEnabled]);
 
   // #324 — 推理强度 submenu (fixed bottom row of the model menu). Opens on
   // hover/click of the row; 120ms close delay + an invisible hover bridge
@@ -1717,18 +1741,8 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                 ))}
               </Popover>
 
-              {/* Tool/MCP Dropdown - hidden for external runtimes (they use their own tools) */}
-              {!isExternalRuntime && (
+              {/* Tool/MCP Dropdown */}
               <>
-              {(() => {
-                // Count only MCPs the user will actually see *and* that are live: present in the
-                // catalogue (mcpServers), globally enabled, and workspace-enabled. Using the raw
-                // `workspaceMcpEnabled.length` drifts from the popover contents when a workspace
-                // still references IDs that were disabled globally or removed from the catalogue.
-                const effectiveMcpCount = workspaceMcpEnabled.filter(
-                  id => globalMcpEnabled.includes(id) && mcpServers.some(s => s.id === id)
-                ).length;
-                return (
               <button
                 ref={toolBtnRef}
                 type="button"
@@ -1748,14 +1762,12 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
               >
                 <Wrench className="h-3.5 w-3.5" />
                 <span className="toolbar-label">工具</span>
-                {effectiveMcpCount > 0 && (
+                {effectiveToolCount > 0 && (
                   <span className="text-xs text-[var(--ink-muted)]">
-                    {effectiveMcpCount}
+                    {effectiveToolCount}
                   </span>
                 )}
               </button>
-                );
-              })()}
               <Popover
                 open={toolMenuOpen}
                 onClose={() => setShowToolMenu(false)}
@@ -1771,9 +1783,58 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                     <div className="px-3 py-2 text-xs font-medium text-[var(--ink-muted)] border-b border-[var(--line)]">
                       工具 (在此对话中启用)
                     </div>
-                    {globalMcpEnabled.length > 0 ? (
-                      mcpServers
-                        .filter(s => globalMcpEnabled.includes(s.id))
+                    {visibleOfficialTools.length > 0 || (!isExternalRuntime && mcpServers.some(s => globalMcpEnabled.includes(s.id))) ? (
+                      <>
+                      {visibleOfficialTools.map((tool) => {
+                        const isEnabled = workspaceOfficialToolEnabled.includes(tool.id);
+                        return (
+                          <div
+                            key={tool.id}
+                            className="flex items-center justify-between px-3 py-2"
+                          >
+                            <div className="flex-1 min-w-0">
+                              <div className="text-sm font-medium text-[var(--ink)] truncate">
+                                {tool.name}
+                              </div>
+                              {tool.description && (
+                                <div className="text-xs text-[var(--ink-muted)] truncate">
+                                  {tool.description}
+                                </div>
+                              )}
+                            </div>
+                            <button
+                              type="button"
+                              title="设置"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setShowToolMenu(false);
+                                window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.OPEN_SETTINGS, {
+                                  detail: { section: 'mcp', officialToolId: tool.id },
+                                }));
+                              }}
+                              className="ml-2 shrink-0 rounded p-0.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+                            >
+                              <Settings2 className="h-3.5 w-3.5" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                onWorkspaceOfficialToolToggle?.(tool.id, !isEnabled);
+                              }}
+                              className={`relative ml-2 inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent transition-colors hover:opacity-80 focus:outline-none ${isEnabled ? 'bg-[var(--accent)]' : 'bg-[var(--line-strong)]'
+                                }`}
+                            >
+                              <span
+                                className={`pointer-events-none inline-block h-3.5 w-3.5 rounded-full bg-[var(--toggle-thumb)] shadow-sm ring-0 transition-transform ${isEnabled ? 'translate-x-4' : 'translate-x-0.5'
+                                  }`}
+                              />
+                            </button>
+                          </div>
+                        );
+                      })}
+                      {mcpServers
+                        .filter(s => !isExternalRuntime && globalMcpEnabled.includes(s.id))
                         .map((server) => {
                           const isEnabled = workspaceMcpEnabled.includes(server.id);
                           return (
@@ -1819,7 +1880,8 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                               </button>
                             </div>
                           );
-                        })
+                        })}
+                      </>
                     ) : (
                       <div className="px-3 py-3 text-sm text-[var(--ink-muted)]">
                         在
@@ -1835,10 +1897,14 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                         >
                           设置页面
                         </button>
-                        安装开启 MCP 工具，即可使用浏览器等更多功能
+                        {isExternalRuntime
+                          ? '在设置页面启用官方 CLI 工具后即可在此 runtime 使用。'
+                          : '安装开启 MCP 工具，即可使用浏览器等更多功能'}
                       </div>
                     )}
 
+                    {!isExternalRuntime && (
+                    <>
                     {/* PRD 0.2.17 — Claude Plugins section. Mirrors the MCP
                      *  block above (same toggle UI, same per-workspace
                      *  semantics). Only globally-visible plugins appear here
@@ -1926,9 +1992,10 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                         可以从 GitHub 或本地路径安装。
                       </div>
                     )}
+                    </>
+                    )}
               </Popover>
               </>
-              )}
 
               {/* Heartbeat Loop Button — PRD 0.2.7 D1: launcher exposes this
                *  too. The handler stages cron config on launcher; actual
