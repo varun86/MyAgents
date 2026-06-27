@@ -108,6 +108,35 @@ describe('SimpleChatInput send paths', () => {
     expect(onSend).toHaveBeenCalledWith('subscription hello', undefined);
   });
 
+  it('uses subscription provider names verbatim in the model menu', async () => {
+    const user = userEvent.setup();
+    const subscriptionProvider = {
+      id: 'anthropic-sub',
+      name: 'Anthropic (订阅)',
+      vendor: 'Anthropic',
+      cloudProvider: '模型官方',
+      type: 'subscription',
+      primaryModel: 'claude-sonnet-4-6',
+      isBuiltin: true,
+      config: {},
+      models: [{ model: 'claude-sonnet-4-6', modelName: 'Claude Sonnet 4.6' }],
+    } as Provider;
+
+    renderInput({
+      runtime: 'builtin',
+      provider: subscriptionProvider,
+      providers: [subscriptionProvider],
+      providerAvailable: true,
+      availableProviderIds: ['anthropic-sub'],
+      selectedModel: 'claude-sonnet-4-6',
+    });
+
+    await user.click(screen.getByTitle('切换模型'));
+
+    expect(await screen.findByText('Anthropic (订阅)')).toBeInTheDocument();
+    expect(screen.queryByText('Anthropic (订阅) (订阅)')).not.toBeInTheDocument();
+  });
+
   it('emits provider-scoped builtin model selections from the model menu', async () => {
     const user = userEvent.setup();
     const onBuiltinModelSelect = vi.fn();

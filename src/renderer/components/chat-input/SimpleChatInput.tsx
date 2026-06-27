@@ -2004,7 +2004,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                     <div key={p.id}>
                       {idx > 0 && <div className="mx-2 my-1 border-t border-[var(--line)]" />}
                       <div className="group/provider relative flex items-center gap-1 px-3 pb-0.5 pt-1.5 text-xs font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60">
-                        {p.name}{p.type === 'subscription' ? ' (订阅)' : ''}
+                        {p.name}
                         {isProviderWarning(p, apiKeys, providerVerifyStatus) && (
                           <Tip label="验证未通过，部分模型可能不可用" position="bottom">
                             <AlertCircle className="h-3 w-3 shrink-0 text-[var(--warning)]" />
