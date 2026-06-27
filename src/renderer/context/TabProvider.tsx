@@ -25,7 +25,7 @@ import { useConfigData } from '@/config/useConfigData';
 import { getAgentByWorkspacePath } from '@/config/services/agentConfigService';
 import { notifyConfigChanged } from '@/config/services/appConfigService';
 import { normalizeRuntime, resolveEffectiveRuntime } from '@/utils/sessionOpenPlan';
-import type { RuntimeType } from '@/../shared/types/runtime';
+import type { RuntimeDiagnostics, RuntimeSource, RuntimeType } from '@/../shared/types/runtime';
 import type { SessionMetadata } from '@/api/sessionClient';
 import { createSseConnection, type SseConnection } from '@/api/SseConnection';
 import type { ImageAttachment } from '@/components/SimpleChatInput';
@@ -44,7 +44,6 @@ import { isSubagentContainerTool } from '@/components/tools/toolBadgeConfig';
 import type { AgentStatusTodoSnapshot, Message, MessageAttachment, ContentBlock, ToolUseSimple, ToolInput, TaskStats, SubagentToolCall } from '@/types/chat';
 import type { ToolUse } from '@/types/stream';
 import type { SystemInitInfo } from '../../shared/types/system';
-import type { RuntimeDiagnostics } from '../../shared/types/runtime';
 import type { ContextUsage } from '../../shared/types/context-usage';
 import type { TerminalReason } from '../../shared/terminalReason';
 import type { SlashCommand } from '../../shared/slashCommands';
@@ -368,17 +367,28 @@ interface TabApiCallOptions {
     signal?: AbortSignal;
 }
 
+function tabCorrelationHeaders(tabId: string, sessionId?: string | null): Record<string, string> {
+    return {
+        'X-MyAgents-Tab-Id': tabId,
+        ...(sessionId ? { 'X-MyAgents-Session-Id': sessionId } : {}),
+    };
+}
+
 /**
  * Create a Tab-scoped POST function
  * Uses Session-centric port lookup when sessionId is available
  */
 function createPostJson(tabId: string, sessionIdRef: React.MutableRefObject<string | null>) {
     return async <T,>(path: string, body?: unknown, opts?: TabApiCallOptions): Promise<T> => {
-        const baseUrl = await getBaseUrl(tabId, sessionIdRef.current);
+        const sessionId = sessionIdRef.current;
+        const baseUrl = await getBaseUrl(tabId, sessionId);
         const url = `${baseUrl}${path}`;
         const response = await proxyFetch(url, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: {
+                'Content-Type': 'application/json',
+                ...tabCorrelationHeaders(tabId, sessionId),
+            },
             body: body ? JSON.stringify(body) : undefined,
             signal: opts?.signal,
         });
@@ -392,9 +402,13 @@ function createPostJson(tabId: string, sessionIdRef: React.MutableRefObject<stri
  */
 function createApiGetJson(tabId: string, sessionIdRef: React.MutableRefObject<string | null>) {
     return async <T,>(path: string, opts?: TabApiCallOptions): Promise<T> => {
-        const baseUrl = await getBaseUrl(tabId, sessionIdRef.current);
+        const sessionId = sessionIdRef.current;
+        const baseUrl = await getBaseUrl(tabId, sessionId);
         const url = `${baseUrl}${path}`;
-        const response = await proxyFetch(url, { signal: opts?.signal });
+        const response = await proxyFetch(url, {
+            headers: tabCorrelationHeaders(tabId, sessionId),
+            signal: opts?.signal,
+        });
         return handleApiResponse<T>(response);
     };
 }
@@ -405,11 +419,15 @@ function createApiGetJson(tabId: string, sessionIdRef: React.MutableRefObject<st
  */
 function createApiPutJson(tabId: string, sessionIdRef: React.MutableRefObject<string | null>) {
     return async <T,>(path: string, body?: unknown, opts?: TabApiCallOptions): Promise<T> => {
-        const baseUrl = await getBaseUrl(tabId, sessionIdRef.current);
+        const sessionId = sessionIdRef.current;
+        const baseUrl = await getBaseUrl(tabId, sessionId);
         const url = `${baseUrl}${path}`;
         const response = await proxyFetch(url, {
             method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
+            headers: {
+                'Content-Type': 'application/json',
+                ...tabCorrelationHeaders(tabId, sessionId),
+            },
             body: body ? JSON.stringify(body) : undefined,
             signal: opts?.signal,
         });
@@ -423,9 +441,14 @@ function createApiPutJson(tabId: string, sessionIdRef: React.MutableRefObject<st
  */
 function createApiDelete(tabId: string, sessionIdRef: React.MutableRefObject<string | null>) {
     return async <T,>(path: string, opts?: TabApiCallOptions): Promise<T> => {
-        const baseUrl = await getBaseUrl(tabId, sessionIdRef.current);
+        const sessionId = sessionIdRef.current;
+        const baseUrl = await getBaseUrl(tabId, sessionId);
         const url = `${baseUrl}${path}`;
-        const response = await proxyFetch(url, { method: 'DELETE', signal: opts?.signal });
+        const response = await proxyFetch(url, {
+            method: 'DELETE',
+            headers: tabCorrelationHeaders(tabId, sessionId),
+            signal: opts?.signal,
+        });
         return handleApiResponse<T>(response);
     };
 }
@@ -561,6 +584,7 @@ export default function TabProvider({
     const loadingOlderRef = useRef(false);
     const [sessionState, setSessionState] = useState<SessionState>('idle');
     const [sessionRuntime, setSessionRuntime] = useState<string | null>(null);
+    const [sessionRuntimeSource, setSessionRuntimeSource] = useState<RuntimeSource | null>(null);
     // Populate analyticsMetaRef (declared above). The session-FROZEN runtime is
     // authoritative once known — it mirrors the runtime the sidecar was actually
     // spawned with (Rust resolve_session_runtime takes precedence over agent
@@ -820,6 +844,7 @@ export default function TabProvider({
         setUnifiedLogs([]);
         setLogs([]);
         setSessionMeta(null);
+        setSessionRuntimeSource(null);
         // Issue #194 (Codex review #6) — clear runtime diagnostics on reset so
         // a stale Codex banner from the previous session doesn't leak into a
         // new one (or a Tab that just switched to builtin runtime).
@@ -940,6 +965,7 @@ export default function TabProvider({
         setUnifiedLogs([]);
         setLogs([]);
         setSessionMeta(null);
+        setSessionRuntimeSource(null);
         clearInteractiveState();
 
         // Reset tab title so SortableTabItem falls back to folder name.
@@ -2426,7 +2452,13 @@ export default function TabProvider({
             }
 
             case 'chat:system-init': {
-                const payload = data as { info: SystemInitInfo; sessionId?: string; prewarm?: boolean; runtime?: string } | null;
+                const payload = data as {
+                    info: SystemInitInfo;
+                    sessionId?: string;
+                    prewarm?: boolean;
+                    runtime?: string;
+                    runtimeSource?: RuntimeSource;
+                } | null;
                 if (payload?.info) {
                     setSystemInitInfo(payload.info);
                     // v0.1.69: backend tags every system-init with the runtime that
@@ -2437,8 +2469,12 @@ export default function TabProvider({
                     // currentRuntime = sessionRuntime ?? agentRuntime then keeps the
                     // bottom-bar display consistent with how messages route.
                     if (payload.runtime) {
-                        setSessionRuntime(payload.runtime);
-                        if (payload.runtime !== 'builtin') {
+                        const runtime = normalizeRuntime(payload.runtime);
+                        setSessionRuntime(runtime);
+                        setSessionRuntimeSource(runtime === 'builtin'
+                            ? null
+                            : (payload.runtimeSource ?? 'system-cli'));
+                        if (runtime !== 'builtin') {
                             setSdkSlashCommands([]);
                         }
                     }
@@ -3849,7 +3885,11 @@ export default function TabProvider({
             }
             // Old sessions (pre-v0.1.60) have no runtime field → treat as 'builtin'.
             // null is reserved strictly for "session not loaded yet" (initial state).
-            setSessionRuntime(response.session.runtime || 'builtin');
+            const loadedRuntime = response.session.runtime || 'builtin';
+            setSessionRuntime(loadedRuntime);
+            setSessionRuntimeSource(loadedRuntime === 'builtin'
+                ? null
+                : (response.session.runtimeSource ?? 'system-cli'));
             // Strip SessionData.messages so sessionMeta holds just the metadata slice
             // (prevents accidental reliance on .messages elsewhere and keeps the
             // snapshot concept clean — SessionData is a superset of SessionMetadata).
@@ -4419,6 +4459,7 @@ export default function TabProvider({
         isSessionLoading,
         sessionState,
         sessionRuntime,
+        sessionRuntimeSource,
         sessionMeta,
         logs,
         unifiedLogs,
@@ -4468,7 +4509,7 @@ export default function TabProvider({
         // Cron task exit handler ref (mutable, no need in deps)
         onCronTaskExitRequested: onCronTaskExitRequestedRef,
     }), [
-        tabId, agentDir, currentSessionId, messages, historyMessages, streamingMessage, firstItemIndex, hasMoreBefore, isLoading, isSessionLoading, sessionState, sessionRuntime, sessionMeta,
+        tabId, agentDir, currentSessionId, messages, historyMessages, streamingMessage, firstItemIndex, hasMoreBefore, isLoading, isSessionLoading, sessionState, sessionRuntime, sessionRuntimeSource, sessionMeta,
         logs, unifiedLogs, systemInitInfo, sdkSlashCommands, runtimeDiagnostics, agentError, systemStatus, systemNotice, contextUsage, agentPlanTodos, lastTerminalReason, pendingPermission, pendingAskUserQuestion, pendingExitPlanMode, pendingEnterPlanMode, toolCompleteCount, queuedMessages, isConnected,
         setMessages, appendLog, appendUnifiedLog, clearUnifiedLogs, sendMessage, stopResponse, loadSession, loadOlderMessages, resetSession, adoptMigratedSession,
         apiGetJson, postJson, apiPutJson, apiDeleteJson, respondPermission, respondAskUserQuestion, respondExitPlanMode, cancelQueuedMessage, forceExecuteQueuedMessage

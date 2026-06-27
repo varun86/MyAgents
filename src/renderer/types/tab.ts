@@ -79,6 +79,21 @@ export interface InitialMessage {
 }
 
 /**
+ * Empty workspace opens have no user message, but may still need to carry the
+ * Launcher's local execution selection into session birth before async config
+ * persistence has refreshed App.configRef.
+ */
+export interface LaunchSessionBirthHint {
+    permissionMode?: PermissionMode | string;
+    mcpEnabledServers?: string[];
+    enabledPluginIds?: string[];
+    builtinSelection?: { providerId: string; model: string };
+    runtimeModel?: string;
+    providerExecutionIdentity?: RuntimeBackedProviderIdentity;
+    reasoningEffort?: string;
+}
+
+/**
  * How a freshly-mounted Chat reconciles config with its session's sidecar.
  * Replaces the old `joinedExistingSidecar?: boolean`, whose `undefined → ?? false
  * → push` collapse had no way to express "not decided yet" and silently pushed

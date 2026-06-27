@@ -19,8 +19,8 @@ import { useConfigData } from '@/config/useConfigData';
 import { patchAgentConfig } from '@/config/services/agentConfigService';
 import { buildRuntimeChangePatch, type RuntimeConfig } from '@/../shared/types/runtime';
 import {
+    agentDefaultsForRuntimeBackedProvider,
     isRuntimeBackedProvider,
-    runtimeConfigForRuntimeBackedProvider,
     toProviderExecutionIntent,
 } from '@/../shared/providerExecution';
 
@@ -49,10 +49,7 @@ export function useHelperAgentModelDefaults(): HelperAgentModelDefaults {
             ? (() => {
                 const intent = toProviderExecutionIntent(provider, model);
                 return intent.kind === 'runtime-backed-provider'
-                    ? {
-                        runtime: intent.runtime,
-                        runtimeConfig: runtimeConfigForRuntimeBackedProvider(intent, currentRuntimeConfig),
-                    }
+                    ? agentDefaultsForRuntimeBackedProvider(intent, currentRuntimeConfig)
                     : buildRuntimeChangePatch(currentRuntimeConfig, 'builtin');
             })()
             : buildRuntimeChangePatch(currentRuntimeConfig, 'builtin');

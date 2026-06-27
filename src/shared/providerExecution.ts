@@ -1,4 +1,4 @@
-import type { Provider, ProviderExecution } from './config-types';
+import type { PermissionMode, Provider, ProviderExecution } from './config-types';
 import { CODEX_SUBSCRIPTION_PROVIDER_ID, SUBSCRIPTION_PROVIDER_ID } from './config-types';
 import {
   canResumeAcrossProviderBoundary,
@@ -10,7 +10,12 @@ import {
   createConcreteProviderRoute,
   type ProviderRoute,
 } from './providerRoute';
-import type { RuntimeConfig } from './types/runtime';
+import {
+  coercePermissionModeForRuntime,
+  getDefaultRuntimePermissionMode,
+  RUNTIME_CONFIG_PER_RUNTIME_FIELDS,
+  type RuntimeConfig,
+} from './types/runtime';
 
 export type RuntimeBackedProviderIdentity = {
   kind: 'runtime-backed-provider';
@@ -36,6 +41,19 @@ function nonEmpty(value: string | null | undefined): string | undefined {
   const trimmed = value?.trim();
   return trimmed ? trimmed : undefined;
 }
+
+const MANAGED_CODEX_PROVIDER_PERMISSION_TO_RUNTIME: Record<PermissionMode, string> = {
+  auto: 'auto-edit',
+  plan: 'suggest',
+  fullAgency: 'no-restrictions',
+};
+
+const MANAGED_CODEX_RUNTIME_PERMISSION_TO_PROVIDER: Record<string, PermissionMode> = {
+  suggest: 'plan',
+  'auto-edit': 'auto',
+  'full-auto': 'fullAgency',
+  'no-restrictions': 'fullAgency',
+};
 
 export function isRuntimeBackedProvider(
   provider: ProviderExecutionShape | null | undefined,
@@ -94,14 +112,96 @@ export function createRuntimeBackedProviderIdentity(args: {
   };
 }
 
+export function managedCodexProviderPermissionToRuntimePermission(
+  permissionMode: string | null | undefined,
+): string | undefined {
+  const mode = nonEmpty(permissionMode);
+  if (!mode) return undefined;
+  return MANAGED_CODEX_PROVIDER_PERMISSION_TO_RUNTIME[mode as PermissionMode]
+    ?? coercePermissionModeForRuntime(mode, 'codex')
+    ?? getDefaultRuntimePermissionMode('codex');
+}
+
+export function managedCodexRuntimePermissionToProviderPermission(
+  permissionMode: string | null | undefined,
+): PermissionMode | undefined {
+  const mode = nonEmpty(permissionMode);
+  if (!mode) return undefined;
+  if (mode === 'auto' || mode === 'plan' || mode === 'fullAgency') return mode;
+  return MANAGED_CODEX_RUNTIME_PERMISSION_TO_PROVIDER[mode];
+}
+
+export function runtimeBackedProviderPermissionMode(
+  identity: RuntimeBackedProviderIdentity,
+  permissionMode: string | null | undefined,
+): string | undefined {
+  if (identity.providerId === CODEX_SUBSCRIPTION_PROVIDER_ID) {
+    return managedCodexProviderPermissionToRuntimePermission(permissionMode);
+  }
+  return nonEmpty(permissionMode);
+}
+
+/**
+ * Runtime snapshots are execution-level payloads (session/task birth). They
+ * intentionally include source/model so the sidecar can spawn managed Codex.
+ */
 export function runtimeConfigForRuntimeBackedProvider(
   identity: RuntimeBackedProviderIdentity,
   current?: RuntimeConfig,
 ): RuntimeConfig {
+  const next: RuntimeConfig = { ...(current ?? {}) };
+  for (const key of RUNTIME_CONFIG_PER_RUNTIME_FIELDS) {
+    delete next[key];
+  }
   return {
-    ...(current ?? {}),
+    ...next,
     source: identity.runtimeSource,
     model: identity.model,
+  };
+}
+
+/**
+ * Agent/Channel defaults store the user's Provider choice. They must not store
+ * the managed runtime/source projection, otherwise Codex subscription becomes
+ * indistinguishable from the legacy user-managed Codex CLI runtime.
+ */
+export function runtimeConfigForRuntimeBackedProviderDefault(
+  current?: RuntimeConfig,
+  overrides?: Pick<RuntimeConfig, 'permissionMode' | 'reasoningEffort'>,
+): RuntimeConfig | undefined {
+  const next: RuntimeConfig = { ...(current ?? {}) };
+  delete next.source;
+  delete next.model;
+  delete next.additionalArgs;
+  if (overrides?.permissionMode !== undefined) {
+    next.permissionMode = overrides.permissionMode;
+  }
+  if (overrides?.reasoningEffort !== undefined) {
+    next.reasoningEffort = overrides.reasoningEffort;
+  }
+  return Object.keys(next).length > 0 ? next : undefined;
+}
+
+export function agentDefaultsForRuntimeBackedProvider(
+  identity: RuntimeBackedProviderIdentity,
+  current?: RuntimeConfig,
+  overrides?: Pick<RuntimeConfig, 'permissionMode' | 'reasoningEffort'>,
+): {
+  providerId: RuntimeBackedProviderIdentity['providerId'];
+  model: string;
+  runtime: 'builtin';
+  runtimeConfig: RuntimeConfig | undefined;
+} {
+  return {
+    providerId: identity.providerId,
+    model: identity.model,
+    runtime: 'builtin',
+    runtimeConfig: runtimeConfigForRuntimeBackedProviderDefault(current, {
+      ...(overrides?.permissionMode !== undefined
+        ? { permissionMode: runtimeBackedProviderPermissionMode(identity, overrides.permissionMode) }
+        : {}),
+      ...(overrides?.reasoningEffort !== undefined ? { reasoningEffort: overrides.reasoningEffort } : {}),
+    }),
   };
 }
 

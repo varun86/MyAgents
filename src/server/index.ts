@@ -600,6 +600,10 @@ import {
   getMaxPermissionForRuntime,
 } from '../shared/types/runtime';
 import { coerceReasoningEffortForRuntime } from '../shared/reasoningEffort';
+import {
+  coerceRuntimeBirthPermissionMode,
+  coerceRuntimeBirthReasoningEffort,
+} from '../shared/runtimeBirthFields';
 import type { RuntimeConfig, RuntimeSource, RuntimeType } from '../shared/types/runtime';
 import type { RuntimeBackedProviderIdentity } from '../shared/providerExecution';
 import type { InteractionScenario } from './system-prompt';
@@ -2376,8 +2380,15 @@ async function main() {
       if (pathname === '/api/runtime/models' && request.method === 'GET') {
         const type = url.searchParams.get('type');
         if (!type) return jsonResponse({ error: 'Missing type parameter' }, 400);
+        const sourceParam = url.searchParams.get('source');
+        const runtimeSource: RuntimeSource | undefined =
+          sourceParam === 'managed-provider' || sourceParam === 'system-cli'
+            ? sourceParam
+            : undefined;
         try {
-          const models = await queryRuntimeModels(type as import('../shared/types/runtime').RuntimeType);
+          const models = await queryRuntimeModels(type as import('../shared/types/runtime').RuntimeType, {
+            runtimeSource,
+          });
           return jsonResponse({ models });
         } catch (error) {
           return jsonResponse({ error: error instanceof Error ? error.message : 'Unknown error' }, 500);
@@ -3711,8 +3722,17 @@ async function main() {
             );
           }
         }
-        if (payload.permissionMode !== undefined) baseSnapshot.permissionMode = payload.permissionMode;
-        if (payload.reasoningEffort !== undefined) baseSnapshot.reasoningEffort = payload.reasoningEffort;
+        const snapshotRuntime = (baseSnapshot.runtime ?? runtimeValue ?? 'builtin') as RuntimeType;
+        const payloadPermissionMode = coerceRuntimeBirthPermissionMode(
+          payload.permissionMode,
+          snapshotRuntime,
+        );
+        if (payloadPermissionMode !== undefined) baseSnapshot.permissionMode = payloadPermissionMode;
+        const payloadReasoningEffort = coerceRuntimeBirthReasoningEffort(
+          payload.reasoningEffort,
+          snapshotRuntime,
+        );
+        if (payloadReasoningEffort !== undefined) baseSnapshot.reasoningEffort = payloadReasoningEffort;
         if (payload.mcpEnabledServers !== undefined) baseSnapshot.mcpEnabledServers = payload.mcpEnabledServers;
         if (payload.enabledPluginIds !== undefined) baseSnapshot.enabledPluginIds = payload.enabledPluginIds;
         const session = await createSession(agentDirValue, baseSnapshot);

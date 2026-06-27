@@ -276,8 +276,7 @@ export function isProviderAvailable(
 ): boolean {
     if (!isProviderEnabled(provider)) return false;
     if (isRuntimeBackedProvider(provider)) {
-        const result = verifyStatus[provider.id];
-        return provider.enabled === true && result?.status === 'valid';
+        return provider.runtimeReady === true && (provider.models?.length ?? 0) > 0;
     }
     if (provider.type === 'subscription') {
         // Issue #203: `accountEmail` is enrichment only — a valid SDK verify

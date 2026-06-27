@@ -265,14 +265,12 @@ export interface RuntimeConfig {
  * runtimes". Used by `buildRuntimeChangePatch` and the startup migration to
  * decide what to scrub when `agent.runtime` changes.
  *
- *  - **NOT portable**: model / permissionMode / additionalArgs — model lists
- *    and permission vocabularies are wholly disjoint between Codex (`gpt-*`,
- *    `suggest/auto-edit/full-auto`), Claude Code (`sonnet/opus/haiku`,
- *    `default/acceptEdits/bypassPermissions`), and Gemini (`gemini-*`,
- *    `default/autoEdit/yolo/plan`). Carrying a value from one runtime to
- *    another guarantees the new runtime either rejects it (Codex CLI:
- *    "model is not supported when using ChatGPT account") or silently
- *    falls back to defaults — both worse than starting clean.
+ *  - **NOT portable**: source / model / permissionMode / reasoningEffort /
+ *    additionalArgs — runtime ownership, model lists, permission vocabularies,
+ *    and effort vocabularies are wholly disjoint between managed Codex, user
+ *    Codex CLI, Claude Code, and Gemini. Carrying a value from one runtime to
+ *    another guarantees the new runtime either rejects it or silently falls
+ *    back to defaults — both worse than starting clean.
  *  - **Portable**: envPolicy — per-agent network routing choice that has
  *    nothing to do with which CLI is in use.
  *
@@ -280,6 +278,7 @@ export interface RuntimeConfig {
  * write-time helper can't drift.
  */
 export const RUNTIME_CONFIG_PER_RUNTIME_FIELDS = [
+  'source',
   'model',
   'permissionMode',
   'reasoningEffort',

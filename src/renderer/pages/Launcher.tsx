@@ -13,6 +13,8 @@ import { open } from '@tauri-apps/plugin-dialog';
 import { track } from '@/analytics';
 import type { EntryIntent, HistoryEntrySource, Surface } from '@/analytics';
 import { type ImageAttachment } from '@/components/SimpleChatInput';
+import { projectCronExecutionOverrides } from '@/utils/cronExecutionProjection';
+import { coerceRuntimeBirthPermissionMode } from '../../shared/runtimeBirthFields';
 import { useToast } from '@/components/Toast';
 import { UnifiedLogsPanel } from '@/components/UnifiedLogsPanel';
 import PathInputDialog from '@/components/PathInputDialog';
@@ -48,7 +50,7 @@ import { resolveLauncherProvider } from '@/utils/optionResolve';
 import { useAgentStatuses } from '@/hooks/useAgentStatuses';
 import { useWorkspaceFileService } from '@/hooks/useWorkspaceFileService';
 import type { SessionMetadata } from '@/api/sessionClient';
-import type { InitialMessage } from '@/types/tab';
+import type { InitialMessage, LaunchSessionBirthHint } from '@/types/tab';
 
 interface LauncherProps {
     onLaunchProject: (
@@ -56,6 +58,7 @@ interface LauncherProps {
         sessionId?: string,
         initialMessage?: InitialMessage,
         analyticsContext?: { surface?: Surface; entryIntent?: EntryIntent; historyEntrySource?: HistoryEntrySource },
+        sessionBirthHint?: LaunchSessionBirthHint,
     ) => void;
     isStarting?: boolean;
     startError?: string | null;
@@ -332,6 +335,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
                     agentId: selectedWorkspace.agentId ?? null,
                     isExternalRuntime,
                     currentRuntimeConfig: runtimeConfigRef.current,
+                    currentProviderId: selectedAgent?.providerId ?? selectedWorkspace.providerId,
                     fields: { mcpEnabledServers: newEnabled },
                     patchProject,
                     patchAgentConfig,
@@ -420,6 +424,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
                 agentId: selectedWorkspace.agentId ?? null,
                 isExternalRuntime,
                 currentRuntimeConfig: runtimeConfigRef.current,
+                currentProviderId: selectedAgent?.providerId ?? selectedWorkspace.providerId,
                 fields: { permissionMode: mode },
                 patchProject,
                 patchAgentConfig,
@@ -439,6 +444,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
                 agentId: selectedWorkspace.agentId ?? null,
                 isExternalRuntime,
                 currentRuntimeConfig: runtimeConfigRef.current,
+                currentProviderId: selectedAgent?.providerId ?? selectedWorkspace.providerId,
                 fields: isExternalRuntime
                     ? { runtimeModel: model ?? null }
                     : providerExecutionIntent?.kind === 'runtime-backed-provider'
@@ -462,6 +468,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
                 agentId: selectedWorkspace.agentId ?? null,
                 isExternalRuntime,
                 currentRuntimeConfig: runtimeConfigRef.current,
+                currentProviderId: selectedAgent?.providerId ?? selectedWorkspace.providerId,
                 fields: { reasoningEffort: effort },
                 patchProject,
                 patchAgentConfig,
@@ -509,6 +516,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
                 agentId: selectedWorkspace.agentId ?? null,
                 isExternalRuntime,
                 currentRuntimeConfig: runtimeConfigRef.current,
+                currentProviderId: selectedAgent?.providerId ?? selectedWorkspace.providerId,
                 fields: {
                     ...(providerExecutionIntent?.kind === 'runtime-backed-provider'
                         ? { runtimeBackedProviderSelection: providerExecutionIntent }
@@ -651,6 +659,17 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
                     !isExternalRuntime && launcherProvider
                         ? launcherProvider.id
                         : undefined;
+                const cronExecution = projectCronExecutionOverrides({
+                    providers,
+                    runtime: launcherRuntime,
+                    providerId: launcherProviderId,
+                    model: builtinSelection?.model ?? runtimeModel,
+                    runtimeConfig: isExternalRuntime ? runtimeConfigRef.current : undefined,
+                });
+                const cronPermissionMode = coerceRuntimeBirthPermissionMode(
+                    launcherPermissionMode,
+                    cronExecution.runtime ?? launcherRuntime,
+                );
                 const created = await createCronTask({
                     workspacePath: selectedWorkspace.path,
                     sessionId: standaloneSessionId,
@@ -662,17 +681,17 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
                     schedule: cron.schedule,
                     delivery: cron.delivery,
                     name: cron.name,
-                    permissionMode: launcherPermissionMode,
-                    model: builtinSelection?.model ?? runtimeModel,
-                    providerId: launcherProviderId,
+                    permissionMode: cronPermissionMode,
+                    model: cronExecution.model,
+                    providerId: cronExecution.providerId,
                     // PRD 0.2.9 — When `providerId` is set the sidecar ignores
                     // intent (live-resolve takes precedence). We still send
                     // `subscription` for the no-providerId subscription case
                     // so legacy /cron/execute paths handle it correctly until
                     // all callers move to providerId-only.
-                    providerIntent: launcherProviderId ? undefined : 'subscription',
-                    runtime: launcherRuntime,
-                    runtimeConfig: isExternalRuntime ? runtimeConfigRef.current : undefined,
+                    providerIntent: cronExecution.providerIntent,
+                    runtime: cronExecution.runtime,
+                    runtimeConfig: cronExecution.runtimeConfig,
                     // Snapshot the launcher's MCP selection so the cron task's
                     // own override branch fires at execute-sync time. The
                     // perf shortcut in /cron/execute-sync (preferring
@@ -709,7 +728,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
     }, [selectedWorkspace, launcherProvider, launcherPermissionMode,
         launcherSelectedModel, launcherReasoningEffort, launcherWorkspaceMcpEnabled, launcherGlobalMcpEnabled,
         launcherEnabledPlugins, config.plugins, config.enabledPlugins,
-        isExternalRuntime, launcherRuntime,
+        isExternalRuntime, launcherRuntime, providers,
         touchProject, onLaunchProject, updateConfig]);
 
     // Path input dialog state (for browser dev mode)
@@ -729,6 +748,31 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
         touchProject(project.id).catch((err) => {
             console.warn('[Launcher] Failed to update lastOpened:', err);
         });
+        let sessionBirthHint: LaunchSessionBirthHint | undefined;
+        if (
+            !sessionId
+            && selectedWorkspace
+            && workspacePathsEqual(selectedWorkspace.path, project.path)
+            && !isExternalRuntime
+            && launcherProvider
+        ) {
+            const model = launcherSelectedModel ?? launcherProvider.primaryModel;
+            const intent = model ? toProviderExecutionIntent(launcherProvider, model) : undefined;
+            if (intent?.kind === 'runtime-backed-provider') {
+                const visiblePluginIds = new Set(
+                    (config.plugins ?? [])
+                        .filter(p => config.enabledPlugins?.[p.id] === true)
+                        .map(p => p.id),
+                );
+                sessionBirthHint = {
+                    providerExecutionIdentity: intent,
+                    permissionMode: launcherPermissionMode,
+                    reasoningEffort: launcherReasoningEffort,
+                    mcpEnabledServers: launcherWorkspaceMcpEnabled.filter(id => launcherGlobalMcpEnabled.includes(id)),
+                    enabledPluginIds: launcherEnabledPlugins.filter(id => visiblePluginIds.has(id)),
+                };
+            }
+        }
         onLaunchProject(
             project,
             sessionId,
@@ -736,8 +780,23 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
             sessionId
                 ? { historyEntrySource: historyEntrySource ?? 'launcher_recent' }
                 : { surface: 'agent_card', entryIntent: 'open_workspace' },
+            sessionBirthHint,
         );
-    }, [touchProject, onLaunchProject]);
+    }, [
+        touchProject,
+        onLaunchProject,
+        selectedWorkspace,
+        isExternalRuntime,
+        launcherProvider,
+        launcherSelectedModel,
+        launcherPermissionMode,
+        launcherReasoningEffort,
+        launcherWorkspaceMcpEnabled,
+        launcherGlobalMcpEnabled,
+        launcherEnabledPlugins,
+        config.plugins,
+        config.enabledPlugins,
+    ]);
 
     const handleOpenTask = useCallback((session: SessionMetadata, project: Project, historyEntrySource: HistoryEntrySource = 'launcher_recent') => {
         handleLaunch(project, session.id, historyEntrySource);

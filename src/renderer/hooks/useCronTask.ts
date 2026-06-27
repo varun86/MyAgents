@@ -18,6 +18,11 @@ import { isTauriEnvironment } from '@/utils/browserMock';
 import { isDebugMode } from '@/utils/debug';
 import { createSyncStateRef } from '@/utils/syncStateRef';
 import { listenWithCleanup } from '@/utils/tauriListen';
+import { coerceRuntimeBirthPermissionMode } from '@/../shared/runtimeBirthFields';
+import {
+  resolveCronProviderEnvForExecution,
+  resolveCronProviderIntentForExecution,
+} from '@/utils/cronExecutionProjection';
 
 export interface CronTaskState {
   /** Whether cron mode is enabled (before task is created) */
@@ -124,6 +129,15 @@ export function useCronTask(options: UseCronTaskOptions) {
   // the same settings that were active when the user enabled cron mode,
   // not the settings at execution time (which might have changed)
   const enableCronMode = useCallback((config: Omit<CronTaskConfig, 'workspacePath' | 'sessionId' | 'tabId'> & { executionTarget?: 'current_session' | 'new_task' }) => {
+    const providerEnv = resolveCronProviderEnvForExecution({
+      runtime: config.runtime,
+      providerId: config.providerId,
+      providerEnv: config.providerEnv,
+    });
+    const permissionMode = coerceRuntimeBirthPermissionMode(
+      config.permissionMode,
+      config.runtime ?? 'builtin',
+    );
     setState({
       isEnabled: true,
       config: {
@@ -133,27 +147,24 @@ export function useCronTask(options: UseCronTaskOptions) {
         runMode: config.runMode,
         notifyEnabled: config.notifyEnabled,
         model: config.model,
-        permissionMode: config.permissionMode,
-        // PRD 0.2.9 R2 invariant — zero credential copies on disk: when
-        // `providerId` is set (the live-resolve path), force-clear
-        // `providerEnv` so the persisted CronTask carries no apiKey
-        // snapshot, even if the caller accidentally forwarded one. The
-        // sidecar prefers providerId at runtime regardless, but on-disk
-        // shape is what matters for R2. Legacy callers that pass only
-        // `providerEnv` (no providerId) keep the explicit-snapshot path.
-        providerEnv: config.providerId ? undefined : config.providerEnv,
+        permissionMode,
+        // PRD 0.2.9 R2 invariant — zero credential copies on disk: live
+        // provider resolution and external runtime execution both clear
+        // `providerEnv`, so cron payloads do not mix provider snapshots
+        // into runtime-owned execution. Legacy builtin callers that pass
+        // only `providerEnv` keep the explicit-snapshot path.
+        providerEnv,
         providerId: config.providerId,
         // PRD #119 / 0.2.9 — When providerId is set, intent is ignored by
         // sidecar (live-resolve takes precedence). Otherwise we fall back
         // to the legacy explicit-vs-subscription split derived from
         // providerEnv presence so legacy crons still route correctly.
-        providerIntent:
-          config.providerIntent
-          ?? (config.providerId
-            ? undefined
-            : config.providerEnv
-              ? 'explicit'
-              : 'subscription'),
+        providerIntent: resolveCronProviderIntentForExecution({
+          runtime: config.runtime,
+          providerId: config.providerId,
+          providerEnv,
+          providerIntent: config.providerIntent,
+        }),
         runtime: config.runtime,
         runtimeConfig: config.runtimeConfig,
         schedule: config.schedule,
@@ -242,11 +253,20 @@ export function useCronTask(options: UseCronTaskOptions) {
 
     let createdTaskId: string | null = null;
     try {
+      const providerEnv = resolveCronProviderEnvForExecution({
+        runtime: currentConfig.runtime,
+        providerId: currentConfig.providerId,
+        providerEnv: currentConfig.providerEnv,
+      });
+      const permissionMode = coerceRuntimeBirthPermissionMode(
+        currentConfig.permissionMode,
+        currentConfig.runtime ?? 'builtin',
+      );
+
       // PRD 0.2.9 — Forward providerId (live-resolve) when set; fall back
-      // to legacy providerEnv path otherwise. R2 invariant: when
-      // providerId is set, drop providerEnv from the create payload so
-      // no apiKey snapshot lands in cron_tasks.json (sidecar prefers
-      // providerId at runtime, but on-disk shape is what R2 enforces).
+      // to legacy providerEnv path only for builtin execution. R2 invariant:
+      // providerId and external runtime payloads drop providerEnv so no apiKey
+      // snapshot lands in cron_tasks.json or crosses runtime ownership.
       const task = await createCronTask({
         workspacePath,
         sessionId,
@@ -257,17 +277,16 @@ export function useCronTask(options: UseCronTaskOptions) {
         runMode: currentConfig.runMode,
         notifyEnabled: currentConfig.notifyEnabled,
         model: currentConfig.model,
-        permissionMode: currentConfig.permissionMode,
-        providerEnv: currentConfig.providerId ? undefined : currentConfig.providerEnv,
+        permissionMode,
+        providerEnv,
         providerId: currentConfig.providerId,
         // PRD #119 / 0.2.9 — see enableCronMode for the same fallback rules.
-        providerIntent:
-          currentConfig.providerIntent
-          ?? (currentConfig.providerId
-            ? undefined
-            : currentConfig.providerEnv
-              ? 'explicit'
-              : 'subscription'),
+        providerIntent: resolveCronProviderIntentForExecution({
+          runtime: currentConfig.runtime,
+          providerId: currentConfig.providerId,
+          providerEnv,
+          providerIntent: currentConfig.providerIntent,
+        }),
         runtime: currentConfig.runtime,
         runtimeConfig: currentConfig.runtimeConfig,
         schedule: currentConfig.schedule,

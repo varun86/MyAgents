@@ -1181,8 +1181,12 @@ function isSubAgentScopedEvent(
 
 // ─── Model cache ───
 
-let modelCache: { models: RuntimeModelInfo[]; timestamp: number } | null = null;
+const modelCache = new Map<string, { models: RuntimeModelInfo[]; timestamp: number }>();
 const MODEL_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+function modelCacheKey(runtimeSource: RuntimeSource): string {
+  return runtimeSource;
+}
 
 // ─── JSON-RPC 2.0 Client ───
 
@@ -1987,31 +1991,39 @@ export class CodexRuntime implements AgentRuntime {
     return { installed: false };
   }
 
-  async queryModels(): Promise<RuntimeModelInfo[]> {
+  async queryModels(options: { runtimeSource?: RuntimeSource } = {}): Promise<RuntimeModelInfo[]> {
+    const runtimeSource = options.runtimeSource ?? 'system-cli';
+    const cacheKey = modelCacheKey(runtimeSource);
     // Return cached if fresh
-    if (modelCache && Date.now() - modelCache.timestamp < MODEL_CACHE_TTL_MS) {
-      return modelCache.models;
+    const cached = modelCache.get(cacheKey);
+    if (cached && Date.now() - cached.timestamp < MODEL_CACHE_TTL_MS) {
+      return cached.models;
     }
 
     try {
-      const models = await this.queryModelsViaAppServer();
-      modelCache = { models, timestamp: Date.now() };
+      const models = await this.queryModelsViaAppServer(runtimeSource);
+      modelCache.set(cacheKey, { models, timestamp: Date.now() });
       return models;
     } catch (err) {
-      console.error('[codex] Failed to query models:', err);
+      console.error(`[codex] Failed to query models for source=${runtimeSource}:`, err);
       // Return cached even if stale, or empty
-      return modelCache?.models ?? [];
+      return cached?.models ?? [];
     }
   }
 
-  private async queryModelsViaAppServer(): Promise<RuntimeModelInfo[]> {
+  private async queryModelsViaAppServer(runtimeSource: RuntimeSource): Promise<RuntimeModelInfo[]> {
     // Spawn a temporary app-server to query model/list
-    const context = resolveCodexCommandContext({ source: 'system-cli' });
-    const proc = spawn([context.commandPath, 'app-server'], {
+    const context = resolveCodexCommandContext({ source: runtimeSource });
+    const codexEnv = context.env;
+    const proc = spawn(buildCodexAppServerArgs({
+      commandPath: context.commandPath,
+      runtimeSource,
+      codexEnv,
+    }), {
       stdout: 'pipe',
       stderr: 'pipe',
       stdin: 'pipe',
-      env: context.env,
+      env: codexEnv,
     });
 
     const rpc = new JsonRpcClient(proc);

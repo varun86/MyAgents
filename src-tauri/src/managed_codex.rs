@@ -3,11 +3,12 @@ use std::fs::{self, File};
 use std::io::{ErrorKind, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::{ChildStderr, ChildStdout, Output, Stdio};
+use std::sync::{Mutex, OnceLock};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use base64::{engine::general_purpose, Engine as _};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use minisign_verify::{Error as MinisignError, PublicKey, Signature};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -19,8 +20,8 @@ use crate::{ulog_error, ulog_info, ulog_warn};
 
 const CODEX_PROVIDER_ID: &str = "codex-sub";
 const REQUIRED_VERSION: &str = "0.142.2";
-const REQUIRED_APP_RUNTIME_SET: &str = "0.2.43";
-const MANIFEST_BASE_URL: &str = "https://download.myagents.io/runtimes/codex/by-app/0.2.43";
+const REQUIRED_RUNTIME_SET: &str = "codex-0.142.2";
+const RUNTIME_SETS_BASE_URL: &str = "https://download.myagents.io/runtimes/codex/sets";
 // Keep this in sync with `src-tauri/tauri.conf.json > plugins.updater.pubkey`.
 // Managed runtime manifests and artifacts use the same minisign trust root as app updates.
 const MYAGENTS_MINISIGN_PUBKEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEY3RkQ5QjIzMTE4RTgyRTkKUldUcGdvNFJJNXY5OTB3T2pnUzVUbjFrV203Zk5ZTDg0NVJRdGI0UVRranJzTUsvM0hGcmFlc0IK";
@@ -33,6 +34,7 @@ const MAX_ARCHIVE_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_UNPACKED_BYTES: u64 = 900 * 1024 * 1024;
 const MAX_ARCHIVE_ENTRIES: usize = 4096;
 const MAX_CAPTURED_OUTPUT_CHARS: usize = 1000;
+const DOWNLOADING_STATE_TTL_SECS: i64 = 30 * 60;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -43,6 +45,9 @@ pub struct ManagedCodexRuntimeInstallState {
     pub platform: Option<String>,
     pub installed_at: Option<String>,
     pub last_checked_at: Option<String>,
+    pub downloaded_bytes: Option<u64>,
+    pub total_bytes: Option<u64>,
+    pub progress_percent: Option<u8>,
     pub error: Option<String>,
 }
 
@@ -67,6 +72,36 @@ pub struct ManagedCodexStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ManagedCodexLoginState {
+    pub status: String,
+    pub login_url: Option<String>,
+    pub started_at: Option<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ManagedCodexLoginRuntimeState {
+    status: String,
+    login_url: Option<String>,
+    started_at: Option<String>,
+    error: Option<String>,
+    raw_output: String,
+}
+
+impl Default for ManagedCodexLoginRuntimeState {
+    fn default() -> Self {
+        Self {
+            status: "idle".to_string(),
+            login_url: None,
+            started_at: None,
+            error: None,
+            raw_output: String::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct InstalledJson {
     version: String,
     platform: String,
@@ -83,7 +118,7 @@ struct InstalledJson {
 #[serde(rename_all = "camelCase")]
 struct ManagedCodexManifest {
     schema_version: u32,
-    app_version: String,
+    runtime_set: String,
     codex_version: String,
     #[serde(default)]
     platform: Option<String>,
@@ -163,12 +198,16 @@ fn platform_key() -> Option<&'static str> {
     }
 }
 
+fn manifest_base_url() -> String {
+    format!("{}/{}", RUNTIME_SETS_BASE_URL, REQUIRED_RUNTIME_SET)
+}
+
 fn manifest_url_for_platform(platform: &str) -> String {
-    format!("{}/{}/manifest-v1.json", MANIFEST_BASE_URL, platform)
+    format!("{}/{}/manifest-v1.json", manifest_base_url(), platform)
 }
 
 fn manifest_signature_url_for_platform(platform: &str) -> String {
-    format!("{}/{}/manifest-v1.json.sig", MANIFEST_BASE_URL, platform)
+    format!("{}/{}/manifest-v1.json.sig", manifest_base_url(), platform)
 }
 
 fn data_dir() -> Result<PathBuf, String> {
@@ -432,6 +471,18 @@ fn validate_download_url(raw: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_artifact_url(raw: &str, platform: &str) -> Result<(), String> {
+    validate_download_url(raw)?;
+    let expected_prefix = format!("{}/{}/artifacts/", manifest_base_url(), platform);
+    if !raw.starts_with(&expected_prefix) {
+        return Err(format!(
+            "Managed Codex artifact URL must stay under {}",
+            expected_prefix
+        ));
+    }
+    Ok(())
+}
+
 fn validate_platform_signing(
     platform: &str,
     signing: Option<&ManagedCodexArtifactSigning>,
@@ -453,12 +504,6 @@ fn validate_platform_signing(
             if non_empty_trimmed(signing.team_id.as_deref()).is_none() {
                 return Err(
                     "Managed Codex macOS artifact signing metadata requires teamId".to_string(),
-                );
-            }
-            if signing.notarization.as_deref() != Some("spctl-assess") {
-                return Err(
-                    "Managed Codex macOS artifact signing metadata requires notarization=spctl-assess"
-                        .to_string(),
                 );
             }
         }
@@ -496,10 +541,10 @@ fn validate_manifest_for_platform(
             manifest.schema_version
         ));
     }
-    if manifest.app_version != REQUIRED_APP_RUNTIME_SET {
+    if manifest.runtime_set != REQUIRED_RUNTIME_SET {
         return Err(format!(
-            "Managed Codex manifest appVersion mismatch: expected {}, got {}",
-            REQUIRED_APP_RUNTIME_SET, manifest.app_version
+            "Managed Codex manifest runtimeSet mismatch: expected {}, got {}",
+            REQUIRED_RUNTIME_SET, manifest.runtime_set
         ));
     }
     if manifest.codex_version != REQUIRED_VERSION {
@@ -527,7 +572,7 @@ fn validate_manifest_for_platform(
             platform, artifact.archive_type
         ));
     }
-    validate_download_url(&artifact.url)?;
+    validate_artifact_url(&artifact.url, platform)?;
     normalize_sha256_hex(&artifact.sha256)?;
     validate_executable_relative_path(&artifact.executable_relative_path)?;
     validate_artifact_file_allowlist(&artifact)?;
@@ -615,6 +660,8 @@ fn download_to_file_with_hash(
     url: &str,
     path: &Path,
     max_bytes: u64,
+    progress_total_bytes: Option<u64>,
+    mut on_progress: impl FnMut(u64, Option<u64>),
 ) -> Result<(u64, String), String> {
     validate_download_url(url)?;
     let mut response = client
@@ -629,6 +676,8 @@ fn download_to_file_with_hash(
             response.content_length().unwrap_or(0)
         ));
     }
+    let total_for_progress = progress_total_bytes.or_else(|| response.content_length());
+    on_progress(0, total_for_progress);
     let mut file = File::create(path)
         .map_err(|e| format!("[managed-codex] Failed to create artifact file: {}", e))?;
     let mut hasher = Sha256::new();
@@ -648,6 +697,7 @@ fn download_to_file_with_hash(
         hasher.update(&buf[..read]);
         file.write_all(&buf[..read])
             .map_err(|e| format!("[managed-codex] Failed to write artifact: {}", e))?;
+        on_progress(total, total_for_progress);
     }
     Ok((total, format!("{:x}", hasher.finalize())))
 }
@@ -809,15 +859,6 @@ fn verify_macos_platform_signature(
         }
     }
 
-    let assess_output = crate::process_cmd::new("/usr/sbin/spctl")
-        .args(["--assess", "--type", "execute", "--verbose=4"])
-        .arg(executable)
-        .output()
-        .map_err(|e| format!("[managed-codex] Failed to spawn spctl assess: {}", e))?;
-    if !assess_output.status.success() {
-        return Err(command_failure("spctl assess", &assess_output));
-    }
-
     Ok(ManagedCodexSigningVerification {
         kind: "codesign".to_string(),
         verified_at: now_iso(),
@@ -825,7 +866,7 @@ fn verify_macos_platform_signature(
         signing_identity,
         publisher: None,
         certificate_sha256: None,
-        notarization: Some("spctl-assess".to_string()),
+        notarization: None,
     })
 }
 
@@ -1343,7 +1384,6 @@ fn installed_meta_has_required_security(meta: &InstalledJson, platform: &str) ->
                     .as_deref()
                     .map(|v| !v.trim().is_empty())
                     .unwrap_or(false)
-                && platform_signature.notarization.as_deref() == Some("spctl-assess")
         }
         "win32-x64" => {
             platform_signature.kind == "authenticode"
@@ -1367,6 +1407,9 @@ fn runtime_install_state() -> ManagedCodexRuntimeInstallState {
             platform: None,
             installed_at: None,
             last_checked_at: checked_at,
+            downloaded_bytes: None,
+            total_bytes: None,
+            progress_percent: None,
             error: Some(format!(
                 "Managed Codex does not support {}-{}",
                 std::env::consts::OS,
@@ -1390,6 +1433,9 @@ fn runtime_install_state() -> ManagedCodexRuntimeInstallState {
                 platform: Some(platform.to_string()),
                 installed_at: meta.installed_at,
                 last_checked_at: checked_at,
+                downloaded_bytes: None,
+                total_bytes: None,
+                progress_percent: None,
                 error: None,
             }
         }
@@ -1403,6 +1449,9 @@ fn runtime_install_state() -> ManagedCodexRuntimeInstallState {
                 platform: Some(platform.to_string()),
                 installed_at: meta.installed_at,
                 last_checked_at: checked_at,
+                downloaded_bytes: None,
+                total_bytes: None,
+                progress_percent: None,
                 error: if needs_security_refresh {
                     Some(
                         "Managed Codex runtime requires refreshed signed install metadata"
@@ -1420,6 +1469,9 @@ fn runtime_install_state() -> ManagedCodexRuntimeInstallState {
             platform: Some(platform.to_string()),
             installed_at: meta.installed_at,
             last_checked_at: checked_at,
+            downloaded_bytes: None,
+            total_bytes: None,
+            progress_percent: None,
             error: Some(
                 "Installed metadata exists, but the managed Codex binary is missing".to_string(),
             ),
@@ -1431,6 +1483,9 @@ fn runtime_install_state() -> ManagedCodexRuntimeInstallState {
             platform: Some(platform.to_string()),
             installed_at: None,
             last_checked_at: checked_at,
+            downloaded_bytes: None,
+            total_bytes: None,
+            progress_percent: None,
             error: None,
         },
     }
@@ -1581,7 +1636,93 @@ fn join_child_output(handle: Option<thread::JoinHandle<String>>) -> String {
     handle.and_then(|h| h.join().ok()).unwrap_or_default()
 }
 
-fn run_codex_capture(args: &[&str], timeout: Duration) -> Result<(bool, String, String), String> {
+fn login_runtime_state() -> &'static Mutex<ManagedCodexLoginRuntimeState> {
+    static STATE: OnceLock<Mutex<ManagedCodexLoginRuntimeState>> = OnceLock::new();
+    STATE.get_or_init(|| Mutex::new(ManagedCodexLoginRuntimeState::default()))
+}
+
+fn login_state_snapshot() -> ManagedCodexLoginState {
+    let state = login_runtime_state()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    ManagedCodexLoginState {
+        status: state.status.clone(),
+        login_url: state.login_url.clone(),
+        started_at: state.started_at.clone(),
+        error: state.error.clone(),
+    }
+}
+
+fn extract_first_http_url(raw: &str) -> Option<String> {
+    let start = raw.find("https://").or_else(|| raw.find("http://"))?;
+    let rest = &raw[start..];
+    let end = rest
+        .char_indices()
+        .find_map(|(idx, ch)| {
+            if ch.is_whitespace() || matches!(ch, '"' | '\'' | '<' | '>' | ')' | ']' | '}') {
+                Some(idx)
+            } else {
+                None
+            }
+        })
+        .unwrap_or(rest.len());
+    let url = rest[..end].trim_matches(|ch| matches!(ch, '.' | ',' | ';' | ':'));
+    if url.starts_with("http://") || url.starts_with("https://") {
+        Some(url.to_string())
+    } else {
+        None
+    }
+}
+
+fn extract_authenticate_url(raw: &str) -> Option<String> {
+    let lower = raw.to_lowercase();
+    let marker = "navigate to this url to authenticate:";
+    if let Some(marker_idx) = lower.find(marker) {
+        return extract_first_http_url(&raw[marker_idx + marker.len()..]);
+    }
+    None
+}
+
+fn extract_login_url(raw: &str) -> Option<String> {
+    if let Some(authenticate_url) = extract_authenticate_url(raw) {
+        return Some(authenticate_url);
+    }
+    extract_first_http_url(raw).filter(|url| url.starts_with("https://"))
+}
+
+fn append_login_output(raw: &str) {
+    if raw.is_empty() {
+        return;
+    }
+    let mut state = login_runtime_state()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    state.raw_output.push_str(raw);
+    if state.raw_output.chars().count() > MAX_CAPTURED_OUTPUT_CHARS * 4 {
+        state.raw_output = state
+            .raw_output
+            .chars()
+            .rev()
+            .take(MAX_CAPTURED_OUTPUT_CHARS * 3)
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect();
+    }
+    if state.login_url.is_none() {
+        state.login_url = extract_login_url(&state.raw_output);
+    }
+    if state.login_url.is_some() && state.status == "starting" {
+        state.status = "waiting".to_string();
+    }
+}
+
+fn login_output_indicates_cancelled(output: &str) -> bool {
+    let lower = output.to_lowercase();
+    lower.contains("login cancelled") || lower.contains("login canceled")
+}
+
+fn managed_codex_command(args: &[&str]) -> Result<std::process::Command, String> {
     let platform = platform_key().ok_or_else(|| {
         format!(
             "Managed Codex does not support {}-{}",
@@ -1600,11 +1741,16 @@ fn run_codex_capture(args: &[&str], timeout: Duration) -> Result<(bool, String, 
     for (key, value) in managed_env()? {
         cmd.env(key, value);
     }
-    cmd.args(args)
-        .stdout(Stdio::piped())
+    cmd.args(args);
+    crate::proxy_config::apply_to_subprocess(&mut cmd);
+    Ok(cmd)
+}
+
+fn run_codex_capture(args: &[&str], timeout: Duration) -> Result<(bool, String, String), String> {
+    let mut cmd = managed_codex_command(args)?;
+    cmd.stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .stdin(Stdio::null());
-    crate::proxy_config::apply_to_subprocess(&mut cmd);
 
     let start = std::time::Instant::now();
     let mut child = cmd
@@ -1812,10 +1958,54 @@ fn config_path() -> Result<PathBuf, String> {
     Ok(data_dir()?.join("config.json"))
 }
 
+fn read_persisted_runtime_install_state() -> Option<ManagedCodexRuntimeInstallState> {
+    let path = config_path().ok()?;
+    let config = crate::config_io::with_config_lock(&path, false, |_| Ok(())).ok()?;
+    serde_json::from_value(config.get("managedCodexRuntimeInstall")?.clone()).ok()
+}
+
+fn is_fresh_downloading_install_state(
+    install: &ManagedCodexRuntimeInstallState,
+    platform: &str,
+) -> bool {
+    if install.status != "downloading"
+        || install.required_version.as_deref() != Some(REQUIRED_VERSION)
+        || install.platform.as_deref() != Some(platform)
+    {
+        return false;
+    }
+    let Some(last_checked_at) = install.last_checked_at.as_deref() else {
+        return false;
+    };
+    let Ok(last_checked) = DateTime::parse_from_rfc3339(last_checked_at) else {
+        return false;
+    };
+    let age = Utc::now().signed_duration_since(last_checked.with_timezone(&Utc));
+    age.num_seconds() <= DOWNLOADING_STATE_TTL_SECS
+}
+
+fn preserve_active_download_state(
+    derived: ManagedCodexRuntimeInstallState,
+) -> ManagedCodexRuntimeInstallState {
+    if derived.status == "installed" {
+        return derived;
+    }
+    let Some(platform) = platform_key() else {
+        return derived;
+    };
+    let Some(persisted) = read_persisted_runtime_install_state() else {
+        return derived;
+    };
+    if is_fresh_downloading_install_state(&persisted, platform) {
+        return persisted;
+    }
+    derived
+}
+
 fn persist_status(
     install: &ManagedCodexRuntimeInstallState,
     auth: &ManagedCodexAuthState,
-    disable_provider: bool,
+    _disable_provider: bool,
 ) -> Result<(), String> {
     let path = config_path()?;
     let install_value = serde_json::to_value(install)
@@ -1862,17 +2052,49 @@ fn persist_status(
                     "verifiedAt": auth.verified_at.clone().unwrap_or_else(now_iso),
                 }),
             );
-            if disable_provider {
-                obj.insert("managedCodexProviderEnabled".to_string(), json!(false));
-            }
         }
         Ok(())
     })?;
     Ok(())
 }
 
+fn download_progress_percent(downloaded_bytes: u64, total_bytes: Option<u64>) -> Option<u8> {
+    let total = total_bytes?;
+    if total == 0 {
+        return None;
+    }
+    Some((((downloaded_bytes as u128) * 100) / (total as u128)).min(100) as u8)
+}
+
+fn persist_download_progress(
+    platform: &str,
+    installed: &ManagedCodexRuntimeInstallState,
+    auth: &ManagedCodexAuthState,
+    downloaded_bytes: u64,
+    total_bytes: Option<u64>,
+) {
+    let install = ManagedCodexRuntimeInstallState {
+        status: "downloading".to_string(),
+        required_version: Some(REQUIRED_VERSION.to_string()),
+        installed_version: installed.installed_version.clone(),
+        platform: Some(platform.to_string()),
+        installed_at: installed.installed_at.clone(),
+        last_checked_at: Some(now_iso()),
+        downloaded_bytes: Some(downloaded_bytes),
+        total_bytes,
+        progress_percent: download_progress_percent(downloaded_bytes, total_bytes),
+        error: None,
+    };
+    if let Err(err) = persist_status(&install, auth, false) {
+        ulog_warn!(
+            "[managed-codex] failed to persist download progress: {}",
+            err
+        );
+    }
+}
+
 fn current_status_blocking() -> Result<ManagedCodexStatus, String> {
-    let install = runtime_install_state();
+    let install = preserve_active_download_state(runtime_install_state());
     let auth = auth_state_from_login_status();
     persist_status(&install, &auth, false)?;
     let runtime_path = platform_key()
@@ -1954,6 +2176,9 @@ pub async fn cmd_managed_codex_download() -> Result<ManagedCodexStatus, String> 
                 platform: Some(platform.to_string()),
                 installed_at: installed.installed_at.clone(),
                 last_checked_at: Some(now_iso()),
+                downloaded_bytes: Some(0),
+                total_bytes: None,
+                progress_percent: Some(0),
                 error: None,
             };
             let current_auth = auth_state_from_login_status();
@@ -1980,11 +2205,34 @@ pub async fn cmd_managed_codex_download() -> Result<ManagedCodexStatus, String> 
                 let archive_path = tmp_dir.join("codex-runtime.zip");
 
                 let cleanup_result = (|| -> Result<ManagedCodexStatus, String> {
+                    let progress_auth = current_auth.clone();
+                    let progress_installed = installed.clone();
+                    let mut last_progress_percent: Option<u8> = None;
+                    let mut last_progress_at = Instant::now() - Duration::from_secs(1);
                     let (downloaded_bytes, actual_sha) = download_to_file_with_hash(
                         &client,
                         &artifact.url,
                         &archive_path,
                         artifact.archive_size_bytes.unwrap_or(MAX_ARCHIVE_BYTES),
+                        artifact.archive_size_bytes,
+                        |downloaded, total| {
+                            let percent = download_progress_percent(downloaded, total);
+                            let should_persist = downloaded == 0
+                                || percent != last_progress_percent
+                                || last_progress_at.elapsed() >= Duration::from_secs(1);
+                            if !should_persist {
+                                return;
+                            }
+                            last_progress_percent = percent;
+                            last_progress_at = Instant::now();
+                            persist_download_progress(
+                                platform,
+                                &progress_installed,
+                                &progress_auth,
+                                downloaded,
+                                total,
+                            );
+                        },
                     )?;
                     let expected_sha = normalize_sha256_hex(&artifact.sha256)?;
                     if let Some(expected_size) = artifact.archive_size_bytes {
@@ -2033,6 +2281,9 @@ pub async fn cmd_managed_codex_download() -> Result<ManagedCodexStatus, String> 
                         platform: Some(platform.to_string()),
                         installed_at: installed.installed_at,
                         last_checked_at: Some(now_iso()),
+                        downloaded_bytes: None,
+                        total_bytes: None,
+                        progress_percent: None,
                         error: Some(err.clone()),
                     };
                     let auth = auth_state_from_login_status();
@@ -2049,6 +2300,220 @@ pub async fn cmd_managed_codex_download() -> Result<ManagedCodexStatus, String> 
     })
     .await
     .map_err(|e| format!("[managed-codex] download task failed: {}", e))?
+}
+
+fn read_login_stream<R>(mut stream: R)
+where
+    R: Read + Send + 'static,
+{
+    let _ = thread::spawn(move || {
+        let mut buf = [0u8; 1024];
+        loop {
+            match stream.read(&mut buf) {
+                Ok(0) => break,
+                Ok(read) => {
+                    let chunk = String::from_utf8_lossy(&buf[..read]).to_string();
+                    append_login_output(&chunk);
+                }
+                Err(_) => break,
+            }
+        }
+    });
+}
+
+fn persist_login_auth_state(status: &str, error: Option<String>) {
+    let auth = ManagedCodexAuthState {
+        status: status.to_string(),
+        auth_method: None,
+        account_email: None,
+        verified_at: Some(now_iso()),
+        error,
+    };
+    if let Err(err) = persist_status(&runtime_install_state(), &auth, false) {
+        ulog_warn!(
+            "[managed-codex] failed to persist login auth state: {}",
+            err
+        );
+    }
+}
+
+fn set_login_state(status: &str, error: Option<String>) {
+    let mut state = login_runtime_state()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    state.status = status.to_string();
+    state.error = error;
+}
+
+fn finish_login_attempt(ok: bool, output: String) {
+    if ok {
+        match current_status_blocking() {
+            Ok(status) if status.auth.status == "valid" => {
+                set_login_state("succeeded", None);
+                ulog_info!(
+                    "[managed-codex] login done runtime=codex runtimeSource=managed-provider authStatus={}",
+                    status.auth.status
+                );
+            }
+            Ok(status) => {
+                let message = status.auth.error.unwrap_or_else(|| {
+                    "Codex login finished but ChatGPT subscription auth was not verified"
+                        .to_string()
+                });
+                set_login_state("error", Some(message));
+            }
+            Err(err) => {
+                set_login_state("error", Some(err));
+            }
+        }
+        return;
+    }
+
+    let message = redact_managed_codex_output(&output);
+    if login_output_indicates_cancelled(&output) {
+        persist_login_auth_state("logged-out", None);
+        set_login_state(
+            "cancelled",
+            Some("登录已取消，可以重新发起登录。".to_string()),
+        );
+    } else {
+        let error = if message.is_empty() {
+            "Codex login failed".to_string()
+        } else {
+            message
+        };
+        persist_login_auth_state("error", Some(error.clone()));
+        set_login_state("error", Some(error));
+    }
+}
+
+#[tauri::command]
+pub async fn cmd_managed_codex_login_start() -> Result<ManagedCodexLoginState, String> {
+    tauri::async_runtime::spawn_blocking(|| -> Result<ManagedCodexLoginState, String> {
+        let install = runtime_install_state();
+        if install.status != "installed" {
+            let err = "Managed Codex runtime must be installed before login".to_string();
+            persist_login_auth_state("error", Some(err.clone()));
+            return Err(err);
+        }
+
+        {
+            let state = login_runtime_state()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if matches!(state.status.as_str(), "starting" | "waiting") {
+                return Ok(ManagedCodexLoginState {
+                    status: state.status.clone(),
+                    login_url: state.login_url.clone(),
+                    started_at: state.started_at.clone(),
+                    error: state.error.clone(),
+                });
+            }
+        }
+
+        ulog_info!("[managed-codex] login start runtime=codex runtimeSource=managed-provider");
+        let started_at = now_iso();
+        {
+            let mut state = login_runtime_state()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            *state = ManagedCodexLoginRuntimeState {
+                status: "starting".to_string(),
+                login_url: None,
+                started_at: Some(started_at),
+                error: None,
+                raw_output: String::new(),
+            };
+        }
+        persist_login_auth_state("logging-in", None);
+
+        let mut cmd = managed_codex_command(&[
+            "-c",
+            "cli_auth_credentials_store=\"file\"",
+            "-c",
+            "forced_login_method=\"chatgpt\"",
+            "login",
+        ])?;
+        cmd.stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .stdin(Stdio::null());
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| format!("[managed-codex] Failed to spawn codex login: {}", e))?;
+        if let Some(stdout) = child.stdout.take() {
+            read_login_stream(stdout);
+        }
+        if let Some(stderr) = child.stderr.take() {
+            read_login_stream(stderr);
+        }
+
+        let _ = thread::spawn(move || {
+            let started = Instant::now();
+            loop {
+                match child.try_wait() {
+                    Ok(Some(status)) => {
+                        let _ = child.wait();
+                        let output = {
+                            let state = login_runtime_state()
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                            state.raw_output.clone()
+                        };
+                        finish_login_attempt(status.success(), output);
+                        break;
+                    }
+                    Ok(None) if started.elapsed() > Duration::from_secs(5 * 60) => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        persist_login_auth_state("logged-out", None);
+                        set_login_state(
+                            "error",
+                            Some("登录超时，请重新发起 Codex 登录。".to_string()),
+                        );
+                        break;
+                    }
+                    Ok(None) => thread::sleep(Duration::from_millis(250)),
+                    Err(err) => {
+                        persist_login_auth_state("error", Some(err.to_string()));
+                        set_login_state(
+                            "error",
+                            Some(format!(
+                                "[managed-codex] Failed to poll codex login: {}",
+                                err
+                            )),
+                        );
+                        break;
+                    }
+                }
+            }
+        });
+
+        let wait_started = Instant::now();
+        loop {
+            let snapshot = login_state_snapshot();
+            if snapshot.login_url.is_some()
+                || matches!(
+                    snapshot.status.as_str(),
+                    "succeeded" | "error" | "cancelled"
+                )
+                || wait_started.elapsed() > Duration::from_secs(5)
+            {
+                return Ok(snapshot);
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+    })
+    .await
+    .map_err(|e| format!("[managed-codex] login start task failed: {}", e))?
+}
+
+#[tauri::command]
+pub async fn cmd_managed_codex_login_status() -> Result<ManagedCodexLoginState, String> {
+    tauri::async_runtime::spawn_blocking(|| -> Result<ManagedCodexLoginState, String> {
+        Ok(login_state_snapshot())
+    })
+    .await
+    .map_err(|e| format!("[managed-codex] login status task failed: {}", e))?
 }
 
 #[tauri::command]
@@ -2160,9 +2625,15 @@ pub async fn cmd_managed_codex_logout() -> Result<ManagedCodexStatus, String> {
 mod tests {
     use super::*;
 
-    fn valid_artifact() -> ManagedCodexArtifact {
+    fn valid_artifact(platform: &str) -> ManagedCodexArtifact {
         ManagedCodexArtifact {
-            url: "https://download.myagents.io/runtimes/codex/releases/v0.142.2/codex-darwin-arm64.zip".to_string(),
+            url: format!(
+                "{}/{}/artifacts/managed-codex-{}-{}.zip",
+                manifest_base_url(),
+                platform,
+                REQUIRED_VERSION,
+                platform
+            ),
             sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
             signature: "placeholder-signature".to_string(),
             signing: Some(ManagedCodexArtifactSigning {
@@ -2171,7 +2642,7 @@ mod tests {
                 signing_identity: Some("Developer ID Application".to_string()),
                 publisher: None,
                 certificate_sha256: None,
-                notarization: Some("spctl-assess".to_string()),
+                notarization: None,
             }),
             executable_relative_path: "bin/codex".to_string(),
             file_allowlist: vec![
@@ -2189,10 +2660,10 @@ mod tests {
     fn valid_manifest(platform: &str) -> ManagedCodexManifest {
         ManagedCodexManifest {
             schema_version: MANIFEST_SCHEMA_VERSION,
-            app_version: REQUIRED_APP_RUNTIME_SET.to_string(),
+            runtime_set: REQUIRED_RUNTIME_SET.to_string(),
             codex_version: REQUIRED_VERSION.to_string(),
             platform: Some(platform.to_string()),
-            artifacts: HashMap::from([(platform.to_string(), valid_artifact())]),
+            artifacts: HashMap::from([(platform.to_string(), valid_artifact(platform))]),
         }
     }
 
@@ -2219,6 +2690,45 @@ mod tests {
     }
 
     #[test]
+    fn fresh_downloading_state_is_owned_by_download_flow() {
+        let state = ManagedCodexRuntimeInstallState {
+            status: "downloading".to_string(),
+            required_version: Some(REQUIRED_VERSION.to_string()),
+            installed_version: None,
+            platform: Some("darwin-arm64".to_string()),
+            installed_at: None,
+            last_checked_at: Some(now_iso()),
+            downloaded_bytes: Some(1024),
+            total_bytes: Some(4096),
+            progress_percent: Some(25),
+            error: None,
+        };
+
+        assert!(is_fresh_downloading_install_state(&state, "darwin-arm64"));
+        assert!(!is_fresh_downloading_install_state(&state, "darwin-x64"));
+    }
+
+    #[test]
+    fn stale_downloading_state_is_not_preserved() {
+        let stale =
+            (Utc::now() - chrono::Duration::seconds(DOWNLOADING_STATE_TTL_SECS + 1)).to_rfc3339();
+        let state = ManagedCodexRuntimeInstallState {
+            status: "downloading".to_string(),
+            required_version: Some(REQUIRED_VERSION.to_string()),
+            installed_version: None,
+            platform: Some("darwin-arm64".to_string()),
+            installed_at: None,
+            last_checked_at: Some(stale),
+            downloaded_bytes: Some(1024),
+            total_bytes: Some(4096),
+            progress_percent: Some(25),
+            error: None,
+        };
+
+        assert!(!is_fresh_downloading_install_state(&state, "darwin-arm64"));
+    }
+
+    #[test]
     fn installed_metadata_requires_signature_verification_fields() {
         let mut meta = InstalledJson {
             version: REQUIRED_VERSION.to_string(),
@@ -2235,7 +2745,7 @@ mod tests {
                 signing_identity: None,
                 publisher: None,
                 certificate_sha256: None,
-                notarization: Some("spctl-assess".to_string()),
+                notarization: None,
             }),
             installed_at: Some(now_iso()),
             source_url: None,
@@ -2260,6 +2770,35 @@ mod tests {
         );
         assert_eq!(login_status_auth_method_from_output("Logged in"), None);
         assert!(login_status_indicates_logged_out("Not logged in"));
+    }
+
+    #[test]
+    fn login_output_extracts_authenticate_url() {
+        let output = "Starting local login server on http://127.0.0.1:1455\n\
+If your browser did not open, navigate to this URL to authenticate: https://auth.openai.com/oauth/authorize?client_id=codex&state=abc\n\
+On a remote or headless machine? Use `codex login --device-auth` instead.";
+
+        assert_eq!(
+            extract_login_url(output).as_deref(),
+            Some("https://auth.openai.com/oauth/authorize?client_id=codex&state=abc")
+        );
+    }
+
+    #[test]
+    fn login_output_ignores_local_callback_url_before_authenticate_url() {
+        let output = "Starting local login server on http://127.0.0.1:1455\n";
+
+        assert_eq!(extract_login_url(output), None);
+    }
+
+    #[test]
+    fn login_output_detects_cancelled_state() {
+        assert!(login_output_indicates_cancelled(
+            "Error logging in: Login cancelled"
+        ));
+        assert!(login_output_indicates_cancelled(
+            "Error logging in: Login canceled"
+        ));
     }
 
     #[test]
@@ -2307,7 +2846,7 @@ mod tests {
         zip.write_all(b"evil").unwrap();
         zip.finish().unwrap();
 
-        let mut artifact = valid_artifact();
+        let mut artifact = valid_artifact("darwin-arm64");
         artifact.file_allowlist = vec!["bin/codex".to_string()];
         artifact.entry_count = Some(2);
         let err = extract_managed_codex_zip(&archive_path, &dir.path().join("out"), &artifact)
@@ -2393,6 +2932,13 @@ mod tests {
         assert!(validate_manifest_for_platform(manifest, "darwin-arm64")
             .unwrap_err()
             .contains("HTTPS"));
+
+        let mut manifest = valid_manifest("darwin-arm64");
+        manifest.artifacts.get_mut("darwin-arm64").unwrap().url =
+            "https://download.myagents.io/runtimes/codex/sets/other-runtime/darwin-arm64/artifacts/codex.zip".to_string();
+        assert!(validate_manifest_for_platform(manifest, "darwin-arm64")
+            .unwrap_err()
+            .contains("artifact URL"));
     }
 
     #[test]

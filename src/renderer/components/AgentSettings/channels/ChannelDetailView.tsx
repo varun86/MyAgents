@@ -19,7 +19,7 @@ import { isProviderAvailable } from '@/config/services/providerService';
 import { patchAgentConfig, invokeStartAgentChannel, stopAndDisableAgentChannel, startAndEnableAgentChannel, channelHasCredentials } from '@/config/services/agentConfigService';
 import { resolveEffectiveConfig } from '../../../../shared/types/agent';
 import type { RuntimeConfig } from '../../../../shared/types/runtime';
-import { runtimeConfigForRuntimeBackedProvider, toProviderExecutionIntent } from '../../../../shared/providerExecution';
+import { runtimeConfigForRuntimeBackedProviderDefault, toProviderExecutionIntent } from '../../../../shared/providerExecution';
 import BotTokenInput from '../../ImSettings/components/BotTokenInput';
 import FeishuCredentialInput from '../../ImSettings/components/FeishuCredentialInput';
 import DingtalkCredentialInput from '../../ImSettings/components/DingtalkCredentialInput';
@@ -1200,9 +1200,8 @@ export default function ChannelDetailView({
                                             providerId,
                                             providerEnvJson: undefined,
                                             model: newModel,
-                                            runtime: intent.runtime,
-                                            runtimeConfig: runtimeConfigForRuntimeBackedProvider(
-                                                intent,
+                                            runtime: undefined,
+                                            runtimeConfig: runtimeConfigForRuntimeBackedProviderDefault(
                                                 channel?.overrides?.runtimeConfig as RuntimeConfig | undefined,
                                             ),
                                         });
@@ -1244,9 +1243,8 @@ export default function ChannelDetailView({
                                     if (intent?.kind === 'runtime-backed-provider') {
                                         await patchOverrides({
                                             model: model || undefined,
-                                            runtime: intent.runtime,
-                                            runtimeConfig: runtimeConfigForRuntimeBackedProvider(
-                                                intent,
+                                            runtime: undefined,
+                                            runtimeConfig: runtimeConfigForRuntimeBackedProviderDefault(
                                                 channel?.overrides?.runtimeConfig as RuntimeConfig | undefined,
                                             ),
                                         });

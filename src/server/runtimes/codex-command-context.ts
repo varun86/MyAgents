@@ -57,6 +57,12 @@ const MANAGED_SAFE_ENV_KEYS = [
   'SSL_CERT_FILE',
   'SSL_CERT_DIR',
   'NODE_EXTRA_CA_CERTS',
+  // Non-secret MyAgents control-plane env. Managed Codex still gets an
+  // isolated CODEX_HOME and no provider auth env, but its shell tool must be
+  // able to run the MyAgents CLI just like builtin/external runtime shells.
+  'MYAGENTS_PORT',
+  'MYAGENTS_MANAGEMENT_PORT',
+  'MYAGENTS_VERSION',
   'MYAGENTS_PROXY_INJECTED',
   ...PROXY_ENV_KEYS,
 ] as const;

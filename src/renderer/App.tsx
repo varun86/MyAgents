@@ -57,7 +57,7 @@ import {
   isProjectVisibleToUser,
   type Project,
 } from '@/config/types';
-import { type Tab, type InitialMessage, type SidecarConfigDisposition, type FilePreviewIntent, createNewTab, getFolderName, buildChatFlipPatch, MAX_TABS } from '@/types/tab';
+import { type Tab, type InitialMessage, type LaunchSessionBirthHint, type SidecarConfigDisposition, type FilePreviewIntent, createNewTab, getFolderName, buildChatFlipPatch, MAX_TABS } from '@/types/tab';
 import { buildRestoredTabs, saveOpenTabs, hydratePersistedState, pickDurableOverride, shouldOfferRestore, planRestoreTabs } from '@/utils/tabPersistence';
 import { persistOpenTabsDurable, loadAndClearOpenTabsDurable, clearOpenTabsDurable } from '@/utils/tabPersistenceDurable';
 import { consumeCleanExitMarker } from '@/utils/lastExitMarker';
@@ -93,6 +93,7 @@ import {
   toProviderExecutionIntent,
   type RuntimeBackedProviderIdentity,
 } from '../shared/providerExecution';
+import { buildRuntimeBackedInitialSessionBirth } from '@/utils/providerSwitchSessionBirth';
 
 // ============================================================
 // User Support Prompt Builder
@@ -108,6 +109,31 @@ function buildSupportPrompt(description: string, appVersion: string): string {
     ``,
     `请使用 /support skill 帮助用户解决这个问题。`,
   ].join('\n');
+}
+
+function normalizeInitialPermissionMode(value: unknown): InitialMessage['permissionMode'] | undefined {
+  return value === 'auto' || value === 'plan' || value === 'fullAgency'
+    ? value
+    : undefined;
+}
+
+function resolveInitialPermissionMode(args: {
+  project: Pick<Project, 'permissionMode'>;
+  agent?: { permissionMode?: unknown };
+  defaultPermissionMode?: unknown;
+}): InitialMessage['permissionMode'] | undefined {
+  return normalizeInitialPermissionMode(args.agent?.permissionMode)
+    ?? normalizeInitialPermissionMode(args.project.permissionMode)
+    ?? normalizeInitialPermissionMode(args.defaultPermissionMode);
+}
+
+function normalizeStringSetting(value: unknown): string | undefined {
+  const trimmed = typeof value === 'string' ? value.trim() : '';
+  return trimmed || undefined;
+}
+
+function cloneStringArray(value: string[] | undefined): string[] | undefined {
+  return value ? [...value] : undefined;
 }
 
 interface SessionRuntimeOpenIdentity {
@@ -197,7 +223,7 @@ interface TabContentProps {
   settingsInitialMcpId: string | undefined;
   settingsInitialSelect: CapabilityInitialSelect | undefined;
   // Launcher callbacks
-  onLaunchProject: (project: Project, sessionId?: string, initialMessage?: InitialMessage, analyticsContext?: LaunchProjectAnalyticsContext) => void;
+  onLaunchProject: (project: Project, sessionId?: string, initialMessage?: InitialMessage, analyticsContext?: LaunchProjectAnalyticsContext, sessionBirthHint?: LaunchSessionBirthHint) => void;
   // Chat callbacks
   onBack: () => Promise<void>;
   onSwitchSession: (tabId: string, sessionId: string, historyEntrySource?: HistoryEntrySource) => Promise<void>;
@@ -1410,6 +1436,7 @@ export default function App() {
     sessionId?: string,
     initialMessage?: InitialMessage,
     analyticsContext?: LaunchProjectAnalyticsContext,
+    sessionBirthHint?: LaunchSessionBirthHint,
   ) => {
     const activeTabId = activeTabIdRef.current;
     if (!activeTabId) return;
@@ -1671,24 +1698,96 @@ export default function App() {
         await deactivateSession(oldSessionForLaunch);
       }
 
+      const configForLaunchBirth = configRef.current;
+      const agentForLaunchBirth = configForLaunchBirth
+        ? getAgentByWorkspacePath(configForLaunchBirth, project.path)
+        : undefined;
+      const initialMessageHasExecutionSelection = Boolean(
+        initialMessage?.providerExecutionIdentity
+        || initialMessage?.builtinSelection
+        || initialMessage?.runtimeModel
+        || sessionBirthHint?.providerExecutionIdentity
+        || sessionBirthHint?.builtinSelection
+        || sessionBirthHint?.runtimeModel,
+      );
+      const runtimeBackedProviderIdentityFromConfig = (() => {
+        if (sessionId || initialMessageHasExecutionSelection || !configForLaunchBirth) {
+          return undefined;
+        }
+        const effectiveAgentRuntime = resolveEffectiveRuntime(
+          agentForLaunchBirth?.runtime,
+          !!configForLaunchBirth.multiAgentRuntime,
+        );
+        if (effectiveAgentRuntime !== 'builtin') {
+          return undefined;
+        }
+        const sel = resolveBuiltinSelection(
+          { agent: agentForLaunchBirth, workspace: project },
+          configForLaunchBirth,
+          appProvidersRef.current,
+          appApiKeysRef.current,
+          appProviderVerifyStatusRef.current,
+        );
+        if (!sel || !isRuntimeBackedProvider(sel.provider)) {
+          return undefined;
+        }
+        const intent = toProviderExecutionIntent(sel.provider, sel.model);
+        return intent.kind === 'runtime-backed-provider' ? intent : undefined;
+      })();
+      const runtimeBackedProviderIdentity =
+        initialMessage?.providerExecutionIdentity
+        ?? sessionBirthHint?.providerExecutionIdentity
+        ?? runtimeBackedProviderIdentityFromConfig;
+
       // For ordinary new sessions (no sessionId), generate a temporary session ID;
       // the sidecar materializes it later. Runtime-backed providers are different:
-      // Rust must read runtime/runtimeSource from sessions.json before spawning, so
-      // create a real session metadata row before ensureSessionSidecar.
+      // Rust must read runtime/runtimeSource/providerExecutionIdentity from
+      // sessions.json before spawning, so create a real session metadata row before
+      // ensureSessionSidecar. This covers both explicit initial-message launches
+      // and empty Launcher opens whose current Provider is Codex (订阅).
       let effectiveSessionId = sessionId ?? createPendingSessionId(targetTabId);
-      if (!sessionId && initialMessage?.providerExecutionIdentity) {
+      if (!sessionId && runtimeBackedProviderIdentity) {
         try {
-          const identity = initialMessage.providerExecutionIdentity;
-          const prepared = await createSession(project.path, identity.runtime, {
-            runtimeSource: identity.runtimeSource,
-            providerExecutionIdentity: identity,
-            providerId: identity.providerId,
-            model: identity.model,
-            permissionMode: initialMessage.permissionMode,
-            reasoningEffort: initialMessage.reasoningEffort,
-            mcpEnabledServers: initialMessage.mcpEnabledServers,
-            enabledPluginIds: initialMessage.enabledPluginIds,
+          const identity = runtimeBackedProviderIdentity;
+          const identityResolvedFromCurrentConfig =
+            !initialMessage?.providerExecutionIdentity && !sessionBirthHint?.providerExecutionIdentity;
+          const birth = buildRuntimeBackedInitialSessionBirth({
+            identity,
+            permissionMode: initialMessage?.permissionMode
+              ?? sessionBirthHint?.permissionMode
+              ?? (identityResolvedFromCurrentConfig
+                ? (
+                    normalizeStringSetting(agentForLaunchBirth?.runtimeConfig?.permissionMode)
+                    ?? resolveInitialPermissionMode({
+                      project,
+                      agent: agentForLaunchBirth,
+                      defaultPermissionMode: configForLaunchBirth?.defaultPermissionMode,
+                    })
+                  )
+                : undefined),
+            reasoningEffort: initialMessage?.reasoningEffort
+              ?? sessionBirthHint?.reasoningEffort
+              ?? (identityResolvedFromCurrentConfig
+                ? (
+                    normalizeStringSetting(agentForLaunchBirth?.runtimeConfig?.reasoningEffort)
+                    ?? normalizeStringSetting(agentForLaunchBirth?.reasoningEffort)
+                  )
+                : undefined),
+            mcpEnabledServers: initialMessage?.mcpEnabledServers
+              ?? sessionBirthHint?.mcpEnabledServers
+              ?? (identityResolvedFromCurrentConfig
+                ? cloneStringArray(agentForLaunchBirth?.mcpEnabledServers ?? project.mcpEnabledServers)
+                : undefined),
+            enabledPluginIds: initialMessage?.enabledPluginIds
+              ?? sessionBirthHint?.enabledPluginIds
+              ?? (identityResolvedFromCurrentConfig
+                ? cloneStringArray(agentForLaunchBirth?.enabledPluginIds ?? project.enabledPluginIds)
+                : undefined),
           });
+          console.log(
+            `[App] Runtime-backed provider launch birth: provider=${identity.providerId} runtime=${birth.runtime} source=${birth.opts.runtimeSource ?? 'none'} model=${identity.model}`,
+          );
+          const prepared = await createSession(project.path, birth.runtime, birth.opts);
           effectiveSessionId = prepared.id;
         } catch (err) {
           console.error('[App] Failed to create runtime-backed provider session:', err);
@@ -1725,8 +1824,9 @@ export default function App() {
 
       // INSTANT-NAV: flip to the chat shell BEFORE awaiting the sidecar boot, so the
       // user lands in Chat instantly (the boot runs under the "AI 启动中" overlay).
-      // `effectiveSessionId` is truthy (D1): a real history id, or a `pending-<tabId>`
-      // for new sessions → TabProvider's SSE connect fires and Chat mounts now.
+      // `effectiveSessionId` is truthy (D1): a real history/prepared runtime-backed
+      // id, or a `pending-<tabId>` for ordinary new sessions → TabProvider's SSE
+      // connect fires and Chat mounts now.
       //
       // `getSessionPort` is a PAINT-TIMING hint ONLY, never a config-correctness
       // input: null ⇒ flip instant (no ready sidecar to wait on); non-null ⇒ flip
@@ -3112,8 +3212,14 @@ export default function App() {
         const alignmentProviderExecutionIdentity = alignmentProviderIntent?.kind === 'runtime-backed-provider'
           ? alignmentProviderIntent
           : undefined;
+        const alignmentPermissionMode = resolveInitialPermissionMode({
+          project: workspace,
+          agent: workspaceAgent,
+          defaultPermissionMode: configRef.current?.defaultPermissionMode,
+        });
         const initialMessage: InitialMessage = {
           text: alignmentPrompt,
+          ...(alignmentPermissionMode ? { permissionMode: alignmentPermissionMode } : {}),
           ...(alignmentProviderExecutionIdentity
             ? {
                 providerExecutionIdentity: alignmentProviderExecutionIdentity,
@@ -3372,6 +3478,9 @@ export default function App() {
         // Always pass an explicit execution identity (when any provider is available)
         // so Chat tab autoSend doesn't race against the invalid-model correction
         // useEffect when helper Agent's persisted (provider, model) has gone stale.
+        const helperAgent = project.agentId && configRef.current
+          ? getAgentById(configRef.current, project.agentId)
+          : undefined;
         let builtinSelection: { providerId: string; model: string } | undefined;
         let providerExecutionIdentity: RuntimeBackedProviderIdentity | undefined;
         if (providerId) {
@@ -3393,9 +3502,6 @@ export default function App() {
           }
         }
         if (!builtinSelection && !providerExecutionIdentity) {
-          const helperAgent = project.agentId && configRef.current
-            ? getAgentById(configRef.current, project.agentId)
-            : undefined;
           const sel = resolveBuiltinSelection(
             { agent: helperAgent, workspace: project },
             configRef.current!,
@@ -3416,9 +3522,15 @@ export default function App() {
           // else: no provider available system-wide — let Chat tab show its
           // empty-state guidance ("请先设置模型服务").
         }
+        const helperPermissionMode = resolveInitialPermissionMode({
+          project,
+          agent: helperAgent,
+          defaultPermissionMode: configRef.current?.defaultPermissionMode,
+        });
 
         const initialMessage: InitialMessage = {
           text: buildSupportPrompt(description, appVersion),
+          ...(helperPermissionMode ? { permissionMode: helperPermissionMode } : {}),
           ...(builtinSelection ? { builtinSelection } : {}),
           ...(providerExecutionIdentity ? {
             providerExecutionIdentity,

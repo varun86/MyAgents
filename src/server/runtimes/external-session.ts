@@ -1400,7 +1400,13 @@ export function getExternalSessionState(): ExternalSessionState {
   return getExternalLifecycleState();
 }
 
-export function getExternalSystemInitPayload(): { info: SystemInitInfo; sessionId: string; prewarm?: boolean; runtime: RuntimeType } | null {
+export function getExternalSystemInitPayload(): {
+  info: SystemInitInfo;
+  sessionId: string;
+  prewarm?: boolean;
+  runtime: RuntimeType;
+  runtimeSource?: import('../../shared/types/runtime').RuntimeSource;
+} | null {
   return getExternalSystemInitPayloadSnapshot();
 }
 
@@ -3016,13 +3022,17 @@ export async function prewarmExternalSession(options: {
 /**
  * Query models for a given runtime type
  */
-export async function queryRuntimeModels(runtimeType: RuntimeType): Promise<unknown[]> {
+export async function queryRuntimeModels(
+  runtimeType: RuntimeType,
+  options: { runtimeSource?: import('../../shared/types/runtime').RuntimeSource } = {},
+): Promise<unknown[]> {
   if (runtimeType === 'builtin') return [];
+  const runtimeSource = runtimeType === 'codex' ? options.runtimeSource : undefined;
   try {
     return await queryRuntimeModelsSingleFlight(runtimeType, async () => {
       const runtime = getExternalRuntime(runtimeType);
-      return await runtime.queryModels();
-    });
+      return await runtime.queryModels({ runtimeSource });
+    }, runtimeSource);
   } catch (err) {
     console.error(`[external-session] Failed to query models for ${runtimeType}:`, err);
     return [];
@@ -3681,6 +3691,7 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
       const systemInitPayload = buildExternalSystemInitPayload({
         info,
         runtime: getCurrentRuntimeType(),
+        runtimeSource: getCurrentRuntimeSource(),
       });
       setExternalSystemInitPayload(systemInitPayload);
       broadcast('chat:system-init', systemInitPayload);

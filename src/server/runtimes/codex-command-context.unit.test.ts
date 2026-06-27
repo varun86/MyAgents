@@ -48,6 +48,9 @@ describe('codex command context', () => {
     vi.stubEnv('OPENAI_API_KEY', 'must-not-leak');
     vi.stubEnv('CODEX_ACCESS_TOKEN', 'must-not-leak');
     vi.stubEnv('CODEX_HOME', '/tmp/user-codex-home');
+    vi.stubEnv('MYAGENTS_PORT', '31415');
+    vi.stubEnv('MYAGENTS_MANAGEMENT_PORT', '27182');
+    vi.stubEnv('MYAGENTS_VERSION', '9.9.9-test');
 
     const installDir = join(
       tempHome,
@@ -69,6 +72,9 @@ describe('codex command context', () => {
     expect(context.env.CODEX_HOME).toBe(getManagedCodexHome());
     expect(context.env.OPENAI_API_KEY).toBeUndefined();
     expect(context.env.CODEX_ACCESS_TOKEN).toBeUndefined();
+    expect(context.env.MYAGENTS_PORT).toBe('31415');
+    expect(context.env.MYAGENTS_MANAGEMENT_PORT).toBe('27182');
+    expect(context.env.MYAGENTS_VERSION).toBe('9.9.9-test');
   });
 
   it('prefers executableRelativePath from managed installed metadata', () => {

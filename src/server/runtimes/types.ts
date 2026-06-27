@@ -298,7 +298,10 @@ export interface AgentRuntime {
   detect(): Promise<RuntimeDetection>;
 
   /** Query available models from the CLI (may spawn a temporary process) */
-  queryModels(): Promise<RuntimeModelInfo[]>;
+  queryModels(options?: {
+    runtimeSource?: RuntimeSource;
+    envPolicy?: RuntimeEnvPolicy;
+  }): Promise<RuntimeModelInfo[]>;
 
   /** Get the permission modes supported by this runtime */
   getPermissionModes(): RuntimePermissionMode[];

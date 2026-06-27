@@ -12,11 +12,13 @@ describe('buildRuntimeChangePatch', () => {
     expect(patch).toEqual({ runtime: 'codex', runtimeConfig: undefined });
   });
 
-  it('scrubs model / permissionMode / additionalArgs', () => {
+  it('scrubs source / model / permissionMode / reasoningEffort / additionalArgs', () => {
     const patch = buildRuntimeChangePatch(
       {
+        source: 'managed-provider',
         model: 'gemini-3.1-pro-preview',
         permissionMode: 'autoEdit',
+        reasoningEffort: 'xhigh',
         additionalArgs: ['--acp'],
       },
       'codex',

@@ -1,7 +1,7 @@
 // Provider and permission configuration types
 
 import type { HeartbeatConfig, MemoryAutoUpdateConfig } from './types/im';
-import type { RuntimeSource, RuntimeType } from './types/runtime';
+import type { RuntimeModelInfo, RuntimeSource, RuntimeType } from './types/runtime';
 
 /**
  * Permission mode for agent behavior
@@ -245,6 +245,7 @@ export interface Provider {
   primaryModel: string;     // 默认模型 API 代码
   isBuiltin: boolean;
   enabled?: boolean;        // Runtime-derived: false when globally disabled by the user
+  runtimeReady?: boolean;   // Runtime-backed providers only: true when their managed runtime/auth preconditions are ready
 
   // API 配置
   config: {
@@ -488,6 +489,9 @@ export interface ManagedCodexRuntimeInstallState {
   platform?: string;
   installedAt?: string;
   lastCheckedAt?: string;
+  downloadedBytes?: number;
+  totalBytes?: number;
+  progressPercent?: number;
   error?: string;
 }
 
@@ -502,7 +506,8 @@ export interface ManagedCodexAuthState {
 export const MANAGED_CODEX_REQUIRED_RUNTIME = {
   component: 'codex',
   version: '0.142.2',
-  manifestUrl: 'https://download.myagents.io/runtimes/codex/by-app/0.2.43/manifest-v1.json',
+  runtimeSet: 'codex-0.142.2',
+  manifestBaseUrl: 'https://download.myagents.io/runtimes/codex/sets/codex-0.142.2',
   manifestPublicKeyId: 'myagents-runtime-manifest-ed25519-2026-06',
 } as const;
 
@@ -700,7 +705,7 @@ export interface AppConfig {
   // ===== Managed Codex Provider (PRD 0.2.43) =====
   // Developer gate controls visibility only; release-grade security remains required.
   managedCodexProviderDevGate?: boolean;
-  // User intent to expose Codex (订阅) in provider-selecting surfaces once ready.
+  /** @deprecated Use disabledProviderIds / providerOrder like every other provider. */
   managedCodexProviderEnabled?: boolean;
   managedCodexRuntimeInstall?: ManagedCodexRuntimeInstallState;
   managedCodexAuth?: ManagedCodexAuthState;
@@ -840,15 +845,44 @@ const MIMO_MODELS: ModelEntity[] = [
 
 const MIMO_ALIASES = { sonnet: 'mimo-v2.5-pro', opus: 'mimo-v2.5-pro', haiku: 'mimo-v2.5' } as const;
 
-export const MANAGED_CODEX_MODELS: ModelEntity[] = [
-  {
-    model: 'gpt-5.4-codex',
-    modelName: 'GPT-5.4 Codex',
-    modelSeries: 'codex',
-    inputModalities: ['text', 'image'],
-    outputModalities: ['text'],
-  },
-];
+export const MANAGED_CODEX_MODELS: ModelEntity[] = [];
+
+export function managedCodexModelsFromRuntime(
+  runtimeModels: readonly RuntimeModelInfo[] | undefined,
+): ModelEntity[] {
+  const seen = new Set<string>();
+  const models: ModelEntity[] = [];
+  for (const runtimeModel of runtimeModels ?? []) {
+    const model = runtimeModel.value.trim();
+    if (!model || seen.has(model)) continue;
+    seen.add(model);
+    models.push({
+      model,
+      modelName: runtimeModel.displayName?.trim() || model,
+      modelSeries: 'codex',
+      inputModalities: ['text', 'image'],
+      outputModalities: ['text'],
+      source: 'discovered',
+    });
+  }
+  return models;
+}
+
+export function withManagedCodexRuntimeModels(
+  provider: Provider,
+  runtimeModels: readonly RuntimeModelInfo[] | undefined,
+): Provider {
+  const models = managedCodexModelsFromRuntime(runtimeModels);
+  const defaultModel = runtimeModels?.find(model => model.isDefault && model.value.trim())?.value.trim();
+  const primaryModel = defaultModel && models.some(model => model.model === defaultModel)
+    ? defaultModel
+    : (models[0]?.model ?? '');
+  return {
+    ...provider,
+    primaryModel,
+    models,
+  };
+}
 
 export const MANAGED_CODEX_PROVIDER: Provider = {
   id: CODEX_SUBSCRIPTION_PROVIDER_ID,
@@ -858,7 +892,7 @@ export const MANAGED_CODEX_PROVIDER: Provider = {
   cloudProvider: 'ChatGPT Subscription',
   type: 'subscription',
   execution: { kind: 'runtime-backed', runtime: 'codex', source: 'managed-provider' },
-  primaryModel: MANAGED_CODEX_MODELS[0].model,
+  primaryModel: '',
   isBuiltin: true,
   config: {},
   models: MANAGED_CODEX_MODELS,
@@ -886,7 +920,7 @@ export interface ManagedCodexProviderReadiness {
 
 type ManagedCodexConfigLike = Pick<AppConfig,
   | 'managedCodexProviderDevGate'
-  | 'managedCodexProviderEnabled'
+  | 'disabledProviderIds'
   | 'managedCodexRuntimeInstall'
   | 'managedCodexAuth'
 >;
@@ -949,7 +983,7 @@ export function getManagedCodexProviderReadiness(
     return { visible: true, selectable: false, reason, requiredVersion };
   }
 
-  if (config.managedCodexProviderEnabled !== true) {
+  if (config.disabledProviderIds?.includes(CODEX_SUBSCRIPTION_PROVIDER_ID)) {
     return { visible: true, selectable: false, reason: 'provider-disabled', requiredVersion };
   }
 
@@ -959,10 +993,14 @@ export function getManagedCodexProviderReadiness(
 export function withManagedCodexProviderCatalog(
   providers: readonly Provider[],
   config: Pick<AppConfig, 'managedCodexProviderDevGate'>,
+  runtimeModels?: readonly RuntimeModelInfo[],
 ): Provider[] {
   const withoutManagedCodex = providers.filter(provider => provider.id !== CODEX_SUBSCRIPTION_PROVIDER_ID);
   if (config.managedCodexProviderDevGate !== true) return withoutManagedCodex;
-  return [...withoutManagedCodex, MANAGED_CODEX_PROVIDER];
+  return [
+    ...withoutManagedCodex,
+    withManagedCodexRuntimeModels(MANAGED_CODEX_PROVIDER, runtimeModels),
+  ];
 }
 
 export function applyManagedCodexProviderReadiness(
@@ -970,11 +1008,12 @@ export function applyManagedCodexProviderReadiness(
   config: ManagedCodexConfigLike,
 ): Provider[] {
   const readiness = getManagedCodexProviderReadiness(config);
+  const runtimeReady = readiness.reason === 'ready' || readiness.reason === 'provider-disabled';
   return providers.map(provider => {
     if (provider.id !== CODEX_SUBSCRIPTION_PROVIDER_ID) return provider;
     return {
       ...provider,
-      enabled: readiness.selectable && provider.enabled !== false,
+      runtimeReady,
     };
   });
 }

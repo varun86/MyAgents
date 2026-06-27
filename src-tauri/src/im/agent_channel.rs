@@ -1130,7 +1130,7 @@ pub(super) async fn create_bot_instance<R: Runtime>(
                                             let config_for_disk = new_config.clone();
                                             tokio::task::spawn_blocking(move || {
                                                 let patch = AgentConfigPatch {
-                                                    runtime_config: Some(config_for_disk),
+                                                    runtime_config: Some(Some(config_for_disk)),
                                                     ..Default::default()
                                                 };
                                                 if let Err(e) = persist_agent_config_patch(&agent_id, &patch) {
@@ -1486,7 +1486,7 @@ pub(super) async fn create_bot_instance<R: Runtime>(
                                     let config_for_disk = new_config.clone();
                                     tokio::task::spawn_blocking(move || {
                                         let patch = AgentConfigPatch {
-                                            runtime_config: Some(config_for_disk),
+                                            runtime_config: Some(Some(config_for_disk)),
                                             ..Default::default()
                                         };
                                         if let Err(e) = persist_agent_config_patch(&agent_id, &patch) {

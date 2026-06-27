@@ -1,4 +1,4 @@
-import { Check, ChevronDown, Download, FolderOpen, KeyRound, Link, Loader2, Plus, RefreshCw, SlidersHorizontal, Square, Trash2, Unlink, X, AlertCircle, Globe, ExternalLink as ExternalLinkIcon, Settings2 } from 'lucide-react';
+import { Check, ChevronDown, Copy, Download, FolderOpen, KeyRound, Link, Loader2, Plus, RefreshCw, SlidersHorizontal, Square, Trash2, Unlink, X, AlertCircle, Globe, ExternalLink as ExternalLinkIcon, Settings2 } from 'lucide-react';
 import { ExternalLink } from '@/components/ExternalLink';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { getVersion } from '@tauri-apps/api/app';
@@ -116,6 +116,36 @@ async function getPlaywrightDefaultArgs(): Promise<string[]> {
     return [`--user-data-dir=${profilePath}`];
 }
 
+type ManagedCodexLoginStatus = 'idle' | 'starting' | 'waiting' | 'succeeded' | 'cancelled' | 'error';
+
+interface ManagedCodexLoginAttemptState {
+    status: ManagedCodexLoginStatus;
+    loginUrl?: string | null;
+    startedAt?: string | null;
+    error?: string | null;
+}
+
+const EMPTY_MANAGED_CODEX_LOGIN_STATE: ManagedCodexLoginAttemptState = {
+    status: 'idle',
+    loginUrl: null,
+    startedAt: null,
+    error: null,
+};
+
+function normalizeManagedCodexLoginState(raw: unknown): ManagedCodexLoginAttemptState {
+    if (!raw || typeof raw !== 'object') return EMPTY_MANAGED_CODEX_LOGIN_STATE;
+    const value = raw as Record<string, unknown>;
+    const status = typeof value.status === 'string' ? value.status : 'idle';
+    return {
+        status: ['starting', 'waiting', 'succeeded', 'cancelled', 'error'].includes(status)
+            ? status as ManagedCodexLoginStatus
+            : 'idle',
+        loginUrl: typeof value.loginUrl === 'string' ? value.loginUrl : null,
+        startedAt: typeof value.startedAt === 'string' ? value.startedAt : null,
+        error: typeof value.error === 'string' ? value.error : null,
+    };
+}
+
 export default function Settings({ initialSection, initialMcpId, initialSelect, onSectionChange, isActive, updateReady: propUpdateReady, updateVersion: propUpdateVersion, updateChecking, updateDownloading, updateInstalling, updatePreparing, onCheckForUpdate, onRestartAndUpdate }: SettingsProps) {
     const {
         apiKeys,
@@ -157,6 +187,11 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
     );
     const [floatingBallGateBusy, setFloatingBallGateBusy] = useState(false);
     const [managedCodexBusy, setManagedCodexBusy] = useState<null | 'status' | 'download' | 'login' | 'logout'>(null);
+    const managedCodexBusyRef = useRef<typeof managedCodexBusy>(null);
+    managedCodexBusyRef.current = managedCodexBusy;
+    const [managedCodexDetailsOpen, setManagedCodexDetailsOpen] = useState(false);
+    const [managedCodexLoginDialogOpen, setManagedCodexLoginDialogOpen] = useState(false);
+    const [managedCodexLoginState, setManagedCodexLoginState] = useState<ManagedCodexLoginAttemptState>(EMPTY_MANAGED_CODEX_LOGIN_STATE);
     useEffect(() => {
         setClaudeTranscriptCleanupDaysDraft(String(claudeTranscriptCleanupPeriodDays));
     }, [claudeTranscriptCleanupPeriodDays]);
@@ -797,6 +832,8 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
         // z-[60]: delete confirmation (highest)
         if (deleteConfirmProvider) { setDeleteConfirmProvider(null); return true; }
         // z-50: all other inline overlays
+        if (managedCodexLoginDialogOpen) { setManagedCodexLoginDialogOpen(false); return true; }
+        if (managedCodexDetailsOpen) { setManagedCodexDetailsOpen(false); return true; }
         if (runtimeDialog.show) { setRuntimeDialog(prev => ({ ...prev, show: false })); return true; }
         if (editingProvider) { setEditingProvider(null); return true; }
         if (showProviderOrderDialog) { setShowProviderOrderDialog(false); return true; }
@@ -2099,6 +2136,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
 
     // Open provider management panel
     const openProviderManage = (provider: Provider) => {
+        if (provider.id === CODEX_SUBSCRIPTION_PROVIDER_ID) return;
         // For preset providers, we allow adding custom models
         // For custom providers, we can edit all fields
         const effectiveAliases = getEffectiveModelAliases(provider, config.providerModelAliases);
@@ -2232,11 +2270,8 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
         ],
     );
     const visibleProviders = useMemo(
-        () => providers.filter(provider =>
-            provider.enabled !== false
-            || (provider.id === CODEX_SUBSCRIPTION_PROVIDER_ID && managedCodexReadiness.visible),
-        ),
-        [providers, managedCodexReadiness.visible],
+        () => providers.filter(provider => provider.enabled !== false),
+        [providers],
     );
 
     const openProviderOrderDialog = useCallback(() => {
@@ -2249,6 +2284,10 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
 
     const refreshManagedCodexStatus = useCallback(async () => {
         if (!isTauriEnvironment()) return;
+        if (managedCodexBusyRef.current === 'download') {
+            await refreshConfig();
+            return;
+        }
         setManagedCodexBusy('status');
         try {
             await invoke('cmd_managed_codex_status');
@@ -2265,6 +2304,24 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
         if (config.managedCodexProviderDevGate !== true) return;
         void refreshManagedCodexStatus();
     }, [activeSection, config.managedCodexProviderDevGate, refreshManagedCodexStatus]);
+
+    useEffect(() => {
+        if (activeSection !== 'providers') return;
+        if (config.managedCodexProviderDevGate !== true) return;
+        const isDownloading = managedCodexBusy === 'download'
+            || config.managedCodexRuntimeInstall?.status === 'downloading';
+        if (!isDownloading) return;
+        const interval = window.setInterval(() => {
+            void refreshConfig();
+        }, 500);
+        return () => window.clearInterval(interval);
+    }, [
+        activeSection,
+        config.managedCodexProviderDevGate,
+        config.managedCodexRuntimeInstall?.status,
+        managedCodexBusy,
+        refreshConfig,
+    ]);
 
     const runManagedCodexCommand = useCallback(async (
         action: 'download' | 'login' | 'logout',
@@ -2292,6 +2349,78 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
             setManagedCodexBusy(null);
         }
     }, [managedCodexBusy, refreshConfig, toast]);
+
+    const startManagedCodexLogin = useCallback(async () => {
+        if (!isTauriEnvironment()) {
+            toast.error('当前环境不支持 Codex 订阅登录');
+            return;
+        }
+        if (managedCodexBusyRef.current === 'download') return;
+        setManagedCodexLoginDialogOpen(true);
+        setManagedCodexBusy('login');
+        try {
+            const state = normalizeManagedCodexLoginState(
+                await invoke('cmd_managed_codex_login_start'),
+            );
+            setManagedCodexLoginState(state);
+            await refreshConfig();
+            if (state.status === 'succeeded') {
+                toast.success('Codex 登录成功');
+            }
+        } catch (error) {
+            await refreshConfig().catch(() => {});
+            const message = error instanceof Error ? error.message : String(error);
+            setManagedCodexLoginState({
+                status: 'error',
+                loginUrl: null,
+                startedAt: null,
+                error: message,
+            });
+            toast.error(`Codex 登录失败：${message}`);
+        } finally {
+            setManagedCodexBusy(prev => prev === 'login' ? null : prev);
+        }
+    }, [refreshConfig, toast]);
+
+    const refreshManagedCodexLoginState = useCallback(async () => {
+        if (!isTauriEnvironment()) return;
+        try {
+            const state = normalizeManagedCodexLoginState(
+                await invoke('cmd_managed_codex_login_status'),
+            );
+            setManagedCodexLoginState(state);
+            if (state.status === 'succeeded' || state.status === 'cancelled' || state.status === 'error') {
+                await refreshConfig();
+            }
+        } catch (error) {
+            console.warn('[Settings] Managed Codex login status failed:', error);
+        }
+    }, [refreshConfig]);
+
+    useEffect(() => {
+        if (!managedCodexLoginDialogOpen) return;
+        if (!['starting', 'waiting'].includes(managedCodexLoginState.status)) return;
+        const interval = window.setInterval(() => {
+            void refreshManagedCodexLoginState();
+        }, 1000);
+        return () => window.clearInterval(interval);
+    }, [
+        managedCodexLoginDialogOpen,
+        managedCodexLoginState.status,
+        refreshManagedCodexLoginState,
+    ]);
+
+    const copyManagedCodexLoginUrl = useCallback(async () => {
+        const url = managedCodexLoginState.loginUrl;
+        if (!url) return;
+        try {
+            await navigator.clipboard.writeText(url);
+            toast.success('登录地址已复制');
+        } catch (error) {
+            console.warn('[Settings] Failed to copy Managed Codex login URL:', error);
+            toast.error('复制登录地址失败');
+        }
+    }, [managedCodexLoginState.loginUrl, toast]);
 
     const saveProviderOrderSettings = useCallback(async () => {
         const providerIds = allProviders.map(provider => provider.id);
@@ -2369,125 +2498,381 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
         return () => document.removeEventListener('mousedown', handleClick);
     }, [errorDetailOpenId, verifyError]);
 
-    const renderManagedCodexStatus = () => {
-        const reasonText: Record<typeof managedCodexReadiness.reason, string> = {
-            'developer-gate-off': '未开放',
-            'runtime-not-installed': '需要下载 Codex runtime',
-            'runtime-downloading': 'Codex runtime 准备中',
-            'runtime-update-required': `需要更新到 ${managedCodexReadiness.requiredVersion}`,
-            'runtime-error': config.managedCodexRuntimeInstall?.error ?? 'Runtime 状态异常',
-            'auth-missing': '需要登录 ChatGPT Codex 订阅账户',
-            'auth-logging-in': '登录中',
-            'auth-invalid': '登录已失效',
-            'auth-error': config.managedCodexAuth?.error ?? '登录状态异常',
-            'provider-disabled': '已准备，可启用',
-            ready: '已启用',
-        };
-        const canToggleProvider = managedCodexReadiness.reason === 'provider-disabled' || managedCodexReadiness.reason === 'ready';
-        const installStatus = config.managedCodexRuntimeInstall?.status;
-        const authStatus = config.managedCodexAuth?.status;
-        const busy = managedCodexBusy !== null;
+    const renderManagedCodexProviderCard = (provider: Provider) => {
+        const install = config.managedCodexRuntimeInstall;
+        const auth = config.managedCodexAuth;
+        const installStatus = install?.status;
+        const authStatus = auth?.status;
+        const isDownloadingRuntime = managedCodexBusy === 'download'
+            || installStatus === 'downloading'
+            || managedCodexReadiness.reason === 'runtime-downloading';
+        const isCommandBusy = managedCodexBusy !== null;
+        const busy = isCommandBusy || isDownloadingRuntime;
         const needsDownload = managedCodexReadiness.reason === 'runtime-not-installed'
             || managedCodexReadiness.reason === 'runtime-error'
             || managedCodexReadiness.reason === 'runtime-update-required';
+        const showDownloadRow = needsDownload || isDownloadingRuntime;
         const needsLogin = managedCodexReadiness.reason === 'auth-missing'
             || managedCodexReadiness.reason === 'auth-invalid'
-            || managedCodexReadiness.reason === 'auth-error';
-        const hasManagedAuth = authStatus === 'valid'
-            || !!config.managedCodexAuth?.authMethod;
-        const primaryAction = needsDownload
-            ? {
-                label: installStatus === 'update-required' ? '更新' : '下载',
-                icon: Download,
-                busyKey: 'download' as const,
-                run: () => runManagedCodexCommand('download', 'cmd_managed_codex_download'),
-            }
-            : needsLogin
-                ? {
-                    label: '登录',
-                    icon: Link,
-                    busyKey: 'login' as const,
-                    run: () => runManagedCodexCommand('login', 'cmd_managed_codex_login'),
-                }
-                : null;
+            || managedCodexReadiness.reason === 'auth-error'
+            || managedCodexReadiness.reason === 'auth-logging-in';
+        const rawProgress = install?.progressPercent;
+        const progressPercent = typeof rawProgress === 'number' && Number.isFinite(rawProgress)
+            ? Math.max(0, Math.min(100, Math.round(rawProgress)))
+            : null;
+        const downloadButtonLabel = isDownloadingRuntime
+            ? (progressPercent == null ? '下载中' : `${progressPercent}%`)
+            : installStatus === 'update-required' ? '更新' : '下载';
+        const modelLine = provider.models
+            .map(model => model.modelName || model.model)
+            .join('  ');
+        const loginInProgress = managedCodexBusy === 'login' || authStatus === 'logging-in';
+        const isLoggedIn = authStatus === 'valid';
+        const accountLabel = auth?.accountEmail ?? 'ChatGPT Codex 订阅账户';
+        const statusText = isLoggedIn
+            ? accountLabel
+            : loginInProgress
+                ? 'ChatGPT Codex 账号登录中'
+                : authStatus === 'error'
+                    ? 'ChatGPT Codex 账号登录异常'
+                    : 'ChatGPT Codex 账号未登录';
+        const runtimeError = install?.error && (managedCodexReadiness.reason === 'runtime-error'
+            || managedCodexReadiness.reason === 'runtime-update-required')
+            ? install.error
+            : null;
 
         return (
-            <div className="space-y-3">
-                <p className="text-sm text-[var(--ink-muted)]">使用 ChatGPT Codex 订阅账户</p>
-                <div className="flex items-center justify-between gap-3 rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2">
+            <div
+                key={provider.id}
+                className="min-w-0 rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5"
+            >
+                <div className="mb-4 flex min-w-0 items-start justify-between gap-3">
                     <div className="min-w-0">
-                        <p className="text-sm font-medium text-[var(--ink)]">{reasonText[managedCodexReadiness.reason]}</p>
-                        {config.managedCodexAuth?.accountEmail && (
-                            <p className="mt-0.5 truncate font-mono text-xs text-[var(--ink-muted)]">
-                                {config.managedCodexAuth.accountEmail}
+                        <div className="flex min-w-0 items-center gap-2">
+                            <h3 className="truncate text-lg font-semibold text-[var(--ink)]">{provider.name}</h3>
+                            <span className="shrink-0 rounded bg-[var(--paper-inset)] px-1.5 py-0.5 text-xs font-medium text-[var(--ink-muted)]">
+                                {provider.cloudProvider}
+                            </span>
+                        </div>
+                        <p className="mt-1 truncate text-sm text-[var(--ink-muted)]">
+                            {modelLine}
+                        </p>
+                    </div>
+                    {!showDownloadRow && (
+                        <button
+                            type="button"
+                            onClick={() => setManagedCodexDetailsOpen(true)}
+                            className="shrink-0 rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+                            title="Codex 订阅设置"
+                        >
+                            <SlidersHorizontal className="h-4 w-4" />
+                        </button>
+                    )}
+                </div>
+
+                {showDownloadRow ? (
+                    <div className="space-y-2">
+                        <div className="flex items-center justify-between gap-3 rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2.5">
+                            <div className="flex min-w-0 items-center gap-2">
+                                <Download className="h-4 w-4 shrink-0 text-[var(--accent)]" />
+                                <span className="truncate text-sm font-semibold text-[var(--ink)]">
+                                    下载 Codex Runtime
+                                </span>
+                            </div>
+                            <button
+                                type="button"
+                                disabled={busy}
+                                onClick={() => runManagedCodexCommand('download', 'cmd_managed_codex_download')}
+                                className="flex min-w-16 items-center justify-center gap-1.5 rounded-lg bg-[var(--button-primary-bg)] px-3 py-1.5 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:cursor-wait disabled:opacity-70"
+                            >
+                                {isDownloadingRuntime && progressPercent == null && (
+                                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                )}
+                                {downloadButtonLabel}
+                            </button>
+                        </div>
+                        {runtimeError && (
+                            <p className="text-xs text-[var(--error)]">{runtimeError}</p>
+                        )}
+                    </div>
+                ) : (
+                    <div className="flex items-center justify-between gap-3 border-t border-[var(--line-subtle)] pt-3">
+                        <div className="min-w-0">
+                            <div className="flex min-w-0 items-center gap-2">
+                                <p className="truncate text-sm font-medium text-[var(--ink)]">
+                                    {statusText}
+                                </p>
+                                {isLoggedIn && (
+                                    <span className="shrink-0 rounded bg-[var(--success-bg)] px-1.5 py-0.5 text-xs font-medium text-[var(--success)]">
+                                        已验证
+                                    </span>
+                                )}
+                            </div>
+                            {!isLoggedIn && (
+                                <p className="mt-0.5 truncate text-xs text-[var(--ink-muted)]">
+                                    使用 ChatGPT Codex 订阅账户
+                                </p>
+                            )}
+                        </div>
+                        {needsLogin ? (
+                            <button
+                                type="button"
+                                disabled={busy}
+                                onClick={() => void startManagedCodexLogin()}
+                                className="flex shrink-0 items-center gap-1.5 rounded-lg bg-[var(--button-primary-bg)] px-3 py-1.5 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:cursor-wait disabled:opacity-60"
+                            >
+                                {loginInProgress
+                                    ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                    : <Link className="h-3.5 w-3.5" />}
+                                登录
+                            </button>
+                        ) : (
+                            <button
+                                type="button"
+                                onClick={() => setManagedCodexDetailsOpen(true)}
+                                className="shrink-0 rounded-lg border border-[var(--line)] px-3 py-1.5 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)]"
+                            >
+                                查看
+                            </button>
+                        )}
+                    </div>
+                )}
+            </div>
+        );
+    };
+
+    const renderManagedCodexDetailsDialog = () => {
+        if (!managedCodexDetailsOpen) return null;
+        const install = config.managedCodexRuntimeInstall;
+        const auth = config.managedCodexAuth;
+        const runtimeVersion = install?.installedVersion ?? managedCodexReadiness.requiredVersion;
+        const authStatus = auth?.status;
+        const isLoggedIn = authStatus === 'valid';
+        const loginInProgress = managedCodexBusy === 'login' || authStatus === 'logging-in';
+        const accountLabel = auth?.accountEmail ?? 'ChatGPT Codex 订阅账户';
+        const authBadgeClass = isLoggedIn
+            ? 'bg-[var(--success-bg)] text-[var(--success)]'
+            : authStatus === 'error' || authStatus === 'invalid'
+                ? 'bg-[var(--error-bg)] text-[var(--error)]'
+                : loginInProgress
+                    ? 'bg-[var(--info-bg)] text-[var(--info)]'
+                    : 'bg-[var(--paper-inset)] text-[var(--ink-muted)]';
+        const authBadgeLabel = isLoggedIn
+            ? '已登录'
+            : loginInProgress
+                ? '登录中'
+                : authStatus === 'error'
+                    ? '异常'
+                    : '未登录';
+        const authError = auth?.error && (managedCodexReadiness.reason === 'auth-error'
+            || managedCodexReadiness.reason === 'auth-invalid')
+            ? auth.error
+            : null;
+
+        return (
+            <OverlayBackdrop onClose={() => setManagedCodexDetailsOpen(false)} className="z-50 overflow-y-auto py-8">
+                <div className="mx-4 flex max-h-[90vh] w-full max-w-lg flex-col rounded-2xl bg-[var(--paper-elevated)] shadow-xl">
+                    <div className="flex shrink-0 items-start justify-between gap-4 border-b border-[var(--line-subtle)] px-6 py-5">
+                        <div className="min-w-0">
+                            <h3 className="text-lg font-semibold text-[var(--ink)]">Codex 订阅设置</h3>
+                            <p className="mt-1 text-sm text-[var(--ink-muted)]">使用 ChatGPT Codex 订阅账户</p>
+                        </div>
+                        <button
+                            type="button"
+                            onClick={() => setManagedCodexDetailsOpen(false)}
+                            className="rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+                        >
+                            <X className="h-4 w-4" />
+                        </button>
+                    </div>
+
+                    <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-6 py-5">
+                        <section>
+                            <div className="flex items-start justify-between gap-4">
+                                <div className="min-w-0">
+                                    <p className="text-sm font-medium text-[var(--ink)]">Codex Runtime</p>
+                                    <p className="mt-1 text-sm font-semibold text-[var(--ink)]">v{runtimeVersion}</p>
+                                    <p className="mt-1 truncate text-xs text-[var(--ink-muted)]">
+                                        {install?.platform ?? '当前平台'}
+                                    </p>
+                                </div>
+                                <button
+                                    type="button"
+                                    disabled={managedCodexBusy === 'status'}
+                                    onClick={() => void refreshManagedCodexStatus()}
+                                    className="flex shrink-0 items-center gap-1.5 rounded-lg border border-[var(--line)] px-3 py-1.5 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)] disabled:cursor-wait disabled:opacity-60"
+                                >
+                                    <RefreshCw className={`h-3.5 w-3.5 ${managedCodexBusy === 'status' ? 'animate-spin' : ''}`} />
+                                    刷新
+                                </button>
+                            </div>
+                        </section>
+
+                        <section className="border-t border-[var(--line-subtle)] pt-5">
+                            <div className="flex items-start justify-between gap-4">
+                                <div className="min-w-0">
+                                    <div className="flex items-center gap-2">
+                                        <p className="text-sm font-medium text-[var(--ink)]">登录状态</p>
+                                        <span className={`rounded px-1.5 py-0.5 text-xs font-medium ${authBadgeClass}`}>
+                                            {authBadgeLabel}
+                                        </span>
+                                    </div>
+                                    <p className="mt-1 truncate text-sm text-[var(--ink-muted)]">
+                                        {isLoggedIn ? accountLabel : 'ChatGPT Codex 订阅账户'}
+                                    </p>
+                                </div>
+                                {isLoggedIn ? (
+                                    <button
+                                        type="button"
+                                        disabled={managedCodexBusy === 'logout'}
+                                        onClick={() => runManagedCodexCommand('logout', 'cmd_managed_codex_logout')}
+                                        className="flex shrink-0 items-center gap-1.5 rounded-lg border border-[var(--line)] px-3 py-1.5 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)] disabled:cursor-wait disabled:opacity-60"
+                                    >
+                                        {managedCodexBusy === 'logout'
+                                            ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                            : <Unlink className="h-3.5 w-3.5" />}
+                                        退出登录
+                                    </button>
+                                ) : (
+                                    <button
+                                        type="button"
+                                        disabled={managedCodexBusy === 'login'}
+                                        onClick={() => void startManagedCodexLogin()}
+                                        className="flex shrink-0 items-center gap-1.5 rounded-lg bg-[var(--button-primary-bg)] px-3 py-1.5 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:cursor-wait disabled:opacity-60"
+                                    >
+                                        {managedCodexBusy === 'login'
+                                            ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                            : <Link className="h-3.5 w-3.5" />}
+                                        登录
+                                    </button>
+                                )}
+                            </div>
+                            {authError && (
+                                <p className="mt-3 break-words text-xs text-[var(--error)]">{authError}</p>
+                            )}
+                        </section>
+                    </div>
+                </div>
+            </OverlayBackdrop>
+        );
+    };
+
+    const renderManagedCodexLoginDialog = () => {
+        if (!managedCodexLoginDialogOpen) return null;
+        const state = managedCodexLoginState;
+        const isActiveLogin = state.status === 'starting' || state.status === 'waiting';
+        const statusLabel = state.status === 'succeeded'
+            ? '已完成'
+            : state.status === 'cancelled'
+                ? '已取消'
+                : state.status === 'error'
+                    ? '异常'
+                    : '等待登录';
+        const statusClass = state.status === 'succeeded'
+            ? 'bg-[var(--success-bg)] text-[var(--success)]'
+            : state.status === 'cancelled' || state.status === 'error'
+                ? 'bg-[var(--error-bg)] text-[var(--error)]'
+                : 'bg-[var(--info-bg)] text-[var(--info)]';
+
+        return (
+            <OverlayBackdrop onClose={() => setManagedCodexLoginDialogOpen(false)} className="z-50 overflow-y-auto px-4 py-8">
+                <div className="w-full max-w-xl rounded-2xl bg-[var(--paper-elevated)] shadow-xl">
+                    <div className="flex items-start justify-between gap-4 border-b border-[var(--line-subtle)] px-6 py-5">
+                        <div className="min-w-0">
+                            <div className="flex items-center gap-2">
+                                <h3 className="text-lg font-semibold text-[var(--ink)]">登录 ChatGPT Codex</h3>
+                                <span className={`rounded px-1.5 py-0.5 text-xs font-medium ${statusClass}`}>
+                                    {statusLabel}
+                                </span>
+                            </div>
+                            <p className="mt-1 text-sm text-[var(--ink-muted)]">
+                                登录信息会保存到 MyAgents 管理的 Codex Runtime 环境中。
+                            </p>
+                        </div>
+                        <button
+                            type="button"
+                            onClick={() => setManagedCodexLoginDialogOpen(false)}
+                            className="rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+                        >
+                            <X className="h-4 w-4" />
+                        </button>
+                    </div>
+
+                    <div className="space-y-5 px-6 py-5">
+                        <section>
+                            <div className="flex items-center gap-2">
+                                {isActiveLogin ? (
+                                    <Loader2 className="h-4 w-4 animate-spin text-[var(--info)]" />
+                                ) : state.status === 'succeeded' ? (
+                                    <Check className="h-4 w-4 text-[var(--success)]" />
+                                ) : (
+                                    <AlertCircle className="h-4 w-4 text-[var(--error)]" />
+                                )}
+                                <p className="text-sm font-medium text-[var(--ink)]">自动打开浏览器</p>
+                            </div>
+                            <p className="mt-2 text-sm leading-relaxed text-[var(--ink-muted)]">
+                                我们已经尝试打开浏览器完成 ChatGPT Codex 登录。如果浏览器没有自动打开，可以复制下面的地址，在浏览器中打开后继续登录。
+                            </p>
+                            <div className="mt-3 flex min-w-0 items-center gap-2 rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2">
+                                <p className="min-w-0 flex-1 truncate font-mono text-xs text-[var(--ink-muted)]">
+                                    {state.loginUrl ?? '正在等待 Codex 返回登录地址...'}
+                                </p>
+                                <button
+                                    type="button"
+                                    disabled={!state.loginUrl}
+                                    onClick={() => void copyManagedCodexLoginUrl()}
+                                    className="flex shrink-0 items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)] disabled:cursor-not-allowed disabled:opacity-50"
+                                >
+                                    <Copy className="h-3.5 w-3.5" />
+                                    复制
+                                </button>
+                            </div>
+                        </section>
+
+                        <section className="border-t border-[var(--line-subtle)] pt-5">
+                            <p className="text-sm font-medium text-[var(--ink)]">远程或无浏览器环境</p>
+                            <p className="mt-2 text-sm leading-relaxed text-[var(--ink-muted)]">
+                                如果当前机器没有可用浏览器，请在对应环境的终端中使用设备码登录：
+                                <code className="mx-1 rounded bg-[var(--paper-inset)] px-1.5 py-0.5 font-mono text-xs text-[var(--ink)]">
+                                    codex login --device-auth
+                                </code>
+                            </p>
+                        </section>
+
+                        {state.status === 'succeeded' && (
+                            <p className="rounded-lg bg-[var(--success-bg)] px-3 py-2 text-sm text-[var(--success)]">
+                                登录已完成，可以关闭此窗口。
+                            </p>
+                        )}
+                        {(state.status === 'cancelled' || state.status === 'error') && (
+                            <p className="break-words rounded-lg bg-[var(--error-bg)] px-3 py-2 text-sm text-[var(--error)]">
+                                {state.error ?? '登录没有完成，可以重新发起登录。'}
                             </p>
                         )}
                     </div>
-                    <button
-                        type="button"
-                        disabled={!canToggleProvider}
-                        aria-pressed={config.managedCodexProviderEnabled === true}
-                        onClick={() => {
-                            if (!canToggleProvider) return;
-                            const nextEnabled = config.managedCodexProviderEnabled !== true;
-                            console.info(
-                                `[managed-codex] provider toggle requested runtime=codex runtimeSource=managed-provider enabled=${nextEnabled} readiness=${managedCodexReadiness.reason}`,
-                            );
-                            updateConfig({ managedCodexProviderEnabled: nextEnabled });
-                        }}
-                        className={`relative h-6 w-11 shrink-0 rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${config.managedCodexProviderEnabled === true && managedCodexReadiness.reason === 'ready' ? 'bg-[var(--accent)]' : 'bg-[var(--line-strong)]'
-                            }`}
-                    >
-                        <span
-                            className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-[var(--toggle-thumb)] shadow transition-transform ${config.managedCodexProviderEnabled === true && managedCodexReadiness.reason === 'ready' ? 'translate-x-5' : 'translate-x-0'
-                                }`}
-                        />
-                    </button>
-                </div>
-                <div className="flex flex-wrap items-center gap-2">
-                    {primaryAction && (
+
+                    <div className="flex items-center justify-end gap-3 border-t border-[var(--line-subtle)] px-6 py-4">
                         <button
                             type="button"
-                            disabled={busy}
-                            onClick={primaryAction.run}
-                            className="flex items-center gap-1.5 rounded-lg bg-[var(--button-primary-bg)] px-3 py-1.5 text-xs font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:cursor-wait disabled:opacity-60"
+                            onClick={() => setManagedCodexLoginDialogOpen(false)}
+                            className="rounded-lg border border-[var(--line)] px-4 py-2 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)]"
                         >
-                            {managedCodexBusy === primaryAction.busyKey
-                                ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                                : React.createElement(primaryAction.icon, { className: 'h-3.5 w-3.5' })}
-                            {primaryAction.label}
+                            关闭
                         </button>
-                    )}
-                    {hasManagedAuth && (
-                        <button
-                            type="button"
-                            disabled={busy}
-                            onClick={() => runManagedCodexCommand('logout', 'cmd_managed_codex_logout')}
-                            className="flex items-center gap-1.5 rounded-lg border border-[var(--line)] px-3 py-1.5 text-xs font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)] disabled:cursor-wait disabled:opacity-60"
-                        >
-                            {managedCodexBusy === 'logout'
-                                ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                                : <Unlink className="h-3.5 w-3.5" />}
-                            退出登录
-                        </button>
-                    )}
-                    <button
-                        type="button"
-                        disabled={busy}
-                        onClick={() => void refreshManagedCodexStatus()}
-                        className="rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] disabled:cursor-wait disabled:opacity-60"
-                        title="刷新状态"
-                    >
-                        <RefreshCw className={`h-3.5 w-3.5 ${managedCodexBusy === 'status' ? 'animate-spin' : ''}`} />
-                    </button>
+                        {(state.status === 'cancelled' || state.status === 'error') && (
+                            <button
+                                type="button"
+                                disabled={managedCodexBusy === 'login'}
+                                onClick={() => void startManagedCodexLogin()}
+                                className="flex items-center gap-1.5 rounded-lg bg-[var(--button-primary-bg)] px-4 py-2 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:cursor-wait disabled:opacity-60"
+                            >
+                                {managedCodexBusy === 'login' && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                                重新登录
+                            </button>
+                        )}
+                    </div>
                 </div>
-                {config.managedCodexRuntimeInstall?.error && managedCodexReadiness.reason === 'runtime-error' && (
-                    <p className="text-xs text-[var(--error)]">{config.managedCodexRuntimeInstall.error}</p>
-                )}
-                {config.managedCodexAuth?.error && (managedCodexReadiness.reason === 'auth-error' || managedCodexReadiness.reason === 'auth-invalid') && (
-                    <p className="text-xs text-[var(--error)]">{config.managedCodexAuth.error}</p>
-                )}
-            </div>
+            </OverlayBackdrop>
         );
     };
 
@@ -2685,10 +3070,12 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                         {/* Provider list */}
                         <div className="grid grid-cols-2 gap-4">
                             {visibleProviders.map((provider) => (
-                                <div
-                                    key={provider.id}
-                                    className="min-w-0 rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5"
-                                >
+                                provider.id === CODEX_SUBSCRIPTION_PROVIDER_ID
+                                    ? renderManagedCodexProviderCard(provider)
+                                    : <div
+                                        key={provider.id}
+                                        className="min-w-0 rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5"
+                                    >
                                     {/* Provider header */}
                                     <div className="mb-4 flex items-start justify-between gap-2">
                                         <div className="min-w-0 flex-1">
@@ -2750,9 +3137,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
 
                                     {/* Subscription type - show status */}
                                     {provider.type === 'subscription' && (
-                                        provider.id === CODEX_SUBSCRIPTION_PROVIDER_ID
-                                            ? renderManagedCodexStatus()
-                                            : <div className="space-y-2">
+                                        <div className="space-y-2">
                                             <p className="text-sm text-[var(--ink-muted)]">
                                                 使用 Anthropic 订阅账户，无需 API Key
                                             </p>
@@ -2823,7 +3208,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                             </div>
                                         </div>
                                     )}
-                                </div>
+                                    </div>
                             ))}
                             {visibleProviders.length === 0 && (
                                 <div className="col-span-2 rounded-xl border border-dashed border-[var(--line)] bg-[var(--paper-elevated)] p-8 text-center">
@@ -5597,6 +5982,9 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                     </div>
                 </OverlayBackdrop>
             )}
+
+            {renderManagedCodexDetailsDialog()}
+            {renderManagedCodexLoginDialog()}
 
             {/* Provider Enablement / Ordering Modal */}
             {showProviderOrderDialog && (

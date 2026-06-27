@@ -30,6 +30,7 @@ import { patchAgentConfig } from '@/config/services/agentConfigService';
 import { useDeliveryChannels } from '@/hooks/useDeliveryChannels';
 import { useCloseLayer } from '@/hooks/useCloseLayer';
 import OverlayBackdrop from '@/components/OverlayBackdrop';
+import { buildAgentPatchFromSessionSnapshot } from '@/utils/sessionSnapshotAgentSync';
 
 interface CronTaskDetailPanelProps {
     task: CronTask;
@@ -81,10 +82,14 @@ export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, 
     useCloseLayer(() => { onClose(); return true; }, 50);
 
     const toast = useToast();
-    const { projects } = useConfig();
+    const { config, projects } = useConfig();
     const isMountedRef = useRef(true);
     useEffect(() => () => { isMountedRef.current = false; }, []);
     const project = useMemo(() => projects.find(p => workspacePathsEqual(p.path, task.workspacePath)), [projects, task.workspacePath]);
+    const agent = useMemo(
+        () => project?.agentId ? config.agents?.find(a => a.id === project.agentId) : undefined,
+        [config.agents, project?.agentId],
+    );
     const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
     const [showStopConfirm, setShowStopConfirm] = useState(false);
     const [showSyncConfirm, setShowSyncConfirm] = useState(false);
@@ -187,12 +192,10 @@ export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, 
         if (!sessionMeta || !project?.agentId) return;
         setIsSyncing(true);
         try {
-            await patchAgentConfig(project.agentId, {
-                model: sessionMeta.model,
-                permissionMode: sessionMeta.permissionMode,
-                mcpEnabledServers: sessionMeta.mcpEnabledServers,
-                providerId: sessionMeta.providerId,
-            });
+            await patchAgentConfig(
+                project.agentId,
+                buildAgentPatchFromSessionSnapshot(sessionMeta, agent),
+            );
             if (!isMountedRef.current) return;
             toast.success('已同步到 Agent');
             setShowSyncConfirm(false);
@@ -202,7 +205,7 @@ export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, 
         } finally {
             if (isMountedRef.current) setIsSyncing(false);
         }
-    }, [sessionMeta, project?.agentId, toast]);
+    }, [agent, sessionMeta, project?.agentId, toast]);
 
     const resumeCheck = checkCanResume(task);
     const displayName = task.name || task.prompt.slice(0, 40) + (task.prompt.length > 40 ? '...' : '');

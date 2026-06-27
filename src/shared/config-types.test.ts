@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -15,6 +16,7 @@ import {
   normalizeClaudeTranscriptCleanupPeriodDays,
   normalizeProviderOrder,
   splitProviderModelInput,
+  withManagedCodexRuntimeModels,
   withManagedCodexProviderCatalog,
 } from './config-types';
 
@@ -122,6 +124,21 @@ describe('CLI tool registry defaults', () => {
 });
 
 describe('Managed Codex provider readiness', () => {
+  function readManagedCodexRustConst(name: string): string {
+    const source = readFileSync('src-tauri/src/managed_codex.rs', 'utf8');
+    const match = source.match(new RegExp(`^const ${name}:.*= "([^"]+)";`, 'm'));
+    if (!match) throw new Error(`Missing Rust Managed Codex constant: ${name}`);
+    return match[1];
+  }
+
+  it('keeps the shared runtime lock aligned with the Rust downloader lock', () => {
+    expect(MANAGED_CODEX_REQUIRED_RUNTIME.version).toBe(readManagedCodexRustConst('REQUIRED_VERSION'));
+    expect(MANAGED_CODEX_REQUIRED_RUNTIME.runtimeSet).toBe(readManagedCodexRustConst('REQUIRED_RUNTIME_SET'));
+    expect(MANAGED_CODEX_REQUIRED_RUNTIME.manifestBaseUrl).toBe(
+      `${readManagedCodexRustConst('RUNTIME_SETS_BASE_URL')}/${readManagedCodexRustConst('REQUIRED_RUNTIME_SET')}`,
+    );
+  });
+
   it('keeps the provider out of the catalogue while the developer gate is off', () => {
     expect(withManagedCodexProviderCatalog([MANAGED_CODEX_PROVIDER], {
       managedCodexProviderDevGate: false,
@@ -134,18 +151,35 @@ describe('Managed Codex provider readiness', () => {
     });
     const providers = applyManagedCodexProviderReadiness(catalog, {
       managedCodexProviderDevGate: true,
-      managedCodexProviderEnabled: true,
     });
 
     expect(catalog.map(provider => provider.id)).toEqual([CODEX_SUBSCRIPTION_PROVIDER_ID]);
-    expect(providers[0].enabled).toBe(false);
+    expect(providers[0].enabled).toBeUndefined();
+    expect(providers[0].runtimeReady).toBe(false);
     expect(getManagedCodexProviderReadiness({
       managedCodexProviderDevGate: true,
-      managedCodexProviderEnabled: true,
     }).reason).toBe('runtime-not-installed');
   });
 
-  it('requires exact runtime version, subscription auth, and user enablement', () => {
+  it('derives Codex subscription models from the managed runtime model list', () => {
+    const provider = withManagedCodexRuntimeModels(MANAGED_CODEX_PROVIDER, [
+      { value: 'gpt-5.1', displayName: 'GPT-5.1' },
+      { value: 'gpt-5', displayName: 'GPT-5', isDefault: true },
+      { value: '', displayName: '默认', isDefault: true },
+      { value: 'gpt-5', displayName: 'duplicate' },
+    ]);
+
+    expect(MANAGED_CODEX_PROVIDER.models).toEqual([]);
+    expect(provider.primaryModel).toBe('gpt-5');
+    expect(provider.models.map(model => model.model)).toEqual(['gpt-5.1', 'gpt-5']);
+    expect(provider.models[0]).toMatchObject({
+      modelName: 'GPT-5.1',
+      modelSeries: 'codex',
+      source: 'discovered',
+    });
+  });
+
+  it('requires exact runtime version, subscription auth, and no explicit disablement', () => {
     const runtime = {
       status: 'installed' as const,
       installedVersion: MANAGED_CODEX_REQUIRED_RUNTIME.version,
@@ -160,7 +194,6 @@ describe('Managed Codex provider readiness', () => {
     expect(isManagedCodexSubscriptionAuthValid(auth)).toBe(true);
     expect(getManagedCodexProviderReadiness({
       managedCodexProviderDevGate: true,
-      managedCodexProviderEnabled: true,
       managedCodexRuntimeInstall: runtime,
       managedCodexAuth: auth,
     })).toMatchObject({
@@ -182,7 +215,7 @@ describe('Managed Codex provider readiness', () => {
       { ...MANAGED_CODEX_PROVIDER, enabled: false },
     ], {
       managedCodexProviderDevGate: true,
-      managedCodexProviderEnabled: true,
+      disabledProviderIds: [CODEX_SUBSCRIPTION_PROVIDER_ID],
       managedCodexRuntimeInstall: {
         status: 'installed',
         installedVersion: MANAGED_CODEX_REQUIRED_RUNTIME.version,
@@ -194,5 +227,6 @@ describe('Managed Codex provider readiness', () => {
     });
 
     expect(providers[0].enabled).toBe(false);
+    expect(providers[0].runtimeReady).toBe(true);
   });
 });

@@ -78,7 +78,7 @@ describe('provider availability with enablement', () => {
         expect(selection?.model).toBe('beta-primary');
     });
 
-    it('requires runtime-backed providers to be explicitly marked ready by catalogue readiness', () => {
+    it('requires runtime-backed providers to be ready and have discovered models', () => {
         expect(isProviderAvailable(
             MANAGED_CODEX_PROVIDER,
             {},
@@ -86,10 +86,33 @@ describe('provider availability with enablement', () => {
         )).toBe(false);
 
         expect(isProviderAvailable(
-            { ...MANAGED_CODEX_PROVIDER, enabled: true },
+            { ...MANAGED_CODEX_PROVIDER, runtimeReady: true },
             {},
-            { [CODEX_SUBSCRIPTION_PROVIDER_ID]: { status: 'valid', verifiedAt: '2026-06-26T00:00:00.000Z' } },
+            {},
+        )).toBe(false);
+
+        expect(isProviderAvailable(
+            {
+                ...MANAGED_CODEX_PROVIDER,
+                runtimeReady: true,
+                primaryModel: 'gpt-5',
+                models: [{ model: 'gpt-5', modelName: 'GPT-5', modelSeries: 'codex' }],
+            },
+            {},
+            {},
         )).toBe(true);
+
+        expect(isProviderAvailable(
+            {
+                ...MANAGED_CODEX_PROVIDER,
+                enabled: false,
+                runtimeReady: true,
+                primaryModel: 'gpt-5',
+                models: [{ model: 'gpt-5', modelName: 'GPT-5', modelSeries: 'codex' }],
+            },
+            {},
+            {},
+        )).toBe(false);
     });
 
     it('does not fallback from an unavailable runtime-backed provider to an API provider', () => {

@@ -335,6 +335,8 @@ pub fn run() {
             managed_codex::cmd_managed_codex_status,
             managed_codex::cmd_managed_codex_download,
             managed_codex::cmd_managed_codex_check_update,
+            managed_codex::cmd_managed_codex_login_start,
+            managed_codex::cmd_managed_codex_login_status,
             managed_codex::cmd_managed_codex_login,
             managed_codex::cmd_managed_codex_logout,
             // Workspace template commands

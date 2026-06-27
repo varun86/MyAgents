@@ -18,7 +18,7 @@ import WorkspaceIcon from '../launcher/WorkspaceIcon';
 import RuntimeSelector from '../RuntimeSelector';
 import type { RuntimeType, RuntimeDetections, RuntimeConfig } from '../../../shared/types/runtime';
 import { buildRuntimeChangePatch } from '../../../shared/types/runtime';
-import { runtimeConfigForRuntimeBackedProvider, toProviderExecutionIntent } from '../../../shared/providerExecution';
+import { agentDefaultsForRuntimeBackedProvider, toProviderExecutionIntent } from '../../../shared/providerExecution';
 import { invoke } from '@tauri-apps/api/core';
 import { useToast } from '@/components/Toast';
 
@@ -178,12 +178,10 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
     if (!provider) return;
     const intent = toProviderExecutionIntent(provider, model);
     if (intent.kind === 'runtime-backed-provider') {
-      void saveAgentConfig({
-        providerId,
-        model,
-        runtime: intent.runtime,
-        runtimeConfig: runtimeConfigForRuntimeBackedProvider(intent, agent?.runtimeConfig as RuntimeConfig | undefined),
-      });
+      void saveAgentConfig(agentDefaultsForRuntimeBackedProvider(
+        intent,
+        agent?.runtimeConfig as RuntimeConfig | undefined,
+      ));
     } else {
       void saveAgentConfig({
         providerId,

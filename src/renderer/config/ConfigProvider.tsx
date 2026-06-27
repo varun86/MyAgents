@@ -18,8 +18,11 @@ import {
     MANAGED_CODEX_REQUIRED_RUNTIME,
     applyManagedCodexProviderReadiness,
     applyProviderEnablementAndOrder,
+    getManagedCodexProviderReadiness,
     withManagedCodexProviderCatalog,
 } from './types';
+import type { RuntimeModelInfo } from '../../shared/types/runtime';
+import { apiGetJson } from '@/api/apiFetch';
 import {
     loadAppConfig,
     atomicModifyConfig,
@@ -101,9 +104,7 @@ function migrateToolGroups(config: AppConfig): boolean {
 function shouldAutoUpdateManagedCodexRuntime(config: AppConfig): boolean {
     if (config.managedCodexProviderDevGate !== true) return false;
     const install = config.managedCodexRuntimeInstall;
-    const userEngaged =
-        config.managedCodexProviderEnabled === true
-        || Boolean(install?.installedVersion || install?.installedAt);
+    const userEngaged = Boolean(install?.status || install?.installedVersion || install?.installedAt);
     if (!userEngaged || !install) return false;
     if (install.status === 'downloading' || install.status === 'checking') return false;
     if (install.status === 'update-required') return true;
@@ -174,6 +175,7 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
     const [config, setConfig] = useState<AppConfig>(DEFAULT_CONFIG);
     const [projects, setProjects] = useState<Project[]>([]);
     const [rawProviders, setRawProviders] = useState<Provider[]>(PRESET_PROVIDERS);
+    const [managedCodexRuntimeModels, setManagedCodexRuntimeModels] = useState<RuntimeModelInfo[]>([]);
     const [apiKeys, setApiKeys] = useState<Record<string, string>>({});
     const [providerVerifyStatus, setProviderVerifyStatus] = useState<Record<string, ProviderVerifyStatus>>({});
     const [isLoading, setIsLoading] = useState(true);
@@ -181,7 +183,7 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
 
     // Derived: merge preset custom models + apply user primary model overrides
     const providers = useMemo(() => {
-        const catalog = withManagedCodexProviderCatalog(rawProviders, config);
+        const catalog = withManagedCodexProviderCatalog(rawProviders, config, managedCodexRuntimeModels);
         const merged = mergePresetCustomModels(catalog, config.presetCustomModels, config.presetRemovedModels);
         const providerOrderSettings = {
             providerOrder: config.providerOrder,
@@ -208,7 +210,30 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
     }, [
         config,
         rawProviders,
+        managedCodexRuntimeModels,
     ]);
+    const managedCodexReadiness = useMemo(
+        () => getManagedCodexProviderReadiness(config),
+        [config],
+    );
+    const managedCodexModelListKey = useMemo(
+        () => [
+            managedCodexReadiness.reason,
+            config.managedCodexRuntimeInstall?.installedVersion ?? '',
+            config.managedCodexRuntimeInstall?.requiredVersion ?? '',
+            config.managedCodexAuth?.status ?? '',
+            config.managedCodexAuth?.authMethod ?? '',
+            config.managedCodexAuth?.verifiedAt ?? '',
+        ].join('|'),
+        [
+            managedCodexReadiness.reason,
+            config.managedCodexRuntimeInstall?.installedVersion,
+            config.managedCodexRuntimeInstall?.requiredVersion,
+            config.managedCodexAuth?.status,
+            config.managedCodexAuth?.authMethod,
+            config.managedCodexAuth?.verifiedAt,
+        ],
+    );
 
     // Mount guard
     const isMountedRef = useRef(true);
@@ -396,6 +421,30 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
         config,
         isLoading,
         load,
+    ]);
+
+    useEffect(() => {
+        if (managedCodexReadiness.reason !== 'ready' && managedCodexReadiness.reason !== 'provider-disabled') {
+            setManagedCodexRuntimeModels([]);
+            return;
+        }
+
+        let cancelled = false;
+        apiGetJson<{ models?: RuntimeModelInfo[] }>('/api/runtime/models?type=codex&source=managed-provider')
+            .then((result) => {
+                if (cancelled) return;
+                setManagedCodexRuntimeModels(Array.isArray(result.models) ? result.models : []);
+            })
+            .catch((err) => {
+                if (cancelled) return;
+                console.warn('[managed-codex] failed to load provider model list', err);
+                setManagedCodexRuntimeModels([]);
+            });
+
+        return () => { cancelled = true; };
+    }, [
+        managedCodexReadiness.reason,
+        managedCodexModelListKey,
     ]);
 
     // ============= Listen for im:bot-config-changed =============

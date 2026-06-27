@@ -106,13 +106,18 @@ pub(super) fn resolve_agent_runtime_from_config(
 fn managed_codex_provider_ready(cfg: &serde_json::Value) -> bool {
     let install = cfg.get("managedCodexRuntimeInstall");
     let auth = cfg.get("managedCodexAuth");
+    let provider_disabled = cfg
+        .get("disabledProviderIds")
+        .and_then(|v| v.as_array())
+        .map(|ids| {
+            ids.iter()
+                .any(|id| id.as_str() == Some(CODEX_SUBSCRIPTION_PROVIDER_ID))
+        })
+        .unwrap_or(false);
     cfg.get("managedCodexProviderDevGate")
         .and_then(|v| v.as_bool())
         .unwrap_or(false)
-        && cfg
-            .get("managedCodexProviderEnabled")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false)
+        && !provider_disabled
         && install
             .and_then(|v| v.get("status"))
             .and_then(|v| v.as_str())
@@ -283,10 +288,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn managed_codex_provider_ready_requires_enabled_installed_and_chatgpt_auth() {
+    fn managed_codex_provider_ready_requires_user_enablement_installed_and_chatgpt_auth() {
         let ready = serde_json::json!({
             "managedCodexProviderDevGate": true,
-            "managedCodexProviderEnabled": true,
             "managedCodexRuntimeInstall": {
                 "status": "installed",
                 "installedVersion": MANAGED_CODEX_REQUIRED_VERSION
@@ -300,7 +304,6 @@ mod tests {
 
         let api_key_auth = serde_json::json!({
             "managedCodexProviderDevGate": true,
-            "managedCodexProviderEnabled": true,
             "managedCodexRuntimeInstall": {
                 "status": "installed",
                 "installedVersion": MANAGED_CODEX_REQUIRED_VERSION
@@ -314,7 +317,7 @@ mod tests {
 
         let disabled = serde_json::json!({
             "managedCodexProviderDevGate": true,
-            "managedCodexProviderEnabled": false,
+            "disabledProviderIds": [CODEX_SUBSCRIPTION_PROVIDER_ID],
             "managedCodexRuntimeInstall": {
                 "status": "installed",
                 "installedVersion": MANAGED_CODEX_REQUIRED_VERSION

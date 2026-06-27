@@ -7,11 +7,15 @@ import {
   SUBSCRIPTION_PROVIDER_ID,
 } from './config-types';
 import {
+  agentDefaultsForRuntimeBackedProvider,
   assertBuiltinExecutionProvider,
   canReuseSessionAcrossProviderExecutionBoundary,
   getProviderExecutionHistoryFamily,
   isAnthropicSubscriptionProviderIntent,
   isRuntimeBackedProvider,
+  managedCodexProviderPermissionToRuntimePermission,
+  managedCodexRuntimePermissionToProviderPermission,
+  runtimeConfigForRuntimeBackedProvider,
   toProviderExecutionIntent,
 } from './providerExecution';
 
@@ -50,6 +54,52 @@ describe('provider execution identity', () => {
   it('does not let runtime-backed providers enter builtin ProviderEnv paths', () => {
     expect(isRuntimeBackedProvider(MANAGED_CODEX_PROVIDER)).toBe(true);
     expect(() => assertBuiltinExecutionProvider(MANAGED_CODEX_PROVIDER)).toThrow(/runtime-backed/);
+  });
+
+  it('separates session runtime snapshots from agent/provider defaults', () => {
+    const intent = toProviderExecutionIntent(MANAGED_CODEX_PROVIDER, 'gpt-5.4-codex');
+    if (intent.kind !== 'runtime-backed-provider') throw new Error('expected runtime-backed intent');
+
+    expect(runtimeConfigForRuntimeBackedProvider(intent, {
+      envPolicy: { proxy: 'terminal' },
+      permissionMode: 'full-auto',
+      reasoningEffort: 'xhigh',
+      additionalArgs: ['--legacy'],
+    })).toEqual({
+      envPolicy: { proxy: 'terminal' },
+      source: 'managed-provider',
+      model: 'gpt-5.4-codex',
+    });
+
+    expect(agentDefaultsForRuntimeBackedProvider(intent, {
+      envPolicy: { proxy: 'terminal' },
+      source: 'system-cli',
+      model: 'stale-system-cli-model',
+      additionalArgs: ['--legacy'],
+      permissionMode: 'suggest',
+    }, {
+      permissionMode: 'full-auto',
+    })).toEqual({
+      providerId: CODEX_SUBSCRIPTION_PROVIDER_ID,
+      model: 'gpt-5.4-codex',
+      runtime: 'builtin',
+      runtimeConfig: {
+        envPolicy: { proxy: 'terminal' },
+        permissionMode: 'full-auto',
+      },
+    });
+  });
+
+  it('maps Managed Codex provider permission semantics onto Codex runtime permissions', () => {
+    expect(managedCodexProviderPermissionToRuntimePermission('auto')).toBe('auto-edit');
+    expect(managedCodexProviderPermissionToRuntimePermission('plan')).toBe('suggest');
+    expect(managedCodexProviderPermissionToRuntimePermission('fullAgency')).toBe('no-restrictions');
+    expect(managedCodexProviderPermissionToRuntimePermission('no-restrictions')).toBe('no-restrictions');
+
+    expect(managedCodexRuntimePermissionToProviderPermission('auto-edit')).toBe('auto');
+    expect(managedCodexRuntimePermissionToProviderPermission('suggest')).toBe('plan');
+    expect(managedCodexRuntimePermissionToProviderPermission('no-restrictions')).toBe('fullAgency');
+    expect(managedCodexRuntimePermissionToProviderPermission('full-auto')).toBe('fullAgency');
   });
 
   it('keeps Anthropic subscription as a builtin subscription provider intent', () => {

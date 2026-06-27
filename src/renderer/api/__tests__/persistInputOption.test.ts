@@ -194,7 +194,7 @@ describe('persistInputOptionChange — disk write fanout', () => {
     });
   });
 
-  it('writes runtime-backed provider selection as provider identity plus runtime model push', async () => {
+  it('writes runtime-backed provider selection without switching the agent to legacy Codex runtime', async () => {
     const m = makeMocks();
     const identity = {
       kind: 'runtime-backed-provider' as const,
@@ -208,7 +208,12 @@ describe('persistInputOptionChange — disk write fanout', () => {
       workspaceId: 'ws-1',
       agentId: 'agent-1',
       isExternalRuntime: true,
-      currentRuntimeConfig: { envPolicy: { proxy: 'terminal' } },
+      currentRuntimeConfig: {
+        envPolicy: { proxy: 'terminal' },
+        source: 'system-cli',
+        model: 'stale-system-cli-model',
+        additionalArgs: ['--legacy'],
+      },
       fields: {
         runtimeBackedProviderSelection: identity,
         permissionMode: 'full-auto',
@@ -226,11 +231,9 @@ describe('persistInputOptionChange — disk write fanout', () => {
     expect(m.patchAgentConfig).toHaveBeenCalledWith('agent-1', {
       providerId: 'codex-sub',
       model: 'gpt-5.4-codex',
-      runtime: 'codex',
+      runtime: 'builtin',
       runtimeConfig: {
         envPolicy: { proxy: 'terminal' },
-        source: 'managed-provider',
-        model: 'gpt-5.4-codex',
         permissionMode: 'full-auto',
       },
     });
@@ -248,7 +251,7 @@ describe('persistInputOptionChange — disk write fanout', () => {
     });
   });
 
-  it('writes managed codex runtime identity even when selected from the builtin provider picker', async () => {
+  it('keeps managed codex as a provider default when selected from the builtin provider picker', async () => {
     const m = makeMocks();
     const identity = {
       kind: 'runtime-backed-provider' as const,
@@ -275,13 +278,77 @@ describe('persistInputOptionChange — disk write fanout', () => {
     expect(m.patchAgentConfig).toHaveBeenCalledWith('agent-1', {
       providerId: 'codex-sub',
       model: 'gpt-5.4-codex',
-      runtime: 'codex',
+      runtime: 'builtin',
       runtimeConfig: {
         envPolicy: { proxy: 'myagents' },
-        source: 'managed-provider',
-        model: 'gpt-5.4-codex',
-        permissionMode: 'plan',
+        permissionMode: 'suggest',
       },
+    });
+    expect(m.patchSnapshot).toHaveBeenCalledWith(expect.objectContaining({
+      permissionMode: 'suggest',
+    }));
+  });
+
+  it('clears stale managed Codex runtime projection when switching back to an ordinary provider', async () => {
+    const m = makeMocks();
+
+    await persistInputOptionChange({
+      workspaceId: 'ws-1',
+      agentId: 'agent-1',
+      isExternalRuntime: false,
+      currentProviderId: 'codex-sub',
+      currentRuntimeConfig: {
+        source: 'managed-provider',
+        model: 'gpt-5.5-codex',
+        additionalArgs: ['--legacy'],
+        envPolicy: { proxy: 'terminal' },
+      },
+      fields: {
+        builtinSelection: { providerId: 'openrouter', model: 'anthropic/claude-sonnet-4.6' },
+      },
+      patchProject: m.patchProject,
+      patchAgentConfig: m.patchAgentConfig,
+      patchSnapshot: m.patchSnapshot,
+    });
+
+    expect(m.patchAgentConfig).toHaveBeenCalledWith('agent-1', {
+      providerId: 'openrouter',
+      model: 'anthropic/claude-sonnet-4.6',
+      runtime: 'builtin',
+      runtimeConfig: {
+        envPolicy: { proxy: 'terminal' },
+      },
+    });
+  });
+
+  it('writes ordinary provider fields as builtin defaults even when the current session is managed Codex', async () => {
+    const m = makeMocks();
+
+    await persistInputOptionChange({
+      workspaceId: 'ws-1',
+      agentId: 'agent-1',
+      isExternalRuntime: true,
+      currentProviderId: 'codex-sub',
+      currentRuntimeConfig: {
+        source: 'managed-provider',
+        model: 'gpt-5.5-codex',
+        additionalArgs: ['--legacy'],
+      },
+      fields: {
+        builtinSelection: { providerId: 'openrouter', model: 'anthropic/claude-sonnet-4.6' },
+        permissionMode: 'full-auto',
+      },
+      patchProject: m.patchProject,
+      patchAgentConfig: m.patchAgentConfig,
+      patchSnapshot: m.patchSnapshot,
+    });
+
+    expect(m.patchAgentConfig).toHaveBeenCalledWith('agent-1', {
+      providerId: 'openrouter',
+      model: 'anthropic/claude-sonnet-4.6',
+      permissionMode: 'full-auto',
+      runtime: 'builtin',
+      runtimeConfig: undefined,
     });
   });
 

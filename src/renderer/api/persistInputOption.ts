@@ -21,12 +21,13 @@
 //    out keeps this function pure across both Chat (with a session) and
 //    Launcher (without).
 
-import type { PermissionMode, Project, McpServerDefinition } from '@/config/types';
+import { CODEX_SUBSCRIPTION_PROVIDER_ID, type PermissionMode, type Project, type McpServerDefinition } from '@/config/types';
 import type { AgentConfig } from '@/../shared/types/agent';
-import type { RuntimeConfig } from '@/../shared/types/runtime';
+import { buildRuntimeChangePatch, type RuntimeConfig } from '@/../shared/types/runtime';
 import { createConcreteProviderRoute, type ProviderRoute } from '@/../shared/providerRoute';
 import {
-  runtimeConfigForRuntimeBackedProvider,
+  agentDefaultsForRuntimeBackedProvider,
+  runtimeBackedProviderPermissionMode,
   type RuntimeBackedProviderIdentity,
 } from '@/../shared/providerExecution';
 
@@ -85,6 +86,8 @@ export interface PersistInputOptionParams {
   /** Existing runtimeConfig to merge into when writing
    *  `runtimeConfig.permissionMode` / `.model`. Avoids stomping unrelated keys. */
   currentRuntimeConfig?: RuntimeConfig;
+  /** Current Agent/Project provider. Used only to clean old managed-provider runtime projection. */
+  currentProviderId?: string | null;
 
   fields: InputOptionFields;
 
@@ -258,7 +261,12 @@ export async function persistInputOptionChange(
         runtimeConfig.model = params.fields.runtimeModel ?? undefined;
       }
       if (params.fields.permissionMode !== undefined) {
-        runtimeConfig.permissionMode = params.fields.permissionMode;
+        runtimeConfig.permissionMode = params.fields.runtimeBackedProviderSelection
+          ? runtimeBackedProviderPermissionMode(
+            params.fields.runtimeBackedProviderSelection,
+            params.fields.permissionMode,
+          )
+          : params.fields.permissionMode;
       }
       await params.pushRuntimeConfigToSidecar(runtimeConfig);
     } catch (e) {
@@ -351,7 +359,12 @@ function buildSnapshotPatch(params: PersistInputOptionParams): SessionSnapshotPa
     patch.model = fields.builtinModel;
   }
   if (fields.permissionMode !== undefined) {
-    patch.permissionMode = fields.permissionMode;
+    patch.permissionMode = fields.runtimeBackedProviderSelection
+      ? runtimeBackedProviderPermissionMode(
+        fields.runtimeBackedProviderSelection,
+        fields.permissionMode,
+      )
+      : fields.permissionMode;
   }
   // Effort is one snapshot field regardless of runtime (like snapshot.model).
   if (fields.reasoningEffort !== undefined) {
@@ -373,24 +386,37 @@ function buildAgentPatch(
   const { fields, isExternalRuntime, currentRuntimeConfig } = params;
 
   if (fields.runtimeBackedProviderSelection !== undefined) {
-    patch.providerId = fields.runtimeBackedProviderSelection.providerId;
-    patch.model = fields.runtimeBackedProviderSelection.model;
-    patch.runtime = fields.runtimeBackedProviderSelection.runtime;
-    const nextRuntimeConfig: RuntimeConfig = runtimeConfigForRuntimeBackedProvider(
+    Object.assign(patch, agentDefaultsForRuntimeBackedProvider(
       fields.runtimeBackedProviderSelection,
       currentRuntimeConfig,
-    );
-    if (fields.permissionMode !== undefined) {
-      nextRuntimeConfig.permissionMode = fields.permissionMode;
-    }
-    if (fields.reasoningEffort !== undefined) {
-      nextRuntimeConfig.reasoningEffort = fields.reasoningEffort;
-    }
-    patch.runtimeConfig = nextRuntimeConfig;
-  } else if (!isExternalRuntime && fields.builtinSelection !== undefined) {
+      {
+        ...(fields.permissionMode !== undefined ? { permissionMode: fields.permissionMode } : {}),
+        ...(fields.reasoningEffort !== undefined ? { reasoningEffort: fields.reasoningEffort } : {}),
+      },
+    ));
+  } else if (fields.builtinSelection !== undefined) {
     patch.providerId = fields.builtinSelection.providerId;
   } else if (fields.providerId !== undefined) {
     patch.providerId = fields.providerId ?? undefined;
+  }
+  const currentLooksLikeManagedCodexProvider =
+    params.currentProviderId === CODEX_SUBSCRIPTION_PROVIDER_ID
+    || currentRuntimeConfig?.source === 'managed-provider';
+  const managedCodexCleanupPatch = currentLooksLikeManagedCodexProvider
+    ? buildRuntimeChangePatch(currentRuntimeConfig, 'builtin')
+    : undefined;
+  const runtimeConfigBase = managedCodexCleanupPatch
+    ? managedCodexCleanupPatch.runtimeConfig
+    : currentRuntimeConfig;
+  const writesOrdinaryProviderDefault =
+    fields.runtimeBackedProviderSelection === undefined
+    && (
+      fields.builtinSelection !== undefined
+      || fields.providerId !== undefined
+      || fields.builtinModel !== undefined
+    );
+  if (managedCodexCleanupPatch && writesOrdinaryProviderDefault) {
+    Object.assign(patch, managedCodexCleanupPatch);
   }
   if (fields.mcpEnabledServers !== undefined) {
     patch.mcpEnabledServers = fields.mcpEnabledServers;
@@ -406,8 +432,8 @@ function buildAgentPatch(
   // the correct branch — this helper is the unified version.
   if (fields.runtimeBackedProviderSelection !== undefined) {
     // Runtime-backed providers already wrote their runtime-owned fields above.
-  } else if (isExternalRuntime) {
-    const next: Partial<RuntimeConfig> = { ...(currentRuntimeConfig ?? {}) };
+  } else if (isExternalRuntime && !writesOrdinaryProviderDefault) {
+    const next: Partial<RuntimeConfig> = { ...(runtimeConfigBase ?? {}) };
     let runtimeConfigDirty = false;
     if (fields.permissionMode !== undefined) {
       next.permissionMode = fields.permissionMode;
