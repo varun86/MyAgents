@@ -16,10 +16,19 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
-const DEFAULT_CODEX_VERSION = '0.142.2';
-const DEFAULT_APP_VERSION = '0.2.43';
-const DEFAULT_BASE_URL = 'https://download.myagents.io/runtimes/codex/by-app';
+const RUST_CODEX_SOURCE = new URL('../src-tauri/src/managed_codex.rs', import.meta.url);
+const DEFAULT_CODEX_VERSION = readRustConst('REQUIRED_VERSION');
+const DEFAULT_RUNTIME_SET = readRustConst('REQUIRED_RUNTIME_SET');
+const DEFAULT_BASE_URL = 'https://download.myagents.io/runtimes/codex/sets';
 const PLATFORMS = ['darwin-arm64', 'darwin-x64', 'win32-x64'];
+const RUNTIME_SET_RE = /^codex-[0-9A-Za-z._-]+$/;
+
+function readRustConst(name) {
+  const source = readFileSync(RUST_CODEX_SOURCE, 'utf8');
+  const match = source.match(new RegExp(`^const ${name}:.*= "([^"]+)";`, 'm'));
+  if (!match) throw new Error(`Could not read ${name} from ${RUST_CODEX_SOURCE.pathname}`);
+  return match[1];
+}
 
 function defaultPlatformsForHost() {
   if (process.platform === 'darwin') return ['darwin-arm64', 'darwin-x64'];
@@ -30,25 +39,35 @@ function defaultPlatformsForHost() {
 function parseArgs(argv) {
   const args = {
     codexVersion: DEFAULT_CODEX_VERSION,
-    appVersion: DEFAULT_APP_VERSION,
+    runtimeSet: DEFAULT_RUNTIME_SET,
     outDir: resolve('dist/managed-codex'),
     baseUrl: DEFAULT_BASE_URL,
     allowUnsigned: false,
     platforms: null,
   };
+  const readValue = (index, option) => {
+    const value = argv[index + 1];
+    if (!value || value.startsWith('--')) {
+      throw new Error(`${option} requires a value`);
+    }
+    return value;
+  };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
-    if (arg === '--codex-version') args.codexVersion = argv[++i];
-    else if (arg === '--app-version') args.appVersion = argv[++i];
-    else if (arg === '--out') args.outDir = resolve(argv[++i]);
-    else if (arg === '--base-url') args.baseUrl = argv[++i].replace(/\/$/, '');
-    else if (arg === '--platforms') args.platforms = argv[++i].split(',').map(p => p.trim()).filter(Boolean);
+    if (arg === '--codex-version') args.codexVersion = readValue(i++, arg);
+    else if (arg === '--runtime-set') args.runtimeSet = readValue(i++, arg);
+    else if (arg === '--out') args.outDir = resolve(readValue(i++, arg));
+    else if (arg === '--base-url') args.baseUrl = readValue(i++, arg).replace(/\/$/, '');
+    else if (arg === '--platforms') args.platforms = readValue(i++, arg).split(',').map(p => p.trim()).filter(Boolean);
     else if (arg === '--allow-unsigned') args.allowUnsigned = true;
     else {
       throw new Error(`Unknown argument: ${arg}`);
     }
   }
   args.platforms ??= defaultPlatformsForHost();
+  if (!RUNTIME_SET_RE.test(args.runtimeSet)) {
+    throw new Error(`Invalid runtime set: ${args.runtimeSet}`);
+  }
   for (const platform of args.platforms) {
     if (!PLATFORMS.includes(platform)) {
       throw new Error(`Unsupported Managed Codex platform: ${platform}`);
@@ -157,6 +176,32 @@ function npmDistMetadata(spec) {
   }
 }
 
+function downloadTarball(url, outPath, spec) {
+  if (!url) {
+    throw new Error(`npm dist metadata did not include tarball URL for ${spec}`);
+  }
+  console.log(`[managed-codex] download ${url}`);
+  run('curl', [
+    '--fail',
+    '--location',
+    '--http1.1',
+    '--silent',
+    '--show-error',
+    '--retry',
+    '3',
+    '--connect-timeout',
+    '30',
+    '--max-time',
+    '600',
+    '--output',
+    outPath,
+    url,
+  ]);
+  if (!existsSync(outPath)) {
+    throw new Error(`Downloaded npm tarball missing: ${outPath}`);
+  }
+}
+
 function findExecutable(root, platform) {
   const wanted = platform === 'win32-x64'
     ? new Set(['codex.exe', 'codex.cmd'])
@@ -183,13 +228,14 @@ function packNpmPlatformPackage(tmpRoot, codexVersion, platform) {
   mkdirSync(extractDir, { recursive: true });
 
   const spec = `@openai/codex@${codexVersion}-${platform}`;
-  console.log(`[managed-codex] npm pack ${spec}`);
-  const stdout = run('npm', ['pack', '--silent', '--pack-destination', packDir, spec]);
-  const tgzName = stdout.trim().split(/\r?\n/).filter(Boolean).pop();
-  if (!tgzName) throw new Error(`npm pack did not return a tarball name for ${spec}`);
-  const tgzPath = join(packDir, basename(tgzName));
-  if (!existsSync(tgzPath)) throw new Error(`npm pack tarball missing: ${tgzPath}`);
+  console.log(`[managed-codex] fetch npm metadata ${spec}`);
   const npmDist = npmDistMetadata(spec);
+  if (!npmDist?.tarball) {
+    throw new Error(`npm dist metadata did not include tarball URL for ${spec}`);
+  }
+  const tarballName = basename(new URL(npmDist.tarball).pathname);
+  const tgzPath = join(packDir, tarballName);
+  downloadTarball(npmDist.tarball, tgzPath, spec);
   const verifiedDist = verifyNpmDistMetadata(tgzPath, npmDist, spec);
 
   run('tar', ['-xzf', tgzPath, '-C', extractDir]);
@@ -250,15 +296,10 @@ function signingSpecForPlatform(platform, allowUnsigned) {
   if (platform.startsWith('darwin-')) {
     const teamId = process.env.MANAGED_CODEX_MACOS_TEAM_ID?.trim();
     const signingIdentity = process.env.MANAGED_CODEX_MACOS_SIGNING_IDENTITY?.trim();
-    if (!teamId) {
-      if (allowUnsigned) return undefined;
-      throw new Error('MANAGED_CODEX_MACOS_TEAM_ID is required for Managed Codex macOS artifact metadata');
-    }
     return {
       type: 'codesign',
-      teamId,
+      ...(teamId ? { teamId } : {}),
       ...(signingIdentity ? { signingIdentity } : {}),
-      notarization: 'spctl-assess',
     };
   }
   if (platform === 'win32-x64') {
@@ -291,18 +332,17 @@ function verifyMacSigning(executablePath, signing) {
   }
   const combined = `${details.stdout}\n${details.stderr}`;
   const teamId = combined.match(/^TeamIdentifier=(.+)$/m)?.[1]?.trim();
-  if (teamId !== signing.teamId) {
-    throw new Error(`codesign Team ID mismatch for ${executablePath}: expected ${signing.teamId}, got ${teamId || '<none>'}`);
+  if (!teamId) {
+    throw new Error(`codesign details did not include TeamIdentifier for ${executablePath}`);
   }
-  const assess = tryRun('/usr/sbin/spctl', ['--assess', '--type', 'execute', '--verbose=4', executablePath]);
-  if (!assess.ok) {
-    throw new Error(`spctl assess failed for ${executablePath}\n${assess.stderr || assess.stdout}`);
+  if (signing.teamId && teamId !== signing.teamId) {
+    throw new Error(`codesign Team ID mismatch for ${executablePath}: expected ${signing.teamId}, got ${teamId || '<none>'}`);
   }
   return {
     checked: true,
     type: 'codesign',
     teamId,
-    notarization: 'spctl-assess',
+    signingIdentity: signing.signingIdentity,
   };
 }
 
@@ -363,13 +403,13 @@ function verifyPlatformSigning(platform, executablePath, signing) {
 
 function main() {
   const args = parseArgs(process.argv.slice(2));
-  const appOutDir = join(args.outDir, 'by-app', args.appVersion);
-  rmSync(appOutDir, { recursive: true, force: true });
+  const runtimeSetOutDir = join(args.outDir, 'sets', args.runtimeSet);
+  rmSync(runtimeSetOutDir, { recursive: true, force: true });
 
   const tmpRoot = mkdtempSync(join(tmpdir(), 'myagents-managed-codex-'));
   try {
     for (const platform of args.platforms) {
-      const platformOutDir = join(appOutDir, platform);
+      const platformOutDir = join(runtimeSetOutDir, platform);
       const artifactDir = join(platformOutDir, 'artifacts');
       mkdirSync(artifactDir, { recursive: true });
 
@@ -388,6 +428,16 @@ function main() {
           `Managed Codex ${platform} platform signing was not verified on this release host: ${signingVerification.reason ?? 'unknown'}`,
         );
       }
+      const artifactSigning = signingVerification.checked === true
+        ? {
+            type: signingVerification.type,
+            ...(signingVerification.teamId ? { teamId: signingVerification.teamId } : {}),
+            ...(signingVerification.signingIdentity ? { signingIdentity: signingVerification.signingIdentity } : {}),
+            ...(signingVerification.publisher ? { publisher: signingVerification.publisher } : {}),
+            ...(signingVerification.certificateSha256 ? { certificateSha256: signingVerification.certificateSha256 } : {}),
+            ...(signingVerification.notarization ? { notarization: signingVerification.notarization } : {}),
+          }
+        : signing;
       const zipName = `managed-codex-${args.codexVersion}-${platform}.zip`;
       const zipPath = join(artifactDir, zipName);
       const archiveStats = zipPackage(packageDir, zipPath);
@@ -396,10 +446,10 @@ function main() {
       const signature = signFile(zipPath, args.allowUnsigned, 'artifact');
       const artifacts = {};
       artifacts[platform] = {
-        url: `${args.baseUrl}/${args.appVersion}/${platform}/artifacts/${zipName}`,
+        url: `${args.baseUrl}/${args.runtimeSet}/${platform}/artifacts/${zipName}`,
         sha256,
         signature,
-        ...(signing ? { signing } : {}),
+        ...(artifactSigning ? { signing: artifactSigning } : {}),
         executableRelativePath,
         fileAllowlist,
         archiveType: 'zip',
@@ -407,7 +457,7 @@ function main() {
       };
       const audit = {
         schemaVersion: 1,
-        appVersion: args.appVersion,
+        runtimeSet: args.runtimeSet,
         codexVersion: args.codexVersion,
         platform,
         generatedAt: new Date().toISOString(),
@@ -427,7 +477,7 @@ function main() {
       };
       const manifest = {
         schemaVersion: 1,
-        appVersion: args.appVersion,
+        runtimeSet: args.runtimeSet,
         codexVersion: args.codexVersion,
         platform,
         generatedAt: new Date().toISOString(),
@@ -447,7 +497,12 @@ function main() {
   } finally {
     rmSync(tmpRoot, { recursive: true, force: true });
   }
-  console.log(`[managed-codex] upload ${appOutDir}/ to R2 path runtimes/codex/by-app/${args.appVersion}/`);
+  console.log(`[managed-codex] upload ${runtimeSetOutDir}/ to R2 path runtimes/codex/sets/${args.runtimeSet}/`);
 }
 
-main();
+try {
+  main();
+} catch (err) {
+  console.error(`[managed-codex] ${err instanceof Error ? err.message : String(err)}`);
+  process.exit(1);
+}

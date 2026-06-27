@@ -252,6 +252,8 @@ npm run tauri:dev                 # Tauri 开发模式（完整桌面体验）
 ./build_dev.sh                    # Debug 构建（含 DevTools）
 ./build_macos.sh                  # 生产构建
 ./publish_release.sh              # 发布到 R2
+./publish_managed_codex_runtime.sh -y      # 发布 Managed Codex runtime macOS 资源
+powershell -ExecutionPolicy Bypass -File ./publish_managed_codex_runtime.ps1 -Yes  # 发布 Managed Codex runtime Windows 资源
 npm run typecheck && npm run lint # 代码质量检查
 npm run test:classification       # server 测试后缀/分层 guard
 npm run test:unit                 # 快池（纯逻辑，并行，秒级）— 开发回合中频繁跑
@@ -264,6 +266,28 @@ npm run coverage                  # 非 credentialed 覆盖率报告（不设硬
 cargo fmt --manifest-path src-tauri/Cargo.toml -- --check  # Rust 格式检查（使用 rust-toolchain.toml pin 的 rustfmt）
 cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D clippy::disallowed_methods -D clippy::disallowed_macros
 ```
+
+## Managed Codex Runtime 资源发布
+
+Managed Codex Runtime 是桌面 App 之外的独立可执行资源。它不随 `publish_release.sh` / `publish_windows.ps1` 上传；只有客户端代码锁定了新的 `REQUIRED_RUNTIME_SET` / `REQUIRED_VERSION`，或需要补发缺失平台资源时，才单独发布。细节见 `specs/guides/build_and_release_guide.md`。
+
+底层脚本入口：
+
+```bash
+./publish_managed_codex_runtime.sh -y
+```
+
+```powershell
+powershell -ExecutionPolicy Bypass -File ./publish_managed_codex_runtime.ps1 -Yes
+```
+
+`package.json` 里的 `npm run publish:managed-codex -- -y` 和 `npm run publish:managed-codex:win -- -Yes` 只是上述脚本的快捷别名，便于 AI / CI 统一调用；真正维护和审查的入口是根目录这两个 publish 脚本。
+
+发布脚本默认从 `src-tauri/src/managed_codex.rs` 读取 `REQUIRED_RUNTIME_SET` 与 `REQUIRED_VERSION`，不要手动从桌面 App 版本推导。macOS 脚本默认发布 `darwin-arm64,darwin-x64`；Windows 脚本默认发布 `win32-x64`。两边上传到同一个 R2 前缀：`runtimes/codex/sets/<runtime-set>/...`。
+
+非交互发布必须显式带 `-y` / `-Yes`。默认禁止覆盖已存在的同平台 manifest；除非确认远端内容错误，否则不要使用 `--force-republish` / `-ForceRepublish`。
+
+Windows 资源必须在 Windows 发布端验证 OpenAI `codex.exe` 的 Authenticode 签名；不要在 macOS 上绕过这一步上传 Windows 正式资源。
 
 ## Rust 工具链纪律
 
@@ -297,7 +321,7 @@ Rust 工具链由仓库根目录 `rust-toolchain.toml` 固定，开发机和 CI 
 - **Commit 格式**：Conventional Commits（`feat:` / `fix:` / `refactor:`）。**只有 prefix 不算合格**：`fix: harden X` / `fix: update Y` 这种只复述 diff 的 subject 仍然是不合格 message。
 - **Commit message 写什么**：diff 已经说清「改了什么」，message 别重复它，专心写「为什么」——为什么要改、为什么这么改而不用那个更显然的办法、有哪些后人不能踩的坑。它是写给半年后来翻这段历史的人（或 AI）看的，不是写给此刻的自己。内容必须和真正提交的代码一致，别写没做、或后来又改掉的事。长短随改动而定：错别字一行就够，微妙的 bug、架构取舍值得写一段。别写 `fix`、`update`、`wip` 这种等于没写的，也别一次提交里混进好几件不相干的事。
 - **Commit 命令前硬闸**：在输入 `git commit` 前，先用“看不到 diff 的半年后维护者”视角检查 message：① 是否说明了触发 bug / 需求的真实故障模式或产品动机；② 是否说明了关键取舍（为什么不是更显然的 move/delete/cache/guard 等方案）；③ 是否标出副作用、残留风险或后人不能踩的坑。任一回答为“没有”，就不要提交，先重写 message。除错别字 / 纯机械小改外，非平凡 bugfix / refactor / 架构相关改动 MUST 用多段 message（`git commit -m "<subject>" -m "<body>"` 或 `git commit -F <file>`），禁止只写一行 subject。
-- **发布流程**：先更新 CHANGELOG.md → `npm version` → `./build_macos.sh` → `./publish_release.sh` → push tag
+- **发布流程**：先更新 CHANGELOG.md → `npm version` → 若本客户端锁定了新的 Managed Codex runtime set，先用独立脚本确认对应平台资源已上传 → `./build_macos.sh` → `./publish_release.sh` → push tag
 
 ## 日志与排查
 

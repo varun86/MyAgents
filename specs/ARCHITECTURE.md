@@ -861,6 +861,7 @@ Windows 无自带 git/bash，NSIS 静默安装 Git for Windows（`src-tauri/nsis
 | `build_dev.sh` | Debug 构建（含 DevTools） |
 | `build_macos.sh` | 生产 DMG 构建 |
 | `publish_release.sh` | 发布到 R2 |
+| `publish_managed_codex_runtime.sh` | 单独发布 Managed Codex runtime set 的 macOS 平台资源 |
 
 ### Windows
 
@@ -869,6 +870,7 @@ Windows 无自带 git/bash，NSIS 静默安装 Git for Windows（`src-tauri/nsis
 | `setup_windows.ps1` | 首次环境初始化 |
 | `build_windows.ps1` | 生产构建（NSIS + 便携版） |
 | `publish_windows.ps1` | 发布到 R2 |
+| `publish_managed_codex_runtime.ps1` | 单独发布 Managed Codex runtime set 的 Windows 平台资源 |
 
 详见 `guides/windows_build_guide.md`。
 

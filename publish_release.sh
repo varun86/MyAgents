@@ -528,23 +528,6 @@ fi
 echo ""
 
 # ========================================
-# 打包并上传 Managed Codex runtime
-# ========================================
-MANAGED_CODEX_RUNTIME_PUBLISHED=0
-MANAGED_CODEX_RUNTIME_DIR="${PROJECT_DIR}/dist/managed-codex/by-app/${VERSION}"
-echo -e "${BLUE}[Managed Codex] 打包并上传 runtime...${NC}"
-node "${PROJECT_DIR}/scripts/package-managed-codex-runtime.mjs" --app-version "$VERSION"
-if ! find "${MANAGED_CODEX_RUNTIME_DIR}" -path "*/manifest-v1.json" -type f | grep -q . \
-    || ! find "${MANAGED_CODEX_RUNTIME_DIR}" -path "*/manifest-v1.json.sig" -type f | grep -q .; then
-    echo -e "${RED}Managed Codex runtime manifest 或签名缺失${NC}"
-    exit 1
-fi
-rclone --config="$RCLONE_CONFIG" copy "${MANAGED_CODEX_RUNTIME_DIR}/" "r2:${R2_BUCKET}/runtimes/codex/by-app/${VERSION}/" --s3-no-check-bucket --progress
-MANAGED_CODEX_RUNTIME_PUBLISHED=1
-echo -e "${GREEN}✓ Managed Codex runtime 已上传${NC}"
-echo ""
-
-# ========================================
 # 上传 manifest
 # ========================================
 echo -e "${BLUE}[7/7] 上传更新清单...${NC}"
@@ -596,12 +579,6 @@ if [ -n "$CF_ZONE_ID" ] && [ -n "$CF_API_TOKEN" ]; then
     PURGE_URLS+=("${DOWNLOAD_BASE_URL}/update/latest.json")
     PURGE_URLS+=("${DOWNLOAD_BASE_URL}/update/darwin-aarch64.json")
     PURGE_URLS+=("${DOWNLOAD_BASE_URL}/update/darwin-x86_64.json")
-    if [ "$MANAGED_CODEX_RUNTIME_PUBLISHED" = "1" ]; then
-        while IFS= read -r file; do
-            rel="${file#${MANAGED_CODEX_RUNTIME_DIR}/}"
-            PURGE_URLS+=("${DOWNLOAD_BASE_URL}/runtimes/codex/by-app/${VERSION}/${rel}")
-        done < <(find "${MANAGED_CODEX_RUNTIME_DIR}" -type f)
-    fi
 
     # 添加构建产物 URL（注意：tar.gz 和 sig 使用带架构后缀的文件名）
     if [ -n "$ARM_TAR" ]; then
