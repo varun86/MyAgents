@@ -31,7 +31,7 @@ export type ProviderExecutionIntent =
 
 export type ProviderExecutionHistoryFamily =
   | 'builtin:anthropic'
-  | `builtin:third-party:${'anthropic' | 'openai'}`
+  | 'builtin:third-party'
   | `builtin:isolated:${string}`
   | `runtime-backed:${typeof CODEX_SUBSCRIPTION_PROVIDER_ID}`;
 
@@ -240,8 +240,7 @@ function builtinFamilyFromHistory(
 ): ProviderExecutionHistoryFamily {
   const identity = getProviderHistoryIdentity(providerEnv, policy);
   if (identity === 'anthropic') return 'builtin:anthropic';
-  if (identity === 'third-party:anthropic') return 'builtin:third-party:anthropic';
-  if (identity === 'third-party:openai') return 'builtin:third-party:openai';
+  if (identity === 'third-party') return 'builtin:third-party';
   if (identity.startsWith('isolated:')) {
     return `builtin:${identity}` as `builtin:isolated:${string}`;
   }

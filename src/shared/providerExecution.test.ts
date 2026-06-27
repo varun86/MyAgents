@@ -189,6 +189,6 @@ describe('provider execution identity', () => {
         baseUrl: 'https://api.deepseek.com/anthropic',
         apiProtocol: 'anthropic',
       },
-    })).toBe('builtin:third-party:anthropic');
+    })).toBe('builtin:third-party');
   });
 });

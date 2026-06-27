@@ -193,7 +193,7 @@ describe('canResumeProviderHistoryForSwitch', () => {
     })).toBe(true);
   });
 
-  it('uses the normal provider-history whitelist once current provider identity is known', () => {
+  it('allows known portable third-party providers to cross transport protocols', () => {
     expect(canResumeProviderHistoryForSwitch({
       legacyCurrentProviderUnknown: false,
       currentProviderEnv: {
@@ -208,7 +208,7 @@ describe('canResumeProviderHistoryForSwitch', () => {
         apiProtocol: 'anthropic',
         model: 'deepseek-v4-pro',
       },
-    })).toBe(false);
+    })).toBe(true);
   });
 
   it('treats Managed Codex as a runtime-backed provider boundary', () => {
