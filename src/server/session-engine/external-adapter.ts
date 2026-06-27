@@ -56,7 +56,6 @@ import { getEffectiveOfficialToolIdsForSession } from '../utils/admin-config';
 import { getSessionData, updateSessionMetadata } from '../SessionStore';
 import { getLatestAssistantResultFromMessages, NO_TEXT_RESPONSE } from '../inbox/latest-result';
 import type { SessionMessage } from '../types/session';
-import type { OfficialToolId } from '../../shared/official-tools';
 
 function getRuntimeSessionId(): string {
   return getExternalSessionId() || getCurrentBoundSessionId() || getSessionId();
@@ -76,14 +75,6 @@ function getLatestExternalResult(): string {
       : NO_TEXT_RESPONSE;
   }
   return latestResult.trim() || NO_TEXT_RESPONSE;
-}
-
-async function persistOfficialToolIdsForSession(sessionId: string | null, ids: OfficialToolId[] | null): Promise<void> {
-  if (!sessionId) return;
-  await updateSessionMetadata(sessionId, {
-    enabledOfficialToolIds: ids === null ? [] : [...ids],
-    configSnapshotAt: new Date().toISOString(),
-  });
 }
 
 function externalLiveMessageToSessionMessage(message: SessionMessage): SessionMessage {
@@ -379,9 +370,7 @@ export function createExternalSessionEngine(): SessionEngine {
       return setExternalReasoningEffort(effort);
     },
 
-    async updateOfficialToolIds(ids) {
-      const sessionId = getRuntimeSessionId();
-      await persistOfficialToolIdsForSession(sessionId, ids);
+    async updateOfficialToolIds(_ids) {
       if (isExternalSessionActive() && getExternalSessionState() !== 'running') {
         await stopExternalSession();
       }

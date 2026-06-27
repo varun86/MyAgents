@@ -430,9 +430,123 @@ export function isImageUnderstandingGloballyConfigured(config?: AdminAppConfig):
   return isImageUnderstandingToolConfigured(c.officialToolSettings);
 }
 
+export type ImageUnderstandingToolUnavailableReason =
+  | 'not-configured'
+  | 'provider-unavailable'
+  | 'runtime-backed-provider'
+  | 'model-not-image-capable'
+  | 'missing-credential'
+  | 'subscription-not-verified';
+
+export type ImageUnderstandingToolAvailability =
+  | {
+      ok: true;
+      providerId: string;
+      model: string;
+      provider: ProviderRecord;
+      modelEntry: { model: string; inputModalities: string[] };
+    }
+  | {
+      ok: false;
+      reason: ImageUnderstandingToolUnavailableReason;
+      status: number;
+      message: string;
+      recoveryMessage: string;
+    };
+
+function unavailableImageUnderstandingTool(
+  reason: ImageUnderstandingToolUnavailableReason,
+  message: string,
+  recoveryMessage: string,
+  status = 409,
+): ImageUnderstandingToolAvailability {
+  return { ok: false, reason, status, message, recoveryMessage };
+}
+
+function findProviderImageModel(
+  provider: Record<string, unknown>,
+  model: string,
+): { model: string; inputModalities: string[] } | null {
+  const models = Array.isArray(provider.models) ? provider.models : [];
+  for (const entry of models) {
+    if (!entry || typeof entry !== 'object') continue;
+    const record = entry as Record<string, unknown>;
+    if (record.model !== model) continue;
+    const inputModalities = Array.isArray(record.inputModalities)
+      ? record.inputModalities.filter((value): value is string => typeof value === 'string')
+      : [];
+    return { model, inputModalities };
+  }
+  return null;
+}
+
+export function resolveImageUnderstandingToolAvailability(
+  config?: AdminAppConfig,
+): ImageUnderstandingToolAvailability {
+  const c = config ?? loadConfig();
+  const settings = c.officialToolSettings?.imageUnderstanding;
+  const providerId = settings?.providerId?.trim();
+  const model = settings?.model?.trim();
+  if (!providerId || !model) {
+    return unavailableImageUnderstandingTool(
+      'not-configured',
+      'Image understanding model is not configured.',
+      'Open Settings -> Toolbox -> Image Understanding and select an image-capable model.',
+    );
+  }
+
+  const provider = findEffectiveProvider(providerId, c);
+  if (!provider || !isProviderEnabled(provider)) {
+    return unavailableImageUnderstandingTool(
+      'provider-unavailable',
+      `Configured vision provider '${providerId}' is unavailable.`,
+      'Open Settings -> Model Providers and re-enable or reconfigure the selected provider.',
+    );
+  }
+  if (isRuntimeBackedProvider(provider)) {
+    return unavailableImageUnderstandingTool(
+      'runtime-backed-provider',
+      `Provider '${providerId}' is runtime-backed and cannot drive the vision helper.`,
+      'Choose an API-backed provider/model for Image Understanding.',
+    );
+  }
+
+  const modelEntry = findProviderImageModel(provider, model);
+  if (!modelEntry || !modelEntry.inputModalities.includes('image')) {
+    return unavailableImageUnderstandingTool(
+      'model-not-image-capable',
+      `Model '${model}' is not registered as image-capable for provider '${providerId}'.`,
+      'Open Model Providers and select or mark a model whose input modalities include image.',
+    );
+  }
+
+  if (provider.type === 'subscription') {
+    const verifyStatus = c.providerVerifyStatus?.[providerId];
+    if (verifyStatus?.status !== 'valid') {
+      return unavailableImageUnderstandingTool(
+        'subscription-not-verified',
+        `Subscription provider '${providerId}' is not verified.`,
+        'Open Settings -> Model Providers and verify the selected subscription provider.',
+      );
+    }
+  } else if (!resolveProviderEnv(providerId, c)) {
+    return unavailableImageUnderstandingTool(
+      'missing-credential',
+      `Provider '${providerId}' needs a valid API key before it can drive image understanding.`,
+      'Open Settings -> Model Providers and configure or verify the provider API key.',
+    );
+  }
+
+  return { ok: true, providerId, model, provider, modelEntry };
+}
+
+export function isImageUnderstandingToolCallable(config?: AdminAppConfig): boolean {
+  return resolveImageUnderstandingToolAvailability(config).ok;
+}
+
 function configuredOfficialToolSet(config: AdminAppConfig): Set<OfficialToolId> {
   const configured = new Set<OfficialToolId>();
-  if (isImageUnderstandingGloballyConfigured(config)) {
+  if (isImageUnderstandingToolCallable(config)) {
     configured.add(IMAGE_UNDERSTANDING_TOOL_ID);
   }
   return configured;
@@ -560,7 +674,7 @@ export function loadCustomProviderFiles(): Array<Record<string, unknown>> {
   } catch { return []; }
 }
 
-type ProviderRecord = Record<string, unknown> & { id: string; enabled?: unknown };
+export type ProviderRecord = Record<string, unknown> & { id: string; enabled?: unknown };
 
 function hasProviderId(provider: Record<string, unknown>): provider is ProviderRecord {
   return typeof provider.id === 'string' && provider.id.length > 0;
@@ -957,10 +1071,7 @@ export function resolveWorkspaceConfig(
 
   // --- Resolve MyAgents official CLI tools ---
   const globalOfficialTools = new Set(getGloballyEnabledOfficialToolIds(config));
-  const configuredOfficialTools = new Set<OfficialToolId>();
-  if (isImageUnderstandingGloballyConfigured(config)) {
-    configuredOfficialTools.add(IMAGE_UNDERSTANDING_TOOL_ID);
-  }
+  const configuredOfficialTools = configuredOfficialToolSet(config);
   const requestedOfficialTools = snapshotOwnsConfig
     ? normalizeOfficialToolIds(sessionMeta?.enabledOfficialToolIds)
     : normalizeOfficialToolIds(

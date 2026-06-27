@@ -1,5 +1,5 @@
 import { randomUUID } from 'crypto';
-import { basename, extname, isAbsolute, relative, resolve } from 'path';
+import { basename, extname, isAbsolute, relative, resolve, win32 } from 'path';
 import { lstatSync, readFileSync, realpathSync, statSync } from 'fs';
 import { homedir } from 'os';
 
@@ -23,6 +23,7 @@ import {
   getAllEffectiveProviders,
   getEffectiveOfficialToolIdsForSession,
   loadConfig,
+  resolveImageUnderstandingToolAvailability,
   resolveProviderEnv,
   type AdminAppConfig,
 } from '../utils/admin-config';
@@ -158,30 +159,10 @@ export async function analyzeImages(input: VisionAnalyzeInput): Promise<VisionAn
     });
   }
 
-  const settings = config.officialToolSettings?.imageUnderstanding;
-  const providerId = settings?.providerId?.trim();
-  const model = settings?.model?.trim();
-  if (!providerId || !model) {
-    throw new VisionToolError('Image understanding model is not configured.', 409, {
-      message: 'Open Settings -> Toolbox -> Image Understanding and select an image-capable model.',
-    });
-  }
-
-  const provider = findEffectiveProvider(providerId, config);
-  if (!provider || !isProviderEnabled(provider)) {
-    throw new VisionToolError(`Configured vision provider '${providerId}' is unavailable.`, 409, {
-      message: 'Open Settings -> Model Providers and re-enable or reconfigure the selected provider.',
-    });
-  }
-  if (isRuntimeBackedProvider(provider)) {
-    throw new VisionToolError(`Provider '${providerId}' is runtime-backed and cannot drive the vision helper.`, 409, {
-      message: 'Choose an API-backed provider/model for Image Understanding.',
-    });
-  }
-  const modelEntry = findProviderModel(provider, model);
-  if (!modelEntry || !modelEntry.inputModalities?.includes('image')) {
-    throw new VisionToolError(`Model '${model}' is not registered as image-capable for provider '${providerId}'.`, 409, {
-      message: 'Open Model Providers and select or mark a model whose input modalities include image.',
+  const availability = resolveImageUnderstandingToolAvailability(config);
+  if (!availability.ok) {
+    throw new VisionToolError(availability.message, availability.status, {
+      message: availability.recoveryMessage,
     });
   }
 
@@ -192,14 +173,14 @@ export async function analyzeImages(input: VisionAnalyzeInput): Promise<VisionAn
     promptFile: input.promptFile,
     workspaceReal,
   });
-  const providerEnv = materializeVisionProviderEnv(providerId, model, config);
+  const providerEnv = materializeVisionProviderEnv(availability.providerId, availability.model, config);
   const deadlineMs = Date.now() + TIMEOUT_MS;
 
   const text = await runVisionQuery({
     workspacePath,
-    providerId,
+    providerId: availability.providerId,
     providerEnv,
-    model,
+    model: availability.model,
     images: images.map(img => img.payload),
     prompt,
     deadlineMs,
@@ -207,8 +188,8 @@ export async function analyzeImages(input: VisionAnalyzeInput): Promise<VisionAn
 
   return {
     toolId: IMAGE_UNDERSTANDING_TOOL_ID,
-    providerId,
-    model,
+    providerId: availability.providerId,
+    model: availability.model,
     prompt,
     images: images.map(({ payload, input: imageInput, resolvedPath }) => ({
       input: imageInput,
@@ -224,23 +205,6 @@ export async function analyzeImages(input: VisionAnalyzeInput): Promise<VisionAn
 function getVisionProviders(config: AdminAppConfig): Array<Record<string, unknown> & { id: string }> {
   return getAllEffectiveProviders(config)
     .filter(provider => isProviderEnabled(provider) && !isRuntimeBackedProvider(provider));
-}
-
-function findProviderModel(
-  provider: Record<string, unknown>,
-  model: string,
-): { model: string; inputModalities?: string[] } | null {
-  const models = Array.isArray(provider.models) ? provider.models : [];
-  for (const entry of models) {
-    if (!entry || typeof entry !== 'object') continue;
-    const record = entry as Record<string, unknown>;
-    if (record.model !== model) continue;
-    const modalities = Array.isArray(record.inputModalities)
-      ? record.inputModalities.filter((v): v is string => typeof v === 'string')
-      : undefined;
-    return { model, inputModalities: modalities };
-  }
-  return null;
 }
 
 function materializeVisionProviderEnv(
@@ -368,12 +332,12 @@ function resolveWorkspaceFilePath(args: {
 }): { input: string; realPath: string } {
   const input = args.rawInput.trim();
   if (!input) throw new VisionToolError(`${args.kind} cannot be empty.`, 400);
-  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(input)) {
+  if (isVisionUrlLikeInput(input)) {
     throw new VisionToolError(`${args.kind} URLs are not supported. Use a local workspace path.`, 400);
   }
 
   const withoutAt = input.startsWith('@') ? input.slice(1) : input;
-  const candidate = isAbsolute(withoutAt)
+  const candidate = isAbsolute(withoutAt) || win32.isAbsolute(withoutAt)
     ? withoutAt
     : resolve(args.workspaceReal, withoutAt);
 
@@ -396,6 +360,12 @@ function resolveWorkspaceFilePath(args: {
     throw new VisionToolError(`${args.kind} must stay inside the current workspace.`, 400);
   }
   return { input, realPath };
+}
+
+export function isVisionUrlLikeInput(input: string): boolean {
+  const trimmed = input.trim();
+  if (/^[a-zA-Z]:[\\/]/.test(trimmed)) return false;
+  return /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(trimmed);
 }
 
 function mimeFromPath(filePath: string): string {
@@ -458,6 +428,7 @@ async function runVisionQueryInner(args: {
   bridgeToken?: string;
 }): Promise<string> {
   const sessionId = randomUUID();
+  const abortController = new AbortController();
   const env = buildClaudeSessionEnv(args.providerEnv, args.model, {
     bridgeToken: args.bridgeToken,
   });
@@ -515,19 +486,24 @@ async function runVisionQueryInner(args: {
       mcpServers: {},
       tools: [],
       model: applyContextWindowSuffix(args.model),
+      abortController,
     },
   });
 
   let timeout: ReturnType<typeof setTimeout> | undefined;
   const timeoutPromise = new Promise<never>((_, reject) => {
-    timeout = setTimeout(() => reject(new VisionToolError('Image understanding timed out.', 504)), remainingMs(args.deadlineMs));
+    timeout = setTimeout(() => {
+      abortController.abort();
+      reject(new VisionToolError('Image understanding timed out.', 504));
+    }, remainingMs(args.deadlineMs));
   });
 
   try {
     return await Promise.race([extractVisionText(visionQuery), timeoutPromise]);
   } finally {
     if (timeout) clearTimeout(timeout);
-    try { visionQuery.return(undefined as never); } catch { /* ignore */ }
+    if (!abortController.signal.aborted) abortController.abort();
+    try { visionQuery.close(); } catch { /* ignore */ }
   }
 }
 

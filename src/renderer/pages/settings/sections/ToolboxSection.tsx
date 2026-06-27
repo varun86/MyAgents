@@ -1,4 +1,4 @@
-import { Globe, ImageIcon, Loader2, Plus, Settings2 } from 'lucide-react';
+import { Globe, ImageIcon, Loader2, Plus, Settings2, Wrench } from 'lucide-react';
 
 import { CliToolsSection } from '@/components/CliToolsSection';
 import type { McpServerDefinition } from '@/config/types';
@@ -46,8 +46,8 @@ export function ToolboxSection({
 
       <div className="flex items-center gap-2.5">
         <h3 className="flex items-center gap-2 text-lg font-semibold text-[var(--ink)]">
-          <Globe className="h-4 w-4 text-[var(--ink-muted)]" />
-          MCP
+          <Wrench className="h-4 w-4 text-[var(--ink-muted)]" />
+          工具
           <span className="rounded-full bg-[var(--paper-inset)] px-2 py-0.5 text-xs font-medium text-[var(--ink-muted)]">
             {totalTools}
           </span>

@@ -636,13 +636,7 @@ describe('session-engine selector and adapters', () => {
 
     expect(result).toEqual({ success: true });
     expect(mocks.setSessionEnabledOfficialToolIds).toHaveBeenCalledWith(['image-understanding']);
-    expect(mocks.updateSessionMetadata).toHaveBeenCalledWith(
-      'builtin-session',
-      expect.objectContaining({
-        enabledOfficialToolIds: ['image-understanding'],
-        configSnapshotAt: expect.any(String),
-      }),
-    );
+    expect(mocks.updateSessionMetadata).not.toHaveBeenCalled();
   });
 
   it('updates official tool ids through the external engine owner', async () => {
@@ -653,13 +647,7 @@ describe('session-engine selector and adapters', () => {
     const result = await getSessionEngine().updateOfficialToolIds([]);
 
     expect(result).toEqual({ success: true });
-    expect(mocks.updateSessionMetadata).toHaveBeenCalledWith(
-      'external-session',
-      expect.objectContaining({
-        enabledOfficialToolIds: [],
-        configSnapshotAt: expect.any(String),
-      }),
-    );
+    expect(mocks.updateSessionMetadata).not.toHaveBeenCalled();
     expect(mocks.stopExternalSession).toHaveBeenCalledTimes(1);
   });
 

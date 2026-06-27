@@ -51,7 +51,6 @@ import type { AgentDefinition } from '@anthropic-ai/claude-agent-sdk';
 import type { CancelReason } from '../utils/cancellation';
 import { createConcreteProviderRoute, isConcreteProviderRoute, type ProviderRoute } from '../../shared/providerRoute';
 import { getEffectiveOfficialToolIdsForSession, materializeProviderRouteEnv } from '../utils/admin-config';
-import type { OfficialToolId } from '../../shared/official-tools';
 import type {
   DesktopAdmissionResult,
   DesktopMessageRequest,
@@ -63,7 +62,7 @@ import type {
   SessionEngine,
 } from './types';
 import { decideBuiltinInjectedTurnResult } from '../session-core/turn-result-policy';
-import { getSessionData, updateSessionMetadata } from '../SessionStore';
+import { getSessionData } from '../SessionStore';
 import { getLatestAssistantResultFromMessages, NO_TEXT_RESPONSE } from '../inbox/latest-result';
 import { shrinkReplayContentForClient } from '../utils/session-message-preview';
 import type { SessionMessage } from '../types/session';
@@ -120,14 +119,6 @@ function getBuiltinWorkspacePath(): string | null {
   return typeof state.agentDir === 'string' && state.agentDir.length > 0
     ? state.agentDir
     : null;
-}
-
-async function persistOfficialToolIdsForSession(sessionId: string | null, ids: OfficialToolId[] | null): Promise<void> {
-  if (!sessionId) return;
-  await updateSessionMetadata(sessionId, {
-    enabledOfficialToolIds: ids === null ? [] : [...ids],
-    configSnapshotAt: new Date().toISOString(),
-  });
 }
 
 function messageWireToSessionMessage(message: MessageWire): SessionMessage {
@@ -446,7 +437,6 @@ export function createBuiltinSessionEngine(): SessionEngine {
 
     async updateOfficialToolIds(ids) {
       setSessionEnabledOfficialToolIds(ids);
-      await persistOfficialToolIdsForSession(getSessionId(), ids);
       return { success: true };
     },
 
