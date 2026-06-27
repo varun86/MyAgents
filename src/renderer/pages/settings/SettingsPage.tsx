@@ -2525,17 +2525,15 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
             : installStatus === 'update-required' ? '更新' : '下载';
         const modelLine = provider.models
             .map(model => model.modelName || model.model)
-            .join('  ');
+            .join(', ');
         const loginInProgress = managedCodexBusy === 'login' || authStatus === 'logging-in';
         const isLoggedIn = authStatus === 'valid';
         const accountLabel = auth?.accountEmail ?? 'ChatGPT Codex 订阅账户';
-        const statusText = isLoggedIn
-            ? accountLabel
-            : loginInProgress
-                ? 'ChatGPT Codex 账号登录中'
-                : authStatus === 'error'
-                    ? 'ChatGPT Codex 账号登录异常'
-                    : 'ChatGPT Codex 账号未登录';
+        const statusText = loginInProgress
+            ? 'ChatGPT Codex 账号登录中'
+            : authStatus === 'error' || authStatus === 'invalid'
+                ? 'ChatGPT Codex 账号验证失败'
+                : 'ChatGPT Codex 账号未登录';
         const runtimeError = install?.error && (managedCodexReadiness.reason === 'runtime-error'
             || managedCodexReadiness.reason === 'runtime-update-required')
             ? install.error
@@ -2551,10 +2549,10 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                         <div className="flex min-w-0 items-center gap-2">
                             <h3 className="truncate text-lg font-semibold text-[var(--ink)]">{provider.name}</h3>
                             <span className="shrink-0 rounded bg-[var(--paper-inset)] px-1.5 py-0.5 text-xs font-medium text-[var(--ink-muted)]">
-                                {provider.cloudProvider}
+                                官方
                             </span>
                         </div>
-                        <p className="mt-1 truncate text-sm text-[var(--ink-muted)]">
+                        <p className="mt-1 truncate text-xs text-[var(--ink-muted)]">
                             {modelLine}
                         </p>
                     </div>
@@ -2596,45 +2594,53 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                         )}
                     </div>
                 ) : (
-                    <div className="flex items-center justify-between gap-3 border-t border-[var(--line-subtle)] pt-3">
-                        <div className="min-w-0">
-                            <div className="flex min-w-0 items-center gap-2">
-                                <p className="truncate text-sm font-medium text-[var(--ink)]">
-                                    {statusText}
-                                </p>
-                                {isLoggedIn && (
-                                    <span className="shrink-0 rounded bg-[var(--success-bg)] px-1.5 py-0.5 text-xs font-medium text-[var(--success)]">
-                                        已验证
-                                    </span>
+                    <div className="space-y-3">
+                        <p className="text-sm text-[var(--ink-muted)]">
+                            使用 ChatGPT Codex 订阅账户额度
+                        </p>
+                        <div className="flex items-center justify-between gap-3">
+                            <div className="flex min-w-0 flex-wrap items-center gap-2 text-xs">
+                                {isLoggedIn ? (
+                                    <>
+                                        <span className="truncate font-mono text-xs text-[var(--ink-muted)]">
+                                            {accountLabel}
+                                        </span>
+                                        <span className="shrink-0 rounded bg-[var(--success-bg)] px-1.5 py-0.5 text-xs font-medium text-[var(--success)]">
+                                            已验证
+                                        </span>
+                                    </>
+                                ) : (
+                                    <>
+                                        <span className="truncate text-xs text-[var(--ink-muted)]">
+                                            {statusText}
+                                        </span>
+                                        {loginInProgress && (
+                                            <span className="shrink-0 rounded bg-[var(--info-bg)] px-1.5 py-0.5 text-xs font-medium text-[var(--info)]">
+                                                登录中
+                                            </span>
+                                        )}
+                                        {(authStatus === 'error' || authStatus === 'invalid') && (
+                                            <span className="shrink-0 rounded bg-[var(--error-bg)] px-1.5 py-0.5 text-xs font-medium text-[var(--error)]">
+                                                验证失败
+                                            </span>
+                                        )}
+                                    </>
                                 )}
                             </div>
-                            {!isLoggedIn && (
-                                <p className="mt-0.5 truncate text-xs text-[var(--ink-muted)]">
-                                    使用 ChatGPT Codex 订阅账户
-                                </p>
+                            {needsLogin && (
+                                <button
+                                    type="button"
+                                    disabled={busy}
+                                    onClick={() => void startManagedCodexLogin()}
+                                    className="flex shrink-0 items-center gap-1.5 rounded-lg bg-[var(--button-primary-bg)] px-3 py-1.5 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:cursor-wait disabled:opacity-60"
+                                >
+                                    {loginInProgress
+                                        ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                        : <Link className="h-3.5 w-3.5" />}
+                                    登录
+                                </button>
                             )}
                         </div>
-                        {needsLogin ? (
-                            <button
-                                type="button"
-                                disabled={busy}
-                                onClick={() => void startManagedCodexLogin()}
-                                className="flex shrink-0 items-center gap-1.5 rounded-lg bg-[var(--button-primary-bg)] px-3 py-1.5 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:cursor-wait disabled:opacity-60"
-                            >
-                                {loginInProgress
-                                    ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                                    : <Link className="h-3.5 w-3.5" />}
-                                登录
-                            </button>
-                        ) : (
-                            <button
-                                type="button"
-                                onClick={() => setManagedCodexDetailsOpen(true)}
-                                className="shrink-0 rounded-lg border border-[var(--line)] px-3 py-1.5 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)]"
-                            >
-                                查看
-                            </button>
-                        )}
                     </div>
                 )}
             </div>
