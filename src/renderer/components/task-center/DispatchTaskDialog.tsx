@@ -398,11 +398,9 @@ export function DispatchTaskDialog({
                 value={taskMd}
                 onChange={(e) => setTaskMd(e.target.value)}
                 rows={12}
+                placeholder="AI 执行时看到的 prompt，默认取自想法原文。你可以补充细节、目标、约束。"
                 className={`${INPUT_CLS} resize-y font-mono text-sm`}
               />
-              <p className="mt-1.5 text-xs text-[var(--ink-muted)]">
-                AI 执行时看到的 prompt，默认取自想法原文。你可以补充细节、目标、约束。
-              </p>
             </div>
 
             {/* verify.md — folded by default. The dispatch flow used to

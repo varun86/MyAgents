@@ -145,6 +145,8 @@ describe('Task Center UX refinements', () => {
     expect(screen.queryByText('基本信息')).not.toBeInTheDocument();
     expect(screen.queryByText('简短描述')).not.toBeInTheDocument();
     expect(screen.getByText('任务需求 Task.md')).toBeInTheDocument();
+    expect(screen.queryByText('AI 执行时看到的 prompt，默认取自想法原文。你可以补充细节、目标、约束。')).not.toBeInTheDocument();
+    expect(screen.getByPlaceholderText('AI 执行时看到的 prompt，默认取自想法原文。你可以补充细节、目标、约束。')).toBeInTheDocument();
 
     const name = screen.getByText('任务名称');
     const taskDemand = screen.getByText('任务需求 Task.md');
