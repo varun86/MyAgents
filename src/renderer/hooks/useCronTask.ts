@@ -63,8 +63,17 @@ export interface CronTaskState {
   task: CronTask | null;
   /** Whether task is currently being created/started */
   isStarting: boolean;
+  /** Whether the current task is inside one scheduler execution turn */
+  isExecuting: boolean;
+  /** 1-based scheduler execution number for the active turn */
+  executionNumber?: number;
   /** Error message if any */
   error: string | null;
+}
+
+export interface CronTaskStopResult {
+  task: CronTask;
+  prompt: string | null;
 }
 
 const initialState: CronTaskState = {
@@ -72,6 +81,8 @@ const initialState: CronTaskState = {
   config: null,
   task: null,
   isStarting: false,
+  isExecuting: false,
+  executionNumber: undefined,
   error: null,
 };
 
@@ -174,6 +185,8 @@ export function useCronTask(options: UseCronTaskOptions) {
       },
       task: null,
       isStarting: false,
+      isExecuting: false,
+      executionNumber: undefined,
       error: null,
     });
   }, [setState]);
@@ -203,6 +216,20 @@ export function useCronTask(options: UseCronTaskOptions) {
       };
     });
   }, [setState]);
+
+  const setExecutionState = useCallback((taskId: string, isExecuting: boolean, executionNumber?: number) => {
+    if (stateRef.current.task?.id !== taskId) return;
+    isExecutingRef.current = isExecuting;
+    setState(prev => (
+      prev.task?.id === taskId
+        ? {
+            ...prev,
+            isExecuting,
+            executionNumber: isExecuting ? executionNumber : undefined,
+          }
+        : prev
+    ));
+  }, [setState, stateRef]);
 
   // Create and start the cron task
   // Optional prompt parameter allows caller to pass the prompt directly,
@@ -393,7 +420,7 @@ export function useCronTask(options: UseCronTaskOptions) {
 
   // Stop the task
   // Returns the original prompt so it can be restored to the input field
-  const stop = useCallback(async (): Promise<string | null> => {
+  const stop = useCallback(async (): Promise<CronTaskStopResult | null> => {
     const currentTask = stateRef.current.task;
     const currentConfig = stateRef.current.config;
     if (!currentTask) return null;
@@ -412,7 +439,10 @@ export function useCronTask(options: UseCronTaskOptions) {
       // Rust scheduler will detect status change and stop
       setState(initialState);
       console.log('[useCronTask] Task stopped:', stoppedTask.id);
-      return originalPrompt;
+      return {
+        task: stoppedTask,
+        prompt: originalPrompt,
+      };
     } catch (error) {
       console.error('[useCronTask] Failed to stop task:', error);
       return null;
@@ -495,9 +525,14 @@ export function useCronTask(options: UseCronTaskOptions) {
     }
 
     isExecutingRef.current = true;
-    await markTaskExecuting(payload.taskId);
-
+    setState(prev => ({
+      ...prev,
+      isExecuting: true,
+      executionNumber: (currentTask.executionCount ?? 0) + 1,
+    }));
     try {
+      await markTaskExecuting(payload.taskId);
+
       if (optionsRef.current.onExecute) {
         await optionsRef.current.onExecute(
           payload.taskId,
@@ -525,8 +560,18 @@ export function useCronTask(options: UseCronTaskOptions) {
         setState(initialState);
       }
     } finally {
-      await markTaskComplete(payload.taskId);
-      isExecutingRef.current = false;
+      try {
+        await markTaskComplete(payload.taskId);
+      } catch (error) {
+        console.warn('[useCronTask] failed to mark task complete:', error);
+      } finally {
+        isExecutingRef.current = false;
+        setState(prev => (
+          prev.task?.id === payload.taskId
+            ? { ...prev, isExecuting: false, executionNumber: undefined }
+            : prev
+        ));
+      }
     }
   }, [tabId, setState, stateRef]);
 
@@ -560,13 +605,20 @@ export function useCronTask(options: UseCronTaskOptions) {
       return;
     }
 
+    isExecutingRef.current = false;
+
     // Refresh task state from server to get updated lastExecutedAt and executionCount
     try {
       const task = await getCronTask(payload.taskId);
       // Check if component is still mounted before updating state
       if (!mountedRef.current) return;
 
-      setState(prev => ({ ...prev, task }));
+      setState(prev => ({
+        ...prev,
+        task,
+        isExecuting: false,
+        executionNumber: undefined,
+      }));
 
       // Notify caller that execution completed (for UI refresh, loading state reset, etc.)
       // Pass success flag so caller can decide whether to refresh (e.g., skip on timeout)
@@ -589,6 +641,12 @@ export function useCronTask(options: UseCronTaskOptions) {
       }
     } catch (error) {
       console.error('[useCronTask] Failed to refresh task after execution:', error);
+      if (!mountedRef.current) return;
+      setState(prev => (
+        prev.task?.id === payload.taskId
+          ? { ...prev, isExecuting: false, executionNumber: undefined }
+          : prev
+      ));
     }
   }, [setState, stateRef]);
 
@@ -598,12 +656,24 @@ export function useCronTask(options: UseCronTaskOptions) {
     if (!currentTask || currentTask.id !== payload.taskId) return;
 
     console.error('[useCronTask] Execution error from Rust scheduler:', payload);
+    isExecutingRef.current = false;
     // Task will continue to next interval, just log the error
     // Optionally refresh to get updated lastError
     getCronTask(payload.taskId).then(task => {
       if (!mountedRef.current) return;
-      setState(prev => ({ ...prev, task }));
+      setState(prev => ({
+        ...prev,
+        task,
+        isExecuting: false,
+        executionNumber: undefined,
+      }));
     }).catch(() => {
+      if (!mountedRef.current) return;
+      setState(prev => (
+        prev.task?.id === payload.taskId
+          ? { ...prev, isExecuting: false, executionNumber: undefined }
+          : prev
+      ));
       // Ignore refresh errors
     });
   }, [setState, stateRef]);
@@ -620,7 +690,13 @@ export function useCronTask(options: UseCronTaskOptions) {
     const currentTask = stateRef.current.task;
     if (!currentTask || currentTask.id !== payload.taskId) return;
     console.log('[useCronTask] Execution starting:', payload);
-  }, [stateRef]);
+    isExecutingRef.current = true;
+    setState(prev => ({
+      ...prev,
+      isExecuting: true,
+      executionNumber: payload.executionNumber,
+    }));
+  }, [setState, stateRef]);
 
   // Handle debug events from Rust (for debugging visibility)
   const handleDebugEvent = useCallback((payload: { taskId: string; message: string; error?: boolean }) => {
@@ -797,6 +873,8 @@ export function useCronTask(options: UseCronTaskOptions) {
       },
       task,
       isStarting: false,
+      isExecuting: false,
+      executionNumber: undefined,
       error: null,
     });
   }, [setState]);
@@ -821,6 +899,7 @@ export function useCronTask(options: UseCronTaskOptions) {
     disableCronMode,
     updateConfig,
     updateRunningConfig,
+    setExecutionState,
     startTask,
     stop,
     refresh,

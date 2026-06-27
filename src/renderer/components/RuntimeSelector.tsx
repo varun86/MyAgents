@@ -1,7 +1,7 @@
 // RuntimeSelector — dropdown to switch between Agent Runtime types (v0.1.59)
 // Appears in SimpleChatInput toolbar (left of permission mode) and WorkspaceBasicsSection
 
-import { memo, useCallback, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import { ChevronUp, Settings } from 'lucide-react';
 
 import { Popover } from '@/components/ui/Popover';
@@ -56,6 +56,9 @@ interface RuntimeSelectorProps {
   onChange: (runtime: RuntimeType) => void;
   variant?: 'toolbar' | 'panel';
   onOpenSettings?: () => void;
+  disabled?: boolean;
+  disabledReason?: string;
+  onDisabledClick?: () => void;
 }
 
 export default memo(function RuntimeSelector({
@@ -64,17 +67,29 @@ export default memo(function RuntimeSelector({
   onChange,
   variant = 'toolbar',
   onOpenSettings,
+  disabled = false,
+  disabledReason,
+  onDisabledClick,
 }: RuntimeSelectorProps) {
   const [open, setOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
 
+  useEffect(() => {
+    if (!disabled || !open) return;
+    const timer = window.setTimeout(() => setOpen(false), 0);
+    return () => window.clearTimeout(timer);
+  }, [disabled, open]);
+
+  const menuOpen = open && !disabled;
+
   // Register with close layer system so Cmd+W dismisses dropdown before closing Tab
   useCloseLayer(() => {
-    if (open) { setOpen(false); return true; }
+    if (menuOpen) { setOpen(false); return true; }
     return false;
-  }, open ? 10 : -1);
+  }, menuOpen ? 10 : -1);
 
   const handleSelect = useCallback((type: RuntimeType) => {
+    if (disabled) return;
     if (type === value) {
       setOpen(false);
       return;
@@ -83,7 +98,7 @@ export default memo(function RuntimeSelector({
     if (!detection?.installed) return; // Can't select uninstalled runtime
     setOpen(false);
     onChange(type);
-  }, [value, detections, onChange]);
+  }, [value, detections, onChange, disabled]);
 
   const currentOption = RUNTIME_OPTIONS.find(o => o.type === value) ?? RUNTIME_OPTIONS[0];
 
@@ -93,17 +108,27 @@ export default memo(function RuntimeSelector({
         <button
           ref={triggerRef}
           type="button"
-          onClick={() => setOpen(!open)}
-          className="flex w-full items-center justify-between rounded-md px-2 py-1.5 text-sm text-[var(--ink)] hover:bg-[var(--hover-bg)] transition-colors"
+          aria-disabled={disabled}
+          onClick={() => {
+            if (disabled) {
+              onDisabledClick?.();
+              return;
+            }
+            setOpen(!menuOpen);
+          }}
+          className={`flex w-full items-center justify-between rounded-md px-2 py-1.5 text-sm text-[var(--ink)] transition-colors hover:bg-[var(--hover-bg)] ${
+            disabled ? 'cursor-not-allowed opacity-50 hover:bg-transparent' : ''
+          }`}
+          title={disabled ? disabledReason : undefined}
         >
           <span className="flex items-center gap-2">
             <RuntimeIcon type={value} size={16} />
             {currentOption.name}
           </span>
-          <ChevronUp className={`h-3.5 w-3.5 text-[var(--ink-muted)] transition-transform ${open ? '' : 'rotate-180'}`} />
+          <ChevronUp className={`h-3.5 w-3.5 text-[var(--ink-muted)] transition-transform ${menuOpen ? '' : 'rotate-180'}`} />
         </button>
         <Popover
-          open={open}
+          open={menuOpen}
           onClose={() => setOpen(false)}
           anchorRef={triggerRef}
           placement="top-start"
@@ -148,18 +173,25 @@ export default memo(function RuntimeSelector({
       <button
         ref={triggerRef}
         type="button"
+        aria-disabled={disabled}
         onClick={(e) => {
           e.stopPropagation();
-          setOpen(!open);
+          if (disabled) {
+            onDisabledClick?.();
+            return;
+          }
+          setOpen(!menuOpen);
         }}
-        className="flex items-center gap-1 rounded-lg px-1.5 py-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
-        title={`Runtime: ${currentOption.name}`}
+        className={`flex items-center gap-1 rounded-lg px-1.5 py-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)] ${
+          disabled ? 'cursor-not-allowed opacity-50 hover:bg-transparent hover:text-[var(--ink-muted)]' : ''
+        }`}
+        title={disabled ? disabledReason : `Runtime: ${currentOption.name}`}
       >
         <RuntimeIcon type={value} size={16} />
-        <ChevronUp className={`h-2.5 w-2.5 transition-transform ${open ? '' : 'rotate-180'}`} />
+        <ChevronUp className={`h-2.5 w-2.5 transition-transform ${menuOpen ? '' : 'rotate-180'}`} />
       </button>
       <Popover
-        open={open}
+        open={menuOpen}
         onClose={() => setOpen(false)}
         anchorRef={triggerRef}
         placement="top-start"

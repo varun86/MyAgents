@@ -14,7 +14,6 @@ import SlashCommandMenu, { type SlashCommand, filterAndSortCommands, mergeSlashC
 import { isClientActionCommand, withClientActionCommands } from '@/utils/slashActions';
 import QueuedMessagesPanel from '../QueuedMessageBubble';
 import CronTaskStatusBar from '../cron/CronTaskStatusBar';
-import CronTaskOverlay from '../cron/CronTaskOverlay';
 import { useUndoStack } from '@/hooks/useUndoStack';
 import { CUSTOM_EVENTS } from '../../../shared/constants';
 import { reasoningEffortChoices, REASONING_EFFORT_DESCRIPTIONS, REASONING_EFFORT_DEFAULT } from '../../../shared/reasoningEffort';
@@ -124,10 +123,15 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   cronModeEnabled = false,
   cronConfig,
   cronTask,
+  stoppedCronTask,
+  cronIsExecuting = false,
+  cronExecutionNumber,
+  composerConfigLockedReason,
   onCronButtonClick,
   onCronSettings,
   onCronCancel,
   onCronStop,
+  onCronDismissStopped,
   onSlashAction,
   sdkSlashCommands = [],
   mode = 'chat',
@@ -252,6 +256,13 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   // Stabilize toast reference to avoid unnecessary effect re-runs
   const toastRef = useRef(toast);
   toastRef.current = toast;
+  const configControlsLocked = !!composerConfigLockedReason;
+  const configControlLockTitle = composerConfigLockedReason ?? undefined;
+  const showConfigLockedReason = useCallback(() => {
+    if (!composerConfigLockedReason) return false;
+    toastRef.current.warning(composerConfigLockedReason, 3500);
+    return true;
+  }, [composerConfigLockedReason]);
 
   const { openPreview } = useImagePreview();
   // Use external ref if provided, otherwise use internal ref
@@ -282,6 +293,18 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   const [showModeMenu, setShowModeMenu] = useState(false);
   const [showModelMenu, setShowModelMenu] = useState(false);
   const [showToolMenu, setShowToolMenu] = useState(false);
+  useEffect(() => {
+    if (!configControlsLocked || (!showModeMenu && !showModelMenu && !showToolMenu)) return;
+    const timer = window.setTimeout(() => {
+      setShowModeMenu(false);
+      setShowModelMenu(false);
+      setShowToolMenu(false);
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [configControlsLocked, showModeMenu, showModelMenu, showToolMenu]);
+  const modeMenuOpen = showModeMenu && !configControlsLocked;
+  const modelMenuOpen = showModelMenu && !configControlsLocked;
+  const toolMenuOpen = showToolMenu && !configControlsLocked;
 
   // #324 — 推理强度 submenu (fixed bottom row of the model menu). Opens on
   // hover/click of the row; 120ms close delay + an invisible hover bridge
@@ -312,12 +335,11 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   }, []);
   // Reset submenu state whenever the model menu closes (incl. outside-click).
   useEffect(() => {
-    if (!showModelMenu) setShowEffortSubmenu(false);
-  }, [showModelMenu]);
+    if (!modelMenuOpen) setShowEffortSubmenu(false);
+  }, [modelMenuOpen]);
   useEffect(() => () => {
     if (effortCloseTimerRef.current) clearTimeout(effortCloseTimerRef.current);
   }, []);
-
   // Derive current model ID from prop or provider default — no hardcoded fallback
   const currentModelId = selectedModel ?? provider?.primaryModel;
   // Get display name for current model (runtime-aware)
@@ -814,6 +836,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   // Builtin: auto → plan → fullAgency → auto
   // External: cycle through runtimePermissionModes (CC or Codex specific modes)
   const cyclePermissionMode = useCallback(() => {
+    if (showConfigLockedReason()) return;
     const modeOrder: string[] = runtimePermissionModes?.length
       ? runtimePermissionModes.map(m => m.value)
       : ['auto', 'plan', 'fullAgency'];
@@ -828,7 +851,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
       toastRef.current.warning('自主行动已启用：Agent 可能做出不可挽回的操作，请谨慎使用', 5000);
     }
     onPermissionModeChange?.(nextMode);
-  }, [permissionMode, onPermissionModeChange, runtimePermissionModes]);
+  }, [permissionMode, onPermissionModeChange, runtimePermissionModes, showConfigLockedReason]);
 
   // Global Shift+Tab handler with capture phase to prevent default Tab behavior.
   // Gated by `active` so pressing Shift+Tab doesn't cycle permission-mode on every
@@ -926,6 +949,11 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   // `/name ` as before.
   const handleSlashSelect = useCallback((cmd: SlashCommand) => {
     if (slashPosition === null) return;
+    if (onSlashAction && isClientActionCommand(cmd) && cmd.name === 'loop' && showConfigLockedReason()) {
+      setShowSlashMenu(false);
+      setSlashPosition(null);
+      return;
+    }
     const before = inputValue.slice(0, slashPosition);
     const after = inputValue.slice(textareaRef.current?.selectionStart || slashPosition + slashSearchQuery.length + 1);
 
@@ -942,7 +970,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
     setShowSlashMenu(false);
     setSlashPosition(null);
   // eslint-disable-next-line react-hooks/exhaustive-deps -- textareaRef is a stable ref
-  }, [slashPosition, inputValue, slashSearchQuery, handleSkillSelect, onSlashAction]);
+  }, [slashPosition, inputValue, slashSearchQuery, handleSkillSelect, onSlashAction, showConfigLockedReason]);
 
   const handleKeyDown = useCallback(async (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
     // Shift+Tab to cycle permission mode
@@ -1134,6 +1162,13 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
     // eslint-disable-next-line react-hooks/exhaustive-deps -- textareaRef is stable
   }, [cyclePermissionMode, undoStack, fileService, showSlashMenu, filteredSlashCommands, slashSearchQuery, selectedSlashIndex, slashPosition, showFileSearch, fileSearchResults, selectedFileIndex, inputValue, atPosition, fileSearchQuery, images.length, handleSend, handleSkillSelect, handleSlashSelect, mentionTab, thoughtResults]);
 
+  const showDraftCronBar = cronModeEnabled && !cronTask && !!cronConfig;
+  const activeCronTask = !isLauncherMode && cronTask?.status === 'running' && cronTask.runMode !== 'new_session'
+    ? cronTask
+    : null;
+  const visibleStoppedCronTask = !isLauncherMode ? stoppedCronTask : null;
+  const hasCronBar = showDraftCronBar || !!activeCronTask || !!visibleStoppedCronTask;
+
   return (
     <>
     <div ref={overlayRootRef} className={isLauncherMode
@@ -1190,43 +1225,45 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
         {/* Cron task status bar — shown when cron mode is enabled but the task
          *  hasn't started yet. PRD 0.2.7 D1: launcher SHOULD show this so the
          *  user sees their staged cron config; the actual cron creation happens
-         *  after handoff to chat. Overlay (running status) stays gated below
-         *  because launcher never reaches "running" — handoff fires first. */}
-        {cronModeEnabled && !cronTask && cronConfig && (
+         *  after handoff to chat. Running current-session cron also stays here
+         *  as a non-blocking bar so the composer remains usable. */}
+        {showDraftCronBar && cronConfig && (
           <CronTaskStatusBar
+            mode="draft"
             intervalMinutes={cronConfig.intervalMinutes}
             schedule={cronConfig.schedule}
             onSettings={() => onCronSettings?.()}
             onCancel={() => onCronCancel?.()}
           />
         )}
+        {activeCronTask && (
+          <CronTaskStatusBar
+            mode={cronIsExecuting ? 'executing' : 'running'}
+            intervalMinutes={activeCronTask.intervalMinutes}
+            schedule={activeCronTask.schedule}
+            executionCount={activeCronTask.executionCount}
+            maxExecutions={activeCronTask.endConditions?.maxExecutions}
+            nextExecutionAt={activeCronTask.nextExecutionAt}
+            executionNumber={cronExecutionNumber}
+            onStop={() => onCronStop?.()}
+          />
+        )}
+        {visibleStoppedCronTask && (
+          <CronTaskStatusBar
+            mode="stopped"
+            intervalMinutes={visibleStoppedCronTask.intervalMinutes}
+            schedule={visibleStoppedCronTask.schedule}
+            executionCount={visibleStoppedCronTask.executionCount}
+            maxExecutions={visibleStoppedCronTask.endConditions?.maxExecutions}
+            onDismissStopped={() => onCronDismissStopped?.()}
+          />
+        )}
 
         <div className={`relative border border-[var(--line)] bg-[var(--paper-elevated)] shadow-md ${
-          cronModeEnabled && !cronTask && cronConfig
+          hasCronBar
             ? 'rounded-b-2xl rounded-t-none border-t-0'  // StatusBar visible: no top rounded, no top border
             : 'rounded-2xl'  // Normal: fully rounded
         }`}>
-          {/* Cron task overlay - shows when task is running.
-           *  `runMode === 'new_session'` rotates a fresh sessionId per execution
-           *  (`cron_task.rs::rotate_new_session_id`), so any prior session opened
-           *  via 任务详情 →「关联会话」is already a one-shot historical chat —
-           *  it's functionally detached from the cron and the user must be able
-           *  to keep typing in it. Only `single_session` mode keeps a session as
-           *  the cron's live workbench, where the overlay is the right signal. */}
-          {!isLauncherMode && cronTask && cronTask.status === 'running' && cronTask.runMode !== 'new_session' && (
-            <CronTaskOverlay
-              status={cronTask.status}
-              intervalMinutes={cronTask.intervalMinutes}
-              schedule={cronTask.schedule}
-              executionCount={cronTask.executionCount}
-              maxExecutions={cronTask.endConditions?.maxExecutions}
-              nextExecutionTime={cronTask.lastExecutedAt
-                ? new Date(new Date(cronTask.lastExecutedAt).getTime() + cronTask.intervalMinutes * 60000)
-                : undefined}
-              onStop={() => onCronStop?.()}
-              onSettings={() => onCronSettings?.()}
-            />
-          )}
           {/* Clickable area for focus - covers input area but not toolbar */}
           <div
             className="cursor-text"
@@ -1600,6 +1637,9 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                   onChange={onRuntimeChange}
                   variant="toolbar"
                   onOpenSettings={onOpenAgentSettings}
+                  disabled={configControlsLocked}
+                  disabledReason={configControlLockTitle}
+                  onDisabledClick={showConfigLockedReason}
                 />
               )}
 
@@ -1607,22 +1647,26 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
               <button
                 ref={modeBtnRef}
                 type="button"
+                aria-disabled={configControlsLocked}
                 onClick={(e) => {
                   e.stopPropagation();
-                  setShowModeMenu(!showModeMenu);
+                  if (showConfigLockedReason()) return;
+                  setShowModeMenu(!modeMenuOpen);
                   setShowModelMenu(false);
                   setShowPlusMenu(false);
                   setShowToolMenu(false);
                 }}
-                className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
-                title="切换执行模式"
+                className={`flex items-center gap-1 rounded-lg px-2 py-1.5 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)] ${
+                  configControlsLocked ? 'cursor-not-allowed opacity-50 hover:bg-transparent hover:text-[var(--ink-muted)]' : ''
+                }`}
+                title={configControlLockTitle ?? '切换执行模式'}
               >
                 <span>{currentModeDisplay?.icon}</span>
                 <span className="toolbar-label">{currentModeDisplay?.label}</span>
                 <ChevronUp className="h-3 w-3" />
               </button>
               <Popover
-                open={showModeMenu}
+                open={modeMenuOpen}
                 onClose={() => setShowModeMenu(false)}
                 anchorRef={modeBtnRef}
                 placement="top-start"
@@ -1686,15 +1730,19 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
               <button
                 ref={toolBtnRef}
                 type="button"
+                aria-disabled={configControlsLocked}
                 onClick={(e) => {
                   e.stopPropagation();
-                  setShowToolMenu(!showToolMenu);
+                  if (showConfigLockedReason()) return;
+                  setShowToolMenu(!toolMenuOpen);
                   setShowModeMenu(false);
                   setShowModelMenu(false);
                   setShowPlusMenu(false);
                 }}
-                className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
-                title="使用工具"
+                className={`flex items-center gap-1 rounded-lg px-2 py-1.5 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)] ${
+                  configControlsLocked ? 'cursor-not-allowed opacity-50 hover:bg-transparent hover:text-[var(--ink-muted)]' : ''
+                }`}
+                title={configControlLockTitle ?? '使用工具'}
               >
                 <Wrench className="h-3.5 w-3.5" />
                 <span className="toolbar-label">工具</span>
@@ -1707,7 +1755,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                 );
               })()}
               <Popover
-                open={showToolMenu}
+                open={toolMenuOpen}
                 onClose={() => setShowToolMenu(false)}
                 anchorRef={toolBtnRef}
                 placement="top-start"
@@ -1886,16 +1934,20 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
               {onCronButtonClick && (
                 <button
                   type="button"
+                  aria-disabled={configControlsLocked}
                   onClick={(e) => {
                     e.stopPropagation();
+                    if (showConfigLockedReason()) return;
                     onCronButtonClick();
                   }}
                   className={`flex items-center gap-1 rounded-lg px-2 py-1.5 text-sm font-medium transition-colors ${
-                    cronModeEnabled
+                    cronModeEnabled && !configControlsLocked
                       ? 'bg-[var(--heartbeat-bg)] text-[var(--heartbeat)] hover:bg-[var(--heartbeat)]/20'
+                      : configControlsLocked
+                        ? 'cursor-not-allowed text-[var(--ink-muted)] opacity-50 hover:bg-transparent hover:text-[var(--ink-muted)]'
                       : 'text-[var(--ink-muted)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]'
                   }`}
-                  title={cronModeEnabled ? '定时已启用' : '定时'}
+                  title={configControlLockTitle ?? (cronModeEnabled ? '定时已启用' : '定时')}
                 >
                   <Timer className="h-3.5 w-3.5" />
                   <span className="toolbar-label">定时</span>
@@ -1920,9 +1972,11 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
               <button
                 ref={modelBtnRef}
                 type="button"
+                aria-disabled={configControlsLocked}
                 onClick={(e) => {
                   e.stopPropagation();
-                  const willOpen = !showModelMenu;
+                  if (showConfigLockedReason()) return;
+                  const willOpen = !modelMenuOpen;
                   setShowModelMenu(willOpen);
                   setShowModeMenu(false);
                   setShowPlusMenu(false);
@@ -1932,8 +1986,10 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                     onRefreshProviders();
                   }
                 }}
-                className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
-                title="切换模型"
+                className={`flex items-center gap-1 rounded-lg px-2 py-1.5 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)] ${
+                  configControlsLocked ? 'cursor-not-allowed opacity-50 hover:bg-transparent hover:text-[var(--ink-muted)]' : ''
+                }`}
+                title={configControlLockTitle ?? '切换模型'}
               >
                 <span className="max-w-[140px] truncate">{currentModelName}</span>
                 <ChevronUp className="h-3 w-3 shrink-0" />
@@ -1944,7 +2000,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                   list keeps its own scroll container below; the effort row stays
                   fixed at the bottom, outside the scroll area. */}
               <Popover
-                open={showModelMenu}
+                open={modelMenuOpen}
                 onClose={() => setShowModelMenu(false)}
                 anchorRef={modelBtnRef}
                 placement="top-end"

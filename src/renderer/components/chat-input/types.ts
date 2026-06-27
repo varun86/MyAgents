@@ -85,15 +85,33 @@ export interface SimpleChatInputProps {
     schedule?: import('@/types/cronTask').CronSchedule;
     executionCount: number;
     lastExecutedAt?: string;
+    nextExecutionAt?: string;
+    prompt?: string;
     endConditions?: {
       maxExecutions?: number;
     };
     runMode?: import('@/types/cronTask').CronRunMode;
   } | null;
+  stoppedCronTask?: {
+    status?: 'stopped';
+    intervalMinutes: number;
+    schedule?: import('@/types/cronTask').CronSchedule;
+    executionCount: number;
+    nextExecutionAt?: string;
+    prompt?: string;
+    endConditions?: {
+      maxExecutions?: number;
+    };
+    runMode?: import('@/types/cronTask').CronRunMode;
+  } | null;
+  cronIsExecuting?: boolean;
+  cronExecutionNumber?: number;
+  composerConfigLockedReason?: string;
   onCronButtonClick?: () => void;
   onCronSettings?: () => void;
   onCronCancel?: () => void;
   onCronStop?: () => void;
+  onCronDismissStopped?: () => void;
   onSlashAction?: (name: string) => void;
   sdkSlashCommands?: SlashCommand[];
   mode?: 'chat' | 'launcher';

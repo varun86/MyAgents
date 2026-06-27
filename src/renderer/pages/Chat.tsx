@@ -55,6 +55,7 @@ import type { CronSettingsResult, CronInitialConfig } from '@/components/cron/Cr
 import { isTauriEnvironment } from '@/utils/browserMock';
 import { isDebugMode } from '@/utils/debug';
 import { isImSource, getChannelTypeLabel } from '@/utils/taskCenterUtils';
+import { appendCronPromptToDraft } from '@/utils/cronComposerRecovery';
 import { CODEX_SUBSCRIPTION_PROVIDER_ID, type PermissionMode, type McpServerDefinition, type Provider, getEffectiveModelAliases } from '@/config/types';
 import { syncMcpServerNames } from '@/components/tools/toolBadgeConfig';
 import {
@@ -1028,6 +1029,11 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   const [cronOpenPreset, setCronOpenPreset] = useState<CronInitialConfig | null>(null);
   const [cronCardTask, setCronCardTask] = useState<CronTask | null>(null);
   const [cronDetailTask, setCronDetailTask] = useState<CronTask | null>(null);
+  const [stoppedCronRecovery, setStoppedCronRecovery] = useState<{
+    prompt: string;
+    task: CronTask | null;
+    sessionId: string;
+  } | null>(null);
 
   // Track permission mode before AI-triggered plan mode (for restore on ExitPlanMode)
   const prePlanPermissionModeRef = useRef<PermissionMode | null>(null);
@@ -1804,6 +1810,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     disableCronMode,
     updateConfig: _updateCronConfig,
     updateRunningConfig,
+    setExecutionState: setCronExecutionState,
     startTask: startCronTask,
     stop: stopCronTask,
     restoreFromTask: restoreCronTask,
@@ -1848,6 +1855,27 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   // PERFORMANCE: Ref-stabilize cronState for handleSendMessage
   const cronStateRef = useRef(cronState);
   cronStateRef.current = cronState;
+  const activeCurrentSessionCronTask = cronState.task?.status === 'running' && cronState.task.runMode !== 'new_session'
+    ? cronState.task
+    : null;
+  const composerConfigLockedReason = activeCurrentSessionCronTask
+    ? '当前会话有定时任务运行中，停止任务后可修改此设置'
+    : undefined;
+  const guardCronConfigMutation = useCallback(() => {
+    if (!composerConfigLockedReason) return false;
+    toastRef.current.warning(composerConfigLockedReason, 3500);
+    return true;
+  }, [composerConfigLockedReason]);
+  const stoppedCronTaskForInput = useMemo(
+    () => stoppedCronRecovery?.task && stoppedCronRecovery.sessionId === sessionId
+      ? { ...stoppedCronRecovery.task, status: 'stopped' as const }
+      : null,
+    [stoppedCronRecovery, sessionId],
+  );
+
+  useEffect(() => {
+    setStoppedCronRecovery(null);
+  }, [sessionId]);
 
   // Sync cron task's sessionId when session is created after task creation
   // This handles two cases:
@@ -2005,6 +2033,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
           // Restore UI state only - Scheduler is managed by Rust layer (方案 A)
           // Do NOT call startCronScheduler here to avoid duplicate scheduler starts
           restoreCronTask(task);
+          setStoppedCronRecovery(null);
 
           // Check if task is currently executing (e.g., execution started before app restart)
           // If executing, mark it so we can set loading state after TabProvider's loadSession completes
@@ -2012,8 +2041,10 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
           // Calling it here causes infinite loop with TabProvider's session loading effect
           const executing = await isTaskExecuting(task.id);
           if (executing) {
+            if (sessionIdRef.current !== sessionId) return;
             console.log('[Chat] Cron task is currently executing, marking for loading state');
             pendingCronLoadingRef.current = true;
+            setCronExecutionState(task.id, true, (task.executionCount ?? 0) + 1);
           }
         } else if (cronState.task && cronState.task.sessionId && cronState.task.sessionId !== sessionId) {
           // Current cron state is for a different session - clear FRONTEND state only
@@ -2044,7 +2075,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     };
 
     void loadCronTaskState();
-  }, [sessionId, tabId, restoreCronTask, disableCronMode, cronState.task, setIsLoading]);
+  }, [sessionId, tabId, restoreCronTask, disableCronMode, cronState.task, setIsLoading, setCronExecutionState]);
 
   // Set loading state after TabProvider's loadSession completes (for cron task executing scenario)
   // This effect watches for messages reference changes, which indicates loadSession has completed
@@ -2400,6 +2431,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   //     v0.1.69 §4.3 rule 2: "写 Session + 向上写 Agent"). For unlocked/IM this is also
   //     the live-follow source, so the single write covers both roles.
   const handleWorkspaceMcpToggle = useCallback(async (serverId: string, enabled: boolean) => {
+    if (guardCronConfigMutation()) return;
     const newEnabled = enabled
       ? [...workspaceMcpEnabled, serverId]
       : workspaceMcpEnabled.filter(id => id !== serverId);
@@ -2415,13 +2447,14 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     if (!persisted) {
       setWorkspaceMcpEnabled(workspaceMcpEnabled);
     }
-  }, [workspaceMcpEnabled, persistTabConfigChange]);
+  }, [workspaceMcpEnabled, persistTabConfigChange, guardCronConfigMutation]);
 
   // PRD 0.2.17 — Claude plugin per-workspace toggle. Mirrors MCP exactly:
   // optimistic local update + dual-write via persistTabConfigChange (which
   // also pushes /api/cc-plugin/session-enable to the running sidecar so
   // the SDK options pick up the new plugin set on next pre-warm).
   const handleWorkspacePluginToggle = useCallback(async (pluginId: string, enabled: boolean) => {
+    if (guardCronConfigMutation()) return;
     const newEnabled = enabled
       ? [...workspaceEnabledPlugins, pluginId]
       : workspaceEnabledPlugins.filter(id => id !== pluginId);
@@ -2430,7 +2463,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     if (!persisted) {
       setWorkspaceEnabledPlugins(workspaceEnabledPlugins);
     }
-  }, [workspaceEnabledPlugins, persistTabConfigChange]);
+  }, [workspaceEnabledPlugins, persistTabConfigChange, guardCronConfigMutation]);
 
   // Sync selectedModel when provider changes (skip initial mount to preserve project-stored model)
   const providerInitRef = useRef(true);
@@ -2980,6 +3013,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   // targetModel: when provided, use this model instead of the provider's primaryModel
   // (avoids useEffect race when user picks a specific model from a different provider).
   const handleProviderChange = useCallback(async (providerId: string, targetModel?: string) => {
+    if (guardCronConfigMutation()) return;
     // Skip if selecting the same provider (compare against local state, not shared project)
     if (effectiveSelectedProviderId === providerId) {
       // Provider unchanged but caller passed a specific model — treat as model change.
@@ -3086,6 +3120,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     builtinSnapshotProviderHistoryUnknown,
     effectivePermissionMode,
     persistTabConfigChange,
+    guardCronConfigMutation,
   ]);
 
   const handleBuiltinModelSelect = useCallback(async (selection: BuiltinModelSelection) => {
@@ -3097,6 +3132,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   // snapshot the new model locally so this session persists the choice; project + agent
   // also get written so FUTURE new sessions / Bots / Crons inherit the latest preference.
   const handleModelChange = useCallback(async (model: string) => {
+    if (guardCronConfigMutation()) return;
     // Skip if selecting the same model
     if (selectedModel === model) {
       return;
@@ -3151,6 +3187,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     builtinSnapshotProviderHistoryUnknown,
     effectivePermissionMode,
     persistTabConfigChange,
+    guardCronConfigMutation,
   ]);
 
   // External-runtime model change. Same dual-write policy as builtin
@@ -3160,11 +3197,12 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   // was lost on next session — matching launcher's persist behavior closes
   // that gap.
   const handleRuntimeModelChange = useCallback(async (model: string) => {
+    if (guardCronConfigMutation()) return;
     if (runtimeModel === model) return;
     const persisted = await persistTabConfigChange({ runtimeModel: model });
     if (!persisted) return;
     setRuntimeModel(model);
-  }, [runtimeModel, persistTabConfigChange]);
+  }, [runtimeModel, persistTabConfigChange, guardCronConfigMutation]);
 
   // #324 — reasoning effort change. Same dual-write policy as handleModelChange
   // (snapshot + agent; live sidecar apply rides the effort-push effect, and the
@@ -3190,6 +3228,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   }, [configPending, pushReasoningEffort]);
 
   const handleReasoningEffortChange = useCallback(async (effort: string) => {
+    if (guardCronConfigMutation()) return;
     if (reasoningEffort === effort) return;
     track('reasoning_effort_switch', { effort });
     const persisted = await persistTabConfigChange({ reasoningEffort: effort });
@@ -3204,7 +3243,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     } else {
       pushReasoningEffort(effort);
     }
-  }, [reasoningEffort, persistTabConfigChange, pushReasoningEffort]);
+  }, [reasoningEffort, persistTabConfigChange, pushReasoningEffort, guardCronConfigMutation]);
 
   // #324 — clamp effort on provider-protocol change. An OpenAI-only level
   // (e.g. 'minimal') left selected after switching to an Anthropic-protocol
@@ -3239,6 +3278,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   }, [isExternalRuntime, persistTabConfigChange]);
 
   const handleInputPermissionModeChange = useCallback(async (mode: PermissionMode) => {
+    if (guardCronConfigMutation()) return;
     if (!managedProviderRuntimeActive) {
       await handlePermissionModeChange(mode);
       return;
@@ -3257,6 +3297,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     handlePermissionModeChange,
     currentRuntime,
     persistTabConfigChange,
+    guardCronConfigMutation,
   ]);
 
   const inputChromePermissionMode = managedProviderRuntimeActive
@@ -3352,6 +3393,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       // If cron mode is enabled and task hasn't started yet, start the task
       const cron = cronStateRef.current;
       if (cron.isEnabled && !cron.task && cron.config) {
+        setStoppedCronRecovery(null);
         if (cron.config.executionTarget === 'new_task') {
           // ── New standalone task: create independently, show card in chat ──
           try {
@@ -3522,9 +3564,10 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   ]);
 
   const handleRuntimeChange = useCallback((runtime: RuntimeType) => {
+    if (guardCronConfigMutation()) return;
     if (!currentAgent || runtime === currentRuntime) return;
     setPendingRuntimeChange(runtime);
-  }, [currentAgent, currentRuntime]);
+  }, [currentAgent, currentRuntime, guardCronConfigMutation]);
 
   const transferBindingToForkedSession = useCallback(async (channel: ChannelSurface, targetSessionId: string) => {
     if (!agentDir) {
@@ -3556,6 +3599,10 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   }, []);
 
   const confirmRuntimeChange = useCallback(async () => {
+    if (guardCronConfigMutation()) {
+      setPendingRuntimeChange(null);
+      return;
+    }
     const runtime = pendingRuntimeChange;
     setPendingRuntimeChange(null);
     if (!runtime || !currentAgent) return;
@@ -3652,7 +3699,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
         return;
       }
     }
-  }, [pendingRuntimeChange, currentAgent, onForkSession, agentDir, transferBindingToForkedSession, deleteUnopenedForkSession]);
+  }, [pendingRuntimeChange, currentAgent, onForkSession, agentDir, transferBindingToForkedSession, deleteUnopenedForkSession, guardCronConfigMutation]);
 
   // Provider/model history-boundary confirm: create a fresh session in a new
   // tab so the old transcript is not reused across incompatible provider
@@ -3660,6 +3707,10 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   // provider/model choice is still written upward to Project/Agent defaults
   // without mutating the old session snapshot.
   const confirmProviderSwitch = useCallback(async () => {
+    if (guardCronConfigMutation()) {
+      setPendingProviderSwitch(null);
+      return;
+    }
     const pending = pendingProviderSwitch;
     setPendingProviderSwitch(null);
     if (!pending || !agentDir || !onForkSession) return;
@@ -3737,7 +3788,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
           : '创建新会话失败',
       );
     }
-  }, [pendingProviderSwitch, agentDir, onForkSession, providers, transferBindingToForkedSession, deleteUnopenedForkSession, inputChromePermissionMode, reasoningEffort, workspaceMcpEnabled, workspaceEnabledPlugins, currentProject, currentAgent, patchProject, refreshConfig]);
+  }, [pendingProviderSwitch, agentDir, onForkSession, providers, transferBindingToForkedSession, deleteUnopenedForkSession, inputChromePermissionMode, reasoningEffort, workspaceMcpEnabled, workspaceEnabledPlugins, currentProject, currentAgent, patchProject, refreshConfig, guardCronConfigMutation]);
 
   // Cross-runtime confirm: create new session in new tab and send the pending message
   const confirmCrossRuntimeSend = useCallback(async () => {
@@ -3771,28 +3822,49 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   // re-rendered the entire Chat tree on every paste — see SimpleChatInput #231
   // comment).
   const handleOpenCronSettings = useCallback(() => {
+    if (guardCronConfigMutation()) return;
+    setStoppedCronRecovery(null);
     setCronPrompt(chatInputRef.current?.getCurrentValue() ?? '');
     setCronOpenPreset(null); // 定时 button = no slash preset
     setShowCronSettings(true);
-  }, []);
+  }, [guardCronConfigMutation]);
 
   // Dispatch a client-action slash command from the chat input. `/loop` opens
   // the cron modal preset to infinite-loop mode; the task content is entered in
   // the input after confirming (which arms cron mode — see handleSendMessage).
   const handleSlashAction = useCallback((name: string) => {
     if (name === 'loop') {
+      if (guardCronConfigMutation()) return;
+      setStoppedCronRecovery(null);
       setCronPrompt(''); // task is entered after confirm, not snapshotted here
       setCronOpenPreset(LOOP_SLASH_PRESET);
       setShowCronSettings(true);
     }
-  }, []);
+  }, [guardCronConfigMutation]);
 
   const handleCronStop = useCallback(async () => {
-    const originalPrompt = await stopCronTask();
-    if (originalPrompt) {
-      chatInputRef.current?.setValue(originalPrompt);
+    const stopSessionId = sessionIdRef.current;
+    const result = await stopCronTask();
+    if (!result || sessionIdRef.current !== stopSessionId) return;
+    const promptToRecover = result.prompt;
+    if (promptToRecover) {
+      setStoppedCronRecovery({
+        prompt: promptToRecover,
+        task: result.task,
+        sessionId: stopSessionId ?? '',
+      });
     }
   }, [stopCronTask]);
+
+  const handleCronDismissStopped = useCallback(() => {
+    if (stoppedCronRecovery?.prompt) {
+      const currentValue = chatInputRef.current?.getCurrentValue() ?? '';
+      const nextValue = appendCronPromptToDraft(currentValue, stoppedCronRecovery.prompt);
+      chatInputRef.current?.setValue(nextValue);
+      chatInputRef.current?.focus();
+    }
+    setStoppedCronRecovery(null);
+  }, [stoppedCronRecovery]);
 
   const handleCancelQueuedVoid = useCallback(
     (queueId: string) => { void handleCancelQueued(queueId); },
@@ -4767,14 +4839,19 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
             onRefreshProviders={refreshProviderData}
             onOpenAgentSettings={handleOpenAgentSettings}
             onWorkspaceRefresh={triggerWorkspaceRefresh}
-            // Cron task props - StatusBar and Overlay are rendered inside SimpleChatInput
+            // Cron task props - the non-blocking status bar is rendered inside SimpleChatInput.
             cronModeEnabled={cronState.isEnabled}
             cronConfig={cronState.config}
             cronTask={cronState.task}
+            stoppedCronTask={stoppedCronTaskForInput}
+            cronIsExecuting={cronState.isExecuting}
+            cronExecutionNumber={cronState.executionNumber}
+            composerConfigLockedReason={composerConfigLockedReason}
             onCronButtonClick={handleOpenCronSettings}
             onCronSettings={handleOpenCronSettings}
             onCronCancel={disableCronMode}
             onCronStop={handleCronStop}
+            onCronDismissStopped={handleCronDismissStopped}
             onSlashAction={handleSlashAction}
             runtime={inputChromeRuntime}
             runtimeDetections={showLegacyRuntimeSelector ? runtimeDetections : undefined}
@@ -5235,6 +5312,12 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
         initialConfig={cronState.task ? cronState.config : (cronOpenPreset ?? cronState.config)}
         workspacePath={agentDir}
         onConfirm={async (config: CronSettingsResult) => {
+          if (composerConfigLockedReason) {
+            toastRef.current.warning(composerConfigLockedReason, 3500);
+            setShowCronSettings(false);
+            setCronOpenPreset(null);
+            return;
+          }
           const cronExecution = buildCronExecutionOverrides({
             providerId: !isExternalRuntime && currentProvider ? currentProvider.id : undefined,
             model: isExternalRuntime ? undefined : selectedModel,
