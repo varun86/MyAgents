@@ -146,6 +146,46 @@ function normalizeManagedCodexLoginState(raw: unknown): ManagedCodexLoginAttempt
     };
 }
 
+type SubscriptionLoginStatus = 'idle' | 'starting' | 'waiting' | 'succeeded' | 'cancelled' | 'error';
+
+interface SubscriptionLoginAttemptState {
+    status: SubscriptionLoginStatus;
+    loginUrl?: string | null;
+    manualUrl?: string | null;
+    automaticUrl?: string | null;
+    startedAt?: string | null;
+    error?: string | null;
+}
+
+const EMPTY_SUBSCRIPTION_LOGIN_STATE: SubscriptionLoginAttemptState = {
+    status: 'idle',
+    loginUrl: null,
+    manualUrl: null,
+    automaticUrl: null,
+    startedAt: null,
+    error: null,
+};
+
+function normalizeSubscriptionLoginState(raw: unknown): SubscriptionLoginAttemptState {
+    if (!raw || typeof raw !== 'object') return EMPTY_SUBSCRIPTION_LOGIN_STATE;
+    const value = raw as Record<string, unknown>;
+    const status = typeof value.status === 'string' ? value.status : 'idle';
+    return {
+        status: ['starting', 'waiting', 'succeeded', 'cancelled', 'error'].includes(status)
+            ? status as SubscriptionLoginStatus
+            : 'idle',
+        loginUrl: typeof value.loginUrl === 'string' ? value.loginUrl : null,
+        manualUrl: typeof value.manualUrl === 'string' ? value.manualUrl : null,
+        automaticUrl: typeof value.automaticUrl === 'string' ? value.automaticUrl : null,
+        startedAt: typeof value.startedAt === 'string' ? value.startedAt : null,
+        error: typeof value.error === 'string' ? value.error : null,
+    };
+}
+
+function isSubscriptionLoginActiveStatus(status: SubscriptionLoginStatus): boolean {
+    return status === 'starting' || status === 'waiting';
+}
+
 export default function Settings({ initialSection, initialMcpId, initialSelect, onSectionChange, isActive, updateReady: propUpdateReady, updateVersion: propUpdateVersion, updateChecking, updateDownloading, updateInstalling, updatePreparing, onCheckForUpdate, onRestartAndUpdate }: SettingsProps) {
     const {
         apiKeys,
@@ -606,6 +646,28 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
     // Anthropic subscription status
     const [subscriptionStatus, setSubscriptionStatus] = useState<SubscriptionStatus | null>(null);
     const [subscriptionVerifying, setSubscriptionVerifying] = useState(false);
+    const [subscriptionLoginDialogOpen, setSubscriptionLoginDialogOpen] = useState(false);
+    const [subscriptionLoginState, setSubscriptionLoginState] = useState<SubscriptionLoginAttemptState>(EMPTY_SUBSCRIPTION_LOGIN_STATE);
+    const [subscriptionLoginBusy, setSubscriptionLoginBusy] = useState(false);
+    const subscriptionLoginSuccessHandledRef = useRef(false);
+    const subscriptionFallbackProbeInFlightRef = useRef(false);
+    const subscriptionFallbackProbeLastAtRef = useRef(0);
+    const cancelSubscriptionLoginAttempt = useCallback(async (startedAt?: string | null) => {
+        try {
+            const state = normalizeSubscriptionLoginState(
+                await apiPostJson('/api/subscription/login/cancel', { startedAt }),
+            );
+            setSubscriptionLoginState(prev => startedAt && prev.startedAt !== startedAt ? prev : state);
+        } catch (error) {
+            console.warn('[Settings] Subscription login cancel failed:', error);
+        }
+    }, []);
+    const closeSubscriptionLoginDialog = useCallback(() => {
+        setSubscriptionLoginDialogOpen(false);
+        if (isSubscriptionLoginActiveStatus(subscriptionLoginState.status)) {
+            void cancelSubscriptionLoginAttempt(subscriptionLoginState.startedAt ?? null);
+        }
+    }, [cancelSubscriptionLoginAttempt, subscriptionLoginState.startedAt, subscriptionLoginState.status]);
 
     // Ref for verify timeout cleanup
     const verifyTimeoutRef = useRef<Record<string, NodeJS.Timeout>>({});
@@ -832,6 +894,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
         // z-[60]: delete confirmation (highest)
         if (deleteConfirmProvider) { setDeleteConfirmProvider(null); return true; }
         // z-50: all other inline overlays
+        if (subscriptionLoginDialogOpen) { closeSubscriptionLoginDialog(); return true; }
         if (managedCodexLoginDialogOpen) { setManagedCodexLoginDialogOpen(false); return true; }
         if (managedCodexDetailsOpen) { setManagedCodexDetailsOpen(false); return true; }
         if (runtimeDialog.show) { setRuntimeDialog(prev => ({ ...prev, show: false })); return true; }
@@ -1893,6 +1956,88 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
         }
     }, [subscriptionStatus, saveProviderVerifyStatus, toast]);
 
+    const refreshSubscriptionStatusAfterLogin = useCallback(async (): Promise<boolean> => {
+        try {
+            const status = await apiGetJson<SubscriptionStatus>('/api/subscription/status');
+            setSubscriptionStatus({ ...status, verifyStatus: 'idle' });
+            if (!status.available) {
+                return false;
+            }
+
+            const currentEmail = status.info?.email;
+            setSubscriptionVerifying(true);
+            setSubscriptionStatus(prev => prev ? { ...prev, verifyStatus: 'loading', verifyError: undefined } : prev);
+            const result = await apiPostJson<{ success: boolean; error?: string; detail?: string }>('/api/subscription/verify', {});
+            const nextStatus = result.success ? 'valid' : 'invalid';
+            if (result.success) {
+                await saveProviderVerifyStatus(SUBSCRIPTION_PROVIDER_ID, 'valid', currentEmail);
+            }
+            const errorMsg = result.error && result.detail && result.detail !== result.error
+                ? `${result.error} (${result.detail.slice(0, 100)})`
+                : result.error;
+            setSubscriptionStatus(prev => prev ? {
+                ...prev,
+                verifyStatus: nextStatus,
+                verifyError: errorMsg,
+            } : prev);
+            return result.success;
+        } catch (error) {
+            console.warn('[Settings] Failed to refresh subscription after login:', error);
+            setSubscriptionStatus(prev => prev ? {
+                ...prev,
+                verifyStatus: 'invalid',
+                verifyError: error instanceof Error ? error.message : '验证失败',
+            } : prev);
+            return false;
+        } finally {
+            setSubscriptionVerifying(false);
+        }
+    }, [saveProviderVerifyStatus]);
+
+    const handleSubscriptionLoginSucceeded = useCallback(async () => {
+        if (subscriptionLoginSuccessHandledRef.current) return;
+        subscriptionLoginSuccessHandledRef.current = true;
+        await refreshSubscriptionStatusAfterLogin();
+        toast.success('Claude 登录成功');
+    }, [refreshSubscriptionStatusAfterLogin, toast]);
+
+    const probeSubscriptionFallbackLogin = useCallback(async () => {
+        if (subscriptionLoginSuccessHandledRef.current || subscriptionFallbackProbeInFlightRef.current) {
+            return;
+        }
+        const now = Date.now();
+        if (now - subscriptionFallbackProbeLastAtRef.current < 10000) {
+            return;
+        }
+        subscriptionFallbackProbeLastAtRef.current = now;
+        subscriptionFallbackProbeInFlightRef.current = true;
+        try {
+            const status = await apiGetJson<SubscriptionStatus>('/api/subscription/status');
+            if (!status.available) {
+                return;
+            }
+
+            const currentEmail = status.info?.email;
+            setSubscriptionStatus({ ...status, verifyStatus: 'loading', verifyError: undefined });
+            const result = await apiPostJson<{ success: boolean; error?: string; detail?: string }>('/api/subscription/verify', {});
+            if (!result.success) {
+                return;
+            }
+
+            await saveProviderVerifyStatus(SUBSCRIPTION_PROVIDER_ID, 'valid', currentEmail);
+            subscriptionLoginSuccessHandledRef.current = true;
+            setSubscriptionStatus({ ...status, verifyStatus: 'valid', verifyError: undefined });
+            setSubscriptionLoginState(prev => isSubscriptionLoginActiveStatus(prev.status)
+                ? { ...prev, status: 'succeeded', error: null }
+                : prev);
+            toast.success('Claude 登录成功');
+        } catch (error) {
+            console.warn('[Settings] Subscription fallback login probe failed:', error);
+        } finally {
+            subscriptionFallbackProbeInFlightRef.current = false;
+        }
+    }, [saveProviderVerifyStatus, toast]);
+
     // Verify API key for a provider
     const verifyProvider = useCallback(async (provider: Provider, apiKey: string) => {
         if (!apiKey || !provider.config.baseUrl) {
@@ -2422,6 +2567,94 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
         }
     }, [managedCodexLoginState.loginUrl, toast]);
 
+    const startSubscriptionLogin = useCallback(async () => {
+        if (subscriptionLoginBusy) return;
+        subscriptionLoginSuccessHandledRef.current = false;
+        subscriptionFallbackProbeInFlightRef.current = false;
+        subscriptionFallbackProbeLastAtRef.current = 0;
+        setSubscriptionLoginDialogOpen(true);
+        setSubscriptionLoginBusy(true);
+        setSubscriptionLoginState({
+            ...EMPTY_SUBSCRIPTION_LOGIN_STATE,
+            status: 'starting',
+        });
+        try {
+            const state = normalizeSubscriptionLoginState(
+                await apiPostJson('/api/subscription/login/start', {}),
+            );
+            setSubscriptionLoginState(state);
+            const urlToOpen = state.automaticUrl ?? state.loginUrl ?? state.manualUrl;
+            if (urlToOpen) {
+                const { openExternal } = await import('@/utils/openExternal');
+                await openExternal(urlToOpen);
+            }
+            if (state.status === 'succeeded') {
+                await handleSubscriptionLoginSucceeded();
+            }
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            setSubscriptionLoginState({
+                status: 'error',
+                loginUrl: null,
+                manualUrl: null,
+                automaticUrl: null,
+                startedAt: null,
+                error: message,
+            });
+            toast.error(`Claude 登录失败：${message}`);
+        } finally {
+            setSubscriptionLoginBusy(false);
+        }
+    }, [handleSubscriptionLoginSucceeded, subscriptionLoginBusy, toast]);
+
+    const refreshSubscriptionLoginState = useCallback(async () => {
+        try {
+            const state = normalizeSubscriptionLoginState(
+                await apiGetJson('/api/subscription/login/status'),
+            );
+            setSubscriptionLoginState(state);
+            if (state.status === 'succeeded') {
+                await handleSubscriptionLoginSucceeded();
+            } else if (isSubscriptionLoginActiveStatus(state.status)) {
+                void probeSubscriptionFallbackLogin();
+            }
+        } catch (error) {
+            console.warn('[Settings] Subscription login status failed:', error);
+        }
+    }, [handleSubscriptionLoginSucceeded, probeSubscriptionFallbackLogin]);
+
+    useEffect(() => {
+        if (!subscriptionLoginDialogOpen) return;
+        if (!['starting', 'waiting'].includes(subscriptionLoginState.status)) return;
+        const interval = window.setInterval(() => {
+            void refreshSubscriptionLoginState();
+        }, 1000);
+        return () => window.clearInterval(interval);
+    }, [
+        refreshSubscriptionLoginState,
+        subscriptionLoginDialogOpen,
+        subscriptionLoginState.status,
+    ]);
+
+    const copySubscriptionLoginUrl = useCallback(async () => {
+        const url = subscriptionLoginState.manualUrl
+            ?? subscriptionLoginState.loginUrl
+            ?? subscriptionLoginState.automaticUrl;
+        if (!url) return;
+        try {
+            await navigator.clipboard.writeText(url);
+            toast.success('登录地址已复制');
+        } catch (error) {
+            console.warn('[Settings] Failed to copy subscription login URL:', error);
+            toast.error('复制登录地址失败');
+        }
+    }, [
+        subscriptionLoginState.automaticUrl,
+        subscriptionLoginState.loginUrl,
+        subscriptionLoginState.manualUrl,
+        toast,
+    ]);
+
     const saveProviderOrderSettings = useCallback(async () => {
         const providerIds = allProviders.map(provider => provider.id);
         const nextOrder = normalizeProviderOrder(providerIds, providerOrderDraft);
@@ -2497,6 +2730,103 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
         document.addEventListener('mousedown', handleClick);
         return () => document.removeEventListener('mousedown', handleClick);
     }, [errorDetailOpenId, verifyError]);
+
+    const renderSubscriptionProviderContent = () => {
+        const isLoginActive = subscriptionLoginBusy
+            || subscriptionLoginState.status === 'starting'
+            || subscriptionLoginState.status === 'waiting';
+        const isLoggedIn = subscriptionStatus?.available && subscriptionStatus.verifyStatus === 'valid';
+        const isVerifyInvalid = subscriptionStatus?.verifyStatus === 'invalid';
+        const needsLogin = !subscriptionStatus?.available || isVerifyInvalid;
+        const accountLabel = subscriptionStatus?.info?.email ?? '已检测到本地 OAuth 凭证';
+        const statusText = isLoginActive
+            ? 'Claude 账号登录中'
+            : isVerifyInvalid
+                ? 'Claude 账号验证失败'
+                : subscriptionStatus?.available
+                    ? accountLabel
+                    : 'Claude 账号未登录';
+
+        return (
+            <div className="space-y-3">
+                <p className="text-sm text-[var(--ink-muted)]">
+                    使用 Anthropic 订阅账户额度
+                </p>
+                <div className="flex items-center justify-between gap-3">
+                    <div className="flex min-w-0 flex-wrap items-center gap-2 text-xs">
+                        {isLoggedIn ? (
+                            <>
+                                <span className="truncate font-mono text-xs text-[var(--ink-muted)]">
+                                    {accountLabel}
+                                </span>
+                                <span className="shrink-0 rounded bg-[var(--success-bg)] px-1.5 py-0.5 text-xs font-medium text-[var(--success)]">
+                                    已验证
+                                </span>
+                            </>
+                        ) : (
+                            <>
+                                <span className="truncate text-xs text-[var(--ink-muted)]">
+                                    {statusText}
+                                </span>
+                                {isLoginActive && (
+                                    <span className="shrink-0 rounded bg-[var(--info-bg)] px-1.5 py-0.5 text-xs font-medium text-[var(--info)]">
+                                        登录中
+                                    </span>
+                                )}
+                                {subscriptionStatus?.verifyStatus === 'loading' && !isLoginActive && (
+                                    <span className="flex shrink-0 items-center gap-1 rounded bg-[var(--info-bg)] px-1.5 py-0.5 text-xs font-medium text-[var(--info)]">
+                                        <Loader2 className="h-3 w-3 animate-spin" />
+                                        验证中
+                                    </span>
+                                )}
+                                {isVerifyInvalid && (
+                                    <span className="shrink-0 rounded bg-[var(--error-bg)] px-1.5 py-0.5 text-xs font-medium text-[var(--error)]">
+                                        验证失败
+                                    </span>
+                                )}
+                            </>
+                        )}
+                    </div>
+                    <div className="flex shrink-0 items-center gap-2">
+                        {subscriptionStatus?.available && (
+                            <button
+                                type="button"
+                                onClick={handleReVerifySubscription}
+                                disabled={subscriptionVerifying || isLoginActive}
+                                className="rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] disabled:cursor-wait disabled:opacity-50"
+                                title="重新验证"
+                            >
+                                <RefreshCw className={`h-4 w-4 ${subscriptionVerifying ? 'animate-spin' : ''}`} />
+                            </button>
+                        )}
+                        {needsLogin && (
+                            <button
+                                type="button"
+                                disabled={isLoginActive || subscriptionVerifying}
+                                onClick={() => void startSubscriptionLogin()}
+                                className="flex shrink-0 items-center gap-1.5 rounded-lg bg-[var(--button-primary-bg)] px-3 py-1.5 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:cursor-wait disabled:opacity-60"
+                            >
+                                {isLoginActive
+                                    ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                    : <Link className="h-3.5 w-3.5" />}
+                                登录
+                            </button>
+                        )}
+                    </div>
+                </div>
+                {isVerifyInvalid && subscriptionStatus?.verifyError && (
+                    <p className="break-words text-xs text-[var(--error)]">
+                        {subscriptionStatus.verifyError}
+                    </p>
+                )}
+                {subscriptionLoginState.status === 'error' && subscriptionLoginState.error && (
+                    <p className="break-words text-xs text-[var(--error)]">
+                        {subscriptionLoginState.error}
+                    </p>
+                )}
+            </div>
+        );
+    };
 
     const renderManagedCodexProviderCard = (provider: Provider) => {
         const install = config.managedCodexRuntimeInstall;
@@ -2882,6 +3212,126 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
         );
     };
 
+    const renderSubscriptionLoginDialog = () => {
+        if (!subscriptionLoginDialogOpen) return null;
+        const state = subscriptionLoginState;
+        const isActiveLogin = state.status === 'starting' || state.status === 'waiting';
+        const displayUrl = state.manualUrl ?? state.loginUrl ?? state.automaticUrl;
+        const statusLabel = state.status === 'succeeded'
+            ? '已完成'
+            : state.status === 'cancelled'
+                ? '已取消'
+                : state.status === 'error'
+                    ? '异常'
+                    : '等待登录';
+        const statusClass = state.status === 'succeeded'
+            ? 'bg-[var(--success-bg)] text-[var(--success)]'
+            : state.status === 'cancelled' || state.status === 'error'
+                ? 'bg-[var(--error-bg)] text-[var(--error)]'
+                : 'bg-[var(--info-bg)] text-[var(--info)]';
+
+        return (
+            <OverlayBackdrop onClose={closeSubscriptionLoginDialog} className="z-50 overflow-y-auto px-4 py-8">
+                <div className="w-full max-w-xl rounded-2xl bg-[var(--paper-elevated)] shadow-xl">
+                    <div className="flex items-start justify-between gap-4 border-b border-[var(--line-subtle)] px-6 py-5">
+                        <div className="min-w-0">
+                            <div className="flex items-center gap-2">
+                                <h3 className="text-lg font-semibold text-[var(--ink)]">登录 Claude</h3>
+                                <span className={`rounded px-1.5 py-0.5 text-xs font-medium ${statusClass}`}>
+                                    {statusLabel}
+                                </span>
+                            </div>
+                            <p className="mt-1 text-sm text-[var(--ink-muted)]">
+                                登录信息会保存到 Claude Code 的本机 OAuth 凭证中。
+                            </p>
+                        </div>
+                        <button
+                            type="button"
+                            onClick={closeSubscriptionLoginDialog}
+                            className="rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+                        >
+                            <X className="h-4 w-4" />
+                        </button>
+                    </div>
+
+                    <div className="space-y-5 px-6 py-5">
+                        <section>
+                            <div className="flex items-center gap-2">
+                                {isActiveLogin ? (
+                                    <Loader2 className="h-4 w-4 animate-spin text-[var(--info)]" />
+                                ) : state.status === 'succeeded' ? (
+                                    <Check className="h-4 w-4 text-[var(--success)]" />
+                                ) : (
+                                    <AlertCircle className="h-4 w-4 text-[var(--error)]" />
+                                )}
+                                <p className="text-sm font-medium text-[var(--ink)]">自动打开浏览器</p>
+                            </div>
+                            <p className="mt-2 text-sm leading-relaxed text-[var(--ink-muted)]">
+                                我们已经尝试打开浏览器完成 Claude 登录。如果浏览器没有自动打开，可以复制下面的地址，在浏览器中打开后继续登录。
+                            </p>
+                            <div className="mt-3 flex min-w-0 items-center gap-2 rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2">
+                                <p className="min-w-0 flex-1 truncate font-mono text-xs text-[var(--ink-muted)]">
+                                    {displayUrl ?? '正在等待 AgentSDK 返回登录地址...'}
+                                </p>
+                                <button
+                                    type="button"
+                                    disabled={!displayUrl}
+                                    onClick={() => void copySubscriptionLoginUrl()}
+                                    className="flex shrink-0 items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)] disabled:cursor-not-allowed disabled:opacity-50"
+                                >
+                                    <Copy className="h-3.5 w-3.5" />
+                                    复制
+                                </button>
+                            </div>
+                        </section>
+
+                        <section className="border-t border-[var(--line-subtle)] pt-5">
+                            <p className="text-sm font-medium text-[var(--ink)]">远程或无浏览器环境</p>
+                            <p className="mt-2 text-sm leading-relaxed text-[var(--ink-muted)]">
+                                如果当前机器没有可用浏览器，请在对应环境的终端中登录：
+                                <code className="mx-1 rounded bg-[var(--paper-inset)] px-1.5 py-0.5 font-mono text-xs text-[var(--ink)]">
+                                    claude auth login
+                                </code>
+                            </p>
+                        </section>
+
+                        {state.status === 'succeeded' && (
+                            <p className="rounded-lg bg-[var(--success-bg)] px-3 py-2 text-sm text-[var(--success)]">
+                                登录已完成，可以关闭此窗口。
+                            </p>
+                        )}
+                        {(state.status === 'cancelled' || state.status === 'error') && (
+                            <p className="break-words rounded-lg bg-[var(--error-bg)] px-3 py-2 text-sm text-[var(--error)]">
+                                {state.error ?? '登录没有完成，可以重新发起登录。'}
+                            </p>
+                        )}
+                    </div>
+
+                    <div className="flex items-center justify-end gap-3 border-t border-[var(--line-subtle)] px-6 py-4">
+                        <button
+                            type="button"
+                            onClick={closeSubscriptionLoginDialog}
+                            className="rounded-lg border border-[var(--line)] px-4 py-2 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)]"
+                        >
+                            关闭
+                        </button>
+                        {(state.status === 'cancelled' || state.status === 'error') && (
+                            <button
+                                type="button"
+                                disabled={subscriptionLoginBusy}
+                                onClick={() => void startSubscriptionLogin()}
+                                className="flex items-center gap-1.5 rounded-lg bg-[var(--button-primary-bg)] px-4 py-2 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:cursor-wait disabled:opacity-60"
+                            >
+                                {subscriptionLoginBusy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                                重新登录
+                            </button>
+                        )}
+                    </div>
+                </div>
+            </OverlayBackdrop>
+        );
+    };
+
     // Render verification status indicator (icon row)
     const renderVerifyStatus = (provider: Provider) => {
         const isLoading = verifyLoading[provider.id];
@@ -3143,76 +3593,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
 
                                     {/* Subscription type - show status */}
                                     {provider.type === 'subscription' && (
-                                        <div className="space-y-2">
-                                            <p className="text-sm text-[var(--ink-muted)]">
-                                                使用 Anthropic 订阅账户，无需 API Key
-                                            </p>
-                                            {/* Subscription status display */}
-                                            <div className="flex items-center gap-2 text-xs flex-wrap">
-                                                {subscriptionStatus?.available ? (
-                                                    <>
-                                                        {/* Email display first; Issue #203: info may be empty
-                                                            when the user just did `claude auth login` without
-                                                            ever opening the CLI REPL. */}
-                                                        <span className="text-[var(--ink-muted)] font-mono text-xs">
-                                                            {subscriptionStatus.info?.email ?? '已检测到本地 OAuth 凭证'}
-                                                        </span>
-                                                        {/* Verification status after email */}
-                                                        {subscriptionStatus.verifyStatus === 'loading' && (
-                                                            <div className="flex items-center gap-1.5 text-[var(--ink-muted)]">
-                                                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                                                                <span>验证中...</span>
-                                                            </div>
-                                                        )}
-                                                        {subscriptionStatus.verifyStatus === 'valid' && (
-                                                            <div className="flex items-center gap-1.5 text-[var(--success)]">
-                                                                <Check className="h-3.5 w-3.5" />
-                                                                <span className="font-medium">已验证</span>
-                                                                <button
-                                                                    type="button"
-                                                                    onClick={handleReVerifySubscription}
-                                                                    disabled={subscriptionVerifying}
-                                                                    className="ml-1 rounded p-0.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] disabled:opacity-50"
-                                                                    title="重新验证"
-                                                                >
-                                                                    <RefreshCw className={`h-3 w-3 ${subscriptionVerifying ? 'animate-spin' : ''}`} />
-                                                                </button>
-                                                            </div>
-                                                        )}
-                                                        {subscriptionStatus.verifyStatus === 'invalid' && (
-                                                            <div className="flex items-center gap-1.5 text-[var(--error)]">
-                                                                <AlertCircle className="h-3.5 w-3.5" />
-                                                                <span className="font-medium">验证失败</span>
-                                                                <button
-                                                                    type="button"
-                                                                    onClick={handleReVerifySubscription}
-                                                                    disabled={subscriptionVerifying}
-                                                                    className="ml-1 rounded p-0.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] disabled:opacity-50"
-                                                                    title="重新验证"
-                                                                >
-                                                                    <RefreshCw className={`h-3 w-3 ${subscriptionVerifying ? 'animate-spin' : ''}`} />
-                                                                </button>
-                                                            </div>
-                                                        )}
-                                                        {subscriptionStatus.verifyStatus === 'idle' && (
-                                                            <div className="flex items-center gap-1.5 text-[var(--ink-muted)]">
-                                                                <span>检测中...</span>
-                                                            </div>
-                                                        )}
-                                                        {/* Error message */}
-                                                        {subscriptionStatus.verifyStatus === 'invalid' && subscriptionStatus.verifyError && (
-                                                            <span className="text-[var(--error)] text-xs w-full mt-1">
-                                                                {subscriptionStatus.verifyError}
-                                                            </span>
-                                                        )}
-                                                    </>
-                                                ) : (
-                                                    <span className="text-[var(--ink-muted)]">
-                                                        未登录，请先使用 Claude Code CLI 登录 (claude --login)
-                                                    </span>
-                                                )}
-                                            </div>
-                                        </div>
+                                        renderSubscriptionProviderContent()
                                     )}
                                     </div>
                             ))}
@@ -5991,6 +6372,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
 
             {renderManagedCodexDetailsDialog()}
             {renderManagedCodexLoginDialog()}
+            {renderSubscriptionLoginDialog()}
 
             {/* Provider Enablement / Ordering Modal */}
             {showProviderOrderDialog && (

@@ -560,6 +560,7 @@ import { broadcast, createSseClient, getClients } from './sse';
 import { imEventBus } from './utils/im-event-bus';
 import { imRequestRegistry } from './utils/im-request-registry';
 import { checkAnthropicSubscription, verifyProviderViaSdk, verifySubscription } from './provider-verify';
+import { cancelSubscriptionLogin, getSubscriptionLoginState, startSubscriptionLogin } from './subscription-auth';
 // openai-bridge is lazy-loaded via ensureBridgeHandler() below — only users on
 // OpenAI-protocol providers (DeepSeek/Moonshot/etc.) ever hit /v1/messages, so
 // most sessions never need to pay the 2.6k-line module's init cost.
@@ -4477,6 +4478,49 @@ async function main() {
           console.error('[api/subscription/verify] Error:', error);
           return jsonResponse(
             { success: false, error: error instanceof Error ? error.message : 'Verification failed' },
+            500
+          );
+        }
+      }
+
+      // POST /api/subscription/login/start - Start Anthropic Claude OAuth login via AgentSDK
+      if (pathname === '/api/subscription/login/start' && request.method === 'POST') {
+        try {
+          console.log('[api/subscription/login/start] Starting Claude OAuth login...');
+          const state = await startSubscriptionLogin();
+          return jsonResponse(state);
+        } catch (error) {
+          console.error('[api/subscription/login/start] Error:', error);
+          return jsonResponse(
+            { status: 'error', error: error instanceof Error ? error.message : 'Login failed' },
+            500
+          );
+        }
+      }
+
+      // GET /api/subscription/login/status - Poll Anthropic Claude OAuth login state
+      if (pathname === '/api/subscription/login/status' && request.method === 'GET') {
+        try {
+          return jsonResponse(getSubscriptionLoginState());
+        } catch (error) {
+          console.error('[api/subscription/login/status] Error:', error);
+          return jsonResponse(
+            { status: 'error', error: error instanceof Error ? error.message : 'Status check failed' },
+            500
+          );
+        }
+      }
+
+      // POST /api/subscription/login/cancel - Stop an active Anthropic Claude OAuth login attempt
+      if (pathname === '/api/subscription/login/cancel' && request.method === 'POST') {
+        try {
+          const payload = await request.json().catch(() => ({})) as { startedAt?: string | null };
+          const state = cancelSubscriptionLogin(payload.startedAt);
+          return jsonResponse(state);
+        } catch (error) {
+          console.error('[api/subscription/login/cancel] Error:', error);
+          return jsonResponse(
+            { status: 'error', error: error instanceof Error ? error.message : 'Cancel failed' },
             500
           );
         }
