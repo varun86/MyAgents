@@ -37,7 +37,7 @@ export default function ChatBootOverlay({ show = true }: { show?: boolean }) {
 
     return (
         <div
-            className={`absolute inset-0 z-30 flex items-center justify-center bg-[var(--paper)]/80 backdrop-blur-sm transition-opacity duration-300 ease-out ${show ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}
+            className={`absolute inset-0 z-30 flex items-center justify-center bg-[var(--paper-elevated)]/80 backdrop-blur-sm transition-opacity duration-300 ease-out ${show ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}
         >
             <div className="flex flex-col items-center gap-3">
                 <Loader2 className="h-6 w-6 animate-spin text-[var(--ink-muted)]" />
