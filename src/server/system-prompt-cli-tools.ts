@@ -128,6 +128,7 @@ before answering.
 
 Command:
   myagents vision analyze --image <path> [--image <path> ...] [--prompt "..."] [--json]
+  myagents vision analyze --image <path> --prompt-file <workspace-relative-text-file>
 
 Use paths that are available in the current workspace, especially
 \`@myagents_files/...\` references shown in the conversation. The CLI resolves
@@ -135,9 +136,10 @@ those paths inside the current MyAgents workspace and sends the images to the
 vision model configured by the user in Settings.
 
 If you need specific information, pass a concise \`--prompt\` describing what to
-extract. If you omit \`--prompt\`, MyAgents uses a default prompt that asks for a
-faithful, structured visual description with text/OCR, layout, objects, and any
-task-relevant details.
+extract. For long or quoted instructions, write a text file inside the current
+workspace and pass it with \`--prompt-file\`. If you omit both, MyAgents uses a
+default prompt that asks for a faithful, structured visual description with
+text/OCR, layout, objects, and any task-relevant details.
 
 Before first use in a session, you may run:
   myagents vision readme

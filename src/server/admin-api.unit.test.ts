@@ -9,6 +9,7 @@ const agentSessionMocks = vi.hoisted(() => ({
   setAgents: vi.fn(),
   getMcpServers: vi.fn(() => []),
   getSidecarPort: vi.fn(() => 0),
+  getQueueStatus: vi.fn(() => []),
   forceReloadActiveSession: vi.fn(),
 }));
 
@@ -23,6 +24,7 @@ vi.mock('./agent-session', () => ({
   setAgents: agentSessionMocks.setAgents,
   getMcpServers: agentSessionMocks.getMcpServers,
   getSidecarPort: agentSessionMocks.getSidecarPort,
+  getQueueStatus: agentSessionMocks.getQueueStatus,
   forceReloadActiveSession: agentSessionMocks.forceReloadActiveSession,
 }));
 

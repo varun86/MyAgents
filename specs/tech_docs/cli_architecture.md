@@ -323,7 +323,7 @@ MyAgents CLI 同时承载两类“工具”：
 - 官方 CLI 工具：产品内置、稳定可用，由 MyAgents 自己实现和审核，例如 `myagents vision analyze`。它们可以出现在设置页「工具箱」和对话工具菜单中，但不属于 MCP，也不受用户 CLI 工具注册表实验开关影响。
 - 用户注册 CLI 工具：用户通过 `myagents tool add` 注册的自定义 Agent-CLI 工具，受实验室开关控制，并通过 registry 注入新 session prompt。
 
-`vision` 的开关语义与 MCP 类似：设置页全局启用后，对话内工具菜单还可以做 session 级启用；实际可用性还要求「设置 → 工具箱」中选择了支持图片输入的模型。`vision analyze` 只接受当前 workspace 内的本地图片路径，`--prompt` 只用于短指令，不提供 `--prompt-file`。
+`vision` 的开关语义与 MCP 类似：设置页全局启用后，对话内工具菜单还可以做 session 级启用；实际可用性还要求「设置 → 工具箱」中选择了支持图片输入的模型。`vision analyze` 只接受当前 workspace 内的本地图片路径；`--prompt` 用于短指令，`--prompt-file` 用于长/多行指令，但同样只按当前 workspace 解析，拒绝 URL、symlink 与逃逸路径。
 
 ### CLI 工具注册表实验门控
 

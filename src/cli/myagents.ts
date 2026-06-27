@@ -1965,9 +1965,13 @@ function buildRequestBody(
         ...((flags.image as string[] | undefined) ?? []),
         ...rest,
       ].filter((value): value is string => typeof value === 'string' && value.trim().length > 0);
-      if (typeof flags.promptFile === 'string') {
-        console.error('Error: vision analyze does not support --prompt-file. Use --prompt "<short instruction>".');
-        process.exit(3);
+      if (flags.promptFile !== undefined && typeof flags.promptFile !== 'string') {
+        console.error('Error: --prompt-file must be a file path string.');
+        process.exit(2);
+      }
+      if (typeof flags.prompt === 'string' && typeof flags.promptFile === 'string') {
+        console.error('Error: --prompt and --prompt-file are mutually exclusive.');
+        process.exit(2);
       }
       const invalidImageValue = images.find(value => value.startsWith('-'));
       if (invalidImageValue) {
@@ -1975,11 +1979,12 @@ function buildRequestBody(
         process.exit(1);
       }
       const prompt = typeof flags.prompt === 'string' ? flags.prompt : undefined;
+      const promptFile = typeof flags.promptFile === 'string' ? flags.promptFile : undefined;
       if (images.length === 0) {
         console.error('Error: vision analyze requires at least one --image <path> (or positional image path).');
         process.exit(1);
       }
-      return { images, prompt };
+      return { images, prompt, promptFile };
     }
     return {};
   }

@@ -36,5 +36,6 @@ describe('buildCliToolsAppend', () => {
 
     expect(text).toContain('<myagents-cli-vision>');
     expect(text).toContain('myagents vision analyze');
+    expect(text).toContain('--prompt-file');
   });
 });

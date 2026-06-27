@@ -116,12 +116,14 @@ myagents tool env <name> delete KEY      # 删
 ```bash
 myagents vision readme
 myagents vision analyze --image <path> [--image <path> ...] [--prompt "what to inspect"]
+myagents vision analyze --image <path> --prompt-file <workspace-relative-text-file>
 myagents vision analyze --image @myagents_files/screenshot.png --prompt "Extract the error text and UI state"
 ```
 
 **约束：**
 - 只接受当前 MyAgents 工作区内的本地图片路径；不要传 URL。
-- `--prompt` 是短指令；vision 不支持 `--prompt-file`。
+- `--prompt` 是短指令；长/多行/含引号的检查指令写进当前 workspace 内的文本文件，再用 `--prompt-file`。
+- `--prompt-file` 路径也按当前 workspace 安全解析；不要传 URL、symlink 或 workspace 外路径。
 - 如果报“not enabled / not configured”，让用户在「设置 → 工具箱」启用图片理解并选择支持图片输入的模型。
 
 **何时用：**

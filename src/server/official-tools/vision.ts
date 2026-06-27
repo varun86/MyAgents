@@ -44,6 +44,8 @@ const SYSTEM_PROMPT = [
 ].join('\n');
 
 const MAX_IMAGES = 6;
+const MAX_TOTAL_IMAGE_BYTES = 50 * 1024 * 1024;
+const MAX_PROMPT_FILE_BYTES = 256 * 1024;
 const TIMEOUT_MS = 120_000;
 
 const MIME_BY_EXT: Record<string, string> = {
@@ -66,6 +68,7 @@ export interface VisionAnalyzeInput {
   sessionMeta?: SessionMetadata | null;
   images: string[];
   prompt?: string;
+  promptFile?: string;
 }
 
 export interface VisionAnalyzeResult {
@@ -84,7 +87,11 @@ export interface VisionAnalyzeResult {
 }
 
 class VisionToolError extends Error {
-  constructor(message: string, readonly status = 400) {
+  constructor(
+    message: string,
+    readonly status = 400,
+    readonly recoveryHint?: { recoveryCommand?: string; message?: string },
+  ) {
     super(message);
     this.name = 'VisionToolError';
   }
@@ -95,12 +102,17 @@ export function getVisionToolReadme(): string {
 
 Usage:
   myagents vision analyze --image <path> [--image <path> ...] [--prompt "..."] [--json]
+  myagents vision analyze --image <path> --prompt-file <workspace-relative-text-file>
   myagents vision analyze --image @myagents_files/screenshot.png --prompt "Read the error message"
   myagents vision readme
 
 The tool only accepts local image paths inside the current MyAgents workspace.
 Use @myagents_files/... paths when the conversation shows attached images as
-workspace references. URLs are not supported.`;
+workspace references. URLs are not supported.
+
+For long or quoted inspection instructions, write a text file inside the current
+workspace and pass it with --prompt-file. Prompt files are resolved with the same
+workspace safety boundary as image paths; arbitrary absolute paths are rejected.`;
 }
 
 export function listVisionModelOptions(config: AdminAppConfig = loadConfig()): VisionModelOption[] {
@@ -130,7 +142,9 @@ export async function analyzeImages(input: VisionAnalyzeInput): Promise<VisionAn
   const config = loadConfig();
   const workspacePath = input.workspacePath?.trim();
   if (!workspacePath) {
-    throw new VisionToolError('No current workspace is available for image path resolution.', 400);
+    throw new VisionToolError('No current workspace is available for image path resolution.', 400, {
+      message: 'Run this command from an active MyAgents session with a workspace.',
+    });
   }
   const enabledIds = getEffectiveOfficialToolIdsForSession(
     workspacePath,
@@ -139,30 +153,45 @@ export async function analyzeImages(input: VisionAnalyzeInput): Promise<VisionAn
     config,
   );
   if (!enabledIds.includes(IMAGE_UNDERSTANDING_TOOL_ID)) {
-    throw new VisionToolError('Image understanding is not enabled for this session.', 403);
+    throw new VisionToolError('Image understanding is not enabled for this session.', 403, {
+      message: 'Open the chat tool menu and enable Image Understanding for this session.',
+    });
   }
 
   const settings = config.officialToolSettings?.imageUnderstanding;
   const providerId = settings?.providerId?.trim();
   const model = settings?.model?.trim();
   if (!providerId || !model) {
-    throw new VisionToolError('Image understanding model is not configured.', 409);
+    throw new VisionToolError('Image understanding model is not configured.', 409, {
+      message: 'Open Settings -> Toolbox -> Image Understanding and select an image-capable model.',
+    });
   }
 
   const provider = findEffectiveProvider(providerId, config);
   if (!provider || !isProviderEnabled(provider)) {
-    throw new VisionToolError(`Configured vision provider '${providerId}' is unavailable.`, 409);
+    throw new VisionToolError(`Configured vision provider '${providerId}' is unavailable.`, 409, {
+      message: 'Open Settings -> Model Providers and re-enable or reconfigure the selected provider.',
+    });
   }
   if (isRuntimeBackedProvider(provider)) {
-    throw new VisionToolError(`Provider '${providerId}' is runtime-backed and cannot drive the vision helper.`, 409);
+    throw new VisionToolError(`Provider '${providerId}' is runtime-backed and cannot drive the vision helper.`, 409, {
+      message: 'Choose an API-backed provider/model for Image Understanding.',
+    });
   }
   const modelEntry = findProviderModel(provider, model);
   if (!modelEntry || !modelEntry.inputModalities?.includes('image')) {
-    throw new VisionToolError(`Model '${model}' is not registered as image-capable for provider '${providerId}'.`, 409);
+    throw new VisionToolError(`Model '${model}' is not registered as image-capable for provider '${providerId}'.`, 409, {
+      message: 'Open Model Providers and select or mark a model whose input modalities include image.',
+    });
   }
 
-  const images = resolveVisionImages(input.images, workspacePath);
-  const prompt = normalizePrompt(input.prompt);
+  const workspaceReal = realpathSync(workspacePath);
+  const images = resolveVisionImages(input.images, workspaceReal);
+  const prompt = resolveVisionPrompt({
+    prompt: input.prompt,
+    promptFile: input.promptFile,
+    workspaceReal,
+  });
   const providerEnv = materializeVisionProviderEnv(providerId, model, config);
   const deadlineMs = Date.now() + TIMEOUT_MS;
 
@@ -225,14 +254,49 @@ function materializeVisionProviderEnv(
     return {};
   }
   if (provider?.type === 'api' && !env) {
-    throw new VisionToolError(`Provider '${providerId}' needs a valid API key before it can drive image understanding.`, 409);
+    throw new VisionToolError(`Provider '${providerId}' needs a valid API key before it can drive image understanding.`, 409, {
+      message: 'Open Settings -> Model Providers and configure or verify the provider API key.',
+    });
   }
   return env as ProviderEnv | undefined;
 }
 
-function normalizePrompt(prompt: string | undefined): string {
+export function buildVisionPrompt(prompt: string | undefined): string {
   const trimmed = prompt?.trim();
-  return trimmed || DEFAULT_VISION_PROMPT;
+  if (!trimmed) return DEFAULT_VISION_PROMPT;
+  return [
+    DEFAULT_VISION_PROMPT,
+    '',
+    'Specific inspection request from the calling agent:',
+    trimmed,
+  ].join('\n');
+}
+
+function resolveVisionPrompt(args: {
+  prompt?: string;
+  promptFile?: string;
+  workspaceReal: string;
+}): string {
+  if (args.prompt?.trim() && args.promptFile?.trim()) {
+    throw new VisionToolError('--prompt and --prompt-file are mutually exclusive.', 400);
+  }
+  if (!args.promptFile?.trim()) {
+    return buildVisionPrompt(args.prompt);
+  }
+  const promptFile = resolveWorkspaceFilePath({
+    rawInput: args.promptFile,
+    workspaceReal: args.workspaceReal,
+    kind: 'Prompt file',
+  });
+  const stat = statSync(promptFile.realPath);
+  if (stat.size > MAX_PROMPT_FILE_BYTES) {
+    throw new VisionToolError(`Prompt file '${promptFile.input}' exceeds 256KB.`, 400);
+  }
+  const text = readFileSync(promptFile.realPath, 'utf-8');
+  if (text.includes('\0')) {
+    throw new VisionToolError(`Prompt file '${promptFile.input}' contains NUL bytes and looks binary.`, 400);
+  }
+  return buildVisionPrompt(text);
 }
 
 function remainingMs(deadlineMs: number): number {
@@ -245,7 +309,7 @@ function remainingMs(deadlineMs: number): number {
 
 function resolveVisionImages(
   rawImages: string[],
-  workspacePath: string,
+  workspaceReal: string,
 ): Array<{ input: string; resolvedPath: string; payload: ResolvedImagePayload }> {
   if (!Array.isArray(rawImages) || rawImages.length === 0) {
     throw new VisionToolError('At least one --image path is required.', 400);
@@ -253,68 +317,116 @@ function resolveVisionImages(
   if (rawImages.length > MAX_IMAGES) {
     throw new VisionToolError(`At most ${MAX_IMAGES} images can be analyzed at once.`, 400);
   }
-  const workspaceReal = realpathSync(workspacePath);
-  return rawImages.map(raw => resolveOneVisionImage(raw, workspaceReal));
+  const images = rawImages.map(raw => resolveOneVisionImage(raw, workspaceReal));
+  const totalBytes = images.reduce((sum, image) => sum + (image.payload.sizeBytes ?? 0), 0);
+  if (totalBytes > MAX_TOTAL_IMAGE_BYTES) {
+    throw new VisionToolError('Total image payload exceeds 50MB.', 400);
+  }
+  return images;
 }
 
 function resolveOneVisionImage(
   rawInput: string,
   workspaceReal: string,
 ): { input: string; resolvedPath: string; payload: ResolvedImagePayload } {
-  const input = rawInput.trim();
-  if (!input) throw new VisionToolError('Image path cannot be empty.', 400);
-  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(input)) {
-    throw new VisionToolError('Image URLs are not supported. Use a local workspace image path.', 400);
-  }
-
-  const withoutAt = input.startsWith('@') ? input.slice(1) : input;
-  const candidate = isAbsolute(withoutAt)
-    ? withoutAt
-    : resolve(workspaceReal, withoutAt);
-
-  let lst;
-  try {
-    lst = lstatSync(candidate);
-  } catch {
-    throw new VisionToolError(`Image not found: ${input}`, 404);
-  }
-  if (lst.isSymbolicLink()) {
-    throw new VisionToolError(`Image path must not be a symlink: ${input}`, 400);
-  }
-  if (!lst.isFile()) {
-    throw new VisionToolError(`Image path is not a file: ${input}`, 400);
-  }
-
-  const realPath = realpathSync(candidate);
-  const rel = relative(workspaceReal, realPath);
-  if (rel.startsWith('..') || isAbsolute(rel)) {
-    throw new VisionToolError('Image path must stay inside the current workspace.', 400);
-  }
-
-  const stat = statSync(realPath);
+  const resolved = resolveWorkspaceFilePath({
+    rawInput,
+    workspaceReal,
+    kind: 'Image path',
+  });
+  const stat = statSync(resolved.realPath);
   if (stat.size > USER_IMAGE_ATTACHMENT_MAX_BYTES) {
-    throw new VisionToolError(`Image '${input}' exceeds 10MB.`, 400);
+    throw new VisionToolError(`Image '${resolved.input}' exceeds 10MB.`, 400);
   }
 
-  const mimeType = mimeFromPath(realPath);
+  const data = readFileSync(resolved.realPath);
+  const mimeType = mimeFromPath(resolved.realPath);
   if (!ALLOWED_IMAGE_MIME_TYPES.includes(mimeType)) {
-    throw new VisionToolError(`Unsupported image type for '${input}'.`, 400);
+    throw new VisionToolError(`Unsupported image type for '${resolved.input}'.`, 400);
+  }
+  const magicMimeType = detectImageMimeFromMagic(data);
+  if (!magicMimeType || magicMimeType !== mimeType) {
+    throw new VisionToolError(`Image '${resolved.input}' does not match its declared image type.`, 400);
   }
 
   return {
-    input,
-    resolvedPath: realPath,
+    input: resolved.input,
+    resolvedPath: resolved.realPath,
     payload: {
-      name: basename(realPath),
+      name: basename(resolved.realPath),
       mimeType,
-      data: readFileSync(realPath).toString('base64'),
+      data: data.toString('base64'),
       sizeBytes: stat.size,
     },
   };
 }
 
+function resolveWorkspaceFilePath(args: {
+  rawInput: string;
+  workspaceReal: string;
+  kind: string;
+}): { input: string; realPath: string } {
+  const input = args.rawInput.trim();
+  if (!input) throw new VisionToolError(`${args.kind} cannot be empty.`, 400);
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(input)) {
+    throw new VisionToolError(`${args.kind} URLs are not supported. Use a local workspace path.`, 400);
+  }
+
+  const withoutAt = input.startsWith('@') ? input.slice(1) : input;
+  const candidate = isAbsolute(withoutAt)
+    ? withoutAt
+    : resolve(args.workspaceReal, withoutAt);
+
+  let lst;
+  try {
+    lst = lstatSync(candidate);
+  } catch {
+    throw new VisionToolError(`${args.kind} not found: ${input}`, 404);
+  }
+  if (lst.isSymbolicLink()) {
+    throw new VisionToolError(`${args.kind} must not be a symlink: ${input}`, 400);
+  }
+  if (!lst.isFile()) {
+    throw new VisionToolError(`${args.kind} is not a file: ${input}`, 400);
+  }
+
+  const realPath = realpathSync(candidate);
+  const rel = relative(args.workspaceReal, realPath);
+  if (rel.startsWith('..') || isAbsolute(rel)) {
+    throw new VisionToolError(`${args.kind} must stay inside the current workspace.`, 400);
+  }
+  return { input, realPath };
+}
+
 function mimeFromPath(filePath: string): string {
   return MIME_BY_EXT[extname(filePath).toLowerCase()] ?? 'application/octet-stream';
+}
+
+function detectImageMimeFromMagic(data: Buffer): string | null {
+  if (
+    data.length >= 8
+    && data[0] === 0x89
+    && data[1] === 0x50
+    && data[2] === 0x4e
+    && data[3] === 0x47
+    && data[4] === 0x0d
+    && data[5] === 0x0a
+    && data[6] === 0x1a
+    && data[7] === 0x0a
+  ) {
+    return 'image/png';
+  }
+  if (data.length >= 3 && data[0] === 0xff && data[1] === 0xd8 && data[2] === 0xff) {
+    return 'image/jpeg';
+  }
+  const asciiHead = data.subarray(0, 12).toString('ascii');
+  if (asciiHead.startsWith('GIF87a') || asciiHead.startsWith('GIF89a')) {
+    return 'image/gif';
+  }
+  if (data.length >= 12 && asciiHead.startsWith('RIFF') && asciiHead.slice(8, 12) === 'WEBP') {
+    return 'image/webp';
+  }
+  return null;
 }
 
 async function runVisionQuery(args: {
@@ -451,9 +563,13 @@ function textFromContent(content: unknown): string {
     .join('\n');
 }
 
-export function visionErrorResponse(error: unknown): { status: number; error: string } {
+export function visionErrorResponse(error: unknown): {
+  status: number;
+  error: string;
+  recoveryHint?: { recoveryCommand?: string; message?: string };
+} {
   if (error instanceof VisionToolError) {
-    return { status: error.status, error: error.message };
+    return { status: error.status, error: error.message, recoveryHint: error.recoveryHint };
   }
   return { status: 500, error: error instanceof Error ? error.message : String(error) };
 }

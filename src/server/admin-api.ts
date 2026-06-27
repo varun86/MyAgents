@@ -806,12 +806,14 @@ export async function handleVisionAnalyze(payload: {
   images?: unknown;
   image?: unknown;
   prompt?: unknown;
+  promptFile?: unknown;
 }): Promise<AdminResponse> {
   const rawImages = Array.isArray(payload.images)
     ? payload.images
     : (payload.image !== undefined ? [payload.image] : []);
   const images = rawImages.filter((value): value is string => typeof value === 'string' && value.trim().length > 0);
   const prompt = typeof payload.prompt === 'string' ? payload.prompt : undefined;
+  const promptFile = typeof payload.promptFile === 'string' ? payload.promptFile : undefined;
   const { analyzeImages, visionErrorResponse } = await import('./official-tools/vision');
   try {
     const sessionContext = getSessionEngine().getCurrentSessionContext();
@@ -820,6 +822,7 @@ export async function handleVisionAnalyze(payload: {
       sessionMeta: sessionContext.sessionMeta ?? null,
       images,
       prompt,
+      promptFile,
     });
     trackServer('official_tool_vision_analyze', {
       tool_id: IMAGE_UNDERSTANDING_TOOL_ID,
@@ -829,8 +832,8 @@ export async function handleVisionAnalyze(payload: {
     });
     return { success: true, data: result };
   } catch (error) {
-    const { status, error: message } = visionErrorResponse(error);
-    return { success: false, error: message, data: { status } };
+    const { status, error: message, recoveryHint } = visionErrorResponse(error);
+    return { success: false, error: message, data: { status }, recoveryHint };
   }
 }
 
