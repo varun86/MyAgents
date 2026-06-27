@@ -507,7 +507,9 @@ export function TaskDetailOverlay({
                   per v0.1.69 UX feedback. Users opening a task detail are
                   most often trying to "see what happened in the last run"
                   before they ever care about task.md / verify.md contents. */}
-              <TaskSessionsList task={task} onBeforeOpen={onClose} />
+              <div className="mt-5">
+                <TaskSessionsList task={task} onBeforeOpen={onClose} />
+              </div>
 
               {/* task.md / verify.md / progress.md — read-only previews.
                   The overlay's top-level "编辑" button is the single

@@ -4,13 +4,8 @@
 // prd_0.1.69_task_center_visual_feedback.md v2):
 //
 //   Row 1  — [Category chip left]                       [Status chip + hover actions right]
-//   Row 2  — [Title, 16px semibold, clamp-2]
+//   Row 2  — [Title, 14px medium, clamp-2]
 //   Row 3  — [📁 workspace · mode-aware meta · time/rounds]
-//   Row 4  — (optional) ActivityBar — latest statusHistory message,
-//            rendered when the task is in running or blocked state so
-//            users can see "what's happening right now" or "why it's
-//            stuck" without opening the detail overlay.
-//
 // Left vertical stripe was removed — the status chip on the right + the
 // category chip on the left already carry the "state" and "kind" axes;
 // a third indicator in the form of a color stripe would triple-count
@@ -76,29 +71,6 @@ export function TaskCardItem(props: TaskCardItemProps) {
     };
   }, [shouldFetchStats, task?.id]);
 
-  // Activity bar content — quote the latest statusHistory message IFF
-  // it's user-meaningful. Whitelist:
-  //   - `cli`   — agent-submitted via `myagents task update-status` (real
-  //               progress / blocker reason)
-  //   - `ui`    — user wrote it via the detail overlay (own note)
-  //   - `crash` — boot recovery ("上次被重启中断"); worth surfacing so
-  //               the user knows why the task landed in blocked without
-  //               their doing
-  // Creation entries (`from == null`) are skipped even when source is
-  // `ui` — the auto-generated "created (direct)" row isn't something a
-  // user needs to see on every new card. `system`/`scheduler`/`rerun`/
-  // `migration`/`watchdog`/`endCondition` are all audit-only: useful
-  // in the detail overlay's timeline, but noise on the card.
-  const latestHistory = task?.statusHistory?.at(-1);
-  const activityMessage: string | null = (() => {
-    if (!latestHistory) return null;
-    if (latestHistory.from === null) return null;
-    const src = latestHistory.source;
-    if (src !== 'cli' && src !== 'ui' && src !== 'crash') return null;
-    const msg = latestHistory.message?.trim();
-    return msg && msg.length > 0 ? msg : null;
-  })();
-
   return (
     <button
       type="button"
@@ -150,12 +122,6 @@ export function TaskCardItem(props: TaskCardItemProps) {
         executionCount={runStats?.executionCount ?? 0}
         updatedAt={updatedAt}
       />
-
-      {/* Row 4 — optional activity bar. Rendered only when there's a
-          user-meaningful message (see `activityMessage` derivation up
-          top). One visual treatment for all variants — this is a
-          "quote" of the last human/agent note, not a status colour. */}
-      {activityMessage && <ActivityBar message={activityMessage} />}
     </button>
   );
 }
@@ -227,39 +193,6 @@ function MetaRow({
           <span className={i === parts.length - 1 ? 'truncate' : undefined}>{p}</span>
         </span>
       ))}
-    </div>
-  );
-}
-
-/**
- * Inline activity bar — one uniform "quote" treatment for every kind
- * of message we surface (agent progress, agent blocker reason, user
- * note, crash-recovery). Left hairline + paper tint is the same
- * vocabulary the detail overlay uses for the "来自想法" source quote,
- * so the two surfaces read as related. Status colour is carried by the
- * status badge above; this bar doesn't re-encode it.
- *
- * Single-line clamp keeps every card the same height regardless of how
- * verbose the latest message is — the full text is available on hover
- * tooltip and inside the detail overlay's status timeline.
- */
-function ActivityBar({ message }: { message: string }) {
-  // Softer wash than solid `--paper-inset`. Single-element truncate
-  // (rather than flex + inner span) — wrapping the text in a flex row
-  // would make the inner span a flex item with `min-width: auto`, and
-  // the long Chinese run would push the outer card past its width.
-  // `block` + `truncate` directly on the bordered container avoids that
-  // entire class of overflow bug.
-  return (
-    <div
-      className="block w-full min-w-0 truncate rounded-r-[var(--radius-sm)] border-l-2 border-[var(--line)] px-2.5 py-1 text-xs leading-snug text-[var(--ink-muted)]"
-      style={{
-        backgroundColor:
-          'color-mix(in srgb, var(--paper-inset) 35%, var(--paper-elevated))',
-      }}
-      title={message}
-    >
-      {message}
     </div>
   );
 }

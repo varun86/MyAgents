@@ -17,7 +17,6 @@ import {
   ChevronDown,
   ChevronRight,
   Clock,
-  FileText,
   Flag,
   Zap,
 } from 'lucide-react';
@@ -121,7 +120,6 @@ export function DispatchTaskDialog({
   // Form state. v0.1.69 scope is AI execution only — `executor` is pinned to
   // `'agent'`; the user-as-todo variant is a future extension.
   const [name, setName] = useState(defaultName);
-  const [description, setDescription] = useState('');
   const [workspacePath, setWorkspacePath] = useState<string>(
     defaultProject?.path ?? '',
   );
@@ -262,7 +260,6 @@ export function DispatchTaskDialog({
       const task = await taskCreateDirect({
         name: name.trim(),
         executor: 'agent',
-        description: description.trim() || undefined,
         workspaceId: workspace.id,
         workspacePath: workspace.path,
         taskMdContent: taskMd,
@@ -335,7 +332,6 @@ export function DispatchTaskDialog({
     cronExpression,
     cronTimezone,
     name,
-    description,
     taskMd,
     verifyMd,
     executionMode,
@@ -379,137 +375,120 @@ export function DispatchTaskDialog({
 
         {/* Body — generous breathing room per design review */}
         <div className={`flex-1 overflow-y-auto px-6 py-6 ${SECTION_GAP}`}>
-          {/* 基本信息 */}
-          <FormSection icon={FileText} title="基本信息">
-            <div className="space-y-5">
-              <div>
-                <label className="mb-1.5 block text-sm font-medium text-[var(--ink-secondary)]">
-                  任务名称
-                </label>
-                <input
-                  type="text"
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  maxLength={MAX_NAME_LEN}
-                  placeholder="例如: 升级 OpenClaw lark 适配器到 v2.4"
-                  className={INPUT_CLS}
-                />
-              </div>
-
-              <div>
-                <label className="mb-1.5 block text-sm font-medium text-[var(--ink-secondary)]">
-                  简短描述
-                  <span className="ml-1 font-normal text-[var(--ink-muted)]">（可选）</span>
-                </label>
-                <input
-                  type="text"
-                  value={description}
-                  onChange={(e) => setDescription(e.target.value)}
-                  placeholder="一行话说明，任务卡会展示"
-                  className={INPUT_CLS}
-                />
-              </div>
-
-              <div>
-                <label className="mb-1.5 block text-sm font-medium text-[var(--ink-secondary)]">
-                  Agent 工作区
-                </label>
-                <CustomSelect
-                  value={workspacePath}
-                  options={projectOptions}
-                  onChange={setWorkspacePath}
-                  placeholder="选择工作区"
-                  size="md"
-                />
-                <p className="mt-1.5 text-xs text-[var(--ink-muted)]">
-                  默认使用该 Agent 的 runtime / 模型 / 权限 / MCP 工具。可在下方「高级配置」单独覆盖。
-                </p>
-              </div>
-
-              {/* 高级配置 — runtime / provider / model / permission / MCP overrides */}
-              <TaskAdvancedConfigEditor
-                workspacePath={workspace?.path}
-                runtime={advRuntime}
-                setRuntime={setAdvRuntime}
-                providerId={advProviderId}
-                setProviderId={setAdvProviderId}
-                model={advModel}
-                setModel={setAdvModel}
-                runtimeConfig={advRuntimeConfig}
-                setRuntimeConfig={setAdvRuntimeConfig}
-                permissionMode={advPermissionMode}
-                setPermissionMode={setAdvPermissionMode}
-                mcpEnabledServers={advMcpEnabledServers}
-                setMcpEnabledServers={setAdvMcpEnabledServers}
+          <div className="space-y-5">
+            <div>
+              <label className="mb-1.5 block text-sm font-medium text-[var(--ink-secondary)]">
+                任务名称
+              </label>
+              <input
+                type="text"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                maxLength={MAX_NAME_LEN}
+                placeholder="例如: 升级 OpenClaw lark 适配器到 v2.4"
+                className={INPUT_CLS}
               />
-
-              <div>
-                <label className="mb-1.5 block text-sm font-medium text-[var(--ink-secondary)]">
-                  task.md 内容
-                </label>
-                <textarea
-                  value={taskMd}
-                  onChange={(e) => setTaskMd(e.target.value)}
-                  rows={12}
-                  className={`${INPUT_CLS} resize-y font-mono text-sm`}
-                />
-                <p className="mt-1.5 text-xs text-[var(--ink-muted)]">
-                  AI 执行时看到的 prompt，默认取自想法原文。你可以补充细节、目标、约束。
-                </p>
-              </div>
-
-              {/* verify.md — folded by default. The dispatch flow used to
-                  force users to "create then immediately edit to add a
-                  verification list", which is two steps for what should
-                  be one. Showing it here matches the edit panel's
-                  symmetric task.md / verify.md pair. */}
-              <div className="rounded-[var(--radius-lg)] border border-[var(--line-subtle)] bg-[var(--paper)]">
-                <button
-                  type="button"
-                  onClick={() => setVerifyExpanded((v) => !v)}
-                  className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm font-medium text-[var(--ink-secondary)] hover:text-[var(--ink)]"
-                >
-                  {verifyExpanded ? (
-                    <ChevronDown className="h-3.5 w-3.5" />
-                  ) : (
-                    <ChevronRight className="h-3.5 w-3.5" />
-                  )}
-                  验收清单 verify.md
-                  <span className="text-xs font-normal text-[var(--ink-muted)]/80">
-                    （可选 · AI 在 verifying 阶段读取）
-                  </span>
-                </button>
-                {verifyExpanded && (
-                  <div className="border-t border-[var(--line-subtle)] p-3">
-                    <textarea
-                      value={verifyMd}
-                      onChange={(e) => setVerifyMd(e.target.value)}
-                      rows={6}
-                      placeholder="例如:&#10;- curl /health 返回 200&#10;- npm test 全绿"
-                      className={`${INPUT_CLS} resize-y font-mono text-sm`}
-                    />
-                    <p className="mt-1.5 text-xs text-[var(--ink-muted)]">
-                      留空则跳过验证阶段。创建后也可以随时编辑。
-                    </p>
-                  </div>
-                )}
-              </div>
-
-              <div>
-                <label className="mb-1.5 block text-sm font-medium text-[var(--ink-secondary)]">
-                  标签
-                  <span className="ml-1 font-normal text-[var(--ink-muted)]">（可选）</span>
-                </label>
-                <input
-                  type="text"
-                  value={tagsInput}
-                  onChange={(e) => setTagsInput(e.target.value)}
-                  placeholder="以逗号分隔，例如 MyAgents, 维护"
-                  className={INPUT_CLS}
-                />
-              </div>
             </div>
-          </FormSection>
+
+            <div>
+              <label className="mb-1.5 block text-sm font-medium text-[var(--ink-secondary)]">
+                任务需求 Task.md
+              </label>
+              <textarea
+                value={taskMd}
+                onChange={(e) => setTaskMd(e.target.value)}
+                rows={12}
+                className={`${INPUT_CLS} resize-y font-mono text-sm`}
+              />
+              <p className="mt-1.5 text-xs text-[var(--ink-muted)]">
+                AI 执行时看到的 prompt，默认取自想法原文。你可以补充细节、目标、约束。
+              </p>
+            </div>
+
+            {/* verify.md — folded by default. The dispatch flow used to
+                force users to "create then immediately edit to add a
+                verification list", which is two steps for what should
+                be one. Showing it here matches the edit panel's
+                symmetric task.md / verify.md pair. */}
+            <div className="rounded-[var(--radius-lg)] border border-[var(--line-subtle)] bg-[var(--paper)]">
+              <button
+                type="button"
+                onClick={() => setVerifyExpanded((v) => !v)}
+                className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm font-medium text-[var(--ink-secondary)] hover:text-[var(--ink)]"
+              >
+                {verifyExpanded ? (
+                  <ChevronDown className="h-3.5 w-3.5" />
+                ) : (
+                  <ChevronRight className="h-3.5 w-3.5" />
+                )}
+                验收清单
+                <span className="text-xs font-normal text-[var(--ink-muted)]/80">
+                  （可选 · verify.md · AI 在 verifying 阶段读取）
+                </span>
+              </button>
+              {verifyExpanded && (
+                <div className="border-t border-[var(--line-subtle)] p-3">
+                  <textarea
+                    value={verifyMd}
+                    onChange={(e) => setVerifyMd(e.target.value)}
+                    rows={6}
+                    placeholder="例如:&#10;- curl /health 返回 200&#10;- npm test 全绿"
+                    className={`${INPUT_CLS} resize-y font-mono text-sm`}
+                  />
+                  <p className="mt-1.5 text-xs text-[var(--ink-muted)]">
+                    留空则跳过验证阶段。创建后也可以随时编辑。
+                  </p>
+                </div>
+              )}
+            </div>
+
+            <div>
+              <label className="mb-1.5 block text-sm font-medium text-[var(--ink-secondary)]">
+                Agent 工作区
+              </label>
+              <CustomSelect
+                value={workspacePath}
+                options={projectOptions}
+                onChange={setWorkspacePath}
+                placeholder="选择工作区"
+                size="md"
+              />
+              <p className="mt-1.5 text-xs text-[var(--ink-muted)]">
+                默认使用该 Agent 的 runtime / 模型 / 权限 / MCP 工具。可在下方「高级配置」单独覆盖。
+              </p>
+            </div>
+
+            {/* 高级配置 — runtime / provider / model / permission / MCP overrides */}
+            <TaskAdvancedConfigEditor
+              workspacePath={workspace?.path}
+              runtime={advRuntime}
+              setRuntime={setAdvRuntime}
+              providerId={advProviderId}
+              setProviderId={setAdvProviderId}
+              model={advModel}
+              setModel={setAdvModel}
+              runtimeConfig={advRuntimeConfig}
+              setRuntimeConfig={setAdvRuntimeConfig}
+              permissionMode={advPermissionMode}
+              setPermissionMode={setAdvPermissionMode}
+              mcpEnabledServers={advMcpEnabledServers}
+              setMcpEnabledServers={setAdvMcpEnabledServers}
+            />
+
+            <div>
+              <label className="mb-1.5 block text-sm font-medium text-[var(--ink-secondary)]">
+                标签
+                <span className="ml-1 font-normal text-[var(--ink-muted)]">（可选）</span>
+              </label>
+              <input
+                type="text"
+                value={tagsInput}
+                onChange={(e) => setTagsInput(e.target.value)}
+                placeholder="以逗号分隔，例如 MyAgents, 维护"
+                className={INPUT_CLS}
+              />
+            </div>
+          </div>
 
           <div className={SECTION_DIVIDER} />
 

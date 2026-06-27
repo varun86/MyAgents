@@ -14,7 +14,7 @@
 //
 // Visual language mirrors Launcher's 历史对话 list (DESIGN.md §15.6):
 // `rounded-lg hover:bg-[var(--hover-bg)]` row with a timestamp column on
-// the left and truncated title on the right. Timestamp column is 84px
+// the left and truncated title on the right. Timestamp column is 104px
 // (vs Launcher's 56px w-14) because this list shows `MM-DD HH:mm` whereas
 // Launcher's shows `HH:mm` only.
 
@@ -24,6 +24,7 @@ import { Clock } from 'lucide-react';
 import { getSessions, type SessionMetadata } from '@/api/sessionClient';
 import { CUSTOM_EVENTS } from '@/../shared/constants';
 import type { Task } from '@/../shared/types/task';
+import { getSessionDisplayText } from '@/utils/sessionDisplay';
 
 interface Props {
   task: Task;
@@ -146,12 +147,12 @@ export function TaskSessionsList({ task, onBeforeOpen }: Props) {
               title={`打开此次执行的 session（${session.id}）`}
               className="group flex w-full cursor-pointer items-center gap-2.5 rounded-lg px-3 py-2 text-left transition-colors hover:bg-[var(--hover-bg)]"
             >
-              <div className="flex w-[84px] shrink-0 items-center gap-1 text-xs text-[var(--ink-muted)]/50">
+              <div className="flex w-[104px] shrink-0 items-center gap-1 text-xs text-[var(--ink-muted)]/50">
                 <Clock className="h-2.5 w-2.5" />
-                <span className="tabular-nums">{formatTimestamp(session.lastActiveAt)}</span>
+                <span className="whitespace-nowrap tabular-nums">{formatTimestamp(session.lastActiveAt)}</span>
               </div>
               <span className="min-w-0 flex-1 truncate text-sm text-[var(--ink-secondary)] transition-colors group-hover:text-[var(--ink)]">
-                {session.title || '未命名对话'}
+                {getSessionDisplayText(session)}
               </span>
             </div>
           ))}
