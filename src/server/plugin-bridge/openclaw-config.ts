@@ -18,8 +18,17 @@ function cloneConfig<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
 
-export function inferOpenClawChannelKey(entryModule: string): string {
-  let channelKey = entryModule.replace(/^@[^/]+\//, '');
+function nonEmptyString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function packageBasename(entryModule: string): string {
+  const channelKey = entryModule.replace(/^@[^/]+\//, '');
+  return channelKey;
+}
+
+function legacyInferredChannelKey(entryModule: string): string {
+  let channelKey = packageBasename(entryModule);
   if (/lark|feishu/i.test(entryModule)) {
     channelKey = 'feishu';
   } else if (/qqbot|qq/i.test(entryModule)) {
@@ -30,6 +39,55 @@ export function inferOpenClawChannelKey(entryModule: string): string {
     channelKey = 'telegram';
   }
   return channelKey;
+}
+
+function manifestChannelKey(manifest: unknown): string | undefined {
+  const root = asRecord(manifest);
+  const channels = Array.isArray(root.channels) ? root.channels : [];
+  for (const channel of channels) {
+    const key = nonEmptyString(channel);
+    if (key) return key;
+  }
+
+  const channelId = nonEmptyString(asRecord(root.channel).id);
+  if (channelId) return channelId;
+
+  const packageOpenClawChannelId = nonEmptyString(asRecord(asRecord(root.openclaw).channel).id);
+  if (packageOpenClawChannelId) return packageOpenClawChannelId;
+
+  const channelConfigs = asRecord(root.channelConfigs);
+  const channelConfigKeys = Object.keys(channelConfigs).filter(key => key.trim());
+  return channelConfigKeys.length === 1 ? channelConfigKeys[0] : undefined;
+}
+
+export function inferOpenClawChannelKey(args: {
+  entryModule: string;
+  manifest?: unknown;
+}): string {
+  return manifestChannelKey(args.manifest) ?? legacyInferredChannelKey(args.entryModule);
+}
+
+function manifestPluginId(manifest: unknown): string | undefined {
+  return nonEmptyString(asRecord(manifest).id);
+}
+
+function collectChannelAliases(args: {
+  entryModule: string;
+  manifest?: unknown;
+  channelKey: string;
+}): string[] {
+  const aliases = new Set<string>();
+  const add = (value: string | undefined) => {
+    if (value && value !== args.channelKey) aliases.add(value);
+  };
+
+  // Old MyAgents data often uses the installation/package identity while
+  // OpenClaw plugins read their protocol channel identity.
+  add(packageBasename(args.entryModule));
+  add(legacyInferredChannelKey(args.entryModule));
+  add(manifestPluginId(args.manifest));
+
+  return [...aliases];
 }
 
 export function normalizeOpenClawConfig(value: unknown): OpenClawConfigSnapshot {
@@ -45,21 +103,34 @@ export function normalizeOpenClawConfig(value: unknown): OpenClawConfigSnapshot 
 export function buildOpenClawConfig(args: {
   entryModule: string;
   pluginConfig: Record<string, unknown>;
+  manifest?: unknown;
 }): { channelKey: string; config: OpenClawConfigSnapshot } {
-  const channelKey = inferOpenClawChannelKey(args.entryModule);
+  const channelKey = inferOpenClawChannelKey({
+    entryModule: args.entryModule,
+    manifest: args.manifest,
+  });
   const channelConfig = {
     enabled: true,
     ...args.pluginConfig,
     dmPolicy: 'open',
     groupPolicy: 'open',
   };
+  const baseConfig: OpenClawConfigSnapshot = {
+    channels: {
+      [channelKey]: channelConfig,
+    },
+  };
   return {
     channelKey,
-    config: {
-      channels: {
-        [channelKey]: channelConfig,
-      },
-    },
+    config: addOpenClawChannelAliases(
+      baseConfig,
+      collectChannelAliases({
+        entryModule: args.entryModule,
+        manifest: args.manifest,
+        channelKey,
+      }),
+      channelKey,
+    ),
   };
 }
 
@@ -78,6 +149,18 @@ export function addOpenClawChannelAlias(
       [alias]: source,
     },
   };
+}
+
+export function addOpenClawChannelAliases(
+  config: OpenClawConfigSnapshot,
+  aliases: Iterable<string | undefined>,
+  sourceKey: string,
+): OpenClawConfigSnapshot {
+  let next = config;
+  for (const alias of aliases) {
+    next = addOpenClawChannelAlias(next, alias, sourceKey);
+  }
+  return next;
 }
 
 export function setOpenClawConfigSnapshot(config: unknown): OpenClawConfigSnapshot {

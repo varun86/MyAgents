@@ -22,7 +22,7 @@ import { createMcpHandler } from './mcp-handler';
 import { getPendingDispatch, resolvePendingDispatch, rejectPendingDispatch, clearAllPendingDispatches } from './pending-dispatch';
 import { buildFunctionalHealth, buildReadyHealth, type GatewayRuntimeStatus } from './gateway-health';
 import {
-  addOpenClawChannelAlias,
+  addOpenClawChannelAliases,
   buildOpenClawConfig,
   getOpenClawConfigSnapshot,
   setOpenClawConfigSnapshot,
@@ -152,6 +152,22 @@ async function readJsonFile(path: string, fallback?: PkgJsonLike): Promise<PkgJs
   }
 }
 
+async function readOptionalJsonObject(path: string): Promise<Record<string, unknown> | null> {
+  try {
+    const raw = await readFile(path, 'utf8');
+    const parsed = JSON.parse(raw) as unknown;
+    return asOptionalJsonObject(parsed);
+  } catch {
+    return null;
+  }
+}
+
+function asOptionalJsonObject(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
 /**
  * Resolve an OpenClaw plugin's entry file inside its package directory.
  *
@@ -250,14 +266,18 @@ async function loadPlugin() {
   // Find installed packages (look in node_modules for packages with openclaw metadata)
   const deps = { ...pkgJson.dependencies, ...pkgJson.devDependencies };
   let entryModule: string | null = null;
+  let entryManifest: Record<string, unknown> | null = null;
 
   for (const depName of Object.keys(deps || {})) {
     if (depName === 'openclaw') continue; // Skip the shim
     try {
-      const depPkg = await readJsonFile(`${pluginDir}/node_modules/${depName}/package.json`, {});
+      const depPkgDir = `${pluginDir}/node_modules/${depName}`;
+      const depPkg = await readJsonFile(`${depPkgDir}/package.json`, {});
       if (depPkg.openclaw || depPkg.keywords?.includes('openclaw')) {
         entryModule = depName;
         pluginName = depPkg.name || depName;
+        entryManifest = await readOptionalJsonObject(`${depPkgDir}/openclaw.plugin.json`)
+          ?? asOptionalJsonObject(depPkg.openclaw);
         break;
       }
     } catch {
@@ -276,6 +296,7 @@ async function loadPlugin() {
   const { channelKey, config: openclawConfig } = buildOpenClawConfig({
     entryModule,
     pluginConfig,
+    manifest: entryManifest,
   });
 
   // Create compat API with properly structured config
@@ -396,10 +417,19 @@ async function loadPlugin() {
     (runtime as Record<string, unknown> & { setPluginId: (id: string) => void }).setPluginId(capturedPlugin.id);
   }
 
-  // Set up MCP handler with captured tools (use openclawConfig so tools resolve accounts)
+  // Add the registered ChannelPlugin.id as an additional alias when it differs
+  // from the manifest channel key. The manifest key is canonical for OpenClaw
+  // config, while historical MyAgents data and some plugins still mention
+  // install/package identities.
+  const openclawCfg = addOpenClawChannelAliases(openclawConfig, [capturedPlugin.id], channelKey);
+  compatApi.config = openclawCfg;
+  setOpenClawConfigSnapshot(openclawCfg);
+
+  // Set up MCP handler with captured tools (use the final config so tools and
+  // message routing see the same channel aliases).
   getCapturedToolsFn = () => compatApi.getCapturedTools();
   getCapturedCommandsFn = () => compatApi.getCapturedCommands();
-  mcpHandler = createMcpHandler(getCapturedToolsFn, openclawConfig, channelKey);
+  mcpHandler = createMcpHandler(getCapturedToolsFn, openclawCfg, channelKey);
   const toolCount = compatApi.getCapturedTools().length;
   if (toolCount > 0) {
     console.log(`[plugin-bridge] MCP handler initialized with ${toolCount} captured tool factories`);
@@ -428,11 +458,6 @@ async function loadPlugin() {
       console.log('[plugin-bridge] No LarkTicket module found (withTicket injection unavailable)');
     }
   }
-
-  // Add plugin ID as additional channel key if it differs from inferred brand
-  // (e.g., plugin.id="openclaw-lark" but tools need channels.feishu).
-  const openclawCfg = addOpenClawChannelAlias(openclawConfig, capturedPlugin.id, channelKey);
-  setOpenClawConfigSnapshot(openclawCfg);
 
   // Resolve account using the plugin's own config.resolveAccount if available
   // Pass accountId from pluginConfig (persisted after QR login) so plugins like

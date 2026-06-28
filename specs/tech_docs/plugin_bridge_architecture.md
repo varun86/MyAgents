@@ -92,7 +92,7 @@ Bridge index.ts
   ↓
 1. 读 plugin_dir/package.json，扫描 dependencies
 2. 检测 OpenClaw 插件标记（pkg.openclaw 或 keywords 含 'openclaw'）
-3. 推断 Channel 品牌（feishu/qqbot/dingtalk/telegram）
+3. 读取插件元数据里的协议 Channel ID（优先 `openclaw.plugin.json.channels[0]`，其次 `package.json.openclaw.channel.id`，缺失时才走旧品牌推断）
 4. 全局 axios 超时补丁（10s，防御性兜底"插件在网络差的环境下 hang"）
 5. resolveOpenClawPluginEntry(packageDir) → 解析入口（见下方 §入口解析协议）
 6. import(resolvedEntry) → 获取插件对象（tsx/esm 会自动处理 .ts）
@@ -103,6 +103,18 @@ Bridge index.ts
    ├─ 通过 → 启动 gateway（startAccount）
    └─ 不通过 + supportsQrLogin → 等待 QR 登录
 ```
+
+### Channel 身份边界
+
+OpenClaw 插件有三种容易混淆的身份：
+
+| 身份 | 示例 | Owner | 用途 |
+|------|------|-------|------|
+| 安装 ID / pluginId | `wecom-openclaw-plugin`、`openclaw-lark` | MyAgents Rust/Renderer | 定位 `~/.myagents/openclaw-plugins/<pluginId>`、卸载、重启相关 channel |
+| npm 包名 | `@wecom/wecom-openclaw-plugin` | npm/OpenClaw 包 | 安装与入口解析 |
+| 协议 Channel ID | `wecom`、`feishu` | OpenClaw manifest / `registerChannel()` | `cfg.channels.<channelId>`、插件运行时配置读取 |
+
+**Bridge 内部 OpenClaw config 的 canonical key 必须是协议 Channel ID**，优先来自 OpenClaw manifest 的 `channels[0]`，其次来自 `package.json.openclaw.channel.id` 或单一 `channelConfigs` key，最后才从历史包名规则推断。安装 ID 和 manifest `id` 只能作为 alias 兼容旧数据，不能作为 canonical config key。典型反例：`@wecom/wecom-openclaw-plugin` 的 manifest `id` 是 `wecom-openclaw-plugin`，但 channel 是 `wecom`，插件源码读取的是 `cfg.channels.wecom`。
 
 ### 入口解析协议
 

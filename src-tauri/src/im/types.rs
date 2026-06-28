@@ -50,7 +50,10 @@ pub enum ImPlatform {
     Telegram,
     Feishu,
     Dingtalk,
-    /// OpenClaw channel plugin (String = channel ID, e.g. "qqbot")
+    /// OpenClaw route identity. Historical data may store either the protocol
+    /// channel ID (e.g. "qqbot") or the install plugin ID (e.g.
+    /// "wecom-openclaw-plugin"). Bridge config canonicalization resolves the
+    /// protocol channel ID from the OpenClaw manifest at runtime.
     OpenClaw(String),
 }
 
