@@ -7,6 +7,7 @@
  */
 import { Save, FolderOpen, Loader2, ChevronDown, ChevronUp, Trash2, Edit2, X, Check } from 'lucide-react';
 import { useCallback, useEffect, useState, useImperativeHandle, forwardRef, useRef, useMemo } from 'react';
+import { useTranslation } from 'react-i18next';
 
 import { apiGetJson as globalApiGet, apiPutJson as globalApiPut, apiDelete as globalApiDelete, apiPostJson as globalApiPost } from '@/api/apiFetch';
 import { useTabApiOptional } from '@/context/TabContext';
@@ -39,10 +40,13 @@ export interface SkillDetailPanelRef {
 
 const SkillDetailPanel = forwardRef<SkillDetailPanelRef, SkillDetailPanelProps>(
     function SkillDetailPanel({ name, scope, onBack: _onBack, onSaved, onDeleted, startInEditMode = false, agentDir }, ref) {
+        const { t } = useTranslation('settings');
         const toast = useToast();
         // Stabilize toast reference to avoid unnecessary effect re-runs
         const toastRef = useRef(toast);
         toastRef.current = toast;
+        const tRef = useRef(t);
+        tRef.current = t;
 
         // Use Tab-scoped API when available (in project workspace context)
         const tabState = useTabApiOptional();
@@ -161,10 +165,10 @@ const SkillDetailPanel = forwardRef<SkillDetailPanelRef, SkillDetailPanelProps>(
                             setIsEditing(true);
                         }
                     } else {
-                        toastRef.current.error(response.error || '加载失败');
+                        toastRef.current.error(response.error || tRef.current('resourceDetail.common.loadFailed'));
                     }
                 } catch {
-                    toastRef.current.error('加载失败');
+                    toastRef.current.error(tRef.current('resourceDetail.common.loadFailed'));
                 } finally {
                     setLoading(false);
                 }
@@ -229,7 +233,7 @@ const SkillDetailPanel = forwardRef<SkillDetailPanelRef, SkillDetailPanelProps>(
         const handleSave = useCallback(async () => {
             if (!skill) return;
             if (!skillName.trim()) {
-                toastRef.current.error('技能名称不能为空');
+                toastRef.current.error(t('resourceDetail.skill.nameRequired'));
                 return;
             }
             setSaving(true);
@@ -275,7 +279,7 @@ const SkillDetailPanel = forwardRef<SkillDetailPanelRef, SkillDetailPanelProps>(
                 );
 
                 if (response.success) {
-                    toastRef.current.success('保存成功');
+                    toastRef.current.success(t('resourceDetail.common.saveSuccess'));
 
                     // If folder was renamed, always close detail view (name prop is now invalid)
                     const folderWasRenamed = response.folderName && response.folderName !== skill.folderName;
@@ -307,14 +311,14 @@ const SkillDetailPanel = forwardRef<SkillDetailPanelRef, SkillDetailPanelProps>(
                     // 新建技能保存后自动关闭详情返回列表
                     onSaved(wasNewSkill);
                 } else {
-                    toastRef.current.error(response.error || '保存失败');
+                    toastRef.current.error(response.error || t('resourceDetail.common.saveFailed'));
                 }
             } catch {
-                toastRef.current.error('保存失败');
+                toastRef.current.error(t('resourceDetail.common.saveFailed'));
             } finally {
                 setSaving(false);
             }
-        }, [skill, name, scope, agentDir, skillName, originalSkillName, description, body, invocationMode, allowedTools, context, agent, argumentHint, onSaved, isNewSkill, api, isInTabContext]);
+        }, [skill, name, scope, agentDir, skillName, originalSkillName, description, body, invocationMode, allowedTools, context, agent, argumentHint, onSaved, isNewSkill, api, isInTabContext, t]);
 
         const handleDelete = useCallback(async () => {
             setDeleting(true);
@@ -324,18 +328,18 @@ const SkillDetailPanel = forwardRef<SkillDetailPanelRef, SkillDetailPanelProps>(
                     `/api/skill/${encodeURIComponent(name)}?scope=${scope}${agentDirParam}`
                 );
                 if (response.success) {
-                    toastRef.current.success('删除成功');
+                    toastRef.current.success(t('resourceDetail.common.deleteSuccess'));
                     onDeleted();
                 } else {
-                    toastRef.current.error(response.error || '删除失败');
+                    toastRef.current.error(response.error || t('resourceDetail.common.deleteFailed'));
                 }
             } catch {
-                toastRef.current.error('删除失败');
+                toastRef.current.error(t('resourceDetail.common.deleteFailed'));
             } finally {
                 setDeleting(false);
                 setShowDeleteConfirm(false);
             }
-        }, [name, scope, agentDir, onDeleted, api, isInTabContext]);
+        }, [name, scope, agentDir, onDeleted, api, isInTabContext, t]);
 
         // Phase D.5: skill.path is an absolute path (`~/.myagents/skills/<name>/`
         // for global, `<project>/.claude/skills/<name>/` for project), not a
@@ -354,9 +358,9 @@ const SkillDetailPanel = forwardRef<SkillDetailPanelRef, SkillDetailPanelProps>(
                     workspace: scope === 'project' ? agentDir ?? null : null,
                 });
             } catch {
-                toastRef.current.error('无法打开目录');
+                toastRef.current.error(t('resourceDetail.common.openFolderFailed'));
             }
-        }, [skill, fileService, scope, agentDir]);
+        }, [skill, fileService, scope, agentDir, t]);
 
         if (loading) {
             return (
@@ -369,7 +373,7 @@ const SkillDetailPanel = forwardRef<SkillDetailPanelRef, SkillDetailPanelProps>(
         if (!skill) {
             return (
                 <div className="flex h-full items-center justify-center">
-                    <p className="text-sm text-[var(--ink-muted)]">技能不存在</p>
+                    <p className="text-sm text-[var(--ink-muted)]">{t('resourceDetail.skill.notFound')}</p>
                 </div>
             );
         }
@@ -396,14 +400,14 @@ const SkillDetailPanel = forwardRef<SkillDetailPanelRef, SkillDetailPanelProps>(
                                 {shortenPathForDisplay(previewPath)}
                             </span>
                             {pathChanged && (
-                                <span className="text-xs text-[var(--accent)]">(将重命名)</span>
+                                <span className="text-xs text-[var(--accent)]">{t('resourceDetail.common.willRename')}</span>
                             )}
                             <button
                                 type="button"
                                 onClick={handleOpenInFinder}
                                 disabled={pathChanged}
                                 className="flex-shrink-0 rounded p-0.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] disabled:opacity-50 disabled:cursor-not-allowed"
-                                title={pathChanged ? "保存后可打开新位置" : "在 Finder 中打开"}
+                                title={pathChanged ? t('resourceDetail.common.openAfterSave') : t('resourceDetail.common.openLocation')}
                             >
                                 <FolderOpen className="h-3.5 w-3.5" />
                             </button>
@@ -418,7 +422,7 @@ const SkillDetailPanel = forwardRef<SkillDetailPanelRef, SkillDetailPanelProps>(
                                     className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-medium text-[var(--error)] hover:bg-[var(--error-bg)]"
                                 >
                                     <Trash2 className="h-4 w-4" />
-                                    删除
+                                    {t('resourceDetail.common.delete')}
                                 </button>
                                 <button
                                     type="button"
@@ -426,7 +430,7 @@ const SkillDetailPanel = forwardRef<SkillDetailPanelRef, SkillDetailPanelProps>(
                                     className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-medium text-[var(--ink-muted)] hover:bg-[var(--paper-inset)]"
                                 >
                                     <X className="h-4 w-4" />
-                                    取消
+                                    {t('resourceDetail.common.cancel')}
                                 </button>
                                 <button
                                     type="button"
@@ -435,7 +439,7 @@ const SkillDetailPanel = forwardRef<SkillDetailPanelRef, SkillDetailPanelProps>(
                                     className="flex items-center gap-1.5 rounded-lg bg-[var(--button-primary-bg)] px-4 py-1.5 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:opacity-50"
                                 >
                                     {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
-                                    保存
+                                    {t('resourceDetail.common.save')}
                                 </button>
                             </div>
                         ) : (
@@ -446,7 +450,7 @@ const SkillDetailPanel = forwardRef<SkillDetailPanelRef, SkillDetailPanelProps>(
                                 className="flex items-center gap-1.5 rounded-lg bg-[var(--button-dark-bg)] px-3 py-1.5 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-dark-bg-hover)]"
                             >
                                 <Edit2 className="h-4 w-4" />
-                                编辑
+                                {t('resourceDetail.common.edit')}
                             </button>
                         )}
                     </div>
@@ -457,7 +461,7 @@ const SkillDetailPanel = forwardRef<SkillDetailPanelRef, SkillDetailPanelProps>(
                     <div className="mx-auto max-w-4xl space-y-4">
                         {/* Skill Name */}
                         <div>
-                            <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">名称</label>
+                            <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">{t('resourceDetail.common.name')}</label>
                             <div className={`w-full rounded-lg border px-4 py-2.5 ${
                                 isEditing
                                     ? 'border-[var(--line)] bg-[var(--paper)] focus-within:border-[var(--accent)] focus-within:ring-2 focus-within:ring-[var(--accent)]/20'
@@ -469,12 +473,12 @@ const SkillDetailPanel = forwardRef<SkillDetailPanelRef, SkillDetailPanelProps>(
                                         type="text"
                                         value={skillName}
                                         onChange={(e) => setSkillName(e.target.value)}
-                                        placeholder="为技能起一个名字"
+                                        placeholder={t('resourceDetail.skill.namePlaceholder')}
                                         className="w-full border-none bg-transparent p-0 text-sm leading-relaxed text-[var(--ink)] placeholder-[var(--ink-muted)] outline-none"
                                     />
                                 ) : (
                                     <span className={`block select-text text-sm leading-relaxed ${skillName ? 'text-[var(--ink)]' : 'text-[var(--ink-muted)]/60'}`}>
-                                        {skillName || '（未设置）'}
+                                        {skillName || t('resourceDetail.common.notSet')}
                                     </span>
                                 )}
                             </div>
@@ -482,7 +486,7 @@ const SkillDetailPanel = forwardRef<SkillDetailPanelRef, SkillDetailPanelProps>(
 
                         {/* Description - 1-4 lines with overflow scroll, same height for edit/preview */}
                         <div>
-                            <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">描述</label>
+                            <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">{t('resourceDetail.common.description')}</label>
                             <div
                                 className={`w-full rounded-lg border px-4 py-2.5 ${
                                     isEditing
@@ -504,7 +508,7 @@ const SkillDetailPanel = forwardRef<SkillDetailPanelRef, SkillDetailPanelProps>(
                                             }}
                                             value={description}
                                             onChange={(e) => setDescription(e.target.value)}
-                                            placeholder="描述这个技能是做什么的，Claude 会根据此决定何时使用"
+                                            placeholder={t('resourceDetail.skill.descriptionPlaceholder')}
                                             className="block min-h-[22px] w-full resize-none border-none bg-transparent p-0 text-sm leading-[22px] text-[var(--ink)] placeholder-[var(--ink-muted)] outline-none"
                                             style={{ height: 'auto' }}
                                             onInput={(e) => {
@@ -516,7 +520,7 @@ const SkillDetailPanel = forwardRef<SkillDetailPanelRef, SkillDetailPanelProps>(
                                     ) : (
                                         <div className="select-text whitespace-pre-wrap text-sm leading-[22px]">
                                             <span className={description ? 'text-[var(--ink)]' : 'text-[var(--ink-muted)]/60'}>
-                                                {description || '（未设置）'}
+                                                {description || t('resourceDetail.common.notSet')}
                                             </span>
                                         </div>
                                     )}
@@ -526,7 +530,7 @@ const SkillDetailPanel = forwardRef<SkillDetailPanelRef, SkillDetailPanelProps>(
 
                         {/* Instructions - same height for edit/preview, adapts to viewport */}
                         <div>
-                            <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">技能内容 (Instructions)</label>
+                            <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">{t('resourceDetail.skill.instructions')}</label>
                             <div
                                 className={`overflow-hidden rounded-lg border ${
                                     isEditing
@@ -549,7 +553,7 @@ const SkillDetailPanel = forwardRef<SkillDetailPanelRef, SkillDetailPanelProps>(
                                                 <Markdown raw>{body}</Markdown>
                                             </div>
                                         ) : (
-                                            <span className="text-sm text-[var(--ink-muted)]/60">点击编辑技能内容...</span>
+                                            <span className="text-sm text-[var(--ink-muted)]/60">{t('resourceDetail.skill.emptyContent')}</span>
                                         )}
                                     </div>
                                 )}
@@ -563,7 +567,7 @@ const SkillDetailPanel = forwardRef<SkillDetailPanelRef, SkillDetailPanelProps>(
                             className="flex items-center gap-2 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:text-[var(--ink)]"
                         >
                             {showAdvanced ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
-                            高级设置
+                            {t('resourceDetail.skill.advancedSettings')}
                         </button>
 
                         {/* Advanced Settings */}
@@ -571,12 +575,12 @@ const SkillDetailPanel = forwardRef<SkillDetailPanelRef, SkillDetailPanelProps>(
                             <div className="space-y-4 rounded-xl border border-[var(--line)] bg-[var(--paper-inset)]/30 p-4">
                                 {/* Invocation Mode - 调用模式单选 */}
                                 <div>
-                                    <label className="mb-2 block text-sm font-medium text-[var(--ink)]">调用模式</label>
+                                    <label className="mb-2 block text-sm font-medium text-[var(--ink)]">{t('resourceDetail.skill.invocationMode')}</label>
                                     <div className="flex flex-wrap gap-2">
                                         {[
-                                            { value: 'both', label: '用户与模型均可', desc: '默认模式' },
-                                            { value: 'userOnly', label: '仅用户使用', desc: '模型不会自动调用' },
-                                            { value: 'modelOnly', label: '仅模型使用', desc: '用户不可手动调用' },
+                                            { value: 'both', label: t('resourceDetail.skill.invocationBoth'), desc: t('resourceDetail.skill.invocationBothDesc') },
+                                            { value: 'userOnly', label: t('resourceDetail.skill.invocationUserOnly'), desc: t('resourceDetail.skill.invocationUserOnlyDesc') },
+                                            { value: 'modelOnly', label: t('resourceDetail.skill.invocationModelOnly'), desc: t('resourceDetail.skill.invocationModelOnlyDesc') },
                                         ].map((option) => (
                                             <button
                                                 key={option.value}
@@ -600,34 +604,34 @@ const SkillDetailPanel = forwardRef<SkillDetailPanelRef, SkillDetailPanelProps>(
                                         ))}
                                     </div>
                                     <p className="mt-1.5 text-xs text-[var(--ink-muted)]">
-                                        {invocationMode === 'both' && '用户可通过 /命令 调用，Claude 也可根据描述自动使用'}
-                                        {invocationMode === 'userOnly' && '仅用户可通过 /命令 手动调用，Claude 不会自动使用'}
-                                        {invocationMode === 'modelOnly' && '仅 Claude 可根据描述自动调用，用户无法使用 /命令'}
+                                        {invocationMode === 'both' && t('resourceDetail.skill.invocationBothHelp')}
+                                        {invocationMode === 'userOnly' && t('resourceDetail.skill.invocationUserOnlyHelp')}
+                                        {invocationMode === 'modelOnly' && t('resourceDetail.skill.invocationModelOnlyHelp')}
                                     </p>
                                 </div>
 
                                 {/* Allowed Tools - 白名单 */}
                                 <div>
-                                    <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">允许的工具</label>
-                                    <p className="mb-2 text-xs text-[var(--ink-muted)]">白名单模式：仅允许技能使用指定的工具，留空表示不限制</p>
+                                    <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">{t('resourceDetail.skill.allowedTools')}</label>
+                                    <p className="mb-2 text-xs text-[var(--ink-muted)]">{t('resourceDetail.skill.allowedToolsHelp')}</p>
                                     {isEditing ? (
                                         <input
                                             type="text"
                                             value={allowedTools}
                                             onChange={(e) => setAllowedTools(e.target.value)}
-                                            placeholder="例如: Read, Grep, Glob"
+                                            placeholder={t('resourceDetail.skill.allowedToolsPlaceholder')}
                                             className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 text-sm text-[var(--ink)] placeholder-[var(--ink-muted)] focus:border-[var(--accent)] focus:outline-none"
                                         />
                                     ) : (
                                         <div onClick={() => handleEdit()} className="w-full cursor-pointer rounded-lg border border-[var(--line)] bg-[var(--paper-inset)]/30 px-3 py-2 text-sm transition-colors hover:border-[var(--ink-muted)]/50">
-                                            {allowedTools || <span className="text-[var(--ink-muted)]/60">未设置 (不限制)</span>}
+                                            {allowedTools || <span className="text-[var(--ink-muted)]/60">{t('resourceDetail.skill.unrestricted')}</span>}
                                         </div>
                                     )}
                                 </div>
 
                                 {/* Context - 自定义下拉 */}
                                 <div>
-                                    <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">执行上下文</label>
+                                    <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">{t('resourceDetail.skill.context')}</label>
                                     <button
                                         ref={contextBtnRef}
                                         type="button"
@@ -645,7 +649,7 @@ const SkillDetailPanel = forwardRef<SkillDetailPanelRef, SkillDetailPanelProps>(
                                         }`}
                                     >
                                         <span className={context ? 'text-[var(--ink)]' : 'text-[var(--ink-muted)]'}>
-                                            {context === 'fork' ? 'fork (独立子代理)' : '默认 (主会话上下文)'}
+                                            {context === 'fork' ? t('resourceDetail.skill.contextFork') : t('resourceDetail.skill.contextDefault')}
                                         </span>
                                         <ChevronDown className="h-4 w-4 text-[var(--ink-muted)]" />
                                     </button>
@@ -658,8 +662,8 @@ const SkillDetailPanel = forwardRef<SkillDetailPanelRef, SkillDetailPanelProps>(
                                         className="py-1 shadow-lg"
                                     >
                                         {[
-                                            { value: '', label: '默认 (主会话上下文)', desc: '在当前对话上下文中执行' },
-                                            { value: 'fork', label: 'fork (独立子代理)', desc: '在独立的子代理中执行' },
+                                            { value: '', label: t('resourceDetail.skill.contextDefault'), desc: t('resourceDetail.skill.contextDefaultDesc') },
+                                            { value: 'fork', label: t('resourceDetail.skill.contextFork'), desc: t('resourceDetail.skill.contextForkDesc') },
                                         ].map((option) => (
                                             <button
                                                 key={option.value}
@@ -684,7 +688,7 @@ const SkillDetailPanel = forwardRef<SkillDetailPanelRef, SkillDetailPanelProps>(
 
                                 {/* Agent - 自定义下拉 */}
                                 <div>
-                                    <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">代理类型</label>
+                                    <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">{t('resourceDetail.skill.agentType')}</label>
                                     <button
                                         ref={agentBtnRef}
                                         type="button"
@@ -702,10 +706,10 @@ const SkillDetailPanel = forwardRef<SkillDetailPanelRef, SkillDetailPanelProps>(
                                         }`}
                                     >
                                         <span className={agent ? 'text-[var(--ink)]' : 'text-[var(--ink-muted)]'}>
-                                            {agent === 'Explore' && 'Explore (探索代理)'}
-                                            {agent === 'Plan' && 'Plan (规划代理)'}
-                                            {agent === 'general-purpose' && 'general-purpose (通用代理)'}
-                                            {!agent && '默认 (自动选择)'}
+                                            {agent === 'Explore' && t('resourceDetail.skill.agentExplore')}
+                                            {agent === 'Plan' && t('resourceDetail.skill.agentPlan')}
+                                            {agent === 'general-purpose' && t('resourceDetail.skill.agentGeneral')}
+                                            {!agent && t('resourceDetail.skill.agentDefault')}
                                         </span>
                                         <ChevronDown className="h-4 w-4 text-[var(--ink-muted)]" />
                                     </button>
@@ -718,10 +722,10 @@ const SkillDetailPanel = forwardRef<SkillDetailPanelRef, SkillDetailPanelProps>(
                                         className="py-1 shadow-lg"
                                     >
                                         {[
-                                            { value: '', label: '默认 (自动选择)', desc: '由 Claude 根据任务自动选择' },
-                                            { value: 'Explore', label: 'Explore (探索代理)', desc: '适合代码搜索和探索任务' },
-                                            { value: 'Plan', label: 'Plan (规划代理)', desc: '适合方案设计和任务规划' },
-                                            { value: 'general-purpose', label: 'general-purpose (通用代理)', desc: '通用任务处理' },
+                                            { value: '', label: t('resourceDetail.skill.agentDefault'), desc: t('resourceDetail.skill.agentDefaultDesc') },
+                                            { value: 'Explore', label: t('resourceDetail.skill.agentExplore'), desc: t('resourceDetail.skill.agentExploreDesc') },
+                                            { value: 'Plan', label: t('resourceDetail.skill.agentPlan'), desc: t('resourceDetail.skill.agentPlanDesc') },
+                                            { value: 'general-purpose', label: t('resourceDetail.skill.agentGeneral'), desc: t('resourceDetail.skill.agentGeneralDesc') },
                                         ].map((option) => (
                                             <button
                                                 key={option.value}
@@ -746,18 +750,18 @@ const SkillDetailPanel = forwardRef<SkillDetailPanelRef, SkillDetailPanelProps>(
 
                                 {/* Argument Hint */}
                                 <div>
-                                    <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">参数提示</label>
+                                    <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">{t('resourceDetail.skill.argumentHint')}</label>
                                     {isEditing ? (
                                         <input
                                             type="text"
                                             value={argumentHint}
                                             onChange={(e) => setArgumentHint(e.target.value)}
-                                            placeholder="例如: [issue-number]"
+                                            placeholder={t('resourceDetail.skill.argumentHintPlaceholder')}
                                             className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 text-sm text-[var(--ink)] placeholder-[var(--ink-muted)] focus:border-[var(--accent)] focus:outline-none"
                                         />
                                     ) : (
                                         <div onClick={() => handleEdit()} className="w-full cursor-pointer rounded-lg border border-[var(--line)] bg-[var(--paper-inset)]/30 px-3 py-2 text-sm transition-colors hover:border-[var(--ink-muted)]/50">
-                                            {argumentHint || <span className="text-[var(--ink-muted)]/60">未设置</span>}
+                                            {argumentHint || <span className="text-[var(--ink-muted)]/60">{t('resourceDetail.common.notSet')}</span>}
                                         </div>
                                     )}
                                 </div>
@@ -769,9 +773,9 @@ const SkillDetailPanel = forwardRef<SkillDetailPanelRef, SkillDetailPanelProps>(
                 {/* Delete Confirmation */}
                 {showDeleteConfirm && (
                     <ConfirmDialog
-                        title="删除技能"
-                        message={`确定要删除「${skill.frontmatter.name || name}」吗？此操作无法撤销。`}
-                        confirmText="删除"
+                        title={t('resourceDetail.skill.deleteTitle')}
+                        message={t('resourceDetail.skill.deleteMessage', { name: skill.frontmatter.name || name })}
+                        confirmText={t('resourceDetail.common.delete')}
                         confirmVariant="danger"
                         onConfirm={handleDelete}
                         onCancel={() => setShowDeleteConfirm(false)}

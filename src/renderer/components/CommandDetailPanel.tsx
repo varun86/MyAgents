@@ -8,6 +8,7 @@
  */
 import { Save, FolderOpen, Loader2, Trash2, Edit2, X } from 'lucide-react';
 import { useCallback, useEffect, useState, useImperativeHandle, forwardRef, useRef, useMemo } from 'react';
+import { useTranslation } from 'react-i18next';
 
 import { apiGetJson as globalApiGet, apiPutJson as globalApiPut, apiDelete as globalApiDelete, apiPostJson as globalApiPost } from '@/api/apiFetch';
 import { useTabApiOptional } from '@/context/TabContext';
@@ -37,10 +38,13 @@ export interface CommandDetailPanelRef {
 
 const CommandDetailPanel = forwardRef<CommandDetailPanelRef, CommandDetailPanelProps>(
     function CommandDetailPanel({ name, scope, onBack: _onBack, onSaved, onDeleted, agentDir }, ref) {
+        const { t } = useTranslation('settings');
         const toast = useToast();
         // Stabilize toast reference to avoid unnecessary effect re-runs
         const toastRef = useRef(toast);
         toastRef.current = toast;
+        const tRef = useRef(t);
+        tRef.current = t;
 
         // Use Tab-scoped API when available (in project workspace context)
         const tabState = useTabApiOptional();
@@ -110,10 +114,10 @@ const CommandDetailPanel = forwardRef<CommandDetailPanelRef, CommandDetailPanelP
                         setOriginalDescription(desc);
                         setOriginalBody(bd);
                     } else {
-                        toastRef.current.error(response.error || '加载失败');
+                        toastRef.current.error(response.error || tRef.current('resourceDetail.common.loadFailed'));
                     }
                 } catch {
-                    toastRef.current.error('加载失败');
+                    toastRef.current.error(tRef.current('resourceDetail.common.loadFailed'));
                 } finally {
                     setLoading(false);
                 }
@@ -157,7 +161,7 @@ const CommandDetailPanel = forwardRef<CommandDetailPanelRef, CommandDetailPanelP
         const handleSave = useCallback(async () => {
             if (!command) return;
             if (!commandName.trim()) {
-                toastRef.current.error('指令名称不能为空');
+                toastRef.current.error(t('resourceDetail.command.nameRequired'));
                 return;
             }
             setSaving(true);
@@ -189,7 +193,7 @@ const CommandDetailPanel = forwardRef<CommandDetailPanelRef, CommandDetailPanelP
                 );
 
                 if (response.success) {
-                    toastRef.current.success('保存成功');
+                    toastRef.current.success(t('resourceDetail.common.saveSuccess'));
 
                     // If file was renamed, always close detail view (name prop is now invalid)
                     const fileWasRenamed = response.fileName && response.fileName !== currentFileName;
@@ -215,14 +219,14 @@ const CommandDetailPanel = forwardRef<CommandDetailPanelRef, CommandDetailPanelP
                     setIsEditing(false);
                     onSaved();
                 } else {
-                    toastRef.current.error(response.error || '保存失败');
+                    toastRef.current.error(response.error || t('resourceDetail.common.saveFailed'));
                 }
             } catch {
-                toastRef.current.error('保存失败');
+                toastRef.current.error(t('resourceDetail.common.saveFailed'));
             } finally {
                 setSaving(false);
             }
-        }, [command, name, scope, agentDir, commandName, originalCommandName, description, body, onSaved, api, isInTabContext]);
+        }, [command, name, scope, agentDir, commandName, originalCommandName, description, body, onSaved, api, isInTabContext, t]);
 
         const handleDelete = useCallback(async () => {
             if (!command) return;
@@ -234,18 +238,18 @@ const CommandDetailPanel = forwardRef<CommandDetailPanelRef, CommandDetailPanelP
                     `/api/command-item/${encodeURIComponent(currentFileName)}?scope=${scope}${agentDirParam}`
                 );
                 if (response.success) {
-                    toastRef.current.success('删除成功');
+                    toastRef.current.success(t('resourceDetail.common.deleteSuccess'));
                     onDeleted();
                 } else {
-                    toastRef.current.error(response.error || '删除失败');
+                    toastRef.current.error(response.error || t('resourceDetail.common.deleteFailed'));
                 }
             } catch {
-                toastRef.current.error('删除失败');
+                toastRef.current.error(t('resourceDetail.common.deleteFailed'));
             } finally {
                 setDeleting(false);
                 setShowDeleteConfirm(false);
             }
-        }, [command, name, scope, agentDir, onDeleted, api, isInTabContext]);
+        }, [command, name, scope, agentDir, onDeleted, api, isInTabContext, t]);
 
         // Phase D.5: command.path is an absolute path; route through the
         // dedicated `cmd_open_path_external` invoke (validates home/tmp prefix)
@@ -262,9 +266,9 @@ const CommandDetailPanel = forwardRef<CommandDetailPanelRef, CommandDetailPanelP
                     workspace: scope === 'project' ? agentDir ?? null : null,
                 });
             } catch {
-                toastRef.current.error('无法打开目录');
+                toastRef.current.error(t('resourceDetail.common.openFolderFailed'));
             }
-        }, [command, fileService, scope, agentDir]);
+        }, [command, fileService, scope, agentDir, t]);
 
         if (loading) {
             return (
@@ -277,7 +281,7 @@ const CommandDetailPanel = forwardRef<CommandDetailPanelRef, CommandDetailPanelP
         if (!command) {
             return (
                 <div className="flex h-full items-center justify-center">
-                    <p className="text-sm text-[var(--ink-muted)]">指令不存在</p>
+                    <p className="text-sm text-[var(--ink-muted)]">{t('resourceDetail.command.notFound')}</p>
                 </div>
             );
         }
@@ -305,14 +309,14 @@ const CommandDetailPanel = forwardRef<CommandDetailPanelRef, CommandDetailPanelP
                                 {shortenPathForDisplay(previewPath)}
                             </span>
                             {pathChanged && (
-                                <span className="text-xs text-[var(--accent)]">(将重命名)</span>
+                                <span className="text-xs text-[var(--accent)]">{t('resourceDetail.common.willRename')}</span>
                             )}
                             <button
                                 type="button"
                                 onClick={handleOpenInFinder}
                                 disabled={pathChanged}
                                 className="flex-shrink-0 rounded p-0.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] disabled:opacity-50 disabled:cursor-not-allowed"
-                                title={pathChanged ? "保存后可打开新位置" : "在 Finder 中打开"}
+                                title={pathChanged ? t('resourceDetail.common.openAfterSave') : t('resourceDetail.common.openLocation')}
                             >
                                 <FolderOpen className="h-3.5 w-3.5" />
                             </button>
@@ -327,7 +331,7 @@ const CommandDetailPanel = forwardRef<CommandDetailPanelRef, CommandDetailPanelP
                                     className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-medium text-[var(--error)] hover:bg-[var(--error-bg)]"
                                 >
                                     <Trash2 className="h-4 w-4" />
-                                    删除
+                                    {t('resourceDetail.common.delete')}
                                 </button>
                                 <button
                                     type="button"
@@ -335,7 +339,7 @@ const CommandDetailPanel = forwardRef<CommandDetailPanelRef, CommandDetailPanelP
                                     className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-medium text-[var(--ink-muted)] hover:bg-[var(--paper-inset)]"
                                 >
                                     <X className="h-4 w-4" />
-                                    取消
+                                    {t('resourceDetail.common.cancel')}
                                 </button>
                                 <button
                                     type="button"
@@ -344,7 +348,7 @@ const CommandDetailPanel = forwardRef<CommandDetailPanelRef, CommandDetailPanelP
                                     className="flex items-center gap-1.5 rounded-lg bg-[var(--button-primary-bg)] px-4 py-1.5 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:opacity-50"
                                 >
                                     {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
-                                    保存
+                                    {t('resourceDetail.common.save')}
                                 </button>
                             </div>
                         ) : (
@@ -355,7 +359,7 @@ const CommandDetailPanel = forwardRef<CommandDetailPanelRef, CommandDetailPanelP
                                 className="flex items-center gap-1.5 rounded-lg bg-[var(--button-dark-bg)] px-3 py-1.5 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-dark-bg-hover)]"
                             >
                                 <Edit2 className="h-4 w-4" />
-                                编辑
+                                {t('resourceDetail.common.edit')}
                             </button>
                         )}
                     </div>
@@ -366,7 +370,7 @@ const CommandDetailPanel = forwardRef<CommandDetailPanelRef, CommandDetailPanelP
                     <div className="mx-auto max-w-4xl space-y-4">
                         {/* Command Name */}
                         <div>
-                            <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">名称</label>
+                            <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">{t('resourceDetail.common.name')}</label>
                             <div className={`w-full rounded-lg border px-4 py-2.5 ${
                                 isEditing
                                     ? 'border-[var(--line)] bg-[var(--paper)] focus-within:border-[var(--accent)] focus-within:ring-2 focus-within:ring-[var(--accent)]/20'
@@ -378,12 +382,12 @@ const CommandDetailPanel = forwardRef<CommandDetailPanelRef, CommandDetailPanelP
                                         type="text"
                                         value={commandName}
                                         onChange={(e) => setCommandName(e.target.value)}
-                                        placeholder="为指令起一个名字"
+                                        placeholder={t('resourceDetail.command.namePlaceholder')}
                                         className="w-full border-none bg-transparent p-0 text-sm leading-relaxed text-[var(--ink)] placeholder-[var(--ink-muted)] outline-none"
                                     />
                                 ) : (
                                     <span className={`block select-text text-sm leading-relaxed ${commandName ? 'text-[var(--ink)]' : 'text-[var(--ink-muted)]/60'}`}>
-                                        {commandName || '（未设置）'}
+                                        {commandName || t('resourceDetail.common.notSet')}
                                     </span>
                                 )}
                             </div>
@@ -391,7 +395,7 @@ const CommandDetailPanel = forwardRef<CommandDetailPanelRef, CommandDetailPanelP
 
                         {/* Description - 1-4 lines with overflow scroll */}
                         <div>
-                            <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">描述</label>
+                            <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">{t('resourceDetail.common.description')}</label>
                             <div
                                 className={`w-full rounded-lg border px-4 py-2.5 ${
                                     isEditing
@@ -412,7 +416,7 @@ const CommandDetailPanel = forwardRef<CommandDetailPanelRef, CommandDetailPanelP
                                             }}
                                             value={description}
                                             onChange={(e) => setDescription(e.target.value)}
-                                            placeholder="描述这个指令是做什么的"
+                                            placeholder={t('resourceDetail.command.descriptionPlaceholder')}
                                             className="block min-h-[22px] w-full resize-none border-none bg-transparent p-0 text-sm leading-[22px] text-[var(--ink)] placeholder-[var(--ink-muted)] outline-none"
                                             style={{ height: 'auto' }}
                                             onInput={(e) => {
@@ -424,7 +428,7 @@ const CommandDetailPanel = forwardRef<CommandDetailPanelRef, CommandDetailPanelP
                                     ) : (
                                         <div className="select-text whitespace-pre-wrap text-sm leading-[22px]">
                                             <span className={description ? 'text-[var(--ink)]' : 'text-[var(--ink-muted)]/60'}>
-                                                {description || '（未设置）'}
+                                                {description || t('resourceDetail.common.notSet')}
                                             </span>
                                         </div>
                                     )}
@@ -434,7 +438,7 @@ const CommandDetailPanel = forwardRef<CommandDetailPanelRef, CommandDetailPanelP
 
                         {/* Instructions - same height for edit/preview, adapts to viewport */}
                         <div>
-                            <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">指令内容 (Instructions)</label>
+                            <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">{t('resourceDetail.command.instructions')}</label>
                             <div
                                 className={`overflow-hidden rounded-lg border ${
                                     isEditing
@@ -457,7 +461,7 @@ const CommandDetailPanel = forwardRef<CommandDetailPanelRef, CommandDetailPanelP
                                                 <Markdown raw>{body}</Markdown>
                                             </div>
                                         ) : (
-                                            <span className="text-sm text-[var(--ink-muted)]/60">点击编辑指令内容...</span>
+                                            <span className="text-sm text-[var(--ink-muted)]/60">{t('resourceDetail.command.emptyContent')}</span>
                                         )}
                                     </div>
                                 )}
@@ -469,9 +473,9 @@ const CommandDetailPanel = forwardRef<CommandDetailPanelRef, CommandDetailPanelP
                 {/* Delete Confirmation */}
                 {showDeleteConfirm && (
                     <ConfirmDialog
-                        title="删除指令"
-                        message={`确定要删除「${commandName}」吗？此操作无法撤销。`}
-                        confirmText="删除"
+                        title={t('resourceDetail.command.deleteTitle')}
+                        message={t('resourceDetail.command.deleteMessage', { name: commandName })}
+                        confirmText={t('resourceDetail.common.delete')}
                         confirmVariant="danger"
                         onConfirm={handleDelete}
                         onCancel={() => setShowDeleteConfirm(false)}
