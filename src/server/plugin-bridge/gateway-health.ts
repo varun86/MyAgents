@@ -7,6 +7,7 @@ export type GatewayHealthInput = {
   waitingForQrLogin: boolean;
   hasGateway: boolean;
   pluginName?: string;
+  pluginId?: string;
   gatewayStatus?: GatewayRuntimeStatus | null;
   lastForwardAt?: number;
   nowMs?: number;
@@ -19,6 +20,7 @@ export type GatewayHealthResult = {
 };
 
 const DEFAULT_STALENESS_MS = 90_000;
+const LAST_EVENT_IS_POLL_HEARTBEAT_PLUGIN_IDS = new Set(['openclaw-weixin']);
 
 function readyFailureReason(input: GatewayHealthInput): string {
   if (!input.pluginLoaded) return 'plugin-not-loaded';
@@ -28,6 +30,55 @@ function readyFailureReason(input: GatewayHealthInput): string {
 
 function numericTimestamp(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function normalizeGatewayStatus(input: GatewayHealthInput): {
+  lastPollSuccessAt: number | null;
+  lastInboundAt: number | null;
+  rawLastEventAt: number | null;
+  heartbeatSource: string | null;
+} {
+  const status = input.gatewayStatus;
+  const explicitPoll = numericTimestamp(status?.lastPollSuccessAt);
+  if (explicitPoll !== null) {
+    return {
+      lastPollSuccessAt: explicitPoll,
+      lastInboundAt: numericTimestamp(status?.lastInboundAt),
+      rawLastEventAt: numericTimestamp(status?.lastEventAt),
+      heartbeatSource: 'lastPollSuccessAt',
+    };
+  }
+
+  const heartbeat = numericTimestamp(status?.lastHeartbeatAt);
+  if (heartbeat !== null) {
+    return {
+      lastPollSuccessAt: heartbeat,
+      lastInboundAt: numericTimestamp(status?.lastInboundAt),
+      rawLastEventAt: numericTimestamp(status?.lastEventAt),
+      heartbeatSource: 'lastHeartbeatAt',
+    };
+  }
+
+  const rawLastEventAt = numericTimestamp(status?.lastEventAt);
+  if (
+    rawLastEventAt !== null
+    && input.pluginId
+    && LAST_EVENT_IS_POLL_HEARTBEAT_PLUGIN_IDS.has(input.pluginId)
+  ) {
+    return {
+      lastPollSuccessAt: rawLastEventAt,
+      lastInboundAt: numericTimestamp(status?.lastInboundAt),
+      rawLastEventAt,
+      heartbeatSource: 'lastEventAt:openclaw-weixin',
+    };
+  }
+
+  return {
+    lastPollSuccessAt: null,
+    lastInboundAt: numericTimestamp(status?.lastInboundAt),
+    rawLastEventAt,
+    heartbeatSource: null,
+  };
 }
 
 export function buildReadyHealth(input: GatewayHealthInput): GatewayHealthResult {
@@ -92,16 +143,19 @@ export function buildFunctionalHealth(input: GatewayHealthInput): GatewayHealthR
 
   const nowMs = input.nowMs ?? Date.now();
   const stalenessMs = input.stalenessMs ?? DEFAULT_STALENESS_MS;
-  const lastEventAt = numericTimestamp(status?.lastEventAt);
-  if (lastEventAt !== null) {
-    const gatewayStatusMsAgo = nowMs - lastEventAt;
-    if (gatewayStatusMsAgo <= stalenessMs) {
+  const normalized = normalizeGatewayStatus(input);
+  if (normalized.lastPollSuccessAt !== null) {
+    const gatewayPollMsAgo = nowMs - normalized.lastPollSuccessAt;
+    if (gatewayPollMsAgo <= stalenessMs) {
       return {
         status: 200,
         body: {
           state: 'functional',
-          reason: 'gateway-status',
-          gatewayStatusMsAgo,
+          reason: 'gateway-poll',
+          gatewayPollMsAgo,
+          heartbeatSource: normalized.heartbeatSource,
+          lastInboundAt: normalized.lastInboundAt ?? undefined,
+          rawLastEventAt: normalized.rawLastEventAt ?? undefined,
         },
       };
     }
@@ -110,8 +164,11 @@ export function buildFunctionalHealth(input: GatewayHealthInput): GatewayHealthR
       status: 503,
       body: {
         state: 'unfunctional',
-        reason: 'gateway-status-stale',
-        gatewayStatusMsAgo,
+        reason: 'gateway-poll-stale',
+        gatewayPollMsAgo,
+        heartbeatSource: normalized.heartbeatSource,
+        lastInboundAt: normalized.lastInboundAt ?? undefined,
+        rawLastEventAt: normalized.rawLastEventAt ?? undefined,
         message: `no successful gateway poll in the last ${stalenessMs}ms`,
       },
     };
@@ -135,6 +192,8 @@ export function buildFunctionalHealth(input: GatewayHealthInput): GatewayHealthR
     body: {
       state: lastForwardMsAgo === null ? 'unknown' : 'stale',
       lastForwardMsAgo,
+      lastInboundAt: normalized.lastInboundAt ?? undefined,
+      rawLastEventAt: normalized.rawLastEventAt ?? undefined,
       message: `no successful forward in the last ${stalenessMs}ms`,
     },
   };

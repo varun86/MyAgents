@@ -37,6 +37,7 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use super::adapter::ImAdapter;
+use super::health;
 use super::types::ImSourceType;
 use super::AgentInstance;
 use crate::sidecar::{release_session_sidecar, ManagedSidecarManager, SidecarOwner};
@@ -553,7 +554,7 @@ pub async fn freeze_and_rotate_for_runtime_change(
         let mut pending_notifications: HashMap<String, RuntimeChangeNotification> = HashMap::new();
         let mut channel_rotated = 0usize;
 
-        let active_sessions_after_rotation = {
+        {
             let mut router = ch_inst.bot_instance.router.lock().await;
             let keys: Vec<String> = router.peer_session_keys();
             if keys.is_empty() {
@@ -740,21 +741,15 @@ pub async fn freeze_and_rotate_for_runtime_change(
                     pending_notifications.insert(chat_id, candidate);
                 }
             }
-
-            router.active_sessions()
-        };
+        }
 
         if channel_rotated > 0 {
-            health
-                .set_active_sessions(active_sessions_after_rotation)
-                .await;
-            if let Err(e) = health.persist().await {
-                ulog_warn!(
-                    "[runtime-change] failed to persist rotated active sessions (channel={}): {}",
-                    channel_id,
-                    e
-                );
-            }
+            let _ = health::persist_router_active_sessions(
+                &health,
+                &ch_inst.bot_instance.router,
+                "runtime-change-rotation",
+            )
+            .await;
         }
 
         notification_targets += pending_notifications.len();

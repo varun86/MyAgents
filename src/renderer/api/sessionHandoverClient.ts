@@ -64,6 +64,10 @@ export interface HandoverResult {
     sessionKey: string;
     /** Whether the IM notification reached the channel */
     notified: boolean;
+    /** Whether peer-session binding was durably projected to channel state */
+    statePersisted?: boolean;
+    /** Optional management warning, e.g. binding changed in memory but state persistence failed */
+    warning?: string;
 }
 
 /**

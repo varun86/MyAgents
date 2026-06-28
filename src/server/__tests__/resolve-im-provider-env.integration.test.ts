@@ -57,6 +57,7 @@ describe('resolveImProviderEnv (#237)', () => {
         enabled: true,
         workspacePath: AGENT_WORKSPACE,
         providerId: 'deepseek',
+        model: 'deepseek-v4-pro',
         // Intentionally stale: looks valid but for the WRONG provider.
         providerEnvJson: JSON.stringify({
           baseUrl: 'https://api.minimaxi.com/anthropic',
@@ -92,12 +93,13 @@ describe('resolveImProviderEnv (#237)', () => {
         enabled: true,
         workspacePath: AGENT_WORKSPACE,
         providerId: 'deepseek',
+        model: 'deepseek-v4-pro',
         permissionMode: 'plan',
         channels: [{
           id: 'channel-1',
           type: 'openclaw:wecom-openclaw-plugin',
           enabled: true,
-          overrides: { providerId: 'minimax' },
+          overrides: { providerId: 'minimax', model: 'MiniMax-M2.7' },
         }],
       }],
       providerApiKeys: { deepseek: 'sk-d', minimax: 'sk-m' },
@@ -120,6 +122,7 @@ describe('resolveImProviderEnv (#237)', () => {
         enabled: true,
         workspacePath: AGENT_WORKSPACE,
         providerId: 'deepseek',
+        model: 'deepseek-v4-pro',
         permissionMode: 'plan',
         channels: [],
       }],
@@ -138,6 +141,7 @@ describe('resolveImProviderEnv (#237)', () => {
         name: 'Mino',
         enabled: true,
         workspacePath: AGENT_WORKSPACE,
+        model: 'deepseek-v4-pro',
         permissionMode: 'plan',
         channels: [],
       }],
@@ -182,6 +186,7 @@ describe('resolveImProviderEnv (#237)', () => {
         enabled: true,
         workspacePath: '/other/path', // does NOT match AGENT_WORKSPACE
         providerId: 'deepseek',
+        model: 'deepseek-v4-pro',
         permissionMode: 'plan',
         channels: [],
       }],
@@ -206,6 +211,7 @@ describe('resolveImProviderEnv (#237)', () => {
         enabled: true,
         workspacePath: AGENT_WORKSPACE,
         providerId: 'deepseek',
+        model: 'deepseek-v4-pro',
         permissionMode: 'plan',
         channels: [{
           id: 'channel-legacy',
@@ -213,6 +219,7 @@ describe('resolveImProviderEnv (#237)', () => {
           enabled: true,
           // Legacy root-level providerId — no overrides shape.
           providerId: 'minimax',
+          overrides: { model: 'MiniMax-M2.7' },
         }],
       }],
       providerApiKeys: { deepseek: 'sk-d', minimax: 'sk-m' },
@@ -232,13 +239,14 @@ describe('resolveImProviderEnv (#237)', () => {
         enabled: true,
         workspacePath: AGENT_WORKSPACE,
         providerId: 'deepseek',
+        model: 'deepseek-v4-pro',
         permissionMode: 'plan',
         channels: [{
           id: 'channel-mixed',
           type: 'openclaw:wecom-openclaw-plugin',
           enabled: true,
           providerId: 'minimax', // legacy root — should LOSE to overrides below
-          overrides: { providerId: 'zhipu' }, // post-bc06386 location — should WIN
+          overrides: { providerId: 'zhipu', model: 'glm-5.2' }, // post-bc06386 location — should WIN
         }],
       }],
       providerApiKeys: { deepseek: 'sk-d', minimax: 'sk-m', zhipu: 'sk-z' },
@@ -258,6 +266,7 @@ describe('resolveImProviderEnv (#237)', () => {
         enabled: true,
         workspacePath: winPath,
         providerId: 'deepseek',
+        model: 'deepseek-v4-pro',
         permissionMode: 'plan',
         channels: [],
       }],
@@ -268,5 +277,146 @@ describe('resolveImProviderEnv (#237)', () => {
     // Same Windows identity with forward slashes, different case, and no trailing slash should match.
     const fwdEnv = resolveImProviderEnv('c:/users/test/workspace', undefined);
     expect(fwdEnv?.baseUrl).toBe('https://api.deepseek.com/anthropic');
+  });
+
+  it('resolves a validated ProviderRoute for pure IM builtin sessions', async () => {
+    writeConfig({
+      agents: [{
+        id: 'agent-1',
+        name: 'Mino',
+        enabled: true,
+        workspacePath: AGENT_WORKSPACE,
+        providerId: 'deepseek',
+        model: 'deepseek-v4-pro',
+        permissionMode: 'plan',
+        channels: [],
+      }],
+      providerApiKeys: { deepseek: 'sk-d' },
+    });
+
+    const { resolveImProviderRouting } = await import('../utils/admin-config');
+    const routing = resolveImProviderRouting(AGENT_WORKSPACE, undefined);
+
+    expect(routing).toMatchObject({
+      kind: 'provider-route',
+      providerRoute: {
+        kind: 'provider',
+        providerId: 'deepseek',
+        model: 'deepseek-v4-pro',
+      },
+    });
+  });
+
+  it('fails loud when providerId is known but Agent/Channel does not own a model', async () => {
+    writeConfig({
+      agents: [{
+        id: 'agent-1',
+        name: 'Mino',
+        enabled: true,
+        workspacePath: AGENT_WORKSPACE,
+        providerId: 'deepseek',
+        permissionMode: 'plan',
+        channels: [],
+      }],
+      providerApiKeys: { deepseek: 'sk-d' },
+    });
+
+    const { resolveImProviderRouting, resolveImProviderEnv } = await import('../utils/admin-config');
+    const routing = resolveImProviderRouting(AGENT_WORKSPACE, undefined);
+
+    expect(routing).toMatchObject({
+      kind: 'error',
+      status: 409,
+      reason: 'provider-route-unresolved',
+      providerId: 'deepseek',
+      providerRoute: {
+        kind: 'unknown-legacy',
+        reason: 'missing-model',
+      },
+    });
+    expect(resolveImProviderEnv(AGENT_WORKSPACE, undefined)).toBeUndefined();
+  });
+
+  it('fails loud when ProviderRoute validation rejects the provider/model pair', async () => {
+    writeConfig({
+      agents: [{
+        id: 'agent-1',
+        name: 'Mino',
+        enabled: true,
+        workspacePath: AGENT_WORKSPACE,
+        providerId: 'deepseek',
+        model: 'MiniMax-M2.7',
+        permissionMode: 'plan',
+        channels: [],
+      }],
+      providerApiKeys: { deepseek: 'sk-d' },
+    });
+
+    const { resolveImProviderRouting } = await import('../utils/admin-config');
+    const routing = resolveImProviderRouting(AGENT_WORKSPACE, undefined);
+
+    expect(routing).toMatchObject({
+      kind: 'error',
+      status: 409,
+      reason: 'provider-route-unresolved',
+      providerRoute: {
+        kind: 'unknown-legacy',
+        reason: 'provider-model-mismatch',
+      },
+    });
+  });
+
+  it('fails loud for a known provider route with no live API key', async () => {
+    writeConfig({
+      agents: [{
+        id: 'agent-1',
+        name: 'Mino',
+        enabled: true,
+        workspacePath: AGENT_WORKSPACE,
+        providerId: 'deepseek',
+        model: 'deepseek-v4-pro',
+        permissionMode: 'plan',
+        channels: [],
+      }],
+    });
+
+    const { resolveImProviderRouting } = await import('../utils/admin-config');
+    const routing = resolveImProviderRouting(AGENT_WORKSPACE, undefined);
+
+    expect(routing).toMatchObject({
+      kind: 'error',
+      status: 409,
+      reason: 'provider-env-unavailable',
+      providerId: 'deepseek',
+      model: 'deepseek-v4-pro',
+    });
+  });
+
+  it('reports managed Codex provider as external-runtime, not builtin ProviderRoute', async () => {
+    writeConfig({
+      agents: [{
+        id: 'agent-1',
+        name: 'Mino',
+        enabled: true,
+        workspacePath: AGENT_WORKSPACE,
+        providerId: 'codex-sub',
+        model: 'gpt-5.4',
+        permissionMode: 'plan',
+        channels: [],
+      }],
+    });
+
+    const { resolveImProviderRouting } = await import('../utils/admin-config');
+    const routing = resolveImProviderRouting(AGENT_WORKSPACE, undefined, {
+      managedCodexProviderReady: true,
+    });
+
+    expect(routing).toMatchObject({
+      kind: 'external-runtime',
+      runtime: 'codex',
+      runtimeSource: 'managed-provider',
+      reason: 'managed-codex-provider',
+      model: 'gpt-5.4',
+    });
   });
 });

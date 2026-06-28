@@ -17,6 +17,7 @@ import { writeFile, readFile } from 'fs/promises';
 import { ensureDir } from '../utils/fs-utils';
 import { registerPendingDispatch, rejectPendingDispatch, type PendingDispatchCallbacks } from './pending-dispatch';
 import { cancellableFetch } from '../utils/cancellation';
+import { getOpenClawConfigSnapshot, setOpenClawConfigSnapshot } from './openclaw-config';
 
 // ===== Media extraction utilities =====
 
@@ -230,13 +231,10 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
   // Mutable — updated after plugin registration when actual ID is known
   let currentPluginId = pluginId;
 
-  // Parse the plugin config once (passed via env var by Bridge spawner)
-  const bridgePluginConfig = JSON.parse(process.env.BRIDGE_PLUGIN_CONFIG || '{}');
-
   // Shim compat version — must match the version in sdk-shim/package.json.
   // Plugins check api.runtime.version (e.g. weixin's assertHostCompatibility)
   // to verify the host supports the required SDK surface.
-  const SHIM_COMPAT_VERSION = '2026.5.18';
+  const SHIM_COMPAT_VERSION = '2026.6.28';
 
   const runtime = {
     /** Update the plugin ID after registration */
@@ -258,24 +256,10 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
     config: {
       loadConfig() {
         console.log('[compat-timing] config.loadConfig() called');
-
-        // Return an OpenClaw-format config with the plugin's channel settings
-        // Use currentPluginId as channel key (not hardcoded 'feishu') so any plugin
-        // can resolve its own config via cfg.channels[pluginId]
-        // Force dmPolicy/groupPolicy=open — MyAgents handles access control at Rust layer
-        return {
-          channels: {
-            [currentPluginId]: {
-              enabled: true,
-              ...bridgePluginConfig,
-              dmPolicy: 'open',
-              groupPolicy: 'open',
-            },
-          },
-        };
+        return getOpenClawConfigSnapshot();
       },
-      async writeConfigFile(_cfg: unknown) {
-        // No-op — Bridge doesn't write config files
+      async writeConfigFile(cfg: unknown) {
+        setOpenClawConfigSnapshot(cfg);
       },
     },
 

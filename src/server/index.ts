@@ -530,7 +530,7 @@ import {
   updateSessionMetadata,
   getAttachmentPath,
 } from './SessionStore';
-import { decodeProviderEnvSnapshot, findAgentByWorkspacePath, findProvider, getAllMcpServers, getEffectiveMcpServers, getEnabledMcpServerIds, isProviderDisabled, loadConfig, resolveImProviderEnv, resolveProviderEnv, resolveWorkspaceConfig } from './utils/admin-config';
+import { decodeProviderEnvSnapshot, findAgentByWorkspacePath, findProvider, getAllMcpServers, getEffectiveMcpServers, getEnabledMcpServerIds, isProviderDisabled, loadConfig, resolveImProviderRouting, resolveProviderEnv, resolveWorkspaceConfig } from './utils/admin-config';
 import { snapshotForOwnedSession } from './utils/session-snapshot';
 import {
   isManagedCodexProviderReady,
@@ -8412,24 +8412,43 @@ async function main() {
             let resolvedModel: string | undefined = payload.model ?? undefined;
             let resolvedReasoningEffort: string | undefined;
             let resolvedProviderRoute: ProviderRoute | undefined;
-            // (#237) Re-resolve providerEnv from canonical `providerId` on disk
-            // instead of trusting the blob Rust forwarded. Rust caches
-            // `provider_env_json` as an Arc at bot start and replays it on every
-            // /api/im/enqueue, so a stale agent.providerEnvJson (or
-            // channel.overrides.providerEnvJson — Rust's patch.channels
-            // hot-reload only updates group fields, not provider overrides)
-            // would pin IM forever to the wrong upstream. Desktop Chat is
-            // immune because Chat.tsx rebuilds providerEnv from React state on
-            // every send — this mirrors that "live from providerId" shape on
-            // the sidecar side. Falls back to payload.providerEnv if the agent
-            // has no resolvable providerId (provider deleted / disabled / no
-            // API key), preserving back-compat for edge cases.
-            const freshImProviderEnv = resolveImProviderEnv(agentDir, payload.botId);
-            let resolvedProviderEnv: ProviderEnv | undefined =
-              (freshImProviderEnv as ProviderEnv | undefined) ?? payload.providerEnv ?? undefined;
+            // Pure IM-origin builtin sessions resolve ProviderRoute live from
+            // disk. This keeps route identity canonical (providerId + model)
+            // instead of trusting Rust's legacy providerEnv blob, and fails
+            // loud for known provider/model/key errors. Legacy fallback is kept
+            // only for unmatched historical bots where no Agent can be found.
+            let resolvedProviderEnv: ProviderEnv | undefined = payload.providerEnv ?? undefined;
+            if (!heldImConfig && !snapshotResolvedConfig) {
+              const imRoutingConfig = loadConfig();
+              const imProviderRouting = resolveImProviderRouting(agentDir, payload.botId, {
+                config: imRoutingConfig,
+                managedCodexProviderReady: isManagedCodexProviderReady(imRoutingConfig),
+              });
+              if (imProviderRouting.kind === 'provider-route') {
+                resolvedProviderRoute = imProviderRouting.providerRoute;
+                resolvedModel = imProviderRouting.model;
+                resolvedProviderEnv = undefined;
+              } else if (imProviderRouting.kind === 'external-runtime') {
+                imRequestRegistry.unregister(payload.requestId);
+                return jsonResponse(
+                  {
+                    success: false,
+                    error: `IM channel now resolves to ${imProviderRouting.runtime}; current sidecar is builtin. Runtime drift recovery should create an external-runtime session before enqueue.`,
+                  },
+                  409,
+                );
+              } else if (imProviderRouting.kind === 'error') {
+                imRequestRegistry.unregister(payload.requestId);
+                return jsonResponse(
+                  { success: false, error: imProviderRouting.message, reason: imProviderRouting.reason },
+                  imProviderRouting.status,
+                );
+              }
+            }
             if (heldImConfig) {
               resolvedPermissionMode = (heldImConfig.permissionMode as PermissionMode | undefined) ?? resolvedPermissionMode;
               resolvedModel = heldImConfig.model ?? resolvedModel;
+              resolvedProviderRoute = undefined;
               resolvedProviderEnv = heldImConfig.providerEnv ?? resolvedProviderEnv;
               resolvedReasoningEffort = heldImConfig.reasoningEffort ?? resolvedReasoningEffort;
             }

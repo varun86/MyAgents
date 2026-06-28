@@ -71,10 +71,12 @@ pub(super) async fn shutdown_bot_instance(
     }
 
     // Persist active sessions in health state before releasing Sidecars
-    instance
-        .health
-        .set_active_sessions(instance.router.lock().await.active_sessions())
-        .await;
+    let _ = health::persist_router_active_sessions(
+        &instance.health,
+        &instance.router,
+        "shutdown-before-release",
+    )
+    .await;
 
     // Release all Sidecar sessions
     instance.router.lock().await.release_all(sidecar_manager);
@@ -955,7 +957,20 @@ pub(super) async fn create_bot_instance<R: Runtime>(
                         adapter_for_reply.ack_clear(&chat_id, &message_id).await;
                         match result {
                             Ok(new_id) => {
-                                let reply = format!("✅ 已创建新对话 ({})", &new_id[..8.min(new_id.len())]);
+                                let persist_result = health::persist_router_active_sessions(
+                                    &health_clone,
+                                    &router_clone,
+                                    "command-new-reset",
+                                )
+                                .await;
+                                let reply = match persist_result {
+                                    Ok(()) => format!("✅ 已创建新对话 ({})", &new_id[..8.min(new_id.len())]),
+                                    Err(e) => format!(
+                                        "⚠️ 已创建新对话 ({}), 但状态保存失败: {}",
+                                        &new_id[..8.min(new_id.len())],
+                                        e
+                                    ),
+                                };
                                 if let Err(e) = adapter_for_reply.send_message(&chat_id, &reply).await {
                                     ulog_warn!("[im-cmd] send_message (/new success) failed: {}", e);
                                 }
@@ -1023,6 +1038,7 @@ pub(super) async fn create_bot_instance<R: Runtime>(
                                     &current_runtime,
                                     &app_clone,
                                     &manager_clone,
+                                    &health_clone,
                                 ).await {
                                     Ok(port) => {
                                         let client = {
@@ -1824,15 +1840,22 @@ pub(super) async fn create_bot_instance<R: Runtime>(
                         {
                             // task_runtime is already a String cloned above at the top of
                             // this spawn (runtime_for_loop.read().await.clone()).
-                            let drift_result = task_router
-                                .lock()
-                                .await
-                                .check_and_reset_on_runtime_drift(
-                                    &session_key,
-                                    &task_runtime,
-                                    &task_manager,
-                                );
+                            let drift_result = {
+                                let mut router_guard = task_router.lock().await;
+                                router_guard
+                                    .check_and_reset_on_runtime_drift(
+                                        &session_key,
+                                        &task_runtime,
+                                        &task_manager,
+                                    )
+                            };
                             if let Some((_old_id, new_id)) = drift_result {
+                                let _ = health::persist_router_active_sessions(
+                                    &task_health,
+                                    &task_router,
+                                    "message-runtime-drift",
+                                )
+                                .await;
                                 // C3 fix: drift killed the old Sidecar, so its
                                 // ImEventConsumer must be cancelled before we spawn
                                 // a fresh one against the new Sidecar port. Otherwise
@@ -1873,10 +1896,16 @@ pub(super) async fn create_bot_instance<R: Runtime>(
                                 return;
                             }
                         };
-                        task_router
-                            .lock()
-                            .await
-                            .update_peer_metadata_from_message(&session_key, &msg);
+                        {
+                            let mut router_guard = task_router.lock().await;
+                            router_guard.update_peer_metadata_from_message(&session_key, &msg);
+                        }
+                        let _ = health::persist_router_active_sessions(
+                            &task_health,
+                            &task_router,
+                            "message-ensure-sidecar",
+                        )
+                        .await;
 
                         // 4b. Sync AI config to newly created Sidecar
                         if is_new_sidecar {
@@ -1944,8 +1973,12 @@ pub(super) async fn create_bot_instance<R: Runtime>(
                                         }
                                     }
                                     health.set_last_message_at(chrono::Utc::now().to_rfc3339()).await;
-                                    let active_count = router.lock().await.active_sessions();
-                                    health.set_active_sessions(active_count).await;
+                                    let _ = health::persist_router_active_sessions(
+                                        &health,
+                                        &router,
+                                        "message-terminal",
+                                    )
+                                    .await;
                                     {
                                         let link_guard = agent_link.read().await;
                                         if link_guard.is_some() {
@@ -2075,10 +2108,16 @@ pub(super) async fn create_bot_instance<R: Runtime>(
                                 .await;
                                 match result {
                                     Ok(_) => {
-                                        task_router
-                                            .lock()
-                                            .await
-                                            .mark_metadata_birth_consumed(&session_key);
+                                        {
+                                            let mut router_guard = task_router.lock().await;
+                                            router_guard.mark_metadata_birth_consumed(&session_key);
+                                        }
+                                        let _ = health::persist_router_active_sessions(
+                                            &task_health,
+                                            &task_router,
+                                            "buffer-replay-birth-consumed",
+                                        )
+                                        .await;
                                         ulog_info!(
                                             "[im] Replayed buffered requestId={} session_key={}",
                                             buf_request_id, session_key,
@@ -2205,10 +2244,16 @@ pub(super) async fn create_bot_instance<R: Runtime>(
                         .await
                         {
                             Ok(_session_hint) => {
-                                task_router
-                                    .lock()
-                                    .await
-                                    .mark_metadata_birth_consumed(&session_key);
+                                {
+                                    let mut router_guard = task_router.lock().await;
+                                    router_guard.mark_metadata_birth_consumed(&session_key);
+                                }
+                                let _ = health::persist_router_active_sessions(
+                                    &task_health,
+                                    &task_router,
+                                    "message-birth-consumed",
+                                )
+                                .await;
                                 ulog_info!(
                                     "[im] Enqueued requestId={} session_key={}",
                                     request_id, session_key,
@@ -2525,6 +2570,7 @@ pub(super) async fn create_bot_instance<R: Runtime>(
         let hb_adapter = Arc::clone(&adapter);
         let hb_app = app_handle.clone();
         let hb_peer_locks = Arc::clone(&peer_locks);
+        let hb_health = Arc::clone(&health);
         let hb_agent_id = agent_id.clone().unwrap_or_else(|| bot_id.to_string());
         let hb_workspace = default_workspace_str.clone();
         let handle = tauri::async_runtime::spawn(async move {
@@ -2537,6 +2583,7 @@ pub(super) async fn create_bot_instance<R: Runtime>(
                     hb_adapter,
                     hb_app,
                     hb_peer_locks,
+                    hb_health,
                     hb_agent_id,
                     hb_workspace,
                 )
