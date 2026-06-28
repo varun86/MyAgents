@@ -121,6 +121,17 @@ interface Provider {
 - `providerEnvJson` 只读兼容旧数据：没有 `providerRoute` 的历史 session 才允许 fallback 读取。新写入路径必须写 `providerRoute`，并省略/清空 `providerEnvJson`。
 - `model + configSnapshotAt` 旧 session 缺 provider 时，只在“声明该 model 且本地有凭据/账号证据”的 provider 中修复。API provider 看非空 API key；Anthropic subscription 看 valid 状态、`accountEmail` 或 `verifiedAt` 任一存在。多个候选或没有候选时，不猜默认 provider，要求用户在模型选择器重新选择。
 
+### Runtime-backed Provider（Managed Codex）
+
+`codex-sub` 是 Provider 列表中的订阅型入口，但它不 materialize 为 Claude Agent SDK 的 `ProviderEnv`。它的 `Provider.execution.kind === 'runtime-backed'`，选择后会生成 `RuntimeBackedProviderIdentity { providerId:'codex-sub', runtime:'codex', runtimeSource:'managed-provider', model }`，由 Sidecar 以 Codex Runtime 执行。
+
+边界规则：
+
+- Chat session birth 保存 runtime projection：`runtime:'codex'` + `runtimeSource:'managed-provider'` + `providerExecutionIdentity`；Task/Cron 执行 override 保存 `runtimeConfig.source:'managed-provider'` + 选中的 Codex model。这样 Rust spawn Sidecar 时能注入 `MYAGENTS_RUNTIME=codex` 与 runtime source。
+- Agent/Channel 默认值保存用户的 Provider 选择：`providerId:'codex-sub'` + model，`runtime` 仍保持 `builtin`，且不得把 `runtimeConfig.source/model` 写进 Agent 默认配置。否则 Codex 订阅会和用户手动安装的 Codex CLI runtime 混成同一种身份。
+- `codex-sub` 的可见性由 `managedCodexProviderDevGate` 控制；可选择性还要求 managed runtime 已安装到要求版本、managed Codex auth 有效（`chatgpt` 或兼容的 `access-token`），并且 provider 未被 `disabledProviderIds` 禁用。
+- 进入 runtime-backed family 后，历史边界是 `runtime-backed:codex-sub`，不与 builtin Anthropic / third-party Provider transcript 互相 resume。
+
 ---
 
 ## 调试技巧

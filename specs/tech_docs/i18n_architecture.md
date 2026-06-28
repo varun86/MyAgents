@@ -29,7 +29,7 @@
 | `src-tauri/src/i18n.rs` | Native UI 语言状态、system locale、托盘文案、Tauri commands |
 | `src-tauri/src/tray.rs` | 托盘菜单 handle 保存与 relabel |
 
-Renderer 文案按 namespace 分组，目前包括 `common`、`app`、`settings`、`chat`。新页面应优先复用既有 namespace；当页面形成独立产品面时再新增 namespace。
+Renderer 文案按 namespace 分组，目前包括 `common`、`app`、`settings`、`chat`、`launcher`、`task`。新页面应优先复用既有 namespace；当页面形成独立产品面时再新增 namespace。
 
 ## 同步链路
 
