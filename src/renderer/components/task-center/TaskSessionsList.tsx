@@ -19,6 +19,7 @@
 // Launcher's shows `HH:mm` only.
 
 import { useEffect, useMemo, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Clock } from 'lucide-react';
 
 import { getSessions, type SessionMetadata } from '@/api/sessionClient';
@@ -52,6 +53,7 @@ function formatTimestamp(iso: string | number | undefined): string {
 }
 
 export function TaskSessionsList({ task, onBeforeOpen }: Props) {
+  const { t } = useTranslation('task');
   const [sessions, setSessions] = useState<SessionMetadata[]>([]);
   const [loading, setLoading] = useState(true);
   const [expanded, setExpanded] = useState(false);
@@ -124,18 +126,18 @@ export function TaskSessionsList({ task, onBeforeOpen }: Props) {
           overlay reads as a series of same-weight sections rather than
           an eyebrow label hidden between larger doc blocks. */}
       <div className="mb-2 flex items-baseline gap-2">
-        <h3 className="text-sm font-semibold text-[var(--ink)]">任务执行</h3>
+        <h3 className="text-sm font-semibold text-[var(--ink)]">{t('sessions.title')}</h3>
         <span className="text-xs tabular-nums text-[var(--ink-muted)]">
           {task.sessionIds.length}
         </span>
       </div>
       {loading ? (
         <div className="py-3 text-xs text-[var(--ink-muted)]/60">
-          加载中…
+          {t('sessions.loading')}
         </div>
       ) : sessions.length === 0 ? (
         <div className="py-3 text-xs text-[var(--ink-muted)]/60">
-          {task.sessionIds.length === 0 ? '尚未执行过' : '相关 session 记录已不存在'}
+          {task.sessionIds.length === 0 ? t('sessions.emptyNeverRun') : t('sessions.emptyMissing')}
         </div>
       ) : (
         <div className="space-y-0.5">
@@ -144,7 +146,7 @@ export function TaskSessionsList({ task, onBeforeOpen }: Props) {
               key={session.id}
               role="button"
               onClick={() => handleOpen(session.id)}
-              title={`打开此次执行的 session（${session.id}）`}
+              title={t('sessions.openTitle', { id: session.id })}
               className="group flex w-full cursor-pointer items-center gap-2.5 rounded-lg px-3 py-2 text-left transition-colors hover:bg-[var(--hover-bg)]"
             >
               <div className="flex w-[104px] shrink-0 items-center gap-1 text-xs text-[var(--ink-muted)]/50">
@@ -162,7 +164,7 @@ export function TaskSessionsList({ task, onBeforeOpen }: Props) {
               onClick={() => setExpanded(true)}
               className="mt-1 px-3 py-1 text-xs text-[var(--ink-muted)] transition-colors hover:text-[var(--ink)]"
             >
-              展开全部 {sessions.length} 条
+              {t('sessions.expandAll', { count: sessions.length })}
             </button>
           )}
           {expanded && sessions.length > MAX_VISIBLE && (
@@ -171,7 +173,7 @@ export function TaskSessionsList({ task, onBeforeOpen }: Props) {
               onClick={() => setExpanded(false)}
               className="mt-1 px-3 py-1 text-xs text-[var(--ink-muted)] transition-colors hover:text-[var(--ink)]"
             >
-              收起
+              {t('sessions.collapse')}
             </button>
           )}
         </div>
