@@ -1046,7 +1046,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
             // Just disable
             await toggleMcpServerEnabled(server.id, false);
             setMcpEnabledIds(prev => prev.filter(id => id !== server.id));
-            toast.success('MCP 已禁用');
+            toast.success(tSettings('toolbox.toasts.mcpDisabled'));
             return;
         }
 
@@ -1055,7 +1055,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
             const savedEnv = await getMcpServerEnv(server.id);
             const missingKeys = server.requiresConfig.filter(key => !savedEnv?.[key]?.trim());
             if (missingKeys.length > 0) {
-                toast.error(`请先配置 ${server.name}（点击 ⚙️ 设置）`);
+                toast.error(tSettings('toolbox.toasts.configureServerFirst', { name: server.name }));
                 // Auto-open settings dialog for convenience
                 handleEditBuiltinMcp(server);
                 return;
@@ -1092,7 +1092,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                     }
                 }
 
-                toast.success('MCP 已启用');
+                toast.success(tSettings('toolbox.toasts.mcpEnabled'));
             } else if (result.error) {
                 // Handle different error types
                 if (result.error.type === 'command_not_found' && result.error.downloadUrl) {
@@ -1105,11 +1105,11 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                     });
                 } else {
                     // Show toast for other errors
-                    toast.error(result.error.message || '启用失败');
+                    toast.error(result.error.message || tSettings('toolbox.toasts.mcpEnableFailed'));
                 }
             }
         } catch (err) {
-            const errorMsg = err instanceof Error ? err.message : '启用失败';
+            const errorMsg = err instanceof Error ? err.message : tSettings('toolbox.toasts.mcpEnableFailed');
             toast.error(errorMsg);
         } finally {
             setMcpEnabling(prev => ({ ...prev, [server.id]: false }));
@@ -1136,22 +1136,24 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                 return { ...current, enabledOfficialToolIds: next };
             });
             await refreshConfig();
-            toast.success(enabled ? '工具已启用' : '工具已禁用');
+            toast.success(enabled
+                ? tSettings('toolbox.toasts.officialToolEnabled')
+                : tSettings('toolbox.toasts.officialToolDisabled'));
             if (enabled && tool.id === IMAGE_UNDERSTANDING_TOOL_ID && visionToolNeedsConfig) {
                 openOfficialToolSettings(tool);
             }
         } catch (err) {
             console.error('[Settings] Failed to toggle official tool:', err);
-            toast.error('工具开关保存失败');
+            toast.error(tSettings('toolbox.toasts.officialToolToggleFailed'));
         } finally {
             setOfficialToolEnabling(prev => ({ ...prev, [tool.id]: false }));
         }
-    }, [openOfficialToolSettings, refreshConfig, toast, visionToolNeedsConfig]);
+    }, [openOfficialToolSettings, refreshConfig, tSettings, toast, visionToolNeedsConfig]);
 
     const saveVisionToolSettings = useCallback(async () => {
         const parsed = parseVisionModelOptionValue(visionToolDraftValue);
         if (!parsed) {
-            toast.error('请选择支持图片理解的模型');
+            toast.error(tSettings('toolbox.toasts.visionModelRequired'));
             return;
         }
         try {
@@ -1164,12 +1166,12 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
             }));
             await refreshConfig();
             setVisionToolSettingsOpen(false);
-            toast.success('图片理解模型已保存');
+            toast.success(tSettings('toolbox.toasts.visionModelSaved'));
         } catch (err) {
             console.error('[Settings] Failed to save vision tool settings:', err);
-            toast.error('保存失败');
+            toast.error(tSettings('toolbox.toasts.saveFailed'));
         }
-    }, [refreshConfig, toast, visionToolDraftValue]);
+    }, [refreshConfig, tSettings, toast, visionToolDraftValue]);
 
     const resetMcpForm = () => {
         setEditingMcpId(null);
@@ -1302,9 +1304,9 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
             const servers = await getAllMcpServers();
             setMcpServersState(servers);
             setBuiltinMcpSettings(null);
-            toast.success('设置已保存');
+            toast.success(tSettings('toolbox.toasts.saveSuccess'));
         } catch {
-            toast.error('保存失败');
+            toast.error(tSettings('toolbox.toasts.saveFailed'));
         }
     };
 
@@ -1329,9 +1331,9 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
             setMcpServersState(servers);
             await checkMcpConfigStatus(servers);
             setGeminiImageSettings(null);
-            toast.success('Gemini 图片生成设置已保存');
+            toast.success(tSettings('toolbox.toasts.geminiImageSaved'));
         } catch {
-            toast.error('保存失败');
+            toast.error(tSettings('toolbox.toasts.saveFailed'));
         }
     };
 
@@ -1340,7 +1342,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
         if (!cookieForm) return;
         const { editIndex, domain, name, value, path } = cookieForm;
         if (!domain.trim() || !name.trim() || !value.trim()) {
-            toast.error('域名、名称和值不能为空');
+            toast.error(tSettings('toolbox.toasts.cookieRequired'));
             return;
         }
         try {
@@ -1390,10 +1392,12 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
             await writeTextFile(ssPath, JSON.stringify(storageState, null, 2));
 
             setCookieForm(null);
-            toast.success(editIndex !== null ? 'Cookie 已更新' : 'Cookie 已添加');
+            toast.success(editIndex !== null
+                ? tSettings('toolbox.toasts.cookieUpdated')
+                : tSettings('toolbox.toasts.cookieAdded'));
             await reloadStorageStateInfo();
         } catch {
-            toast.error('保存失败');
+            toast.error(tSettings('toolbox.toasts.saveFailed'));
         }
     };
 
@@ -1406,10 +1410,10 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
             const storageState = JSON.parse(await readTextFile(ssPath));
             storageState.cookies.splice(idx, 1);
             await writeTextFile(ssPath, JSON.stringify(storageState, null, 2));
-            toast.success('Cookie 已删除');
+            toast.success(tSettings('toolbox.toasts.cookieDeleted'));
             await reloadStorageStateInfo();
         } catch {
-            toast.error('删除失败');
+            toast.error(tSettings('toolbox.toasts.deleteFailed'));
         }
     };
 
@@ -1479,9 +1483,9 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
             const servers = await getAllMcpServers();
             setMcpServersState(servers);
             setPlaywrightSettings(null);
-            toast.success('Playwright 设置已保存');
+            toast.success(tSettings('toolbox.toasts.playwrightSaved'));
         } catch {
-            toast.error('保存失败');
+            toast.error(tSettings('toolbox.toasts.saveFailed'));
         }
     };
 
@@ -1506,9 +1510,9 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
             setMcpServersState(servers);
             await checkMcpConfigStatus(servers);
             setEdgeTtsSettings(null);
-            toast.success('Edge TTS 设置已保存');
+            toast.success(tSettings('toolbox.toasts.edgeTtsSaved'));
         } catch {
-            toast.error('保存失败');
+            toast.error(tSettings('toolbox.toasts.saveFailed'));
         }
     };
 
@@ -1566,14 +1570,14 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                 };
                 audio.onerror = () => {
                     URL.revokeObjectURL(blobUrl);
-                    toast.error('音频播放失败');
+                    toast.error(tSettings('toolbox.toasts.audioPlayFailed'));
                     setTtsPreviewPlaying(false);
                     ttsAudioRef.current = null;
                 };
                 await audio.play();
                 setTtsPreviewPlaying(true);
             } else {
-                toast.error(result.error || '试听失败');
+                toast.error(result.error || tSettings('toolbox.toasts.ttsPreviewFailed'));
             }
         } catch {
             // Clean up blob URL on play() rejection to avoid memory leak
@@ -1584,7 +1588,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                 ttsAudioRef.current = null;
                 if (src.startsWith('blob:')) URL.revokeObjectURL(src);
             }
-            toast.error('试听请求失败');
+            toast.error(tSettings('toolbox.toasts.ttsPreviewRequestFailed'));
         } finally {
             setTtsPreviewLoading(false);
         }
@@ -4916,10 +4920,10 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                             <div className="min-w-0 flex-1">
                                 <h2 className="flex items-center gap-2 text-lg font-semibold text-[var(--ink)]">
                                     <ImageIcon className="h-4 w-4 text-[var(--accent-warm)]" />
-                                    图片理解设置
+                                    {tSettings('toolbox.dialogs.vision.title')}
                                 </h2>
                                 <p className="mt-0.5 text-xs text-[var(--ink-muted)]">
-                                    选择一个已配置、且明确支持图片输入的模型作为读图驱动
+                                    {tSettings('toolbox.dialogs.vision.description')}
                                 </p>
                             </div>
                             <button
@@ -4933,18 +4937,20 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                         <div className="space-y-4 overflow-y-auto p-6">
                             <div>
                                 <label className="mb-2 block text-sm font-medium text-[var(--ink)]">
-                                    图片理解模型
+                                    {tSettings('toolbox.dialogs.vision.model')}
                                 </label>
                                 <CustomSelect
                                     value={visionToolDraftValue}
                                     options={visionModelOptions}
                                     onChange={setVisionToolDraftValue}
-                                    placeholder={visionModelOptions.length > 0 ? '选择模型' : '暂无可用图片模型'}
+                                    placeholder={visionModelOptions.length > 0
+                                        ? tSettings('toolbox.dialogs.vision.selectModel')
+                                        : tSettings('toolbox.dialogs.vision.noImageModels')}
                                     size="md"
                                 />
                                 {visionModelOptions.length === 0 && (
                                     <p className="mt-2 text-xs text-[var(--warning)]">
-                                        请先在模型供应商中配置 API Key，并确保至少一个模型声明支持 image 输入。
+                                        {tSettings('toolbox.dialogs.vision.noImageModelsWarning')}
                                     </p>
                                 )}
                             </div>
@@ -4955,14 +4961,14 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                 onClick={() => setVisionToolSettingsOpen(false)}
                                 className="rounded-lg border border-[var(--line)] px-4 py-2 text-sm text-[var(--ink-muted)] hover:bg-[var(--paper-inset)]"
                             >
-                                取消
+                                {tSettings('toolbox.common.cancel')}
                             </button>
                             <button
                                 onClick={() => void saveVisionToolSettings()}
                                 disabled={!parseVisionModelOptionValue(visionToolDraftValue)}
                                 className="rounded-lg bg-[var(--button-primary-bg)] px-4 py-2 text-sm font-medium text-[var(--button-primary-text)] hover:bg-[var(--button-primary-bg-hover)] disabled:cursor-not-allowed disabled:opacity-50"
                             >
-                                保存
+                                {tSettings('toolbox.common.save')}
                             </button>
                         </div>
                     </div>
@@ -4976,7 +4982,9 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                         {/* Header */}
                         <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--line)]">
                             <div className="min-w-0 flex-1">
-                                <h2 className="text-lg font-semibold text-[var(--ink)]">{builtinMcpSettings.server.name} 设置</h2>
+                                <h2 className="text-lg font-semibold text-[var(--ink)]">
+                                    {tSettings('toolbox.dialogs.builtinMcp.title', { name: builtinMcpSettings.server.name })}
+                                </h2>
                                 {builtinMcpSettings.server.description && (
                                     <p className="mt-0.5 text-xs text-[var(--ink-muted)]">{builtinMcpSettings.server.description}</p>
                                 )}
@@ -4991,7 +4999,9 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                             {/* Preset command/URL (read-only) */}
                             <div>
                                 <label className="block text-sm font-medium text-[var(--ink)] mb-1">
-                                    {builtinMcpSettings.server.type === 'stdio' ? '预设命令' : '服务地址'}
+                                    {builtinMcpSettings.server.type === 'stdio'
+                                        ? tSettings('toolbox.dialogs.builtinMcp.presetCommand')
+                                        : tSettings('toolbox.dialogs.builtinMcp.serviceUrl')}
                                 </label>
                                 <div className="rounded-lg bg-[var(--paper-inset)] px-3 py-2 font-mono text-xs text-[var(--ink-muted)]">
                                     {builtinMcpSettings.server.type === 'stdio'
@@ -5004,8 +5014,12 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
 
                             {/* Extra Args (stdio only) */}
                             {builtinMcpSettings.server.type === 'stdio' && <div>
-                                <label className="block text-sm font-medium text-[var(--ink)] mb-1">额外参数</label>
-                                <p className="text-xs text-[var(--ink-muted)] mb-2">以下参数将追加到预设命令之后</p>
+                                <label className="block text-sm font-medium text-[var(--ink)] mb-1">
+                                    {tSettings('toolbox.dialogs.builtinMcp.extraArgs')}
+                                </label>
+                                <p className="text-xs text-[var(--ink-muted)] mb-2">
+                                    {tSettings('toolbox.dialogs.builtinMcp.extraArgsHint')}
+                                </p>
                                 <div className="space-y-2">
                                     {builtinMcpSettings.extraArgs.map((arg, idx) => (
                                         <div key={idx} className="flex items-center gap-2">
@@ -5037,7 +5051,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                                     } : null);
                                                 }
                                             }}
-                                            placeholder="输入参数，如 --headless"
+                                            placeholder={tSettings('toolbox.dialogs.builtinMcp.argPlaceholder')}
                                             className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-1.5 text-sm text-[var(--ink)] placeholder-[var(--ink-muted)]/50 outline-none focus:border-[var(--accent)]"
                                         />
                                         <button
@@ -5069,7 +5083,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                             href={builtinMcpSettings.server.websiteUrl}
                                             className="ml-auto shrink-0 font-medium text-[var(--accent)] hover:underline"
                                         >
-                                            去注册
+                                            {tSettings('toolbox.dialogs.builtinMcp.register')}
                                         </ExternalLink>
                                     )}
                                 </div>
@@ -5077,7 +5091,9 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
 
                             {/* Environment Variables */}
                             <div>
-                                <label className="block text-sm font-medium text-[var(--ink)] mb-1">环境变量</label>
+                                <label className="block text-sm font-medium text-[var(--ink)] mb-1">
+                                    {tSettings('toolbox.dialogs.builtinMcp.environmentVariables')}
+                                </label>
                                 <div className="space-y-2">
                                     {Object.entries(builtinMcpSettings.env).map(([key, value]) => (
                                         <div key={key} className="flex items-center gap-2">
@@ -5111,14 +5127,14 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                             type="text"
                                             value={builtinMcpSettings.newEnvKey}
                                             onChange={e => setBuiltinMcpSettings(prev => prev ? { ...prev, newEnvKey: e.target.value } : null)}
-                                            placeholder="变量名"
+                                            placeholder={tSettings('toolbox.common.envKeyPlaceholder')}
                                             className="w-1/3 rounded-lg border border-[var(--line)] bg-[var(--paper)] px-2 py-1.5 font-mono text-sm text-[var(--ink)] placeholder-[var(--ink-muted)]/50 outline-none focus:border-[var(--accent)]"
                                         />
                                         <input
                                             type="text"
                                             value={builtinMcpSettings.newEnvValue}
                                             onChange={e => setBuiltinMcpSettings(prev => prev ? { ...prev, newEnvValue: e.target.value } : null)}
-                                            placeholder="值"
+                                            placeholder={tSettings('toolbox.common.valuePlaceholder')}
                                             className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper)] px-2 py-1.5 font-mono text-sm text-[var(--ink)] placeholder-[var(--ink-muted)]/50 outline-none focus:border-[var(--accent)]"
                                             onKeyDown={e => {
                                                 if (e.key === 'Enter') {
@@ -5163,13 +5179,13 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                 onClick={() => setBuiltinMcpSettings(null)}
                                 className="rounded-lg px-4 py-2 text-sm text-[var(--ink-muted)] hover:bg-[var(--paper-inset)]"
                             >
-                                取消
+                                {tSettings('toolbox.common.cancel')}
                             </button>
                             <button
                                 onClick={handleSaveBuiltinMcp}
                                 className="rounded-lg bg-[var(--accent)] px-4 py-2 text-sm font-medium text-white hover:bg-[var(--accent)]/90"
                             >
-                                保存
+                                {tSettings('toolbox.common.save')}
                             </button>
                         </div>
                     </div>
@@ -5183,7 +5199,9 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                         {/* Header */}
                         <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--line)]">
                             <div className="min-w-0 flex-1">
-                                <h2 className="text-lg font-semibold text-[var(--ink)]">Gemini 图片生成 设置</h2>
+                                <h2 className="text-lg font-semibold text-[var(--ink)]">
+                                    {tSettings('toolbox.dialogs.geminiImage.title')}
+                                </h2>
                                 {getPresetMcpServer('gemini-image')?.description && (
                                     <p className="mt-0.5 text-xs text-[var(--ink-muted)]">{getPresetMcpServer('gemini-image')?.description}</p>
                                 )}
@@ -5206,7 +5224,9 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                     className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 text-sm text-[var(--ink)] placeholder-[var(--ink-muted)]/50 outline-none focus:border-[var(--accent)] font-mono"
                                 />
                                 <p className="mt-1 text-xs text-[var(--ink-muted)]">
-                                    从 <a href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer" className="text-[var(--accent)] hover:underline">aistudio.google.com</a> 免费获取
+                                    {tSettings('toolbox.dialogs.geminiImage.apiKeyHintPrefix')}
+                                    <a href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer" className="text-[var(--accent)] hover:underline">aistudio.google.com</a>
+                                    {tSettings('toolbox.dialogs.geminiImage.apiKeyHintSuffix')}
                                 </p>
                             </div>
 
@@ -5217,20 +5237,24 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                     type="text"
                                     value={geminiImageSettings.baseUrl}
                                     onChange={e => setGeminiImageSettings(prev => prev ? { ...prev, baseUrl: e.target.value } : null)}
-                                    placeholder="留空使用官方端点"
+                                    placeholder={tSettings('toolbox.dialogs.geminiImage.baseUrlPlaceholder')}
                                     className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 text-sm text-[var(--ink)] placeholder-[var(--ink-muted)]/50 outline-none focus:border-[var(--accent)] font-mono"
                                 />
-                                <p className="mt-1 text-xs text-[var(--ink-muted)]">留空使用官方端点。支持兼容 Gemini 原生协议的第三方中转</p>
+                                <p className="mt-1 text-xs text-[var(--ink-muted)]">
+                                    {tSettings('toolbox.dialogs.geminiImage.baseUrlHint')}
+                                </p>
                             </div>
 
                             {/* Model */}
                             <div>
-                                <label className="block text-sm font-medium text-[var(--ink)] mb-2">模型</label>
+                                <label className="block text-sm font-medium text-[var(--ink)] mb-2">
+                                    {tSettings('toolbox.dialogs.geminiImage.model')}
+                                </label>
                                 <div className="flex flex-wrap gap-2">
                                     {[
-                                        { id: 'gemini-2.5-flash-image', label: 'Nano Banana', desc: 'Stable · 速度快 · 免费额度多' },
-                                        { id: 'gemini-3-pro-image-preview', label: 'Nano Banana Pro', desc: 'Preview · 质量最高 · 文字渲染最佳' },
-                                        { id: 'gemini-3.1-flash-image-preview', label: 'Nano Banana 2', desc: 'Preview · 速度+质量平衡（推荐）' },
+                                        { id: 'gemini-2.5-flash-image', label: 'Nano Banana', desc: tSettings('toolbox.dialogs.geminiImage.modelDescStable') },
+                                        { id: 'gemini-3-pro-image-preview', label: 'Nano Banana Pro', desc: tSettings('toolbox.dialogs.geminiImage.modelDescBestQuality') },
+                                        { id: 'gemini-3.1-flash-image-preview', label: 'Nano Banana 2', desc: tSettings('toolbox.dialogs.geminiImage.modelDescBalanced') },
                                     ].map(m => (
                                         <button
                                             key={m.id}
@@ -5250,7 +5274,9 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
 
                             {/* Aspect Ratio */}
                             <div>
-                                <label className="block text-sm font-medium text-[var(--ink)] mb-2">默认宽高比</label>
+                                <label className="block text-sm font-medium text-[var(--ink)] mb-2">
+                                    {tSettings('toolbox.dialogs.geminiImage.defaultAspectRatio')}
+                                </label>
                                 <div className="flex flex-wrap gap-1.5">
                                     {['auto', '1:1', '3:4', '4:3', '9:16', '16:9', '2:3', '3:2', '4:5', '5:4', '21:9'].map(r => (
                                         <button
@@ -5262,16 +5288,20 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                                     : 'bg-[var(--paper-inset)] text-[var(--ink-muted)] hover:text-[var(--ink)]'
                                             }`}
                                         >
-                                            {r === 'auto' ? '自动' : r}
+                                            {r === 'auto' ? tSettings('toolbox.common.auto') : r}
                                         </button>
                                     ))}
                                 </div>
-                                <p className="mt-1 text-xs text-[var(--ink-muted)]">自动 = 不传参数，由模型决定（默认 1:1）</p>
+                                <p className="mt-1 text-xs text-[var(--ink-muted)]">
+                                    {tSettings('toolbox.dialogs.geminiImage.autoAspectHint')}
+                                </p>
                             </div>
 
                             {/* Resolution */}
                             <div>
-                                <label className="block text-sm font-medium text-[var(--ink)] mb-2">默认分辨率</label>
+                                <label className="block text-sm font-medium text-[var(--ink)] mb-2">
+                                    {tSettings('toolbox.dialogs.geminiImage.defaultResolution')}
+                                </label>
                                 <div className="flex gap-2">
                                     {['auto', '1K', '2K', '4K'].map(s => (
                                         <button
@@ -5283,26 +5313,32 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                                     : 'bg-[var(--paper-inset)] text-[var(--ink-muted)] hover:text-[var(--ink)]'
                                             }`}
                                         >
-                                            {s === 'auto' ? '自动' : s}
+                                            {s === 'auto' ? tSettings('toolbox.common.auto') : s}
                                         </button>
                                     ))}
                                 </div>
-                                <p className="mt-1 text-xs text-[var(--ink-muted)]">自动 = 不传参数，由模型决定（默认 1K）</p>
+                                <p className="mt-1 text-xs text-[var(--ink-muted)]">
+                                    {tSettings('toolbox.dialogs.geminiImage.autoResolutionHint')}
+                                </p>
                             </div>
 
                             {/* Advanced Section Divider */}
                             <div className="border-t border-[var(--line)] pt-4">
-                                <span className="text-sm font-medium text-[var(--ink-muted)]">高级设置</span>
+                                <span className="text-sm font-medium text-[var(--ink-muted)]">
+                                    {tSettings('toolbox.common.advancedSettings')}
+                                </span>
                             </div>
 
                             {/* Thinking Level */}
                             <div>
-                                <label className="block text-sm font-medium text-[var(--ink)] mb-2">推理深度</label>
+                                <label className="block text-sm font-medium text-[var(--ink)] mb-2">
+                                    {tSettings('toolbox.dialogs.geminiImage.thinkingLevel')}
+                                </label>
                                 <div className="flex gap-2">
                                     {[
-                                        { id: 'auto', label: '自动', desc: '不传参数 · 由模型决定' },
-                                        { id: 'minimal', label: '快速', desc: '速度优先（模型默认值）' },
-                                        { id: 'high', label: '高质量', desc: '推理更深 · 生成更精细但更慢' },
+                                        { id: 'auto', label: tSettings('toolbox.dialogs.geminiImage.thinkingAuto'), desc: tSettings('toolbox.dialogs.geminiImage.thinkingAutoDesc') },
+                                        { id: 'minimal', label: tSettings('toolbox.dialogs.geminiImage.thinkingMinimal'), desc: tSettings('toolbox.dialogs.geminiImage.thinkingMinimalDesc') },
+                                        { id: 'high', label: tSettings('toolbox.dialogs.geminiImage.thinkingHigh'), desc: tSettings('toolbox.dialogs.geminiImage.thinkingHighDesc') },
                                     ].map(t => (
                                         <button
                                             key={t.id}
@@ -5322,8 +5358,12 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                             {/* Search Grounding */}
                             <div className="flex items-center justify-between">
                                 <div>
-                                    <div className="text-sm font-medium text-[var(--ink)]">搜索增强</div>
-                                    <div className="text-xs text-[var(--ink-muted)]">生成前搜索 Google 获取实时信息（人物、事件、天气等）</div>
+                                    <div className="text-sm font-medium text-[var(--ink)]">
+                                        {tSettings('toolbox.dialogs.geminiImage.searchGrounding')}
+                                    </div>
+                                    <div className="text-xs text-[var(--ink-muted)]">
+                                        {tSettings('toolbox.dialogs.geminiImage.searchGroundingDescription')}
+                                    </div>
                                 </div>
                                 <button
                                     onClick={() => setGeminiImageSettings(prev => prev ? { ...prev, searchGrounding: !prev.searchGrounding } : null)}
@@ -5339,7 +5379,9 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
 
                             {/* Max Context Turns */}
                             <div>
-                                <label className="block text-sm font-medium text-[var(--ink)] mb-1">单次图片会话最大编辑轮次</label>
+                                <label className="block text-sm font-medium text-[var(--ink)] mb-1">
+                                    {tSettings('toolbox.dialogs.geminiImage.maxContextTurns')}
+                                </label>
                                 <input
                                     type="number"
                                     min={2}
@@ -5348,7 +5390,9 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                     onChange={e => setGeminiImageSettings(prev => prev ? { ...prev, maxContextTurns: parseInt(e.target.value, 10) || 20 } : null)}
                                     className="w-20 rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-1.5 text-sm text-[var(--ink)] outline-none focus:border-[var(--accent)]"
                                 />
-                                <p className="mt-1 text-xs text-[var(--ink-muted)]">超过后自动开始新会话（防止请求体过大）</p>
+                                <p className="mt-1 text-xs text-[var(--ink-muted)]">
+                                    {tSettings('toolbox.dialogs.geminiImage.maxContextTurnsHint')}
+                                </p>
                             </div>
 
                         </div>
@@ -5359,14 +5403,14 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                 onClick={() => setGeminiImageSettings(null)}
                                 className="rounded-lg px-4 py-2 text-sm text-[var(--ink-muted)] hover:bg-[var(--paper-inset)]"
                             >
-                                取消
+                                {tSettings('toolbox.common.cancel')}
                             </button>
                             <button
                                 onClick={handleSaveGeminiImage}
                                 disabled={!geminiImageSettings.apiKey.trim()}
                                 className="rounded-lg bg-[var(--accent)] px-4 py-2 text-sm font-medium text-white hover:bg-[var(--accent)]/90 disabled:opacity-40"
                             >
-                                保存
+                                {tSettings('toolbox.common.save')}
                             </button>
                         </div>
                     </div>
@@ -5380,7 +5424,9 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                         {/* Header */}
                         <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--line)]">
                             <div className="min-w-0 flex-1">
-                                <h2 className="text-lg font-semibold text-[var(--ink)]">Playwright 浏览器设置</h2>
+                                <h2 className="text-lg font-semibold text-[var(--ink)]">
+                                    {tSettings('toolbox.dialogs.playwright.title')}
+                                </h2>
                                 {getPresetMcpServer('playwright')?.description && (
                                     <p className="mt-0.5 text-xs text-[var(--ink-muted)]">{getPresetMcpServer('playwright')?.description}</p>
                                 )}
@@ -5395,8 +5441,12 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                             {/* Headless Mode */}
                             <div className="flex items-center justify-between">
                                 <div>
-                                    <div className="text-sm font-medium text-[var(--ink)]">无头模式</div>
-                                    <div className="text-xs text-[var(--ink-muted)]">后台运行，不弹出浏览器窗口</div>
+                                    <div className="text-sm font-medium text-[var(--ink)]">
+                                        {tSettings('toolbox.dialogs.playwright.headless')}
+                                    </div>
+                                    <div className="text-xs text-[var(--ink-muted)]">
+                                        {tSettings('toolbox.dialogs.playwright.headlessDescription')}
+                                    </div>
                                 </div>
                                 <button
                                     onClick={() => setPlaywrightSettings(prev => prev ? { ...prev, headless: !prev.headless } : null)}
@@ -5412,11 +5462,13 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
 
                             {/* Browser */}
                             <div>
-                                <label className="block text-sm font-medium text-[var(--ink)] mb-2">浏览器</label>
+                                <label className="block text-sm font-medium text-[var(--ink)] mb-2">
+                                    {tSettings('toolbox.dialogs.playwright.browser')}
+                                </label>
                                 <div className="flex flex-wrap gap-1.5">
                                     {(() => {
                                         const knownBrowsers = [
-                                            { id: '', label: '默认 (Chromium)' },
+                                            { id: '', label: tSettings('toolbox.dialogs.playwright.defaultChromium') },
                                             { id: 'chrome', label: 'Chrome' },
                                             { id: 'firefox', label: 'Firefox' },
                                             { id: 'webkit', label: 'WebKit' },
@@ -5443,12 +5495,14 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
 
                             {/* Device Emulation */}
                             <div>
-                                <label className="block text-sm font-medium text-[var(--ink)] mb-2">设备模拟</label>
+                                <label className="block text-sm font-medium text-[var(--ink)] mb-2">
+                                    {tSettings('toolbox.dialogs.playwright.deviceEmulation')}
+                                </label>
                                 <div className="flex flex-wrap gap-1.5">
                                     {[
-                                        { id: '', label: '不模拟' },
+                                        { id: '', label: tSettings('toolbox.dialogs.playwright.noEmulation') },
                                         ...PLAYWRIGHT_DEVICE_PRESETS.map(name => ({ id: name, label: name })),
-                                        { id: '__custom__', label: '自定义' },
+                                        { id: '__custom__', label: tSettings('toolbox.dialogs.playwright.custom') },
                                     ].map(d => (
                                         <button
                                             key={d.id}
@@ -5468,7 +5522,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                         type="text"
                                         value={playwrightSettings.customDevice}
                                         onChange={e => setPlaywrightSettings(prev => prev ? { ...prev, customDevice: e.target.value } : null)}
-                                        placeholder="输入设备名称，如 Galaxy S24"
+                                        placeholder={tSettings('toolbox.dialogs.playwright.customDevicePlaceholder')}
                                         className="mt-2 w-full rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 text-sm text-[var(--ink)] placeholder-[var(--ink-muted)]/50 outline-none focus:border-[var(--accent)]"
                                     />
                                 )}
@@ -5476,7 +5530,9 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
 
                             {/* Browser Mode Selector */}
                             <div>
-                                <label className="block text-sm font-medium text-[var(--ink)] mb-2">浏览器模式</label>
+                                <label className="block text-sm font-medium text-[var(--ink)] mb-2">
+                                    {tSettings('toolbox.dialogs.playwright.browserMode')}
+                                </label>
                                 <div className="grid grid-cols-2 gap-2">
                                     <button
                                         onClick={() => setPlaywrightSettings(prev => prev ? { ...prev, mode: 'persistent' } : null)}
@@ -5487,10 +5543,10 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                         }`}
                                     >
                                         <div className={`text-xs font-medium ${playwrightSettings.mode === 'persistent' ? 'text-[var(--accent)]' : 'text-[var(--ink)]'}`}>
-                                            持久化模式
+                                            {tSettings('toolbox.dialogs.playwright.persistentMode')}
                                         </div>
                                         <div className="text-xs text-[var(--ink-muted)] mt-0.5 leading-tight">
-                                            登录态完整保留，同一时间仅一个对话可使用
+                                            {tSettings('toolbox.dialogs.playwright.persistentModeDescription')}
                                         </div>
                                     </button>
                                     <button
@@ -5502,10 +5558,10 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                         }`}
                                     >
                                         <div className={`text-xs font-medium ${playwrightSettings.mode === 'isolated' ? 'text-[var(--accent)]' : 'text-[var(--ink)]'}`}>
-                                            独立模式
+                                            {tSettings('toolbox.dialogs.playwright.isolatedMode')}
                                         </div>
                                         <div className="text-xs text-[var(--ink-muted)] mt-0.5 leading-tight">
-                                            多对话可同时使用，登录态通过快照共享
+                                            {tSettings('toolbox.dialogs.playwright.isolatedModeDescription')}
                                         </div>
                                     </button>
                                 </div>
@@ -5514,7 +5570,9 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                             {/* Persistent Mode: user-data-dir + warning */}
                             {playwrightSettings.mode === 'persistent' && (
                                 <div>
-                                    <label className="block text-sm font-medium text-[var(--ink)] mb-1">浏览器数据目录</label>
+                                    <label className="block text-sm font-medium text-[var(--ink)] mb-1">
+                                        {tSettings('toolbox.dialogs.playwright.userDataDir')}
+                                    </label>
                                     <input
                                         type="text"
                                         value={playwrightSettings.userDataDir}
@@ -5523,7 +5581,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                         className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 text-sm text-[var(--ink)] placeholder-[var(--ink-muted)]/50 outline-none focus:border-[var(--accent)] font-mono"
                                     />
                                     <div className="mt-2 rounded-lg bg-[var(--warning-bg)] px-3 py-2 text-xs text-[var(--warning)]">
-                                        持久化模式下，同一时间只能有一个对话使用浏览器，其他对话需等待
+                                        {tSettings('toolbox.dialogs.playwright.persistentWarning')}
                                     </div>
                                 </div>
                             )}
@@ -5533,17 +5591,19 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                 <div className="space-y-3">
                                     <div>
                                         <div className="flex items-center justify-between mb-1.5">
-                                            <label className="text-sm font-medium text-[var(--ink)]">登录态管理</label>
+                                            <label className="text-sm font-medium text-[var(--ink)]">
+                                                {tSettings('toolbox.dialogs.playwright.loginState')}
+                                            </label>
                                             <button
                                                 onClick={() => setCookieForm({ editIndex: null, domain: '', name: '', value: '', path: '/' })}
                                                 className="flex items-center gap-1 rounded-md px-2 py-1 text-xs text-[var(--accent)] hover:bg-[var(--accent)]/10 transition-colors"
                                             >
                                                 <Plus className="h-3 w-3" />
-                                                添加 Cookie
+                                                {tSettings('toolbox.dialogs.playwright.addCookie')}
                                             </button>
                                         </div>
                                         <p className="text-xs text-[var(--ink-muted)] mb-2">
-                                            每个对话使用独立浏览器，登录状态通过 Cookie 快照跨对话共享
+                                            {tSettings('toolbox.dialogs.playwright.loginStateDescription')}
                                         </p>
                                     </div>
 
@@ -5585,10 +5645,10 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                     ) : (
                                         <div className="rounded-lg border border-dashed border-[var(--line)] bg-[var(--paper-inset)] px-3 py-4 text-center">
                                             <div className="text-xs text-[var(--ink-muted)]">
-                                                暂无已保存的 Cookie
+                                                {tSettings('toolbox.dialogs.playwright.emptyCookies')}
                                             </div>
                                             <div className="text-xs text-[var(--ink-muted)] mt-0.5">
-                                                AI 使用浏览器登录后会自动保存，也可手动添加
+                                                {tSettings('toolbox.dialogs.playwright.emptyCookiesDescription')}
                                             </div>
                                         </div>
                                     )}
@@ -5597,11 +5657,15 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                     {cookieForm && (
                                         <div className="rounded-lg border border-[var(--accent)]/30 bg-[var(--paper)] p-3 space-y-2.5">
                                             <div className="text-xs font-medium text-[var(--ink)]">
-                                                {cookieForm.editIndex !== null ? '编辑 Cookie' : '添加 Cookie'}
+                                                {cookieForm.editIndex !== null
+                                                    ? tSettings('toolbox.dialogs.playwright.editCookie')
+                                                    : tSettings('toolbox.dialogs.playwright.addCookie')}
                                             </div>
                                             <div className="grid grid-cols-2 gap-2">
                                                 <div>
-                                                    <label className="block text-xs text-[var(--ink-muted)] mb-0.5">域名 *</label>
+                                                    <label className="block text-xs text-[var(--ink-muted)] mb-0.5">
+                                                        {tSettings('toolbox.dialogs.playwright.domain')}
+                                                    </label>
                                                     <input
                                                         type="text"
                                                         value={cookieForm.domain}
@@ -5611,7 +5675,9 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                                     />
                                                 </div>
                                                 <div>
-                                                    <label className="block text-xs text-[var(--ink-muted)] mb-0.5">路径</label>
+                                                    <label className="block text-xs text-[var(--ink-muted)] mb-0.5">
+                                                        {tSettings('toolbox.dialogs.playwright.path')}
+                                                    </label>
                                                     <input
                                                         type="text"
                                                         value={cookieForm.path}
@@ -5622,7 +5688,9 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                                 </div>
                                             </div>
                                             <div>
-                                                <label className="block text-xs text-[var(--ink-muted)] mb-0.5">名称 *</label>
+                                                <label className="block text-xs text-[var(--ink-muted)] mb-0.5">
+                                                    {tSettings('toolbox.dialogs.playwright.name')}
+                                                </label>
                                                 <input
                                                     type="text"
                                                     value={cookieForm.name}
@@ -5632,7 +5700,9 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                                 />
                                             </div>
                                             <div>
-                                                <label className="block text-xs text-[var(--ink-muted)] mb-0.5">值 *</label>
+                                                <label className="block text-xs text-[var(--ink-muted)] mb-0.5">
+                                                    {tSettings('toolbox.dialogs.playwright.value')}
+                                                </label>
                                                 <input
                                                     type="text"
                                                     value={cookieForm.value}
@@ -5646,14 +5716,16 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                                     onClick={() => setCookieForm(null)}
                                                     className="rounded-md px-3 py-1.5 text-xs text-[var(--ink-muted)] hover:bg-[var(--paper-inset)]"
                                                 >
-                                                    取消
+                                                    {tSettings('toolbox.common.cancel')}
                                                 </button>
                                                 <button
                                                     onClick={handleSaveCookie}
                                                     disabled={!cookieForm.domain.trim() || !cookieForm.name.trim() || !cookieForm.value.trim()}
                                                     className="rounded-md bg-[var(--accent)] px-3 py-1.5 text-xs font-medium text-white disabled:opacity-40"
                                                 >
-                                                    {cookieForm.editIndex !== null ? '更新' : '添加'}
+                                                    {cookieForm.editIndex !== null
+                                                        ? tSettings('toolbox.dialogs.playwright.update')
+                                                        : tSettings('toolbox.common.add')}
                                                 </button>
                                             </div>
                                         </div>
@@ -5663,13 +5735,19 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
 
                             {/* Advanced Section Divider */}
                             <div className="border-t border-[var(--line)] pt-4">
-                                <span className="text-sm font-medium text-[var(--ink-muted)]">高级设置</span>
+                                <span className="text-sm font-medium text-[var(--ink-muted)]">
+                                    {tSettings('toolbox.common.advancedSettings')}
+                                </span>
                             </div>
 
                             {/* Extra Args */}
                             <div>
-                                <label className="block text-sm font-medium text-[var(--ink)] mb-1">额外参数</label>
-                                <p className="text-xs text-[var(--ink-muted)] mb-2">如 --proxy-server=... 等（独立模式下 --caps= 会自动合并 storage）</p>
+                                <label className="block text-sm font-medium text-[var(--ink)] mb-1">
+                                    {tSettings('toolbox.dialogs.playwright.extraArgs')}
+                                </label>
+                                <p className="text-xs text-[var(--ink-muted)] mb-2">
+                                    {tSettings('toolbox.dialogs.playwright.extraArgsHint')}
+                                </p>
                                 <div className="space-y-2">
                                     {playwrightSettings.extraArgs.map((arg, idx) => (
                                         <div key={idx} className="flex items-center gap-2">
@@ -5701,7 +5779,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                                     } : null);
                                                 }
                                             }}
-                                            placeholder="输入参数，如 --proxy-server=http://..."
+                                            placeholder={tSettings('toolbox.dialogs.playwright.argPlaceholder')}
                                             className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-1.5 text-sm text-[var(--ink)] placeholder-[var(--ink-muted)]/50 outline-none focus:border-[var(--accent)]"
                                         />
                                         <button
@@ -5730,13 +5808,13 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                 onClick={() => setPlaywrightSettings(null)}
                                 className="rounded-lg px-4 py-2 text-sm text-[var(--ink-muted)] hover:bg-[var(--paper-inset)]"
                             >
-                                取消
+                                {tSettings('toolbox.common.cancel')}
                             </button>
                             <button
                                 onClick={handleSavePlaywright}
                                 className="rounded-lg bg-[var(--accent)] px-4 py-2 text-sm font-medium text-white hover:bg-[var(--accent)]/90"
                             >
-                                保存
+                                {tSettings('toolbox.common.save')}
                             </button>
                         </div>
                     </div>
@@ -5750,7 +5828,9 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                         {/* Header */}
                         <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--line)]">
                             <div className="min-w-0 flex-1">
-                                <h2 className="text-lg font-semibold text-[var(--ink)]">Edge TTS 语音合成 设置</h2>
+                                <h2 className="text-lg font-semibold text-[var(--ink)]">
+                                    {tSettings('toolbox.dialogs.edgeTts.title')}
+                                </h2>
                                 {getPresetMcpServer('edge-tts')?.description && (
                                     <p className="mt-0.5 text-xs text-[var(--ink-muted)]">{getPresetMcpServer('edge-tts')?.description}</p>
                                 )}
@@ -5766,13 +5846,15 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                             <div className="rounded-lg bg-[var(--success-bg)] border border-[var(--success)]/20 px-3 py-2">
                                 <div className="flex items-center gap-2 text-xs text-[var(--success)]">
                                     <Check className="h-3.5 w-3.5" />
-                                    免费服务，无需 API Key，开箱即用
+                                    {tSettings('toolbox.dialogs.edgeTts.freeNotice')}
                                 </div>
                             </div>
 
                             {/* Default Voice */}
                             <div>
-                                <label className="block text-sm font-medium text-[var(--ink)] mb-1">默认语音</label>
+                                <label className="block text-sm font-medium text-[var(--ink)] mb-1">
+                                    {tSettings('toolbox.dialogs.edgeTts.defaultVoice')}
+                                </label>
                                 <input
                                     type="text"
                                     value={edgeTtsSettings.defaultVoice}
@@ -5782,10 +5864,10 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                 />
                                 <div className="mt-2 flex flex-wrap gap-1.5">
                                     {[
-                                        { id: 'zh-CN-XiaoxiaoNeural', label: '晓晓 · 甜美女声' },
-                                        { id: 'zh-CN-YunxiNeural', label: '云希 · 叙事男声' },
-                                        { id: 'zh-CN-XiaomoNeural', label: '晓墨 · 温柔女声' },
-                                        { id: 'zh-CN-YunjianNeural', label: '云健 · 新闻男声' },
+                                        { id: 'zh-CN-XiaoxiaoNeural', label: tSettings('toolbox.dialogs.edgeTts.voiceXiaoxiao') },
+                                        { id: 'zh-CN-YunxiNeural', label: tSettings('toolbox.dialogs.edgeTts.voiceYunxi') },
+                                        { id: 'zh-CN-XiaomoNeural', label: tSettings('toolbox.dialogs.edgeTts.voiceXiaomo') },
+                                        { id: 'zh-CN-YunjianNeural', label: tSettings('toolbox.dialogs.edgeTts.voiceYunjian') },
                                         { id: 'en-US-JennyNeural', label: 'Jenny · English' },
                                         { id: 'en-US-GuyNeural', label: 'Guy · English' },
                                     ].map(v => (
@@ -5806,10 +5888,12 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
 
                             {/* Output Format */}
                             <div>
-                                <label className="block text-sm font-medium text-[var(--ink)] mb-2">输出格式</label>
+                                <label className="block text-sm font-medium text-[var(--ink)] mb-2">
+                                    {tSettings('toolbox.dialogs.edgeTts.outputFormat')}
+                                </label>
                                 <div className="flex gap-2">
                                     {[
-                                        { id: 'audio-24khz-48kbitrate-mono-mp3', label: 'MP3（推荐）' },
+                                        { id: 'audio-24khz-48kbitrate-mono-mp3', label: tSettings('toolbox.dialogs.edgeTts.mp3Recommended') },
                                         { id: 'webm-24khz-16bit-mono-opus', label: 'WebM' },
                                         { id: 'ogg-24khz-16bit-mono-opus', label: 'OGG' },
                                     ].map(f => (
@@ -5830,13 +5914,17 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
 
                             {/* Voice Parameters Divider */}
                             <div className="border-t border-[var(--line)] pt-4">
-                                <span className="text-sm font-medium text-[var(--ink-muted)]">语音参数</span>
+                                <span className="text-sm font-medium text-[var(--ink-muted)]">
+                                    {tSettings('toolbox.dialogs.edgeTts.voiceParameters')}
+                                </span>
                             </div>
 
                             {/* Rate Slider */}
                             <div>
                                 <div className="flex items-center justify-between mb-1">
-                                    <label className="text-sm font-medium text-[var(--ink-muted)]">语速</label>
+                                    <label className="text-sm font-medium text-[var(--ink-muted)]">
+                                        {tSettings('toolbox.dialogs.edgeTts.rate')}
+                                    </label>
                                     <div className="flex items-center gap-2">
                                         <span className="text-xs font-mono text-[var(--ink)]">{edgeTtsSettings.defaultRate >= 0 ? '+' : ''}{edgeTtsSettings.defaultRate}%</span>
                                         {edgeTtsSettings.defaultRate !== 0 && (
@@ -5844,7 +5932,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                                 onClick={() => setEdgeTtsSettings(prev => prev ? { ...prev, defaultRate: 0 } : null)}
                                                 className="text-xs text-[var(--ink-muted)] hover:text-[var(--accent)]"
                                             >
-                                                重置
+                                                {tSettings('toolbox.common.reset')}
                                             </button>
                                         )}
                                     </div>
@@ -5867,7 +5955,9 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                             {/* Volume Slider */}
                             <div>
                                 <div className="flex items-center justify-between mb-1">
-                                    <label className="text-sm font-medium text-[var(--ink-muted)]">音量</label>
+                                    <label className="text-sm font-medium text-[var(--ink-muted)]">
+                                        {tSettings('toolbox.dialogs.edgeTts.volume')}
+                                    </label>
                                     <div className="flex items-center gap-2">
                                         <span className="text-xs font-mono text-[var(--ink)]">{edgeTtsSettings.defaultVolume >= 0 ? '+' : ''}{edgeTtsSettings.defaultVolume}%</span>
                                         {edgeTtsSettings.defaultVolume !== 0 && (
@@ -5875,7 +5965,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                                 onClick={() => setEdgeTtsSettings(prev => prev ? { ...prev, defaultVolume: 0 } : null)}
                                                 className="text-xs text-[var(--ink-muted)] hover:text-[var(--accent)]"
                                             >
-                                                重置
+                                                {tSettings('toolbox.common.reset')}
                                             </button>
                                         )}
                                     </div>
@@ -5898,7 +5988,9 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                             {/* Pitch Slider */}
                             <div>
                                 <div className="flex items-center justify-between mb-1">
-                                    <label className="text-sm font-medium text-[var(--ink-muted)]">音调</label>
+                                    <label className="text-sm font-medium text-[var(--ink-muted)]">
+                                        {tSettings('toolbox.dialogs.edgeTts.pitch')}
+                                    </label>
                                     <div className="flex items-center gap-2">
                                         <span className="text-xs font-mono text-[var(--ink)]">{edgeTtsSettings.defaultPitch >= 0 ? '+' : ''}{edgeTtsSettings.defaultPitch}Hz</span>
                                         {edgeTtsSettings.defaultPitch !== 0 && (
@@ -5906,7 +5998,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                                 onClick={() => setEdgeTtsSettings(prev => prev ? { ...prev, defaultPitch: 0 } : null)}
                                                 className="text-xs text-[var(--ink-muted)] hover:text-[var(--accent)]"
                                             >
-                                                重置
+                                                {tSettings('toolbox.common.reset')}
                                             </button>
                                         )}
                                     </div>
@@ -5928,7 +6020,9 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
 
                             {/* Preview Section Divider */}
                             <div className="border-t border-[var(--line)] pt-4">
-                                <span className="text-sm font-medium text-[var(--ink-muted)]">试听</span>
+                                <span className="text-sm font-medium text-[var(--ink-muted)]">
+                                    {tSettings('toolbox.dialogs.edgeTts.preview')}
+                                </span>
                             </div>
 
                             {/* Preview */}
@@ -5938,14 +6032,16 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                         value={ttsPreviewText}
                                         onChange={e => setTtsPreviewText(e.target.value)}
                                         rows={2}
-                                        placeholder="输入试听文本..."
+                                        placeholder={tSettings('toolbox.dialogs.edgeTts.previewPlaceholder')}
                                         className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 text-sm text-[var(--ink)] placeholder-[var(--ink-muted)]/50 outline-none focus:border-[var(--accent)] resize-none"
                                     />
                                     <button
                                         onClick={handlePreviewTts}
                                         disabled={ttsPreviewLoading || !ttsPreviewText.trim()}
                                         className="shrink-0 h-10 w-10 rounded-full bg-[var(--accent)] text-white flex items-center justify-center hover:bg-[var(--accent)]/90 disabled:opacity-40 transition-colors self-center"
-                                        title={ttsPreviewPlaying ? '停止' : '试听'}
+                                        title={ttsPreviewPlaying
+                                            ? tSettings('toolbox.dialogs.edgeTts.stop')
+                                            : tSettings('toolbox.dialogs.edgeTts.play')}
                                     >
                                         {ttsPreviewLoading ? (
                                             <Loader2 className="h-4 w-4 animate-spin" />
@@ -5967,13 +6063,13 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                 onClick={() => setEdgeTtsSettings(null)}
                                 className="rounded-lg px-4 py-2 text-sm text-[var(--ink-muted)] hover:bg-[var(--paper-inset)]"
                             >
-                                取消
+                                {tSettings('toolbox.common.cancel')}
                             </button>
                             <button
                                 onClick={handleSaveEdgeTts}
                                 className="rounded-lg bg-[var(--accent)] px-4 py-2 text-sm font-medium text-white hover:bg-[var(--accent)]/90"
                             >
-                                保存
+                                {tSettings('toolbox.common.save')}
                             </button>
                         </div>
                     </div>
