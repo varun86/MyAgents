@@ -7,49 +7,35 @@ import type { CronTask } from '@/types/cronTask';
 import { useToast } from '@/components/Toast';
 import CronTaskDetailPanel from '@/components/CronTaskDetailPanel';
 import { currentSupportedLocale, formatPastRelativeTime } from '@/i18n/format';
+import { formatCronIntervalLabel, formatCronStatusText } from '@/utils/cronTaskI18n';
 import { humanizeCron } from '@/utils/taskCenterUtils';
+import type { SupportedLocale } from '../../../../shared/i18n';
+import type { TFunction } from 'i18next';
 
 function formatRelativeTime(isoStr: string): string {
   return formatPastRelativeTime(new Date(isoStr).getTime(), currentSupportedLocale());
 }
 
-function formatInterval(minutes: number, locale = currentSupportedLocale()): string {
-  if (minutes < 60) return locale === 'zh-CN' ? `${minutes} 分钟` : `${minutes} min`;
-  if (minutes < 1440) {
-    const hours = Math.floor(minutes / 60);
-    const mins = minutes % 60;
-    if (mins > 0) return locale === 'zh-CN' ? `${hours} 小时 ${mins} 分钟` : `${hours}h ${mins}m`;
-    return locale === 'zh-CN' ? `${hours} 小时` : `${hours}h`;
-  }
-  const days = Math.floor(minutes / 1440);
-  const hours = Math.floor((minutes % 1440) / 60);
-  if (hours > 0) return locale === 'zh-CN' ? `${days} 天 ${hours} 小时` : `${days}d ${hours}h`;
-  return locale === 'zh-CN' ? `${days} 天` : `${days}d`;
-}
+type TaskT = TFunction<'task'>;
 
-function formatTaskSchedule(task: CronTask): string {
-  const locale = currentSupportedLocale();
+function formatTaskSchedule(task: CronTask, tTask: TaskT, locale: SupportedLocale): string {
   if (task.schedule) {
     switch (task.schedule.kind) {
       case 'at':
-        return locale === 'zh-CN'
-          ? `定时: ${new Date(task.schedule.at).toLocaleString('zh-CN')}`
-          : `At ${new Date(task.schedule.at).toLocaleString('en-US')}`;
+        return tTask('cron.schedule.onceAt', { time: new Date(task.schedule.at).toLocaleString(locale) });
       case 'every':
-        return locale === 'zh-CN' ? `每 ${formatInterval(task.schedule.minutes, locale)}` : `Every ${formatInterval(task.schedule.minutes, locale)}`;
+        return tTask('cron.schedule.every', { interval: formatCronIntervalLabel(task.schedule.minutes, tTask) });
       case 'cron':
-        return humanizeCron(task.schedule.expr, locale) ?? `Cron: ${task.schedule.expr}`;
+        return humanizeCron(task.schedule.expr, locale) ?? tTask('cron.schedule.cron', { expr: task.schedule.expr });
       case 'loop':
-        return locale === 'zh-CN' ? 'Ralph Loop 无限循环' : 'Ralph Loop';
+        return tTask('cron.schedule.loop');
     }
   }
-  return locale === 'zh-CN' ? `每 ${formatInterval(task.intervalMinutes, locale)}` : `Every ${formatInterval(task.intervalMinutes, locale)}`;
+  return tTask('cron.schedule.every', { interval: formatCronIntervalLabel(task.intervalMinutes, tTask) });
 }
 
-function cronStatusText(status: string): string {
-  const locale = currentSupportedLocale();
-  if (status === 'running') return locale === 'zh-CN' ? '运行中' : 'Running';
-  if (status === 'stopped') return locale === 'zh-CN' ? '已停止' : 'Stopped';
+function cronStatusText(status: string, tTask: TaskT): string {
+  if (status === 'running' || status === 'stopped') return formatCronStatusText(status, tTask);
   return status;
 }
 
@@ -64,6 +50,7 @@ interface AgentTasksSectionProps {
 
 export default function AgentTasksSection({ agent }: AgentTasksSectionProps) {
   const { t } = useTranslation('settings');
+  const { t: tTask } = useTranslation('task');
   const [tasks, setTasks] = useState<CronTask[]>([]);
   const [selectedTask, setSelectedTask] = useState<CronTask | null>(null);
   const toast = useToast();
@@ -154,6 +141,7 @@ export default function AgentTasksSection({ agent }: AgentTasksSectionProps) {
       }),
     [tasks],
   );
+  const locale = currentSupportedLocale();
 
   return (
     <div className="space-y-3">
@@ -183,7 +171,7 @@ export default function AgentTasksSection({ agent }: AgentTasksSectionProps) {
                   {task.name || t('agentSettings.tasks.unnamed')}
                 </span>
                 <div className="text-xs text-[var(--ink-subtle)]">
-                  {formatTaskSchedule(task)} · {cronStatusText(task.status)}
+                  {formatTaskSchedule(task, tTask, locale)} · {cronStatusText(task.status, tTask)}
                 </div>
               </div>
               {task.lastExecutedAt && (
