@@ -16,6 +16,7 @@
 import { useState } from 'react';
 import { Search, X } from 'lucide-react';
 import type { RefObject } from 'react';
+import { useTranslation } from 'react-i18next';
 
 interface Props {
   /** Imperative ref so parents can focus the input via shortcut. */
@@ -43,13 +44,14 @@ export function SearchPill({
   value,
   onChange,
   onClear,
-  placeholder = '搜索…',
+  placeholder,
   collapsedPx = 150,
   expandedPx = 320,
   expandedFull = false,
   onFocus,
   onBlur,
 }: Props) {
+  const { t } = useTranslation('task');
   const [focused, setFocused] = useState(false);
   // Focus OR a non-empty query both keep the pill expanded — so a
   // search-in-progress doesn't collapse and clip the query the moment
@@ -88,7 +90,7 @@ export function SearchPill({
             onClear();
           }
         }}
-        placeholder={placeholder}
+        placeholder={placeholder ?? t('search.placeholder')}
         className="min-w-0 flex-1 bg-transparent text-xs text-[var(--ink)] placeholder:text-[var(--ink-muted)] focus:outline-none"
       />
       {value && onClear && (
@@ -102,7 +104,7 @@ export function SearchPill({
             e.preventDefault();
             onClear();
           }}
-          aria-label="清空搜索"
+          aria-label={t('search.clear')}
           className="shrink-0 rounded-full p-0.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-elevated)] hover:text-[var(--ink)]"
         >
           <X className="h-3 w-3" strokeWidth={1.75} />

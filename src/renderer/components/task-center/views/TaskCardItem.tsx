@@ -15,6 +15,7 @@
 
 import { useEffect, useState } from 'react';
 import { Folder, MessageCircle } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 
 import { taskGetRunStats } from '@/api/taskCenter';
 import type { Task, TaskExecutionMode, TaskRunStats } from '@/../shared/types/task';
@@ -24,6 +25,9 @@ import { TaskCategoryBadge } from '../TaskCategoryBadge';
 import { TaskStatusBadge } from '../TaskStatusBadge';
 import { TaskItemActions, deriveTaskRowStatus } from './TaskItemActions';
 import type { LegacyCronRow } from './types';
+import { isSupportedLocale, type SupportedLocale } from '@/../shared/i18n';
+
+type TaskTranslator = (key: string, options?: Record<string, unknown>) => string;
 
 export interface TaskCardItemProps {
   task?: Task;
@@ -42,6 +46,8 @@ export interface TaskCardItemProps {
 
 export function TaskCardItem(props: TaskCardItemProps) {
   const { task, legacy, highlighted, busy, onOpen, onEdit, onRun, onStop, onRerun, onDelete } = props;
+  const { t, i18n } = useTranslation('task');
+  const locale = isSupportedLocale(i18n.language) ? i18n.language : 'zh-CN';
   const isLegacy = !!legacy && !task;
   const status = deriveTaskRowStatus(task ?? null, legacy?.status === 'running');
   const name = task?.name ?? legacy?.name ?? '—';
@@ -121,6 +127,8 @@ export function TaskCardItem(props: TaskCardItemProps) {
         category={category}
         executionCount={runStats?.executionCount ?? 0}
         updatedAt={updatedAt}
+        locale={locale}
+        t={t}
       />
     </button>
   );
@@ -145,40 +153,44 @@ function MetaRow({
   category,
   executionCount,
   updatedAt,
+  locale,
+  t,
 }: {
   task?: Task;
   legacy?: LegacyCronRow;
   category: TaskExecutionMode;
   executionCount: number;
   updatedAt: number;
+  locale: SupportedLocale;
+  t: TaskTranslator;
 }) {
   const workspace = workspaceName(task, legacy);
   const parts: string[] = [];
   // User-executor tasks render as "自己做" since they're the user's own
   // todo items rather than AI-dispatched work. Agent is the default and
   // stays implicit.
-  if (task?.executor === 'user') parts.push('自己做');
+  if (task?.executor === 'user') parts.push(t('tasks.userExecutor'));
 
   switch (category) {
     case 'once':
-      parts.push('一次性');
-      if (updatedAt) parts.push(relativeTime(updatedAt));
+      parts.push(t('badges.category.once'));
+      if (updatedAt) parts.push(relativeTime(updatedAt, locale));
       break;
     case 'loop':
-      parts.push('心跳循环');
-      if (executionCount > 0) parts.push(`第 ${executionCount} 轮`);
-      else if (updatedAt) parts.push(relativeTime(updatedAt));
+      parts.push(t('badges.category.loop'));
+      if (executionCount > 0) parts.push(t('tasks.round', { count: executionCount }));
+      else if (updatedAt) parts.push(relativeTime(updatedAt, locale));
       break;
     case 'scheduled': {
       const when = task?.dispatchAt ?? task?.endConditions?.deadline;
-      if (when) parts.push(formatAbsolute(when));
-      else if (updatedAt) parts.push(relativeTime(updatedAt));
+      if (when) parts.push(formatAbsolute(when, locale, t));
+      else if (updatedAt) parts.push(relativeTime(updatedAt, locale));
       break;
     }
     case 'recurring': {
-      const sched = formatRecurring(task);
+      const sched = formatRecurring(task, locale, t);
       if (sched) parts.push(sched);
-      if (executionCount > 0) parts.push(`已执行 ${executionCount} 次`);
+      if (executionCount > 0) parts.push(t('tasks.executedCount', { count: executionCount }));
       break;
     }
   }
@@ -224,16 +236,19 @@ function workspaceName(task?: Task, legacy?: LegacyCronRow): string {
   return parts[parts.length - 1] ?? raw;
 }
 
-function formatAbsolute(ts: number): string {
+function formatAbsolute(ts: number, locale: SupportedLocale, t: TaskTranslator): string {
   const d = new Date(ts);
   const now = new Date();
   const sameDay =
     d.getFullYear() === now.getFullYear() &&
     d.getMonth() === now.getMonth() &&
     d.getDate() === now.getDate();
-  const hh = String(d.getHours()).padStart(2, '0');
-  const mm = String(d.getMinutes()).padStart(2, '0');
-  if (sameDay) return `今天 ${hh}:${mm}`;
+  const time = new Intl.DateTimeFormat(locale, {
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: locale === 'en-US',
+  }).format(d);
+  if (sameDay) return t('tasks.todayAt', { time });
   // Tomorrow check — diff of 1 day, sensitive to DST transitions is fine
   // for a display string.
   const tomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
@@ -242,9 +257,10 @@ function formatAbsolute(ts: number): string {
     d.getMonth() === tomorrow.getMonth() &&
     d.getDate() === tomorrow.getDate()
   ) {
-    return `明天 ${hh}:${mm}`;
+    return t('tasks.tomorrowAt', { time });
   }
-  return `${d.getMonth() + 1}月${d.getDate()}日 ${hh}:${mm}`;
+  const date = new Intl.DateTimeFormat(locale, { month: 'short', day: 'numeric' }).format(d);
+  return t('tasks.dateAt', { date, time });
 }
 
 // Translate a recurring task's schedule into a one-line Chinese readout
@@ -267,6 +283,7 @@ function formatAbsolute(ts: number): string {
  * identically (immediately left of the ⋯ overflow trigger).
  */
 export function ViewSessionButton({ task }: { task?: Task }) {
+  const { t } = useTranslation('task');
   if (!task || task.sessionIds.length === 0) return null;
   const sessionId = task.sessionIds[task.sessionIds.length - 1];
   const handleClick = (e: React.MouseEvent<HTMLButtonElement>) => {
@@ -283,29 +300,35 @@ export function ViewSessionButton({ task }: { task?: Task }) {
       <button
         type="button"
         onClick={handleClick}
-        aria-label="查看会话详情"
+        aria-label={t('tasks.viewSessionTooltip')}
         className="flex items-center gap-1 rounded-[var(--radius-md)] px-2 py-0.5 text-xs text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--accent-cool)]"
       >
         <MessageCircle className="h-3.5 w-3.5" strokeWidth={1.5} />
-        会话详情
+        {t('tasks.viewSession')}
       </button>
       <span className="pointer-events-none absolute -bottom-7 left-1/2 z-30 -translate-x-1/2 whitespace-nowrap rounded-md bg-[var(--button-dark-bg)] px-2 py-0.5 text-xs text-[var(--button-primary-text)] opacity-0 shadow-lg transition-opacity group-hover/view-session:opacity-100">
-        查看会话详情
+        {t('tasks.viewSessionTooltip')}
       </span>
     </div>
   );
 }
 
-function formatRecurring(task?: Task): string | null {
+function formatRecurring(task: Task | undefined, locale: SupportedLocale, t: TaskTranslator): string | null {
   if (!task) return null;
   if (task.cronExpression) {
-    return humanizeCron(task.cronExpression) ?? task.cronExpression;
+    return humanizeCron(task.cronExpression, locale) ?? task.cronExpression;
   }
   if (task.intervalMinutes) {
     const m = task.intervalMinutes;
-    if (m >= 1440 && m % 1440 === 0) return `每 ${m / 1440} 天`;
-    if (m >= 60 && m % 60 === 0) return `每 ${m / 60} 小时`;
-    return `每 ${m} 分钟`;
+    if (m >= 1440 && m % 1440 === 0) {
+      const count = m / 1440;
+      return t(count === 1 ? 'tasks.intervalDay' : 'tasks.intervalDays', { count });
+    }
+    if (m >= 60 && m % 60 === 0) {
+      const count = m / 60;
+      return t(count === 1 ? 'tasks.intervalHour' : 'tasks.intervalHours', { count });
+    }
+    return t(m === 1 ? 'tasks.intervalMinute' : 'tasks.intervalMinutes', { count: m });
   }
   return null;
 }

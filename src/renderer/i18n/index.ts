@@ -7,11 +7,13 @@ import chatEn from './locales/en-US/chat.json';
 import commonEn from './locales/en-US/common.json';
 import launcherEn from './locales/en-US/launcher.json';
 import settingsEn from './locales/en-US/settings.json';
+import taskEn from './locales/en-US/task.json';
 import appZh from './locales/zh-CN/app.json';
 import chatZh from './locales/zh-CN/chat.json';
 import commonZh from './locales/zh-CN/common.json';
 import launcherZh from './locales/zh-CN/launcher.json';
 import settingsZh from './locales/zh-CN/settings.json';
+import taskZh from './locales/zh-CN/task.json';
 
 export const resources = {
   'zh-CN': {
@@ -20,6 +22,7 @@ export const resources = {
     common: commonZh,
     launcher: launcherZh,
     settings: settingsZh,
+    task: taskZh,
   },
   'en-US': {
     app: appEn,
@@ -27,6 +30,7 @@ export const resources = {
     common: commonEn,
     launcher: launcherEn,
     settings: settingsEn,
+    task: taskEn,
   },
 } as const;
 
@@ -49,7 +53,7 @@ void i18n
     lng: getInitialLocale(),
     fallbackLng: 'zh-CN',
     defaultNS: DEFAULT_I18N_NAMESPACE,
-    ns: ['common', 'app', 'settings', 'chat', 'launcher'],
+    ns: ['common', 'app', 'settings', 'chat', 'launcher', 'task'],
     interpolation: {
       escapeValue: false,
     },

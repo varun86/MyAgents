@@ -5,6 +5,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { FolderOpen, Lightbulb, X } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 import {
   thoughtList,
   thoughtOpenDir,
@@ -73,6 +74,7 @@ export function ThoughtPanel({
   const [bulkBusy, setBulkBusy] = useState(false);
   const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
   const toast = useToast();
+  const { t } = useTranslation('task');
 
   const reload = useCallback(async () => {
     setLoading(true);
@@ -261,7 +263,7 @@ export function ThoughtPanel({
       .filter((t) => selectedIds.has(t.id))
       .map((t) => t.id);
     if (orderedIds.length < 2) {
-      toast.error('请选择至少 2 条想法再合并');
+      toast.error(t('thoughts.selectAtLeastTwo'));
       return;
     }
     setBulkBusy(true);
@@ -279,19 +281,19 @@ export function ThoughtPanel({
       setSelectedIds(new Set());
       setSelectMode(false);
       if (failedSourceDeletes.length === 0) {
-        toast.success(`已合并 ${orderedIds.length} 条想法`);
+        toast.success(t('thoughts.merged', { count: orderedIds.length }));
       } else {
         toast.error(
-          `合并完成，但 ${failedSourceDeletes.length} 条原始想法清理失败，请手动删除。`,
+          t('thoughts.mergePartial', { count: failedSourceDeletes.length }),
         );
       }
     } catch (e) {
       // Pre-flight or atomic-create failure — no source touched, no merge.
-      toast.error(`合并失败：${e instanceof Error ? e.message : String(e)}`);
+      toast.error(t('thoughts.mergeFailed', { message: e instanceof Error ? e.message : String(e) }));
     } finally {
       setBulkBusy(false);
     }
-  }, [bulkBusy, selectedIds, toast, filtered]);
+  }, [bulkBusy, selectedIds, toast, filtered, t]);
 
   // Bulk archive / unarchive — flips every selected thought to the
   // opposite of the current view mode (active view → archive; archived
@@ -320,18 +322,17 @@ export function ThoughtPanel({
       }
       setSelectedIds(new Set());
       setSelectMode(false);
-      const verb = targetArchived ? '归档' : '取消归档';
       if (failures === 0) {
-        toast.success(`已${verb} ${succeeded.length} 条想法`);
+        toast.success(t(targetArchived ? 'thoughts.archiveSuccess' : 'thoughts.unarchiveSuccess', { count: succeeded.length }));
       } else if (succeeded.length === 0) {
-        toast.error(`${verb}失败`);
+        toast.error(t(targetArchived ? 'thoughts.archiveFailed' : 'thoughts.unarchiveFailed'));
       } else {
-        toast.error(`已${verb} ${succeeded.length} 条，${failures} 条失败`);
+        toast.error(t(targetArchived ? 'thoughts.archivePartial' : 'thoughts.unarchivePartial', { successCount: succeeded.length, failCount: failures }));
       }
     } finally {
       setBulkBusy(false);
     }
-  }, [bulkBusy, selectedIds, viewMode, toast]);
+  }, [bulkBusy, selectedIds, viewMode, toast, t]);
 
   const handleBulkDelete = useCallback(async () => {
     if (bulkBusy) return;
@@ -353,16 +354,16 @@ export function ThoughtPanel({
       setSelectedIds(new Set());
       setSelectMode(false);
       if (failures === 0) {
-        toast.success(`已删除 ${succeeded.length} 条想法`);
+        toast.success(t('thoughts.deleteSuccess', { count: succeeded.length }));
       } else if (succeeded.length === 0) {
-        toast.error('删除失败');
+        toast.error(t('thoughts.deleteFailed'));
       } else {
-        toast.error(`已删除 ${succeeded.length} 条，${failures} 条失败`);
+        toast.error(t('thoughts.deletePartial', { successCount: succeeded.length, failCount: failures }));
       }
     } finally {
       setBulkBusy(false);
     }
-  }, [bulkBusy, selectedIds, toast]);
+  }, [bulkBusy, selectedIds, toast, t]);
 
   return (
     <div className="relative flex h-full flex-col">
@@ -410,7 +411,7 @@ export function ThoughtPanel({
                   strokeWidth={1.5}
                 />
                 <span className="whitespace-nowrap text-base font-semibold text-[var(--ink)]">
-                  想法
+                  {t('thoughts.title')}
                 </span>
               </div>
               {/* "打开想法存储的文件夹" — ghost icon button, no label.
@@ -437,13 +438,13 @@ export function ThoughtPanel({
                       console.error('[ThoughtPanel] open dir failed', err);
                     });
                   }}
-                  aria-label="打开想法存储的文件夹"
+                  aria-label={t('thoughts.openFolder')}
                   className="flex h-6 w-6 items-center justify-center rounded-md text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
                 >
                   <FolderOpen className="h-3.5 w-3.5" strokeWidth={1.75} />
                 </button>
                 <span className="pointer-events-none absolute left-1/2 top-full z-50 mt-1.5 -translate-x-1/2 whitespace-nowrap rounded-md bg-[var(--ink)] px-2 py-1 text-xs font-medium text-[var(--paper)] opacity-0 shadow-md transition-opacity duration-150 group-hover/openDir:opacity-100">
-                  打开想法存储的文件夹
+                  {t('thoughts.openFolder')}
                 </span>
               </div>
               <div className="ml-auto flex min-w-0 flex-1 justify-end">
@@ -452,7 +453,7 @@ export function ThoughtPanel({
                   value={query}
                   onChange={setQuery}
                   onClear={clearSearch}
-                  placeholder="搜索想法…"
+                  placeholder={t('thoughts.searchPlaceholder')}
                   expandedFull
                   onFocus={() => setSearchFocused(true)}
                   // Delay blur so clicking a tag inside the floating cloud
@@ -486,7 +487,7 @@ export function ThoughtPanel({
           }}
         >
           <div className="px-3 pb-1 pt-2 text-xs font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60">
-            按标签筛选
+            {t('thoughts.tagFilter')}
           </div>
           <div className="flex max-h-[190px] flex-wrap gap-1.5 overflow-y-auto px-2 pb-2">
             {allTags.map(([tag, n]) => (
@@ -560,13 +561,13 @@ export function ThoughtPanel({
         {activeTag ? (
           <div className="flex items-center gap-2">
             <span className="text-sm font-semibold tracking-[0.04em] text-[var(--ink-muted)]">
-              筛选
+              {t('thoughts.filter')}
             </span>
             <button
               type="button"
               onClick={() => setActiveTag(null)}
               className="flex items-center gap-1 rounded-[var(--radius-md)] bg-[var(--accent-warm-muted)] px-2 py-0.5 text-xs text-[var(--accent-warm)]"
-              title="清除筛选"
+              title={t('thoughts.clearFilter')}
             >
               #{activeTag}
               <X className="h-3 w-3" />
@@ -574,7 +575,7 @@ export function ThoughtPanel({
           </div>
         ) : (
           <span className="text-sm font-semibold tracking-[0.04em] text-[var(--ink-muted)]">
-            想法 <span className="text-[var(--ink-muted)]/60">({thoughts.length})</span>
+            {t('thoughts.title')} <span className="text-[var(--ink-muted)]/60">({thoughts.length})</span>
           </span>
         )}
         {/* Right slot — v0.2.16: archive view toggle. Segmented control
@@ -583,8 +584,8 @@ export function ThoughtPanel({
             `viewMode`. No per-segment count by user request (PRD §2.1). */}
         <div className="flex items-center gap-0.5 rounded-full bg-[var(--paper-inset)] p-0.5">
           {([
-            ['active', '活跃'],
-            ['archived', '已归档'],
+            ['active', t('thoughts.viewActive')],
+            ['archived', t('thoughts.viewArchived')],
           ] as const).map(([mode, label]) => {
             const isActive = viewMode === mode;
             return (
@@ -621,15 +622,15 @@ export function ThoughtPanel({
       <div className="flex-1 overflow-y-auto px-4 py-3">
         {loading ? (
           <div className="py-8 text-center text-sm text-[var(--ink-muted)]">
-            加载中…
+            {t('common.loading')}
           </div>
         ) : filtered.length === 0 ? (
           <div className="py-12 text-center text-sm text-[var(--ink-muted)]">
             {thoughts.length === 0
               ? viewMode === 'archived'
-                ? '还没有已归档的想法'
-                : '还没有想法，写下第一条吧'
-              : '没有匹配的想法'}
+                ? t('thoughts.emptyArchived')
+                : t('thoughts.emptyActive')
+              : t('thoughts.emptySearch')}
           </div>
         ) : (
           <div className="flex flex-col gap-3">
@@ -671,10 +672,10 @@ export function ThoughtPanel({
           but bulk delete does. */}
       {confirmDeleteOpen && (
         <ConfirmDialog
-          title="删除选中的想法？"
-          message={`将永久删除 ${selectedIds.size} 条想法，操作不可恢复。`}
-          confirmText="删除"
-          cancelText="取消"
+          title={t('thoughts.deleteConfirmTitle')}
+          message={t('thoughts.deleteConfirmMessage', { count: selectedIds.size })}
+          confirmText={t('common.delete')}
+          cancelText={t('common.cancel')}
           confirmVariant="danger"
           loading={bulkBusy}
           onConfirm={() => void handleBulkDelete()}

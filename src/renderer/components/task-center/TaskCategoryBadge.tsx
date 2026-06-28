@@ -22,13 +22,13 @@
 // just for backward compat.
 
 import { Clock, Heart, Play, Repeat } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 
 import type { TaskExecutionMode } from '@/../shared/types/task';
 
 type Category = TaskExecutionMode;
 
 interface CategoryStyle {
-  label: string;
   icon: typeof Clock;
   bg: string;
   fg: string;
@@ -36,25 +36,21 @@ interface CategoryStyle {
 
 const CATEGORY_STYLE: Record<Category, CategoryStyle> = {
   loop: {
-    label: '心跳循环',
     icon: Heart,
     bg: 'bg-[var(--heartbeat-bg)]',
     fg: 'text-[var(--heartbeat)]',
   },
   once: {
-    label: '一次性',
     icon: Play,
     bg: 'bg-[var(--accent-warm-subtle)]',
     fg: 'text-[var(--accent-warm)]',
   },
   scheduled: {
-    label: '定时',
     icon: Clock,
     bg: 'bg-[var(--success-bg)]',
     fg: 'text-[var(--success)]',
   },
   recurring: {
-    label: '周期',
     icon: Repeat,
     bg: 'bg-[var(--info-bg)]',
     fg: 'text-[var(--info)]',
@@ -69,6 +65,7 @@ interface Props {
 }
 
 export function TaskCategoryBadge({ mode, legacy, compact }: Props) {
+  const { t } = useTranslation('task');
   const style = CATEGORY_STYLE[mode];
   const Icon = style.icon;
   const size = 'text-xs'; // compact 与常规已同档（Part 1 合并 10→11→12 的遗留三元塌缩）
@@ -82,10 +79,10 @@ export function TaskCategoryBadge({ mode, legacy, compact }: Props) {
       className={`inline-flex items-center gap-1 rounded-[var(--radius-sm)] font-medium leading-none ${style.bg} ${style.fg} ${padding} ${height} ${size}`}
     >
       <Icon className="h-3 w-3" strokeWidth={1.75} />
-      {style.label}
+      {t(`badges.category.${mode}`)}
       {legacy && (
-        <span className="text-[var(--ink-muted)]/80" aria-label="遗留任务">
-          · 遗留
+        <span className="text-[var(--ink-muted)]/80" aria-label={t('badges.category.legacyTask')}>
+          · {t('badges.category.legacy')}
         </span>
       )}
     </span>

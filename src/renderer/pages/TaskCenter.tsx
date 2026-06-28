@@ -2,6 +2,7 @@
 // PRD §5 / §6.
 
 import { useCallback, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { ThoughtPanel } from '@/components/task-center/ThoughtPanel';
 import { TaskListPanel } from '@/components/task-center/TaskListPanel';
 import { DispatchTaskDialog } from '@/components/task-center/DispatchTaskDialog';
@@ -22,6 +23,7 @@ interface Props {
 }
 
 export default function TaskCenter({ isActive, pendingIntent }: Props) {
+  const { t } = useTranslation('task');
   const [dispatching, setDispatching] = useState<Thought | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
 
@@ -73,12 +75,12 @@ export default function TaskCenter({ isActive, pendingIntent }: Props) {
     return (
       <div className="flex h-full items-center justify-center bg-[var(--paper)] px-8 text-center">
         <div className="max-w-md text-sm leading-relaxed text-[var(--ink-muted)]">
-          <p className="font-medium text-[var(--ink-secondary)]">任务中心</p>
+          <p className="font-medium text-[var(--ink-secondary)]">{t('center.title')}</p>
           <p className="mt-2">
-            此功能仅在桌面客户端内可用。
+            {t('center.desktopOnly')}
           </p>
           <p className="mt-2 text-[var(--ink-muted)]/70">
-            当前是浏览器开发模式（Tauri 未就绪），Thought/Task 的本地存储未挂载。
+            {t('center.desktopUnavailable')}
           </p>
         </div>
       </div>
@@ -99,7 +101,7 @@ export default function TaskCenter({ isActive, pendingIntent }: Props) {
               "layout over rules" direction set in the review  */}
       <div className="flex shrink-0 items-center px-5 pt-5 pb-3">
         <h1 className="text-xl font-semibold text-[var(--ink)]">
-          任务中心
+          {t('center.title')}
         </h1>
       </div>
 
@@ -151,4 +153,3 @@ export default function TaskCenter({ isActive, pendingIntent }: Props) {
     </div>
   );
 }
-

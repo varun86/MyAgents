@@ -8,12 +8,14 @@
 // visual vocabulary.
 
 import type { Task, TaskExecutionMode } from '@/../shared/types/task';
+import { useTranslation } from 'react-i18next';
 import { relativeTime } from '@/utils/taskCenterUtils';
 import { TaskCategoryBadge } from '../TaskCategoryBadge';
 import { TaskStatusBadge } from '../TaskStatusBadge';
 import { TaskItemActions, deriveTaskRowStatus } from './TaskItemActions';
 import { ViewSessionButton } from './TaskCardItem';
 import type { LegacyCronRow } from './types';
+import { isSupportedLocale } from '@/../shared/i18n';
 
 export interface TaskListRowProps {
   task?: Task;
@@ -30,6 +32,8 @@ export interface TaskListRowProps {
 
 export function TaskListRow(props: TaskListRowProps) {
   const { task, legacy, highlighted, busy, onOpen, onEdit, onRun, onStop, onRerun, onDelete } = props;
+  const { i18n } = useTranslation('task');
+  const locale = isSupportedLocale(i18n.language) ? i18n.language : 'zh-CN';
   const isLegacy = !!legacy && !task;
   const status = deriveTaskRowStatus(task ?? null, legacy?.status === 'running');
   const name = task?.name ?? legacy?.name ?? '—';
@@ -66,7 +70,7 @@ export function TaskListRow(props: TaskListRowProps) {
         </span>
       )}
       <span className="w-[80px] shrink-0 text-right text-xs text-[var(--ink-muted)]/80">
-        {relativeTime(updatedAt)}
+        {relativeTime(updatedAt, locale)}
       </span>
       <ViewSessionButton task={task} />
       <TaskItemActions

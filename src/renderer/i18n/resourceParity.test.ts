@@ -17,7 +17,7 @@ function interpolationNames(value: string): string[] {
 }
 
 describe('renderer i18n resource parity', () => {
-  it.each(['chat', 'launcher', 'settings'] as const)('%s keeps zh-CN and en-US keys aligned', (namespace) => {
+  it.each(['chat', 'launcher', 'settings', 'task'] as const)('%s keeps zh-CN and en-US keys aligned', (namespace) => {
     const zh = flattenResource(resources['zh-CN'][namespace]);
     const en = flattenResource(resources['en-US'][namespace]);
 

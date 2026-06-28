@@ -33,17 +33,7 @@
 // "where is it in its lifecycle".
 
 import type { TaskStatus } from '@/../shared/types/task';
-
-const STATUS_LABEL: Record<TaskStatus, string> = {
-  todo: '待启动',
-  running: '进行中',
-  verifying: '验收中',
-  done: '已完成',
-  blocked: '已阻塞',
-  stopped: '已暂停',
-  archived: '已归档',
-  deleted: '已删除',
-};
+import { useTranslation } from 'react-i18next';
 
 interface StatusStyle {
   bg: string;
@@ -84,8 +74,9 @@ interface Props {
 }
 
 export function TaskStatusBadge({ status, compact }: Props) {
+  const { t } = useTranslation('task');
   const style = STATUS_STYLE[status];
-  const label = STATUS_LABEL[status];
+  const label = t(`badges.status.${status}`);
   const size = 'text-xs'; // compact 与常规已同档（Part 1 合并 10→11→12 的遗留三元塌缩）
   // Fixed height + leading-none so TaskStatusBadge and TaskCategoryBadge
   // render at identical pixel sizes side-by-side. TaskCategoryBadge
