@@ -352,12 +352,12 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                 enabled: next.enabled,
                 accelerator: next.accelerator,
             });
-            toastRef.current.success(next.enabled ? '快捷键已生效' : '快捷键已关闭');
+            toastRef.current.success(tSettingsRef.current(next.enabled ? 'shortcuts.toasts.enabled' : 'shortcuts.toasts.disabled'));
         } catch (e) {
             setSummonEnabled(prevEnabled);
             setSummonAccelerator(prevAccelerator);
             const msg = e instanceof Error ? e.message : String(e);
-            toastRef.current.error(`快捷键设置失败：${msg}`);
+            toastRef.current.error(tSettingsRef.current('shortcuts.toasts.saveFailed', { message: msg }));
         }
     }, [summonEnabled, summonAccelerator]);
 
@@ -913,7 +913,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
 
     const [mcpFormMode, setMcpFormMode] = useState<'form' | 'json'>('form');
     const [mcpJsonInput, setMcpJsonInput] = useState('');
-    const [mcpJsonError, setMcpJsonError] = useState('');
+    const [mcpJsonError, setMcpJsonError] = useState<{ key: string; params?: Record<string, number | string> } | null>(null);
 
     // OAuth state for MCP servers
     const [mcpOAuthStatus, setMcpOAuthStatus] = useState<Record<string, 'disconnected' | 'connecting' | 'connected' | 'expired' | 'error'>>({});
@@ -1177,7 +1177,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
         setEditingMcpId(null);
         setMcpFormMode('form');
         setMcpJsonInput('');
-        setMcpJsonError('');
+        setMcpJsonError(null);
         setMcpForm({
             id: '', name: '', type: 'stdio', command: '', args: [], newArg: '', url: '',
             env: {}, newEnvKey: '', newEnvValue: '', headers: {}, newHeaderKey: '', newHeaderValue: '',
@@ -1613,7 +1613,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
     // OAuth: start OAuth flow (auto mode = no clientId, manual mode = with clientId)
     const handleMcpOAuthConnect = async (serverId: string, serverUrl: string, manual?: boolean) => {
         if (manual && !mcpForm.oauthClientId) {
-            toast.error('请填写 Client ID');
+            toast.error(tSettingsRef.current('toolbox.toasts.oauthClientIdRequired'));
             return;
         }
         setMcpOAuthConnecting(serverId);
@@ -1636,7 +1636,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
             if (result.success && result.authUrl) {
                 const { openExternal } = await import('@/utils/openExternal');
                 await openExternal(result.authUrl);
-                toast.success('已在浏览器中打开授权页面，请完成授权');
+                toast.success(tSettingsRef.current('toolbox.toasts.oauthOpened'));
                 setMcpOAuthStatus(prev => ({ ...prev, [serverId]: 'connecting' }));
                 // Clean up any previous poll
                 if (oauthPollIntervalRef.current) clearInterval(oauthPollIntervalRef.current);
@@ -1650,7 +1650,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                             oauthPollIntervalRef.current = null;
                             setMcpOAuthStatus(prev => ({ ...prev, [serverId]: 'connected' }));
                             setMcpOAuthConnecting(null);
-                            toast.success('OAuth 授权成功');
+                            toast.success(tSettingsRef.current('toolbox.toasts.oauthSuccess'));
                         } else if (status.success && status.status === 'disconnected') {
                             setMcpOAuthConnecting(prev => {
                                 if (prev === serverId) {
@@ -1672,11 +1672,11 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                     setMcpOAuthConnecting(null);
                 }, 5 * 60 * 1000);
             } else {
-                toast.error(result.error || 'OAuth 启动失败');
+                toast.error(result.error || tSettingsRef.current('toolbox.toasts.oauthStartFailed'));
                 setMcpOAuthConnecting(null);
             }
         } catch (err) {
-            toast.error(`OAuth 错误: ${err instanceof Error ? err.message : String(err)}`);
+            toast.error(tSettingsRef.current('toolbox.toasts.oauthError', { message: err instanceof Error ? err.message : String(err) }));
             setMcpOAuthConnecting(null);
         }
     };
@@ -1693,9 +1693,9 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                 throw new Error(`HTTP ${response.status}`);
             }
             setMcpOAuthStatus(prev => ({ ...prev, [serverId]: 'disconnected' }));
-            toast.success('OAuth 连接已断开');
+            toast.success(tSettingsRef.current('toolbox.toasts.oauthDisconnected'));
         } catch {
-            toast.error('断开 OAuth 失败');
+            toast.error(tSettingsRef.current('toolbox.toasts.oauthDisconnectFailed'));
         }
     };
 
@@ -1803,7 +1803,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
             // Track mcp_add event
             if (!editingMcpId) track('mcp_add', { type: mcpForm.type });
 
-            toast.success(editingMcpId ? 'MCP 服务器已保存' : 'MCP 服务器已添加');
+            toast.success(tSettingsRef.current(editingMcpId ? 'toolbox.toasts.mcpServerSaved' : 'toolbox.toasts.mcpServerAdded'));
 
             // Auto-probe OAuth for HTTP/SSE servers after adding/saving
             if ((mcpForm.type === 'http' || mcpForm.type === 'sse') && mcpForm.url) {
@@ -1817,23 +1817,23 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                         handleMcpOAuthConnect(savedId, savedUrl);
                     } else {
                         // Manual config needed — inform user
-                        toast.info('此 MCP 需要 OAuth 授权，请在设置中配置 OAuth 参数');
+                        toast.info(tSettingsRef.current('toolbox.toasts.mcpOAuthRequired'));
                     }
                 }).catch(() => { /* probe failed — server may not need OAuth */ });
             }
         } catch {
-            toast.error(editingMcpId ? '保存失败' : '添加失败');
+            toast.error(tSettingsRef.current(editingMcpId ? 'toolbox.toasts.mcpSaveFailed' : 'toolbox.toasts.mcpAddFailed'));
         }
     };
 
     // Add MCP servers from JSON (batch import)
     const handleAddMcpFromJson = async () => {
-        setMcpJsonError('');
+        setMcpJsonError(null);
         let parsed: Record<string, unknown>;
         try {
             parsed = JSON.parse(mcpJsonInput);
         } catch {
-            setMcpJsonError('JSON 格式错误，请检查语法');
+            setMcpJsonError({ key: 'toolbox.dialogs.customMcp.jsonInvalid' });
             return;
         }
 
@@ -1844,7 +1844,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
             ([, v]) => v && typeof v === 'object' && !Array.isArray(v)
         );
         if (entries.length === 0) {
-            setMcpJsonError('未找到有效的 MCP 服务器配置');
+            setMcpJsonError({ key: 'toolbox.dialogs.customMcp.jsonNoValidServers' });
             return;
         }
 
@@ -1900,15 +1900,15 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
         }
 
         if (added.length > 0 && skipped.length === 0) {
-            toast.success(`已添加 ${added.length} 个 MCP 服务器`);
+            toast.success(tSettingsRef.current('toolbox.toasts.mcpJsonAdded', { count: added.length }));
             resetMcpForm();
             setShowMcpForm(false);
         } else if (added.length > 0 && skipped.length > 0) {
-            toast.success(`已添加 ${added.length} 个，跳过 ${skipped.length} 个已存在的（${skipped.join(', ')}）`);
+            toast.success(tSettingsRef.current('toolbox.toasts.mcpJsonAddedSkipped', { added: added.length, skipped: skipped.length, names: skipped.join(', ') }));
             resetMcpForm();
             setShowMcpForm(false);
         } else if (skipped.length > 0) {
-            setMcpJsonError(`所有服务器均已存在：${skipped.join(', ')}`);
+            setMcpJsonError({ key: 'toolbox.dialogs.customMcp.jsonAllExist', params: { names: skipped.join(', ') } });
         }
     };
 
@@ -1923,9 +1923,9 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
             // Track mcp_remove event
             track('mcp_remove');
 
-            toast.success('已删除');
+            toast.success(tSettingsRef.current('toolbox.toasts.deleteSuccess'));
         } catch {
-            toast.error('删除失败');
+            toast.error(tSettingsRef.current('toolbox.toasts.deleteFailed'));
         }
     };
 
@@ -3781,26 +3781,26 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                     {activeSection === 'shortcuts' && (
                         <div className="space-y-6">
                             <div>
-                                <h2 className="text-lg font-semibold text-[var(--ink)]">快捷键</h2>
+                                <h2 className="text-lg font-semibold text-[var(--ink)]">{tSettings('shortcuts.title')}</h2>
                                 <p className="mt-1 text-xs text-[var(--ink-muted)]">
-                                    管理消息发送与全局唤起快捷键
+                                    {tSettings('shortcuts.description')}
                                 </p>
                             </div>
 
                             {/* 消息发送 — applies to every "AI conversation" composer:
                                 主对话框 / AI 小助理 / 问题反馈 (shared via utils/chatSendKey). */}
                             <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
-                                <h3 className="text-base font-medium text-[var(--ink)]">消息发送</h3>
+                                <h3 className="text-base font-medium text-[var(--ink)]">{tSettings('shortcuts.messageSend.title')}</h3>
                                 <p className="mt-1 text-xs text-[var(--ink-muted)]">
-                                    设置在对话、AI 小助理、问题反馈中如何用键盘发送消息
+                                    {tSettings('shortcuts.messageSend.description')}
                                 </p>
                                 <div className="mt-4 flex items-center justify-between">
                                     <div className="flex-1 pr-4">
-                                        <p className="text-sm font-medium text-[var(--ink)]">发送快捷键</p>
+                                        <p className="text-sm font-medium text-[var(--ink)]">{tSettings('shortcuts.messageSend.shortcutTitle')}</p>
                                         <p className="text-xs text-[var(--ink-muted)]">
                                             {(config.chatSendShortcut ?? 'enter') === 'modEnter'
-                                                ? `${isMac ? '⌘' : 'Ctrl'} + Enter 发送，Enter 换行`
-                                                : 'Enter 发送，Shift + Enter 换行'}
+                                                ? tSettings('shortcuts.messageSend.modEnterSummary', { mod: isMac ? '⌘' : 'Ctrl' })
+                                                : tSettings('shortcuts.messageSend.enterSummary')}
                                         </p>
                                     </div>
                                     <div className="flex gap-0.5 rounded-full bg-[var(--paper-inset)] p-0.5">
@@ -3827,17 +3827,17 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                             {/* Global Summon Shortcut (PRD 0.2.16) — relocated here from
                                 通用设置 in 0.2.29 so all keyboard shortcuts live together. */}
                             <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
-                                <h3 className="text-base font-medium text-[var(--ink)]">全局唤起快捷键</h3>
+                                <h3 className="text-base font-medium text-[var(--ink)]">{tSettings('shortcuts.summon.title')}</h3>
                                 <p className="mt-1 text-xs text-[var(--ink-muted)]">
-                                    在任何应用中按下快捷键，快速唤起 MyAgents 并自动定位到启动页输入框。再按一次隐藏窗口。
+                                    {tSettings('shortcuts.summon.description')}
                                 </p>
 
                                 {/* Enable toggle */}
                                 <div className="mt-4 flex items-center justify-between">
                                     <div className="flex-1 pr-4">
-                                        <p className="text-sm font-medium text-[var(--ink)]">启用快捷键</p>
+                                        <p className="text-sm font-medium text-[var(--ink)]">{tSettings('shortcuts.summon.enableTitle')}</p>
                                         <p className="text-xs text-[var(--ink-muted)]">
-                                            {isTauriEnvironment() ? '关闭后该快捷键不再被注册' : '仅桌面版有效'}
+                                            {isTauriEnvironment() ? tSettings('shortcuts.summon.enableDescription') : tSettings('shortcuts.desktopOnly')}
                                         </p>
                                     </div>
                                     <button
@@ -3862,8 +3862,8 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                 {/* Shortcut recorder + reset */}
                                 <div className="mt-4 flex items-center justify-between">
                                     <div className="flex-1 pr-4">
-                                        <p className="text-sm font-medium text-[var(--ink)]">当前快捷键</p>
-                                        <p className="text-xs text-[var(--ink-muted)]">点击右侧键位修改</p>
+                                        <p className="text-sm font-medium text-[var(--ink)]">{tSettings('shortcuts.summon.currentTitle')}</p>
+                                        <p className="text-xs text-[var(--ink-muted)]">{tSettings('shortcuts.summon.currentDescription')}</p>
                                     </div>
                                     <div className="flex items-center gap-2">
                                         <ShortcutRecorder
@@ -3880,9 +3880,9 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                                     ? 'opacity-40 cursor-not-allowed'
                                                     : 'cursor-pointer'
                                             }`}
-                                            title="恢复默认快捷键"
+                                            title={tSettings('shortcuts.summon.resetTitle')}
                                         >
-                                            重置默认
+                                            {tSettings('shortcuts.summon.resetDefault')}
                                         </button>
                                     </div>
                                 </div>
@@ -3891,14 +3891,14 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                             {/* 应用快捷键 reference — read-only, sourced from the same
                                 APP_SHORTCUTS table App.tsx dispatches from (no drift). */}
                             <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
-                                <h3 className="text-base font-medium text-[var(--ink)]">应用快捷键</h3>
+                                <h3 className="text-base font-medium text-[var(--ink)]">{tSettings('shortcuts.app.title')}</h3>
                                 <p className="mt-1 text-xs text-[var(--ink-muted)]">
-                                    以下快捷键在应用内全局生效（暂不支持自定义）
+                                    {tSettings('shortcuts.app.description')}
                                 </p>
                                 <div className="mt-4 space-y-2.5">
                                     {VISIBLE_APP_SHORTCUTS.map((s) => (
                                         <div key={s.id} className="flex items-center justify-between gap-4">
-                                            <p className="text-sm text-[var(--ink-secondary)]">{s.label}</p>
+                                            <p className="text-sm text-[var(--ink-secondary)]">{tSettings(`shortcuts.app.items.${s.id}`)}</p>
                                             <kbd className="shrink-0 rounded-md border border-[var(--line)] bg-[var(--paper-inset)] px-2 py-0.5 font-mono text-xs text-[var(--ink-muted)]">
                                                 {s.keys?.(isMac)}
                                             </kbd>
@@ -4661,9 +4661,9 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                         <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
                                             <div className="flex items-center justify-between">
                                                 <div>
-                                                    <h3 className="text-sm font-medium text-[var(--ink)]">开发者模式</h3>
+                                                    <h3 className="text-sm font-medium text-[var(--ink)]">{tSettings('about.developer.devModeTitle')}</h3>
                                                     <p className="mt-1 text-xs text-[var(--ink-muted)]">
-                                                        显示页面上的日志入口按钮（如 Logs、System Info 等）。
+                                                        {tSettings('about.developer.devModeDescription')}
                                                     </p>
                                                 </div>
                                                 <button
@@ -4683,9 +4683,9 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                         <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
                                             <div className="flex items-center justify-between">
                                                 <div className="flex-1 pr-4">
-                                                    <h3 className="text-sm font-medium text-[var(--ink)]">Codex 订阅 Provider</h3>
+                                                    <h3 className="text-sm font-medium text-[var(--ink)]">{tSettings('about.developer.codexProviderTitle')}</h3>
                                                     <p className="mt-1 text-xs text-[var(--ink-muted)]">
-                                                        在模型供应商页显示 MyAgents 托管的 Codex (订阅) 配置入口。
+                                                        {tSettings('about.developer.codexProviderDescription')}
                                                     </p>
                                                 </div>
                                                 <button
@@ -4712,13 +4712,13 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                         <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
                                             <div className="flex items-center justify-between">
                                                 <div className="flex-1 pr-4">
-                                                    <h3 className="text-sm font-medium text-[var(--ink)]">团队入口</h3>
+                                                    <h3 className="text-sm font-medium text-[var(--ink)]">{tSettings('about.developer.teamTitle')}</h3>
                                                     <p className="mt-1 text-xs text-[var(--ink-muted)]">
                                                         {spaceBuildCapability.isLoading
-                                                            ? '正在读取团队服务构建状态...'
+                                                            ? tSettings('about.developer.teamLoading')
                                                             : spaceBuildCapability.available
-                                                            ? '显示标题栏中的「团队」tab。该功能仍在开发中，默认关闭，关闭时已打开的团队页面也会被隐藏。'
-                                                            : `当前构建未包含团队服务。构建时设置 MYAGENTS_SPACE_ENABLED=true 与 MYAGENTS_SPACE_BASE_URL 后才可开启。${spaceBuildCapability.reason ? ` (${spaceBuildCapability.reason})` : ''}`}
+                                                            ? tSettings('about.developer.teamAvailable')
+                                                            : tSettings(spaceBuildCapability.reason ? 'about.developer.teamUnavailableWithReason' : 'about.developer.teamUnavailable', { reason: spaceBuildCapability.reason })}
                                                     </p>
                                                 </div>
                                                 <button
@@ -4743,9 +4743,9 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                         <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
                                             <div className="flex items-center justify-between">
                                                 <div>
-                                                    <h3 className="text-sm font-medium text-[var(--ink)]">分屏预览（实验性）</h3>
+                                                    <h3 className="text-sm font-medium text-[var(--ink)]">{tSettings('about.developer.splitViewTitle')}</h3>
                                                     <p className="mt-1 text-xs text-[var(--ink-muted)]">
-                                                        点击文件在右侧分屏打开预览，而非弹窗。
+                                                        {tSettings('about.developer.splitViewDescription')}
                                                     </p>
                                                 </div>
                                                 <button
@@ -4765,16 +4765,16 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                         <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
                                             <div className="flex items-center justify-between">
                                                 <div className="flex-1 pr-4">
-                                                    <h3 className="text-sm font-medium text-[var(--ink)]">后台 Agent 权限</h3>
+                                                    <h3 className="text-sm font-medium text-[var(--ink)]">{tSettings('about.developer.backgroundAgentPermissionTitle')}</h3>
                                                     <p className="mt-1 text-xs text-[var(--ink-muted)]">
-                                                        通过 <span className="font-mono">run_in_background</span> 启动的后台 Agent 没有权限弹窗。「继承已授权」只放行你已点过「始终允许」的工具，其余拒绝并提示；「全自动」允许后台 Agent 使用所有非交互工具（权限更宽，请谨慎）。
+                                                        {tSettings('about.developer.backgroundAgentPermissionPrefix')} <span className="font-mono">run_in_background</span> {tSettings('about.developer.backgroundAgentPermissionSuffix')}
                                                     </p>
                                                 </div>
                                                 <CustomSelect
                                                     value={config.backgroundAgentPermissionMode ?? 'inherit'}
                                                     options={[
-                                                        { value: 'inherit', label: '继承已授权' },
-                                                        { value: 'fullAgency', label: '全自动' },
+                                                        { value: 'inherit', label: tSettings('about.developer.backgroundAgentPermissionInherit') },
+                                                        { value: 'fullAgency', label: tSettings('about.developer.backgroundAgentPermissionFullAgency') },
                                                     ]}
                                                     onChange={(val) => {
                                                         updateConfig({ backgroundAgentPermissionMode: val as 'inherit' | 'fullAgency' });
@@ -4788,9 +4788,9 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                         <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
                                             <div className="flex items-center justify-between">
                                                 <div>
-                                                    <h3 className="text-sm font-medium text-[var(--ink)]">模型数据自动更新（LiteLLM）</h3>
+                                                    <h3 className="text-sm font-medium text-[var(--ink)]">{tSettings('about.developer.liteLlmRefreshTitle')}</h3>
                                                     <p className="mt-1 text-xs text-[var(--ink-muted)]">
-                                                        定期从 GitHub 拉取 LiteLLM 模型库，作为模型上下文长度的兜底数据源（启动检查 + 每日增量，未改动几乎不耗流量）。
+                                                        {tSettings('about.developer.liteLlmRefreshDescription')}
                                                     </p>
                                                 </div>
                                                 <button
@@ -4810,9 +4810,9 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                         <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
                                             <div className="flex items-center justify-between">
                                                 <div>
-                                                    <h3 className="text-sm font-medium text-[var(--ink)]">急切 Fork（实验性）</h3>
+                                                    <h3 className="text-sm font-medium text-[var(--ink)]">{tSettings('about.developer.eagerForkTitle')}</h3>
                                                     <p className="mt-1 text-xs text-[var(--ink-muted)]">
-                                                        Fork 会话时用 SDK 独立 forkSession() 急切分叉（点击即创建 + UUID 重映射），消除旧的懒分叉状态机。关掉则回退稳定的旧路径。
+                                                        {tSettings('about.developer.eagerForkDescription')}
                                                     </p>
                                                 </div>
                                                 <button
@@ -4832,9 +4832,9 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                         <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
                                             <div className="flex items-start justify-between gap-4">
                                                 <div className="min-w-0">
-                                                    <h3 className="text-sm font-medium text-[var(--ink)]">Claude 会话保留天数</h3>
+                                                    <h3 className="text-sm font-medium text-[var(--ink)]">{tSettings('about.developer.claudeTranscriptRetentionTitle')}</h3>
                                                     <p className="mt-1 text-xs text-[var(--ink-muted)]">
-                                                        写入 Claude Agent SDK 的 cleanupPeriodDays，用于控制本地 transcript 自动清理周期。
+                                                        {tSettings('about.developer.claudeTranscriptRetentionDescription')}
                                                     </p>
                                                 </div>
                                                 <div className="flex shrink-0 items-center gap-2">
@@ -4845,18 +4845,18 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                                         onChange={(e) => setClaudeTranscriptCleanupDaysDraft(e.target.value.replace(/[^0-9]/g, ''))}
                                                         onBlur={commitClaudeTranscriptCleanupDays}
                                                         onKeyDown={(e) => { if (e.key === 'Enter') e.currentTarget.blur(); }}
-                                                        aria-label="Claude 会话保留天数"
+                                                        aria-label={tSettings('about.developer.claudeTranscriptRetentionTitle')}
                                                         className="w-24 rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-1.5 text-right text-xs text-[var(--ink)] placeholder:text-[var(--ink-faint)] focus:border-[var(--focus-border)] focus:outline-none"
                                                         placeholder={String(DEFAULT_CLAUDE_TRANSCRIPT_CLEANUP_PERIOD_DAYS)}
                                                     />
-                                                    <span className="text-xs text-[var(--ink-muted)]">天</span>
+                                                    <span className="text-xs text-[var(--ink-muted)]">{tSettings('about.developer.daysUnit')}</span>
                                                 </div>
                                             </div>
                                         </div>
 
                                         {/* Build Versions */}
                                         <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
-                                            <h3 className="mb-3 text-sm font-medium text-[var(--ink)]">构建信息</h3>
+                                            <h3 className="mb-3 text-sm font-medium text-[var(--ink)]">{tSettings('about.developer.buildInfoTitle')}</h3>
                                             <div className="space-y-2 text-xs">
                                                 {(() => {
                                                     const versions = getBuildVersions();
@@ -4884,16 +4884,16 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                         <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
                                             <div className="flex items-center justify-between">
                                                 <div>
-                                                    <h3 className="text-sm font-medium text-[var(--ink)]">循环任务</h3>
+                                                    <h3 className="text-sm font-medium text-[var(--ink)]">{tSettings('about.developer.cronTaskTitle')}</h3>
                                                     <p className="mt-1 text-xs text-[var(--ink-muted)]">
-                                                        查看和管理运行中的循环任务（开发调试用）
+                                                        {tSettings('about.developer.cronTaskDescription')}
                                                     </p>
                                                 </div>
                                                 <button
                                                     onClick={() => setShowCronDebugPanel(true)}
                                                     className="rounded-lg bg-[var(--paper-inset)] px-3 py-1.5 text-xs font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-elevated)]"
                                                 >
-                                                    打开面板
+                                                    {tSettings('about.developer.openPanel')}
                                                 </button>
                                             </div>
                                         </div>
@@ -6082,17 +6082,17 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                     <div className="mx-4 w-full max-w-lg rounded-2xl bg-[var(--paper-elevated)] shadow-xl max-h-[85vh] flex flex-col">
                         {/* Header */}
                         <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--line)]">
-                            <h3 className="text-lg font-semibold text-[var(--ink)]">{editingMcpId ? '编辑 MCP 服务器' : '添加 MCP 服务器'}</h3>
+                            <h3 className="text-lg font-semibold text-[var(--ink)]">{editingMcpId ? tSettings('toolbox.dialogs.customMcp.editTitle') : tSettings('toolbox.dialogs.customMcp.addTitle')}</h3>
                             <div className="flex items-center gap-2">
                                 {!editingMcpId && (
                                     <button
                                         onClick={() => {
                                             setMcpFormMode(m => m === 'form' ? 'json' : 'form');
-                                            setMcpJsonError('');
+                                            setMcpJsonError(null);
                                         }}
                                         className="text-sm text-[var(--accent)] hover:underline"
                                     >
-                                        {mcpFormMode === 'form' ? '切换为 JSON 配置' : '切换为添加面板'}
+                                        {mcpFormMode === 'form' ? tSettings('toolbox.dialogs.customMcp.switchToJson') : tSettings('toolbox.dialogs.customMcp.switchToForm')}
                                     </button>
                                 )}
                                 <button
@@ -6110,24 +6110,24 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                             <div className="space-y-3">
                               <textarea
                                 value={mcpJsonInput}
-                                onChange={e => { setMcpJsonInput(e.target.value); setMcpJsonError(''); }}
-                                placeholder={'请粘贴完整的 JSON 配置，例如：\n{\n  "mcpServers": {\n    "ddg-search": {\n      "command": "uvx",\n      "args": ["duckduckgo-mcp-server"]\n    }\n  }\n}'}
+                                onChange={e => { setMcpJsonInput(e.target.value); setMcpJsonError(null); }}
+                                placeholder={tSettings('toolbox.dialogs.customMcp.jsonPlaceholder')}
                                 className="w-full h-64 rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 font-mono text-sm text-[var(--ink)] placeholder:text-[var(--ink-muted)]/50 focus:border-[var(--accent)] focus:outline-none focus:ring-1 focus:ring-[var(--accent)] resize-none"
                                 spellCheck={false}
                               />
                               {mcpJsonError && (
-                                <p className="text-sm text-[var(--error)]">{mcpJsonError}</p>
+                                <p className="text-sm text-[var(--error)]">{tSettings(mcpJsonError.key, mcpJsonError.params)}</p>
                               )}
                             </div>
                           ) : (
                           <>
                             {/* Transport Type Selector */}
                             <div className="mb-5">
-                                <label className="mb-2 block text-sm font-medium text-[var(--ink-muted)]">传输协议</label>
+                                <label className="mb-2 block text-sm font-medium text-[var(--ink-muted)]">{tSettings('toolbox.dialogs.customMcp.transport')}</label>
                                 <div className="grid grid-cols-3 gap-2">
                                     {[
-                                        { type: 'stdio' as const, icon: '💻', name: 'STDIO', desc: '本地命令行' },
-                                        { type: 'http' as const, icon: '🌐', name: 'Streamable HTTP', desc: '远程服务器' },
+                                        { type: 'stdio' as const, icon: '💻', name: 'STDIO', desc: tSettings('toolbox.dialogs.customMcp.localCommand') },
+                                        { type: 'http' as const, icon: '🌐', name: 'Streamable HTTP', desc: tSettings('toolbox.dialogs.customMcp.remoteServer') },
                                         { type: 'sse' as const, icon: '📡', name: 'SSE', desc: 'Server-Sent Events' },
                                     ].map((t) => (
                                         <button
@@ -6158,23 +6158,23 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                         type="text"
                                         value={mcpForm.id}
                                         onChange={(e) => setMcpForm((p) => ({ ...p, id: e.target.value.toLowerCase().replace(/\s/g, '-') }))}
-                                        placeholder="例如: my-mcp-server"
+                                        placeholder={tSettings('toolbox.dialogs.customMcp.idPlaceholder')}
                                         disabled={!!editingMcpId}
                                         className={`w-full rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2.5 text-sm font-mono transition-colors focus:border-[var(--focus-border)] focus:outline-none ${editingMcpId ? 'opacity-50 cursor-not-allowed' : ''}`}
                                     />
-                                    <p className="mt-1 text-xs text-[var(--ink-muted)]">唯一标识符，用于在配置中引用</p>
+                                    <p className="mt-1 text-xs text-[var(--ink-muted)]">{tSettings('toolbox.dialogs.customMcp.idHint')}</p>
                                 </div>
 
                                 {/* Name - Common */}
                                 <div>
                                     <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">
-                                        名称 <span className="font-mono text-[var(--ink-muted)]">name</span> <span className="text-[var(--error)]">*</span>
+                                        {tSettings('toolbox.dialogs.customMcp.name')} <span className="font-mono text-[var(--ink-muted)]">name</span> <span className="text-[var(--error)]">*</span>
                                     </label>
                                     <input
                                         type="text"
                                         value={mcpForm.name}
                                         onChange={(e) => setMcpForm((p) => ({ ...p, name: e.target.value }))}
-                                        placeholder="例如: 我的 MCP 服务器"
+                                        placeholder={tSettings('toolbox.dialogs.customMcp.namePlaceholder')}
                                         className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2.5 text-sm transition-colors focus:border-[var(--focus-border)] focus:outline-none"
                                     />
                                 </div>
@@ -6184,22 +6184,22 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                     <>
                                         <div>
                                             <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">
-                                                命令 <span className="font-mono text-[var(--ink-muted)]">command</span> <span className="text-[var(--error)]">*</span>
+                                                {tSettings('toolbox.dialogs.customMcp.command')} <span className="font-mono text-[var(--ink-muted)]">command</span> <span className="text-[var(--error)]">*</span>
                                             </label>
                                             <input
                                                 type="text"
                                                 value={mcpForm.command}
                                                 onChange={(e) => setMcpForm((p) => ({ ...p, command: e.target.value }))}
-                                                placeholder="例如: npx, uvx, node, python"
+                                                placeholder={tSettings('toolbox.dialogs.customMcp.commandPlaceholder')}
                                                 className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2.5 text-sm font-mono transition-colors focus:border-[var(--focus-border)] focus:outline-none"
                                             />
-                                            <p className="mt-1 text-xs text-[var(--ink-muted)]">启动服务器的命令</p>
+                                            <p className="mt-1 text-xs text-[var(--ink-muted)]">{tSettings('toolbox.dialogs.customMcp.commandHint')}</p>
                                         </div>
 
                                         {/* Args - array input */}
                                         <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-inset)] p-4">
                                             <label className="mb-3 block text-sm font-medium text-[var(--ink)]">
-                                                参数 <span className="font-mono text-[var(--ink-muted)]">args</span>
+                                                {tSettings('toolbox.dialogs.customMcp.args')} <span className="font-mono text-[var(--ink-muted)]">args</span>
                                             </label>
 
                                             {/* Existing args */}
@@ -6230,7 +6230,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                                     type="text"
                                                     value={mcpForm.newArg}
                                                     onChange={(e) => setMcpForm((p) => ({ ...p, newArg: e.target.value }))}
-                                                    placeholder="例如: @playwright/mcp@latest"
+                                                    placeholder={tSettings('toolbox.dialogs.customMcp.argPlaceholder')}
                                                     className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2 text-sm font-mono transition-colors focus:border-[var(--focus-border)] focus:outline-none"
                                                     onKeyDown={(e) => {
                                                         if (e.key === 'Enter') {
@@ -6259,16 +6259,16 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                                     className="flex items-center gap-1.5 rounded-lg border border-[var(--ink)] px-3 py-2 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)] disabled:opacity-50"
                                                 >
                                                     <Plus className="h-4 w-4" />
-                                                    添加
+                                                    {tSettings('toolbox.common.add')}
                                                 </button>
                                             </div>
-                                            <p className="mt-2 text-xs text-[var(--ink-muted)]">一次填写一个参数，按 Enter 或点击添加</p>
+                                            <p className="mt-2 text-xs text-[var(--ink-muted)]">{tSettings('toolbox.dialogs.customMcp.argHint')}</p>
                                         </div>
 
                                         {/* Environment Variables */}
                                         <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-inset)] p-4">
                                             <label className="mb-3 flex items-center gap-2 text-sm font-medium text-[var(--ink)]">
-                                                <span>🔐</span> 环境变量 <span className="font-mono text-[var(--ink-muted)]">env</span>（可选）
+                                                <span>🔐</span> {tSettings('toolbox.dialogs.customMcp.envVars')} <span className="font-mono text-[var(--ink-muted)]">env</span>{tSettings('toolbox.dialogs.customMcp.optionalSuffix')}
                                             </label>
 
                                             {/* Existing env vars */}
@@ -6282,7 +6282,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                                             ...p,
                                                             env: { ...p.env, [key]: e.target.value }
                                                         }))}
-                                                        placeholder="值"
+                                                        placeholder={tSettings('toolbox.common.valuePlaceholder')}
                                                         className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2 text-sm transition-colors focus:border-[var(--focus-border)] focus:outline-none"
                                                     />
                                                     <button
@@ -6304,14 +6304,14 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                                     type="text"
                                                     value={mcpForm.newEnvKey}
                                                     onChange={(e) => setMcpForm((p) => ({ ...p, newEnvKey: e.target.value.toUpperCase().replace(/\s/g, '_') }))}
-                                                    placeholder="变量名"
+                                                    placeholder={tSettings('toolbox.common.envKeyPlaceholder')}
                                                     className="w-[140px] shrink-0 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2 text-sm font-mono transition-colors focus:border-[var(--focus-border)] focus:outline-none"
                                                 />
                                                 <input
                                                     type="text"
                                                     value={mcpForm.newEnvValue}
                                                     onChange={(e) => setMcpForm((p) => ({ ...p, newEnvValue: e.target.value }))}
-                                                    placeholder="值"
+                                                    placeholder={tSettings('toolbox.common.valuePlaceholder')}
                                                     className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2 text-sm font-mono transition-colors focus:border-[var(--focus-border)] focus:outline-none"
                                                     onKeyDown={(e) => {
                                                         if (e.key === 'Enter') {
@@ -6344,7 +6344,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                                     className="flex items-center gap-1.5 rounded-lg border border-[var(--ink)] px-3 py-2 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)] disabled:opacity-50"
                                                 >
                                                     <Plus className="h-4 w-4" />
-                                                    添加
+                                                    {tSettings('toolbox.common.add')}
                                                 </button>
                                             </div>
                                         </div>
@@ -6356,17 +6356,17 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                     <>
                                         <div>
                                             <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">
-                                                服务器 <span className="font-mono text-[var(--ink-muted)]">url</span> <span className="text-[var(--error)]">*</span>
+                                                {tSettings('toolbox.dialogs.customMcp.serverUrl')} <span className="font-mono text-[var(--ink-muted)]">url</span> <span className="text-[var(--error)]">*</span>
                                             </label>
                                             <input
                                                 type="url"
                                                 value={mcpForm.url}
                                                 onChange={(e) => setMcpForm((p) => ({ ...p, url: e.target.value }))}
-                                                placeholder={mcpForm.type === 'sse' ? "例如: https://example.com/sse" : "例如: https://example.com/mcp"}
+                                                placeholder={mcpForm.type === 'sse' ? tSettings('toolbox.dialogs.customMcp.urlPlaceholderSse') : tSettings('toolbox.dialogs.customMcp.urlPlaceholderHttp')}
                                                 className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2.5 text-sm font-mono transition-colors focus:border-[var(--focus-border)] focus:outline-none"
                                             />
                                             <p className="mt-1 text-xs text-[var(--ink-muted)]">
-                                                {mcpForm.type === 'sse' ? 'SSE 事件流端点地址' : 'MCP 服务器的 HTTP 端点地址'}
+                                                {mcpForm.type === 'sse' ? tSettings('toolbox.dialogs.customMcp.urlHintSse') : tSettings('toolbox.dialogs.customMcp.urlHintHttp')}
                                             </p>
                                         </div>
 
@@ -6378,7 +6378,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                                 className="flex w-full items-center justify-between p-4 text-sm font-medium text-[var(--ink)]"
                                             >
                                                 <span className="flex items-center gap-2">
-                                                    <KeyRound className="h-4 w-4" /> 请求头 <span className="font-mono text-[var(--ink-muted)]">headers</span>
+                                                    <KeyRound className="h-4 w-4" /> {tSettings('toolbox.dialogs.customMcp.headers')} <span className="font-mono text-[var(--ink-muted)]">headers</span>
                                                     {Object.keys(mcpForm.headers).length > 0 && (
                                                         <span className="rounded-full bg-[var(--accent)]/10 px-1.5 py-0.5 text-xs text-[var(--accent)]">{Object.keys(mcpForm.headers).length}</span>
                                                     )}
@@ -6403,7 +6403,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                                                     ...p,
                                                                     headers: { ...p.headers, [key]: e.target.value }
                                                                 }))}
-                                                                placeholder="值"
+                                                                placeholder={tSettings('toolbox.common.valuePlaceholder')}
                                                                 className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2 text-sm font-mono transition-colors focus:border-[var(--focus-border)] focus:outline-none"
                                                             />
                                                             <button
@@ -6425,14 +6425,14 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                                             type="text"
                                                             value={mcpForm.newHeaderKey}
                                                             onChange={(e) => setMcpForm((p) => ({ ...p, newHeaderKey: e.target.value }))}
-                                                            placeholder="名称"
+                                                            placeholder={tSettings('toolbox.dialogs.customMcp.headerNamePlaceholder')}
                                                             className="w-[140px] shrink-0 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2 text-sm font-mono transition-colors focus:border-[var(--focus-border)] focus:outline-none"
                                                         />
                                                         <input
                                                             type="text"
                                                             value={mcpForm.newHeaderValue}
                                                             onChange={(e) => setMcpForm((p) => ({ ...p, newHeaderValue: e.target.value }))}
-                                                            placeholder="值"
+                                                            placeholder={tSettings('toolbox.common.valuePlaceholder')}
                                                             className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2 text-sm font-mono transition-colors focus:border-[var(--focus-border)] focus:outline-none"
                                                             onKeyDown={(e) => {
                                                                 if (e.key === 'Enter') {
@@ -6465,7 +6465,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                                             <Plus className="h-4 w-4" />
                                                         </button>
                                                     </div>
-                                                    <p className="mt-2 text-xs text-[var(--ink-muted)]">用于认证的 HTTP 请求头，如 Authorization: Bearer token</p>
+                                                    <p className="mt-2 text-xs text-[var(--ink-muted)]">{tSettings('toolbox.dialogs.customMcp.authHeaderHint')}</p>
                                                 </div>
                                             )}
                                         </div>
@@ -6475,17 +6475,17 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                             <div className="p-4">
                                                 <div className="flex items-center justify-between">
                                                     <span className="flex items-center gap-2 text-sm font-medium text-[var(--ink)]">
-                                                        <Link className="h-4 w-4" /> OAuth 2.0 授权
+                                                        <Link className="h-4 w-4" /> {tSettings('toolbox.dialogs.customMcp.oauthTitle')}
                                                     </span>
                                                     <span className="flex items-center gap-2">
                                                         {mcpOAuthStatus[mcpForm.id] === 'connected' && (
                                                             <span className="flex items-center gap-1 rounded-full bg-[var(--success)]/10 px-2 py-0.5 text-xs text-[var(--success)]">
-                                                                <Check className="h-3 w-3" /> 已授权
+                                                                <Check className="h-3 w-3" /> {tSettings('toolbox.dialogs.customMcp.oauthAuthorized')}
                                                             </span>
                                                         )}
                                                         {mcpOAuthStatus[mcpForm.id] === 'expired' && (
                                                             <span className="flex items-center gap-1 rounded-full bg-[var(--warning)]/10 px-2 py-0.5 text-xs text-[var(--warning)]">
-                                                                <AlertCircle className="h-3 w-3" /> 已过期
+                                                                <AlertCircle className="h-3 w-3" /> {tSettings('toolbox.dialogs.customMcp.oauthExpired')}
                                                             </span>
                                                         )}
                                                     </span>
@@ -6498,7 +6498,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                                             onClick={() => handleMcpOAuthDisconnect(mcpForm.id)}
                                                             className="flex items-center gap-1.5 rounded-lg border border-[var(--error)] px-3 py-2 text-sm font-medium text-[var(--error)] transition-colors hover:bg-[var(--error-bg)]"
                                                         >
-                                                            <Unlink className="h-4 w-4" /> 撤销授权
+                                                            <Unlink className="h-4 w-4" /> {tSettings('toolbox.dialogs.customMcp.revokeAuthorization')}
                                                         </button>
                                                     </div>
                                                 )}
@@ -6512,9 +6512,9 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                                             className="flex items-center gap-1.5 rounded-lg border border-[var(--warning)] px-3 py-2 text-sm font-medium text-[var(--warning)] transition-colors hover:bg-[var(--warning)]/10 disabled:opacity-50"
                                                         >
                                                             {mcpOAuthConnecting === mcpForm.id ? (
-                                                                <><Loader2 className="h-4 w-4 animate-spin" /> 等待授权...</>
+                                                                <><Loader2 className="h-4 w-4 animate-spin" /> {tSettings('toolbox.dialogs.customMcp.waitingAuthorization')}</>
                                                             ) : (
-                                                                <><Link className="h-4 w-4" /> 重新授权</>
+                                                                <><Link className="h-4 w-4" /> {tSettings('toolbox.dialogs.customMcp.reauthorize')}</>
                                                             )}
                                                         </button>
                                                     </div>
@@ -6542,9 +6542,9 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                                                     className="flex items-center gap-1.5 rounded-lg bg-[var(--accent)] px-4 py-2 text-sm font-medium text-white transition-colors hover:opacity-90 disabled:opacity-50"
                                                                 >
                                                                     {mcpOAuthConnecting === mcpForm.id ? (
-                                                                        <><Loader2 className="h-4 w-4 animate-spin" /> 等待授权...</>
+                                                                        <><Loader2 className="h-4 w-4 animate-spin" /> {tSettings('toolbox.dialogs.customMcp.waitingAuthorization')}</>
                                                                     ) : (
-                                                                        <><Link className="h-4 w-4" /> 授权登录</>
+                                                                        <><Link className="h-4 w-4" /> {tSettings('toolbox.dialogs.customMcp.authorizeLogin')}</>
                                                                     )}
                                                                 </button>
                                                                 <button
@@ -6552,7 +6552,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                                                     onClick={() => setMcpOAuthExpanded(v => !v)}
                                                                     className="text-xs text-[var(--ink-muted)] hover:text-[var(--ink)] transition-colors"
                                                                 >
-                                                                    {mcpOAuthExpanded ? '收起高级选项' : '手动配置 (高级)'}
+                                                                    {mcpOAuthExpanded ? tSettings('toolbox.dialogs.customMcp.collapseAdvanced') : tSettings('toolbox.dialogs.customMcp.manualConfig')}
                                                                 </button>
                                                             </div>
                                                         )}
@@ -6561,14 +6561,14 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                                         {mcpOAuthProbe[mcpForm.id]?.supportsDynamicRegistration === false && !mcpOAuthExpanded && (
                                                             <div>
                                                                 <p className="mb-2 text-xs text-[var(--ink-muted)]">
-                                                                    该服务不支持自动注册，请手动配置 OAuth 凭证。
+                                                                    {tSettings('toolbox.dialogs.customMcp.manualFallbackNote')}
                                                                 </p>
                                                                 <button
                                                                     type="button"
                                                                     onClick={() => setMcpOAuthExpanded(true)}
                                                                     className="text-xs text-[var(--accent)] hover:underline"
                                                                 >
-                                                                    展开手动配置
+                                                                    {tSettings('toolbox.dialogs.customMcp.expandManualConfig')}
                                                                 </button>
                                                             </div>
                                                         )}
@@ -6580,14 +6580,14 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                                                     type="text"
                                                                     value={mcpForm.oauthClientId}
                                                                     onChange={(e) => setMcpForm(p => ({ ...p, oauthClientId: e.target.value }))}
-                                                                    placeholder="Client ID *"
+                                                                    placeholder={tSettings('toolbox.dialogs.customMcp.clientIdPlaceholder')}
                                                                     className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2 text-sm font-mono transition-colors focus:border-[var(--focus-border)] focus:outline-none"
                                                                 />
                                                                 <input
                                                                     type="password"
                                                                     value={mcpForm.oauthClientSecret}
                                                                     onChange={(e) => setMcpForm(p => ({ ...p, oauthClientSecret: e.target.value }))}
-                                                                    placeholder="Client Secret（可选）"
+                                                                    placeholder={tSettings('toolbox.dialogs.customMcp.clientSecretPlaceholder')}
                                                                     className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2 text-sm font-mono transition-colors focus:border-[var(--focus-border)] focus:outline-none"
                                                                 />
                                                                 <div className="grid grid-cols-2 gap-2">
@@ -6595,14 +6595,14 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                                                         type="text"
                                                                         value={mcpForm.oauthScopes}
                                                                         onChange={(e) => setMcpForm(p => ({ ...p, oauthScopes: e.target.value }))}
-                                                                        placeholder="Scopes（空格分隔）"
+                                                                        placeholder={tSettings('toolbox.dialogs.customMcp.scopesPlaceholder')}
                                                                         className="rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2 text-sm font-mono transition-colors focus:border-[var(--focus-border)] focus:outline-none"
                                                                     />
                                                                     <input
                                                                         type="text"
                                                                         value={mcpForm.oauthCallbackPort}
                                                                         onChange={(e) => setMcpForm(p => ({ ...p, oauthCallbackPort: e.target.value.replace(/\D/g, '') }))}
-                                                                        placeholder="回调端口（留空随机）"
+                                                                        placeholder={tSettings('toolbox.dialogs.customMcp.callbackPortPlaceholder')}
                                                                         className="rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2 text-sm font-mono transition-colors focus:border-[var(--focus-border)] focus:outline-none"
                                                                     />
                                                                 </div>
@@ -6611,14 +6611,14 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                                                         type="url"
                                                                         value={mcpForm.oauthAuthUrl}
                                                                         onChange={(e) => setMcpForm(p => ({ ...p, oauthAuthUrl: e.target.value }))}
-                                                                        placeholder="Authorization URL（留空自动发现）"
+                                                                        placeholder={tSettings('toolbox.dialogs.customMcp.authUrlPlaceholder')}
                                                                         className="rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2 text-sm font-mono transition-colors focus:border-[var(--focus-border)] focus:outline-none"
                                                                     />
                                                                     <input
                                                                         type="url"
                                                                         value={mcpForm.oauthTokenUrl}
                                                                         onChange={(e) => setMcpForm(p => ({ ...p, oauthTokenUrl: e.target.value }))}
-                                                                        placeholder="Token URL（留空自动发现）"
+                                                                        placeholder={tSettings('toolbox.dialogs.customMcp.tokenUrlPlaceholder')}
                                                                         className="rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2 text-sm font-mono transition-colors focus:border-[var(--focus-border)] focus:outline-none"
                                                                     />
                                                                 </div>
@@ -6628,9 +6628,9 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                                                     className="flex items-center gap-1.5 rounded-lg border border-[var(--accent)] px-3 py-2 text-sm font-medium text-[var(--accent)] transition-colors hover:bg-[var(--accent)]/10 disabled:opacity-50"
                                                                 >
                                                                     {mcpOAuthConnecting === mcpForm.id ? (
-                                                                        <><Loader2 className="h-4 w-4 animate-spin" /> 等待授权...</>
+                                                                        <><Loader2 className="h-4 w-4 animate-spin" /> {tSettings('toolbox.dialogs.customMcp.waitingAuthorization')}</>
                                                                     ) : (
-                                                                        <><Link className="h-4 w-4" /> 手动连接</>
+                                                                        <><Link className="h-4 w-4" /> {tSettings('toolbox.dialogs.customMcp.manualConnect')}</>
                                                                     )}
                                                                 </button>
                                                             </div>
@@ -6653,14 +6653,14 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                 onClick={() => { setShowMcpForm(false); resetMcpForm(); }}
                                 className="flex-1 rounded-lg border border-[var(--line)] px-4 py-2.5 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)]"
                             >
-                                取消
+                                {tSettings('toolbox.common.cancel')}
                             </button>
                             <button
                                 onClick={handleAddMcpFromJson}
                                 disabled={!mcpJsonInput.trim()}
                                 className="flex-1 rounded-lg bg-[var(--button-primary-bg)] px-4 py-2.5 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:opacity-50"
                             >
-                                导入
+                                {tSettings('toolbox.dialogs.customMcp.import')}
                             </button>
                         </div>
                         ) : (
@@ -6671,7 +6671,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                     className="flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium text-[var(--error)] transition-colors hover:bg-[var(--error-bg)]"
                                 >
                                     <Trash2 className="h-4 w-4" />
-                                    删除
+                                    {tSettings('toolbox.dialogs.customMcp.delete')}
                                 </button>
                             )}
                             <div className={editingMcpId ? 'flex gap-3' : 'flex gap-3 flex-1'}>
@@ -6679,7 +6679,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                     onClick={() => { setShowMcpForm(false); resetMcpForm(); }}
                                     className={`rounded-lg border border-[var(--line)] px-4 py-2.5 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)] ${editingMcpId ? '' : 'flex-1'}`}
                                 >
-                                    取消
+                                    {tSettings('toolbox.common.cancel')}
                                 </button>
                                 <button
                                     onClick={handleAddMcp}
@@ -6690,7 +6690,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                     }
                                     className={`rounded-lg bg-[var(--button-primary-bg)] px-4 py-2.5 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:opacity-50 ${editingMcpId ? '' : 'flex-1'}`}
                                 >
-                                    {editingMcpId ? '保存修改' : '添加服务器'}
+                                    {editingMcpId ? tSettings('toolbox.dialogs.customMcp.saveChanges') : tSettings('toolbox.dialogs.customMcp.addServer')}
                                 </button>
                             </div>
                         </div>
@@ -7337,17 +7337,17 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                             <div className="flex h-10 w-10 items-center justify-center rounded-full bg-[var(--warning-bg)]">
                                 <AlertCircle className="h-5 w-5 text-[var(--warning)]" />
                             </div>
-                            <h3 className="flex-1 text-lg font-semibold text-[var(--ink)]">缺少运行环境</h3>
+                            <h3 className="flex-1 text-lg font-semibold text-[var(--ink)]">{tSettings('toolbox.dialogs.runtimeMissing.title')}</h3>
                             <button
                                 onClick={() => setRuntimeDialog({ show: false })}
-                                aria-label="关闭"
+                                aria-label={tSettings('toolbox.dialogs.runtimeMissing.close')}
                                 className="flex h-8 w-8 items-center justify-center rounded-lg text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
                             >
                                 <X className="h-4 w-4" />
                             </button>
                         </div>
                         <p className="mt-4 text-sm text-[var(--ink-muted)]">
-                            此 MCP 服务依赖 <span className="font-medium text-[var(--ink)]">{runtimeDialog.runtimeName}</span> 运行，请先安装后再启用。
+                            {tSettings('toolbox.dialogs.runtimeMissing.descriptionPrefix')} <span className="font-medium text-[var(--ink)]">{runtimeDialog.runtimeName}</span> {tSettings('toolbox.dialogs.runtimeMissing.descriptionSuffix')}
                         </p>
                         <div className="mt-6 flex gap-3">
                             <div className="flex-1" onClick={() => setRuntimeDialog({ show: false })}>
@@ -7355,7 +7355,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                     href={runtimeDialog.downloadUrl || '#'}
                                     className="flex w-full items-center justify-center gap-2 rounded-lg border border-[var(--line)] px-4 py-2.5 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)]"
                                 >
-                                    去官网下载
+                                    {tSettings('toolbox.dialogs.runtimeMissing.downloadOfficial')}
                                     <ExternalLinkIcon className="h-3.5 w-3.5" />
                                 </ExternalLink>
                             </div>
@@ -7364,7 +7364,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                     onClick={handleAiInstallRuntime}
                                     className="flex-1 rounded-lg bg-[var(--accent)] px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-[var(--accent-warm-hover)]"
                                 >
-                                    让 AI 小助理安装
+                                    {tSettings('toolbox.dialogs.runtimeMissing.askHelperInstall')}
                                 </button>
                             )}
                         </div>

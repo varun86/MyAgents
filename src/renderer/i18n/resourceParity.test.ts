@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
+import { VISIBLE_APP_SHORTCUTS } from '../utils/appShortcuts';
 import { resources } from './index';
 
 function flattenResource(value: unknown, prefix = ''): Record<string, string> {
@@ -25,5 +26,14 @@ describe('renderer i18n resource parity', () => {
     for (const key of Object.keys(zh)) {
       expect(interpolationNames(en[key] ?? '')).toEqual(interpolationNames(zh[key] ?? ''));
     }
+  });
+
+  it('settings includes labels for every visible app shortcut', () => {
+    const expectedIds = VISIBLE_APP_SHORTCUTS.map(shortcut => shortcut.id).sort();
+    const zhItems = resources['zh-CN'].settings.shortcuts.app.items;
+    const enItems = resources['en-US'].settings.shortcuts.app.items;
+
+    expect(Object.keys(zhItems).sort()).toEqual(expectedIds);
+    expect(Object.keys(enItems).sort()).toEqual(expectedIds);
   });
 });
