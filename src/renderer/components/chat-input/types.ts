@@ -54,7 +54,6 @@ export interface SimpleChatInputProps {
   onModelChange?: (modelId: string) => void;
   reasoningEffort?: string;
   onReasoningEffortChange?: (effort: string) => void;
-  sessionUnlocked?: boolean;
   permissionMode?: PermissionMode;
   onPermissionModeChange?: (mode: PermissionMode) => void;
   apiKeys?: Record<string, string>;

@@ -1,4 +1,4 @@
-import { AlertCircle, ChevronRight, ChevronUp, Gauge, Loader, Paperclip, Plus, Send, Square, X, FileText, AtSign, Wrench, Timer, Settings2, Unlock } from 'lucide-react';
+import { AlertCircle, ChevronRight, ChevronUp, Gauge, Loader, Paperclip, Plus, Send, Square, X, FileText, AtSign, Wrench, Timer, Settings2 } from 'lucide-react';
 import { memo, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState, forwardRef } from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -106,7 +106,6 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   onModelChange,
   reasoningEffort = 'default',
   onReasoningEffortChange,
-  sessionUnlocked = false,
   permissionMode = 'auto',
   onPermissionModeChange,
   apiKeys = {},
@@ -2049,15 +2048,6 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
 
             {/* Right side - model selector + send/stop button */}
             <div className="ml-auto flex items-center gap-2 shrink-0">
-              {/* v0.1.69: Unlocked indicator for legacy pre-snapshot sessions */}
-              {sessionUnlocked && (
-                <span
-                  className="flex h-5 w-5 items-center justify-center rounded text-[var(--ink-muted)]/60"
-                  title={t('input.sessionUnlocked')}
-                >
-                  <Unlock className="h-3 w-3" />
-                </span>
-              )}
               {/* PRD 0.2.32 — context 用量指示器（自取数 slot，model 按钮左侧） */}
               {contextIndicator}
               {/* Model Dropdown with Provider Selector */}

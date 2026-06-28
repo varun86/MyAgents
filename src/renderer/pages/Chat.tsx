@@ -56,7 +56,7 @@ import { projectCronExecutionOverrides } from '@/utils/cronExecutionProjection';
 import type { CronSettingsResult, CronInitialConfig } from '@/components/cron/CronTaskSettingsModal';
 import { isTauriEnvironment } from '@/utils/browserMock';
 import { isDebugMode } from '@/utils/debug';
-import { isImSource, getChannelTypeLabel } from '@/utils/taskCenterUtils';
+import { getChannelTypeLabel } from '@/utils/taskCenterUtils';
 import { appendCronPromptToDraft } from '@/utils/cronComposerRecovery';
 import { CODEX_SUBSCRIPTION_PROVIDER_ID, type PermissionMode, type McpServerDefinition, type Provider, getEffectiveModelAliases } from '@/config/types';
 import { syncMcpServerNames } from '@/components/tools/toolBadgeConfig';
@@ -2354,16 +2354,6 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     sessionMetaConfigSnapshotAt: sessionMeta?.configSnapshotAt ?? null,
     sessionMetaLoaded: !!sessionMeta,
   });
-
-  // v0.1.69 T17: legacy pre-snapshot session — session exists but has no snapshot,
-  // and not IM-sourced (IM is live-follow by design, not a legacy artifact). These
-  // sessions live-follow the agent, so edits to the agent mutate this session's
-  // effective config. Show an "unlocked" indicator so the user understands why.
-  // (Note: after #305 these sessions auto-migrate to owned on first UI config
-  // change; the indicator only shows until the user touches a config knob.)
-  const isSessionUnlocked = !!sessionMeta
-    && !sessionMeta.configSnapshotAt
-    && !isImSource(sessionMeta.source);
 
   // #300 — the session pinned a provider (selectedProviderId) but resolveProvider
   // silently fell back to a different one because the pinned provider is
@@ -4932,7 +4922,6 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
             onModelChange={inputUsesExternalRuntimeControls ? handleRuntimeModelChange : handleModelChange}
             reasoningEffort={reasoningEffort}
             onReasoningEffortChange={handleReasoningEffortChange}
-            sessionUnlocked={isSessionUnlocked}
             contextIndicator={contextIndicatorSlot}
             permissionMode={inputChromePermissionMode}
             onPermissionModeChange={handleInputPermissionModeChange}
