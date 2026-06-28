@@ -3038,7 +3038,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                             className="shrink-0 rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
                             title={tSettings('providers.managedCodex.settingsTitle')}
                         >
-                            <SlidersHorizontal className="h-4 w-4" />
+                            <Settings2 className="h-4 w-4" />
                         </button>
                     )}
                 </div>
