@@ -41,6 +41,29 @@
     "teamBuildUnavailable": "Team is not enabled in this build",
     "teamUnavailable": "Team is not available yet"
   },
+  "appChrome": {
+    "updateVerifyFailed": "Could not verify the update because of a network issue. Try again later.",
+    "updateExpiredRedownloading": "The downloaded update expired. Downloading the latest version...",
+    "updateInstallFailed": "Update installation failed. Try again or check manually in Settings.",
+    "backgroundCompletion": "AI will continue in the background",
+    "maxTabsReached": "Maximum tab count reached. Close another tab and try again.",
+    "maxTabsReachedWithCount": "Maximum tab count reached ({{count}}). Close one tab before starting an AI discussion.",
+    "codexSessionCreateFailed": "Failed to create Codex session",
+    "launchFailed": "Launch failed: {{message}}",
+    "tabLimitReached": "Tab limit reached. Close one tab and try again.",
+    "noWorkspaceForDiscussion": "No workspaces yet. Cannot start AI discussion.",
+    "noModelProviderForDiscussion": "No available model provider configured. Cannot start AI discussion.",
+    "discussionTabTitle": "Task discussion",
+    "diagnosticsTabTitle": "Issue diagnosis",
+    "exitAppTitle": "Exit app",
+    "exitRunningTasksMessage": "{{count}} recurring task(s) are running. They will stop after exit. Exit now?",
+    "exit": "Exit",
+    "cancel": "Cancel",
+    "newVersionTitle": "New version available",
+    "newVersionMessage": "Version v{{version}} has been downloaded. Install now?",
+    "install": "Install",
+    "later": "Later"
+  },
   "common": {
     "loading": "Loading...",
     "selectPlaceholder": "Select"

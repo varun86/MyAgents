@@ -41,6 +41,29 @@
     "teamBuildUnavailable": "当前构建未启用团队功能",
     "teamUnavailable": "团队功能尚未开放"
   },
+  "appChrome": {
+    "updateVerifyFailed": "无法验证更新（网络异常），请稍后重试",
+    "updateExpiredRedownloading": "已下载的更新已过期，正在重新下载新版本...",
+    "updateInstallFailed": "安装更新失败，请重试或前往设置页手动重新检查",
+    "backgroundCompletion": "AI 继续在后台完成任务",
+    "maxTabsReached": "已达到最大标签页数量，请关闭其他标签页后重试",
+    "maxTabsReachedWithCount": "已达标签页上限（{{count}} 个），请先关闭一个再开始 AI 讨论",
+    "codexSessionCreateFailed": "创建 Codex 会话失败",
+    "launchFailed": "启动失败：{{message}}",
+    "tabLimitReached": "标签页已达上限，请关闭一个后重试",
+    "noWorkspaceForDiscussion": "还没有工作区，无法开始 AI 讨论",
+    "noModelProviderForDiscussion": "未配置可用模型供应商，无法开始 AI 讨论",
+    "discussionTabTitle": "任务讨论",
+    "diagnosticsTabTitle": "问题诊断",
+    "exitAppTitle": "退出应用",
+    "exitRunningTasksMessage": "有 {{count}} 个循环任务正在运行中。退出后任务将被停止。确定要退出吗？",
+    "exit": "退出",
+    "cancel": "取消",
+    "newVersionTitle": "发现新版本",
+    "newVersionMessage": "最新版本 v{{version}} 已下载完成，是否立即安装？",
+    "install": "安装",
+    "later": "稍后"
+  },
   "common": {
     "loading": "加载中...",
     "selectPlaceholder": "请选择"

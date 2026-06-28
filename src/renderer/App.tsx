@@ -802,14 +802,14 @@ export default function App() {
       }
     }
     if (outcome === 'network-error') {
-      toastRef.current?.error('无法验证更新（网络异常），请稍后重试');
+      toastRef.current?.error(t('appChrome.updateVerifyFailed'));
     } else if (outcome === 'version-mismatch') {
-      toastRef.current?.info('已下载的更新已过期，正在重新下载新版本…');
+      toastRef.current?.info(t('appChrome.updateExpiredRedownloading'));
     } else if (outcome === 'error') {
-      toastRef.current?.error('安装更新失败，请重试或前往设置页手动重新检查');
+      toastRef.current?.error(t('appChrome.updateInstallFailed'));
     }
     // 'ok' → process is exiting via NSIS/relaunch, no toast needed
-  }, [flushOpenTabsNow]);
+  }, [flushOpenTabsNow, t]);
 
   // Per-tab loading state (keyed by tabId)
   const [loadingTabs, setLoadingTabs] = useState<Record<string, boolean>>({});
@@ -1365,13 +1365,13 @@ export default function App() {
 
     if (tab?.isGenerating && tab.sessionId) {
       void performCloseTab(tabId);
-      toastRef.current.info('AI 继续在后台完成任务');
+      toastRef.current.info(t('appChrome.backgroundCompletion'));
       return;
     }
 
     void performCloseTab(tabId);
   // eslint-disable-next-line react-hooks/exhaustive-deps -- callbacks stabilized via tabsRef
-  }, [setActiveTabId]);
+  }, [setActiveTabId, t]);
 
   // Close current active tab (for Cmd+W)
   const closeCurrentTab = useCallback(() => {
@@ -1606,7 +1606,7 @@ export default function App() {
 
         if (plan.type === 'open-new-tab') {
           if (tabsRef.current.length >= MAX_TABS) {
-            setTabErrors((prev) => ({ ...prev, [activeTabId]: '已达到最大标签页数量，请关闭其他标签页后重试' }));
+            setTabErrors((prev) => ({ ...prev, [activeTabId]: t('appChrome.maxTabsReached') }));
             setLoadingTabs((prev) => ({ ...prev, [activeTabId]: false }));
             launchingTabRef.current = null;
             return;
@@ -1670,7 +1670,7 @@ export default function App() {
           console.log(`[App] Scenario 3: Current tab ${activeTabId} has running cron task ${currentTabCronTask.id}, creating new tab`);
 
           if (tabsRef.current.length >= MAX_TABS) {
-            setTabErrors((prev) => ({ ...prev, [activeTabId]: '已达到最大标签页数量，请关闭其他标签页后重试' }));
+            setTabErrors((prev) => ({ ...prev, [activeTabId]: t('appChrome.maxTabsReached') }));
             setLoadingTabs((prev) => ({ ...prev, [activeTabId]: false }));
             launchingTabRef.current = null;
             return;
@@ -1803,7 +1803,7 @@ export default function App() {
           effectiveSessionId = prepared.id;
         } catch (err) {
           console.error('[App] Failed to create runtime-backed provider session:', err);
-          setTabErrors((prev) => ({ ...prev, [targetTabId]: '创建 Codex 会话失败' }));
+          setTabErrors((prev) => ({ ...prev, [targetTabId]: t('appChrome.codexSessionCreateFailed') }));
           setLoadingTabs((prev) => ({ ...prev, [targetTabId]: false }));
           launchingTabRef.current = null;
           return;
@@ -1967,7 +1967,7 @@ export default function App() {
       // to a blank chat. A toast makes the boot failure visible regardless of
       // which view the user is on. (Full in-chat "启动失败 + 重试" via
       // useSessionReady('failed'): Phase A follow-up.)
-      toastRef.current.error(`启动失败：${errorMsg}`);
+      toastRef.current.error(t('appChrome.launchFailed', { message: errorMsg }));
 
       // Cross-AI review (Critical): an instant flip set the tab to chat + 'pending'
       // BEFORE this ensure threw. 'pending' has no resolver left now (the post-ensure
@@ -2006,7 +2006,7 @@ export default function App() {
       launchingTabRef.current = null;
       setLoadingTabs((prev) => ({ ...prev, [activeTabId]: false, [targetTabId]: false }));
     }
-  }, [setActiveTabId, trackHistorySessionOpen]);
+  }, [setActiveTabId, t, trackHistorySessionOpen]);
 
   // Clear initialMessage from a tab after it has been consumed by Chat
   const clearInitialMessage = useCallback((tabId: string) => {
@@ -2051,7 +2051,7 @@ export default function App() {
   const handleForkSession = useCallback(async (_tabId: string, newSessionId: string, forkAgentDir: string, title: string, initialMessage?: string) => {
     // Check tab limit
     if (tabsRef.current.length >= MAX_TABS) {
-      toastRef.current.error('标签页已达上限，请关闭一个后重试');
+      toastRef.current.error(t('appChrome.tabLimitReached'));
       return false;
     }
 
@@ -2094,7 +2094,7 @@ export default function App() {
     } finally {
       setLoadingTabs(prev => ({ ...prev, [newTab.id]: false }));
     }
-  }, [setActiveTabId]);
+  }, [setActiveTabId, t]);
 
   /**
    * Spawn a fresh Tab bound to an EXISTING session, ensure its sidecar, and
@@ -2118,7 +2118,7 @@ export default function App() {
     opts?: { preserveCronActivation?: boolean; pendingFilePreview?: FilePreviewIntent },
   ): Promise<boolean> => {
     if (tabsRef.current.length >= MAX_TABS) {
-      toastRef.current.error('标签页已达上限，请关闭一个后重试');
+      toastRef.current.error(t('appChrome.tabLimitReached'));
       return false;
     }
     const newTab: Tab = {
@@ -2176,7 +2176,7 @@ export default function App() {
     } finally {
       setLoadingTabs(prev => ({ ...prev, [newTab.id]: false }));
     }
-  }, [setActiveTabId]);
+  }, [setActiveTabId, t]);
 
   // Per-session in-flight guard for open-in-new-tab. Without it, a rapid
   // double-click both observe a `tabsRef.current` that doesn't yet reflect the
@@ -3124,13 +3124,13 @@ export default function App() {
       try {
         const currentTabs = tabsRef.current;
         if (currentTabs.length >= MAX_TABS) {
-          toastRef.current?.error(`已达标签页上限（${MAX_TABS} 个），请先关闭一个再开始 AI 讨论`);
+          toastRef.current?.error(t('appChrome.maxTabsReachedWithCount', { count: MAX_TABS }));
           return;
         }
 
         const projects = configProjectsRef.current.filter(isProjectVisibleToUser);
         if (projects.length === 0) {
-          toastRef.current?.error('还没有工作区，无法开始 AI 讨论');
+          toastRef.current?.error(t('appChrome.noWorkspaceForDiscussion'));
           return;
         }
         // Prefer the explicit pick; fall back to smart default for legacy
@@ -3158,7 +3158,7 @@ export default function App() {
           appProviderVerifyStatusRef.current,
         );
         if (!sel) {
-          toastRef.current?.error('未配置可用模型供应商，无法开始 AI 讨论');
+          toastRef.current?.error(t('appChrome.noModelProviderForDiscussion'));
           return;
         }
 
@@ -3259,7 +3259,7 @@ export default function App() {
             view: 'chat' as const,
             agentDir: workspace.path,
             sessionId: createPendingSessionId(newTab.id),
-            title: '任务讨论',
+            title: t('appChrome.discussionTabTitle'),
             initialMessage,
           };
           setTabs((prev) => [...prev, seeded]);
@@ -3278,8 +3278,8 @@ export default function App() {
         // the tab consistently reads as a discussion session, not the
         // workspace's generic name.
         setTabs((prev) =>
-          prev.map((t) =>
-            t.id === newTab.id ? { ...t, title: '任务讨论' } : t,
+          prev.map((tab) =>
+            tab.id === newTab.id ? { ...tab, title: t('appChrome.discussionTabTitle') } : tab,
           ),
         );
       } catch (err) {
@@ -3290,7 +3290,7 @@ export default function App() {
     return () =>
       window.removeEventListener(CUSTOM_EVENTS.OPEN_AI_DISCUSSION, handler);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- stable via refs
-  }, [setActiveTabId]);
+  }, [setActiveTabId, t]);
 
   // Listen for OPEN_SESSION_IN_NEW_TAB — task center's 任务执行 session list
   // dispatches this to open a historical execution in a fresh chat tab.
@@ -3567,8 +3567,8 @@ export default function App() {
 
           // Override tab title
           setTabs((prev) =>
-            prev.map((t) =>
-              t.id === newTab.id ? { ...t, title: '问题诊断' } : t
+            prev.map((tab) =>
+              tab.id === newTab.id ? { ...tab, title: t('appChrome.diagnosticsTabTitle') } : tab
             )
           );
         } finally {
@@ -3584,7 +3584,7 @@ export default function App() {
       window.removeEventListener(CUSTOM_EVENTS.LAUNCH_BUG_REPORT, listener);
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps -- callbacks stabilized via refs, configAdd/patchProject are stable useCallbacks
-  }, [configAddProject, configPatchProject]);
+  }, [configAddProject, configPatchProject, t]);
 
   // Note: CRON_TASK_STOPPED event listener removed
   // With Session-centric Sidecar (Owner model), stopping a cron task only releases
@@ -3748,10 +3748,10 @@ export default function App() {
       {/* Exit confirmation dialog for running cron tasks */}
       {exitConfirmState && (
         <ConfirmDialog
-          title="退出应用"
-          message={`有 ${exitConfirmState.runningTaskCount} 个循环任务正在运行中。退出后任务将被停止。确定要退出吗？`}
-          confirmText="退出"
-          cancelText="取消"
+          title={t('appChrome.exitAppTitle')}
+          message={t('appChrome.exitRunningTasksMessage', { count: exitConfirmState.runningTaskCount })}
+          confirmText={t('appChrome.exit')}
+          cancelText={t('appChrome.cancel')}
           confirmVariant="danger"
           onConfirm={() => {
             exitConfirmState.resolve(true);
@@ -3772,10 +3772,10 @@ export default function App() {
           is unchanged; only the visibility gate is `updatePreparing`). */}
       {pendingUpdateOnStartup && !updatePreparing && (
         <ConfirmDialog
-          title="发现新版本"
-          message={`最新版本 v${pendingUpdateOnStartup} 已下载完成，是否立即安装？`}
-          confirmText="安装"
-          cancelText="稍后"
+          title={t('appChrome.newVersionTitle')}
+          message={t('appChrome.newVersionMessage', { version: pendingUpdateOnStartup })}
+          confirmText={t('appChrome.install')}
+          cancelText={t('appChrome.later')}
           confirmVariant="primary"
           onConfirm={() => {
             dismissPendingUpdate();
