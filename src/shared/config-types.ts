@@ -721,6 +721,7 @@ export interface AppConfig {
 
   // ===== Managed Codex Provider (PRD 0.2.43) =====
   // Developer gate controls visibility only; release-grade security remains required.
+  // Only explicit true enables the provider; release defaults persist true.
   managedCodexProviderDevGate?: boolean;
   /** @deprecated Use disabledProviderIds / providerOrder like every other provider. */
   managedCodexProviderEnabled?: boolean;
@@ -948,6 +949,12 @@ type ManagedCodexConfigLike = Pick<AppConfig,
   | 'managedCodexAuth'
 >;
 
+export function isManagedCodexProviderGateEnabled(
+  config: Pick<AppConfig, 'managedCodexProviderDevGate'>,
+): boolean {
+  return config.managedCodexProviderDevGate === true;
+}
+
 export function isManagedCodexRequiredRuntimeInstalled(
   state: ManagedCodexRuntimeInstallState | undefined,
 ): boolean {
@@ -968,7 +975,7 @@ export function getManagedCodexProviderReadiness(
   config: ManagedCodexConfigLike,
 ): ManagedCodexProviderReadiness {
   const requiredVersion = MANAGED_CODEX_REQUIRED_RUNTIME.version;
-  if (config.managedCodexProviderDevGate !== true) {
+  if (!isManagedCodexProviderGateEnabled(config)) {
     return {
       visible: false,
       selectable: false,
@@ -1019,7 +1026,7 @@ export function withManagedCodexProviderCatalog(
   runtimeModels?: readonly RuntimeModelInfo[],
 ): Provider[] {
   const withoutManagedCodex = providers.filter(provider => provider.id !== CODEX_SUBSCRIPTION_PROVIDER_ID);
-  if (config.managedCodexProviderDevGate !== true) return withoutManagedCodex;
+  if (!isManagedCodexProviderGateEnabled(config)) return withoutManagedCodex;
   const managedCodexProvider = withManagedCodexRuntimeModels(MANAGED_CODEX_PROVIDER, runtimeModels);
   const insertAfterIndex = withoutManagedCodex.findIndex(provider => provider.id === SUBSCRIPTION_PROVIDER_ID);
   if (insertAfterIndex < 0) return [...withoutManagedCodex, managedCodexProvider];
@@ -1692,6 +1699,7 @@ export const DEFAULT_CONFIG: AppConfig = {
   showDevTools: false,
   cliToolRegistryEnabled: false, // 默认关闭用户注册 CLI 工具注册表（实验室）
   teamSpaceEnabled: false, // 默认隐藏未发布的团队 Space 入口
+  managedCodexProviderDevGate: true, // 默认开放 Codex 订阅 Provider；只有显式 true 才启用
   floatingBallHoverPeekEnabled: true,
   liteLLMModelDataRefresh: true, // 默认开启 LiteLLM 模型数据兜底刷新（开发者可关）
   claudeTranscriptCleanupPeriodDays: DEFAULT_CLAUDE_TRANSCRIPT_CLEANUP_PERIOD_DAYS,

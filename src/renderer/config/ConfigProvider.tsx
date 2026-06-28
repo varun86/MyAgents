@@ -19,6 +19,7 @@ import {
     applyManagedCodexProviderReadiness,
     applyProviderEnablementAndOrder,
     getManagedCodexProviderReadiness,
+    isManagedCodexProviderGateEnabled,
     withManagedCodexProviderCatalog,
 } from './types';
 import type { RuntimeModelInfo } from '../../shared/types/runtime';
@@ -27,6 +28,7 @@ import {
     loadAppConfig,
     atomicModifyConfig,
     ensureBundledWorkspace,
+    ensureManagedCodexProviderDevGateDefault,
     mergePresetCustomModels,
 } from './services/appConfigService';
 import {
@@ -103,7 +105,7 @@ function migrateToolGroups(config: AppConfig): boolean {
 }
 
 function shouldAutoUpdateManagedCodexRuntime(config: AppConfig): boolean {
-    if (config.managedCodexProviderDevGate !== true) return false;
+    if (!isManagedCodexProviderGateEnabled(config)) return false;
     const install = config.managedCodexRuntimeInstall;
     const userEngaged = Boolean(install?.status || install?.installedVersion || install?.installedAt);
     if (!userEngaged || !install) return false;
@@ -274,6 +276,12 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
                 }
             } catch (e) {
                 console.warn('[ConfigProvider] Agent/CLI/system-skills sync failed:', e);
+            }
+
+            try {
+                await ensureManagedCodexProviderDevGateDefault();
+            } catch (e) {
+                console.warn('[ConfigProvider] Managed Codex provider default migration failed:', e);
             }
 
             const [rawConfig, loadedProjects, loadedProviders, loadedApiKeys, loadedVerifyStatus] = await Promise.all([

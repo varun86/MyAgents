@@ -131,6 +131,40 @@ function normalizeLoadedConfig(config: AppConfig): AppConfig {
     return normalizeDeveloperSettings(config);
 }
 
+export async function ensureManagedCodexProviderDevGateDefault(): Promise<void> {
+    if (isBrowserDevMode()) {
+        let latest: Partial<AppConfig> = {};
+        try {
+            const stored = localStorage.getItem('myagents:config');
+            latest = stored ? JSON.parse(stored) as Partial<AppConfig> : {};
+        } catch {
+            latest = {};
+        }
+        if (Object.prototype.hasOwnProperty.call(latest, 'managedCodexProviderDevGate')) {
+            return;
+        }
+        localStorage.setItem('myagents:config', JSON.stringify({
+            ...latest,
+            managedCodexProviderDevGate: true,
+        }));
+        return;
+    }
+
+    await withConfigLock(async () => {
+        await ensureConfigDir();
+        const dir = await getConfigDir();
+        const configPath = await join(dir, CONFIG_FILE);
+        const latest = await safeLoadJson<Partial<AppConfig>>(configPath, isValidAppConfig) ?? {};
+        if (Object.prototype.hasOwnProperty.call(latest, 'managedCodexProviderDevGate')) {
+            return;
+        }
+        await safeWriteJson(configPath, {
+            ...latest,
+            managedCodexProviderDevGate: true,
+        });
+    });
+}
+
 // ============= Load / Save =============
 
 export async function loadAppConfig(): Promise<AppConfig> {

@@ -12,6 +12,7 @@ import {
   applyManagedCodexProviderReadiness,
   getManagedCodexProviderReadiness,
   isManagedCodexRequiredRuntimeInstalled,
+  isManagedCodexProviderGateEnabled,
   isManagedCodexSubscriptionAuthValid,
   normalizeChatQueueResponseMode,
   normalizeClaudeTranscriptCleanupPeriodDays,
@@ -164,16 +165,21 @@ describe('Managed Codex provider readiness', () => {
     );
   });
 
-  it('keeps the provider out of the catalogue while the developer gate is off', () => {
+  it('defaults the developer gate on but still honors explicit disablement', () => {
+    expect(DEFAULT_CONFIG.managedCodexProviderDevGate).toBe(true);
+    expect(isManagedCodexProviderGateEnabled({})).toBe(false);
+    expect(isManagedCodexProviderGateEnabled({ managedCodexProviderDevGate: true })).toBe(true);
+    expect(isManagedCodexProviderGateEnabled({ managedCodexProviderDevGate: false })).toBe(false);
+  });
+
+  it('keeps the provider out of the catalogue while the developer gate is explicitly off', () => {
     expect(withManagedCodexProviderCatalog([MANAGED_CODEX_PROVIDER], {
       managedCodexProviderDevGate: false,
     }).some(provider => provider.id === CODEX_SUBSCRIPTION_PROVIDER_ID)).toBe(false);
   });
 
   it('inserts the provider after Anthropic subscription in the default catalogue', () => {
-    const catalog = withManagedCodexProviderCatalog(PRESET_PROVIDERS, {
-      managedCodexProviderDevGate: true,
-    });
+    const catalog = withManagedCodexProviderCatalog(PRESET_PROVIDERS, DEFAULT_CONFIG);
 
     expect(catalog.slice(0, 3).map(provider => provider.id)).toEqual([
       SUBSCRIPTION_PROVIDER_ID,
@@ -182,20 +188,14 @@ describe('Managed Codex provider readiness', () => {
     ]);
   });
 
-  it('shows the provider card behind the developer gate but keeps it unselectable until ready', () => {
-    const catalog = withManagedCodexProviderCatalog([], {
-      managedCodexProviderDevGate: true,
-    });
-    const providers = applyManagedCodexProviderReadiness(catalog, {
-      managedCodexProviderDevGate: true,
-    });
+  it('shows the provider card by default but keeps it unselectable until ready', () => {
+    const catalog = withManagedCodexProviderCatalog([], DEFAULT_CONFIG);
+    const providers = applyManagedCodexProviderReadiness(catalog, DEFAULT_CONFIG);
 
     expect(catalog.map(provider => provider.id)).toEqual([CODEX_SUBSCRIPTION_PROVIDER_ID]);
     expect(providers[0].enabled).toBeUndefined();
     expect(providers[0].runtimeReady).toBe(false);
-    expect(getManagedCodexProviderReadiness({
-      managedCodexProviderDevGate: true,
-    }).reason).toBe('runtime-not-installed');
+    expect(getManagedCodexProviderReadiness(DEFAULT_CONFIG).reason).toBe('runtime-not-installed');
   });
 
   it('derives Codex subscription models from the managed runtime model list', () => {

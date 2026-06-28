@@ -42,6 +42,7 @@ import {
     normalizeClaudeTranscriptCleanupPeriodDays,
     normalizeChatQueueResponseMode,
     getManagedCodexProviderReadiness,
+    isManagedCodexProviderGateEnabled,
     type ChatQueueResponseMode,
 } from '@/config/types';
 import {
@@ -2552,6 +2553,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
 
     // providers from useConfig includes both preset and custom providers
     const allProviders = providers;
+    const managedCodexProviderGateEnabled = isManagedCodexProviderGateEnabled(config);
     const managedCodexReadiness = useMemo(
         () => getManagedCodexProviderReadiness(config),
         [
@@ -2590,13 +2592,13 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
 
     useEffect(() => {
         if (activeSection !== 'providers') return;
-        if (config.managedCodexProviderDevGate !== true) return;
+        if (!managedCodexProviderGateEnabled) return;
         void refreshManagedCodexStatus();
-    }, [activeSection, config.managedCodexProviderDevGate, refreshManagedCodexStatus]);
+    }, [activeSection, managedCodexProviderGateEnabled, refreshManagedCodexStatus]);
 
     useEffect(() => {
         if (activeSection !== 'providers') return;
-        if (config.managedCodexProviderDevGate !== true) return;
+        if (!managedCodexProviderGateEnabled) return;
         const isDownloading = managedCodexBusy === 'download'
             || config.managedCodexRuntimeInstall?.status === 'downloading';
         if (!isDownloading) return;
@@ -2606,7 +2608,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
         return () => window.clearInterval(interval);
     }, [
         activeSection,
-        config.managedCodexProviderDevGate,
+        managedCodexProviderGateEnabled,
         config.managedCodexRuntimeInstall?.status,
         managedCodexBusy,
         refreshConfig,
@@ -4691,18 +4693,18 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                                 </div>
                                                 <button
                                                     onClick={() => {
-                                                        const nextEnabled = config.managedCodexProviderDevGate !== true;
+                                                        const nextEnabled = !managedCodexProviderGateEnabled;
                                                         console.info(
                                                             `[managed-codex] developer gate toggle requested runtime=codex runtimeSource=managed-provider enabled=${nextEnabled}`,
                                                         );
                                                         updateConfig({ managedCodexProviderDevGate: nextEnabled });
                                                     }}
-                                                    aria-pressed={config.managedCodexProviderDevGate === true}
-                                                    className={`relative h-6 w-11 shrink-0 cursor-pointer rounded-full transition-colors ${config.managedCodexProviderDevGate === true ? 'bg-[var(--accent)]' : 'bg-[var(--line-strong)]'
+                                                    aria-pressed={managedCodexProviderGateEnabled}
+                                                    className={`relative h-6 w-11 shrink-0 cursor-pointer rounded-full transition-colors ${managedCodexProviderGateEnabled ? 'bg-[var(--accent)]' : 'bg-[var(--line-strong)]'
                                                         }`}
                                                 >
                                                     <span
-                                                        className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-[var(--toggle-thumb)] shadow transition-transform ${config.managedCodexProviderDevGate === true ? 'translate-x-5' : 'translate-x-0'
+                                                        className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-[var(--toggle-thumb)] shadow transition-transform ${managedCodexProviderGateEnabled ? 'translate-x-5' : 'translate-x-0'
                                                             }`}
                                                     />
                                                 </button>

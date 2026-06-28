@@ -288,7 +288,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn managed_codex_provider_ready_requires_user_enablement_installed_and_chatgpt_auth() {
+    fn managed_codex_provider_ready_requires_explicit_gate_install_and_chatgpt_auth() {
+        let missing_gate = serde_json::json!({
+            "managedCodexRuntimeInstall": {
+                "status": "installed",
+                "installedVersion": MANAGED_CODEX_REQUIRED_VERSION
+            },
+            "managedCodexAuth": {
+                "status": "valid",
+                "authMethod": "chatgpt"
+            }
+        });
+        assert!(!managed_codex_provider_ready(&missing_gate));
+
         let ready = serde_json::json!({
             "managedCodexProviderDevGate": true,
             "managedCodexRuntimeInstall": {
@@ -301,6 +313,19 @@ mod tests {
             }
         });
         assert!(managed_codex_provider_ready(&ready));
+
+        let gate_off = serde_json::json!({
+            "managedCodexProviderDevGate": false,
+            "managedCodexRuntimeInstall": {
+                "status": "installed",
+                "installedVersion": MANAGED_CODEX_REQUIRED_VERSION
+            },
+            "managedCodexAuth": {
+                "status": "valid",
+                "authMethod": "chatgpt"
+            }
+        });
+        assert!(!managed_codex_provider_ready(&gate_off));
 
         let api_key_auth = serde_json::json!({
             "managedCodexProviderDevGate": true,
