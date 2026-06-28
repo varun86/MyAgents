@@ -4561,7 +4561,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       >
       <div className={`flex min-w-0 flex-1 flex-col overflow-hidden ${showWorkspace && !shouldUseWorkspaceOverlay ? 'border-r border-[var(--line-subtle)]' : ''}`}>
         {/* Compact header - single row */}
-        <div className="relative z-10 flex h-12 flex-shrink-0 items-center justify-between bg-[var(--paper-elevated)] px-4 after:pointer-events-none after:absolute after:inset-x-0 after:top-full after:h-6 after:bg-gradient-to-b after:from-[var(--paper-elevated)] after:to-[var(--paper-elevated-a0)]">
+        <div className="relative z-10 flex h-12 flex-shrink-0 items-center justify-between bg-[var(--paper-elevated)] px-4 after:pointer-events-none after:absolute after:inset-x-0 after:top-full after:h-3 after:bg-gradient-to-b after:from-[var(--paper-elevated)] after:to-[var(--paper-elevated-a0)]">
           <div className="flex min-w-0 items-center gap-2">
             {onBack && (
               <button

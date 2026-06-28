@@ -1255,7 +1255,7 @@ export default function FilePreviewModal({
         // (non-md or read-only md), the middle column collapses to 0.
         return (
             <div className="flex h-full flex-col overflow-hidden">
-                <div className="relative z-10 grid flex-shrink-0 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-2 px-4 py-2 after:pointer-events-none after:absolute after:inset-x-0 after:top-full after:h-6 after:bg-gradient-to-b after:from-[var(--paper-elevated)] after:to-[var(--paper-elevated-a0)]">
+                <div className="relative z-10 grid flex-shrink-0 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-2 px-4 py-2 after:pointer-events-none after:absolute after:inset-x-0 after:top-full after:h-3 after:bg-gradient-to-b after:from-[var(--paper-elevated)] after:to-[var(--paper-elevated-a0)]">
                     {/* Left: file info */}
                     <div className="flex min-w-0 items-center gap-2">
                         <div className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-md bg-[var(--accent-warm-muted)]">
