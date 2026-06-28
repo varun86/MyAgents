@@ -5,6 +5,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState, lazy, Suspense } from 'react';
+import { useTranslation } from 'react-i18next';
 
 import { perfMark } from '@/utils/perfMark';
 import { RENDERER_PERF_PHASE } from '../../shared/perfTrace';
@@ -75,6 +76,7 @@ interface LauncherProps {
 }
 
 export default function Launcher({ onLaunchProject, isStarting, startError: _startError, isActive, attachmentSessionId }: LauncherProps) {
+    const { t } = useTranslation('launcher');
     const toast = useToast();
     const toastRef = useRef(toast);
     const pinToggleInFlightRef = useRef(new Set<string>());
@@ -532,7 +534,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
     // the next handoff creates a fresh sidecar with the persisted runtime.
     const handleLauncherRuntimeChange = useCallback(async (runtime: RuntimeType) => {
         if (!selectedWorkspace?.agentId) {
-            toastRef.current.warning('该工作区未配置 Agent，无法切换 Runtime');
+            toastRef.current.warning(t('toasts.runtimeNeedsAgent'));
             return;
         }
         try {
@@ -546,9 +548,9 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
             );
         } catch (err) {
             console.error('[Launcher] runtime change failed:', err);
-            toastRef.current.error('切换 Runtime 失败，请重试');
+            toastRef.current.error(t('toasts.runtimeSwitchFailed'));
         }
-    }, [selectedWorkspace?.agentId, selectedAgent?.runtimeConfig]);
+    }, [selectedWorkspace?.agentId, selectedAgent?.runtimeConfig, t]);
 
     const handleLauncherProviderChange = useCallback((providerId: string | undefined, targetModel?: string) => {
         setLauncherProviderId(providerId);
@@ -600,9 +602,9 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
             await updateConfig({ defaultWorkspacePath: project.path });
         } catch (err) {
             console.error('[Launcher] failed to set default workspace:', err);
-            toastRef.current.warning('设为默认失败，请重试');
+            toastRef.current.warning(t('toasts.setDefaultFailed'));
         }
-    }, [updateConfig]);
+    }, [t, updateConfig]);
 
     // Handle send from BrandSection — `cron` is the launcher-staged cron config
     // (PRD 0.2.7 D1); when present, Chat's autoSend dispatches startCronTask
@@ -613,7 +615,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
         cron?: import('@/types/tab').InitialMessageCron,
     ) => {
         if (!selectedWorkspace) {
-            toastRef.current.error('请先选择工作区');
+            toastRef.current.error(t('toasts.selectWorkspaceFirst'));
             return;
         }
 
@@ -764,12 +766,12 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
                     interval_minutes: cron.intervalMinutes,
                     schedule_kind: cron.schedule.kind,
                 });
-                toastRef.current.success('独立定时任务已创建，可在任务中心查看');
+                toastRef.current.success(t('toasts.standaloneCronCreated'));
                 setLaunchingProjectId(null);
                 return;
             } catch (err) {
                 console.error('[Launcher] Failed to create standalone cron task:', err);
-                toastRef.current.error(`创建定时任务失败：${err instanceof Error ? err.message : String(err)}`);
+                toastRef.current.error(t('toasts.createCronFailed', { message: err instanceof Error ? err.message : String(err) }));
                 setLaunchingProjectId(null);
                 return;
             }
@@ -785,7 +787,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
         launcherSelectedModel, launcherReasoningEffort, launcherWorkspaceMcpEnabled, launcherGlobalMcpEnabled,
         launcherEnabledPlugins, launcherOfficialToolEnabled, launcherGlobalOfficialToolEnabled,
         imageUnderstandingConfiguredForInput, config.plugins, config.enabledPlugins,
-        isExternalRuntime, launcherRuntime, providers,
+        isExternalRuntime, launcherRuntime, providers, t,
         touchProject, onLaunchProject, updateConfig]);
 
     // Path input dialog state (for browser dev mode)
@@ -894,7 +896,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
                 const selected = await open({
                     directory: true,
                     multiple: false,
-                    title: '选择项目文件夹',
+                    title: t('dialogs.pickProjectFolder'),
                 });
                 console.log('[Launcher] Dialog result:', selected);
 
@@ -910,7 +912,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
             const errorMsg = err instanceof Error ? err.message : String(err);
             console.error('[Launcher] Failed to add project:', errorMsg);
             setAddError(errorMsg);
-            toast.error(`添加项目失败: ${errorMsg}`);
+            toast.error(t('toasts.addProjectFailed', { message: errorMsg }));
         }
     };
 
@@ -931,7 +933,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
             const errorMsg = err instanceof Error ? err.message : String(err);
             console.error('[Launcher] Failed to add project:', errorMsg);
             setAddError(errorMsg);
-            toast.error(`添加项目失败: ${errorMsg}`);
+            toast.error(t('toasts.addProjectFailed', { message: errorMsg }));
         }
     };
 
@@ -954,11 +956,11 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
             });
         } catch (err) {
             console.error('[Launcher] failed to toggle workspace pin:', err);
-            toastRef.current.warning('置顶状态保存失败，请重试');
+            toastRef.current.warning(t('toasts.pinFailed'));
         } finally {
             pinToggleInFlightRef.current.delete(project.id);
         }
-    }, [patchProject, projects]);
+    }, [patchProject, projects, t]);
 
     const confirmRemoveProject = async () => {
         if (projectToRemove) {
@@ -996,9 +998,9 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
             await openPathExternal({ fullPath: project.path, workspace: null });
         } catch (err) {
             console.error('[Launcher] Failed to open project folder:', err);
-            toastRef.current.error('打开所在文件夹失败');
+            toastRef.current.error(t('toasts.openFolderFailed'));
         }
-    }, [openPathExternal]);
+    }, [openPathExternal, t]);
     const handleCloseAgentOverlay = useCallback(() => setAgentOverlay(null), []);
 
     // SystemPromptsPanel "智能生成" → close the overlay and launch the workspace into
@@ -1012,7 +1014,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
         // first ordered provider which the user disabled in Settings → 启用和排序.
         const effectiveProvider = launcherProvider ?? providers.find(isProviderEnabled);
         if (!effectiveProvider) {
-            toastRef.current.error('没有可用的 Provider，请先在设置中配置');
+            toastRef.current.error(t('toasts.noProvider'));
             return;
         }
         setAgentOverlay(null);
@@ -1041,7 +1043,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
             initialMessage,
             { surface: 'agent_setup', entryIntent: 'workspace_init' },
         );
-    }, [agentOverlay, projects, launcherProvider, providers, launcherPermissionMode, launcherSelectedModel, isExternalRuntime, onLaunchProject]);
+    }, [agentOverlay, projects, launcherProvider, providers, launcherPermissionMode, launcherSelectedModel, isExternalRuntime, onLaunchProject, t]);
 
     return (
         <div className="flex h-full flex-col overflow-hidden bg-[var(--paper)] text-[var(--ink)]">
@@ -1064,12 +1066,11 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
             {/* Remove Workspace Confirm Dialog */}
             {projectToRemove && (
                 <ConfirmDialog
-                    title={isSystemPresetProject(projectToRemove) ? '隐藏默认工作区' : '移除工作区'}
+                    title={isSystemPresetProject(projectToRemove) ? t('dialogs.hideDefaultWorkspace') : t('dialogs.removeWorkspace')}
                     message={isSystemPresetProject(projectToRemove)
-                        ? `确定要隐藏「${projectToRemove.displayName || projectToRemove.name}」吗？此操作不会删除本地文件，后续可通过恢复入口重新显示。`
-                        : `确定要从列表中移除「${projectToRemove.name}」吗？此操作不会删除项目文件。`}
-                    confirmText={isSystemPresetProject(projectToRemove) ? '隐藏' : '移除'}
-                    cancelText="取消"
+                        ? t('dialogs.hideWorkspaceMessage', { name: projectToRemove.displayName || projectToRemove.name })
+                        : t('dialogs.removeWorkspaceMessage', { name: projectToRemove.name })}
+                    confirmText={isSystemPresetProject(projectToRemove) ? t('dialogs.hide') : t('dialogs.remove')}
                     confirmVariant="danger"
                     onConfirm={confirmRemoveProject}
                     onCancel={() => setProjectToRemove(null)}

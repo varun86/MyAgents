@@ -5,6 +5,173 @@
     "companionPlaceholder": "Ask Mino or delegate a task...",
     "addScreenshot": "Add screenshot",
     "send": "Send",
-    "stop": "Stop"
+    "stop": "Stop",
+    "stopRetry": "Stop retry",
+    "currentModel": "Current model",
+    "workspaceRoot": "Workspace root",
+    "modelDefault": "Default",
+    "selectModel": "Select model",
+    "runtimeModelHeader": "{{runtime}} Models",
+    "setupModelProvider": "Set up a model provider →",
+    "providerWarning": "Verification failed. Some models may be unavailable.",
+    "reasoningEffort": "Reasoning effort",
+    "reasoningDefault": "Default",
+    "reasoningRequirement": "Requires provider support; actual behavior depends on the provider.",
+    "systemBusy": "A system task is running. Please wait.",
+    "stopping": "Stopping...",
+    "providerUnavailableDefault": "Set up a model provider in Settings first.",
+    "deleteImage": "Remove image",
+    "addContext": "Add context",
+    "referenceFile": "Reference file",
+    "useSkill": "Use skill",
+    "uploadFile": "Upload file",
+    "permissionModeTitle": "Switch execution mode",
+    "permissionModeHeader": "Session mode",
+    "agentSettings": "Agent settings",
+    "autonomyWarning": "Autonomous mode is enabled. The Agent may perform irreversible actions.",
+    "toolsTitle": "Use tools",
+    "toolsLabel": "Tools",
+    "toolsHeader": "Tools enabled in this chat",
+    "settings": "Settings",
+    "settingsPage": "Settings",
+    "toolsEmptyPrefix": "Enable tools in",
+    "toolsEmptyExternal": "Enable official CLI tools in Settings to use them with this runtime.",
+    "toolsEmptyBuiltin": "Install and enable MCP tools to use browser automation and more.",
+    "pluginsHeader": "Plugins",
+    "pluginLoadsMcpTitle": "Enabling this plugin automatically loads these MCP servers: {{names}}",
+    "pluginLoadsMcp": "{{count}} MCP: {{names}}",
+    "managePlugins": "Manage plugins",
+    "noPluginsPrefix": "No plugins yet. Install them in",
+    "pluginsSettings": "Settings → Plugins",
+    "noPluginsSuffix": "from GitHub or a local path.",
+    "cronEnabled": "Schedule enabled",
+    "cron": "Schedule",
+    "sessionUnlocked": "This session is not locked and follows the Agent default. Agent changes will affect this chat.",
+    "switchModel": "Switch model",
+    "imageFilteredOnSend": "{{model}} does not support images. {{count}} image(s) were filtered; only text was sent.",
+    "undoFilesAdded": "Undid adding {{count}} file(s).",
+    "undoFilesPartial": "Undid {{successCount}} file(s); {{failCount}} file(s) could not be deleted.",
+    "undoReferenceOnly": "Reference removed, but file deletion failed.",
+    "mode": {
+      "chat": "Chat",
+      "thought": "Thought",
+      "switchToThought": "Press Tab to switch to Thought",
+      "switchToChat": "Press Tab to switch to Chat"
+    },
+    "mention": {
+      "workspaceFiles": "Workspace files",
+      "thoughts": "Thoughts",
+      "switchHint": "⌘/Ctrl + ←/→ to switch",
+      "filePlaceholder": "Type a filename to search...",
+      "searching": "Searching...",
+      "noFiles": "No files found",
+      "emptyThoughts": "No thoughts yet. Capture one in Task Center first.",
+      "noThoughtMatchesPrefix": "No thoughts match",
+      "noThoughtMatchesSuffix": "",
+      "recentThoughts": "Recent {{count}} thoughts",
+      "matchedThoughts": "Thoughts matching \"{{query}}\" · {{count}}",
+      "thoughtSoftCap": "Showing the first {{count}} matches. Type a more specific keyword."
+    },
+    "permissionModes": {
+      "auto": {
+        "label": "Act",
+        "description": "Agent works in the workspace and asks before using tools"
+      },
+      "plan": {
+        "label": "Plan",
+        "description": "Read-only planning mode"
+      },
+      "fullAgency": {
+        "label": "Autonomous",
+        "description": "Agent has full autonomy without manual confirmation"
+      },
+      "custom": {
+        "label": "Custom",
+        "description": "User-defined permission rules"
+      },
+      "default": {
+        "label": "Default",
+        "description": "Ask before each tool call"
+      },
+      "acceptEdits": {
+        "label": "Accept Edits",
+        "description": "Automatically accept file edits; ask for other actions"
+      },
+      "bypassPermissions": {
+        "label": "Bypass Permissions",
+        "description": "Skip all permission prompts"
+      },
+      "autoEdit": {
+        "label": "Auto Edit",
+        "description": "Automatically accept file edits; ask for other actions"
+      },
+      "yolo": {
+        "label": "YOLO",
+        "description": "Automatically approve all tools"
+      },
+      "suggest": {
+        "label": "Suggest",
+        "description": "Auto-run trusted commands; ask for everything else"
+      },
+      "auto-edit": {
+        "label": "Auto-Edit",
+        "description": "Edit files automatically and run commands in the sandbox"
+      },
+      "full-auto": {
+        "label": "Full Auto",
+        "description": "Run autonomously in the sandbox and ask when needed"
+      },
+      "no-restrictions": {
+        "label": "No Restrictions",
+        "description": "Skip all approvals and sandbox restrictions"
+      }
+    },
+    "slashCommands": {
+      "compact": "Compress chat history to free context space",
+      "context": "Show or manage the current context",
+      "cost": "View token usage and cost",
+      "init": "Initialize project config (.CLAUDE.md)",
+      "pr-comments": "Generate Pull Request comments",
+      "release-notes": "Generate release notes from recent commits",
+      "review": "Review code",
+      "security-review": "Run a security-focused code review"
+    },
+    "attachments": {
+      "unsupportedImageType": "Unsupported image format. Use PNG, JPG, GIF, or WebP.",
+      "imageTooLarge": "Images must be 10 MB or smaller.",
+      "maxImages": "You can upload at most {{count}} images.",
+      "previewFailed": "Failed to generate a preview URL for image \"{{name}}\".",
+      "oversizedImageAsFile": "Image is over 10 MB. Use Upload file or drag it from a folder to reference it as an @file.",
+      "oversizedImagesAsFile": "{{count}} images are over 10 MB. Use Upload file or drag them from a folder to reference them as @files.",
+      "imagesConvertedToFiles": "The current model does not support image input, so images were saved as workspace files for the model to read.",
+      "desktopRequiredForUpload": "Cannot upload files in browser dev mode. Use the desktop app.",
+      "selectWorkspaceForUpload": "Select a workspace before uploading files.",
+      "uploadFailed": "Upload failed",
+      "filesAdded": "Added {{count}} file(s) to the workspace.",
+      "fileUploadFailed": "File upload failed",
+      "desktopRequiredForProcess": "Cannot process files in browser dev mode. Use the desktop app.",
+      "selectWorkspaceForProcess": "Select a workspace before processing files.",
+      "sessionNotReadyForImage": "Cannot add image because this session is not ready.",
+      "oversizedImageAddedAsReference": "Image is over 10 MB and was added as a file reference.",
+      "oversizedImagesAddedAsReference": "{{count}} images are over 10 MB and were added as file references.",
+      "copyFailed": "Copy failed",
+      "noFilesCopied": "No files were copied successfully",
+      "filesAddedPartial": "Added {{successCount}}/{{totalCount}} file(s) to the workspace.",
+      "fileCopyFailed": "File copy failed",
+      "pickFilesTitle": "Choose files",
+      "pickFilesFailed": "Failed to choose files"
+    },
+    "repetition": {
+      "title": "Repeated content detected",
+      "message": "The same text repeats about {{count}} times ({{chars}} characters total). This often happens after speech recognition glitches in third-party input methods. Send anyway?",
+      "confirm": "Send anyway",
+      "cancel": "Cancel"
+    }
+  },
+  "runtime": {
+    "header": "Runtime",
+    "settings": "Settings",
+    "notInstalled": "Not installed",
+    "comingSoon": "Coming soon"
   }
 }

@@ -5,10 +5,12 @@ import { resolveEffectiveLocale, type SupportedLocale } from '../../shared/i18n'
 import appEn from './locales/en-US/app.json';
 import chatEn from './locales/en-US/chat.json';
 import commonEn from './locales/en-US/common.json';
+import launcherEn from './locales/en-US/launcher.json';
 import settingsEn from './locales/en-US/settings.json';
 import appZh from './locales/zh-CN/app.json';
 import chatZh from './locales/zh-CN/chat.json';
 import commonZh from './locales/zh-CN/common.json';
+import launcherZh from './locales/zh-CN/launcher.json';
 import settingsZh from './locales/zh-CN/settings.json';
 
 export const resources = {
@@ -16,12 +18,14 @@ export const resources = {
     app: appZh,
     chat: chatZh,
     common: commonZh,
+    launcher: launcherZh,
     settings: settingsZh,
   },
   'en-US': {
     app: appEn,
     chat: chatEn,
     common: commonEn,
+    launcher: launcherEn,
     settings: settingsEn,
   },
 } as const;
@@ -45,7 +49,7 @@ void i18n
     lng: getInitialLocale(),
     fallbackLng: 'zh-CN',
     defaultNS: DEFAULT_I18N_NAMESPACE,
-    ns: ['common', 'app', 'settings', 'chat'],
+    ns: ['common', 'app', 'settings', 'chat', 'launcher'],
     interpolation: {
       escapeValue: false,
     },

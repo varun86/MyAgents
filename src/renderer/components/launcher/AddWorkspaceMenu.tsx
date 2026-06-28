@@ -5,6 +5,7 @@
 
 import { memo, useCallback, useRef, useState } from 'react';
 import { Plus, FolderPlus, LayoutTemplate } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 
 import { Popover } from '@/components/ui/Popover';
 
@@ -17,6 +18,7 @@ export default memo(function AddWorkspaceMenu({
     onAddFolder,
     onCreateFromTemplate,
 }: AddWorkspaceMenuProps) {
+    const { t } = useTranslation('launcher');
     const [open, setOpen] = useState(false);
     const buttonRef = useRef<HTMLButtonElement>(null);
 
@@ -30,7 +32,7 @@ export default memo(function AddWorkspaceMenu({
                 className="flex items-center gap-1.5 rounded-lg bg-[var(--button-primary-bg)] px-2.5 py-1 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)]"
             >
                 <Plus className="h-3.5 w-3.5" />
-                添加
+                {t('addWorkspaceMenu.add')}
             </button>
             <Popover
                 open={open}
@@ -46,7 +48,7 @@ export default memo(function AddWorkspaceMenu({
                     className="flex w-full items-center gap-2.5 px-3 py-2 text-left text-sm text-[var(--ink)] transition-colors hover:bg-[var(--hover-bg)]"
                 >
                     <FolderPlus className="h-3.5 w-3.5 text-[var(--ink-muted)]" />
-                    添加本地文件夹
+                    {t('addWorkspaceMenu.addLocalFolder')}
                 </button>
                 <button
                     type="button"
@@ -55,7 +57,7 @@ export default memo(function AddWorkspaceMenu({
                     className="flex w-full items-center gap-2.5 px-3 py-2 text-left text-sm text-[var(--ink)] transition-colors hover:bg-[var(--hover-bg)]"
                 >
                     <LayoutTemplate className="h-3.5 w-3.5 text-[var(--ink-muted)]" />
-                    从模板创建 Agent
+                    {t('addWorkspaceMenu.createFromTemplateAgent')}
                 </button>
             </Popover>
         </>

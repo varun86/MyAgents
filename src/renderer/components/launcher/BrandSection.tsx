@@ -10,6 +10,7 @@
  */
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 
 import SimpleChatInput, { type ImageAttachment, type SimpleChatInputHandle } from '@/components/SimpleChatInput';
 import CronTaskSettingsModal, { type CronSettingsResult } from '@/components/cron/CronTaskSettingsModal';
@@ -139,15 +140,20 @@ export default memo(function BrandSection({
     onRuntimeChange,
     activeRuntime,
 }: BrandSectionProps) {
+    const { t } = useTranslation('launcher');
     const toast = useToast();
     // Project convention: keep `toast` behind a ref so it stays out of
     // useCallback dep arrays and doesn't re-trigger memoization (see
     // specs/tech_docs/react_stability_rules.md). Updated via effect to
     // satisfy the `react-hooks/refs` no-mutate-during-render rule.
     const toastRef = useRef(toast);
+    const tRef = useRef(t);
     useEffect(() => {
         toastRef.current = toast;
     }, [toast]);
+    useEffect(() => {
+        tRef.current = t;
+    }, [t]);
     const [mode, setMode] = useState<InputMode>('task');
     // PRD 0.2.7 D1 + C6: cron settings staged in the launcher. The actual
     // `cmd_create_cron_task` does NOT run here — we only collect the params,
@@ -282,7 +288,7 @@ export default memo(function BrandSection({
             const hadCron = stagedCron !== null;
             if (hadCron) setStagedCron(null);
             if (total > 0 || hadCron) {
-                toastRef.current.info('已切换工作区，已清理上一工作区的附件草稿');
+                toastRef.current.info(tRef.current('toasts.workspaceAttachmentsCleared'));
             }
         }
         lastWorkspacePathRef.current = next;
@@ -353,7 +359,7 @@ export default memo(function BrandSection({
     const handleThoughtCreated = useCallback((t: Thought) => {
         setThoughts((prev) => [t, ...prev]);
         setThoughtRefreshKey((k) => k + 1);
-        toastRef.current.success('想法已记录，可在任务中心查看');
+        toastRef.current.success(tRef.current('toasts.thoughtSaved'));
     }, []);
 
     const openTaskCenter = useCallback(() => {
@@ -426,13 +432,13 @@ export default memo(function BrandSection({
 
     const providerSettingsPrompt = !hasAnyProvider ? (
         <p className="text-center text-sm text-[var(--ink-muted)]">
-            ✨ 只需一步，即刻开启 AI 之旅 —
+            {t('brand.providerPrompt.prefix')}
             <button
                 type="button"
                 onClick={() => onGoToSettings?.()}
                 className="ml-1 rounded-md px-1 py-0.5 text-[var(--accent-warm)] transition-colors hover:bg-[var(--accent-warm-subtle)] hover:text-[var(--accent-warm-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent-warm-muted)]"
             >
-                配置模型供应商 →
+                {t('brand.providerPrompt.configure')}
             </button>
         </p>
     ) : null;
@@ -453,7 +459,7 @@ export default memo(function BrandSection({
                     15px/17px 是 DESIGN.md §15.2 立档的展示型字号（display 用途），
                     不属于正文 Type Scale；这是全仓唯一豁免点（PRD 0.2.34）。 */}
                 <p className="brand-slogan text-center text-[15px] text-[var(--ink-muted)] md:text-[17px]">
-                    每个人都应享受智能的推背感，欢迎来到言出法随的世界
+                    {t('brand.slogan')}
                 </p>
             </div>
 

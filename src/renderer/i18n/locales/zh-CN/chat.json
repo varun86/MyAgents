@@ -5,6 +5,173 @@
     "companionPlaceholder": "问问 Mino，或者派个活…",
     "addScreenshot": "添加屏幕截图",
     "send": "发送",
-    "stop": "停止"
+    "stop": "停止",
+    "stopRetry": "停止重试",
+    "currentModel": "当前模型",
+    "workspaceRoot": "工作区根目录",
+    "modelDefault": "默认",
+    "selectModel": "选择模型",
+    "runtimeModelHeader": "{{runtime}} 模型",
+    "setupModelProvider": "请先设置模型服务 →",
+    "providerWarning": "验证未通过，部分模型可能不可用",
+    "reasoningEffort": "推理强度",
+    "reasoningDefault": "默认",
+    "reasoningRequirement": "需服务商支持该参数，以实际生效为准",
+    "systemBusy": "正在执行系统任务，请稍等",
+    "stopping": "正在停止...",
+    "providerUnavailableDefault": "请前往设置页面设置模型供应商",
+    "deleteImage": "删除图片",
+    "addContext": "添加上下文",
+    "referenceFile": "引用文件",
+    "useSkill": "使用技能",
+    "uploadFile": "上传文件",
+    "permissionModeTitle": "切换执行模式",
+    "permissionModeHeader": "会话模式",
+    "agentSettings": "Agent 设置",
+    "autonomyWarning": "自主行动已启用：Agent 可能做出不可挽回的操作，请谨慎使用",
+    "toolsTitle": "使用工具",
+    "toolsLabel": "工具",
+    "toolsHeader": "工具 (在此对话中启用)",
+    "settings": "设置",
+    "settingsPage": "设置页面",
+    "toolsEmptyPrefix": "在",
+    "toolsEmptyExternal": "在设置页面启用官方 CLI 工具后即可在此 runtime 使用。",
+    "toolsEmptyBuiltin": "安装开启 MCP 工具，即可使用浏览器等更多功能",
+    "pluginsHeader": "插件 Plugins",
+    "pluginLoadsMcpTitle": "启用此插件会自动加载这些 MCP server：{{names}}",
+    "pluginLoadsMcp": "{{count}} 个 MCP：{{names}}",
+    "managePlugins": "管理插件",
+    "noPluginsPrefix": "还没有插件。在",
+    "pluginsSettings": "设置 → 插件",
+    "noPluginsSuffix": "可以从 GitHub 或本地路径安装。",
+    "cronEnabled": "定时已启用",
+    "cron": "定时",
+    "sessionUnlocked": "该 session 未锁定，跟随 agent 默认（修改 agent 会影响此会话）",
+    "switchModel": "切换模型",
+    "imageFilteredOnSend": "{{model}} 不支持图片，已自动过滤 {{count}} 张图片，仅文本已送达",
+    "undoFilesAdded": "已撤销 {{count}} 个文件的添加",
+    "undoFilesPartial": "已撤销 {{successCount}} 个文件，{{failCount}} 个文件删除失败",
+    "undoReferenceOnly": "已移除引用，但文件删除失败",
+    "mode": {
+      "chat": "对话",
+      "thought": "想法",
+      "switchToThought": "按 Tab 切换到「想法」",
+      "switchToChat": "按 Tab 切换到「对话」"
+    },
+    "mention": {
+      "workspaceFiles": "工作区文件",
+      "thoughts": "想法",
+      "switchHint": "⌘/Ctrl + ←/→ 切换",
+      "filePlaceholder": "输入文件名搜索...",
+      "searching": "搜索中...",
+      "noFiles": "未找到文件",
+      "emptyThoughts": "暂无想法，先在「任务中心」记录吧",
+      "noThoughtMatchesPrefix": "没有匹配",
+      "noThoughtMatchesSuffix": "的想法",
+      "recentThoughts": "最近 {{count}} 条想法",
+      "matchedThoughts": "匹配 \"{{query}}\" 的想法 · {{count}} 条",
+      "thoughtSoftCap": "已显示前 {{count}} 条匹配，请输入更精确的关键词"
+    },
+    "permissionModes": {
+      "auto": {
+        "label": "行动",
+        "description": "Agent 在工作区内行动，使用工具需确认"
+      },
+      "plan": {
+        "label": "规划",
+        "description": "规划模式，只读不执行"
+      },
+      "fullAgency": {
+        "label": "自主行动",
+        "description": "Agent 拥有完全自主权限，无需人工确认"
+      },
+      "custom": {
+        "label": "自定义",
+        "description": "用户自定义的权限规则"
+      },
+      "default": {
+        "label": "Default",
+        "description": "每次工具调用都需要确认"
+      },
+      "acceptEdits": {
+        "label": "Accept Edits",
+        "description": "自动接受文件编辑，其他需确认"
+      },
+      "bypassPermissions": {
+        "label": "Bypass Permissions",
+        "description": "跳过所有权限确认"
+      },
+      "autoEdit": {
+        "label": "Auto Edit",
+        "description": "自动接受文件编辑，其他需确认"
+      },
+      "yolo": {
+        "label": "YOLO",
+        "description": "跳过所有工具确认"
+      },
+      "suggest": {
+        "label": "Suggest",
+        "description": "仅信任的命令自动执行，其他需确认"
+      },
+      "auto-edit": {
+        "label": "Auto-Edit",
+        "description": "自动编辑文件，沙箱内执行命令"
+      },
+      "full-auto": {
+        "label": "Full Auto",
+        "description": "沙箱内自主执行，按需询问"
+      },
+      "no-restrictions": {
+        "label": "No Restrictions",
+        "description": "跳过所有审批和沙箱限制"
+      }
+    },
+    "slashCommands": {
+      "compact": "压缩对话历史，释放上下文空间",
+      "context": "显示或管理当前上下文",
+      "cost": "查看 token 使用量和费用",
+      "init": "初始化项目配置 (.CLAUDE.md)",
+      "pr-comments": "生成 Pull Request 评论",
+      "release-notes": "根据最近提交生成发布说明",
+      "review": "对代码进行审查",
+      "security-review": "进行安全相关的代码审查"
+    },
+    "attachments": {
+      "unsupportedImageType": "不支持的图片格式，请使用 PNG/JPG/GIF/WebP",
+      "imageTooLarge": "图片大小不能超过 10MB",
+      "maxImages": "最多只能上传 {{count}} 张图片",
+      "previewFailed": "图片 \"{{name}}\" 预览地址生成失败",
+      "oversizedImageAsFile": "图片超过 10MB，请使用“上传文件”或从文件夹拖入以作为 @文件 引用",
+      "oversizedImagesAsFile": "{{count}} 张图片超过 10MB，请使用“上传文件”或从文件夹拖入以作为 @文件 引用",
+      "imagesConvertedToFiles": "当前模型不支持图片输入，已转为文件存入工作区供模型读取",
+      "desktopRequiredForUpload": "无法上传文件：当前为浏览器开发模式，请使用桌面应用",
+      "selectWorkspaceForUpload": "无法上传文件：请先选择工作区",
+      "uploadFailed": "上传失败",
+      "filesAdded": "已添加 {{count}} 个文件到工作区",
+      "fileUploadFailed": "文件上传失败",
+      "desktopRequiredForProcess": "无法处理文件：当前为浏览器开发模式，请使用桌面应用",
+      "selectWorkspaceForProcess": "无法处理文件：请先选择工作区",
+      "sessionNotReadyForImage": "无法添加图片：当前会话尚未就绪",
+      "oversizedImageAddedAsReference": "图片超过 10MB，已作为文件引用添加",
+      "oversizedImagesAddedAsReference": "{{count}} 张图片超过 10MB，已作为文件引用添加",
+      "copyFailed": "复制失败",
+      "noFilesCopied": "没有文件被成功复制",
+      "filesAddedPartial": "已添加 {{successCount}}/{{totalCount}} 个文件到工作区",
+      "fileCopyFailed": "文件复制失败",
+      "pickFilesTitle": "选择文件",
+      "pickFilesFailed": "选择文件失败"
+    },
+    "repetition": {
+      "title": "检测到内容存在大量重复",
+      "message": "同一段文字重复了约 {{count}} 次（共 {{chars}} 字符）。常见于第三方输入法的语音识别异常。仍要发送吗？",
+      "confirm": "仍要发送",
+      "cancel": "取消"
+    }
+  },
+  "runtime": {
+    "header": "运行环境",
+    "settings": "设置",
+    "notInstalled": "未安装",
+    "comingSoon": "即将支持"
   }
 }

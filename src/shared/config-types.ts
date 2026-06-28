@@ -371,6 +371,8 @@ export interface WorkspaceTemplate {
   id: string;           // kebab-case unique ID
   name: string;         // Display name
   description: string;  // Description (can be empty)
+  /** Renderer i18n key for built-in template descriptions; user templates keep literal description. */
+  i18nDescriptionKey?: string;
   icon?: string;        // Phosphor icon ID (e.g. "sparkle") or emoji fallback; defaults to cube icon if absent
   isBuiltin: boolean;   // true = preset template bundled with app
   path?: string;        // User template: absolute path under ~/.myagents/templates/
@@ -434,6 +436,7 @@ export const PRESET_TEMPLATES: WorkspaceTemplate[] = [
     id: DEFAULT_BUNDLED_WORKSPACE_TEMPLATE_ID,
     name: 'Mino',
     description: '能记忆、会进化的 AI Agent。从 minimal 开始，长成你想要的样子。',
+    i18nDescriptionKey: 'templateLibrary.preset.minoDescription',
     icon: 'lightning',
     isBuiltin: true,
     agentDefaults: {

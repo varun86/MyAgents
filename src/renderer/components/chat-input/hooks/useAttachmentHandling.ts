@@ -1,5 +1,6 @@
 import { open } from '@tauri-apps/plugin-dialog';
 import { useCallback, useEffect, useRef, useState, type Dispatch, type MutableRefObject, type RefObject, type SetStateAction } from 'react';
+import { useTranslation } from 'react-i18next';
 
 import type { Provider } from '@/config/types';
 import { modelSupportsModality } from '@/config/services/providerService';
@@ -92,6 +93,7 @@ export function useAttachmentHandling({
   setShowPlusMenu,
   onWorkspaceRefresh,
 }: UseAttachmentHandlingParams) {
+  const { t } = useTranslation('chat');
   const [images, setImages] = useState<ImageAttachment[]>([]);
   const mountedRef = useRef(true);
   const activeReadersRef = useRef<Set<FileReader>>(new Set());
@@ -137,11 +139,11 @@ export function useAttachmentHandling({
 
   const addImage = useCallback((file: File) => {
     if (!ALLOWED_IMAGE_MIME_TYPES.includes(file.type)) {
-      toastRef.current.warning('不支持的图片格式，请使用 PNG/JPG/GIF/WebP');
+      toastRef.current.warning(t('input.attachments.unsupportedImageType'));
       return;
     }
     if (file.size > MAX_IMAGE_SIZE) {
-      toastRef.current.warning('图片大小不能超过 10MB');
+      toastRef.current.warning(t('input.attachments.imageTooLarge'));
       return;
     }
 
@@ -153,7 +155,7 @@ export function useAttachmentHandling({
       const dataUrl = e.target?.result as string;
       setImages((prev) => {
         if (prev.length >= MAX_IMAGES) {
-          toastRef.current.warning(`最多只能上传 ${MAX_IMAGES} 张图片`);
+          toastRef.current.warning(t('input.attachments.maxImages', { count: MAX_IMAGES }));
           return prev;
         }
         return [...prev, {
@@ -170,17 +172,17 @@ export function useAttachmentHandling({
     reader.onerror = () => forgetReader(reader);
     reader.onabort = () => forgetReader(reader);
     reader.readAsDataURL(file);
-  }, [forgetReader, toastRef]);
+  }, [forgetReader, toastRef, t]);
 
   const addPreparedImageAttachment = useCallback((attachment: PreparedImageAttachment) => {
     const preview = resolveAttachmentUrl({ relativePath: attachment.relativePath });
     if (!preview) {
-      toastRef.current.warning(`图片 "${attachment.name}" 预览地址生成失败`);
+      toastRef.current.warning(t('input.attachments.previewFailed', { name: attachment.name }));
       return;
     }
     setImages((prev) => {
       if (prev.length >= MAX_IMAGES) {
-        toastRef.current.warning(`最多只能上传 ${MAX_IMAGES} 张图片`);
+        toastRef.current.warning(t('input.attachments.maxImages', { count: MAX_IMAGES }));
         return prev;
       }
       return [...prev, {
@@ -194,7 +196,7 @@ export function useAttachmentHandling({
         relativePath: attachment.relativePath,
       }];
     });
-  }, [toastRef]);
+  }, [toastRef, t]);
 
   const removeImage = useCallback((id: string) => {
     setImages((prev) => prev.filter((img) => img.id !== id));
@@ -248,8 +250,8 @@ export function useAttachmentHandling({
     if (oversizedImageFiles.length > 0) {
       toastRef.current.warning(
         oversizedImageFiles.length === 1
-          ? '图片超过 10MB，请使用“上传文件”或从文件夹拖入以作为 @文件 引用'
-          : `${oversizedImageFiles.length} 张图片超过 10MB，请使用“上传文件”或从文件夹拖入以作为 @文件 引用`,
+          ? t('input.attachments.oversizedImageAsFile')
+          : t('input.attachments.oversizedImagesAsFile', { count: oversizedImageFiles.length }),
       );
       for (const img of oversizedImageFiles) {
         const idx = imageFiles.indexOf(img);
@@ -264,7 +266,7 @@ export function useAttachmentHandling({
 
     if (fallbackImagesToFiles) {
       toastRef.current.info(
-        '当前模型不支持图片输入，已转为文件存入工作区供模型读取',
+        t('input.attachments.imagesConvertedToFiles'),
       );
       for (const img of imageFiles) {
         otherFiles.push(renameIfBareClipboardImage(img));
@@ -281,8 +283,8 @@ export function useAttachmentHandling({
         console.error('[SimpleChatInput] workspace file service unavailable');
         toastRef.current.error(
           workspacePath
-            ? '无法上传文件：当前为浏览器开发模式，请使用桌面应用'
-            : '无法上传文件：请先选择工作区',
+            ? t('input.attachments.desktopRequiredForUpload')
+            : t('input.attachments.selectWorkspaceForUpload'),
         );
         return;
       }
@@ -301,7 +303,7 @@ export function useAttachmentHandling({
         if (!mountedRef.current) return;
 
         if (!result.success || !result.files || result.files.length === 0) {
-          throw new Error('上传失败');
+          throw new Error(t('input.attachments.uploadFailed'));
         }
 
         try {
@@ -326,17 +328,17 @@ export function useAttachmentHandling({
         }
 
         if (userIntendedFileCount > 0) {
-          toastRef.current.success(`已添加 ${userIntendedFileCount} 个文件到工作区`);
+          toastRef.current.success(t('input.attachments.filesAdded', { count: userIntendedFileCount }));
         }
 
         onWorkspaceRefresh?.();
       } catch (err) {
         if (!mountedRef.current) return;
         console.error('[SimpleChatInput] File upload error:', err);
-        toastRef.current.error(err instanceof Error ? err.message : '文件上传失败');
+        toastRef.current.error(err instanceof Error ? err.message : t('input.attachments.fileUploadFailed'));
       }
     }
-  }, [fileService, workspacePath, addImage, undoStack, fileToBase64, onWorkspaceRefresh, provider, currentModelId, isExternalRuntime, toastRef, insertReferenceText]);
+  }, [fileService, workspacePath, addImage, undoStack, fileToBase64, onWorkspaceRefresh, provider, currentModelId, isExternalRuntime, toastRef, insertReferenceText, t]);
 
   const processDroppedFilePaths = useCallback(async (paths: string[]) => {
     if (isDebugMode()) {
@@ -347,8 +349,8 @@ export function useAttachmentHandling({
       console.error('[SimpleChatInput] workspace file service unavailable for path drop');
       toastRef.current.error(
         workspacePath
-          ? '无法处理文件：当前为浏览器开发模式，请使用桌面应用'
-          : '无法处理文件：请先选择工作区',
+          ? t('input.attachments.desktopRequiredForProcess')
+          : t('input.attachments.selectWorkspaceForProcess'),
       );
       return;
     }
@@ -374,7 +376,7 @@ export function useAttachmentHandling({
 
     if (fallbackImagesToFiles) {
       toastRef.current.info(
-        '当前模型不支持图片输入，已转为文件存入工作区供模型读取',
+        t('input.attachments.imagesConvertedToFiles'),
       );
       otherPaths.push(...imagePaths);
       imagePaths.length = 0;
@@ -382,7 +384,7 @@ export function useAttachmentHandling({
 
     if (imagePaths.length > 0) {
       if (!attachmentSessionId) {
-        toastRef.current.error('无法添加图片：当前会话尚未就绪');
+        toastRef.current.error(t('input.attachments.sessionNotReadyForImage'));
         return;
       }
       const pendingFileReferencePaths: string[] = [];
@@ -415,8 +417,8 @@ export function useAttachmentHandling({
       if (oversizedCount > 0) {
         toastRef.current.info(
           oversizedCount === 1
-            ? '图片超过 10MB，已作为文件引用添加'
-            : `${oversizedCount} 张图片超过 10MB，已作为文件引用添加`,
+            ? t('input.attachments.oversizedImageAddedAsReference')
+            : t('input.attachments.oversizedImagesAddedAsReference', { count: oversizedCount }),
         );
       }
       otherPaths.push(...pendingFileReferencePaths);
@@ -433,12 +435,12 @@ export function useAttachmentHandling({
         if (!mountedRef.current) return;
 
         if (!result.success) {
-          throw new Error('复制失败');
+          throw new Error(t('input.attachments.copyFailed'));
         }
 
         const successfulCopies = result.copiedFiles || [];
         if (successfulCopies.length === 0) {
-          throw new Error('没有文件被成功复制');
+          throw new Error(t('input.attachments.noFilesCopied'));
         }
 
         try {
@@ -464,9 +466,12 @@ export function useAttachmentHandling({
 
         if (userIntendedPathCount > 0) {
           if (successfulCopies.length < otherPaths.length) {
-            toastRef.current.warning(`已添加 ${successfulCopies.length}/${otherPaths.length} 个文件到工作区`);
+            toastRef.current.warning(t('input.attachments.filesAddedPartial', {
+              successCount: successfulCopies.length,
+              totalCount: otherPaths.length,
+            }));
           } else {
-            toastRef.current.success(`已添加 ${userIntendedPathCount} 个文件到工作区`);
+            toastRef.current.success(t('input.attachments.filesAdded', { count: userIntendedPathCount }));
           }
         }
 
@@ -474,10 +479,10 @@ export function useAttachmentHandling({
       } catch (err) {
         if (!mountedRef.current) return;
         console.error('[SimpleChatInput] Tauri file copy error:', err);
-        toastRef.current.error(err instanceof Error ? err.message : '文件复制失败');
+        toastRef.current.error(err instanceof Error ? err.message : t('input.attachments.fileCopyFailed'));
       }
     }
-  }, [fileService, workspacePath, addPreparedImageAttachment, undoStack, onWorkspaceRefresh, provider, currentModelId, isExternalRuntime, attachmentSessionId, toastRef, insertReferenceText]);
+  }, [fileService, workspacePath, addPreparedImageAttachment, undoStack, onWorkspaceRefresh, provider, currentModelId, isExternalRuntime, attachmentSessionId, toastRef, insertReferenceText, t]);
 
   const handleUploadButtonClick = useCallback(async () => {
     setShowPlusMenu(false);
@@ -486,7 +491,7 @@ export function useAttachmentHandling({
         const selected = await open({
           multiple: true,
           directory: false,
-          title: '选择文件',
+          title: t('input.attachments.pickFilesTitle'),
         });
         if (!mountedRef.current) return;
         const paths = Array.isArray(selected)
@@ -498,12 +503,12 @@ export function useAttachmentHandling({
       } catch (err) {
         if (!mountedRef.current) return;
         console.error('[SimpleChatInput] File picker error:', err);
-        toastRef.current.error('选择文件失败');
+        toastRef.current.error(t('input.attachments.pickFilesFailed'));
       }
       return;
     }
     fileInputRef.current?.click();
-  }, [processDroppedFilePaths, setShowPlusMenu, fileInputRef, toastRef]);
+  }, [processDroppedFilePaths, setShowPlusMenu, fileInputRef, toastRef, t]);
 
   const handleFileChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;

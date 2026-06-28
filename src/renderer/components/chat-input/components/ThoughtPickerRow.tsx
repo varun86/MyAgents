@@ -1,8 +1,11 @@
 import type { Thought } from '@/../shared/types/thought';
+import { useTranslation } from 'react-i18next';
+import { isSupportedLocale } from '@/../shared/i18n';
 import {
   findHighlightRanges,
   renderTextWithHighlights,
 } from '@/utils/highlightSearchMatches';
+import { formatPastRelativeTime } from '@/i18n/format';
 
 interface ThoughtPickerRowProps {
   thought: Thought;
@@ -17,6 +20,8 @@ export function ThoughtPickerRow({
   active,
   onClick,
 }: ThoughtPickerRowProps) {
+  const { i18n } = useTranslation();
+  const locale = isSupportedLocale(i18n.language) ? i18n.language : 'zh-CN';
   const ranges = query.trim().length > 0
     ? findHighlightRanges(thought.content, query)
     : [];
@@ -32,7 +37,7 @@ export function ThoughtPickerRow({
       }`}
     >
       <div className="mb-1 flex items-center gap-2 text-xs text-[var(--ink-muted)]">
-        <span>{formatThoughtTime(thought.updatedAt)}</span>
+        <span>{formatPastRelativeTime(thought.updatedAt, locale)}</span>
         {tags.length > 0 && (
           <div className="flex items-center gap-1">
             {tags.map((t) => (
@@ -62,16 +67,4 @@ export function ThoughtPickerRow({
       </div>
     </div>
   );
-}
-
-function formatThoughtTime(ts: number): string {
-  const diff = Date.now() - ts;
-  const mins = Math.floor(diff / 60_000);
-  if (mins < 1) return '刚刚';
-  if (mins < 60) return `${mins} 分钟前`;
-  const hrs = Math.floor(mins / 60);
-  if (hrs < 24) return `${hrs} 小时前`;
-  const days = Math.floor(hrs / 24);
-  if (days < 7) return `${days} 天前`;
-  return new Date(ts).toLocaleDateString();
 }

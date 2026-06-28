@@ -10,7 +10,7 @@ import { useImagePreview } from '@/context/ImagePreviewContext';
 import { useWorkspaceFileService } from '@/hooks/useWorkspaceFileService';
 import { type PermissionMode, PERMISSION_MODES, type Provider, type ProviderVerifyStatus, getModelDisplayName } from '@/config/types';
 import { useConfigData } from '@/config/useConfigData';
-import { resolveEnterKeyAction, sendHintLabel } from '@/utils/chatSendKey';
+import { resolveEnterKeyAction, sendKeyHint } from '@/utils/chatSendKey';
 import SlashCommandMenu, { type SlashCommand, filterAndSortCommands, mergeSlashCommands } from '../SlashCommandMenu';
 import { isClientActionCommand, withClientActionCommands } from '@/utils/slashActions';
 import QueuedMessagesPanel from '../QueuedMessageBubble';
@@ -63,8 +63,9 @@ function isProviderWarning(
 function getCurrentModelLabel(
   provider: Provider | null | undefined,
   modelId: string | undefined,
+  fallbackLabel: string,
 ): string {
-  if (!modelId) return '当前模型';
+  if (!modelId) return fallbackLabel;
   return provider ? getModelDisplayName(provider, modelId) : modelId;
 }
 
@@ -76,13 +77,13 @@ interface FileSearchResult {
   type: 'file' | 'dir';
 }
 
-function getFileSearchParentPath(path: string, name: string): string {
+function getFileSearchParentPath(path: string, name: string, workspaceRootLabel: string): string {
   const normalized = path.replace(/\\/g, '/');
   const suffix = `/${name}`;
   if (normalized.endsWith(suffix)) {
-    return normalized.slice(0, -suffix.length) || '工作区根目录';
+    return normalized.slice(0, -suffix.length) || workspaceRootLabel;
   }
-  return normalized === name ? '工作区根目录' : normalized;
+  return normalized === name ? workspaceRootLabel : normalized;
 }
 
 const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputProps>(function SimpleChatInput({
@@ -172,8 +173,18 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
 
   // Compute display modes and model name based on runtime
   const displayPermissionModes = isExternalRuntime && runtimePermissionModes
-    ? runtimePermissionModes.map(m => ({ value: m.value as PermissionMode, label: m.label, icon: m.icon, description: m.description, sdkValue: m.value }))
-    : PERMISSION_MODES;
+    ? runtimePermissionModes.map(m => ({
+      value: m.value as PermissionMode,
+      label: t(`input.permissionModes.${m.value}.label`, { defaultValue: m.label }),
+      icon: m.icon,
+      description: t(`input.permissionModes.${m.value}.description`, { defaultValue: m.description }),
+      sdkValue: m.value,
+    }))
+    : PERMISSION_MODES.map(m => ({
+      ...m,
+      label: t(`input.permissionModes.${m.value}.label`, { defaultValue: m.label }),
+      description: t(`input.permissionModes.${m.value}.description`, { defaultValue: m.description }),
+    }));
   const currentModeDisplay = displayPermissionModes.find(m => m.value === permissionMode)
     ?? displayPermissionModes[0];
 
@@ -372,10 +383,10 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   const currentModelName = isExternalRuntime
     ? (runtimeModels?.find(m => m.value === selectedModel)?.displayName
       ?? runtimeModels?.find(m => m.isDefault)?.displayName
-      ?? '默认')
+      ?? t('input.modelDefault'))
     : (currentModelId
       ? (provider ? getModelDisplayName(provider, currentModelId) : currentModelId)
-      : '选择模型');
+      : t('input.selectModel'));
 
   // @file search
   const [showFileSearch, setShowFileSearch] = useState(false);
@@ -405,6 +416,13 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   const [slashPosition, setSlashPosition] = useState<number | null>(null);
 
   const clientActionsEnabled = !!onSlashAction;
+  const localizedFallbackSlashCommands = useMemo(
+    () => BUILTIN_FALLBACK_SLASH_COMMANDS.map(cmd => ({
+      ...cmd,
+      description: t(`input.slashCommands.${cmd.name}`, { defaultValue: cmd.description }),
+    })),
+    [t],
+  );
   const mergedSlashCommands = useMemo(
     () => withClientActionCommands(
       mergeSlashCommands(slashCommands, sdkSlashCommands),
@@ -516,7 +534,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
       setSlashCommands(list);
     if (!fileService.isAvailable) {
       // Fall back to builtins so the menu isn't empty in browser dev mode.
-      apply(BUILTIN_FALLBACK_SLASH_COMMANDS);
+      apply(localizedFallbackSlashCommands);
       return;
     }
     try {
@@ -525,13 +543,13 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
         apply(response.commands);
       } else {
         console.warn('[slash-commands] Rust returned empty, using builtin fallback');
-        apply(BUILTIN_FALLBACK_SLASH_COMMANDS);
+        apply(localizedFallbackSlashCommands);
       }
     } catch (err) {
       console.error('Failed to fetch slash commands, using fallback:', err);
-      apply(BUILTIN_FALLBACK_SLASH_COMMANDS);
+      apply(localizedFallbackSlashCommands);
     }
-  }, [fileService]);
+  }, [fileService, localizedFallbackSlashCommands]);
 
   // Fetch slash commands on mount or when workspacePath changes (so launcher
   // workspace switching reloads project-level skills).
@@ -874,10 +892,10 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
     // Show warning toast for dangerous modes (runtime-agnostic string check)
     const dangerousModes = new Set(['fullAgency', 'bypassPermissions', 'no-restrictions']);
     if (dangerousModes.has(nextMode)) {
-      toastRef.current.warning('自主行动已启用：Agent 可能做出不可挽回的操作，请谨慎使用', 5000);
+      toastRef.current.warning(t('input.autonomyWarning'), 5000);
     }
     onPermissionModeChange?.(nextMode);
-  }, [permissionMode, onPermissionModeChange, runtimePermissionModes, showConfigLockedReason]);
+  }, [permissionMode, onPermissionModeChange, runtimePermissionModes, showConfigLockedReason, t]);
 
   // Global Shift+Tab handler with capture phase to prevent default Tab behavior.
   // Gated by `active` so pressing Shift+Tab doesn't cycle permission-mode on every
@@ -941,7 +959,10 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
       !modelSupportsModality(provider, currentModelId, 'image')
     ) {
       toastRef.current.warning(
-        `${getCurrentModelLabel(provider, currentModelId)} 不支持图片，已自动过滤 ${images.length} 张图片，仅文本已送达`,
+        t('input.imageFilteredOnSend', {
+          model: getCurrentModelLabel(provider, currentModelId, t('input.currentModel')),
+          count: images.length,
+        }),
       );
     }
 
@@ -961,7 +982,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
     } finally {
       sendingRef.current = false;
     }
-  }, [onSend, images, inputValue, provider, currentModelId, isExternalRuntime, setImages]);
+  }, [onSend, images, inputValue, provider, currentModelId, isExternalRuntime, setImages, t]);
 
   // Handle keyboard navigation in file search and slash menu
   // Handler for selecting a slash command — shared by the click path
@@ -1047,11 +1068,11 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
 
           // Show appropriate message
           if (failCount === 0) {
-            toastRef.current.success(`已撤销 ${successCount} 个文件的添加`);
+            toastRef.current.success(t('input.undoFilesAdded', { count: successCount }));
           } else if (successCount > 0) {
-            toastRef.current.warning(`已撤销 ${successCount} 个文件，${failCount} 个文件删除失败`);
+            toastRef.current.warning(t('input.undoFilesPartial', { successCount, failCount }));
           } else {
-            toastRef.current.warning('已移除引用，但文件删除失败');
+            toastRef.current.warning(t('input.undoReferenceOnly'));
           }
         }
         return;
@@ -1316,7 +1337,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                     type="button"
                     onClick={() => removeImage(img.id)}
                     className="absolute -top-1.5 -right-1.5 h-5 w-5 rounded-full bg-[var(--error)] text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
-                    title="删除图片"
+                    title={t('input.deleteImage')}
                   >
                     <X className="h-3 w-3" />
                   </button>
@@ -1382,7 +1403,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
               {/* Tabs header */}
               <div className="flex shrink-0 items-center gap-1 border-b border-[var(--line-subtle)] bg-[var(--paper)] p-1">
                 <MentionTabButton
-                  label="工作区文件"
+                  label={t('input.mention.workspaceFiles')}
                   active={mentionTab === 'file'}
                   onClick={() => {
                     setMentionTab('file');
@@ -1390,7 +1411,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                   }}
                 />
                 <MentionTabButton
-                  label="想法"
+                  label={t('input.mention.thoughts')}
                   active={mentionTab === 'thought'}
                   onClick={() => {
                     setMentionTab('thought');
@@ -1398,7 +1419,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                   }}
                 />
                 <span className="ml-auto pr-2 text-xs text-[var(--ink-muted)]/60">
-                  ⌘/Ctrl + ←/→ 切换
+                  {t('input.mention.switchHint')}
                 </span>
               </div>
 
@@ -1406,20 +1427,20 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                 {mentionTab === 'file' ? (
                   fileSearchQuery.length === 0 ? (
                     <div className="px-3 py-2 text-sm text-[var(--ink-muted)]">
-                      输入文件名搜索...
+                      {t('input.mention.filePlaceholder')}
                     </div>
                   ) : isFileSearching ? (
                     <div className="px-3 py-2 text-sm text-[var(--ink-muted)]">
-                      搜索中...
+                      {t('input.mention.searching')}
                     </div>
                   ) : fileSearchResults.length === 0 ? (
                     <div className="px-3 py-2 text-sm text-[var(--ink-muted)]">
-                      未找到文件
+                      {t('input.mention.noFiles')}
                     </div>
                   ) : (
                     fileSearchResults.map((file, idx) => {
                       const isSelected = idx === selectedFileIndex;
-                      const parentPath = getFileSearchParentPath(file.path, file.name);
+                      const parentPath = getFileSearchParentPath(file.path, file.name, t('input.workspaceRoot'));
                       return (
                         <div
                           key={file.path}
@@ -1462,15 +1483,17 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                   // Thought tab
                   isThoughtSearching ? (
                     <div className="px-3 py-2 text-sm text-[var(--ink-muted)]">
-                      搜索中...
+                      {t('input.mention.searching')}
                     </div>
                   ) : thoughtResults.length === 0 ? (
                     <div className="px-3 py-3 text-sm text-[var(--ink-muted)]">
                       {fileSearchQuery.length === 0
-                        ? '暂无想法，先在「任务中心」记录吧'
+                        ? t('input.mention.emptyThoughts')
                         : (
                           <>
-                            没有匹配 <span className="font-medium text-[var(--ink)]">{`"${fileSearchQuery}"`}</span> 的想法
+                            {t('input.mention.noThoughtMatchesPrefix')}{' '}
+                            <span className="font-medium text-[var(--ink)]">{`"${fileSearchQuery}"`}</span>
+                            {' '}{t('input.mention.noThoughtMatchesSuffix')}
                           </>
                         )}
                     </div>
@@ -1478,8 +1501,8 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                     <>
                       <div className="px-3 pt-2 pb-1 text-xs font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60">
                         {fileSearchQuery.length === 0
-                          ? `最近 ${Math.min(thoughtResults.length, THOUGHT_RECENT_LIMIT)} 条想法`
-                          : `匹配 "${fileSearchQuery}" 的想法 · ${thoughtResults.length} 条`}
+                          ? t('input.mention.recentThoughts', { count: Math.min(thoughtResults.length, THOUGHT_RECENT_LIMIT) })
+                          : t('input.mention.matchedThoughts', { query: fileSearchQuery, count: thoughtResults.length })}
                       </div>
                       {thoughtResults.map((thought, idx) => (
                         <ThoughtPickerRow
@@ -1503,7 +1526,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                       {fileSearchQuery.length > 0
                         && thoughtResults.length >= THOUGHT_SOFT_CAP && (
                           <div className="border-t border-[var(--line-subtle)] px-3 py-2 text-xs text-[var(--ink-muted)]/70">
-                            已显示前 {THOUGHT_SOFT_CAP} 条匹配，请输入更精确的关键词
+                            {t('input.mention.thoughtSoftCap', { count: THOUGHT_SOFT_CAP })}
                           </div>
                         )}
                     </>
@@ -1564,7 +1587,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                   setShowPlusMenu(!showPlusMenu);
                 }}
                 className="rounded-lg p-2 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
-                title="添加上下文"
+                title={t('input.addContext')}
               >
                 <Plus className="h-4 w-4" />
               </button>
@@ -1605,7 +1628,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                   className="flex w-full items-center gap-2 px-3 py-2 text-sm text-[var(--ink-muted)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
                 >
                   <AtSign className="h-4 w-4" />
-                  引用文件
+                  {t('input.referenceFile')}
                 </button>
                 <button
                   type="button"
@@ -1631,7 +1654,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                   className="flex w-full items-center gap-2 px-3 py-2 text-sm text-[var(--ink-muted)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
                 >
                   <span className="inline-flex h-4 w-4 items-center justify-center font-medium text-[var(--ink-muted)]">/</span>
-                  使用技能
+                  {t('input.useSkill')}
                 </button>
                 <button
                   type="button"
@@ -1642,7 +1665,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                   className="flex w-full items-center gap-2 px-3 py-2 text-sm text-[var(--ink-muted)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
                 >
                   <Paperclip className="h-4 w-4" />
-                  上传文件
+                  {t('input.uploadFile')}
                 </button>
               </Popover>
 
@@ -1685,7 +1708,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                 className={`flex items-center gap-1 rounded-lg px-2 py-1.5 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)] ${
                   configControlsLocked ? 'cursor-not-allowed opacity-50 hover:bg-transparent hover:text-[var(--ink-muted)]' : ''
                 }`}
-                title={configControlLockTitle ?? '切换执行模式'}
+                title={configControlLockTitle ?? t('input.permissionModeTitle')}
               >
                 <span>{currentModeDisplay?.icon}</span>
                 <span className="toolbar-label">{currentModeDisplay?.label}</span>
@@ -1699,7 +1722,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                 className="w-72 py-1"
               >
                 <div className="flex items-center justify-between px-3 py-2 border-b border-[var(--line)]">
-                  <span className="text-xs font-medium text-[var(--ink-muted)]">会话模式</span>
+                  <span className="text-xs font-medium text-[var(--ink-muted)]">{t('input.permissionModeHeader')}</span>
                   {onOpenAgentSettings && (
                     <button
                       type="button"
@@ -1710,7 +1733,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                       }}
                       className="text-xs font-medium text-[var(--accent)] hover:text-[var(--accent-warm-hover)] transition-colors"
                     >
-                      Agent 设置
+                      {t('input.agentSettings')}
                     </button>
                   )}
                 </div>
@@ -1721,7 +1744,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                     onClick={(e) => {
                       e.stopPropagation();
                       if (mode.value === 'fullAgency' || (mode.value as string) === 'bypassPermissions') {
-                        toastRef.current.warning('自主行动已启用：Agent 可能做出不可挽回的操作，请谨慎使用', 5000);
+                        toastRef.current.warning(t('input.autonomyWarning'), 5000);
                       }
                       onPermissionModeChange?.(mode.value);
                       setShowModeMenu(false);
@@ -1758,10 +1781,10 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                 className={`flex items-center gap-1 rounded-lg px-2 py-1.5 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)] ${
                   configControlsLocked ? 'cursor-not-allowed opacity-50 hover:bg-transparent hover:text-[var(--ink-muted)]' : ''
                 }`}
-                title={configControlLockTitle ?? '使用工具'}
+                title={configControlLockTitle ?? t('input.toolsTitle')}
               >
                 <Wrench className="h-3.5 w-3.5" />
-                <span className="toolbar-label">工具</span>
+                <span className="toolbar-label">{t('input.toolsLabel')}</span>
                 {effectiveToolCount > 0 && (
                   <span className="text-xs text-[var(--ink-muted)]">
                     {effectiveToolCount}
@@ -1781,7 +1804,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                 className="w-64 max-h-[50vh] overflow-y-auto py-1"
               >
                     <div className="px-3 py-2 text-xs font-medium text-[var(--ink-muted)] border-b border-[var(--line)]">
-                      工具 (在此对话中启用)
+                      {t('input.toolsHeader')}
                     </div>
                     {visibleOfficialTools.length > 0 || (!isExternalRuntime && mcpServers.some(s => globalMcpEnabled.includes(s.id))) ? (
                       <>
@@ -1804,7 +1827,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                             </div>
                             <button
                               type="button"
-                              title="设置"
+                              title={t('input.settings')}
                               onClick={(e) => {
                                 e.stopPropagation();
                                 setShowToolMenu(false);
@@ -1854,7 +1877,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                               </div>
                               <button
                                 type="button"
-                                title="设置"
+                                title={t('input.settings')}
                                 onClick={(e) => {
                                   e.stopPropagation();
                                   setShowToolMenu(false);
@@ -1884,7 +1907,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                       </>
                     ) : (
                       <div className="px-3 py-3 text-sm text-[var(--ink-muted)]">
-                        在
+                        {t('input.toolsEmptyPrefix')}
                         <button
                           type="button"
                           onClick={(e) => {
@@ -1895,11 +1918,11 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                           }}
                           className="mx-1 text-[var(--accent)] hover:underline"
                         >
-                          设置页面
+                          {t('input.settingsPage')}
                         </button>
                         {isExternalRuntime
-                          ? '在设置页面启用官方 CLI 工具后即可在此 runtime 使用。'
-                          : '安装开启 MCP 工具，即可使用浏览器等更多功能'}
+                          ? t('input.toolsEmptyExternal')
+                          : t('input.toolsEmptyBuiltin')}
                       </div>
                     )}
 
@@ -1918,7 +1941,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                      *  to Settings → Plugins. Matches the MCP empty-state
                      *  pattern above for visual symmetry. */}
                     <div className="px-3 py-2 mt-1 text-xs font-medium text-[var(--ink-muted)] border-t border-[var(--line)] border-b border-[var(--line)] bg-[var(--paper-inset)]/40">
-                      插件 Plugins
+                      {t('input.pluginsHeader')}
                     </div>
                     {globallyVisiblePlugins.length > 0 ? (
                       globallyVisiblePlugins.map((plugin) => {
@@ -1940,15 +1963,15 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                               {plugin.mcpServerNames && plugin.mcpServerNames.length > 0 && (
                                 <div
                                   className="mt-0.5 text-xs text-[var(--ink-muted)] truncate"
-                                  title={`启用此插件会自动加载这些 MCP server：${plugin.mcpServerNames.join(', ')}`}
+                                  title={t('input.pluginLoadsMcpTitle', { names: plugin.mcpServerNames.join(', ') })}
                                 >
-                                  🔌 {plugin.mcpServerNames.length} 个 MCP：{plugin.mcpServerNames.join(', ')}
+                                  🔌 {t('input.pluginLoadsMcp', { count: plugin.mcpServerNames.length, names: plugin.mcpServerNames.join(', ') })}
                                 </div>
                               )}
                             </div>
                             <button
                               type="button"
-                              title="管理插件"
+                              title={t('input.managePlugins')}
                               onClick={(e) => {
                                 e.stopPropagation();
                                 setShowToolMenu(false);
@@ -1977,7 +2000,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                       })
                     ) : (
                       <div className="px-3 py-3 text-sm text-[var(--ink-muted)]">
-                        还没有插件。在
+                        {t('input.noPluginsPrefix')}
                         <button
                           type="button"
                           onClick={(e) => {
@@ -1987,9 +2010,9 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                           }}
                           className="mx-1 text-[var(--accent)] hover:underline"
                         >
-                          设置 → 插件
+                          {t('input.pluginsSettings')}
                         </button>
-                        可以从 GitHub 或本地路径安装。
+                        {t('input.noPluginsSuffix')}
                       </div>
                     )}
                     </>
@@ -2016,10 +2039,10 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                         ? 'cursor-not-allowed text-[var(--ink-muted)] opacity-50 hover:bg-transparent hover:text-[var(--ink-muted)]'
                       : 'text-[var(--ink-muted)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]'
                   }`}
-                  title={configControlLockTitle ?? (cronModeEnabled ? '定时已启用' : '定时')}
+                  title={configControlLockTitle ?? (cronModeEnabled ? t('input.cronEnabled') : t('input.cron'))}
                 >
                   <Timer className="h-3.5 w-3.5" />
-                  <span className="toolbar-label">定时</span>
+                  <span className="toolbar-label">{t('input.cron')}</span>
                 </button>
               )}
             </div>
@@ -2030,7 +2053,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
               {sessionUnlocked && (
                 <span
                   className="flex h-5 w-5 items-center justify-center rounded text-[var(--ink-muted)]/60"
-                  title="该 session 未锁定，跟随 agent 默认（修改 agent 会影响此会话）"
+                  title={t('input.sessionUnlocked')}
                 >
                   <Unlock className="h-3 w-3" />
                 </span>
@@ -2058,7 +2081,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                 className={`flex items-center gap-1 rounded-lg px-2 py-1.5 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)] ${
                   configControlsLocked ? 'cursor-not-allowed opacity-50 hover:bg-transparent hover:text-[var(--ink-muted)]' : ''
                 }`}
-                title={configControlLockTitle ?? '切换模型'}
+                title={configControlLockTitle ?? t('input.switchModel')}
               >
                 <span className="max-w-[140px] truncate">{currentModelName}</span>
                 <ChevronUp className="h-3 w-3 shrink-0" />
@@ -2080,7 +2103,9 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                 {isExternalRuntime && runtimeModels ? (
                   <>
                     <div className="px-3 pb-0.5 pt-1.5 text-xs font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60">
-                      {runtime === 'claude-code' ? 'CLAUDE CODE' : runtime === 'gemini' ? 'GEMINI CLI' : runtime?.toUpperCase()} 模型
+                      {t('input.runtimeModelHeader', {
+                        runtime: runtime === 'claude-code' ? 'CLAUDE CODE' : runtime === 'gemini' ? 'GEMINI CLI' : runtime?.toUpperCase(),
+                      })}
                     </div>
                     {runtimeModels.map(model => {
                       const isSelected = selectedModel === model.value || (!selectedModel && model.isDefault);
@@ -2121,7 +2146,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                         }}
                         className="w-full px-3 py-2.5 text-left text-sm text-[var(--accent)] transition-colors hover:bg-[var(--hover-bg)]"
                       >
-                        请先设置模型服务 →
+                        {t('input.setupModelProvider')}
                       </button>
                     );
                   }
@@ -2131,7 +2156,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                       <div className="group/provider relative flex items-center gap-1 px-3 pb-0.5 pt-1.5 text-xs font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60">
                         {p.name}
                         {isProviderWarning(p, apiKeys, providerVerifyStatus) && (
-                          <Tip label="验证未通过，部分模型可能不可用" position="bottom">
+                          <Tip label={t('input.providerWarning')} position="bottom">
                             <AlertCircle className="h-3 w-3 shrink-0 text-[var(--warning)]" />
                           </Tip>
                         )}
@@ -2194,13 +2219,13 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                       }`}
                     >
                       <Gauge className="h-3.5 w-3.5 shrink-0 text-[var(--ink-muted)]" />
-                      <span className="flex-1">推理强度</span>
+                      <span className="flex-1">{t('input.reasoningEffort')}</span>
                       <span className={`text-xs ${
                         reasoningEffort !== REASONING_EFFORT_DEFAULT
                           ? 'font-medium text-[var(--accent)]'
                           : 'text-[var(--ink-muted)]'
                       }`}>
-                        {reasoningEffort === REASONING_EFFORT_DEFAULT ? '默认' : reasoningEffort}
+                        {reasoningEffort === REASONING_EFFORT_DEFAULT ? t('input.reasoningDefault') : reasoningEffort}
                       </span>
                       <ChevronRight className="h-3 w-3 shrink-0 text-[var(--ink-muted)]" />
                     </button>
@@ -2232,7 +2257,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                                     : 'text-[var(--ink)] hover:bg-[var(--hover-bg)]'
                                 }`}
                               >
-                                <span>{level === REASONING_EFFORT_DEFAULT ? '默认' : level}</span>
+                                <span>{level === REASONING_EFFORT_DEFAULT ? t('input.reasoningDefault') : level}</span>
                                 <span className={`text-xs font-normal ${isSelected ? 'text-[var(--accent)]/70' : 'text-[var(--ink-muted)]'}`}>
                                   {REASONING_EFFORT_DESCRIPTIONS[level] ?? ''}
                                 </span>
@@ -2240,7 +2265,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                             );
                           })}
                           <div className="mt-1 whitespace-nowrap border-t border-[var(--line)] px-3 pb-1 pt-1.5 text-xs text-[var(--ink-muted)]/60">
-                            需服务商支持该参数，以实际生效为准
+                            {t('input.reasoningRequirement')}
                           </div>
                         </div>
                       </>
@@ -2266,7 +2291,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                   type="button"
                   disabled
                   className="rounded-lg bg-[var(--ink-muted)]/15 p-2 text-[var(--ink-muted)]/60"
-                  title="正在执行系统任务，请稍等"
+                  title={t('input.systemBusy')}
                 >
                   <Send className="h-4 w-4" />
                 </button>
@@ -2276,7 +2301,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                   type="button"
                   disabled
                   className="rounded-lg bg-[var(--ink-muted)]/15 p-2 text-[var(--ink-muted)]"
-                  title="正在停止..."
+                  title={t('input.stopping')}
                 >
                   <Loader className="h-4 w-4 animate-spin" />
                 </button>
@@ -2291,7 +2316,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                   type="button"
                   onClick={onStop}
                   className="rounded-lg bg-[var(--error)] p-2 text-white transition-colors hover:brightness-110"
-                  title={systemStatus?.startsWith('api_retry:') ? '停止重试' : '停止'}
+                  title={systemStatus?.startsWith('api_retry:') ? t('input.stopRetry') : t('input.stop')}
                 >
                   <Square className="h-4 w-4" />
                 </button>
@@ -2301,7 +2326,9 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                   onClick={handleSend}
                   disabled={!canSendMessage || (!inputValue.trim() && images.length === 0)}
                   className="rounded-lg bg-[var(--accent)] p-2 text-white transition-colors hover:bg-[var(--accent-warm-hover)] disabled:bg-[var(--ink-muted)]/15 disabled:text-[var(--ink-muted)]/60"
-                  title={!canSendMessage ? (providerUnavailableMessage ?? '请前往设置页面设置模型供应商') : sendHintLabel(sendShortcut, isMac)}
+                  title={!canSendMessage
+                    ? (providerUnavailableMessage ?? t('input.providerUnavailableDefault'))
+                    : `${t('input.send')} (${sendKeyHint(sendShortcut, isMac).shortcut})`}
                 >
                   <Send className="h-4 w-4" />
                 </button>
@@ -2313,10 +2340,13 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
     </div>
     {repetitionWarning && (
       <ConfirmDialog
-        title="检测到内容存在大量重复"
-        message={`同一段文字重复了约 ${repetitionWarning.count} 次（共 ${repetitionWarning.text.length.toLocaleString()} 字符）。常见于第三方输入法的语音识别异常。仍要发送吗？`}
-        confirmText="仍要发送"
-        cancelText="取消"
+        title={t('input.repetition.title')}
+        message={t('input.repetition.message', {
+          count: repetitionWarning.count,
+          chars: repetitionWarning.text.length.toLocaleString(),
+        })}
+        confirmText={t('input.repetition.confirm')}
+        cancelText={t('input.repetition.cancel')}
         confirmVariant="danger"
         // Bug #123: don't bind Enter to confirm — the user just pressed Enter
         // to trigger send, and a reflexive second Enter must not silently

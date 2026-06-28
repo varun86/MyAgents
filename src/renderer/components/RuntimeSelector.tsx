@@ -3,6 +3,7 @@
 
 import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import { ChevronUp, Settings } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 
 import { Popover } from '@/components/ui/Popover';
 import { useCloseLayer } from '@/hooks/useCloseLayer';
@@ -71,6 +72,7 @@ export default memo(function RuntimeSelector({
   disabledReason,
   onDisabledClick,
 }: RuntimeSelectorProps) {
+  const { t } = useTranslation('chat');
   const [open, setOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
 
@@ -156,7 +158,9 @@ export default memo(function RuntimeSelector({
                 </span>
                 {!installed && (
                   <span className="ml-auto text-[var(--ink-subtle)] text-xs">
-                    {detection?.installed && !IMPLEMENTED_RUNTIMES.has(opt.type) ? '即将支持' : '未安装'}
+                    {detection?.installed && !IMPLEMENTED_RUNTIMES.has(opt.type)
+                      ? t('runtime.comingSoon')
+                      : t('runtime.notInstalled')}
                   </span>
                 )}
               </button>
@@ -198,7 +202,7 @@ export default memo(function RuntimeSelector({
         className="w-72 py-1"
       >
         <div className="flex items-center justify-between px-3 pb-0.5 pt-1.5">
-          <span className="text-xs font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60">运行环境</span>
+          <span className="text-xs font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60">{t('runtime.header')}</span>
           {onOpenSettings && (
             <button
               type="button"
@@ -206,7 +210,7 @@ export default memo(function RuntimeSelector({
               className="flex items-center gap-1 rounded px-1.5 py-0.5 text-xs font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
             >
               <Settings className="h-2.5 w-2.5" />
-              设置
+              {t('runtime.settings')}
             </button>
           )}
         </div>
@@ -234,7 +238,7 @@ export default memo(function RuntimeSelector({
                 {opt.name}
               </span>
               {!installed && (
-                <span className="ml-auto text-[var(--ink-subtle)] text-xs">未安装</span>
+                <span className="ml-auto text-[var(--ink-subtle)] text-xs">{t('runtime.notInstalled')}</span>
               )}
             </button>
           );

@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ImagePreviewProvider } from '@/context/ImagePreviewContext';
 import type { Provider } from '@/config/types';
+import { i18n } from '@/i18n';
 import SimpleChatInput, { type SimpleChatInputHandle } from './SimpleChatInput';
 import { ToastProvider } from './Toast';
 
@@ -195,6 +196,28 @@ describe('SimpleChatInput send paths', () => {
     await user.click(screen.getByTitle(/发送/));
 
     expect(onSend).toHaveBeenCalledWith('launcher hello', undefined);
+  });
+
+  it('renders launcher input chrome in English when the UI language is English', async () => {
+    await i18n.changeLanguage('en-US');
+    const user = userEvent.setup();
+    renderInput({ mode: 'launcher', providerAvailable: true });
+
+    expect(screen.getByPlaceholderText('What do you want to do today?')).toBeInTheDocument();
+    expect(screen.getByTitle('Add context')).toBeInTheDocument();
+    expect(screen.getByTitle('Switch execution mode')).toBeInTheDocument();
+    expect(screen.getByTitle('Switch model')).toBeInTheDocument();
+    expect(screen.getByTitle('Send (Enter)')).toBeInTheDocument();
+
+    await user.click(screen.getByTitle('Add context'));
+    expect(screen.getByText('Reference file')).toBeInTheDocument();
+    expect(screen.getByText('Use skill')).toBeInTheDocument();
+    expect(screen.getByText('Upload file')).toBeInTheDocument();
+
+    await user.click(screen.getByTitle('Switch execution mode'));
+    expect(screen.getByText('Session mode')).toBeInTheDocument();
+    expect(screen.getAllByText('Act').length).toBeGreaterThan(0);
+    expect(screen.getByText('Agent works in the workspace and asks before using tools')).toBeInTheDocument();
   });
 
   it('accepts pasted image attachments without routing through workspace file IO for external runtimes', async () => {
