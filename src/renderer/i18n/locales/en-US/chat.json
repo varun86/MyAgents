@@ -179,6 +179,171 @@
       "cancel": "Cancel",
       "close": "Close"
     },
+    "sessionMenu": {
+      "trigger": "Chat actions",
+      "copySessionIdAria": "Copy SessionID",
+      "copied": "Copied",
+      "copy": "Copy",
+      "rename": "Rename",
+      "renameDisabledTitle": "Send one message before naming this chat",
+      "favorite": "Favorite chat",
+      "unfavorite": "Unfavorite",
+      "exportMarkdown": "Export as Markdown",
+      "tokenStats": "Session token usage",
+      "contextUsage": "Context token details",
+      "bindBot": "Bind chat bot",
+      "cronDeleteTooltip": "Stop the scheduled task before deleting this chat",
+      "delete": "Delete chat",
+      "bound": "Bound",
+      "switchToOther": "Switch to another",
+      "source": {
+        "private": "Private",
+        "group": "Group",
+        "unknownChat": "Unknown chat"
+      },
+      "deleteDialog": {
+        "title": "Delete chat",
+        "message": "Delete \"{{title}}\"? This cannot be undone.",
+        "confirm": "Delete"
+      },
+      "toasts": {
+        "copySessionIdSuccess": "SessionID copied",
+        "copyFailed": "Copy failed",
+        "favoriteAdded": "Added to favorites",
+        "favoriteRemoved": "Removed from favorites",
+        "favoriteFailed": "Failed to update favorite. Please try again.",
+        "deleteFailed": "Delete failed. Please try again.",
+        "deleted": "Deleted",
+        "handoverSuccess": "Handed over to {{target}}",
+        "handoverNotifyFailed": "Handed over to {{target}}, but the IM notification was not delivered.",
+        "handoverFailed": "Handover failed",
+        "handoverFailedWithError": "Handover failed: {{error}}"
+      }
+    },
+    "history": {
+      "title": "History",
+      "loading": "Loading...",
+      "empty": "No history yet",
+      "current": "Current",
+      "messageCount": "{{count}} message(s)",
+      "openInNewTab": "Open in new tab",
+      "more": "More",
+      "moreActions": "More actions",
+      "favorite": "Favorite chat",
+      "unfavorite": "Unfavorite",
+      "exportMarkdown": "Export as Markdown",
+      "viewStats": "View stats",
+      "cronDeleteTooltip": "Stop the scheduled task before deleting this chat",
+      "delete": "Delete chat",
+      "deleteDialog": {
+        "title": "Delete chat",
+        "message": "Delete \"{{title}}\"? This cannot be undone.",
+        "confirm": "Delete"
+      },
+      "errors": {
+        "deleteFailed": "Delete failed. Please try again.",
+        "favoriteFailed": "Failed to update favorite. Please try again."
+      }
+    },
+    "stats": {
+      "title": "Session stats",
+      "loading": "Loading...",
+      "empty": "No stats yet",
+      "errors": {
+        "unavailable": "Unable to load stats",
+        "loadFailed": "Load failed"
+      },
+      "common": {
+        "input": "Input",
+        "output": "Output",
+        "inputCache": "Input cache"
+      },
+      "summary": {
+        "messages": "Messages",
+        "totalTokens": "Total tokens",
+        "inputOutput": "Input {{input}} / output {{output}}",
+        "inputCache": "Input cache",
+        "inputCacheTokens": "input cache tokens"
+      },
+      "byModel": {
+        "title": "By model",
+        "model": "Model",
+        "count": "Count"
+      },
+      "messageDetails": {
+        "title": "Message details",
+        "question": "Question"
+      }
+    },
+    "queue": {
+      "title": "Queued ({{count}})",
+      "sendNow": "Send now",
+      "recallSend": "Recall send",
+      "cancelQueued": "Cancel queued"
+    },
+    "permissionPrompt": {
+      "title": "Permission request",
+      "subtitle": "AI wants to run the following action",
+      "badge": "Authorization required",
+      "deny": "Deny",
+      "alwaysAllow": "Always allow",
+      "allow": "Allow"
+    },
+    "askQuestion": {
+      "preview": "Preview",
+      "customPlaceholder": "Share your thoughts",
+      "progressAria": "Question progress",
+      "questionAria": "Question {{index}}: {{header}}",
+      "previous": "Previous",
+      "submit": "Submit",
+      "next": "Next"
+    },
+    "planPrompt": {
+      "submitFeedback": "Submit feedback",
+      "rejectPlan": "Reject plan",
+      "title": "Plan review",
+      "subtitle": "AI has finished drafting a plan. Review it before deciding whether to execute.",
+      "approved": "Approved",
+      "rejected": "Rejected",
+      "permissions": "Required permissions:",
+      "approve": "Approve and execute",
+      "feedbackPlaceholder": "Share feedback (leave blank to reject the plan)"
+    },
+    "runtimeDiagnostics": {
+      "problems": {
+        "needsCodexLogin": "Codex login required (click the account avatar or run codex login)",
+        "authQueryFailed": "auth query failed: {{error}}",
+        "appListFailed": "app list failed: {{error}}",
+        "mcpStatusFailed": "MCP status query failed: {{error}}",
+        "featureFlagFailed": "feature flag query failed: {{error}}",
+        "appsInaccessible": "{{count}} enabled app(s) inaccessible: {{names}}",
+        "mcpServersFailed": "MCP server failed: {{names}}"
+      },
+      "headlines": {
+        "needsCodexLogin": "Sign in to Codex to continue",
+        "allDiagnosticsFailed": "All Codex diagnostics failed; runtime may not be running"
+      },
+      "status": {
+        "unsupported": "Unsupported",
+        "failed": "Failed: {{error}}",
+        "notReported": "Not reported"
+      },
+      "sections": {
+        "problems": "Problems",
+        "auth": "Auth",
+        "featureFlags": "Feature flags",
+        "mcpServers": "MCP servers",
+        "apps": "Apps",
+        "effectiveEnv": "Effective env"
+      },
+      "requiresLoginSuffix": " • login required",
+      "appAccessible": "accessible ",
+      "appInaccessible": "inaccessible ",
+      "yes": "yes",
+      "no": "no",
+      "snapshot": "Diagnostic snapshot: {{timestamp}}. CLI sync info:",
+      "closeTitle": "Close this notice"
+    },
     "sessionTitle": {
       "renameTitle": "Click to rename"
     },

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { BarChart2, Clock, Download, Loader2, MoreHorizontal, SquareArrowOutUpRight, Star, Trash2 } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 
 import { deleteSession, getSessions, updateSession, type SessionMetadata } from '@/api/sessionClient';
 import { exportSessionAsMarkdown } from '@/utils/sessionExport';
@@ -16,6 +17,7 @@ import { computeSessionTagsMap, resolveFloatingBallBoundSession } from '@/hooks/
 import { loadAppConfig } from '@/config/configService';
 import { getSessionDisplayText } from '@/utils/sessionDisplay';
 import type { SessionTag } from '@/hooks/useTaskCenterData';
+import { currentSupportedLocale } from '@/i18n/format';
 
 import ConfirmDialog from './ConfirmDialog';
 import SessionStatsModal from './SessionStatsModal';
@@ -61,7 +63,9 @@ export default function SessionHistoryDropdown({
     onClose,
     triggerRef,
 }: SessionHistoryDropdownProps) {
+    const { t } = useTranslation('chat');
     const toast = useToast();
+    const locale = currentSupportedLocale();
     const [sessions, setSessions] = useState<FetchState>(null);
     const [cronTasks, setCronTasks] = useState<CronTaskFetchState>(null);
     const [statsSession, setStatsSession] = useState<{ id: string; title: string } | null>(null);
@@ -317,7 +321,7 @@ export default function SessionHistoryDropdown({
             if (isDeletingCurrentSession) {
                 const prepared = await prepareCurrentSessionForDelete();
                 if (!prepared) {
-                    setDeleteError('删除失败，请重试');
+                    setDeleteError(t('shell.history.errors.deleteFailed'));
                     return;
                 }
             }
@@ -326,11 +330,11 @@ export default function SessionHistoryDropdown({
             if (success) {
                 setSessions((prev) => prev?.filter((s) => s.id !== sessionId) ?? null);
             } else {
-                setDeleteError('删除失败，请重试');
+                setDeleteError(t('shell.history.errors.deleteFailed'));
                 console.error(`[SessionHistoryDropdown] Failed to delete session ${sessionId}`);
             }
         } catch (error) {
-            setDeleteError('删除失败，请重试');
+            setDeleteError(t('shell.history.errors.deleteFailed'));
             console.error(`[SessionHistoryDropdown] Error deleting session ${sessionId}:`, error);
         }
     };
@@ -364,16 +368,16 @@ export default function SessionHistoryDropdown({
                 // (no synthetic throw — it just gets caught by the same
                 // handler below for no UX gain, per Codex review).
                 setSessions(prev => prev?.map(s => s.id === session.id ? { ...s, favorite: !next } : s) ?? prev);
-                toast.error('收藏失败，请重试');
+                toast.error(t('shell.history.errors.favoriteFailed'));
             }
         } catch (err) {
             console.error('[SessionHistoryDropdown] Toggle favorite failed:', err);
             setSessions(prev => prev?.map(s => s.id === session.id ? { ...s, favorite: !next } : s) ?? prev);
-            toast.error('收藏失败，请重试');
+            toast.error(t('shell.history.errors.favoriteFailed'));
         } finally {
             favoriteInFlightRef.current.delete(session.id);
         }
-    }, [toast]);
+    }, [toast, t]);
 
     // Export session as .md file — logic lives in utils/sessionExport so
     // the in-Chat session menu (SessionMenuButton) can share it verbatim.
@@ -421,7 +425,7 @@ export default function SessionHistoryDropdown({
             >
                 {/* Header */}
                 <div className="border-b border-[var(--line)] px-4 py-2">
-                    <h3 className="text-sm font-semibold text-[var(--ink)]">历史记录</h3>
+                    <h3 className="text-sm font-semibold text-[var(--ink)]">{t('shell.history.title')}</h3>
                 </div>
 
                 {/* Delete error toast */}
@@ -435,11 +439,11 @@ export default function SessionHistoryDropdown({
                 <div className="max-h-80 overflow-y-auto">
                     {isLoading ? (
                         <div className="px-4 py-8 text-center text-sm text-[var(--ink-muted)]">
-                            加载中...
+                            {t('shell.history.loading')}
                         </div>
                     ) : sessions.length === 0 ? (
                         <div className="px-4 py-8 text-center text-sm text-[var(--ink-muted)]">
-                            暂无历史记录
+                            {t('shell.history.empty')}
                         </div>
                     ) : (
                         sortedSessions.map((session) => {
@@ -478,7 +482,7 @@ export default function SessionHistoryDropdown({
                                             <div className="flex items-center gap-2">
                                                 {isCurrent && (
                                                     <span className="flex-shrink-0 rounded bg-[var(--accent)]/20 px-1.5 py-0.5 text-xs font-medium text-[var(--accent)]">
-                                                        当前
+                                                        {t('shell.history.current')}
                                                     </span>
                                                 )}
                                                 {tags.map((tag, i) => (
@@ -491,12 +495,12 @@ export default function SessionHistoryDropdown({
                                             <div className="mt-1 flex items-center gap-2 text-xs text-[var(--ink-muted)]">
                                                 <span className="flex items-center gap-1">
                                                     <Clock className="h-3 w-3" />
-                                                    {formatTime(session.lastActiveAt)}
+                                                    {formatTime(session.lastActiveAt, new Date(), locale)}
                                                 </span>
                                                 {hasStats && (
                                                     <>
                                                         <span>·</span>
-                                                        <span>{stats.messageCount} 条消息</span>
+                                                        <span>{t('shell.history.messageCount', { count: stats.messageCount })}</span>
                                                         <span>·</span>
                                                         <span>{formatTokens(totalTokens)} tokens</span>
                                                     </>
@@ -518,10 +522,10 @@ export default function SessionHistoryDropdown({
                                         <div className="h-full w-10 bg-gradient-to-r from-[var(--paper-inset-a0)] to-[var(--paper-inset)]" />
                                         <div className="flex h-full items-center gap-1 bg-[var(--paper-inset)] pr-3">
                                             {onOpenInNewTab && (
-                                                <Tip label="在新 tab 打开" position="bottom">
+                                                <Tip label={t('shell.history.openInNewTab')} position="bottom">
                                                     <button
                                                         type="button"
-                                                        aria-label="在新 tab 打开"
+                                                        aria-label={t('shell.history.openInNewTab')}
                                                         className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper)] hover:text-[var(--ink)]"
                                                         onClick={(e) => handleOpenInNewTab(e, session)}
                                                     >
@@ -529,10 +533,10 @@ export default function SessionHistoryDropdown({
                                                     </button>
                                                 </Tip>
                                             )}
-                                            <Tip label="更多" position="bottom">
+                                            <Tip label={t('shell.history.more')} position="bottom">
                                                 <button
                                                     type="button"
-                                                    aria-label="更多操作"
+                                                    aria-label={t('shell.history.moreActions')}
                                                     aria-haspopup="menu"
                                                     aria-expanded={menuOpen}
                                                     className={`flex h-7 w-7 items-center justify-center rounded-md transition-colors hover:bg-[var(--paper)] ${
@@ -575,28 +579,28 @@ export default function SessionHistoryDropdown({
                     <>
                         <MenuItem
                             icon={<Star className="h-3.5 w-3.5" fill={menuSession.favorite ? 'currentColor' : 'none'} />}
-                            label={menuSession.favorite ? '取消收藏' : '收藏对话'}
+                            label={menuSession.favorite ? t('shell.history.unfavorite') : t('shell.history.favorite')}
                             onClick={() => { closeMenu(); void handleToggleFavorite(menuSession); }}
                         />
                         <MenuItem
                             icon={exportingId === menuSession.id
                                 ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
                                 : <Download className="h-3.5 w-3.5" />}
-                            label="导出为 md 文件"
+                            label={t('shell.history.exportMarkdown')}
                             onClick={() => { closeMenu(); void handleExport(menuSession); }}
                             disabled={exportingId === menuSession.id}
                         />
                         <MenuItem
                             icon={<BarChart2 className="h-3.5 w-3.5" />}
-                            label="查看统计"
+                            label={t('shell.history.viewStats')}
                             onClick={() => { closeMenu(); handleShowStats(menuSession); }}
                         />
                         <div className="my-1 border-t border-[var(--line-subtle)]" />
                         {menuCronProtected ? (
-                            <span className="block" title="请先停止循环任务后再删除">
+                            <span className="block" title={t('shell.history.cronDeleteTooltip')}>
                                 <MenuItem
                                     icon={<Trash2 className="h-3.5 w-3.5" />}
-                                    label="删除对话"
+                                    label={t('shell.history.delete')}
                                     disabled
                                     tone="danger"
                                 />
@@ -604,7 +608,7 @@ export default function SessionHistoryDropdown({
                         ) : (
                             <MenuItem
                                 icon={<Trash2 className="h-3.5 w-3.5" />}
-                                label="删除对话"
+                                label={t('shell.history.delete')}
                                 onClick={() => { closeMenu(); handleDeleteClick(menuSession); }}
                                 tone="danger"
                             />
@@ -618,9 +622,9 @@ export default function SessionHistoryDropdown({
              *  any ancestor stacking context to beat FloatingPortal z-50. */}
             {pendingDelete && (
                 <ConfirmDialog
-                    title="删除对话"
-                    message={`确定要删除「${pendingDelete.title}」吗？此操作不可撤销。`}
-                    confirmText="删除"
+                    title={t('shell.history.deleteDialog.title')}
+                    message={t('shell.history.deleteDialog.message', { title: pendingDelete.title })}
+                    confirmText={t('shell.history.deleteDialog.confirm')}
                     confirmVariant="danger"
                     onConfirm={handleConfirmDelete}
                     onCancel={handleCancelDelete}

@@ -179,6 +179,171 @@
       "cancel": "取消",
       "close": "关闭"
     },
+    "sessionMenu": {
+      "trigger": "对话操作",
+      "copySessionIdAria": "复制 SessionID",
+      "copied": "已复制",
+      "copy": "复制",
+      "rename": "重命名",
+      "renameDisabledTitle": "发送一条消息后再为对话命名",
+      "favorite": "收藏对话",
+      "unfavorite": "取消收藏",
+      "exportMarkdown": "导出为 md 文件",
+      "tokenStats": "会话 Token 消耗统计",
+      "contextUsage": "上下文 Token 使用详情",
+      "bindBot": "绑定聊天机器人",
+      "cronDeleteTooltip": "请先停止循环任务后再删除",
+      "delete": "删除对话",
+      "bound": "已绑定",
+      "switchToOther": "切换到其他",
+      "source": {
+        "private": "私聊",
+        "group": "群聊",
+        "unknownChat": "未知聊天"
+      },
+      "deleteDialog": {
+        "title": "删除对话",
+        "message": "确定要删除「{{title}}」吗？此操作不可撤销。",
+        "confirm": "删除"
+      },
+      "toasts": {
+        "copySessionIdSuccess": "已复制 SessionID",
+        "copyFailed": "复制失败",
+        "favoriteAdded": "已收藏",
+        "favoriteRemoved": "已取消收藏",
+        "favoriteFailed": "收藏失败，请重试",
+        "deleteFailed": "删除失败，请重试",
+        "deleted": "已删除",
+        "handoverSuccess": "已交接到 {{target}}",
+        "handoverNotifyFailed": "已交接到 {{target}}，但通知未送达 IM",
+        "handoverFailed": "交接失败",
+        "handoverFailedWithError": "交接失败：{{error}}"
+      }
+    },
+    "history": {
+      "title": "历史记录",
+      "loading": "加载中...",
+      "empty": "暂无历史记录",
+      "current": "当前",
+      "messageCount": "{{count}} 条消息",
+      "openInNewTab": "在新 tab 打开",
+      "more": "更多",
+      "moreActions": "更多操作",
+      "favorite": "收藏对话",
+      "unfavorite": "取消收藏",
+      "exportMarkdown": "导出为 md 文件",
+      "viewStats": "查看统计",
+      "cronDeleteTooltip": "请先停止循环任务后再删除",
+      "delete": "删除对话",
+      "deleteDialog": {
+        "title": "删除对话",
+        "message": "确定要删除「{{title}}」吗？此操作不可撤销。",
+        "confirm": "删除"
+      },
+      "errors": {
+        "deleteFailed": "删除失败，请重试",
+        "favoriteFailed": "收藏失败，请重试"
+      }
+    },
+    "stats": {
+      "title": "会话统计",
+      "loading": "加载中...",
+      "empty": "暂无统计数据",
+      "errors": {
+        "unavailable": "无法加载统计数据",
+        "loadFailed": "加载失败"
+      },
+      "common": {
+        "input": "输入",
+        "output": "输出",
+        "inputCache": "输入缓存"
+      },
+      "summary": {
+        "messages": "消息数",
+        "totalTokens": "总 Tokens",
+        "inputOutput": "输入 {{input}} / 输出 {{output}}",
+        "inputCache": "输入缓存",
+        "inputCacheTokens": "输入缓存 tokens"
+      },
+      "byModel": {
+        "title": "按模型统计",
+        "model": "模型",
+        "count": "次数"
+      },
+      "messageDetails": {
+        "title": "消息明细",
+        "question": "问题"
+      }
+    },
+    "queue": {
+      "title": "排队中 ({{count}})",
+      "sendNow": "立即发送",
+      "recallSend": "撤回发送",
+      "cancelQueued": "取消排队"
+    },
+    "permissionPrompt": {
+      "title": "权限请求",
+      "subtitle": "AI 请求执行以下操作",
+      "badge": "需授权",
+      "deny": "拒绝",
+      "alwaysAllow": "始终允许",
+      "allow": "允许"
+    },
+    "askQuestion": {
+      "preview": "预览",
+      "customPlaceholder": "说说你的想法",
+      "progressAria": "问题进度",
+      "questionAria": "问题 {{index}}: {{header}}",
+      "previous": "上一题",
+      "submit": "提交",
+      "next": "下一题"
+    },
+    "planPrompt": {
+      "submitFeedback": "提交修改意见",
+      "rejectPlan": "拒绝方案",
+      "title": "方案审核",
+      "subtitle": "AI 完成了方案设计，请审核后决定是否执行",
+      "approved": "已批准",
+      "rejected": "已拒绝",
+      "permissions": "需要的权限：",
+      "approve": "批准执行",
+      "feedbackPlaceholder": "说说我的想法（留空则拒绝方案）"
+    },
+    "runtimeDiagnostics": {
+      "problems": {
+        "needsCodexLogin": "需要登录 Codex（点账户头像或运行 codex login）",
+        "authQueryFailed": "auth 查询失败：{{error}}",
+        "appListFailed": "app 列表失败：{{error}}",
+        "mcpStatusFailed": "MCP 状态查询失败：{{error}}",
+        "featureFlagFailed": "feature flag 查询失败：{{error}}",
+        "appsInaccessible": "{{count}} 个 app 启用但不可达：{{names}}",
+        "mcpServersFailed": "MCP server 失败：{{names}}"
+      },
+      "headlines": {
+        "needsCodexLogin": "需要登录 Codex 才能继续使用",
+        "allDiagnosticsFailed": "Codex 自诊断全部失败，runtime 可能未启动"
+      },
+      "status": {
+        "unsupported": "不支持",
+        "failed": "失败：{{error}}",
+        "notReported": "未报告"
+      },
+      "sections": {
+        "problems": "问题",
+        "auth": "认证",
+        "featureFlags": "Feature flags",
+        "mcpServers": "MCP servers",
+        "apps": "Apps",
+        "effectiveEnv": "Effective env"
+      },
+      "requiresLoginSuffix": " • 需登录",
+      "appAccessible": "可访问 ",
+      "appInaccessible": "不可访问 ",
+      "yes": "yes",
+      "no": "no",
+      "snapshot": "诊断快照：{{timestamp}}。命令行同步信息：",
+      "closeTitle": "关闭此提示"
+    },
     "sessionTitle": {
       "renameTitle": "点击重命名"
     },
