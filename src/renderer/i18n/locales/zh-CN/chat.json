@@ -131,6 +131,7 @@
       "context": "显示或管理当前上下文",
       "cost": "查看 token 使用量和费用",
       "init": "初始化项目配置 (.CLAUDE.md)",
+      "loop": "无限循环执行任务（Ralph Loop）",
       "pr-comments": "生成 Pull Request 评论",
       "release-notes": "根据最近提交生成发布说明",
       "review": "对代码进行审查",

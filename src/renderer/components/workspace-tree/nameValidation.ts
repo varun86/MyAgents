@@ -7,32 +7,38 @@
  * `src/shared/item-name-validation-cases.json` — both test suites assert
  * against it, so update the fixture together with any rule change here.
  *
- * Returns a user-facing Chinese message, or `null` when the name is valid.
+ * Returns a user-facing localized message, or `null` when the name is valid.
  */
+import { i18n } from "@/i18n";
+
+function validationMessage(key: string, options?: Record<string, unknown>): string {
+  return String(i18n.t(`app:workspaceNameValidation.${key}`, options));
+}
+
 export function validateItemName(name: string): string | null {
   if (name.length === 0 || name.trim().length === 0) {
-    return "名称不能为空";
+    return validationMessage("empty");
   }
   if (name !== name.trim()) {
-    return "名称不能以空格开头或结尾";
+    return validationMessage("trim");
   }
   if (name.includes("/") || name.includes("\\") || name.includes("..")) {
-    return "名称不能包含路径分隔符或 '..'";
+    return validationMessage("pathSeparators");
   }
   if (/[<>:"|?*]/.test(name)) {
-    return "名称包含非法字符 < > : \" | ? *";
+    return validationMessage("illegalChars");
   }
   for (const ch of name) {
     const code = ch.codePointAt(0) ?? 0;
     if (code < 0x20 || code === 0x7f) {
-      return "名称包含控制字符";
+      return validationMessage("controlChars");
     }
   }
   if ([...name].every((c) => c === ".")) {
-    return "名称不能只由点组成";
+    return validationMessage("dotsOnly");
   }
   if (isWindowsReservedName(name)) {
-    return `'${name}' 是 Windows 保留文件名`;
+    return validationMessage("windowsReserved", { name });
   }
   return null;
 }

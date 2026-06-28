@@ -2,6 +2,7 @@
 // Groups channels by current workspace vs other workspaces
 
 import { useCallback, useMemo } from 'react';
+import { useTranslation } from 'react-i18next';
 import { useAgentStatuses } from './useAgentStatuses';
 import { useConfig } from './useConfig';
 import type { SelectOption } from '@/components/CustomSelect';
@@ -55,6 +56,7 @@ function deriveBotDisplayName(
  * Lists are sorted by agentId + channelId for stable ordering.
  */
 export function useDeliveryChannels(currentWorkspacePath?: string) {
+  const { t } = useTranslation('task');
   const { statuses, loading } = useAgentStatuses();
   const { config, projects } = useConfig();
   const agents = useMemo(() => config.agents ?? [], [config.agents]);
@@ -62,7 +64,7 @@ export function useDeliveryChannels(currentWorkspacePath?: string) {
   const { options, channelMap } = useMemo(() => {
     const map = new Map<string, DeliveryChannelInfo>();
     const result: SelectOption[] = [
-      { value: '', label: '桌面通知（默认）' },
+      { value: '', label: t('notifications.desktopDefault') },
     ];
 
     // Build channelId → ChannelConfig map across all agents. Lets the display-name
@@ -116,7 +118,9 @@ export function useDeliveryChannels(currentWorkspacePath?: string) {
       for (const ch of sortedChannels) {
         const botName = deriveBotDisplayName(ch, channelById.get(ch.channelId));
         const platformTag = getChannelTypeLabel(ch.channelType);
-        const statusText = ch.status === 'online' ? '在线' : ch.status === 'connecting' ? '连接中' : ch.status === 'error' ? '异常' : '离线';
+        const statusText = t(`notifications.channelStatus.${ch.status}`, {
+          defaultValue: t('notifications.channelStatus.offline'),
+        });
         const statusColor = ch.status === 'online' ? 'text-[var(--success)]' : 'text-[var(--ink-muted)]';
 
         map.set(ch.channelId, {
@@ -157,9 +161,9 @@ export function useDeliveryChannels(currentWorkspacePath?: string) {
     }
 
     return { options: result, channelMap: map };
-  }, [statuses, agents, projects, currentWorkspacePath]);
+  }, [statuses, agents, projects, currentWorkspacePath, t]);
 
-  const hasChannels = options.length > 1; // More than just "桌面通知"
+  const hasChannels = options.length > 1; // More than just the desktop fallback.
 
   /** Resolve a botId to CronDelivery (for creating/updating tasks) */
   const resolveDelivery = useCallback((botId: string): CronDelivery | undefined => {

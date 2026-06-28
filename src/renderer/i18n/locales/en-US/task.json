@@ -80,6 +80,7 @@
     "allWorkspaces": "All workspaces",
     "missingWorkspaceLabel": "{{name}} (missing)",
     "empty": "No tasks yet. Capture a thought in the left panel, then click Dispatch to create one.",
+    "loadFailedRetry": "Load failed. Try again later.",
     "autoUpgradeSuccess": "Automatically upgraded {{count}} legacy scheduled task(s) to the new task model",
     "autoUpgradeFailed": "{{count}} legacy task(s) failed to auto-upgrade: {{message}}. Open the detail panel and click \"Upgrade to new task\" to retry manually.",
     "actionFailed": "{{action}} failed: {{message}}",
@@ -203,7 +204,13 @@
     "imBot": "Deliver to IM Bot",
     "optional": "(Optional)",
     "desktopDefault": "Desktop notification (default)",
-    "noChannels": "This workspace has no available IM channels. Only desktop notifications will be sent."
+    "noChannels": "This workspace has no available IM channels. Only desktop notifications will be sent.",
+    "channelStatus": {
+      "online": "Online",
+      "connecting": "Connecting",
+      "error": "Error",
+      "offline": "Offline"
+    }
   },
   "cron": {
     "untitledTask": "Untitled task",
@@ -391,6 +398,11 @@
       "scheduleEvery": "Every {{minutes}} minutes",
       "scheduleOnce": "{{time}} once",
       "scheduleCron": "Cron expression: {{expr}}"
+    },
+    "legacyUpgrade": {
+      "missingCronTaskId": "Missing CronTask id. Cannot upgrade.",
+      "missingWorkspacePath": "Missing workspace path. Cannot upgrade.",
+      "workspaceNotFound": "Workspace not found: {{workspacePath}}. Add this workspace on the launcher first, then retry the upgrade."
     }
   },
   "advanced": {

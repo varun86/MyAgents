@@ -8,6 +8,7 @@
 // 冲突）。见 Chat.tsx::handleJumpToTool（cross-review C1/C2 修复）。
 
 import { memo, useCallback } from 'react';
+import { useTranslation } from 'react-i18next';
 
 import { SubagentRunningIcon } from './icons';
 import type { SubagentStatus } from './types';
@@ -25,6 +26,7 @@ interface SubagentRowProps {
 }
 
 function SubagentRow({ subagent, onJumpToTool }: SubagentRowProps) {
+  const { t } = useTranslation('app');
   const elapsed = useElapsedSeconds(subagent.startedAt);
 
   const onClick = useCallback(() => {
@@ -37,7 +39,7 @@ function SubagentRow({ subagent, onJumpToTool }: SubagentRowProps) {
   // 完整 description 走 title 属性 tooltip。
   const titleParts = [
     subagent.agentType,
-    subagent.mode === 'background' ? '[后台]' : null,
+    subagent.mode === 'background' ? t('agentStatus.backgroundTooltip') : null,
     subagent.description,
   ].filter(Boolean);
   const tooltip = titleParts.join(' · ');
@@ -56,7 +58,7 @@ function SubagentRow({ subagent, onJumpToTool }: SubagentRowProps) {
         </span>
         {subagent.mode === 'background' && (
           <span className="shrink-0 rounded-full bg-[var(--accent)]/10 px-1.5 py-0.5 text-xs font-medium text-[var(--accent)]">
-            后台
+            {t('agentStatus.background')}
           </span>
         )}
         {subagent.description && (

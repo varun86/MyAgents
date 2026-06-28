@@ -35,6 +35,7 @@ import { getAllCronTasks, getBackgroundSessions } from '@/api/cronTaskClient';
 import { taskCenterAvailable, taskList } from '@/api/taskCenter';
 import { deactivateSession } from '@/api/tauriClient';
 import { loadAppConfig } from '@/config/configService';
+import { i18n } from '@/i18n';
 import { isTauriEnvironment } from '@/utils/browserMock';
 import { listenWithCleanup } from '@/utils/tauriListen';
 import { extractPlatformDisplay } from '@/utils/taskCenterUtils';
@@ -43,6 +44,10 @@ import { RENDERER_PERF_PHASE } from '../../shared/perfTrace';
 import { CUSTOM_EVENTS } from '../../shared/constants';
 import type { CronTask } from '@/types/cronTask';
 import type { Task } from '../../shared/types/task';
+
+function taskText(key: string, options?: Record<string, unknown>): string {
+    return String(i18n.t(`task:${key}`, options));
+}
 import type { AgentConfig } from '../../shared/types/agent';
 import type { AgentStatusMap } from '@/hooks/useAgentStatuses';
 
@@ -393,7 +398,7 @@ async function fetchData(retryCount = 0, silent = false): Promise<void> {
         if (!silent && retryCount < MAX_AUTO_RETRIES) {
             retryTimer = setTimeout(() => { void fetchData(retryCount + 1, silent); }, RETRY_DELAY_MS);
         } else if (!silent) {
-            setState({ isLoading: false, error: '加载失败，请稍后重试' });
+            setState({ isLoading: false, error: taskText('tasks.loadFailedRetry') });
         } else {
             setState({ isLoading: false });
         }

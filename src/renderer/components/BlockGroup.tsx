@@ -1,6 +1,7 @@
 
 import { MoreHorizontal } from 'lucide-react';
 import { memo, useCallback, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import type { ContentBlock } from '@/types/chat';
 import ProcessRow from './ProcessRow';
 
@@ -20,6 +21,7 @@ const BlockGroup = memo(function BlockGroup({
   isLatestActiveSection = false,
   isStreaming = false
 }: BlockGroupProps) {
+  const { t } = useTranslation('app');
   const [isUnfolded, setIsUnfolded] = useState(false);
 
   // When the user expands any row, pin the group open (same effect as clicking
@@ -93,7 +95,7 @@ const BlockGroup = memo(function BlockGroup({
                 </div>
                 <div className="flex items-center gap-2">
                   <span className="text-sm text-[var(--ink-muted)] group-hover/fold:text-[var(--ink-secondary)] transition-colors">
-                    展开全部
+                    {t('blockGroup.expandAll')}
                   </span>
                   <span className="inline-flex min-w-5 items-center justify-center rounded-full bg-[var(--accent)]/15 px-1.5 py-0.5 text-xs font-semibold tabular-nums text-[var(--accent)]">
                     +{foldedCount}

@@ -131,6 +131,7 @@
       "context": "Show or manage the current context",
       "cost": "View token usage and cost",
       "init": "Initialize project config (.CLAUDE.md)",
+      "loop": "Run a task continuously (Ralph Loop)",
       "pr-comments": "Generate Pull Request comments",
       "release-notes": "Generate release notes from recent commits",
       "review": "Review code",

@@ -1,5 +1,7 @@
 import { FilePlus, Folder, FolderPlus } from "lucide-react";
 import { memo, useEffect, useMemo, useRef, useState } from "react";
+import type { TFunction } from "i18next";
+import { useTranslation } from "react-i18next";
 
 import { getFileIconElement } from "@/utils/fileIcons";
 
@@ -19,11 +21,12 @@ interface WorkspaceTreeEditRowProps {
 function combinedError(
   name: string,
   editing: TreeEditingState,
+  t: TFunction<"app">,
 ): string | null {
   const base = validateItemName(name);
   if (base) return base;
   if (editing.mode === "rename" && name === editing.initialName) return null;
-  if (editing.siblingNames.has(name)) return "已存在同名文件或文件夹";
+  if (editing.siblingNames.has(name)) return t("workspaceNameValidation.duplicate");
   return null;
 }
 
@@ -39,6 +42,7 @@ export const WorkspaceTreeEditRow = memo(function WorkspaceTreeEditRow({
   onCommit,
   onCancel,
 }: WorkspaceTreeEditRowProps) {
+  const { t } = useTranslation("app");
   const initialName = editing.mode === "rename" ? editing.initialName : "";
   const [name, setName] = useState(initialName);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -46,7 +50,7 @@ export const WorkspaceTreeEditRow = memo(function WorkspaceTreeEditRow({
   // commit (or cancel) again.
   const settledRef = useRef(false);
 
-  const error = useMemo(() => combinedError(name, editing), [name, editing]);
+  const error = useMemo(() => combinedError(name, editing, t), [name, editing, t]);
   const isDir =
     editing.mode === "create-folder" ||
     (editing.mode === "rename" && editing.isDir);
@@ -71,7 +75,7 @@ export const WorkspaceTreeEditRow = memo(function WorkspaceTreeEditRow({
     const trimmed = name.trim();
     if (
       action === "commit" &&
-      !combinedError(trimmed, editing) &&
+      !combinedError(trimmed, editing, t) &&
       trimmed.length > 0 &&
       !(editing.mode === "rename" && trimmed === editing.initialName)
     ) {

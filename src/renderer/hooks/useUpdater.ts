@@ -14,6 +14,7 @@ import { listenWithCleanup } from '@/utils/tauriListen';
 import { relaunch } from '@tauri-apps/plugin-process';
 
 import { track } from '@/analytics';
+import { i18n } from '@/i18n';
 import { isTauriEnvironment } from '@/utils/browserMock';
 import { isDebugMode } from '@/utils/debug';
 import { compareVersions } from '../../shared/utils';
@@ -63,6 +64,10 @@ const isWindows = typeof navigator !== 'undefined' && navigator.platform?.includ
 // Periodic check interval: 30 minutes
 const CHECK_INTERVAL_MS = 30 * 60 * 1000;
 
+function updaterText(key: string): string {
+    return String(i18n.t(`app:updater.${key}`));
+}
+
 export function useUpdater(): UseUpdaterResult {
     const [updateReady, setUpdateReady] = useState(false);
     const [updateVersion, setUpdateVersion] = useState<string | null>(null);
@@ -108,7 +113,7 @@ export function useUpdater(): UseUpdaterResult {
             const result = await invoke('test_update_connectivity') as string;
             const versionMatch = result.match(/version:\s*([^\n]+)/);
             if (!versionMatch) {
-                throw new Error('无法解析远程版本信息');
+                throw new Error(updaterText('remoteVersionParseFailed'));
             }
             const remoteVer = versionMatch[1].trim();
 

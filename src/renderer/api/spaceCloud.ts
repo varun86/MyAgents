@@ -1,4 +1,5 @@
 import type { Project } from '@/config/types';
+import { i18n } from '@/i18n';
 import { workspacePathsEqual } from '@/../shared/workspacePath';
 
 export const DEFAULT_SPACE_ID = 'official';
@@ -254,19 +255,23 @@ function sanitizeSpaceError(message: string): string {
     .trim();
 }
 
+function spaceText(key: string, options?: Record<string, unknown>): string {
+  return String(i18n.t(`app:space.errors.${key}`, options));
+}
+
 function operationFromPath(context?: SpaceErrorContext): string {
   if (context?.operation) return context.operation;
   const path = context?.path ?? '';
   const method = (context?.method ?? '').toUpperCase();
-  if (method === 'POST' && /\/api\/issues\/[^/]+\/comments$/.test(path)) return '评论发送';
-  if (method === 'POST' && /\/api\/spaces\/[^/]+\/issues$/.test(path)) return 'Issue 创建';
-  if (method === 'POST' && /\/api\/issues\/[^/]+\/status$/.test(path)) return 'Issue 状态更新';
-  if (method === 'POST' && /\/api\/issues\/[^/]+\/close-own$/.test(path)) return 'Issue 关闭';
-  if (method === 'POST' && /\/api\/issues\/[^/]+\/dispatch$/.test(path)) return 'Agent 指派';
-  if (method === 'POST' && /\/api\/spaces\/[^/]+\/tags$/.test(path)) return 'Tag 创建';
-  if (path.includes('/attachments')) return '附件操作';
-  if (path.includes('/skills')) return 'Skill 操作';
-  return 'Space 请求';
+  if (method === 'POST' && /\/api\/issues\/[^/]+\/comments$/.test(path)) return spaceText('operations.comment');
+  if (method === 'POST' && /\/api\/spaces\/[^/]+\/issues$/.test(path)) return spaceText('operations.createIssue');
+  if (method === 'POST' && /\/api\/issues\/[^/]+\/status$/.test(path)) return spaceText('operations.updateIssueStatus');
+  if (method === 'POST' && /\/api\/issues\/[^/]+\/close-own$/.test(path)) return spaceText('operations.closeIssue');
+  if (method === 'POST' && /\/api\/issues\/[^/]+\/dispatch$/.test(path)) return spaceText('operations.dispatchAgent');
+  if (method === 'POST' && /\/api\/spaces\/[^/]+\/tags$/.test(path)) return spaceText('operations.createTag');
+  if (path.includes('/attachments')) return spaceText('operations.attachment');
+  if (path.includes('/skills')) return spaceText('operations.skill');
+  return spaceText('operations.request');
 }
 
 export function normalizeSpaceError(error: unknown, context?: SpaceErrorContext): NormalizedSpaceError {
@@ -288,28 +293,28 @@ export function normalizeSpaceError(error: unknown, context?: SpaceErrorContext)
 
   if (code === 'NOT_AUTHENTICATED' || code === 'SESSION_EXPIRED') {
     return {
-      userMessage: `${operation}失败：请重新登录 MyAgents 社区`,
+      userMessage: spaceText('templates.relogin', { operation }),
       debugMessage: [debugSuffix, sanitized].filter(Boolean).join(' · '),
     };
   }
 
   if (code === 'FORBIDDEN' || code.includes('PERMISSION') || lower.includes('permission required')) {
     return {
-      userMessage: `${operation}失败：权限不足`,
+      userMessage: spaceText('templates.permissionDenied', { operation }),
       debugMessage: [debugSuffix, sanitized].filter(Boolean).join(' · '),
     };
   }
 
   if (code === 'INTERNAL_ERROR') {
     return {
-      userMessage: `${operation}失败：服务暂时不可用，请稍后重试`,
+      userMessage: spaceText('templates.serviceUnavailable', { operation }),
       debugMessage: [debugSuffix, sanitized].filter(Boolean).join(' · '),
     };
   }
 
   if (recoveryMessage) {
     return {
-      userMessage: `${operation}失败：${recoveryMessage}`,
+      userMessage: spaceText('templates.withDetail', { operation, detail: recoveryMessage }),
       debugMessage: [debugSuffix, sanitized].filter(Boolean).join(' · '),
     };
   }
@@ -322,27 +327,27 @@ export function normalizeSpaceError(error: unknown, context?: SpaceErrorContext)
     || lower.includes('timed out')
   ) {
     return {
-      userMessage: `${operation}失败，请检查网络或稍后重试`,
+      userMessage: spaceText('templates.network', { operation }),
       debugMessage: [debugSuffix, sanitized].filter(Boolean).join(' · '),
     };
   }
 
   if (lower.includes('invalid space api response') || lower.includes('response missing data')) {
     return {
-      userMessage: `${operation}失败：服务返回了无法识别的数据`,
+      userMessage: spaceText('templates.invalidResponse', { operation }),
       debugMessage: [debugSuffix, sanitized].filter(Boolean).join(' · '),
     };
   }
 
   if (sanitized) {
     return {
-      userMessage: `${operation}失败：${sanitized}`,
+      userMessage: spaceText('templates.withDetail', { operation, detail: sanitized }),
       debugMessage: [debugSuffix, sanitized].filter(Boolean).join(' · '),
     };
   }
 
   return {
-    userMessage: `${operation}失败`,
+    userMessage: spaceText('templates.failed', { operation }),
     debugMessage: [debugSuffix, raw].filter(Boolean).join(' · '),
   };
 }

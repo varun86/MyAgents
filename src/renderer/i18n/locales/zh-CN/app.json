@@ -64,9 +64,100 @@
     "install": "安装",
     "later": "稍后"
   },
+  "tabProvider": {
+    "compactSuccess": "上下文已压缩",
+    "compactFailed": "上下文压缩失败",
+    "sendFailed": "发送失败",
+    "networkError": "网络错误",
+    "networkDisconnected": "网络连接中断，请重试"
+  },
+  "floatingSession": {
+    "sidecarUnavailable": "sidecar 不可达",
+    "backendNotConfirmed": "后端未确认（请求可能已过期）",
+    "replyFailed": "回复出错了",
+    "agentErrorOpenMainWindow": "Agent 出错了，点 ↗ 去主窗口查看",
+    "sessionExpiredNewChat": "上一条会话已失效，已为你开启新对话",
+    "noWorkspace": "没有可用的工作区——请先在 MyAgents 中完成初始化",
+    "switchWorkspaceFailed": "切换工作区失败，请重试",
+    "newConversationFailed": "新建对话失败，请重试",
+    "engineNotReady": "AI 引擎尚未就绪，稍等片刻再试",
+    "confirmSendFailed": "确认发送失败，请重试",
+    "answerSendFailed": "回答发送失败，请重试",
+    "submitFailed": "提交失败，请重试"
+  },
+  "updater": {
+    "remoteVersionParseFailed": "无法解析远程版本信息"
+  },
   "common": {
     "loading": "加载中...",
     "selectPlaceholder": "请选择"
+  },
+  "workspaceNameValidation": {
+    "empty": "名称不能为空",
+    "trim": "名称不能以空格开头或结尾",
+    "pathSeparators": "名称不能包含路径分隔符或 '..'",
+    "illegalChars": "名称包含非法字符 < > : \" | ? *",
+    "controlChars": "名称包含控制字符",
+    "dotsOnly": "名称不能只由点组成",
+    "windowsReserved": "'{{name}}' 是 Windows 保留文件名",
+    "duplicate": "已存在同名文件或文件夹"
+  },
+  "pathInput": {
+    "title": "确认项目路径",
+    "selectedFolder": "已选择文件夹:",
+    "fullPath": "完整路径",
+    "browserPathHint": "浏览器无法获取真实路径，请确认或手动修改上方路径",
+    "confirm": "确认添加"
+  },
+  "monacoEditor": {
+    "loading": "加载编辑器...",
+    "quote": "引用"
+  },
+  "blockGroup": {
+    "expandAll": "展开全部"
+  },
+  "agentStatus": {
+    "expand": "展开 Agent 状态面板",
+    "collapse": "收起 Agent 状态面板",
+    "background": "后台",
+    "backgroundTooltip": "[后台]"
+  },
+  "workspaceTree": {
+    "collapseFolder": "收起文件夹",
+    "emptyFolderHint": "空文件夹 — 拖入文件或右键新建"
+  },
+  "sessionTags": {
+    "cron": "定时",
+    "background": "后台",
+    "floatingBall": "桌面宠物"
+  },
+  "modalities": {
+    "image": "图片",
+    "video": "视频",
+    "audio": "音频"
+  },
+  "modalityBadges": {
+    "supportsInput": "支持{{modality}}输入"
+  },
+  "helperModelPicker": {
+    "noModelSelected": "未选择模型",
+    "configureModel": "请先配置模型 →"
+  },
+  "markdown": {
+    "imageLoadFailed": "图片加载失败: {{src}}",
+    "emptyImagePath": "图片路径为空"
+  },
+  "export": {
+    "downloadedPath": "已导出：{{path}}",
+    "downloadedDownloads": "已导出到下载目录：{{fileName}}"
+  },
+  "sessionExport": {
+    "empty": "该对话暂无内容可导出",
+    "failed": "导出失败，请重试"
+  },
+  "workspaceFile": {
+    "desktopOnly": "工作区文件操作仅在桌面应用中可用。当前为浏览器开发模式。",
+    "selectWorkspaceFirst": "请先选择工作区"
   },
   "browserPanel": {
     "urlPlaceholder": "输入网址或搜索…",
@@ -214,6 +305,28 @@
     "usedLabel": "已用 context 窗口"
   },
   "space": {
+    "errors": {
+      "operations": {
+        "comment": "评论发送",
+        "createIssue": "Issue 创建",
+        "updateIssueStatus": "Issue 状态更新",
+        "closeIssue": "Issue 关闭",
+        "dispatchAgent": "Agent 指派",
+        "createTag": "Tag 创建",
+        "attachment": "附件操作",
+        "skill": "Skill 操作",
+        "request": "Space 请求"
+      },
+      "templates": {
+        "relogin": "{{operation}}失败：请重新登录 MyAgents 社区",
+        "permissionDenied": "{{operation}}失败：权限不足",
+        "serviceUnavailable": "{{operation}}失败：服务暂时不可用，请稍后重试",
+        "withDetail": "{{operation}}失败：{{detail}}",
+        "network": "{{operation}}失败，请检查网络或稍后重试",
+        "invalidResponse": "{{operation}}失败：服务返回了无法识别的数据",
+        "failed": "{{operation}}失败"
+      }
+    },
     "login": {
       "eyebrow": "Official Space",
       "title": "MyAgents 社区",

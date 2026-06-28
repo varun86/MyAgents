@@ -64,9 +64,100 @@
     "install": "Install",
     "later": "Later"
   },
+  "tabProvider": {
+    "compactSuccess": "Context compressed",
+    "compactFailed": "Context compression failed",
+    "sendFailed": "Send failed",
+    "networkError": "Network error",
+    "networkDisconnected": "Network connection interrupted. Try again."
+  },
+  "floatingSession": {
+    "sidecarUnavailable": "Sidecar is unavailable",
+    "backendNotConfirmed": "Backend did not confirm this request. It may have expired.",
+    "replyFailed": "Reply failed",
+    "agentErrorOpenMainWindow": "Agent error. Click ↗ to view it in the main window.",
+    "sessionExpiredNewChat": "The previous session expired. A new chat has been started.",
+    "noWorkspace": "No available workspace. Finish MyAgents setup first.",
+    "switchWorkspaceFailed": "Failed to switch workspace. Try again.",
+    "newConversationFailed": "Failed to start a new chat. Try again.",
+    "engineNotReady": "AI engine is not ready yet. Try again shortly.",
+    "confirmSendFailed": "Failed to send confirmation. Try again.",
+    "answerSendFailed": "Failed to send answer. Try again.",
+    "submitFailed": "Submit failed. Try again."
+  },
+  "updater": {
+    "remoteVersionParseFailed": "Could not parse remote version information"
+  },
   "common": {
     "loading": "Loading...",
     "selectPlaceholder": "Select"
+  },
+  "workspaceNameValidation": {
+    "empty": "Name cannot be empty",
+    "trim": "Name cannot start or end with a space",
+    "pathSeparators": "Name cannot include path separators or '..'",
+    "illegalChars": "Name contains invalid characters < > : \" | ? *",
+    "controlChars": "Name contains control characters",
+    "dotsOnly": "Name cannot contain only dots",
+    "windowsReserved": "'{{name}}' is a reserved Windows file name",
+    "duplicate": "A file or folder with this name already exists"
+  },
+  "pathInput": {
+    "title": "Confirm project path",
+    "selectedFolder": "Selected folder:",
+    "fullPath": "Full path",
+    "browserPathHint": "The browser cannot read the real path. Confirm it or edit the path above.",
+    "confirm": "Add"
+  },
+  "monacoEditor": {
+    "loading": "Loading editor...",
+    "quote": "Quote"
+  },
+  "blockGroup": {
+    "expandAll": "Expand all"
+  },
+  "agentStatus": {
+    "expand": "Expand Agent status panel",
+    "collapse": "Collapse Agent status panel",
+    "background": "Background",
+    "backgroundTooltip": "[Background]"
+  },
+  "workspaceTree": {
+    "collapseFolder": "Collapse folder",
+    "emptyFolderHint": "Empty folder - drop files here or right-click to create"
+  },
+  "sessionTags": {
+    "cron": "Scheduled",
+    "background": "Background",
+    "floatingBall": "Desktop pet"
+  },
+  "modalities": {
+    "image": "image",
+    "video": "video",
+    "audio": "audio"
+  },
+  "modalityBadges": {
+    "supportsInput": "Supports {{modality}} input"
+  },
+  "helperModelPicker": {
+    "noModelSelected": "No model selected",
+    "configureModel": "Configure a model first →"
+  },
+  "markdown": {
+    "imageLoadFailed": "Image failed to load: {{src}}",
+    "emptyImagePath": "Image path is empty"
+  },
+  "export": {
+    "downloadedPath": "Exported: {{path}}",
+    "downloadedDownloads": "Exported to Downloads: {{fileName}}"
+  },
+  "sessionExport": {
+    "empty": "This chat has no exportable content",
+    "failed": "Export failed. Try again."
+  },
+  "workspaceFile": {
+    "desktopOnly": "Workspace file operations are only available in the desktop app. Current mode: browser development.",
+    "selectWorkspaceFirst": "Select a workspace first"
   },
   "browserPanel": {
     "urlPlaceholder": "Enter a URL or search...",
@@ -214,6 +305,28 @@
     "usedLabel": "Used context window"
   },
   "space": {
+    "errors": {
+      "operations": {
+        "comment": "Comment",
+        "createIssue": "Issue creation",
+        "updateIssueStatus": "Issue status update",
+        "closeIssue": "Issue close",
+        "dispatchAgent": "Agent assignment",
+        "createTag": "Tag creation",
+        "attachment": "Attachment operation",
+        "skill": "Skill operation",
+        "request": "Space request"
+      },
+      "templates": {
+        "relogin": "{{operation}} failed: sign in to MyAgents Community again",
+        "permissionDenied": "{{operation}} failed: insufficient permission",
+        "serviceUnavailable": "{{operation}} failed: service is temporarily unavailable. Try again later.",
+        "withDetail": "{{operation}} failed: {{detail}}",
+        "network": "{{operation}} failed. Check the network or try again later.",
+        "invalidResponse": "{{operation}} failed: service returned unrecognized data",
+        "failed": "{{operation}} failed"
+      }
+    },
     "login": {
       "eyebrow": "Official Space",
       "title": "MyAgents Community",

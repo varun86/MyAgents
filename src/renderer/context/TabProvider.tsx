@@ -50,6 +50,7 @@ import type { SlashCommand } from '../../shared/slashCommands';
 import type { LogEntry } from '@/types/log';
 import type { ProviderRoute } from '../../shared/providerRoute';
 import { parsePartialJson } from '@/utils/parsePartialJson';
+import { i18n } from '@/i18n';
 import { subscribeFrontendLogs, setCurrentTabId } from '@/utils/frontendLogger';
 import { getTabServerUrl, proxyFetch, isTauri, getSessionActivation, getSessionPort, ensureSessionSidecar, resetTabServerUrlCache, setActiveCorrelation } from '@/api/tauriClient';
 import { resolveAttachmentUrl } from '@/utils/attachmentUrl';
@@ -72,6 +73,10 @@ import { setBackgroundTaskStatus, setBackgroundTaskDescription, getBackgroundTas
 // via the /refs/:id endpoint when oversize).
 const TOOL_RESULT_DISPLAY_CAP = 8 * 1024;
 const TOOL_RESULT_TAIL_KEEP = 1024;
+
+function appText(key: string, options?: Record<string, unknown>): string {
+    return String(i18n.t(`app:${key}`, options));
+}
 
 function imageAttachmentName(img: ImageAttachment): string {
     return img.name || img.file.name;
@@ -1737,10 +1742,10 @@ export default function TabProvider({
                     setSystemNotice({
                         kind: 'compact',
                         level: 'success',
-                        message: '上下文已压缩',
+                        message: appText('tabProvider.compactSuccess'),
                     });
                 } else if (payload?.compactResult === 'failed') {
-                    const message = payload.compactError?.trim() || '上下文压缩失败';
+                    const message = payload.compactError?.trim() || appText('tabProvider.compactFailed');
                     setSystemNotice({
                         kind: 'compact',
                         level: 'error',
@@ -2343,7 +2348,7 @@ export default function TabProvider({
                     setSystemNotice({
                         kind: 'compact',
                         level: 'success',
-                        message: '上下文已压缩',
+                        message: appText('tabProvider.compactSuccess'),
                     });
                 }
                 // Always track message_complete, use defaults if payload is missing
@@ -3621,7 +3626,7 @@ export default function TabProvider({
                 if (localQueueId) {
                     setQueuedMessages(prev => prev.filter(q => q.queueId !== localQueueId));
                 }
-                setAgentError(response.error ?? '发送失败');
+                setAgentError(response.error ?? appText('tabProvider.sendFailed'));
                 pendingAttachmentsRef.current = null;
             }
         }).catch((error) => {
@@ -3629,8 +3634,8 @@ export default function TabProvider({
             if (localQueueId) {
                 setQueuedMessages(prev => prev.filter(q => q.queueId !== localQueueId));
             }
-            const msg = error instanceof Error ? error.message : '网络错误';
-            setAgentError(msg === 'Failed to fetch' ? '网络连接中断，请重试' : msg);
+            const msg = error instanceof Error ? error.message : appText('tabProvider.networkError');
+            setAgentError(msg === 'Failed to fetch' ? appText('tabProvider.networkDisconnected') : msg);
             pendingAttachmentsRef.current = null;
         });
 

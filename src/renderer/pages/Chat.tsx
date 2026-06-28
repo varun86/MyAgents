@@ -3909,7 +3909,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       if (pending.images.length > 0) {
         toastRef.current.warning(t('shell.toasts.imagesNotTransferred'));
       }
-      const opened = await onForkSession(session.id, agentDir, pending.text.slice(0, 40) || '新会话', pending.text);
+      const opened = await onForkSession(session.id, agentDir, pending.text.slice(0, 40) || t('shell.toasts.newSession'), pending.text);
       if (!opened) {
         await deleteUnopenedForkSession(session.id);
       }

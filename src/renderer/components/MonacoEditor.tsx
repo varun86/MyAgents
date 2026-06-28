@@ -770,7 +770,7 @@ export default function MonacoEditor({
                 loading={
                     <div className="flex h-full items-center justify-center gap-2 text-[var(--ink-muted)]">
                         <Loader2 className="h-5 w-5 animate-spin" />
-                        <span className="text-sm">加载编辑器...</span>
+                        <span className="text-sm">{t('monacoEditor.loading')}</span>
                     </div>
                 }
             />
@@ -798,7 +798,7 @@ export default function MonacoEditor({
                         onMouseDown={retainFocusOnMouseDown}
                     >
                         <Quote className="h-3 w-3" />
-                        引用
+                        {t('monacoEditor.quote')}
                     </button>
                 </div>
             )}

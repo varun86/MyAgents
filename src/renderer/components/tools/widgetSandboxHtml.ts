@@ -12,12 +12,14 @@
  * - Intercepts link clicks and forwards them to the parent via widget:link
  */
 
+import { i18n } from '@/i18n';
+
 export function buildSandboxHtml(
   cssVarsBlock: string,
   options: { scriptErrorPrefix?: string } = {},
 ): string {
   const scriptErrorPrefix = JSON.stringify(
-    options.scriptErrorPrefix ?? '这个组件的脚本没能运行（通常是模型生成的代码有语法错误）：',
+    options.scriptErrorPrefix ?? String(i18n.t('chat:shell.toolChrome.widget.scriptErrorPrefix')),
   );
   // The receiver template. All dynamic content arrives via postMessage.
   return `<!DOCTYPE html>

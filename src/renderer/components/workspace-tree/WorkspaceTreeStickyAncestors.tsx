@@ -1,6 +1,7 @@
 import { ChevronRight, FolderOpen } from "lucide-react";
 import { memo } from "react";
 import { useDroppable } from "@dnd-kit/core";
+import { useTranslation } from "react-i18next";
 
 import { STICKY_DROP_PREFIX } from "./dropTarget";
 import type { StickyAncestor } from "./treeTypes";
@@ -46,6 +47,7 @@ const StickyAncestorRow = memo(function StickyAncestorRow({
   onJumpToPath: (path: string) => void;
   onPathContextMenu: (path: string, event: React.MouseEvent) => void;
 }) {
+  const { t } = useTranslation("app");
   const { setNodeRef } = useDroppable({
     id: `${STICKY_DROP_PREFIX}${ancestor.path}`,
   });
@@ -81,7 +83,7 @@ const StickyAncestorRow = memo(function StickyAncestorRow({
     >
       <button
         type="button"
-        title="收起文件夹"
+        title={t("workspaceTree.collapseFolder")}
         className="flex h-4 w-4 flex-shrink-0 items-center justify-center rounded text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
         onClick={(e) => {
           e.stopPropagation();

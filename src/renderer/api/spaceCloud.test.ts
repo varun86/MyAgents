@@ -14,7 +14,10 @@ async function loadSpaceCloud() {
     configurable: true,
     value: { __TAURI_INTERNALS__: {} },
   });
-  return import('./spaceCloud');
+  const mod = await import('./spaceCloud');
+  const { i18n } = await import('@/i18n');
+  await i18n.changeLanguage('zh-CN');
+  return mod;
 }
 
 beforeEach(() => {
