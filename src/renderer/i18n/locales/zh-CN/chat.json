@@ -173,5 +173,248 @@
     "settings": "设置",
     "notInstalled": "未安装",
     "comingSoon": "即将支持"
+  },
+  "shell": {
+    "common": {
+      "cancel": "取消",
+      "close": "关闭"
+    },
+    "sessionTitle": {
+      "renameTitle": "点击重命名"
+    },
+    "header": {
+      "backToProjects": "返回项目",
+      "newChat": "新建对话",
+      "newChatShort": "新对话",
+      "history": "历史",
+      "expandWorkspace": "展开工作区"
+    },
+    "currentChatFallback": "此对话",
+    "dropZone": {
+      "message": "松手将文件加入工作区",
+      "subtitle": "非图片文件将复制到 myagents_files 并自动引用"
+    },
+    "boot": {
+      "loading": "AI 启动中"
+    },
+    "agentError": {
+      "title": "AI 调用失败：",
+      "imageTooLargePrefix": "工具截图超过模型处理限制，",
+      "rewindAction": "点击时间回溯到之前",
+      "resend": "重新发送"
+    },
+    "selection": {
+      "quote": "引用",
+      "elaborate": "深入讲讲",
+      "quotePrompt": "针对引用的内容：",
+      "elaboratePrompt": "针对引用的内容：深入讲讲"
+    },
+    "search": {
+      "placeholder": "在当前页面中查找",
+      "previousTitle": "上一个 (Shift+Enter)",
+      "previousAria": "上一个匹配",
+      "nextTitle": "下一个 (Enter)",
+      "nextAria": "下一个匹配",
+      "closeTitle": "关闭 (Esc)",
+      "closeAria": "关闭搜索"
+    },
+    "split": {
+      "closeFile": "关闭文件",
+      "terminal": "终端",
+      "hideTerminal": "隐藏终端",
+      "newTab": "新标签页",
+      "browser": "浏览器",
+      "closeBrowser": "关闭浏览器"
+    },
+    "handover": {
+      "noActiveSessions": "暂无聊天记录"
+    },
+    "providerSwitch": {
+      "codexSubscription": "Codex（订阅）",
+      "currentProviderFallback": "当前 Provider",
+      "targetProviderFallback": "目标 Provider",
+      "targetModelFallback": "目标模型",
+      "newSessionTitle": "需要新开会话",
+      "createNewSession": "创建新会话",
+      "defaultMessage": "当前会话的历史上下文不能可靠复用到目标模型。将保留当前会话，并在新 Tab 创建新会话。",
+      "codexTarget": {
+        "title": "需要新开 Codex 会话",
+        "message": "Codex（订阅）必须由 Codex Runtime 创建会话，不能复用当前会话历史。将保留当前会话，并在新 Tab 创建 Codex 会话。",
+        "confirm": "创建 Codex 会话"
+      },
+      "codexCurrent": {
+        "message": "当前会话由 Codex Runtime 创建，不能直接切到内置模型供应商。将保留当前 Codex 会话，并在新 Tab 使用目标模型。"
+      },
+      "runtimeBacked": {
+        "message": "目标 Provider 使用不同 Runtime，不能复用当前会话历史。将保留当前会话，并在新 Tab 创建新会话。"
+      },
+      "sameProvider": {
+        "message": "「{{targetModel}}」需要独立会话，不能复用当前模型的历史。将保留当前会话，并在新 Tab 创建新会话。"
+      },
+      "crossProvider": {
+        "message": "当前会话是在「{{currentProviderName}}」下创建的，切到「{{targetProviderName}}」后历史上下文不能可靠复用。将保留当前会话，并在新 Tab 使用目标模型。"
+      }
+    },
+    "dialogs": {
+      "crossRuntime": {
+        "title": "需要新开会话发送",
+        "message": "这个历史会话由「{{sessionRuntime}}」创建，但当前外部 Runtime 功能已关闭，不能继续在原会话中发送。将保留当前会话，并用「{{currentRuntime}}」新开会话发送这条消息。",
+        "confirm": "新开会话并发送"
+      },
+      "runtimeSwitch": {
+        "title": "需要新开 Runtime 会话",
+        "message": "当前会话已绑定到「{{currentRuntime}}」，不能在同一条历史中切到「{{targetRuntime}}」。将保留当前会话，在新 Tab 打开「{{targetRuntime}}」会话，并把工作区默认 Runtime 更新为「{{targetRuntime}}」。",
+        "confirm": "确认切换"
+      },
+      "rewind": {
+        "title": "时间回溯",
+        "message": "您的「对话记录」与「文件修改状态」都将回溯到本次对话发生之前。",
+        "confirm": "确认回溯"
+      },
+      "fork": {
+        "title": "创建分支",
+        "message": "将从此处创建一个新的会话分支，在新标签页中打开。原会话不受影响。",
+        "confirm": "创建分支"
+      }
+    },
+    "toasts": {
+      "composerLockedByCron": "当前会话有定时任务运行中，停止任务后可修改此设置",
+      "providerUnavailable": "当前会话指定的 Provider「{{providerId}}」不可用（缺少 API Key 或已被禁用）。请在设置中补充密钥，或在模型选择器中切换 Provider 后再发送。",
+      "snapshotProviderIncomplete": "这个历史会话缺少 Provider 信息，请先在模型选择器里重新选择一次模型。",
+      "previewWorkspaceUnavailable": "无法打开预览：工作区文件服务不可用",
+      "previewUnsupportedType": "这个文件类型暂不支持 MyAgents 预览",
+      "previewOpenFailed": "打开文件预览失败",
+      "autoSendRestoredDraft": "发送失败，已恢复草稿，请重试",
+      "skillSyncedToGlobal": "已同步至全局技能",
+      "syncFailed": "同步失败",
+      "syncFailedRetry": "同步失败，请重试",
+      "configPartiallySaved": "配置未能完全保存，重启后可能恢复旧值",
+      "searchUnsupported": "当前环境不支持页内搜索（缺少 CSS Highlight API）",
+      "codexSubscriptionNeedsSession": "Codex 订阅需要新开 Codex 会话后使用，请先在模型选择器中切换并确认创建新会话。",
+      "queueLimit": "最多排队 5 条消息",
+      "cronTaskCreated": "定时任务已创建",
+      "createFailedWithError": "创建失败: {{error}}",
+      "channelNotificationFailed": "新会话已接管 Channel，但 IM 通知发送失败",
+      "runtimeSwitchCreateFailed": "切换 Runtime 失败：无法创建新会话",
+      "runtimeSwitchDefaultUpdateFailed": "切换 Runtime 失败：工作区默认 Runtime 未能更新",
+      "runtimeSwitchDefaultUpdateWarning": "新会话将继续打开，但工作区默认 Runtime 未能更新",
+      "runtimeSwitchTabOpenFailed": "切换 Runtime 失败：新 Tab 未能打开",
+      "runtimeSwitchChannelTransferFailed": "新会话已打开，但 Channel 绑定未迁移，工作区 Runtime 已恢复",
+      "providerSwitchTargetUnavailable": "创建新会话失败：目标 Provider 不可用",
+      "providerSwitchDefaultSaveFailed": "新会话已创建，但 Agent 默认模型未能保存",
+      "providerSwitchChannelTransferFailed": "新会话已打开，但 Channel 绑定未迁移",
+      "createNewSessionFailed": "创建新会话失败",
+      "imagesNotTransferred": "图片附件无法带入新会话，请重新添加",
+      "reselectModelFirst": "请先在模型选择器里重新选择一次模型",
+      "submitFailedRetry": "提交失败，请重试",
+      "unknownError": "未知错误",
+      "rewindFailedWithError": "时间回溯失败：{{error}}",
+      "rewindFailedRetry": "时间回溯失败，请重试",
+      "retryFailedWithError": "重试失败：{{error}}",
+      "retryFailed": "重试失败",
+      "forkOpenFailed": "创建分支失败：无法打开新会话",
+      "forkFailedWithError": "创建分支失败：{{error}}",
+      "forkFailed": "创建分支失败",
+      "taskDeleted": "任务已删除",
+      "taskResumed": "任务已恢复",
+      "taskStopped": "任务已停止"
+    },
+    "terminalReason": {
+      "newSession": "新开会话",
+      "unknown": {
+        "label": "未知原因 ({{reason}})",
+        "detail": "SDK 返回了未知的 terminal_reason={{reason}}。可能是 SDK 版本升级带来的新枚举值。"
+      },
+      "reasons": {
+        "completed": {
+          "label": "已完成",
+          "detail": "本轮对话正常结束"
+        },
+        "max_turns": {
+          "label": "已达到最大对话轮次",
+          "detail": "本轮执行触达最大轮次上限。建议新开会话继续，或调整 Agent 的 maxTurns 配置。"
+        },
+        "prompt_too_long": {
+          "label": "上下文已满",
+          "detail": "当前对话的 token 总量已达到模型上下文窗口上限，必须精简历史、清理附件或新开会话才能继续。"
+        },
+        "blocking_limit": {
+          "label": "API 额度已用完",
+          "detail": "供应商返回 rate limit / quota 命中。请检查供应商后台配额或等待重置。"
+        },
+        "rapid_refill_breaker": {
+          "label": "请求过于频繁，已自动退避",
+          "detail": "SDK 触发快速补发熔断器，正在自动退避重试。稍后会自行恢复。"
+        },
+        "aborted_tools": {
+          "label": "工具执行被中断",
+          "detail": "工具调用被用户或系统中断。可重新发送消息让 AI 重试。"
+        },
+        "aborted_streaming": {
+          "label": "回复被中断",
+          "detail": "流式回复在完成前被中断。可重新发送消息让 AI 重新生成。"
+        },
+        "tool_deferred": {
+          "label": "工具被延迟执行",
+          "detail": "部分工具调用被延迟处理，本轮已返回。"
+        },
+        "background_requested": {
+          "label": "已转入后台执行",
+          "detail": "SDK 已把后续工作转为后台任务，本轮前台响应已结束。可在后台任务通知中查看进展。"
+        },
+        "stop_hook_prevented": {
+          "label": "被 Stop Hook 阻止结束",
+          "detail": "项目配置的 Stop Hook 主动阻止了会话结束。请检查 Hook 逻辑或 settings.json。"
+        },
+        "hook_stopped": {
+          "label": "被 Hook 主动终止",
+          "detail": "某个 Hook 主动请求终止当前轮次。请检查 Hook 配置或日志定位触发的 Hook。"
+        },
+        "image_error": {
+          "label": "图像处理失败",
+          "detail": "图像内容块无法被模型处理，可能是格式不支持或尺寸超限（>8000px）。"
+        },
+        "model_error": {
+          "label": "模型返回错误",
+          "detail": "模型侧返回错误，请查看日志定位具体原因。"
+        }
+      }
+    },
+    "messageList": {
+      "elapsed": {
+        "hms": "{{hours}}小时{{minutes}}分钟{{seconds}}秒",
+        "ms": "{{minutes}}分钟{{seconds}}秒",
+        "seconds": "{{seconds}}秒"
+      },
+      "systemStatus": {
+        "compacting": "会话内容过长，智能总结中…",
+        "rewinding": "正在时间回溯中，请稍等…",
+        "apiRetry": "API 请求重试中（第 {{attempt}}/{{max}} 次）…"
+      },
+      "starting": "AI 启动中…（首次启动可能较慢）",
+      "loadingHistory": "加载对话记录…",
+      "streaming": {
+        "0": "苦思冥想中…",
+        "1": "深思熟虑中…",
+        "2": "灵光一闪中…",
+        "3": "绞尽脑汁中…",
+        "4": "思绪飞速运转中…",
+        "5": "小脑袋瓜转啊转…",
+        "6": "神经元疯狂放电中…",
+        "7": "灵感小火花碰撞中…",
+        "8": "正在努力组织语言…",
+        "9": "在知识海洋里捞答案…",
+        "10": "正在翻阅宇宙图书馆…",
+        "11": "答案正在酝酿中…",
+        "12": "灵感咖啡冲泡中…",
+        "13": "递归思考中，请勿打扰…",
+        "14": "正在遍历可能性…",
+        "15": "加载智慧模块中…",
+        "16": "容我想想…",
+        "17": "稍等，马上就好…",
+        "18": "别急，好饭不怕晚…",
+        "19": "正在认真对待你的问题…"
+      }
+    }
   }
 }

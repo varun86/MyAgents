@@ -1,5 +1,6 @@
 import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import { Quote, Sparkles } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 import { useCloseLayer } from '@/hooks/useCloseLayer';
 
 /**
@@ -43,6 +44,7 @@ const SelectionCommentMenu = memo(function SelectionCommentMenu({
   onElaborate,
   actions = DEFAULT_ACTIONS,
 }: SelectionCommentMenuProps) {
+  const { t } = useTranslation('chat');
   const showQuote = actions.includes('quote');
   const showElaborate = actions.includes('elaborate');
   const [visible, setVisible] = useState(false);
@@ -170,7 +172,7 @@ const SelectionCommentMenu = memo(function SelectionCommentMenu({
           onClick={handleQuote}
         >
           <Quote className="h-3 w-3" />
-          引用
+          {t('shell.selection.quote')}
         </button>
       )}
       {showQuote && showElaborate && <div className="h-3.5 w-px bg-[var(--line)]" />}
@@ -181,7 +183,7 @@ const SelectionCommentMenu = memo(function SelectionCommentMenu({
           onClick={handleElaborate}
         >
           <Sparkles className="h-3 w-3" />
-          深入讲讲
+          {t('shell.selection.elaborate')}
         </button>
       )}
     </div>

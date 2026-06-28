@@ -173,5 +173,248 @@
     "settings": "Settings",
     "notInstalled": "Not installed",
     "comingSoon": "Coming soon"
+  },
+  "shell": {
+    "common": {
+      "cancel": "Cancel",
+      "close": "Close"
+    },
+    "sessionTitle": {
+      "renameTitle": "Click to rename"
+    },
+    "header": {
+      "backToProjects": "Back to projects",
+      "newChat": "New chat",
+      "newChatShort": "New chat",
+      "history": "History",
+      "expandWorkspace": "Expand workspace"
+    },
+    "currentChatFallback": "This chat",
+    "dropZone": {
+      "message": "Release to add files to the workspace",
+      "subtitle": "Non-image files will be copied to myagents_files and referenced automatically."
+    },
+    "boot": {
+      "loading": "Starting AI"
+    },
+    "agentError": {
+      "title": "AI call failed: ",
+      "imageTooLargePrefix": "The tool screenshot exceeds the model limit. ",
+      "rewindAction": "Rewind to before this turn",
+      "resend": "Resend"
+    },
+    "selection": {
+      "quote": "Quote",
+      "elaborate": "Elaborate",
+      "quotePrompt": "About the quoted content: ",
+      "elaboratePrompt": "About the quoted content: explain in more depth"
+    },
+    "search": {
+      "placeholder": "Find in this page",
+      "previousTitle": "Previous (Shift+Enter)",
+      "previousAria": "Previous match",
+      "nextTitle": "Next (Enter)",
+      "nextAria": "Next match",
+      "closeTitle": "Close (Esc)",
+      "closeAria": "Close search"
+    },
+    "split": {
+      "closeFile": "Close file",
+      "terminal": "Terminal",
+      "hideTerminal": "Hide terminal",
+      "newTab": "New tab",
+      "browser": "Browser",
+      "closeBrowser": "Close browser"
+    },
+    "handover": {
+      "noActiveSessions": "No chat history"
+    },
+    "providerSwitch": {
+      "codexSubscription": "Codex subscription",
+      "currentProviderFallback": "current provider",
+      "targetProviderFallback": "target provider",
+      "targetModelFallback": "target model",
+      "newSessionTitle": "New session required",
+      "createNewSession": "Create new session",
+      "defaultMessage": "This chat history cannot be reliably reused with the target model. The current chat will stay open and a new chat will be created in a new tab.",
+      "codexTarget": {
+        "title": "New Codex session required",
+        "message": "Codex subscription chats must be created by the Codex Runtime and cannot reuse the current chat history. The current chat will stay open and a Codex chat will be created in a new tab.",
+        "confirm": "Create Codex session"
+      },
+      "codexCurrent": {
+        "message": "This chat was created by the Codex Runtime and cannot switch directly to a built-in model provider. The current Codex chat will stay open and the target model will open in a new tab."
+      },
+      "runtimeBacked": {
+        "message": "The target provider uses a different Runtime, so the current chat history cannot be reused. The current chat will stay open and a new chat will be created in a new tab."
+      },
+      "sameProvider": {
+        "message": "\"{{targetModel}}\" requires an independent session and cannot reuse this model history. The current chat will stay open and a new chat will be created in a new tab."
+      },
+      "crossProvider": {
+        "message": "This chat was created under \"{{currentProviderName}}\". After switching to \"{{targetProviderName}}\", the history context cannot be reliably reused. The current chat will stay open and the target model will open in a new tab."
+      }
+    },
+    "dialogs": {
+      "crossRuntime": {
+        "title": "New session required to send",
+        "message": "This historical chat was created by \"{{sessionRuntime}}\", but external Runtime support is currently disabled, so it cannot continue in the original session. The current chat will stay open and this message will be sent in a new \"{{currentRuntime}}\" chat.",
+        "confirm": "Open new chat and send"
+      },
+      "runtimeSwitch": {
+        "title": "New Runtime session required",
+        "message": "This chat is already bound to \"{{currentRuntime}}\" and cannot switch to \"{{targetRuntime}}\" in the same history. The current chat will stay open, a \"{{targetRuntime}}\" chat will open in a new tab, and the workspace default Runtime will be updated to \"{{targetRuntime}}\".",
+        "confirm": "Switch"
+      },
+      "rewind": {
+        "title": "Time rewind",
+        "message": "Your chat history and file modification state will both rewind to before this turn.",
+        "confirm": "Rewind"
+      },
+      "fork": {
+        "title": "Create branch",
+        "message": "A new chat branch will be created from this point and opened in a new tab. The original chat will not be changed.",
+        "confirm": "Create branch"
+      }
+    },
+    "toasts": {
+      "composerLockedByCron": "A scheduled task is running in this chat. Stop the task before changing this setting.",
+      "providerUnavailable": "The Provider pinned to this chat, \"{{providerId}}\", is unavailable because its API key is missing or it has been disabled. Add the key in Settings, or switch Provider in the model picker before sending.",
+      "snapshotProviderIncomplete": "This historical chat is missing Provider information. Select the model again in the model picker first.",
+      "previewWorkspaceUnavailable": "Cannot open preview because the workspace file service is unavailable.",
+      "previewUnsupportedType": "This file type is not supported by MyAgents preview yet.",
+      "previewOpenFailed": "Failed to open file preview.",
+      "autoSendRestoredDraft": "Send failed. Your draft was restored; please try again.",
+      "skillSyncedToGlobal": "Synced to global Skills.",
+      "syncFailed": "Sync failed",
+      "syncFailedRetry": "Sync failed. Please try again.",
+      "configPartiallySaved": "Configuration was not fully saved and may revert after restart.",
+      "searchUnsupported": "In-page search is not supported in this environment because the CSS Highlight API is missing.",
+      "codexSubscriptionNeedsSession": "Codex subscription requires a new Codex session. Switch in the model picker and confirm the new session first.",
+      "queueLimit": "You can queue at most 5 messages.",
+      "cronTaskCreated": "Scheduled task created.",
+      "createFailedWithError": "Create failed: {{error}}",
+      "channelNotificationFailed": "The new chat took over the Channel, but the IM notification failed.",
+      "runtimeSwitchCreateFailed": "Runtime switch failed: cannot create a new chat.",
+      "runtimeSwitchDefaultUpdateFailed": "Runtime switch failed: the workspace default Runtime could not be updated.",
+      "runtimeSwitchDefaultUpdateWarning": "The new chat will still open, but the workspace default Runtime could not be updated.",
+      "runtimeSwitchTabOpenFailed": "Runtime switch failed: the new tab could not be opened.",
+      "runtimeSwitchChannelTransferFailed": "The new chat opened, but the Channel binding was not migrated. The workspace Runtime was restored.",
+      "providerSwitchTargetUnavailable": "Failed to create new chat: the target Provider is unavailable.",
+      "providerSwitchDefaultSaveFailed": "New chat created, but the Agent default model could not be saved.",
+      "providerSwitchChannelTransferFailed": "The new chat opened, but the Channel binding was not migrated.",
+      "createNewSessionFailed": "Failed to create new chat.",
+      "imagesNotTransferred": "Image attachments cannot be carried into the new chat. Add them again.",
+      "reselectModelFirst": "Select the model again in the model picker first.",
+      "submitFailedRetry": "Submit failed. Please try again.",
+      "unknownError": "Unknown error",
+      "rewindFailedWithError": "Time rewind failed: {{error}}",
+      "rewindFailedRetry": "Time rewind failed. Please try again.",
+      "retryFailedWithError": "Retry failed: {{error}}",
+      "retryFailed": "Retry failed",
+      "forkOpenFailed": "Failed to create branch: cannot open a new chat.",
+      "forkFailedWithError": "Failed to create branch: {{error}}",
+      "forkFailed": "Failed to create branch.",
+      "taskDeleted": "Task deleted.",
+      "taskResumed": "Task resumed.",
+      "taskStopped": "Task stopped."
+    },
+    "terminalReason": {
+      "newSession": "New chat",
+      "unknown": {
+        "label": "Unknown reason ({{reason}})",
+        "detail": "The SDK returned an unknown terminal_reason={{reason}}. This may be a new enum value from an SDK upgrade."
+      },
+      "reasons": {
+        "completed": {
+          "label": "Completed",
+          "detail": "This turn ended normally."
+        },
+        "max_turns": {
+          "label": "Maximum turns reached",
+          "detail": "This turn reached the maximum turn limit. Start a new chat to continue, or adjust the Agent maxTurns setting."
+        },
+        "prompt_too_long": {
+          "label": "Context is full",
+          "detail": "This chat has reached the model context window limit. Shorten history, remove attachments, or start a new chat to continue."
+        },
+        "blocking_limit": {
+          "label": "API quota exhausted",
+          "detail": "The provider returned a rate-limit or quota error. Check the provider quota or wait for it to reset."
+        },
+        "rapid_refill_breaker": {
+          "label": "Requests are too frequent; backing off",
+          "detail": "The SDK triggered its rapid refill breaker and is backing off before retrying. It should recover automatically."
+        },
+        "aborted_tools": {
+          "label": "Tool execution was interrupted",
+          "detail": "A tool call was interrupted by the user or system. Resend the message to let the AI retry."
+        },
+        "aborted_streaming": {
+          "label": "Response was interrupted",
+          "detail": "The streaming response stopped before completion. Resend the message to generate it again."
+        },
+        "tool_deferred": {
+          "label": "Tool execution deferred",
+          "detail": "Some tool calls were deferred and this turn has returned."
+        },
+        "background_requested": {
+          "label": "Moved to background execution",
+          "detail": "The SDK moved the remaining work to a background task and ended the foreground response. Check background task notifications for progress."
+        },
+        "stop_hook_prevented": {
+          "label": "Stop Hook prevented completion",
+          "detail": "A project Stop Hook prevented the session from ending. Check the Hook logic or settings.json."
+        },
+        "hook_stopped": {
+          "label": "Stopped by Hook",
+          "detail": "A Hook requested that this turn stop. Check Hook configuration or logs to find the trigger."
+        },
+        "image_error": {
+          "label": "Image processing failed",
+          "detail": "An image content block could not be processed by the model, likely because the format is unsupported or the image is too large (>8000px)."
+        },
+        "model_error": {
+          "label": "Model returned an error",
+          "detail": "The model returned an error. Check logs for the specific cause."
+        }
+      }
+    },
+    "messageList": {
+      "elapsed": {
+        "hms": "{{hours}}h {{minutes}}m {{seconds}}s",
+        "ms": "{{minutes}}m {{seconds}}s",
+        "seconds": "{{seconds}}s"
+      },
+      "systemStatus": {
+        "compacting": "Chat is long. Creating an intelligent summary...",
+        "rewinding": "Rewinding time. Please wait...",
+        "apiRetry": "Retrying API request ({{attempt}}/{{max}})..."
+      },
+      "starting": "Starting AI... first launch may take a while.",
+      "loadingHistory": "Loading chat history...",
+      "streaming": {
+        "0": "Thinking hard...",
+        "1": "Thinking it through...",
+        "2": "Catching a spark...",
+        "3": "Working through it...",
+        "4": "Thoughts are moving fast...",
+        "5": "Turning the gears...",
+        "6": "Firing neurons...",
+        "7": "Connecting ideas...",
+        "8": "Organizing a response...",
+        "9": "Searching the knowledge sea...",
+        "10": "Flipping through the universe library...",
+        "11": "Letting the answer take shape...",
+        "12": "Brewing some insight...",
+        "13": "Thinking recursively...",
+        "14": "Exploring the possibilities...",
+        "15": "Loading the wisdom module...",
+        "16": "Let me think...",
+        "17": "One moment...",
+        "18": "Worth taking a little time...",
+        "19": "Taking your question seriously..."
+      }
+    }
   }
 }
