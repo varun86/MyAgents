@@ -22,6 +22,18 @@ export function formatAbsoluteDateTime(
   }).format(date);
 }
 
+export function formatCalendarDate(
+  date: Date,
+  locale: SupportedLocale = currentSupportedLocale(),
+): string {
+  if (Number.isNaN(date.getTime())) return '';
+  return new Intl.DateTimeFormat(locale, {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+  }).format(date);
+}
+
 export function formatFutureDistance(
   deltaMs: number,
   locale: SupportedLocale = currentSupportedLocale(),

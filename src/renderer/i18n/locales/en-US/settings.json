@@ -1124,6 +1124,54 @@
       "deleteMessage": "Delete \"{{name}}\"? This cannot be undone."
     }
   },
+  "toolbox": {
+    "cliTools": {
+      "title": "CLI Tools",
+      "description": "Command-line tools created and registered by AI. Every runtime and terminal can call them directly; the toggle controls whether AI can discover them automatically.",
+      "registerPrompt": "Use tool-creator to add this CLI tool to MyAgents Toolbox:",
+      "toolPathPlaceholder": "tool path",
+      "copy": "Copy",
+      "copySuccess": "Copied. Paste it into a chat with AI.",
+      "copyFailed": "Copy failed. Copy it manually.",
+      "enabledToast": "Added to AI context. New sessions will see it.",
+      "disabledToast": "Hidden from AI context. The tool can still be called manually.",
+      "operationFailed": "Operation failed: {{message}}",
+      "readFailed": "Failed to read",
+      "envSaved": "Environment variables saved. They take effect next time the tool starts.",
+      "saveFailed": "Save failed: {{message}}",
+      "deleteSuccess": "Deleted tool {{name}}",
+      "deleteFailed": "Delete failed: {{message}}",
+      "emptyTitle": "No CLI tools yet",
+      "emptyDescription": "Ask AI to turn repeated work into command-line tools that every session can use. Try saying:",
+      "existingToolHint": "Already have a CLI tool? Send this to AI: \"{{prompt}}\"",
+      "existingToolLabel": "Already have a CLI tool? Copy this and send it to AI:",
+      "localKind": "Local",
+      "needsApiKey": "⚠️ API Key required",
+      "detailTitle": "Details",
+      "toggleEnabledTitle": "AI can discover this automatically",
+      "toggleDisabledTitle": "Hidden: AI will not discover it automatically, but it can still be called manually",
+      "deleteTitle": "Delete Tool",
+      "deleteMessage": "Remove \"{{name}}\" from the registry and delete its launcher from PATH. The tool directory will stay on disk. New sessions will no longer see this tool.",
+      "deleteConfirm": "Delete",
+      "examples": {
+        "mergeMarkdown": "Turn \"merge multiple Markdown files\" into a CLI tool I can reuse",
+        "ttsApi": "Wrap the Volcano Engine text-to-speech API as a CLI tool"
+      },
+      "detail": {
+        "registeredOn": "Registered on {{date}}",
+        "triggerDescription": "Trigger description (injected into AI context)",
+        "envVars": "Environment variables",
+        "notConfigured": "Not configured",
+        "envHint": "If a value is missing, the tool exits with code 3 so AI can guide you to fill it in instead of failing silently.",
+        "readmeLabelPrefix": "Usage docs from",
+        "readmeLabelSuffix": ", the same file AI sees",
+        "readmeFailed": "Failed to read: {{message}}",
+        "deleteTool": "Delete Tool",
+        "close": "Close",
+        "save": "Save"
+      }
+    }
+  },
   "helper": {
     "title": "AI Helper",
     "history": "History",

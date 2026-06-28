@@ -1124,6 +1124,54 @@
       "deleteMessage": "确定要删除「{{name}}」吗？此操作无法撤销。"
     }
   },
+  "toolbox": {
+    "cliTools": {
+      "title": "CLI 工具",
+      "description": "由 AI 创建并注册的命令行工具，全部 Runtime 与终端都能直接调用；开关控制是否让 AI 自动发现。",
+      "registerPrompt": "请使用 tool-creator 帮我把这个 CLI 工具添加到 MyAgents 工具箱：",
+      "toolPathPlaceholder": "工具路径",
+      "copy": "复制",
+      "copySuccess": "已复制，去对话里粘贴给 AI",
+      "copyFailed": "复制失败，请手动复制",
+      "enabledToast": "已加入 AI 上下文（新会话生效）",
+      "disabledToast": "已从 AI 上下文隐藏（工具仍可手动调用）",
+      "operationFailed": "操作失败：{{message}}",
+      "readFailed": "读取失败",
+      "envSaved": "环境变量已保存（工具下次启动生效）",
+      "saveFailed": "保存失败：{{message}}",
+      "deleteSuccess": "已删除工具 {{name}}",
+      "deleteFailed": "删除失败：{{message}}",
+      "emptyTitle": "还没有 CLI 工具",
+      "emptyDescription": "让 AI 把你常用的需求做成命令行小工具，所有会话随叫随用。试试对 AI 说：",
+      "existingToolHint": "已有现成的 CLI 工具？发这句话给 AI：「{{prompt}}」",
+      "existingToolLabel": "已有现成的 CLI 工具？复制这句话发给对话里的 AI：",
+      "localKind": "本地",
+      "needsApiKey": "⚠️ 需要配置 API Key",
+      "detailTitle": "详情",
+      "toggleEnabledTitle": "AI 可自动发现",
+      "toggleDisabledTitle": "已隐藏：AI 不会自动发现（仍可手动调用）",
+      "deleteTitle": "删除工具",
+      "deleteMessage": "将从注册表移除「{{name}}」并删除 PATH 上的启动器；工具目录会保留在磁盘上。新会话不再看到该工具。",
+      "deleteConfirm": "删除",
+      "examples": {
+        "mergeMarkdown": "把『合并多个 Markdown 文件』做成一个 CLI 工具，以后直接用",
+        "ttsApi": "把火山引擎的语音合成 API 封装成一个 CLI 工具"
+      },
+      "detail": {
+        "registeredOn": "注册于 {{date}}",
+        "triggerDescription": "触发描述（注入 AI 上下文的部分）",
+        "envVars": "环境变量",
+        "notConfigured": "未配置",
+        "envHint": "未配置时工具会以退出码 3 提示 AI 引导你补齐，不会静默失败",
+        "readmeLabelPrefix": "使用文档（来自",
+        "readmeLabelSuffix": "，AI 与你看到同一份）",
+        "readmeFailed": "读取失败：{{message}}",
+        "deleteTool": "删除工具",
+        "close": "关闭",
+        "save": "保存"
+      }
+    }
+  },
   "helper": {
     "title": "AI 小助理",
     "history": "历史",
