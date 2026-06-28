@@ -15,6 +15,10 @@ import {
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import {
+  formatCommandFailure,
+  resolveSpawnInvocation,
+} from './package-managed-codex-spawn.js';
 
 const RUST_CODEX_SOURCE = new URL('../src-tauri/src/managed_codex.rs', import.meta.url);
 const DEFAULT_CODEX_VERSION = readRustConst('REQUIRED_VERSION');
@@ -77,34 +81,30 @@ function parseArgs(argv) {
 }
 
 function run(command, args, options = {}) {
-  const result = spawnSync(command, args, {
+  const invocation = resolveSpawnInvocation(command, args);
+  const result = spawnSync(invocation.command, invocation.args, {
     stdio: options.stdio ?? 'pipe',
     encoding: 'utf8',
     ...options,
   });
-  if (result.status !== 0) {
-    const renderedArgs = args.map((arg) => (
-      /password|private[-_]?key|secret|token/i.test(arg) ? '<redacted>' : arg
-    ));
-    throw new Error([
-      `Command failed: ${command} ${renderedArgs.join(' ')}`,
-      result.stdout?.trim(),
-      result.stderr?.trim(),
-    ].filter(Boolean).join('\n'));
+  if (result.status !== 0 || result.error) {
+    throw new Error(formatCommandFailure(invocation.displayCommand, invocation.displayArgs, result));
   }
   return result.stdout ?? '';
 }
 
 function tryRun(command, args, options = {}) {
-  const result = spawnSync(command, args, {
+  const invocation = resolveSpawnInvocation(command, args);
+  const result = spawnSync(invocation.command, invocation.args, {
     stdio: options.stdio ?? 'pipe',
     encoding: 'utf8',
     ...options,
   });
   return {
-    ok: result.status === 0,
+    ok: result.status === 0 && !result.error,
     stdout: result.stdout ?? '',
     stderr: result.stderr ?? '',
+    error: result.error,
     status: result.status,
   };
 }
@@ -307,7 +307,10 @@ function signingSpecForPlatform(platform, allowUnsigned) {
     const publisher = process.env.MANAGED_CODEX_WINDOWS_PUBLISHER?.trim();
     if (!certificateSha256) {
       if (allowUnsigned) return undefined;
-      throw new Error('MANAGED_CODEX_WINDOWS_CERT_SHA256 is required for Managed Codex Windows artifact metadata');
+      return {
+        type: 'authenticode',
+        ...(publisher ? { publisher } : {}),
+      };
     }
     return {
       type: 'authenticode',
@@ -316,6 +319,29 @@ function signingSpecForPlatform(platform, allowUnsigned) {
     };
   }
   throw new Error(`Unsupported Managed Codex platform: ${platform}`);
+}
+
+function readWindowsAuthenticode(executablePath) {
+  const script = `
+$ErrorActionPreference = 'Stop'
+$sig = Get-AuthenticodeSignature -LiteralPath '${psSingleQuote(executablePath)}'
+$cert = $sig.SignerCertificate
+$sha256 = $null
+if ($cert -ne $null) {
+  $sha256 = [System.BitConverter]::ToString($cert.GetCertHash('SHA256')).Replace('-', '').ToLowerInvariant()
+}
+[ordered]@{
+  status = [string]$sig.Status
+  statusMessage = [string]$sig.StatusMessage
+  subject = if ($cert -ne $null) { [string]$cert.Subject } else { $null }
+  sha256 = $sha256
+} | ConvertTo-Json -Compress
+`;
+  const result = tryRun('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script]);
+  if (!result.ok) {
+    throw new Error(`Get-AuthenticodeSignature failed for ${executablePath}\n${result.error?.message || result.stderr || result.stdout}`);
+  }
+  return JSON.parse(result.stdout.trim());
 }
 
 function verifyMacSigning(executablePath, signing) {
@@ -354,30 +380,19 @@ function verifyWindowsSigning(executablePath, signing) {
   if (process.platform !== 'win32') {
     return { checked: false, reason: 'not-windows-host' };
   }
-  const script = `
-$ErrorActionPreference = 'Stop'
-$sig = Get-AuthenticodeSignature -LiteralPath '${psSingleQuote(executablePath)}'
-$cert = $sig.SignerCertificate
-$sha256 = $null
-if ($cert -ne $null) {
-  $sha256 = [System.BitConverter]::ToString($cert.GetCertHash('SHA256')).Replace('-', '').ToLowerInvariant()
-}
-[ordered]@{
-  status = [string]$sig.Status
-  statusMessage = [string]$sig.StatusMessage
-  subject = if ($cert -ne $null) { [string]$cert.Subject } else { $null }
-  sha256 = $sha256
-} | ConvertTo-Json -Compress
-`;
-  const result = tryRun('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script]);
-  if (!result.ok) {
-    throw new Error(`Get-AuthenticodeSignature failed for ${executablePath}\n${result.stderr || result.stdout}`);
-  }
-  const parsed = JSON.parse(result.stdout.trim());
+  const parsed = readWindowsAuthenticode(executablePath);
   if (parsed.status !== 'Valid') {
     throw new Error(`Authenticode status for ${executablePath} is ${parsed.status}: ${parsed.statusMessage ?? ''}`);
   }
   const actualSha = normalizeSha256(parsed.sha256, 'Authenticode signer certificate SHA-256');
+  if (!signing.certificateSha256) {
+    throw new Error([
+      'MANAGED_CODEX_WINDOWS_CERT_SHA256 is required for Managed Codex Windows artifact metadata.',
+      `Current codex.exe Authenticode subject: ${parsed.subject ?? '<none>'}`,
+      `Current codex.exe signer certificate SHA-256: ${actualSha}`,
+      'After confirming this signer is expected, add MANAGED_CODEX_WINDOWS_CERT_SHA256 to .env and rerun.',
+    ].join('\n'));
+  }
   if (actualSha !== signing.certificateSha256) {
     throw new Error(`Authenticode cert SHA-256 mismatch: expected ${signing.certificateSha256}, got ${actualSha}`);
   }
