@@ -4,6 +4,7 @@
  */
 import { Plus, Sparkles, Terminal, Loader2, ChevronLeft } from 'lucide-react';
 import { useCallback, useEffect, useState, useRef } from 'react';
+import { useTranslation } from 'react-i18next';
 
 import { apiGetJson, apiPostJson } from '@/api/apiFetch';
 import { useToast } from '@/components/Toast';
@@ -44,10 +45,13 @@ export default function GlobalSkillsPanel({
     /** When set on first mount, open the matching detail view directly. */
     initialSelect?: CapabilityInitialSelect;
 }) {
+    const { t } = useTranslation('settings');
     const toast = useToast();
     // Stabilize toast reference to avoid unnecessary effect re-runs
     const toastRef = useRef(toast);
     toastRef.current = toast;
+    const tRef = useRef(t);
+    tRef.current = t;
 
     // Initialize from initialSelect on first mount; subsequent navigation is user-driven.
     const [viewState, setViewState] = useState<ViewState>(() => viewStateForSelect(initialSelect) ?? { type: 'list' });
@@ -107,7 +111,7 @@ export default function GlobalSkillsPanel({
         const next = viewStateForSelect(initialSelect);
         if (!next) return;
         if (isAnyEditingRef.current()) {
-            toastRef.current.warning('请先保存或取消编辑');
+            toastRef.current.warning(tRef.current('agentSettings.panel.unsavedWarning'));
             return;
         }
         setViewState(next);
@@ -134,7 +138,7 @@ export default function GlobalSkillsPanel({
             setSyncableCount(syncCheckRes?.count ?? 0);
         } catch {
             if (!isMountedRef.current) return;
-            toastRef.current.error('加载失败');
+            toastRef.current.error(tRef.current('agentSettings.common.loadFailed'));
         } finally {
             if (isMountedRef.current) setLoading(false);
         }
@@ -146,7 +150,7 @@ export default function GlobalSkillsPanel({
 
     const handleBackToList = useCallback(() => {
         if (isAnyEditing()) {
-            toastRef.current.warning('请先保存或取消编辑');
+            toastRef.current.warning(tRef.current('agentSettings.panel.unsavedWarning'));
             return;
         }
         setViewState({ type: 'list' });
@@ -166,10 +170,10 @@ export default function GlobalSkillsPanel({
                 setViewState({ type: 'skill-detail', name: response.folderName || tempName, isNewSkill: true });
                 setRefreshKey(k => k + 1);
             } else {
-                toastRef.current.error(response.error || '创建失败');
+                toastRef.current.error(response.error || tRef.current('agentSettings.common.createFailed'));
             }
         } catch {
-            toastRef.current.error('创建失败');
+            toastRef.current.error(tRef.current('agentSettings.common.createFailed'));
         }
     }, []);
 
@@ -185,19 +189,19 @@ export default function GlobalSkillsPanel({
 
             if (response.success) {
                 if (response.failed > 0) {
-                    toastRef.current.warning(`成功 ${response.synced} 个，失败 ${response.failed} 个`);
+                    toastRef.current.warning(tRef.current('agentSettings.skillCommandList.syncPartial', { synced: response.synced, failed: response.failed }));
                 } else if (response.synced > 0) {
-                    toastRef.current.success(`成功同步 ${response.synced} 个技能`);
+                    toastRef.current.success(tRef.current('agentSettings.skillCommandList.syncSuccess', { count: response.synced }));
                 } else {
-                    toastRef.current.info('没有可同步的技能');
+                    toastRef.current.info(tRef.current('agentSettings.skillCommandList.noSyncableSkills'));
                 }
                 setShowNewSkillDialog(false);
                 setRefreshKey(k => k + 1);
             } else {
-                toastRef.current.error('同步失败');
+                toastRef.current.error(tRef.current('agentSettings.skillCommandList.syncFailed'));
             }
         } catch {
-            toastRef.current.error('同步失败');
+            toastRef.current.error(tRef.current('agentSettings.skillCommandList.syncFailed'));
         }
     }, []);
 
@@ -220,23 +224,25 @@ export default function GlobalSkillsPanel({
                     });
 
                     if (response.success) {
-                        toastRef.current.success(response.message || '技能导入成功');
+                        toastRef.current.success(response.folderName
+                            ? tRef.current('agentSettings.skillCommandList.skillImportSuccessNamed', { name: response.folderName })
+                            : tRef.current('agentSettings.skillCommandList.skillImportSuccess'));
                         setShowNewSkillDialog(false);
                         setRefreshKey(k => k + 1);
                         if (response.folderName) {
                             setViewState({ type: 'skill-detail', name: response.folderName });
                         }
                     } else {
-                        toastRef.current.error(response.error || '导入失败');
+                        toastRef.current.error(response.error || tRef.current('agentSettings.common.importFailed'));
                     }
                 } catch (err) {
-                    toastRef.current.error(err instanceof Error ? err.message : '导入失败');
+                    toastRef.current.error(err instanceof Error ? err.message : tRef.current('agentSettings.common.importFailed'));
                 }
             };
-            reader.onerror = () => toastRef.current.error('读取文件失败');
+            reader.onerror = () => toastRef.current.error(tRef.current('agentSettings.common.readFileFailed'));
             reader.readAsDataURL(file);
         } catch (err) {
-            toastRef.current.error(err instanceof Error ? err.message : '上传失败');
+            toastRef.current.error(err instanceof Error ? err.message : tRef.current('agentSettings.common.uploadFailed'));
         }
     }, []);
 
@@ -269,17 +275,19 @@ export default function GlobalSkillsPanel({
             });
 
             if (response.success) {
-                toastRef.current.success(response.message || '技能导入成功');
+                toastRef.current.success(response.folderName
+                    ? tRef.current('agentSettings.skillCommandList.skillImportSuccessNamed', { name: response.folderName })
+                    : tRef.current('agentSettings.skillCommandList.skillImportSuccess'));
                 setShowNewSkillDialog(false);
                 setRefreshKey(k => k + 1);
                 if (response.folderName) {
                     setViewState({ type: 'skill-detail', name: response.folderName });
                 }
             } else {
-                toastRef.current.error(response.error || '导入失败');
+                toastRef.current.error(response.error || tRef.current('agentSettings.common.importFailed'));
             }
         } catch (err) {
-            toastRef.current.error(err instanceof Error ? err.message : '导入失败');
+            toastRef.current.error(err instanceof Error ? err.message : tRef.current('agentSettings.common.importFailed'));
         }
     }, []);
 
@@ -293,16 +301,16 @@ export default function GlobalSkillsPanel({
                 description: newItemDescription.trim() || undefined
             });
             if (response.success) {
-                toastRef.current.success('指令创建成功');
+                toastRef.current.success(tRef.current('agentSettings.skillCommandList.commandCreateSuccess'));
                 setShowNewCommandDialog(false);
                 setNewItemName('');
                 setNewItemDescription('');
                 setRefreshKey(k => k + 1);
             } else {
-                toastRef.current.error(response.error || '创建失败');
+                toastRef.current.error(response.error || tRef.current('agentSettings.common.createFailed'));
             }
         } catch {
-            toastRef.current.error('创建失败');
+            toastRef.current.error(tRef.current('agentSettings.common.createFailed'));
         } finally {
             setCreating(false);
         }
@@ -318,10 +326,10 @@ export default function GlobalSkillsPanel({
                     s.folderName === folderName ? { ...s, enabled } : s
                 ));
             } else {
-                toastRef.current.error(res.error || '操作失败');
+                toastRef.current.error(res.error || tRef.current('agentSettings.common.operationFailed'));
             }
         } catch {
-            toastRef.current.error('操作失败');
+            toastRef.current.error(tRef.current('agentSettings.common.operationFailed'));
         }
     }, []);
 
@@ -354,7 +362,7 @@ export default function GlobalSkillsPanel({
                     className="flex items-center gap-1 text-sm text-[var(--ink-muted)] hover:text-[var(--ink)]"
                 >
                     <ChevronLeft className="h-4 w-4" />
-                    返回列表
+                    {t('agentSettings.panel.backToList')}
                 </button>
                 <div className="rounded-xl border border-[var(--line)] bg-[var(--paper)] overflow-hidden" style={{ minHeight: '500px' }}>
                     <SkillDetailPanel
@@ -380,7 +388,7 @@ export default function GlobalSkillsPanel({
                     className="flex items-center gap-1 text-sm text-[var(--ink-muted)] hover:text-[var(--ink)]"
                 >
                     <ChevronLeft className="h-4 w-4" />
-                    返回列表
+                    {t('agentSettings.panel.backToList')}
                 </button>
                 <div className="rounded-xl border border-[var(--line)] bg-[var(--paper)] overflow-hidden" style={{ minHeight: '400px' }}>
                     <CommandDetailPanel
@@ -404,7 +412,7 @@ export default function GlobalSkillsPanel({
                 <div className="mb-4 flex items-center justify-between">
                     <div className="flex items-center gap-2">
                         <Sparkles className="h-5 w-5 text-[var(--ink-muted)]" />
-                        <h3 className="text-base font-semibold text-[var(--ink)]">用户技能</h3>
+                        <h3 className="text-base font-semibold text-[var(--ink)]">{t('agentSettings.skillCommandList.userSkillsTitle')}</h3>
                         <span className="text-xs text-[var(--ink-muted)]">({skills.length})</span>
                     </div>
                     <button
@@ -412,7 +420,7 @@ export default function GlobalSkillsPanel({
                         className="flex items-center gap-1 rounded-lg bg-[var(--button-primary-bg)] px-3 py-1.5 text-sm font-medium text-[var(--button-primary-text)] hover:bg-[var(--button-primary-bg-hover)]"
                     >
                         <Plus className="h-4 w-4" />
-                        新建
+                        {t('agentSettings.common.new')}
                     </button>
                 </div>
                 {skills.length > 0 ? (
@@ -429,7 +437,7 @@ export default function GlobalSkillsPanel({
                 ) : (
                     <div className="rounded-xl border border-dashed border-[var(--line)] bg-[var(--paper-inset)]/30 py-8 text-center">
                         <Sparkles className="mx-auto h-10 w-10 text-[var(--ink-muted)]/30" />
-                        <p className="mt-2 text-sm text-[var(--ink-muted)]">还没有用户技能</p>
+                        <p className="mt-2 text-sm text-[var(--ink-muted)]">{t('agentSettings.skillCommandList.emptyUserSkills')}</p>
                     </div>
                 )}
             </div>
@@ -439,7 +447,7 @@ export default function GlobalSkillsPanel({
                 <div className="mb-4 flex items-center justify-between">
                     <div className="flex items-center gap-2">
                         <Terminal className="h-5 w-5 text-[var(--ink-muted)]" />
-                        <h3 className="text-base font-semibold text-[var(--ink)]">用户指令</h3>
+                        <h3 className="text-base font-semibold text-[var(--ink)]">{t('agentSettings.skillCommandList.userCommandsTitle')}</h3>
                         <span className="text-xs text-[var(--ink-muted)]">({commands.length})</span>
                     </div>
                     <button
@@ -447,7 +455,7 @@ export default function GlobalSkillsPanel({
                         className="flex items-center gap-1 rounded-lg bg-[var(--button-primary-bg)] px-3 py-1.5 text-sm font-medium text-[var(--button-primary-text)] hover:bg-[var(--button-primary-bg-hover)]"
                     >
                         <Plus className="h-4 w-4" />
-                        新建
+                        {t('agentSettings.common.new')}
                     </button>
                 </div>
                 {commands.length > 0 ? (
@@ -463,7 +471,7 @@ export default function GlobalSkillsPanel({
                 ) : (
                     <div className="rounded-xl border border-dashed border-[var(--line)] bg-[var(--paper-inset)]/30 py-8 text-center">
                         <Terminal className="mx-auto h-10 w-10 text-[var(--ink-muted)]/30" />
-                        <p className="mt-2 text-sm text-[var(--ink-muted)]">还没有用户指令</p>
+                        <p className="mt-2 text-sm text-[var(--ink-muted)]">{t('agentSettings.skillCommandList.emptyUserCommands')}</p>
                     </div>
                 )}
             </div>
@@ -498,17 +506,17 @@ export default function GlobalSkillsPanel({
                         setShowInstallFromUrlDialog(false);
                         setRefreshKey(k => k + 1);
                         if (folderNames.length === 1) {
-                            toastRef.current.success(`已安装技能 "${folderNames[0]}"`);
+                            toastRef.current.success(tRef.current('agentSettings.skillCommandList.installedSingle', { name: folderNames[0] }));
                             setViewState({ type: 'skill-detail', name: folderNames[0] });
                         } else {
-                            toastRef.current.success(`已安装 ${folderNames.length} 个技能`);
+                            toastRef.current.success(tRef.current('agentSettings.skillCommandList.installedMultiple', { count: folderNames.length }));
                         }
                     }}
                 />
             )}
             {showNewCommandDialog && (
                 <CreateDialog
-                    title="新建指令"
+                    title={t('agentSettings.skillCommandList.newCommandTitle')}
                     name={newItemName}
                     description={newItemDescription}
                     onNameChange={setNewItemName}
@@ -520,7 +528,7 @@ export default function GlobalSkillsPanel({
             )}
 
             <p className="text-center text-xs text-[var(--ink-muted)]">
-                用户技能和指令存储在 ~/.myagents/ 目录下，对所有项目生效
+                {t('agentSettings.skillCommandList.userStorageHint')}
             </p>
         </div>
     );

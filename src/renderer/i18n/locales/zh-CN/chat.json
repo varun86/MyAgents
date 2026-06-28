@@ -127,6 +127,7 @@
       }
     },
     "slashCommands": {
+      "noResults": "未找到指令",
       "compact": "压缩对话历史，释放上下文空间",
       "context": "显示或管理当前上下文",
       "cost": "查看 token 使用量和费用",

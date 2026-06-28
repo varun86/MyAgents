@@ -127,6 +127,7 @@
       }
     },
     "slashCommands": {
+      "noResults": "No commands found",
       "compact": "Compress chat history to free context space",
       "context": "Show or manage the current context",
       "cost": "View token usage and cost",

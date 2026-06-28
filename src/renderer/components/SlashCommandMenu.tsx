@@ -5,6 +5,7 @@
 // anchored to different triggers without duplicating chrome.
 
 import { useEffect, useRef } from 'react';
+import { useTranslation } from 'react-i18next';
 
 // Import SlashCommand type from shared module to avoid duplication
 import type { SlashCommand } from '../../shared/slashCommands';
@@ -25,6 +26,7 @@ export default function SlashCommandMenu({
     onSelect,
     isEmpty = false,
 }: SlashCommandMenuProps) {
+    const { t } = useTranslation('chat');
     // Ref to track the selected item for auto-scroll
     const selectedItemRef = useRef<HTMLDivElement>(null);
 
@@ -38,12 +40,12 @@ export default function SlashCommandMenu({
         }
     }, [selectedIndex]);
 
-    // Empty state: show "未找到指令" when no matches
+    // Empty state: show the localized no-results copy when no matches exist.
     if (isEmpty || commands.length === 0) {
         return (
             <div className="w-80 max-h-64 overflow-auto">
                 <div className="px-3 py-2 text-sm text-[var(--ink-muted)]">
-                    未找到指令
+                    {t('input.slashCommands.noResults')}
                 </div>
             </div>
         );
