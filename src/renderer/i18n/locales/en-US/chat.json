@@ -46,7 +46,6 @@
     "noPluginsSuffix": "from GitHub or a local path.",
     "cronEnabled": "Schedule enabled",
     "cron": "Schedule",
-    "sessionUnlocked": "This session is not locked and follows the Agent default. Agent changes will affect this chat.",
     "switchModel": "Switch model",
     "imageFilteredOnSend": "{{model}} does not support images. {{count}} image(s) were filtered; only text was sent.",
     "undoFilesAdded": "Undid adding {{count}} file(s).",
@@ -167,6 +166,59 @@
       "message": "The same text repeats about {{count}} times ({{chars}} characters total). This often happens after speech recognition glitches in third-party input methods. Send anyway?",
       "confirm": "Send anyway",
       "cancel": "Cancel"
+    }
+  },
+  "floatingBall": {
+    "ballState": {
+      "idle": "Idle",
+      "running": "Working",
+      "blocked": "Waiting for you",
+      "done": "Unread result"
+    },
+    "activity": {
+      "thinkingRunning": "Thinking...",
+      "thinkingRunningWithSeconds": "Thinking... ({{seconds}}s)",
+      "thinkingFailed": "Thinking failed",
+      "thinkingFailedWithSeconds": "Thinking failed ({{seconds}}s)",
+      "thinkingStopped": "Thinking stopped",
+      "thinkingStoppedWithSeconds": "Thinking stopped ({{seconds}}s)",
+      "thinkingDone": "Thought for {{seconds}}s",
+      "background": "Background"
+    },
+    "watchingApp": "Mino · Watching {{appName}}",
+    "watchingAppWindow": "Mino · Watching {{appName}} — {{windowTitle}}",
+    "chrome": {
+      "openPetSettings": "Open Desktop Pet settings",
+      "openInMyAgents": "Open in MyAgents (continue in a new tab)",
+      "closeEsc": "Close (Esc)"
+    },
+    "connecting": "Connecting to {{workspace}}...",
+    "processing": "Mino is working...",
+    "axPrompt": "Allow Accessibility access so Mino can include selected text when summoned. You only need to grant this once.",
+    "grantAccessibility": "Grant access",
+    "removeQuote": "Remove quote",
+    "resizeHandle": "Drag to resize",
+    "moveHandle": "Drag to move window",
+    "toasts": {
+      "maxImages": "You can upload at most {{count}} images.",
+      "cannotUploadDevMode": "Cannot upload files in browser dev mode. Use the desktop app.",
+      "cannotUploadNoWorkspace": "Select a workspace before uploading files.",
+      "filesAdded": "Added {{count}} file(s) to the workspace.",
+      "fileUploadFailed": "File upload failed",
+      "cannotProcessDevMode": "Cannot process files in browser dev mode. Use the desktop app.",
+      "cannotProcessNoWorkspace": "Select a workspace before processing files.",
+      "filesNotAdded": "{{count}} file(s) could not be added.",
+      "fileProcessFailed": "File processing failed",
+      "imageTooLargeAsFile": "Image is over 10 MB. Drag it from a folder to reference it as an @file.",
+      "imagesTooLargeAsFile": "{{count}} images are over 10 MB. Drag them from a folder to reference them as @files.",
+      "imageConvertedToFile": "The current model does not support image input, so images were saved as workspace files for the model to read.",
+      "unsupportedImageFormat": "Unsupported image format: {{name}}",
+      "imageTooLargeAddedAsFile": "Image is over 10 MB and was added as a file reference.",
+      "imagesTooLargeAddedAsFile": "{{count}} images are over 10 MB and were added as file references.",
+      "screenshotSaveFailed": "Failed to save screenshot",
+      "screenshotFailed": "Screenshot failed",
+      "screenshotFailedWithDetail": "Screenshot failed: {{detail}}",
+      "openPetSettingsFailed": "Failed to open Desktop Pet settings"
     }
   },
   "workspaceFiles": {

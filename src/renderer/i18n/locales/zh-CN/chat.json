@@ -46,7 +46,6 @@
     "noPluginsSuffix": "可以从 GitHub 或本地路径安装。",
     "cronEnabled": "定时已启用",
     "cron": "定时",
-    "sessionUnlocked": "该 session 未锁定，跟随 agent 默认（修改 agent 会影响此会话）",
     "switchModel": "切换模型",
     "imageFilteredOnSend": "{{model}} 不支持图片，已自动过滤 {{count}} 张图片，仅文本已送达",
     "undoFilesAdded": "已撤销 {{count}} 个文件的添加",
@@ -167,6 +166,59 @@
       "message": "同一段文字重复了约 {{count}} 次（共 {{chars}} 字符）。常见于第三方输入法的语音识别异常。仍要发送吗？",
       "confirm": "仍要发送",
       "cancel": "取消"
+    }
+  },
+  "floatingBall": {
+    "ballState": {
+      "idle": "空闲",
+      "running": "正在处理",
+      "blocked": "等你确认",
+      "done": "有结果未读"
+    },
+    "activity": {
+      "thinkingRunning": "思考中…",
+      "thinkingRunningWithSeconds": "思考中… ({{seconds}}s)",
+      "thinkingFailed": "思考失败",
+      "thinkingFailedWithSeconds": "思考失败 ({{seconds}}s)",
+      "thinkingStopped": "思考中断",
+      "thinkingStoppedWithSeconds": "思考中断 ({{seconds}}s)",
+      "thinkingDone": "思考了 {{seconds}}s",
+      "background": "后台"
+    },
+    "watchingApp": "Mino · 正在看 {{appName}}",
+    "watchingAppWindow": "Mino · 正在看 {{appName}} — {{windowTitle}}",
+    "chrome": {
+      "openPetSettings": "打开桌面宠物设置",
+      "openInMyAgents": "在 MyAgents 中打开（新 Tab 接上这条会话）",
+      "closeEsc": "关闭（Esc）"
+    },
+    "connecting": "正在连接 {{workspace}}…",
+    "processing": "Mino 正在处理…",
+    "axPrompt": "授权「辅助功能」后，唤起时能自动带上你选中的文字（一次授权，长期有效）。",
+    "grantAccessibility": "去授权",
+    "removeQuote": "去掉引用",
+    "resizeHandle": "拖动调节高度",
+    "moveHandle": "拖动移动窗口",
+    "toasts": {
+      "maxImages": "最多只能上传 {{count}} 张图片",
+      "cannotUploadDevMode": "无法上传文件：当前为浏览器开发模式，请使用桌面应用",
+      "cannotUploadNoWorkspace": "无法上传文件：请先选择工作区",
+      "filesAdded": "已添加 {{count}} 个文件到工作区",
+      "fileUploadFailed": "文件上传失败",
+      "cannotProcessDevMode": "无法处理文件：当前为浏览器开发模式，请使用桌面应用",
+      "cannotProcessNoWorkspace": "无法处理文件：请先选择工作区",
+      "filesNotAdded": "{{count}} 个文件未能添加",
+      "fileProcessFailed": "文件处理失败",
+      "imageTooLargeAsFile": "图片超过 10MB，请从文件夹拖入以作为 @文件 引用",
+      "imagesTooLargeAsFile": "{{count}} 张图片超过 10MB，请从文件夹拖入以作为 @文件 引用",
+      "imageConvertedToFile": "当前模型不支持图片输入，已转为文件存入工作区供模型读取",
+      "unsupportedImageFormat": "不支持的图片格式：{{name}}",
+      "imageTooLargeAddedAsFile": "图片超过 10MB，已作为文件引用添加",
+      "imagesTooLargeAddedAsFile": "{{count}} 张图片超过 10MB，已作为文件引用添加",
+      "screenshotSaveFailed": "截图保存失败",
+      "screenshotFailed": "截图失败",
+      "screenshotFailedWithDetail": "截图失败：{{detail}}",
+      "openPetSettingsFailed": "打开桌面宠物设置失败"
     }
   },
   "workspaceFiles": {
