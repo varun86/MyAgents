@@ -299,7 +299,6 @@ const Message = memo(function Message({ message, isLoading = false, onRewind, on
   const { openPreview } = useImagePreview();
   const [copied, setCopied] = useState(false);
   const copiedTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
-  const [userHovered, setUserHovered] = useState(false);
   // User message collapse: default collapsed, expand on click (no re-collapse)
   const [userExpanded, setUserExpanded] = useState(false);
   const userContentRef = useRef<HTMLDivElement>(null);
@@ -423,9 +422,7 @@ const Message = memo(function Message({ message, isLoading = false, onRewind, on
 
     return (
       <div className="flex justify-end px-1 select-none"
-           data-role="user" data-message-id={message.id}
-           onMouseEnter={() => setUserHovered(true)}
-           onMouseLeave={() => setUserHovered(false)}>
+           data-role="user" data-message-id={message.id}>
         <div className="flex w-full flex-col items-end">
           {/* IM source indicator */}
           {isImMessage && (
@@ -436,79 +433,81 @@ const Message = memo(function Message({ message, isLoading = false, onRewind, on
           )}
           {/* text-base 自带 1.7 行高（@theme 配对），与 .ai-message-content 一致 —— 用户气泡
               与 AI 正文同为 prose 档，行高不再分叉（PRD 0.2.34 P2-5） */}
-          <article className="relative w-fit max-w-[85%] rounded-2xl border border-[var(--line)] bg-[var(--message-user-bg)] p-4 text-base text-[var(--ink)] select-text">
-            {/* System injection tag badge */}
-            {systemTag && (
-              <div className="mb-2 -mt-0.5">
-                <span className="inline-block rounded-md bg-[var(--accent-warm-subtle)] px-1.5 py-0.5 text-xs font-medium text-[var(--accent-warm)]">
-                  {systemTag}
-                </span>
-              </div>
-            )}
-            {/* Collapsible content wrapper: max 50vh when collapsed */}
-            <div
-              ref={userContentRef}
-              className={!userExpanded && userOverflows ? 'overflow-hidden' : ''}
-              style={!userExpanded && userOverflows ? { maxHeight: `${USER_COLLAPSE_HEIGHT}px` } : undefined}
-            >
-              {hasAttachments && (
-                <div className={hasText ? 'mb-2' : ''}>
-                  <AttachmentPreviewList
-                    attachments={attachmentItems}
-                    compact
-                    onPreview={openPreview}
-                  />
+          <div className="group/user-actions flex w-fit max-w-[85%] flex-col items-end">
+            <article className="relative w-fit max-w-full rounded-2xl border border-[var(--line)] bg-[var(--message-user-bg)] p-4 text-base text-[var(--ink)] select-text">
+              {/* System injection tag badge */}
+              {systemTag && (
+                <div className="mb-2 -mt-0.5">
+                  <span className="inline-block rounded-md bg-[var(--accent-warm-subtle)] px-1.5 py-0.5 text-xs font-medium text-[var(--accent-warm)]">
+                    {systemTag}
+                  </span>
                 </div>
               )}
-              {hasText && (
-                <div className="user-message-content text-[var(--ink)]">
-                  <Markdown preserveNewlines>{userContent}</Markdown>
-                </div>
-              )}
-            </div>
-            {/* Expand button with gradient fade — gradient overlaps bottom of content */}
-            {!userExpanded && userOverflows && (
-              <div className="relative z-10 -mx-4 -mb-4 -mt-14">
-                <div className="pointer-events-none h-14 bg-gradient-to-t from-[var(--message-user-bg)] to-[var(--message-user-bg-a0)]" />
-                <button
-                  type="button"
-                  onClick={() => setUserExpanded(true)}
-                  className="flex w-full items-center justify-center gap-1 rounded-b-2xl bg-[var(--message-user-bg)] py-1.5 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:text-[var(--ink)]"
-                >
-                  <ChevronDown className="size-3.5" />
-                  展开
-                </button>
+              {/* Collapsible content wrapper: max 50vh when collapsed */}
+              <div
+                ref={userContentRef}
+                className={!userExpanded && userOverflows ? 'overflow-hidden' : ''}
+                style={!userExpanded && userOverflows ? { maxHeight: `${USER_COLLAPSE_HEIGHT}px` } : undefined}
+              >
+                {hasAttachments && (
+                  <div className={hasText ? 'mb-2' : ''}>
+                    <AttachmentPreviewList
+                      attachments={attachmentItems}
+                      compact
+                      onPreview={openPreview}
+                    />
+                  </div>
+                )}
+                {hasText && (
+                  <div className="user-message-content text-[var(--ink)]">
+                    <Markdown preserveNewlines>{userContent}</Markdown>
+                  </div>
+                )}
               </div>
-            )}
-          </article>
-          {/* 操作栏：时间 + 图标按钮，hover 淡入 */}
-          <div className={`mr-2 mt-1 flex items-center gap-2 transition-opacity ${userHovered ? 'opacity-100' : 'opacity-0'}`}>
-            <span className="text-xs text-[var(--ink-muted)] mr-1">{formatTimestamp(message.timestamp)}</span>
-            {onRewind && (
-              <span data-rewind-btn>
-                <Tip label="时间回溯">
-                  <button type="button"
-                    aria-label="时间回溯"
-                    onClick={() => onRewind(message.id)}
-                    className="rounded-lg p-1 text-[var(--ink-muted)] transition-all hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]">
-                    <Undo2 className="size-3.5" />
+              {/* Expand button with gradient fade — gradient overlaps bottom of content */}
+              {!userExpanded && userOverflows && (
+                <div className="relative z-10 -mx-4 -mb-4 -mt-14">
+                  <div className="pointer-events-none h-14 bg-gradient-to-t from-[var(--message-user-bg)] to-[var(--message-user-bg-a0)]" />
+                  <button
+                    type="button"
+                    onClick={() => setUserExpanded(true)}
+                    className="flex w-full items-center justify-center gap-1 rounded-b-2xl bg-[var(--message-user-bg)] py-1.5 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:text-[var(--ink)]"
+                  >
+                    <ChevronDown className="size-3.5" />
+                    展开
                   </button>
-                </Tip>
-              </span>
-            )}
-            <Tip label={copied ? '已复制' : '复制'}>
-              <button type="button"
-                aria-label="复制"
-                onClick={() => {
-                  navigator.clipboard.writeText(userContent).catch(() => {});
-                  setCopied(true);
-                  if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current);
-                  copiedTimerRef.current = setTimeout(() => setCopied(false), 1500);
-                }}
-                className="rounded-lg p-1 text-[var(--ink-muted)] transition-all hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]">
-                {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
-              </button>
-            </Tip>
+                </div>
+              )}
+            </article>
+            {/* 操作栏：时间 + 图标按钮，随气泡/操作栏局部 hover 或键盘 focus 淡入 */}
+            <div className="mr-2 mt-1 flex items-center gap-2 opacity-0 transition-opacity duration-150 group-hover/user-actions:opacity-100 group-focus-within/user-actions:opacity-100">
+              <span className="mr-1 text-xs text-[var(--ink-muted)]">{formatTimestamp(message.timestamp)}</span>
+              {onRewind && (
+                <span data-rewind-btn>
+                  <Tip label="时间回溯">
+                    <button type="button"
+                      aria-label="时间回溯"
+                      onClick={() => onRewind(message.id)}
+                      className="rounded-lg p-1 text-[var(--ink-muted)] transition-all hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]">
+                      <Undo2 className="size-3.5" />
+                    </button>
+                  </Tip>
+                </span>
+              )}
+              <Tip label={copied ? '已复制' : '复制'}>
+                <button type="button"
+                  aria-label="复制"
+                  onClick={() => {
+                    navigator.clipboard.writeText(userContent).catch(() => {});
+                    setCopied(true);
+                    if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current);
+                    copiedTimerRef.current = setTimeout(() => setCopied(false), 1500);
+                  }}
+                  className="rounded-lg p-1 text-[var(--ink-muted)] transition-all hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]">
+                  {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+                </button>
+              </Tip>
+            </div>
           </div>
         </div>
       </div>
