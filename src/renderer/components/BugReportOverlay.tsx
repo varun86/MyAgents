@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { X, Send, ImagePlus } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 
 import { useCloseLayer } from '@/hooks/useCloseLayer';
 
@@ -12,7 +13,7 @@ import { HelperModelPicker, resolveInitialHelperModel } from '@/components/Helpe
 import { useImageAttachments } from '@/hooks/useImageAttachments';
 import { dispatchHelperRequest } from '@/utils/dispatchHelperRequest';
 import { useChatComposerKeydown } from '@/hooks/useChatComposerKeydown';
-import { sendHintLabel } from '@/utils/chatSendKey';
+import { sendKeyHint } from '@/utils/chatSendKey';
 
 interface BugReportOverlayProps {
     onClose: () => void;
@@ -34,6 +35,7 @@ export default function BugReportOverlay({
     onClose, onNavigateToProviders, appVersion, providers, apiKeys, providerVerifyStatus,
     initialProviderId, initialModel, onModelChange, assistantEntry,
 }: BugReportOverlayProps) {
+    const { t } = useTranslation('settings');
     // Cmd+W dismissal: z-[250] matches the component's CSS z-index
     useCloseLayer(() => { onClose(); return true; }, 250);
 
@@ -112,9 +114,9 @@ export default function BugReportOverlay({
 
     const isMac = navigator.platform.toLowerCase().includes('mac');
     const getSubmitTitle = () => {
-        if (!hasContent) return '请输入问题描述或添加图片';
-        if (!hasValidModel) return '请先在设置中配置模型';
-        return sendHintLabel(sendShortcut, isMac);
+        if (!hasContent) return t('helper.feedbackEmptyTip');
+        if (!hasValidModel) return t('helper.configureModelTip');
+        return `${t('helper.send')} (${sendKeyHint(sendShortcut, isMac).shortcut})`;
     };
 
     return (
@@ -122,7 +124,7 @@ export default function BugReportOverlay({
             <div className="glass-panel w-full max-w-md">
                 {/* Header */}
                 <div className="flex items-center justify-between border-b border-[var(--line)] px-5 py-4">
-                    <h2 className="text-lg font-semibold text-[var(--ink)]">AI 小助理</h2>
+                    <h2 className="text-lg font-semibold text-[var(--ink)]">{t('helper.title')}</h2>
                     <button
                         onClick={onClose}
                         className="rounded-lg p-1 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
@@ -144,7 +146,7 @@ export default function BugReportOverlay({
                                     <div key={img.id} className="group relative flex-shrink-0">
                                         <img
                                             src={img.preview}
-                                            alt="attachment"
+                                            alt={t('helper.attachmentAlt')}
                                             className="h-16 w-16 cursor-pointer rounded-lg border border-[var(--line)] object-cover"
                                             onDoubleClick={() => openPreview(img.preview, img.file.name)}
                                         />
@@ -169,7 +171,7 @@ export default function BugReportOverlay({
                             onCompositionStart={onCompositionStart}
                             onCompositionEnd={onCompositionEnd}
                             onPaste={pasteHandler}
-                            placeholder="描述您遇到的问题、提出您的意见或建议"
+                            placeholder={t('helper.feedbackPlaceholder')}
                             className="w-full resize-none border-0 bg-transparent px-4 py-3 text-sm text-[var(--ink)] placeholder:text-[var(--ink-muted)]/50 focus:outline-none"
                             rows={5}
                         />
@@ -195,7 +197,7 @@ export default function BugReportOverlay({
                                     type="button"
                                     onClick={() => fileInputRef.current?.click()}
                                     className="rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
-                                    title="上传图片"
+                                    title={t('helper.uploadImage')}
                                 >
                                     <ImagePlus className="h-4 w-4" />
                                 </button>

@@ -108,10 +108,7 @@
     "createAgent": "Create Agent",
     "selectTemplate": "Select a template",
     "deleteDialogTitle": "Delete Template",
-    "deleteDialogMessage": "Delete \"{{name}}\" from the template library? Template files will be permanently deleted.",
-    "preset": {
-      "minoDescription": "An AI Agent that remembers and evolves. Start minimal, then shape it into what you need."
-    }
+    "deleteDialogMessage": "Delete \"{{name}}\" from the template library? Template files will be permanently deleted."
   },
   "workspaceEdit": {
     "title": "Edit Workspace",

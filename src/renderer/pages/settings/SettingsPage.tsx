@@ -244,6 +244,8 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
     // Stabilize toast reference to avoid unnecessary effect re-runs
     const toastRef = useRef(toast);
     toastRef.current = toast;
+    const tSettingsRef = useRef(tSettings);
+    tSettingsRef.current = tSettings;
 
     // Autostart hook for managing launch on startup
     const { isEnabled: autostartEnabled, isLoading: autostartLoading, setAutostart } = useAutostart();
@@ -291,13 +293,16 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                 floatingBallEnabled: next,
             });
             track('floating_ball_toggle', { gate: true, enabled: next });
-            toast.success(next ? '已启用桌面宠物' : '已关闭桌面宠物');
+            toast.success(next ? tSettings('about.desktopPetEnabled') : tSettings('about.desktopPetDisabled'));
         } catch (err) {
-            toast.error(`${next ? '启用' : '关闭'}桌面宠物失败：${describeNativeFloatingBallError(err)}`);
+            toast.error(tSettings('about.desktopPetToggleFailed', {
+                action: tSettings(next ? 'about.enableAction' : 'about.disableAction'),
+                message: describeNativeFloatingBallError(err),
+            }));
         } finally {
             setFloatingBallGateBusy(false);
         }
-    }, [config.floatingBallDevGate, floatingBallGateBusy, toast, updateConfig]);
+    }, [config.floatingBallDevGate, floatingBallGateBusy, tSettings, toast, updateConfig]);
 
     const {
         activeSection,
@@ -492,7 +497,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                     if (proxyProbeGenerationRef.current !== generation) return;
                     setProxyProbeState({
                         status: 'error',
-                        message: '代理检测失败，请稍后重试',
+                        message: tSettings('general.proxyProbeFailed'),
                         detail: error instanceof Error ? error.message : String(error),
                     });
                 });
@@ -504,6 +509,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
         config.proxySettings?.protocol,
         config.proxySettings?.host,
         config.proxySettings?.port,
+        tSettings,
     ]);
 
     const [showCustomForm, setShowCustomForm] = useState(false);
@@ -2007,7 +2013,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                     setSubscriptionStatus((prev: SubscriptionStatus | null) => prev ? {
                         ...prev,
                         verifyStatus: 'invalid',
-                        verifyError: err instanceof Error ? err.message : '验证失败'
+                        verifyError: err instanceof Error ? err.message : tSettingsRef.current('providers.verify.failed')
                     } : prev);
                 }
             }
@@ -2064,10 +2070,10 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
             if (result.success) {
                 // Only cache successful verifications
                 await saveProviderVerifyStatus(SUBSCRIPTION_PROVIDER_ID, 'valid', currentEmail);
-                toast.success('验证成功');
+                toast.success(tSettings('providers.verify.success'));
             } else {
                 // Don't cache failures - they will be retried next time
-                toast.error(result.error || '验证失败');
+                toast.error(result.error || tSettings('providers.verify.failed'));
             }
 
             setSubscriptionStatus(prev => prev ? {
@@ -2082,13 +2088,13 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
             setSubscriptionStatus(prev => prev ? {
                 ...prev,
                 verifyStatus: 'invalid',
-                verifyError: err instanceof Error ? err.message : '验证失败'
+                verifyError: err instanceof Error ? err.message : tSettings('providers.verify.failed')
             } : prev);
-            toast.error('验证失败');
+            toast.error(tSettings('providers.verify.failed'));
         } finally {
             setSubscriptionVerifying(false);
         }
-    }, [subscriptionStatus, saveProviderVerifyStatus, toast]);
+    }, [subscriptionStatus, saveProviderVerifyStatus, tSettings, toast]);
 
     const refreshSubscriptionStatusAfterLogin = useCallback(async (): Promise<boolean> => {
         try {
@@ -2120,20 +2126,20 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
             setSubscriptionStatus(prev => prev ? {
                 ...prev,
                 verifyStatus: 'invalid',
-                verifyError: error instanceof Error ? error.message : '验证失败',
+                verifyError: error instanceof Error ? error.message : tSettings('providers.verify.failed'),
             } : prev);
             return false;
         } finally {
             setSubscriptionVerifying(false);
         }
-    }, [saveProviderVerifyStatus]);
+    }, [saveProviderVerifyStatus, tSettings]);
 
     const handleSubscriptionLoginSucceeded = useCallback(async () => {
         if (subscriptionLoginSuccessHandledRef.current) return;
         subscriptionLoginSuccessHandledRef.current = true;
         await refreshSubscriptionStatusAfterLogin();
-        toast.success('Claude 登录成功');
-    }, [refreshSubscriptionStatusAfterLogin, toast]);
+        toast.success(tSettings('providers.codexToast.claudeLoginSucceeded'));
+    }, [refreshSubscriptionStatusAfterLogin, tSettings, toast]);
 
     const probeSubscriptionFallbackLogin = useCallback(async () => {
         if (subscriptionLoginSuccessHandledRef.current || subscriptionFallbackProbeInFlightRef.current) {
@@ -2164,13 +2170,13 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
             setSubscriptionLoginState(prev => isSubscriptionLoginActiveStatus(prev.status)
                 ? { ...prev, status: 'succeeded', error: null }
                 : prev);
-            toast.success('Claude 登录成功');
+            toast.success(tSettings('providers.codexToast.claudeLoginSucceeded'));
         } catch (error) {
             console.warn('[Settings] Subscription fallback login probe failed:', error);
         } finally {
             subscriptionFallbackProbeInFlightRef.current = false;
         }
-    }, [saveProviderVerifyStatus, toast]);
+    }, [saveProviderVerifyStatus, tSettings, toast]);
 
     // Verify API key for a provider
     const verifyProvider = useCallback(async (provider: Provider, apiKey: string) => {
@@ -2216,12 +2222,12 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                 setVerifyError((prev) => ({
                     ...prev,
                     [provider.id]: {
-                        error: `当前网络无法连接 ${provider.name}，请检查网络或`,
+                        error: tSettings('providers.verify.networkError', { name: provider.name }),
                         detail: detailParts.length > 0 ? detailParts.join('; ') : undefined,
                         action: 'proxy-settings',
                     },
                 }));
-                toastRef.current.error(`${provider.name}: 当前网络不可达，请检查代理设置`);
+                toastRef.current.error(tSettings('providers.verify.networkToast', { name: provider.name }));
                 return;
             }
 
@@ -2249,7 +2255,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                 await saveProviderVerifyStatus(provider.id, 'valid');
             } else {
                 await saveProviderVerifyStatus(provider.id, 'invalid');
-                const errorMsg = result.error || '验证失败';
+                const errorMsg = result.error || tSettings('providers.verify.failed');
                 setVerifyError((prev) => ({ ...prev, [provider.id]: { error: errorMsg, detail: result.detail } }));
                 toastRef.current.error(`${provider.name}: ${errorMsg}`);
             }
@@ -2259,7 +2265,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
 
             console.error('[verifyProvider] Exception:', err);
             await saveProviderVerifyStatus(provider.id, 'invalid');
-            const errorMsg = err instanceof Error ? err.message : '验证失败';
+            const errorMsg = err instanceof Error ? err.message : tSettings('providers.verify.failed');
             setVerifyError((prev) => ({ ...prev, [provider.id]: { error: errorMsg } }));
             toastRef.current.error(`${provider.name}: ${errorMsg}`);
         } finally {
@@ -2268,7 +2274,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                 setVerifyLoading((prev) => ({ ...prev, [provider.id]: false }));
             }
         }
-    }, [saveProviderVerifyStatus]);
+    }, [saveProviderVerifyStatus, tSettings]);
 
     // Auto-verify when API key changes (with debounce)
     const handleSaveApiKey = useCallback(async (provider: Provider, key: string) => {
@@ -2319,7 +2325,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
             return null;
         }
         if (customForm.models.length === 0) {
-            toast.error('请添加至少一个模型 ID');
+            toast.error(tSettings('providers.toast.addAtLeastOneModel'));
             return null;
         }
         const newProvider: Provider = {
@@ -2367,10 +2373,10 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
             if (customForm.apiKey) {
                 verifyProvider(newProvider, customForm.apiKey);
             }
-            toast.success('服务商添加成功');
+            toast.success(tSettings('providers.toast.providerAdded'));
         } catch (error) {
             console.error('[Settings] Failed to add custom provider:', error);
-            toast.error('添加服务商失败');
+            toast.error(tSettings('providers.toast.providerAddFailed'));
             return null;
         }
 
@@ -2404,10 +2410,10 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
 
             // Delete from disk, remove API key, and refresh providers list
             await deleteCustomProviderService(providerId);
-            toast.success('服务商已删除');
+            toast.success(tSettings('providers.toast.providerDeleted'));
         } catch (error) {
             console.error('[Settings] Failed to delete custom provider:', error);
-            toast.error('删除服务商失败');
+            toast.error(tSettings('providers.toast.providerDeleteFailed'));
         }
         setDeleteConfirmProvider(null);
         setEditingProvider(null);
@@ -2471,30 +2477,30 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
             try {
                 await savePresetCustomModels(provider.id, finalCustomModels);
                 if (customModels.length > 0 || removedModels.length > 0) {
-                    toast.success('模型配置已更新');
+                    toast.success(tSettings('providers.toast.modelConfigUpdated'));
                 }
             } catch (error) {
                 console.error('[Settings] Failed to save preset custom models:', error);
-                toast.error('保存失败');
+                toast.error(tSettings('providers.toast.saveFailed'));
                 return;
             }
         } else {
             // 验证必填字段
             if (!editName?.trim() || !editBaseUrl?.trim()) {
-                toast.error('名称和 Base URL 不能为空');
+                toast.error(tSettings('providers.toast.nameAndBaseUrlRequired'));
                 return;
             }
             // 验证 Base URL 格式
             const trimmedUrl = editBaseUrl.trim();
             if (!trimmedUrl.startsWith('http://') && !trimmedUrl.startsWith('https://')) {
-                toast.error('Base URL 必须以 http:// 或 https:// 开头');
+                toast.error(tSettings('providers.toast.baseUrlProtocolRequired'));
                 return;
             }
             // Filter out removed models from existing list, then add new custom models
             const remainingModels = provider.models.filter(m => !removedModels.includes(m.model));
             // Validate: at least one model must remain
             if (remainingModels.length === 0 && customModels.length === 0) {
-                toast.error('供应商至少需要保留一个模型');
+                toast.error(tSettings('providers.toast.atLeastOneModelRequired'));
                 return;
             }
             const finalModels = [
@@ -2531,10 +2537,10 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
             };
             try {
                 await updateCustomProvider(updatedProvider);
-                toast.success('服务商已更新');
+                toast.success(tSettings('providers.toast.providerUpdated'));
             } catch (error) {
                 console.error('[Settings] Failed to update custom provider:', error);
-                toast.error('更新服务商失败');
+                toast.error(tSettings('providers.toast.providerUpdateFailed'));
             }
         }
         setEditingProvider(null);
@@ -2607,7 +2613,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
         command: 'cmd_managed_codex_download' | 'cmd_managed_codex_login' | 'cmd_managed_codex_logout',
     ) => {
         if (!isTauriEnvironment()) {
-            toast.error('当前环境不支持 Codex 订阅管理');
+            toast.error(tSettings('providers.codexToast.unsupportedManagement'));
             return;
         }
         if (managedCodexBusy) return;
@@ -2615,23 +2621,23 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
         try {
             await invoke(command);
             await refreshConfig();
-            if (action === 'download') toast.success('Codex runtime 已准备');
-            if (action === 'login') toast.success('Codex 登录状态已更新');
-            if (action === 'logout') toast.success('已退出 Codex');
+            if (action === 'download') toast.success(tSettings('providers.codexToast.runtimeReady'));
+            if (action === 'login') toast.success(tSettings('providers.codexToast.loginUpdated'));
+            if (action === 'logout') toast.success(tSettings('providers.codexToast.loggedOut'));
         } catch (error) {
             await refreshConfig().catch(() => {});
             const message = error instanceof Error ? error.message : String(error);
-            if (action === 'download') toast.error(`Codex runtime 下载失败：${message}`);
-            if (action === 'login') toast.error(`Codex 登录失败：${message}`);
-            if (action === 'logout') toast.error(`Codex 退出登录失败：${message}`);
+            if (action === 'download') toast.error(tSettings('providers.codexToast.downloadFailed', { message }));
+            if (action === 'login') toast.error(tSettings('providers.codexToast.loginFailed', { message }));
+            if (action === 'logout') toast.error(tSettings('providers.codexToast.logoutFailed', { message }));
         } finally {
             setManagedCodexBusy(null);
         }
-    }, [managedCodexBusy, refreshConfig, toast]);
+    }, [managedCodexBusy, refreshConfig, tSettings, toast]);
 
     const startManagedCodexLogin = useCallback(async () => {
         if (!isTauriEnvironment()) {
-            toast.error('当前环境不支持 Codex 订阅登录');
+            toast.error(tSettings('providers.codexToast.unsupportedLogin'));
             return;
         }
         if (managedCodexBusyRef.current === 'download') return;
@@ -2644,7 +2650,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
             setManagedCodexLoginState(state);
             await refreshConfig();
             if (state.status === 'succeeded') {
-                toast.success('Codex 登录成功');
+                toast.success(tSettings('providers.codexToast.loginSucceeded'));
             }
         } catch (error) {
             await refreshConfig().catch(() => {});
@@ -2655,11 +2661,11 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                 startedAt: null,
                 error: message,
             });
-            toast.error(`Codex 登录失败：${message}`);
+            toast.error(tSettings('providers.codexToast.loginFailed', { message }));
         } finally {
             setManagedCodexBusy(prev => prev === 'login' ? null : prev);
         }
-    }, [refreshConfig, toast]);
+    }, [refreshConfig, tSettings, toast]);
 
     const refreshManagedCodexLoginState = useCallback(async () => {
         if (!isTauriEnvironment()) return;
@@ -2694,12 +2700,12 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
         if (!url) return;
         try {
             await navigator.clipboard.writeText(url);
-            toast.success('登录地址已复制');
+            toast.success(tSettings('providers.codexToast.urlCopied'));
         } catch (error) {
             console.warn('[Settings] Failed to copy Managed Codex login URL:', error);
-            toast.error('复制登录地址失败');
+            toast.error(tSettings('providers.codexToast.urlCopyFailed'));
         }
-    }, [managedCodexLoginState.loginUrl, toast]);
+    }, [managedCodexLoginState.loginUrl, tSettings, toast]);
 
     const startSubscriptionLogin = useCallback(async () => {
         if (subscriptionLoginBusy) return;
@@ -2735,11 +2741,11 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                 startedAt: null,
                 error: message,
             });
-            toast.error(`Claude 登录失败：${message}`);
+            toast.error(tSettings('providers.codexToast.claudeLoginFailed', { message }));
         } finally {
             setSubscriptionLoginBusy(false);
         }
-    }, [handleSubscriptionLoginSucceeded, subscriptionLoginBusy, toast]);
+    }, [handleSubscriptionLoginSucceeded, subscriptionLoginBusy, tSettings, toast]);
 
     const refreshSubscriptionLoginState = useCallback(async () => {
         try {
@@ -2777,15 +2783,16 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
         if (!url) return;
         try {
             await navigator.clipboard.writeText(url);
-            toast.success('登录地址已复制');
+            toast.success(tSettings('providers.codexToast.urlCopied'));
         } catch (error) {
             console.warn('[Settings] Failed to copy subscription login URL:', error);
-            toast.error('复制登录地址失败');
+            toast.error(tSettings('providers.codexToast.urlCopyFailed'));
         }
     }, [
         subscriptionLoginState.automaticUrl,
         subscriptionLoginState.loginUrl,
         subscriptionLoginState.manualUrl,
+        tSettings,
         toast,
     ]);
 
@@ -2805,12 +2812,12 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
             await updateConfig(updates);
             await rebuildAndPersistAvailableProviders();
             setShowProviderOrderDialog(false);
-            toast.success('供应商启用和排序已保存');
+            toast.success(tSettings('providers.toast.providerOrderSaved'));
         } catch (error) {
             console.error('[Settings] Failed to save provider order settings:', error);
-            toast.error('保存供应商启用和排序失败');
+            toast.error(tSettings('providers.toast.providerOrderSaveFailed'));
         }
-    }, [allProviders, config.defaultProviderId, disabledProviderDraft, providerOrderDraft, toast, updateConfig]);
+    }, [allProviders, config.defaultProviderId, disabledProviderDraft, providerOrderDraft, tSettings, toast, updateConfig]);
 
     // Refs for API Key expiry check (P2 fix - avoid stale closures)
     const allProvidersRef = useRef(allProviders);
@@ -2872,19 +2879,19 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
         const isLoggedIn = subscriptionStatus?.available && subscriptionStatus.verifyStatus === 'valid';
         const isVerifyInvalid = subscriptionStatus?.verifyStatus === 'invalid';
         const needsLogin = !subscriptionStatus?.available || isVerifyInvalid;
-        const accountLabel = subscriptionStatus?.info?.email ?? '已检测到本地 OAuth 凭证';
+        const accountLabel = subscriptionStatus?.info?.email ?? tSettings('providers.subscription.localCredential');
         const statusText = isLoginActive
-            ? 'Claude 账号登录中'
+            ? tSettings('providers.subscription.loginInProgress')
             : isVerifyInvalid
-                ? 'Claude 账号验证失败'
+                ? tSettings('providers.subscription.verifyFailed')
                 : subscriptionStatus?.available
                     ? accountLabel
-                    : 'Claude 账号未登录';
+                    : tSettings('providers.subscription.notLoggedIn');
 
         return (
             <div className="space-y-3">
                 <p className="text-sm text-[var(--ink-muted)]">
-                    使用 Anthropic 订阅账户额度
+                    {tSettings('providers.subscription.description')}
                 </p>
                 <div className="flex items-center justify-between gap-3">
                     <div className="flex min-w-0 flex-wrap items-center gap-2 text-xs">
@@ -2894,7 +2901,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                     {accountLabel}
                                 </span>
                                 <span className="shrink-0 rounded bg-[var(--success-bg)] px-1.5 py-0.5 text-xs font-medium text-[var(--success)]">
-                                    已验证
+                                    {tSettings('providers.verified')}
                                 </span>
                             </>
                         ) : (
@@ -2904,18 +2911,18 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                 </span>
                                 {isLoginActive && (
                                     <span className="shrink-0 rounded bg-[var(--info-bg)] px-1.5 py-0.5 text-xs font-medium text-[var(--info)]">
-                                        登录中
+                                        {tSettings('providers.loggingIn')}
                                     </span>
                                 )}
                                 {subscriptionStatus?.verifyStatus === 'loading' && !isLoginActive && (
                                     <span className="flex shrink-0 items-center gap-1 rounded bg-[var(--info-bg)] px-1.5 py-0.5 text-xs font-medium text-[var(--info)]">
                                         <Loader2 className="h-3 w-3 animate-spin" />
-                                        验证中
+                                        {tSettings('providers.verifying')}
                                     </span>
                                 )}
                                 {isVerifyInvalid && (
                                     <span className="shrink-0 rounded bg-[var(--error-bg)] px-1.5 py-0.5 text-xs font-medium text-[var(--error)]">
-                                        验证失败
+                                        {tSettings('providers.verifyFailed')}
                                     </span>
                                 )}
                             </>
@@ -2928,7 +2935,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                 onClick={handleReVerifySubscription}
                                 disabled={subscriptionVerifying || isLoginActive}
                                 className="rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] disabled:cursor-wait disabled:opacity-50"
-                                title="重新验证"
+                                title={tSettings('providers.reverify')}
                             >
                                 <RefreshCw className={`h-4 w-4 ${subscriptionVerifying ? 'animate-spin' : ''}`} />
                             </button>
@@ -2943,7 +2950,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                 {isLoginActive
                                     ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
                                     : <Link className="h-3.5 w-3.5" />}
-                                登录
+                                {tSettings('providers.login')}
                             </button>
                         )}
                     </div>
@@ -2985,19 +2992,19 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
             ? Math.max(0, Math.min(100, Math.round(rawProgress)))
             : null;
         const downloadButtonLabel = isDownloadingRuntime
-            ? (progressPercent == null ? '下载中' : `${progressPercent}%`)
-            : installStatus === 'update-required' ? '更新' : '下载';
+            ? (progressPercent == null ? tSettings('providers.managedCodex.downloading') : `${progressPercent}%`)
+            : installStatus === 'update-required' ? tSettings('providers.managedCodex.update') : tSettings('providers.managedCodex.download');
         const modelLine = provider.models
             .map(model => model.modelName || model.model)
             .join(', ');
         const loginInProgress = managedCodexBusy === 'login' || authStatus === 'logging-in';
         const isLoggedIn = authStatus === 'valid';
-        const accountLabel = auth?.accountEmail ?? 'ChatGPT Codex 订阅账户';
+        const accountLabel = auth?.accountEmail ?? tSettings('providers.managedCodex.account');
         const statusText = loginInProgress
-            ? 'ChatGPT Codex 账号登录中'
+            ? tSettings('providers.managedCodex.loginInProgress')
             : authStatus === 'error' || authStatus === 'invalid'
-                ? 'ChatGPT Codex 账号验证失败'
-                : 'ChatGPT Codex 账号未登录';
+                ? tSettings('providers.managedCodex.verifyFailed')
+                : tSettings('providers.managedCodex.notLoggedIn');
         const runtimeError = install?.error && (managedCodexReadiness.reason === 'runtime-error'
             || managedCodexReadiness.reason === 'runtime-update-required')
             ? install.error
@@ -3013,7 +3020,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                         <div className="flex min-w-0 items-center gap-2">
                             <h3 className="truncate text-lg font-semibold text-[var(--ink)]">{provider.name}</h3>
                             <span className="shrink-0 rounded bg-[var(--paper-inset)] px-1.5 py-0.5 text-xs font-medium text-[var(--ink-muted)]">
-                                官方
+                                {tSettings('providers.official')}
                             </span>
                         </div>
                         <p className="mt-1 truncate text-xs text-[var(--ink-muted)]">
@@ -3025,7 +3032,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                             type="button"
                             onClick={() => setManagedCodexDetailsOpen(true)}
                             className="shrink-0 rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
-                            title="Codex 订阅设置"
+                            title={tSettings('providers.managedCodex.settingsTitle')}
                         >
                             <SlidersHorizontal className="h-4 w-4" />
                         </button>
@@ -3038,7 +3045,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                             <div className="flex min-w-0 items-center gap-2">
                                 <Download className="h-4 w-4 shrink-0 text-[var(--accent)]" />
                                 <span className="truncate text-sm font-semibold text-[var(--ink)]">
-                                    下载 Codex Runtime
+                                    {tSettings('providers.managedCodex.downloadRuntime')}
                                 </span>
                             </div>
                             <button
@@ -3060,7 +3067,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                 ) : (
                     <div className="space-y-3">
                         <p className="text-sm text-[var(--ink-muted)]">
-                            使用 ChatGPT Codex 订阅账户额度
+                            {tSettings('providers.managedCodex.description')}
                         </p>
                         <div className="flex items-center justify-between gap-3">
                             <div className="flex min-w-0 flex-wrap items-center gap-2 text-xs">
@@ -3070,7 +3077,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                             {accountLabel}
                                         </span>
                                         <span className="shrink-0 rounded bg-[var(--success-bg)] px-1.5 py-0.5 text-xs font-medium text-[var(--success)]">
-                                            已验证
+                                            {tSettings('providers.verified')}
                                         </span>
                                     </>
                                 ) : (
@@ -3080,12 +3087,12 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                         </span>
                                         {loginInProgress && (
                                             <span className="shrink-0 rounded bg-[var(--info-bg)] px-1.5 py-0.5 text-xs font-medium text-[var(--info)]">
-                                                登录中
+                                                {tSettings('providers.loggingIn')}
                                             </span>
                                         )}
                                         {(authStatus === 'error' || authStatus === 'invalid') && (
                                             <span className="shrink-0 rounded bg-[var(--error-bg)] px-1.5 py-0.5 text-xs font-medium text-[var(--error)]">
-                                                验证失败
+                                                {tSettings('providers.verifyFailed')}
                                             </span>
                                         )}
                                     </>
@@ -3101,7 +3108,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                     {loginInProgress
                                         ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
                                         : <Link className="h-3.5 w-3.5" />}
-                                    登录
+                                    {tSettings('providers.login')}
                                 </button>
                             )}
                         </div>
@@ -3119,7 +3126,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
         const authStatus = auth?.status;
         const isLoggedIn = authStatus === 'valid';
         const loginInProgress = managedCodexBusy === 'login' || authStatus === 'logging-in';
-        const accountLabel = auth?.accountEmail ?? 'ChatGPT Codex 订阅账户';
+        const accountLabel = auth?.accountEmail ?? tSettings('providers.managedCodex.account');
         const authBadgeClass = isLoggedIn
             ? 'bg-[var(--success-bg)] text-[var(--success)]'
             : authStatus === 'error' || authStatus === 'invalid'
@@ -3128,12 +3135,12 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                     ? 'bg-[var(--info-bg)] text-[var(--info)]'
                     : 'bg-[var(--paper-inset)] text-[var(--ink-muted)]';
         const authBadgeLabel = isLoggedIn
-            ? '已登录'
+            ? tSettings('providers.managedCodex.loggedIn')
             : loginInProgress
-                ? '登录中'
+                ? tSettings('providers.loggingIn')
                 : authStatus === 'error'
-                    ? '异常'
-                    : '未登录';
+                    ? tSettings('providers.managedCodex.errorBadge')
+                    : tSettings('providers.managedCodex.notLoggedInBadge');
         const authError = auth?.error && (managedCodexReadiness.reason === 'auth-error'
             || managedCodexReadiness.reason === 'auth-invalid')
             ? auth.error
@@ -3144,8 +3151,8 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                 <div className="mx-4 flex max-h-[90vh] w-full max-w-lg flex-col rounded-2xl bg-[var(--paper-elevated)] shadow-xl">
                     <div className="flex shrink-0 items-start justify-between gap-4 border-b border-[var(--line-subtle)] px-6 py-5">
                         <div className="min-w-0">
-                            <h3 className="text-lg font-semibold text-[var(--ink)]">Codex 订阅设置</h3>
-                            <p className="mt-1 text-sm text-[var(--ink-muted)]">使用 ChatGPT Codex 订阅账户</p>
+                            <h3 className="text-lg font-semibold text-[var(--ink)]">{tSettings('providers.managedCodex.settingsTitle')}</h3>
+                            <p className="mt-1 text-sm text-[var(--ink-muted)]">{tSettings('providers.managedCodex.settingsDescription')}</p>
                         </div>
                         <button
                             type="button"
@@ -3160,10 +3167,10 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                         <section>
                             <div className="flex items-start justify-between gap-4">
                                 <div className="min-w-0">
-                                    <p className="text-sm font-medium text-[var(--ink)]">Codex Runtime</p>
+                                    <p className="text-sm font-medium text-[var(--ink)]">{tSettings('providers.managedCodex.runtime')}</p>
                                     <p className="mt-1 text-sm font-semibold text-[var(--ink)]">v{runtimeVersion}</p>
                                     <p className="mt-1 truncate text-xs text-[var(--ink-muted)]">
-                                        {install?.platform ?? '当前平台'}
+                                        {install?.platform ?? tSettings('providers.managedCodex.currentPlatform')}
                                     </p>
                                 </div>
                                 <button
@@ -3173,7 +3180,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                     className="flex shrink-0 items-center gap-1.5 rounded-lg border border-[var(--line)] px-3 py-1.5 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)] disabled:cursor-wait disabled:opacity-60"
                                 >
                                     <RefreshCw className={`h-3.5 w-3.5 ${managedCodexBusy === 'status' ? 'animate-spin' : ''}`} />
-                                    刷新
+                                    {tSettings('providers.managedCodex.refresh')}
                                 </button>
                             </div>
                         </section>
@@ -3182,13 +3189,13 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                             <div className="flex items-start justify-between gap-4">
                                 <div className="min-w-0">
                                     <div className="flex items-center gap-2">
-                                        <p className="text-sm font-medium text-[var(--ink)]">登录状态</p>
+                                        <p className="text-sm font-medium text-[var(--ink)]">{tSettings('providers.managedCodex.loginStatus')}</p>
                                         <span className={`rounded px-1.5 py-0.5 text-xs font-medium ${authBadgeClass}`}>
                                             {authBadgeLabel}
                                         </span>
                                     </div>
                                     <p className="mt-1 truncate text-sm text-[var(--ink-muted)]">
-                                        {isLoggedIn ? accountLabel : 'ChatGPT Codex 订阅账户'}
+                                        {isLoggedIn ? accountLabel : tSettings('providers.managedCodex.account')}
                                     </p>
                                 </div>
                                 {isLoggedIn ? (
@@ -3201,7 +3208,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                         {managedCodexBusy === 'logout'
                                             ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
                                             : <Unlink className="h-3.5 w-3.5" />}
-                                        退出登录
+                                        {tSettings('providers.managedCodex.logout')}
                                     </button>
                                 ) : (
                                     <button
@@ -3213,7 +3220,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                         {managedCodexBusy === 'login'
                                             ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
                                             : <Link className="h-3.5 w-3.5" />}
-                                        登录
+                                        {tSettings('providers.login')}
                                     </button>
                                 )}
                             </div>
@@ -3232,12 +3239,12 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
         const state = managedCodexLoginState;
         const isActiveLogin = state.status === 'starting' || state.status === 'waiting';
         const statusLabel = state.status === 'succeeded'
-            ? '已完成'
+            ? tSettings('providers.loginDialog.statusDone')
             : state.status === 'cancelled'
-                ? '已取消'
+                ? tSettings('providers.loginDialog.statusCancelled')
                 : state.status === 'error'
-                    ? '异常'
-                    : '等待登录';
+                    ? tSettings('providers.loginDialog.statusError')
+                    : tSettings('providers.loginDialog.statusWaiting');
         const statusClass = state.status === 'succeeded'
             ? 'bg-[var(--success-bg)] text-[var(--success)]'
             : state.status === 'cancelled' || state.status === 'error'
@@ -3250,13 +3257,13 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                     <div className="flex items-start justify-between gap-4 border-b border-[var(--line-subtle)] px-6 py-5">
                         <div className="min-w-0">
                             <div className="flex items-center gap-2">
-                                <h3 className="text-lg font-semibold text-[var(--ink)]">登录 ChatGPT Codex</h3>
+                                <h3 className="text-lg font-semibold text-[var(--ink)]">{tSettings('providers.loginDialog.codexTitle')}</h3>
                                 <span className={`rounded px-1.5 py-0.5 text-xs font-medium ${statusClass}`}>
                                     {statusLabel}
                                 </span>
                             </div>
                             <p className="mt-1 text-sm text-[var(--ink-muted)]">
-                                登录信息会保存到 MyAgents 管理的 Codex Runtime 环境中。
+                                {tSettings('providers.loginDialog.codexDescription')}
                             </p>
                         </div>
                         <button
@@ -3278,14 +3285,14 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                 ) : (
                                     <AlertCircle className="h-4 w-4 text-[var(--error)]" />
                                 )}
-                                <p className="text-sm font-medium text-[var(--ink)]">自动打开浏览器</p>
+                                <p className="text-sm font-medium text-[var(--ink)]">{tSettings('providers.loginDialog.autoOpenBrowser')}</p>
                             </div>
                             <p className="mt-2 text-sm leading-relaxed text-[var(--ink-muted)]">
-                                我们已经尝试打开浏览器完成 ChatGPT Codex 登录。如果浏览器没有自动打开，可以复制下面的地址，在浏览器中打开后继续登录。
+                                {tSettings('providers.loginDialog.codexAutoOpenDescription')}
                             </p>
                             <div className="mt-3 flex min-w-0 items-center gap-2 rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2">
                                 <p className="min-w-0 flex-1 truncate font-mono text-xs text-[var(--ink-muted)]">
-                                    {state.loginUrl ?? '正在等待 Codex 返回登录地址...'}
+                                    {state.loginUrl ?? tSettings('providers.loginDialog.waitingCodexUrl')}
                                 </p>
                                 <button
                                     type="button"
@@ -3294,15 +3301,15 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                     className="flex shrink-0 items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)] disabled:cursor-not-allowed disabled:opacity-50"
                                 >
                                     <Copy className="h-3.5 w-3.5" />
-                                    复制
+                                    {tSettings('providers.loginDialog.copy')}
                                 </button>
                             </div>
                         </section>
 
                         <section className="border-t border-[var(--line-subtle)] pt-5">
-                            <p className="text-sm font-medium text-[var(--ink)]">远程或无浏览器环境</p>
+                            <p className="text-sm font-medium text-[var(--ink)]">{tSettings('providers.loginDialog.remoteTitle')}</p>
                             <p className="mt-2 text-sm leading-relaxed text-[var(--ink-muted)]">
-                                如果当前机器没有可用浏览器，请在对应环境的终端中使用设备码登录：
+                                {tSettings('providers.loginDialog.codexRemoteDescription')}
                                 <code className="mx-1 rounded bg-[var(--paper-inset)] px-1.5 py-0.5 font-mono text-xs text-[var(--ink)]">
                                     codex login --device-auth
                                 </code>
@@ -3311,12 +3318,12 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
 
                         {state.status === 'succeeded' && (
                             <p className="rounded-lg bg-[var(--success-bg)] px-3 py-2 text-sm text-[var(--success)]">
-                                登录已完成，可以关闭此窗口。
+                                {tSettings('providers.loginDialog.completed')}
                             </p>
                         )}
                         {(state.status === 'cancelled' || state.status === 'error') && (
                             <p className="break-words rounded-lg bg-[var(--error-bg)] px-3 py-2 text-sm text-[var(--error)]">
-                                {state.error ?? '登录没有完成，可以重新发起登录。'}
+                                {state.error ?? tSettings('providers.loginDialog.notCompleted')}
                             </p>
                         )}
                     </div>
@@ -3327,7 +3334,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                             onClick={() => setManagedCodexLoginDialogOpen(false)}
                             className="rounded-lg border border-[var(--line)] px-4 py-2 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)]"
                         >
-                            关闭
+                            {tSettings('providers.loginDialog.close')}
                         </button>
                         {(state.status === 'cancelled' || state.status === 'error') && (
                             <button
@@ -3337,7 +3344,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                 className="flex items-center gap-1.5 rounded-lg bg-[var(--button-primary-bg)] px-4 py-2 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:cursor-wait disabled:opacity-60"
                             >
                                 {managedCodexBusy === 'login' && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-                                重新登录
+                                {tSettings('providers.loginDialog.retryLogin')}
                             </button>
                         )}
                     </div>
@@ -3352,12 +3359,12 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
         const isActiveLogin = state.status === 'starting' || state.status === 'waiting';
         const displayUrl = state.manualUrl ?? state.loginUrl ?? state.automaticUrl;
         const statusLabel = state.status === 'succeeded'
-            ? '已完成'
+            ? tSettings('providers.loginDialog.statusDone')
             : state.status === 'cancelled'
-                ? '已取消'
+                ? tSettings('providers.loginDialog.statusCancelled')
                 : state.status === 'error'
-                    ? '异常'
-                    : '等待登录';
+                    ? tSettings('providers.loginDialog.statusError')
+                    : tSettings('providers.loginDialog.statusWaiting');
         const statusClass = state.status === 'succeeded'
             ? 'bg-[var(--success-bg)] text-[var(--success)]'
             : state.status === 'cancelled' || state.status === 'error'
@@ -3370,13 +3377,13 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                     <div className="flex items-start justify-between gap-4 border-b border-[var(--line-subtle)] px-6 py-5">
                         <div className="min-w-0">
                             <div className="flex items-center gap-2">
-                                <h3 className="text-lg font-semibold text-[var(--ink)]">登录 Claude</h3>
+                                <h3 className="text-lg font-semibold text-[var(--ink)]">{tSettings('providers.loginDialog.claudeTitle')}</h3>
                                 <span className={`rounded px-1.5 py-0.5 text-xs font-medium ${statusClass}`}>
                                     {statusLabel}
                                 </span>
                             </div>
                             <p className="mt-1 text-sm text-[var(--ink-muted)]">
-                                登录信息会保存到 Claude Code 的本机 OAuth 凭证中。
+                                {tSettings('providers.loginDialog.claudeDescription')}
                             </p>
                         </div>
                         <button
@@ -3398,14 +3405,14 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                 ) : (
                                     <AlertCircle className="h-4 w-4 text-[var(--error)]" />
                                 )}
-                                <p className="text-sm font-medium text-[var(--ink)]">自动打开浏览器</p>
+                                <p className="text-sm font-medium text-[var(--ink)]">{tSettings('providers.loginDialog.autoOpenBrowser')}</p>
                             </div>
                             <p className="mt-2 text-sm leading-relaxed text-[var(--ink-muted)]">
-                                我们已经尝试打开浏览器完成 Claude 登录。如果浏览器没有自动打开，可以复制下面的地址，在浏览器中打开后继续登录。
+                                {tSettings('providers.loginDialog.claudeAutoOpenDescription')}
                             </p>
                             <div className="mt-3 flex min-w-0 items-center gap-2 rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2">
                                 <p className="min-w-0 flex-1 truncate font-mono text-xs text-[var(--ink-muted)]">
-                                    {displayUrl ?? '正在等待 AgentSDK 返回登录地址...'}
+                                    {displayUrl ?? tSettings('providers.loginDialog.waitingClaudeUrl')}
                                 </p>
                                 <button
                                     type="button"
@@ -3414,15 +3421,15 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                     className="flex shrink-0 items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)] disabled:cursor-not-allowed disabled:opacity-50"
                                 >
                                     <Copy className="h-3.5 w-3.5" />
-                                    复制
+                                    {tSettings('providers.loginDialog.copy')}
                                 </button>
                             </div>
                         </section>
 
                         <section className="border-t border-[var(--line-subtle)] pt-5">
-                            <p className="text-sm font-medium text-[var(--ink)]">远程或无浏览器环境</p>
+                            <p className="text-sm font-medium text-[var(--ink)]">{tSettings('providers.loginDialog.remoteTitle')}</p>
                             <p className="mt-2 text-sm leading-relaxed text-[var(--ink-muted)]">
-                                如果当前机器没有可用浏览器，请在对应环境的终端中登录：
+                                {tSettings('providers.loginDialog.claudeRemoteDescription')}
                                 <code className="mx-1 rounded bg-[var(--paper-inset)] px-1.5 py-0.5 font-mono text-xs text-[var(--ink)]">
                                     claude auth login
                                 </code>
@@ -3431,12 +3438,12 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
 
                         {state.status === 'succeeded' && (
                             <p className="rounded-lg bg-[var(--success-bg)] px-3 py-2 text-sm text-[var(--success)]">
-                                登录已完成，可以关闭此窗口。
+                                {tSettings('providers.loginDialog.completed')}
                             </p>
                         )}
                         {(state.status === 'cancelled' || state.status === 'error') && (
                             <p className="break-words rounded-lg bg-[var(--error-bg)] px-3 py-2 text-sm text-[var(--error)]">
-                                {state.error ?? '登录没有完成，可以重新发起登录。'}
+                                {state.error ?? tSettings('providers.loginDialog.notCompleted')}
                             </p>
                         )}
                     </div>
@@ -3447,7 +3454,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                             onClick={closeSubscriptionLoginDialog}
                             className="rounded-lg border border-[var(--line)] px-4 py-2 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)]"
                         >
-                            关闭
+                            {tSettings('providers.loginDialog.close')}
                         </button>
                         {(state.status === 'cancelled' || state.status === 'error') && (
                             <button
@@ -3457,7 +3464,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                 className="flex items-center gap-1.5 rounded-lg bg-[var(--button-primary-bg)] px-4 py-2 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:cursor-wait disabled:opacity-60"
                             >
                                 {subscriptionLoginBusy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-                                重新登录
+                                {tSettings('providers.loginDialog.retryLogin')}
                             </button>
                         )}
                     </div>
@@ -3495,7 +3502,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                     </div>
                 )}
                 {!isLoading && !verifyStatus && (
-                    <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-[var(--warning-bg)]" title="待验证">
+                    <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-[var(--warning-bg)]" title={tSettings('providers.verifyPending')}>
                         <AlertCircle className="h-4 w-4 text-[var(--warning)]" />
                     </div>
                 )}
@@ -3506,7 +3513,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                         onClick={() => verifyProvider(provider, apiKeys[provider.id])}
                         disabled={isLoading}
                         className="flex h-10 w-10 items-center justify-center rounded-lg text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] disabled:opacity-50"
-                        title="重新验证"
+                        title={tSettings('providers.reverify')}
                     >
                         <RefreshCw className={`h-4 w-4 ${isLoading ? 'animate-spin' : ''}`} />
                     </button>
@@ -3532,7 +3539,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                 onClick={navigateToProxySettings}
                                 className="mx-1 font-medium text-[var(--accent)] underline decoration-dotted underline-offset-2 transition-colors hover:text-[var(--accent-warm-hover)]"
                             >
-                                配置代理
+                                {tSettings('providers.verify.configureProxy')}
                             </button>
                             <span>。</span>
                         </>
@@ -3547,14 +3554,14 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                             )}
                             className="whitespace-nowrap text-[var(--ink-muted)] underline decoration-dotted transition-colors hover:text-[var(--ink)]"
                         >
-                            详情
+                            {tSettings('providers.verify.details')}
                         </button>
                         {errorDetailOpenId === provider.id && (
                             <div
                                 ref={errorDetailPopoverRef}
                                 className="absolute right-0 top-6 z-50 w-80 max-w-[90vw] rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] p-3 shadow-lg"
                             >
-                                <p className="mb-1 text-xs font-medium uppercase tracking-wider text-[var(--ink-muted)]">错误详情</p>
+                                <p className="mb-1 text-xs font-medium uppercase tracking-wider text-[var(--ink-muted)]">{tSettings('providers.verify.errorDetails')}</p>
                                 <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all font-mono text-xs text-[var(--ink-secondary)]">{errObj.detail}</pre>
                             </div>
                         )}
@@ -3634,27 +3641,27 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                             />
                         )}
                         <div className="mb-8 flex items-center justify-between">
-                            <h2 className="text-lg font-semibold text-[var(--ink)]">模型供应商</h2>
+                            <h2 className="text-lg font-semibold text-[var(--ink)]">{tSettings('providers.title')}</h2>
                             <div className="flex items-center gap-2">
                                 <button
                                     onClick={openProviderOrderDialog}
                                     className="flex items-center gap-1.5 rounded-lg border border-[var(--line)] px-3 py-1.5 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)]"
                                 >
                                     <SlidersHorizontal className="h-3.5 w-3.5" />
-                                    启用和排序
+                                    {tSettings('providers.enableAndSort')}
                                 </button>
                                 <button
                                     onClick={() => setShowCustomForm(true)}
                                     className="flex items-center gap-1.5 rounded-lg bg-[var(--button-primary-bg)] px-3 py-1.5 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)]"
                                 >
                                     <Plus className="h-3.5 w-3.5" />
-                                    添加供应商
+                                    {tSettings('providers.addProvider')}
                                 </button>
                             </div>
                         </div>
 
                         <p className="mb-6 text-sm text-[var(--ink-muted)]">
-                            配置 API 密钥以使用不同的模型供应商
+                            {tSettings('providers.description')}
                         </p>
 
                         {/* Provider list */}
@@ -3676,14 +3683,14 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                                 </span>
                                                 {provider.apiProtocol === 'openai' && (
                                                     <span className="shrink-0 rounded bg-[var(--paper-inset)] px-1.5 py-0.5 text-xs font-medium text-[var(--ink-muted)]">
-                                                        OpenAI 协议
+                                                        {tSettings('providers.openaiProtocol')}
                                                     </span>
                                                 )}
                                             </div>
                                             <p className="mt-1 truncate text-xs text-[var(--ink-muted)]">
                                                 {provider.models.length > 0
                                                     ? provider.models.map(m => m.modelName || m.model).join(', ')
-                                                    : '暂无模型'}
+                                                    : tSettings('providers.noModels')}
                                             </p>
                                         </div>
                                         <div className="flex shrink-0 items-center gap-1">
@@ -3692,13 +3699,13 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                                     href={provider.websiteUrl}
                                                     className="rounded-lg px-1.5 py-1.5 text-xs text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
                                                 >
-                                                    去官网
+                                                    {tSettings('providers.website')}
                                                 </ExternalLink>
                                             )}
                                             <button
                                                 onClick={() => openProviderManage(provider)}
                                                 className="rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
-                                                title="管理"
+                                                title={tSettings('providers.manage')}
                                             >
                                                 <Settings2 className="h-4 w-4" />
                                             </button>
@@ -3713,7 +3720,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                                     <KeyRound className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--ink-muted)]" />
                                                     <input
                                                         type="password"
-                                                        placeholder="输入 API Key"
+                                                        placeholder={tSettings('providers.apiKeyPlaceholder')}
                                                         value={apiKeys[provider.id] || ''}
                                                         onChange={(e) => handleSaveApiKey(provider, e.target.value)}
                                                         className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper)] py-2.5 pl-10 pr-4 text-sm text-[var(--ink)] placeholder-[var(--ink-muted)] transition-colors focus:border-[var(--focus-border)] focus:outline-none"
@@ -3733,8 +3740,8 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                             ))}
                             {visibleProviders.length === 0 && (
                                 <div className="col-span-2 rounded-xl border border-dashed border-[var(--line)] bg-[var(--paper-elevated)] p-8 text-center">
-                                    <p className="text-sm font-medium text-[var(--ink)]">没有已启用的供应商</p>
-                                    <p className="mt-1 text-xs text-[var(--ink-muted)]">打开“启用和排序”重新启用供应商。</p>
+                                    <p className="text-sm font-medium text-[var(--ink)]">{tSettings('providers.noEnabledTitle')}</p>
+                                    <p className="mt-1 text-xs text-[var(--ink-muted)]">{tSettings('providers.noEnabledDescription')}</p>
                                 </div>
                             )}
                         </div>
@@ -3930,23 +3937,23 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
 
                             {/* Startup Settings */}
                             <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
-                                <h3 className="text-base font-medium text-[var(--ink)]">启动设置</h3>
+                                <h3 className="text-base font-medium text-[var(--ink)]">{tSettings('general.startupTitle')}</h3>
 
                                 {/* Auto Start */}
                                 <div className="mt-4 flex items-center justify-between">
                                     <div className="flex-1 pr-4">
-                                        <p className="text-sm font-medium text-[var(--ink)]">开机启动</p>
+                                        <p className="text-sm font-medium text-[var(--ink)]">{tSettings('general.autostartTitle')}</p>
                                         <p className="text-xs text-[var(--ink-muted)]">
-                                            系统启动时自动运行 MyAgents
+                                            {tSettings('general.autostartDescription')}
                                         </p>
                                     </div>
                                     <button
                                         onClick={async () => {
                                             const success = await setAutostart(!autostartEnabled);
                                             if (success) {
-                                                toast.success(autostartEnabled ? '已关闭开机启动' : '已开启开机启动');
+                                                toast.success(autostartEnabled ? tSettings('general.autostartDisabled') : tSettings('general.autostartEnabled'));
                                             } else {
-                                                toast.error('设置失败，请重试');
+                                                toast.error(tSettings('general.saveFailedRetry'));
                                             }
                                         }}
                                         disabled={autostartLoading}
@@ -3969,15 +3976,15 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                 {/* Minimize to Tray */}
                                 <div className="mt-4 flex items-center justify-between">
                                     <div className="flex-1 pr-4">
-                                        <p className="text-sm font-medium text-[var(--ink)]">最小化到托盘</p>
+                                        <p className="text-sm font-medium text-[var(--ink)]">{tSettings('general.minimizeToTrayTitle')}</p>
                                         <p className="text-xs text-[var(--ink-muted)]">
-                                            关闭窗口时最小化到系统托盘而非退出应用
+                                            {tSettings('general.minimizeToTrayDescription')}
                                         </p>
                                     </div>
                                     <button
                                         onClick={() => {
                                             updateConfig({ minimizeToTray: !config.minimizeToTray });
-                                            toast.success(config.minimizeToTray ? '已关闭最小化到托盘' : '已开启最小化到托盘');
+                                            toast.success(config.minimizeToTray ? tSettings('general.minimizeToTrayDisabled') : tSettings('general.minimizeToTrayEnabled'));
                                         }}
                                         className={`relative h-6 w-11 shrink-0 cursor-pointer rounded-full transition-colors ${
                                             config.minimizeToTray
@@ -4001,16 +4008,16 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                     cmd_set_force_wake_lock,本组件保持和 minimizeToTray 同构。 */}
                                 <div className="mt-4 flex items-center justify-between">
                                     <div className="flex-1 pr-4">
-                                        <p className="text-sm font-medium text-[var(--ink)]">始终阻止电脑睡眠</p>
+                                        <p className="text-sm font-medium text-[var(--ink)]">{tSettings('general.forceWakeTitle')}</p>
                                         <p className="text-xs text-[var(--ink-muted)]">
-                                            开启后即使 AI 没有在运行,电脑也不会自动睡眠。注意:合上盖子仍会睡眠,且会更快消耗电池。
+                                            {tSettings('general.forceWakeDescription')}
                                         </p>
                                     </div>
                                     <button
                                         onClick={() => {
                                             const next = !config.forceWakeLock;
                                             updateConfig({ forceWakeLock: next });
-                                            toast.success(next ? '已开启常开阻睡' : '已关闭常开阻睡');
+                                            toast.success(next ? tSettings('general.forceWakeEnabled') : tSettings('general.forceWakeDisabled'));
                                         }}
                                         className={`relative h-6 w-11 shrink-0 cursor-pointer rounded-full transition-colors ${
                                             config.forceWakeLock
@@ -4029,13 +4036,13 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                 {/* Default Workspace */}
                                 <div className="mt-4 flex items-center justify-between">
                                     <div className="flex-1 pr-4">
-                                        <p className="text-sm font-medium text-[var(--ink)]">启动时打开的工作区</p>
-                                        <p className="text-xs text-[var(--ink-muted)]">启动页默认使用的工作区路径</p>
+                                        <p className="text-sm font-medium text-[var(--ink)]">{tSettings('general.defaultWorkspaceTitle')}</p>
+                                        <p className="text-xs text-[var(--ink-muted)]">{tSettings('general.defaultWorkspaceDescription')}</p>
                                     </div>
                                     <CustomSelect
                                         value={config.defaultWorkspacePath ?? ''}
                                         options={[
-                                            { value: '', label: '无' },
+                                            { value: '', label: tSettings('general.defaultWorkspaceNone') },
                                             ...projects.map(p => ({
                                                 value: p.path,
                                                 label: shortenPathForDisplay(p.path),
@@ -4047,25 +4054,25 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                                 await updateConfig({ defaultWorkspacePath: undefined });
                                             } else {
                                                 await updateConfig({ defaultWorkspacePath: val });
-                                                toast.success('已设置默认工作区');
+                                                toast.success(tSettings('general.defaultWorkspaceSaved'));
                                             }
                                         }}
-                                        placeholder="无"
+                                        placeholder={tSettings('general.defaultWorkspaceNone')}
                                         triggerIcon={<FolderOpen className="h-3.5 w-3.5" />}
                                         className="w-[240px]"
                                         footerAction={{
-                                            label: '选择文件夹...',
+                                            label: tSettings('general.defaultWorkspaceBrowse'),
                                             icon: <Plus className="h-3.5 w-3.5" />,
                                             onClick: async () => {
                                                 try {
                                                     const { open } = await import('@tauri-apps/plugin-dialog');
-                                                    const selected = await open({ directory: true, multiple: false, title: '选择默认工作区' });
+                                                    const selected = await open({ directory: true, multiple: false, title: tSettings('general.defaultWorkspacePickTitle') });
                                                     if (selected && typeof selected === 'string') {
                                                         if (!projects.find(p => workspacePathsEqual(p.path, selected))) {
                                                             await addProject(selected);
                                                         }
                                                         await updateConfig({ defaultWorkspacePath: selected });
-                                                        toast.success('已设置默认工作区');
+                                                        toast.success(tSettings('general.defaultWorkspaceSaved'));
                                                     }
                                                 } catch (err) {
                                                     console.error('[Settings] Browse folder failed:', err);
@@ -4075,12 +4082,12 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                     />
                                 </div>
 
-                                {/* 主题 */}
-                                <div className="mt-6 flex items-center justify-between">
-                                    <div>
-                                        <p className="text-sm font-medium text-[var(--ink)]">主题</p>
-                                        <p className="mt-0.5 text-xs text-[var(--ink-muted)]">设置应用外观模式</p>
-                                    </div>
+                            {/* 主题 */}
+                            <div className="mt-6 flex items-center justify-between">
+                                <div>
+                                    <p className="text-sm font-medium text-[var(--ink)]">{tSettings('general.themeTitle')}</p>
+                                    <p className="mt-0.5 text-xs text-[var(--ink-muted)]">{tSettings('general.themeDescription')}</p>
+                                </div>
                                     <div className="flex gap-0.5 rounded-full bg-[var(--paper-inset)] p-0.5">
                                         {(['system', 'light', 'dark'] as const).map((mode) => (
                                             <button
@@ -4092,7 +4099,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                                         : 'text-[var(--ink-muted)] hover:text-[var(--ink-secondary)]'
                                                 }`}
                                             >
-                                                {mode === 'system' ? '跟随系统' : mode === 'light' ? '日间模式' : '夜间模式'}
+                                                {tSettings(`general.theme.${mode}`)}
                                             </button>
                                         ))}
                                     </div>
@@ -4101,20 +4108,20 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
 
                             {/* Chat Queue Response Mode */}
                             <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
-                                <h3 className="text-base font-medium text-[var(--ink)]">连续发送消息</h3>
+                                <h3 className="text-base font-medium text-[var(--ink)]">{tSettings('general.queueTitle')}</h3>
                                 <div className="mt-4 flex items-center justify-between gap-4">
                                     <div className="flex-1">
-                                        <p className="text-sm font-medium text-[var(--ink)]">队列响应模式</p>
+                                        <p className="text-sm font-medium text-[var(--ink)]">{tSettings('general.queueModeTitle')}</p>
                                         <p className="text-xs text-[var(--ink-muted)]">
                                             {normalizeChatQueueResponseMode(config.chatQueueResponseMode) === 'turn'
-                                                ? '仅在 AI 完成一个执行轮次后，自动发送下一条消息'
-                                                : 'AI 执行过程中会阅读消息，自主判断响应时机'}
+                                                ? tSettings('general.queueTurnDescription')
+                                                : tSettings('general.queueRealtimeDescription')}
                                         </p>
                                     </div>
                                     <div className="flex shrink-0 gap-0.5 rounded-full bg-[var(--paper-inset)] p-0.5">
                                         {([
-                                            { value: 'realtime', label: '实时响应' },
-                                            { value: 'turn', label: '轮次响应' },
+                                            { value: 'realtime', label: tSettings('general.queueRealtime') },
+                                            { value: 'turn', label: tSettings('general.queueTurn') },
                                         ] as const satisfies ReadonlyArray<{ value: ChatQueueResponseMode; label: string }>).map((opt) => {
                                             const active = normalizeChatQueueResponseMode(config.chatQueueResponseMode) === opt.value;
                                             return (
@@ -4137,20 +4144,20 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
 
                             {/* Notification Settings */}
                             <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
-                                <h3 className="text-base font-medium text-[var(--ink)]">任务消息通知</h3>
+                                <h3 className="text-base font-medium text-[var(--ink)]">{tSettings('general.notificationTitle')}</h3>
 
                                 {/* Task Notifications */}
                                 <div className="mt-4 flex items-center justify-between">
                                     <div className="flex-1 pr-4">
-                                        <p className="text-sm font-medium text-[var(--ink)]">启用通知</p>
+                                        <p className="text-sm font-medium text-[var(--ink)]">{tSettings('general.notificationEnableTitle')}</p>
                                         <p className="text-xs text-[var(--ink-muted)]">
-                                            AI 完成任务或需要用户确认时通知提醒
+                                            {tSettings('general.notificationEnableDescription')}
                                         </p>
                                     </div>
                                     <button
                                         onClick={() => {
                                             updateConfig({ osNotifications: !config.osNotifications });
-                                            toast.success(config.osNotifications ? '已关闭通知' : '已开启通知');
+                                            toast.success(config.osNotifications ? tSettings('general.notificationDisabled') : tSettings('general.notificationEnabled'));
                                         }}
                                         className={`relative h-6 w-11 shrink-0 cursor-pointer rounded-full transition-colors ${
                                             config.osNotifications
@@ -4172,15 +4179,15 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                 {config.osNotifications && (
                                     <div className="mt-4 flex items-center justify-between">
                                         <div className="flex-1 pr-4">
-                                            <p className="text-sm font-medium text-[var(--ink)]">通知提醒声音</p>
+                                            <p className="text-sm font-medium text-[var(--ink)]">{tSettings('general.notificationSoundTitle')}</p>
                                             <p className="text-xs text-[var(--ink-muted)]">
-                                                系统通知弹出时播放声音
+                                                {tSettings('general.notificationSoundDescription')}
                                             </p>
                                         </div>
                                         <button
                                             onClick={() => {
                                                 updateConfig({ notificationSound: !config.notificationSound });
-                                                toast.success(config.notificationSound ? '已关闭通知声音' : '已开启通知声音');
+                                                toast.success(config.notificationSound ? tSettings('general.notificationSoundDisabled') : tSettings('general.notificationSoundEnabled'));
                                             }}
                                             className={`relative h-6 w-11 shrink-0 cursor-pointer rounded-full transition-colors ${
                                                 config.notificationSound
@@ -4207,17 +4214,17 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                         : 'border-[var(--line)]'
                                 }`}
                             >
-                                <h3 className="text-base font-medium text-[var(--ink)]">网络代理</h3>
+                                <h3 className="text-base font-medium text-[var(--ink)]">{tSettings('general.proxyTitle')}</h3>
                                 <p className="mt-1 text-xs text-[var(--ink-muted)]">
-                                    配置 HTTP/SOCKS5 代理，用于外部 API 请求（如 Clash、V2Ray 等）
+                                    {tSettings('general.proxyDescription')}
                                 </p>
 
                                 {/* Enable toggle */}
                                 <div className="mt-4 flex items-center justify-between">
                                     <div className="flex-1 pr-4">
-                                        <p className="text-sm font-medium text-[var(--ink)]">启用代理</p>
+                                        <p className="text-sm font-medium text-[var(--ink)]">{tSettings('general.proxyEnableTitle')}</p>
                                         <p className="text-xs text-[var(--ink-muted)]">
-                                            开启后所有 API 请求将通过代理服务器转发
+                                            {tSettings('general.proxyEnableDescription')}
                                         </p>
                                     </div>
                                     <button
@@ -4246,7 +4253,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                     <div className="mt-4 space-y-3 border-t border-[var(--line)] pt-4">
                                         {/* Protocol */}
                                         <div className="flex items-center gap-3">
-                                            <label className="w-16 text-xs text-[var(--ink-muted)]">协议</label>
+                                            <label className="w-16 text-xs text-[var(--ink-muted)]">{tSettings('general.proxyProtocol')}</label>
                                             <CustomSelect
                                                 value={config.proxySettings?.protocol || PROXY_DEFAULTS.protocol}
                                                 options={[
@@ -4262,7 +4269,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
 
                                         {/* Host */}
                                         <div className="flex items-center gap-3">
-                                            <label className="w-16 text-xs text-[var(--ink-muted)]">服务器</label>
+                                            <label className="w-16 text-xs text-[var(--ink-muted)]">{tSettings('general.proxyServer')}</label>
                                             <input
                                                 type="text"
                                                 value={proxyHostDraft}
@@ -4276,7 +4283,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
 
                                         {/* Port */}
                                         <div className="flex items-center gap-3">
-                                            <label className="w-16 text-xs text-[var(--ink-muted)]">端口</label>
+                                            <label className="w-16 text-xs text-[var(--ink-muted)]">{tSettings('general.proxyPort')}</label>
                                             <input
                                                 type="text"
                                                 inputMode="numeric"
@@ -4295,7 +4302,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
 
                                         {/* Preview */}
                                         <div className="mt-2 rounded-lg bg-[var(--paper-inset)] px-3 py-2">
-                                            <span className="text-xs text-[var(--ink-muted)]">代理地址: </span>
+                                            <span className="text-xs text-[var(--ink-muted)]">{tSettings('general.proxyAddress')}</span>
                                             <code className="text-xs font-mono text-[var(--ink)]">
                                                 {config.proxySettings?.protocol || PROXY_DEFAULTS.protocol}://{proxyHostDraft || PROXY_DEFAULTS.host}:{proxyPortDraft || PROXY_DEFAULTS.port}
                                             </code>
@@ -4321,14 +4328,14 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                                 )}
                                                 <span className="min-w-0 break-words">
                                                     {proxyProbeState.status === 'checking'
-                                                        ? '正在检测代理连通性...'
+                                                        ? tSettings('general.proxyChecking')
                                                         : proxyProbeState.message}
                                                 </span>
                                             </div>
                                         )}
 
                                         <p className="text-xs text-[var(--ink-faint)]">
-                                            修改后会自动应用到运行中的会话
+                                            {tSettings('general.proxyAppliedHint')}
                                         </p>
                                     </div>
                                 )}
@@ -4338,9 +4345,9 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                             <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
                                 <div className="flex items-center justify-between">
                                     <div>
-                                        <h3 className="text-base font-medium text-[var(--ink)]">运行日志</h3>
+                                        <h3 className="text-base font-medium text-[var(--ink)]">{tSettings('general.logsTitle')}</h3>
                                         <p className="mt-1 text-xs text-[var(--ink-muted)]">
-                                            支持导出近 3 天运行日志排查问题
+                                            {tSettings('general.logsDescription')}
                                         </p>
                                     </div>
                                     <button
@@ -4350,12 +4357,12 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                             try {
                                                 const result = await apiGetJson<{ success: boolean; path?: string; error?: string }>('/api/logs/export');
                                                 if (result.success && result.path) {
-                                                    toast.success(`已导出至 ${result.path}`);
+                                                    toast.success(tSettings('general.logsExported', { path: result.path }));
                                                 } else {
-                                                    toast.error(result.error || '导出失败');
+                                                    toast.error(result.error || tSettings('general.logsExportFailed'));
                                                 }
                                             } catch {
-                                                toast.error('导出失败，请重试');
+                                                toast.error(tSettings('general.logsExportFailedRetry'));
                                             } finally {
                                                 setLogExporting(false);
                                             }
@@ -4366,12 +4373,12 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                         {logExporting ? (
                                             <>
                                                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                                                导出中...
+                                                {tSettings('general.logsExporting')}
                                             </>
                                         ) : (
                                             <>
                                                 <Download className="h-3.5 w-3.5" />
-                                                导出
+                                                {tSettings('general.logsExport')}
                                             </>
                                         )}
                                     </button>
@@ -4401,16 +4408,16 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                                 type="button"
                                                 onClick={async () => {
                                                     if (!onCheckForUpdate) {
-                                                        toast.error('此功能仅在桌面应用中可用');
+                                                        toast.error(tSettings('about.desktopOnly'));
                                                         return;
                                                     }
                                                     const result = await onCheckForUpdate();
                                                     if (result === 'up-to-date') {
-                                                        toast.info('当前已是最新版本');
+                                                        toast.info(tSettings('about.upToDate'));
                                                     } else if (result === 'downloading') {
-                                                        toast.info('发现新版本，正在下载...');
+                                                        toast.info(tSettings('about.foundDownloading'));
                                                     } else if (result === 'error') {
-                                                        toast.error('检查更新失败，请稍后重试');
+                                                        toast.error(tSettings('about.checkFailed'));
                                                     }
                                                 }}
                                                 disabled={updateChecking}
@@ -4419,16 +4426,16 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                                 {updateChecking ? (
                                                     <span className="flex items-center gap-1">
                                                         <Loader2 className="h-3 w-3 animate-spin" />
-                                                        检查中...
+                                                        {tSettings('about.checking')}
                                                     </span>
-                                                ) : '检查更新'}
+                                                ) : tSettings('about.checkUpdates')}
                                             </button>
                                         )}
                                         <ExternalLink
                                             href={MYAGENTS_RELEASES_URL}
                                             className="rounded-lg bg-[var(--paper-inset)] px-2 py-0.5 text-xs text-[var(--ink-secondary)] transition-colors hover:bg-[var(--paper-elevated)]"
                                         >
-                                            更新记录
+                                            {tSettings('about.releaseNotes')}
                                         </ExternalLink>
                                     </div>
                                     <p className="mt-3 text-base text-[var(--ink-secondary)]">
@@ -4439,8 +4446,10 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                             <div className="flex items-center gap-2 text-sm text-[var(--ink-secondary)]">
                                                 <Loader2 className="h-4 w-4 animate-spin text-[var(--accent)]" />
                                                 <span>
-                                                    发现新版本 v{propUpdateVersion}，正在下载
-                                                    {downloadProgress != null ? `… ${downloadProgress}%` : '…'}
+                                                    {tSettings('about.downloadingVersion', {
+                                                        version: propUpdateVersion,
+                                                        progress: downloadProgress != null ? `... ${downloadProgress}%` : '...',
+                                                    })}
                                                 </span>
                                             </div>
                                             {downloadProgress != null && (
@@ -4458,14 +4467,16 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                         are mid-replacement, click would hit inconsistent state. */}
                                     {propUpdateReady && propUpdateVersion && !updatePreparing && (
                                         <div className="mt-3 flex items-center gap-2">
-                                            <span className="text-sm text-[var(--success)]">发现新版本 v{propUpdateVersion}</span>
+                                            <span className="text-sm text-[var(--success)]">
+                                                {tSettings('about.updateReady', { version: propUpdateVersion })}
+                                            </span>
                                             <button
                                                 type="button"
                                                 onClick={updateInstalling ? undefined : onRestartAndUpdate}
                                                 disabled={updateInstalling}
                                                 className="rounded-lg bg-[var(--success)] px-3 py-1.5 text-xs font-medium text-white transition-colors hover:opacity-90 disabled:opacity-80 disabled:cursor-wait"
                                             >
-                                                {updateInstalling ? '安装中…' : '重启安装'}
+                                                {updateInstalling ? tSettings('about.installing') : tSettings('about.restartInstall')}
                                             </button>
                                         </div>
                                     )}
@@ -4474,32 +4485,32 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
 
                             {/* Product Description — Developer Letter */}
                             <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] px-7 py-6">
-                                <p className="text-xs font-medium uppercase tracking-widest text-[var(--ink-muted)]/50">From the Developer</p>
+                                <p className="text-xs font-medium uppercase tracking-widest text-[var(--ink-muted)]/50">{tSettings('about.developerLabel')}</p>
                                 <div className="mt-4 space-y-5 text-sm leading-[1.9] text-[var(--ink-secondary)]">
                                     <p>
-                                        <span className="font-semibold text-[var(--ink)]">MyAgents</span> 是一款住在你电脑里的 AI Agent 桌面客户端，你的个人 AI 中心。基于 Claude Agent SDK 运行，同时支持接入各家大模型与快速切换。所有操作都在本地完成，数据始终留在你的电脑里。
+                                        {tSettings('about.developerParagraph1')}
                                     </p>
                                     <p>
-                                        Claude Code 让开发者率先体会到了 AI 加持下的无限生产力，OpenClaw 又让普通人看到了像伙伴一样的主动型 Agent 助手的雏形。而 MyAgents 要做的，是让本地 Agent 成为完全体——当你在电脑前，它能触达你的文件、项目与一切工具，与你精细化地协同工作，完成高质量的产出；当你不在电脑前，它也能像你的分身，7×24 小时感知世界，按照你的意图持续行动。
+                                        {tSettings('about.developerParagraph2')}
                                     </p>
                                     <p>
-                                        不同于每次对话都要重新自我介绍的 AI 工具，MyAgents 里的 Agent 与你的生活、工作深度同步，是一个越来越懂你的搭档。我们希望它成为每个人意图的超级放大器——
+                                        {tSettings('about.developerParagraph3')}
                                     </p>
                                     <p className="text-center text-base font-medium italic tracking-wide text-[var(--ink)]">
-                                        你有一个想法，And it&apos;s done.
+                                        {tSettings('about.developerQuote')}
                                     </p>
                                 </div>
                             </div>
 
                             {/* 实验室 */}
                             <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
-                                <h3 className="text-base font-medium text-[var(--ink)]">实验室</h3>
+                                <h3 className="text-base font-medium text-[var(--ink)]">{tSettings('about.labTitle')}</h3>
 
                                 <div className="mt-4 flex items-center justify-between">
                                     <div className="flex-1 pr-4">
-                                        <p className="text-sm font-medium text-[var(--ink)]">更多 Agent Runtime</p>
+                                        <p className="text-sm font-medium text-[var(--ink)]">{tSettings('about.runtimeTitle')}</p>
                                         <p className="text-xs text-[var(--ink-muted)]">
-                                            启用后可在输入框和Agent设置中选择外部 Runtime 例如 Claude Code CLI、Codex CLI。若关闭，则恢复使用内置 Runtime。
+                                            {tSettings('about.runtimeDescription')}
                                         </p>
                                     </div>
                                     <button
@@ -4516,9 +4527,9 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
 
                                 <div className="mt-4 flex items-center justify-between border-t border-[var(--line)] pt-4">
                                     <div className="flex-1 pr-4">
-                                        <p className="text-sm font-medium text-[var(--ink)]">CLI 工具注册表</p>
+                                        <p className="text-sm font-medium text-[var(--ink)]">{tSettings('about.cliRegistryTitle')}</p>
                                         <p className="text-xs text-[var(--ink-muted)]">
-                                            允许 AI 创建并注册命令行小工具，并在工具箱中管理；开启后新会话可自动发现已启用工具。MCP 与 myagents 内置 CLI 能力不受影响。
+                                            {tSettings('about.cliRegistryDescription')}
                                         </p>
                                     </div>
                                     <button
@@ -4536,9 +4547,9 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                 {/* Floating Ball Dev Gate (PRD 0.2.35 — 先开发不发布，D10) */}
                                 <div className="mt-4 flex items-center justify-between border-t border-[var(--line)] pt-4">
                                     <div className="flex-1 pr-4">
-                                        <p className="text-sm font-medium text-[var(--ink)]">桌面宠物</p>
+                                        <p className="text-sm font-medium text-[var(--ink)]">{tSettings('about.desktopPetTitle')}</p>
                                         <p className="text-xs text-[var(--ink-muted)]">
-                                            Mino 的桌面宠物：屏幕边缘常驻悬浮球，hover 瞥一眼、点击即问，发完就走由球替你跑。开启后可在设置页管理桌面宠物。
+                                            {tSettings('about.desktopPetDescription')}
                                         </p>
                                     </div>
                                     <button
@@ -4560,16 +4571,16 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                             <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
                                 <div className="flex items-center justify-between">
                                     <div>
-                                        <h3 className="text-base font-medium text-[var(--ink)]">AI 小助理</h3>
+                                        <h3 className="text-base font-medium text-[var(--ink)]">{tSettings('about.helperTitle')}</h3>
                                         <p className="mt-1 text-xs text-[var(--ink-muted)]">
-                                            AI 小助理将分析本地日志进行功能答疑、上报问题或建议
+                                            {tSettings('about.helperDescription')}
                                         </p>
                                     </div>
                                     <button
                                         onClick={() => setShowBugReport(true)}
                                         className="rounded-lg bg-[var(--paper-inset)] px-3 py-1.5 text-xs font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-elevated)]"
                                     >
-                                        反馈问题
+                                        {tSettings('about.feedback')}
                                     </button>
                                 </div>
                             </div>
@@ -4578,8 +4589,8 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                             {(qrCodeLoading || qrCodeDataUrl) && (
                                 <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
                                     <div className="flex flex-col items-center text-center">
-                                        <p className="text-sm font-medium text-[var(--ink)]">加入用户交流群</p>
-                                        <p className="mt-1 text-xs text-[var(--ink-muted)]">扫码加入，与其他用户交流使用心得</p>
+                                        <p className="text-sm font-medium text-[var(--ink)]">{tSettings('about.communityTitle')}</p>
+                                        <p className="mt-1 text-xs text-[var(--ink-muted)]">{tSettings('about.communityDescription')}</p>
                                         {qrCodeLoading ? (
                                             <div className="mt-4 h-36 w-36 flex items-center justify-center">
                                                 <Loader2 className="h-8 w-8 animate-spin text-[var(--ink-muted)]" />
@@ -4587,7 +4598,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                         ) : (
                                             <img
                                                 src={qrCodeDataUrl!}
-                                                alt="用户交流群二维码"
+                                                alt={tSettings('about.communityQrAlt')}
                                                 className="mt-4 h-36 w-36 rounded-lg"
                                             />
                                         )}
@@ -4640,7 +4651,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                             {/* Developer Section - Hidden by default, unlocked by tapping logo 5 times */}
                             {devSectionVisible && (
                                 <div>
-                                    <h2 className="mb-4 text-base font-medium text-[var(--ink-muted)]">开发者</h2>
+                                    <h2 className="mb-4 text-base font-medium text-[var(--ink-muted)]">{tSettings('about.developerSection')}</h2>
                                     <div className="space-y-4">
                                         {/* Developer Mode Toggle */}
                                         <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
@@ -6615,7 +6626,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                     <div className="mx-4 w-full max-w-md flex max-h-[90vh] flex-col rounded-2xl bg-[var(--paper-elevated)] shadow-xl">
                         <div className="flex-shrink-0 px-6 pt-6 pb-4">
                             <div className="flex items-center justify-between">
-                                <h3 className="text-lg font-semibold text-[var(--ink)]">添加自定义供应商</h3>
+                                <h3 className="text-lg font-semibold text-[var(--ink)]">{tSettings('providers.custom.addTitle')}</h3>
                                 <button
                                     onClick={() => {
                                         setShowCustomForm(false);
@@ -6631,33 +6642,33 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                         <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-6 pb-4">
                             <div>
                                 <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">
-                                    供应商名称 <span className="text-[var(--error)]">*</span>
+                                    {tSettings('providers.custom.providerName')} <span className="text-[var(--error)]">*</span>
                                 </label>
                                 <input
                                     type="text"
                                     value={customForm.name}
                                     onChange={(e) => setCustomForm((p) => ({ ...p, name: e.target.value }))}
-                                    placeholder="例如: My Custom Provider"
+                                    placeholder={tSettings('providers.custom.providerNamePlaceholder')}
                                     className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2.5 text-sm transition-colors focus:border-[var(--focus-border)] focus:outline-none"
                                 />
                             </div>
 
                             <div>
-                                <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">服务商标签</label>
+                                <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">{tSettings('providers.custom.cloudProvider')}</label>
                                 <input
                                     type="text"
                                     value={customForm.cloudProvider}
                                     onChange={(e) => setCustomForm((p) => ({ ...p, cloudProvider: e.target.value }))}
-                                    placeholder="例如: 云服务商"
+                                    placeholder={tSettings('providers.custom.cloudProviderPlaceholder')}
                                     className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2.5 text-sm transition-colors focus:border-[var(--focus-border)] focus:outline-none"
                                 />
                             </div>
 
                             <div>
-                                <label className="mb-0.5 block text-sm font-medium text-[var(--ink)]">API 协议</label>
+                                <label className="mb-0.5 block text-sm font-medium text-[var(--ink)]">{tSettings('providers.custom.apiProtocol')}</label>
                                 {customForm.apiProtocol === 'openai' && (
                                     <p className="mb-1.5 text-xs text-[var(--ink-muted)]">
-                                        通过内置桥接自动转换为 Anthropic 协议，存在稳定性风险
+                                        {tSettings('providers.custom.bridgeWarning')}
                                     </p>
                                 )}
                                 <div className={`flex gap-4${customForm.apiProtocol !== 'openai' ? ' mt-1' : ''}`}>
@@ -6670,7 +6681,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                             onChange={() => setCustomForm((p) => ({ ...p, apiProtocol: 'anthropic', authType: 'auth_token' }))}
                                             className="accent-[var(--ink)]"
                                         />
-                                        <span className="text-sm text-[var(--ink)]">Anthropic 协议</span>
+                                        <span className="text-sm text-[var(--ink)]">{tSettings('providers.custom.anthropicProtocol')}</span>
                                     </label>
                                     <label className="flex items-center gap-2 cursor-pointer">
                                         <input
@@ -6681,14 +6692,14 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                             onChange={() => setCustomForm((p) => ({ ...p, apiProtocol: 'openai', authType: 'api_key' }))}
                                             className="accent-[var(--ink)]"
                                         />
-                                        <span className="text-sm text-[var(--ink)]">OpenAI 协议</span>
+                                        <span className="text-sm text-[var(--ink)]">{tSettings('providers.custom.openaiProtocol')}</span>
                                     </label>
                                 </div>
                             </div>
 
                             <div>
                                 <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">
-                                    API Base URL <span className="text-[var(--error)]">*</span>
+                                    {tSettings('providers.custom.baseUrl')} <span className="text-[var(--error)]">*</span>
                                 </label>
                                 <input
                                     type="url"
@@ -6702,7 +6713,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                             {customForm.apiProtocol === 'openai' && (
                                 <>
                                     <div>
-                                        <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">接口格式</label>
+                                        <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">{tSettings('providers.custom.upstreamFormat')}</label>
                                         <div className="flex gap-4">
                                             <label className="flex items-center gap-2 cursor-pointer">
                                                 <input
@@ -6729,7 +6740,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                         </div>
                                     </div>
                                     <div>
-                                        <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">最大输出 Token</label>
+                                        <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">{tSettings('providers.custom.maxOutputTokens')}</label>
                                         <div className="flex gap-2 items-center">
                                             <CustomSelect
                                                 value={customForm.maxOutputTokensParamName}
@@ -6745,7 +6756,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                                 type="number"
                                                 value={customForm.maxOutputTokens}
                                                 onChange={(e) => setCustomForm((p) => ({ ...p, maxOutputTokens: e.target.value }))}
-                                                placeholder="留空则不限制"
+                                                placeholder={tSettings('providers.custom.unlimitedPlaceholder')}
                                                 className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2.5 text-sm transition-colors focus:border-[var(--focus-border)] focus:outline-none"
                                             />
                                         </div>
@@ -6756,9 +6767,9 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                             {/* Auth Type - only meaningful for Anthropic protocol (controls x-api-key vs Authorization header) */}
                             {customForm.apiProtocol !== 'openai' && (
                                 <div>
-                                    <label className="mb-0.5 block text-sm font-medium text-[var(--ink)]">认证方式</label>
+                                    <label className="mb-0.5 block text-sm font-medium text-[var(--ink)]">{tSettings('providers.custom.authType')}</label>
                                     <p className="mb-1.5 text-xs text-[var(--ink-muted)]">
-                                        请根据供应商认证参数进行选择
+                                        {tSettings('providers.custom.authTypeDescription')}
                                     </p>
                                     <div className="flex gap-4">
                                         <label className="flex items-center gap-2 cursor-pointer">
@@ -6790,7 +6801,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                             {/* Models — inline input, no dependency on provider creation */}
                             <div>
                                 <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">
-                                    模型 <span className="text-[var(--error)]">*</span>
+                                    {tSettings('providers.custom.models')} <span className="text-[var(--error)]">*</span>
                                 </label>
                                 {customForm.models.length > 0 && (
                                     <div className="mb-2 flex flex-wrap gap-1.5">
@@ -6815,7 +6826,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                     <input
                                         ref={customModelInputRef}
                                         type="text"
-                                        placeholder="输入模型 ID，回车添加"
+                                        placeholder={tSettings('providers.custom.modelInputPlaceholder')}
                                         className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2.5 text-sm transition-colors placeholder:text-[var(--ink-muted)] focus:border-[var(--focus-border)] focus:outline-none"
                                         onKeyDown={(e) => {
                                             if (e.key === 'Enter') {
@@ -6846,14 +6857,14 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                     }}
                                     className="flex-1 rounded-lg border border-[var(--line)] px-4 py-2.5 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)]"
                                 >
-                                    取消
+                                    {tSettings('providers.custom.cancel')}
                                 </button>
                                 <button
                                     onClick={handleAddCustomProvider}
                                     disabled={!customForm.name || !customForm.baseUrl || customForm.models.length === 0}
                                     className="flex-1 rounded-lg bg-[var(--button-primary-bg)] px-4 py-2.5 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:opacity-50"
                                 >
-                                    添加
+                                    {tSettings('providers.custom.add')}
                                 </button>
                             </div>
                         </div>
@@ -6868,7 +6879,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                         <div className="flex-shrink-0 px-6 pt-6 pb-4">
                             <div className="flex items-center justify-between">
                                 <h3 className="text-lg font-semibold text-[var(--ink)]">
-                                    {editingProvider.provider.isBuiltin ? '管理供应商' : '编辑供应商'}
+                                    {editingProvider.provider.isBuiltin ? tSettings('providers.custom.manageTitle') : tSettings('providers.custom.editTitle')}
                                 </h3>
                                 <button
                                     onClick={() => setEditingProvider(null)}
@@ -6882,7 +6893,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                         <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-6 pb-6">
                             {/* Provider info - editable for custom, read-only for preset */}
                             <div>
-                                <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">供应商名称</label>
+                                <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">{tSettings('providers.custom.providerName')}</label>
                                 {editingProvider.provider.isBuiltin ? (
                                     <div className="rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2.5 text-sm text-[var(--ink-muted)]">
                                         {editingProvider.provider.name}
@@ -6892,7 +6903,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                         type="text"
                                         value={editingProvider.editName || ''}
                                         onChange={(e) => setEditingProvider((p) => p ? { ...p, editName: e.target.value } : null)}
-                                        placeholder="输入供应商名称"
+                                        placeholder={tSettings('providers.custom.providerNameEditPlaceholder')}
                                         className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2.5 text-sm transition-colors focus:border-[var(--focus-border)] focus:outline-none"
                                     />
                                 )}
@@ -6901,12 +6912,12 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                             {/* 云服务商标签 - only for custom providers */}
                             {!editingProvider.provider.isBuiltin && (
                                 <div>
-                                    <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">云服务商标签</label>
+                                    <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">{tSettings('providers.custom.cloudProvider')}</label>
                                     <input
                                         type="text"
                                         value={editingProvider.editCloudProvider || ''}
                                         onChange={(e) => setEditingProvider((p) => p ? { ...p, editCloudProvider: e.target.value } : null)}
-                                        placeholder="例如：自定义、代理"
+                                        placeholder={tSettings('providers.custom.cloudProviderEditPlaceholder')}
                                         className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2.5 text-sm transition-colors focus:border-[var(--focus-border)] focus:outline-none"
                                     />
                                 </div>
@@ -6915,10 +6926,10 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                             {/* API Protocol - only for custom providers */}
                             {!editingProvider.provider.isBuiltin && (
                                 <div>
-                                    <label className="mb-0.5 block text-sm font-medium text-[var(--ink)]">API 协议</label>
+                                    <label className="mb-0.5 block text-sm font-medium text-[var(--ink)]">{tSettings('providers.custom.apiProtocol')}</label>
                                     {editingProvider.editApiProtocol === 'openai' && (
                                         <p className="mb-1.5 text-xs text-[var(--ink-muted)]">
-                                            通过内置桥接自动转换为 Anthropic 协议，存在稳定性风险
+                                            {tSettings('providers.custom.bridgeWarning')}
                                         </p>
                                     )}
                                     <div className={`flex gap-4${editingProvider.editApiProtocol !== 'openai' ? ' mt-1' : ''}`}>
@@ -6931,7 +6942,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                                 onChange={() => setEditingProvider((p) => p ? { ...p, editApiProtocol: 'anthropic', editAuthType: 'auth_token' } : null)}
                                                 className="accent-[var(--ink)]"
                                             />
-                                            <span className="text-sm text-[var(--ink)]">Anthropic 协议</span>
+                                            <span className="text-sm text-[var(--ink)]">{tSettings('providers.custom.anthropicProtocol')}</span>
                                         </label>
                                         <label className="flex items-center gap-2 cursor-pointer">
                                             <input
@@ -6942,7 +6953,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                                 onChange={() => setEditingProvider((p) => p ? { ...p, editApiProtocol: 'openai', editAuthType: 'api_key' } : null)}
                                                 className="accent-[var(--ink)]"
                                             />
-                                            <span className="text-sm text-[var(--ink)]">OpenAI 协议</span>
+                                            <span className="text-sm text-[var(--ink)]">{tSettings('providers.custom.openaiProtocol')}</span>
                                         </label>
                                     </div>
                                 </div>
@@ -6950,7 +6961,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
 
                             {/* Base URL */}
                             <div>
-                                <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">API Base URL</label>
+                                <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">{tSettings('providers.custom.baseUrl')}</label>
                                 {editingProvider.provider.isBuiltin ? (
                                     editingProvider.provider.config.baseUrl && (
                                         <div className="rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2.5 text-sm text-[var(--ink-muted)] font-mono text-xs break-all">
@@ -6972,7 +6983,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                             {!editingProvider.provider.isBuiltin && editingProvider.editApiProtocol === 'openai' && (
                                 <>
                                     <div>
-                                        <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">接口格式</label>
+                                        <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">{tSettings('providers.custom.upstreamFormat')}</label>
                                         <div className="flex gap-4">
                                             <label className="flex items-center gap-2 cursor-pointer">
                                                 <input
@@ -6999,7 +7010,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                         </div>
                                     </div>
                                     <div>
-                                        <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">最大输出 Token</label>
+                                        <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">{tSettings('providers.custom.maxOutputTokens')}</label>
                                         <div className="flex gap-2 items-center">
                                             <CustomSelect
                                                 value={editingProvider.editMaxOutputTokensParamName ?? 'max_tokens'}
@@ -7015,7 +7026,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                                 type="number"
                                                 value={editingProvider.editMaxOutputTokens || ''}
                                                 onChange={(e) => setEditingProvider((p) => p ? { ...p, editMaxOutputTokens: e.target.value } : null)}
-                                                placeholder="留空则不限制"
+                                                placeholder={tSettings('providers.custom.unlimitedPlaceholder')}
                                                 className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2.5 text-sm transition-colors focus:border-[var(--focus-border)] focus:outline-none"
                                             />
                                         </div>
@@ -7026,9 +7037,9 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                             {/* Auth Type - only for custom providers with Anthropic protocol */}
                             {!editingProvider.provider.isBuiltin && editingProvider.editApiProtocol !== 'openai' && (
                                 <div>
-                                    <label className="mb-0.5 block text-sm font-medium text-[var(--ink)]">认证方式</label>
+                                    <label className="mb-0.5 block text-sm font-medium text-[var(--ink)]">{tSettings('providers.custom.authType')}</label>
                                     <p className="mb-1.5 text-xs text-[var(--ink-muted)]">
-                                        请根据供应商认证参数进行选择
+                                        {tSettings('providers.custom.authTypeDescription')}
                                     </p>
                                     <div className="flex gap-4">
                                         <label className="flex items-center gap-2 cursor-pointer">
@@ -7061,7 +7072,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                             <div>
                                 <div className="mb-1.5 flex items-center justify-between">
                                     <label className="text-sm font-medium text-[var(--ink)]">
-                                        模型
+                                        {tSettings('providers.custom.models')}
                                     </label>
                                     <button
                                         type="button"
@@ -7069,13 +7080,13 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                         className="flex items-center gap-1 rounded-lg px-2 py-1 text-sm font-medium text-[var(--accent)] transition-colors hover:bg-[var(--accent-warm-subtle)]"
                                     >
                                         <Settings2 className="h-3.5 w-3.5" />
-                                        管理可用模型
+                                        {tSettings('providers.custom.manageModels')}
                                     </button>
                                 </div>
                                 <p className="truncate text-sm text-[var(--ink-muted)]">
                                     {editingProvider.provider.models.length > 0
                                         ? editingProvider.provider.models.map(m => m.modelName || m.model).join(', ')
-                                        : '暂无模型'}
+                                        : tSettings('providers.noModels')}
                                 </p>
                             </div>
 
@@ -7088,26 +7099,26 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                         className="flex w-full items-center gap-1.5 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:text-[var(--ink)]"
                                     >
                                         <ChevronDown className={`h-4 w-4 transition-transform ${editingProvider.showAdvanced ? '' : '-rotate-90'}`} />
-                                        高级选项
+                                        {tSettings('providers.custom.advanced')}
                                     </button>
                                     {editingProvider.showAdvanced && (() => {
                                         const aliasModels = [
-                                            { value: '', label: '未设置' },
+                                            { value: '', label: tSettings('providers.custom.unset') },
                                             ...editingProvider.provider.models
                                                 .filter(m => !editingProvider.removedModels.includes(m.model))
                                                 .map(m => ({ value: m.model, label: m.modelName })),
                                             ...editingProvider.customModels.map(m => ({ value: m, label: m })),
                                         ];
                                         const ALIAS_LABELS: Record<string, string> = {
-                                            opus: 'Opus（大杯）',
-                                            sonnet: 'Sonnet（中杯）',
-                                            haiku: 'Haiku（小杯）',
+                                            opus: tSettings('providers.custom.aliasOpus'),
+                                            sonnet: tSettings('providers.custom.aliasSonnet'),
+                                            haiku: tSettings('providers.custom.aliasHaiku'),
                                         };
                                         return (
                                             <div className="mt-3">
-                                                <label className="mb-1 block text-sm font-medium text-[var(--ink)]">子 Agent 模型映射</label>
+                                                <label className="mb-1 block text-sm font-medium text-[var(--ink)]">{tSettings('providers.custom.aliasMapping')}</label>
                                                 <p className="mb-3 text-xs leading-relaxed text-[var(--ink-muted)]">
-                                                    Opus 大杯、Sonnet 中杯、Haiku 小杯 — 映射到此供应商的实际模型
+                                                    {tSettings('providers.custom.aliasDescription')}
                                                 </p>
                                                 <div className="space-y-2.5">
                                                     {(['opus', 'sonnet', 'haiku'] as const).map((alias) => (
@@ -7120,7 +7131,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                                                     ...p,
                                                                     editModelAliases: { ...p.editModelAliases, [alias]: v },
                                                                 } : null)}
-                                                                placeholder="未设置"
+                                                                placeholder={tSettings('providers.custom.unset')}
                                                                 compact
                                                                 className="flex-1"
                                                             />
@@ -7142,7 +7153,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                         className="flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium text-[var(--error)] transition-colors hover:bg-[var(--error-bg)]"
                                     >
                                         <Trash2 className="h-4 w-4" />
-                                        删除
+                                        {tSettings('providers.custom.delete')}
                                     </button>
                                 ) : (
                                     <div />
@@ -7153,13 +7164,13 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                         onClick={() => setEditingProvider(null)}
                                         className="rounded-lg border border-[var(--line)] px-4 py-2.5 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)]"
                                     >
-                                        取消
+                                        {tSettings('providers.custom.cancel')}
                                     </button>
                                     <button
                                         onClick={saveProviderEdits}
                                         className="rounded-lg bg-[var(--button-primary-bg)] px-4 py-2.5 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)]"
                                     >
-                                        保存
+                                        {tSettings('providers.custom.save')}
                                     </button>
                                 </div>
                             </div>
@@ -7197,23 +7208,23 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                             <div className="flex h-10 w-10 items-center justify-center rounded-full bg-[var(--error-bg)]">
                                 <Trash2 className="h-5 w-5 text-[var(--error)]" />
                             </div>
-                            <h3 className="text-lg font-semibold text-[var(--ink)]">删除供应商</h3>
+                            <h3 className="text-lg font-semibold text-[var(--ink)]">{tSettings('providers.custom.deleteTitle')}</h3>
                         </div>
                         <p className="mb-6 text-sm text-[var(--ink-muted)]">
-                            确定要删除「{deleteConfirmProvider.name}」吗？此操作无法撤销。
+                            {tSettings('providers.custom.deleteMessage', { name: deleteConfirmProvider.name })}
                         </p>
                         <div className="flex gap-3">
                             <button
                                 onClick={() => setDeleteConfirmProvider(null)}
                                 className="flex-1 rounded-lg border border-[var(--line)] px-4 py-2.5 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)]"
                             >
-                                取消
+                                {tSettings('providers.custom.cancel')}
                             </button>
                             <button
                                 onClick={confirmDeleteCustomProvider}
                                 className="flex-1 rounded-lg bg-[var(--error)] px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-[var(--error-hover)]"
                             >
-                                删除
+                                {tSettings('providers.custom.delete')}
                             </button>
                         </div>
                     </div>

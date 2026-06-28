@@ -108,10 +108,7 @@
     "createAgent": "创建 Agent",
     "selectTemplate": "选择一个模板",
     "deleteDialogTitle": "删除模板",
-    "deleteDialogMessage": "确定要从模板库中删除「{{name}}」吗？模板文件将被永久删除。",
-    "preset": {
-      "minoDescription": "能记忆、会进化的 AI Agent。从 minimal 开始，长成你想要的样子。"
-    }
+    "deleteDialogMessage": "确定要从模板库中删除「{{name}}」吗？模板文件将被永久删除。"
   },
   "workspaceEdit": {
     "title": "编辑工作区",

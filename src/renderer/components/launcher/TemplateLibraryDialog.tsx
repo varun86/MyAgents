@@ -92,12 +92,7 @@ export default memo(function TemplateLibraryDialog({
     }, [selectedId]);
 
     const selectedTemplate = templates.find(t => t.id === selectedId);
-    const getTemplateDescription = useCallback((tpl: WorkspaceTemplate): string => {
-        if (tpl.isBuiltin && tpl.i18nDescriptionKey) {
-            return t(tpl.i18nDescriptionKey);
-        }
-        return tpl.description ?? '';
-    }, [t]);
+    const getTemplateDescription = useCallback((tpl: WorkspaceTemplate): string => tpl.description ?? '', []);
 
     // Debounced check: does targetDir/projectName already exist?
     useEffect(() => {
