@@ -12,6 +12,7 @@
  */
 import { Bot, ChevronDown, ChevronRight, Globe, RefreshCw, Settings2, Sparkles, Terminal } from 'lucide-react';
 import { memo, useState, useCallback, useEffect, useMemo, useRef } from 'react';
+import { useTranslation } from 'react-i18next';
 
 import { track } from '@/analytics';
 import { CUSTOM_EVENTS } from '../../shared/constants';
@@ -58,6 +59,7 @@ function ItemTooltip({ scope, description, children }: {
     description?: string;
     children: React.ReactNode;
 }) {
+    const { t } = useTranslation('settings');
     const [show, setShow] = useState(false);
     const [pos, setPos] = useState({ x: 0, y: 0, width: 240 });
     const timerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
@@ -97,7 +99,7 @@ function ItemTooltip({ scope, description, children }: {
                 >
                     {scope && (
                         <span className="mb-1 inline-block rounded bg-[var(--paper-inset)] px-1.5 py-0.5 text-xs text-[var(--ink-muted)]">
-                            {scope === 'user' ? '全局' : scope === 'project' ? '项目' : scope}
+                            {scope === 'user' ? t('agentSettings.capabilities.scopeUser') : scope === 'project' ? t('agentSettings.capabilities.scopeProject') : scope}
                         </span>
                     )}
                     {description && (
@@ -121,6 +123,7 @@ export default memo(function AgentCapabilitiesPanel({
     onRefresh,
     heightRatio = 0.4,
 }: AgentCapabilitiesPanelProps) {
+    const { t } = useTranslation('settings');
     const [isExpanded, setIsExpanded] = useState(true); // Default expanded
     const toast = useToast();
     const toastRef = useRef(toast);
@@ -183,8 +186,8 @@ export default memo(function AgentCapabilitiesPanel({
     }, [onInsertSlashCommand]);
 
     const handleAgentClick = useCallback(() => {
-        toastRef.current.info('该 Agent 已启用，AI 自主判断使用时机');
-    }, []);
+        toastRef.current.info(t('agentSettings.capabilities.enabledHint'));
+    }, [t]);
 
     // Map capability kind → Settings page section the global panel lives under.
     // 'sub-agents' (not 'agents') is the canonical section name in
@@ -216,11 +219,11 @@ export default memo(function AgentCapabilitiesPanel({
         const select: CapabilityInitialSelect | undefined =
             scope && folderName ? { kind: 'agent', folderName, scope } : undefined;
         const items: ContextMenuItem[] = [
-            { label: '设置', icon: <Settings2 className="h-3.5 w-3.5" />, onClick: () => openSettingsFor(scope, select) },
-            { label: '刷新', icon: <RefreshCw className="h-3.5 w-3.5" />, onClick: () => onRefresh?.() },
+            { label: t('agentSettings.capabilities.settings'), icon: <Settings2 className="h-3.5 w-3.5" />, onClick: () => openSettingsFor(scope, select) },
+            { label: t('agentSettings.capabilities.refresh'), icon: <RefreshCw className="h-3.5 w-3.5" />, onClick: () => onRefresh?.() },
         ];
         setCtxMenu({ x: e.clientX, y: e.clientY, items });
-    }, [openSettingsFor, onRefresh]);
+    }, [openSettingsFor, onRefresh, t]);
 
     const handleSkillContextMenu = useCallback((e: React.MouseEvent, scope: 'user' | 'project' | undefined, folderName: string | undefined) => {
         e.preventDefault();
@@ -228,13 +231,13 @@ export default memo(function AgentCapabilitiesPanel({
         const select: CapabilityInitialSelect | undefined =
             scope && folderName ? { kind: 'skill', folderName, scope } : undefined;
         const items: ContextMenuItem[] = [
-            { label: '设置', icon: <Settings2 className="h-3.5 w-3.5" />, onClick: () => openSettingsFor(scope, select) },
-            { label: '刷新', icon: <RefreshCw className="h-3.5 w-3.5" />, onClick: () => onRefresh?.() },
+            { label: t('agentSettings.capabilities.settings'), icon: <Settings2 className="h-3.5 w-3.5" />, onClick: () => openSettingsFor(scope, select) },
+            { label: t('agentSettings.capabilities.refresh'), icon: <RefreshCw className="h-3.5 w-3.5" />, onClick: () => onRefresh?.() },
         ];
         // Project skills can be synced to global (hide if already exists globally)
         if (scope === 'project' && folderName && !globalSkillFolderNamesRef.current?.has(folderName)) {
             items.push({
-                label: '同步至全局技能',
+                label: t('agentSettings.capabilities.syncToGlobal'),
                 icon: <Globe className="h-3.5 w-3.5" />,
                 onClick: () => {
                     onSyncSkillToGlobalRef.current?.(folderName);
@@ -243,7 +246,7 @@ export default memo(function AgentCapabilitiesPanel({
             });
         }
         setCtxMenu({ x: e.clientX, y: e.clientY, items });
-    }, [openSettingsFor, onRefresh]);
+    }, [openSettingsFor, onRefresh, t]);
 
     const handleCommandContextMenu = useCallback((e: React.MouseEvent, scope: 'user' | 'project' | undefined, fileName: string | undefined) => {
         e.preventDefault();
@@ -251,11 +254,11 @@ export default memo(function AgentCapabilitiesPanel({
         const select: CapabilityInitialSelect | undefined =
             scope && fileName ? { kind: 'command', fileName, scope } : undefined;
         const items: ContextMenuItem[] = [
-            { label: '设置', icon: <Settings2 className="h-3.5 w-3.5" />, onClick: () => openSettingsFor(scope, select) },
-            { label: '刷新', icon: <RefreshCw className="h-3.5 w-3.5" />, onClick: () => onRefresh?.() },
+            { label: t('agentSettings.capabilities.settings'), icon: <Settings2 className="h-3.5 w-3.5" />, onClick: () => openSettingsFor(scope, select) },
+            { label: t('agentSettings.capabilities.refresh'), icon: <RefreshCw className="h-3.5 w-3.5" />, onClick: () => onRefresh?.() },
         ];
         setCtxMenu({ x: e.clientX, y: e.clientY, items });
-    }, [openSettingsFor, onRefresh]);
+    }, [openSettingsFor, onRefresh, t]);
 
     // Empty state. The tree↔capabilities boundary is owned by the parent
     // (DirectoryPanel's drag-divider) — this branch must NOT draw its own top
@@ -269,12 +272,12 @@ export default memo(function AgentCapabilitiesPanel({
                 >
                     {isExpanded ? <ChevronDown className="h-3 w-3 shrink-0" /> : <ChevronRight className="h-3 w-3 shrink-0" />}
                     <Bot className="h-3.5 w-3.5 shrink-0 text-violet-500" />
-                    <span className="font-semibold">Agent 能力</span>
+                    <span className="font-semibold">{t('agentSettings.capabilities.title')}</span>
                 </button>
                 {isExpanded && (
                     <div className="px-4 pb-3 text-center">
                         <p className="text-sm text-[var(--ink-muted)]">
-                            在项目设置中配置 Agent 能力
+                            {t('agentSettings.capabilities.emptyDescription')}
                         </p>
                     </div>
                 )}
@@ -295,7 +298,7 @@ export default memo(function AgentCapabilitiesPanel({
             >
                 {isExpanded ? <ChevronDown className="h-3 w-3 shrink-0" /> : <ChevronRight className="h-3 w-3 shrink-0" />}
                 <Bot className="h-3.5 w-3.5 shrink-0 text-violet-500" />
-                <span className="font-semibold">Agent 能力 ({totalCount})</span>
+                <span className="font-semibold">{t('agentSettings.capabilities.titleWithCount', { count: totalCount })}</span>
             </button>
 
             {/* Expanded content - scrollable */}
