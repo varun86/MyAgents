@@ -5,6 +5,7 @@
 
 import { memo } from 'react';
 import { ChevronRight, ChevronDown, LocateFixed } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 import type { FileMatchLine, FileSearchHit } from '@/api/searchClient';
 import SearchHighlight from './SearchHighlight';
 import { getFileIcon } from '@/utils/fileIcons';
@@ -41,11 +42,14 @@ export default memo(function FileSearchResults({
     onMatchClick,
     onContextMenu,
 }: FileSearchResultsProps) {
+    const { t } = useTranslation('chat');
+    const refreshingSuffix = isRefreshing ? t('workspaceFiles.search.refreshingSuffix') : '';
+
     if (isLoading && results.length === 0) {
         return (
             <div className="flex h-full flex-col px-4 py-3 pb-8 overflow-y-auto overscroll-contain">
                 <div className="flex items-center gap-2 mb-4">
-                    <div className="text-xs font-medium text-[var(--ink-muted)]">搜索中...</div>
+                    <div className="text-xs font-medium text-[var(--ink-muted)]">{t('workspaceFiles.search.searching')}</div>
                 </div>
             </div>
         );
@@ -54,8 +58,8 @@ export default memo(function FileSearchResults({
     if (!query) {
         return (
             <div className="flex h-full flex-col items-center justify-center p-6 text-center text-sm text-[var(--ink-muted)]/60">
-                <p>在当前工作区中搜索</p>
-                <p className="mt-1 text-xs">文件名和文件内容</p>
+                <p>{t('workspaceFiles.search.searchInWorkspace')}</p>
+                <p className="mt-1 text-xs">{t('workspaceFiles.search.fileNameAndContent')}</p>
             </div>
         );
     }
@@ -65,7 +69,7 @@ export default memo(function FileSearchResults({
             <div className="flex h-full flex-col px-4 py-3 pb-8 overflow-y-auto overscroll-contain">
                 <div className="flex items-center gap-2 mb-4">
                     <div className="text-xs font-medium text-[var(--ink-muted)]">
-                        0 个结果{isRefreshing ? ' · 正在更新索引...' : ''}
+                        {t('workspaceFiles.search.zeroResults')}{refreshingSuffix}
                     </div>
                 </div>
             </div>
@@ -78,7 +82,7 @@ export default memo(function FileSearchResults({
         <div className="flex h-full flex-col pb-8 overflow-y-auto overscroll-contain" style={{ scrollbarGutter: 'stable' }}>
             <div className="sticky top-0 z-10 bg-[var(--paper)]/90 px-4 py-2 backdrop-blur-sm border-b border-[var(--line-subtle)]">
                 <div className="text-xs font-medium text-[var(--ink-muted)]">
-                    {results.length} 个文件中找到 {totalMatches} 个结果{isRefreshing ? ' · 正在更新索引...' : ''}
+                    {t('workspaceFiles.search.summary', { files: results.length, matches: totalMatches })}{refreshingSuffix}
                 </div>
             </div>
 
@@ -115,7 +119,7 @@ export default memo(function FileSearchResults({
                                         e.stopPropagation();
                                         onToggleFile(hit.path);
                                     }}
-                                    aria-label={isExpanded ? '折叠结果' : '展开结果'}
+                                    aria-label={isExpanded ? t('workspaceFiles.search.collapseResults') : t('workspaceFiles.search.expandResults')}
                                 >
                                     {isExpanded ? (
                                         <ChevronDown className="h-4 w-4" />
@@ -150,8 +154,8 @@ export default memo(function FileSearchResults({
                                 </button>
                                 <button
                                     type="button"
-                                    title="在文件目录中展示"
-                                    aria-label="在文件目录中展示"
+                                    title={t('workspaceFiles.common.revealInTree')}
+                                    aria-label={t('workspaceFiles.common.revealInTree')}
                                     className="mr-1 flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-[var(--ink-muted)]/60 opacity-0 transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--accent-warm)] group-hover:opacity-100 focus-visible:opacity-100"
                                     onClick={(e) => {
                                         e.stopPropagation();
@@ -200,7 +204,7 @@ export default memo(function FileSearchResults({
                                     })}
                                     {hit.matchCount > hit.matches.length && (
                                         <div className="pl-[38px] py-1 text-xs text-[var(--ink-muted)]/50 italic mb-1">
-                                            ... 还有 {hit.matchCount - hit.matches.length} 个结果
+                                            {t('workspaceFiles.search.moreResults', { count: hit.matchCount - hit.matches.length })}
                                         </div>
                                     )}
                                 </div>
