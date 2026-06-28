@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Bot, ChevronDown, Copy, Download, FileText, Loader2, MessageSquare, Paperclip, Send, UploadCloud, X } from 'lucide-react';
 
 import { spaceErrorMessage, type SpaceAttachment, type SpaceRegisteredAgent, type SpaceSession } from '@/api/spaceCloud';
@@ -64,6 +65,7 @@ export function IssueDetailDrawer({
   onClose: () => void;
   onChanged: () => void;
 }) {
+  const { t } = useTranslation('app');
   const toast = useToast();
   const [comment, setComment] = useState('');
   const [busy, setBusy] = useState(false);
@@ -131,7 +133,7 @@ export function IssueDetailDrawer({
         await actions.setIssueStatus(issueId, option.value);
       }
       setStatusMenuOpen(false);
-      toast.success('Issue 状态已更新');
+      toast.success(t('space.toasts.issueStatusUpdated'));
       await actions.refreshIssueDetail(issueId, { force: true, silent: true });
       onChanged();
     } catch (error) {
@@ -159,12 +161,12 @@ export function IssueDetailDrawer({
   const uploadAttachments = async () => {
     try {
       const { open } = await import('@tauri-apps/plugin-dialog');
-      const selected = await open({ multiple: true, directory: false, title: '选择 Issue 附件' });
+      const selected = await open({ multiple: true, directory: false, title: t('space.createIssue.pickAttachmentsTitle') });
       const filePaths = Array.isArray(selected) ? selected : selected ? [selected] : [];
       if (filePaths.length === 0) return;
       setAttachmentUploading(true);
       const attachments = await actions.uploadIssueAttachments(issueId, filePaths);
-      toast.success(`已上传 ${attachments.length} 个附件`);
+      toast.success(t('space.toasts.attachmentsUploaded', { count: attachments.length }));
       await actions.refreshIssueDetail(issueId, { force: true, silent: true });
       onChanged();
     } catch (error) {
@@ -176,7 +178,7 @@ export function IssueDetailDrawer({
 
   const downloadAttachment = async (attachment: SpaceAttachment, workspacePath: string) => {
     if (!workspacePath) {
-      toast.error('请选择 Agent 工作区');
+      toast.error(t('space.toasts.selectWorkspace'));
       return;
     }
     setDownloadTargetAttachmentId(null);
@@ -189,7 +191,7 @@ export function IssueDetailDrawer({
         fileName: attachment.name,
       });
       setDownloadedAttachmentPaths((paths) => ({ ...paths, [attachment.id]: result.fullPath }));
-      toast.success(`已下载到 ${result.relativePath}`);
+      toast.success(t('space.toasts.attachmentDownloaded', { path: result.relativePath }));
     } catch (error) {
       toast.error(spaceErrorMessage(error));
     } finally {
@@ -199,7 +201,7 @@ export function IssueDetailDrawer({
 
   const requestAttachmentDownload = (attachment: SpaceAttachment) => {
     if (projects.length === 0) {
-      toast.error('暂无可用 Agent 工作区');
+      toast.error(t('space.toasts.noAgentWorkspaces'));
       return;
     }
     if (projects.length === 1) {
@@ -212,7 +214,7 @@ export function IssueDetailDrawer({
   const copyAttachmentCommand = async (attachment: SpaceAttachment) => {
     try {
       await copyPlainText(buildAttachmentDownloadCommand(attachment.id));
-      toast.success('已复制附件下载命令');
+      toast.success(t('space.toasts.attachmentCommandCopied'));
     } catch (error) {
       toast.error(spaceErrorMessage(error));
     }
@@ -223,7 +225,7 @@ export function IssueDetailDrawer({
     if (!fullPath) return;
     try {
       await copyPlainText(fullPath);
-      toast.success('已复制附件本地路径');
+      toast.success(t('space.toasts.attachmentPathCopied'));
     } catch (error) {
       toast.error(spaceErrorMessage(error));
     }
@@ -243,9 +245,9 @@ export function IssueDetailDrawer({
       if (result.errors.length > 0) {
         for (const error of result.errors) toast.error(error);
       } else if (result.processed > 0) {
-        toast.success(`已指派给 ${agent.displayName}`);
+        toast.success(t('space.toasts.assignedToAgent', { name: agent.displayName }));
       } else {
-        toast.success(`已记录指派：${agent.displayName}`);
+        toast.success(t('space.toasts.assignmentRecorded', { name: agent.displayName }));
       }
       setAgentMenuOpen(false);
     } catch (error) {
@@ -258,7 +260,7 @@ export function IssueDetailDrawer({
   const copyIssueCommand = async () => {
     try {
       await copyPlainText(buildIssueCommandPrompt({ spaceName: session.space.name, issueId }));
-      toast.success('已复制 issue 口令');
+      toast.success(t('space.toasts.issueCommandCopied'));
     } catch (error) {
       toast.error(spaceErrorMessage(error));
     }
@@ -269,7 +271,7 @@ export function IssueDetailDrawer({
     <OverlayBackdrop onClose={onClose} className="z-[230] items-stretch justify-end bg-black/20 backdrop-blur-sm">
       <aside className="relative h-full w-[min(75vw,1120px)] border-l border-[var(--line)] bg-[var(--paper-elevated)] shadow-xl">
         <header className="absolute right-4 top-4 z-10 flex justify-end">
-          <button type="button" onClick={onClose} className="grid h-8 w-8 place-items-center rounded-lg text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]" aria-label="关闭详情">
+          <button type="button" onClick={onClose} className="grid h-8 w-8 place-items-center rounded-lg text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]" aria-label={t('space.detail.close')}>
             <X className="h-4 w-4" />
           </button>
         </header>
@@ -277,11 +279,11 @@ export function IssueDetailDrawer({
         {!detail && loading ? (
           <div className="flex h-full items-center justify-center text-sm text-[var(--ink-muted)]">
             <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-            加载 Issue
+            {t('space.detail.loadingIssue')}
           </div>
         ) : !detail ? (
           <div className="flex h-full items-center justify-center text-sm text-[var(--ink-muted)]">
-            {detailState?.error ?? 'Issue 未找到'}
+            {detailState?.error ?? t('space.detail.notFound')}
           </div>
         ) : (
           <section className="h-full min-h-0 overflow-y-auto px-[56px] py-[58px] max-lg:px-8 max-sm:px-5">
@@ -338,7 +340,7 @@ export function IssueDetailDrawer({
                   <div className="mb-2 flex items-center justify-between gap-3">
                     <h3 className="flex items-center gap-2 text-sm font-semibold text-[var(--ink-secondary)]">
                       <Paperclip className="h-4 w-4" />
-                      <span>附件</span>
+                      <span>{t('space.detail.attachments')}</span>
                       <span className="text-xs font-semibold text-[var(--ink-subtle)]">{detail.attachments.length}</span>
                     </h3>
                     <button
@@ -346,14 +348,14 @@ export function IssueDetailDrawer({
                       disabled={attachmentUploading}
                       onClick={() => void uploadAttachments()}
                       className="inline-flex h-7 items-center gap-1.5 rounded-lg px-2 text-xs font-semibold text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] disabled:cursor-wait disabled:opacity-70"
-                      title="上传附件"
+                      title={t('space.detail.uploadAttachment')}
                     >
                       {attachmentUploading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <UploadCloud className="h-3.5 w-3.5" />}
-                      上传
+                      {t('space.common.upload')}
                     </button>
                   </div>
                   {detail.attachments.length === 0 ? (
-                    <div className="py-2 text-sm text-[var(--ink-muted)]">暂无附件</div>
+                    <div className="py-2 text-sm text-[var(--ink-muted)]">{t('space.detail.emptyAttachments')}</div>
                   ) : (
                     <div className="divide-y divide-dashed divide-[var(--line-subtle)]">
                       {detail.attachments.map((attachment) => (
@@ -372,14 +374,14 @@ export function IssueDetailDrawer({
                               disabled={downloadingAttachmentId !== null}
                               onClick={() => requestAttachmentDownload(attachment)}
                               className="grid h-7 w-7 place-items-center rounded-lg text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] disabled:cursor-not-allowed disabled:opacity-55"
-                              aria-label={`下载附件 ${attachment.name}`}
-                              title={projects.length > 1 ? '选择下载工作区' : '下载附件'}
+                              aria-label={t('space.detail.downloadAttachment', { name: attachment.name })}
+                              title={projects.length > 1 ? t('space.detail.chooseDownloadWorkspace') : t('space.detail.downloadAttachment', { name: attachment.name })}
                             >
                               {downloadingAttachmentId === attachment.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
                             </button>
                             {downloadTargetAttachmentId === attachment.id && projects.length > 1 && (
                               <div className="absolute right-0 top-full z-30 mt-2 w-56 rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-1.5 shadow-lg">
-                                <div className="px-2 pb-1 text-xs font-semibold text-[var(--ink-muted)]">下载到 Agent 工作区</div>
+                                <div className="px-2 pb-1 text-xs font-semibold text-[var(--ink-muted)]">{t('space.detail.downloadToAgentWorkspace')}</div>
                                 {projects.map((project) => (
                                   <button
                                     key={project.path}
@@ -397,8 +399,8 @@ export function IssueDetailDrawer({
                               type="button"
                               onClick={() => void copyAttachmentCommand(attachment)}
                               className="grid h-7 w-7 place-items-center rounded-lg text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
-                              aria-label={`复制附件下载命令 ${attachment.name}`}
-                              title="复制 CLI 下载命令"
+                              aria-label={t('space.detail.copyAttachmentCommand', { name: attachment.name })}
+                              title={t('space.detail.copyCliDownloadCommand')}
                             >
                               <Copy className="h-3.5 w-3.5" />
                             </button>
@@ -407,8 +409,8 @@ export function IssueDetailDrawer({
                               disabled={!downloadedAttachmentPaths[attachment.id]}
                               onClick={() => void copyDownloadedAttachmentPath(attachment)}
                               className="grid h-7 w-7 place-items-center rounded-lg text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] disabled:cursor-not-allowed disabled:opacity-45"
-                              aria-label={`复制附件本地路径 ${attachment.name}`}
-                              title="复制本地路径"
+                              aria-label={t('space.detail.copyAttachmentPath', { name: attachment.name })}
+                              title={t('space.detail.copyLocalPath')}
                             >
                               <FileText className="h-3.5 w-3.5" />
                             </button>
@@ -423,7 +425,7 @@ export function IssueDetailDrawer({
               <section className="mb-10 flex flex-wrap items-center justify-between gap-3 border-t border-[var(--line-subtle)] pt-4">
                 <h3 className="flex items-center gap-2 text-sm font-semibold text-[var(--ink-secondary)]">
                   {admin ? <Send className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
-                  {admin ? '派发给 Agent' : 'Issue 口令'}
+                  {admin ? t('space.detail.dispatchToAgent') : t('space.detail.issueCommand')}
                 </h3>
                 <div className="flex flex-wrap items-center gap-2">
                   {admin && (
@@ -435,13 +437,13 @@ export function IssueDetailDrawer({
                         className="inline-flex h-8 items-center justify-center gap-1.5 rounded-lg bg-[var(--button-secondary-bg)] px-3 text-sm font-semibold text-[var(--button-secondary-text)] transition-colors hover:bg-[var(--button-secondary-bg-hover)] disabled:cursor-wait disabled:opacity-70"
                       >
                         {dispatchingAgentId ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Bot className="h-3.5 w-3.5" />}
-                        指派 Agent
+                        {t('space.detail.assignAgent')}
                         <ChevronDown className="h-3.5 w-3.5" />
                       </button>
                       {agentMenuOpen && (
                         <div className="absolute right-0 top-full z-30 mt-2 max-h-72 w-72 overflow-auto rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-1.5 shadow-lg">
                           {registeredAgents.length === 0 ? (
-                            <div className="px-3 py-3 text-sm text-[var(--ink-muted)]">暂无 Registered Agent</div>
+                            <div className="px-3 py-3 text-sm text-[var(--ink-muted)]">{t('space.detail.emptyRegisteredAgents')}</div>
                           ) : (
                             registeredAgents.map((agent) => (
                               <button
@@ -474,7 +476,7 @@ export function IssueDetailDrawer({
                     className="inline-flex h-8 items-center justify-center gap-1.5 rounded-lg bg-transparent px-2.5 text-sm font-semibold text-[var(--ink-secondary)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
                   >
                     <Copy className="h-3.5 w-3.5" />
-                    复制 issue 口令
+                    {t('space.detail.copyIssueCommand')}
                   </button>
                 </div>
               </section>
@@ -483,14 +485,14 @@ export function IssueDetailDrawer({
                 <h3 className="mb-5 flex items-center justify-between gap-3 text-lg font-semibold text-[var(--ink)]">
                   <span className="inline-flex items-center gap-2">
                     <MessageSquare className="h-4 w-4" />
-                    评论
+                    {t('space.detail.comments')}
                   </span>
-                  <small className="text-xs font-semibold text-[var(--ink-subtle)]">{detail.comments.items.length} 条</small>
+                  <small className="text-xs font-semibold text-[var(--ink-subtle)]">{t('space.detail.commentCount', { count: detail.comments.items.length })}</small>
                 </h3>
                 <div className="divide-y divide-[var(--line-subtle)]">
                   {detail.comments.items.length === 0 ? (
                     <div className="py-3 text-sm text-[var(--ink-muted)]">
-                      暂无评论。可以直接在底部补充信息。
+                      {t('space.detail.emptyComments')}
                     </div>
                   ) : (
                     detail.comments.items.map((item) => (
@@ -510,7 +512,7 @@ export function IssueDetailDrawer({
                     value={comment}
                     onChange={(event) => setComment(event.target.value)}
                     className="min-h-[104px] w-full resize-none border-0 bg-transparent p-4 text-base leading-7 text-[var(--ink)] outline-none placeholder:text-[var(--ink-muted)]"
-                    placeholder="说说你的想法"
+                    placeholder={t('space.detail.commentPlaceholder')}
                   />
                   <div className="grid grid-cols-[auto_1fr_auto] items-center gap-2 px-2.5 pb-2.5">
                     <button
@@ -518,7 +520,7 @@ export function IssueDetailDrawer({
                       disabled={attachmentUploading}
                       onClick={() => void uploadAttachments()}
                       className="grid h-8 w-8 place-items-center rounded-lg text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] disabled:cursor-wait disabled:opacity-70"
-                      aria-label="上传附件"
+                      aria-label={t('space.detail.uploadAttachmentAria')}
                     >
                       {attachmentUploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Paperclip className="h-4 w-4" />}
                     </button>
@@ -528,8 +530,8 @@ export function IssueDetailDrawer({
                       disabled={busy || !comment.trim()}
                       onClick={() => void sendComment()}
                       className="grid h-9 w-9 place-items-center rounded-xl bg-[var(--button-primary-bg)] text-sm font-semibold text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:cursor-wait disabled:opacity-70"
-                      aria-label="发送评论"
-                      title="发送评论"
+                      aria-label={t('space.detail.sendComment')}
+                      title={t('space.detail.sendComment')}
                     >
                       {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
                     </button>

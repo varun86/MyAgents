@@ -71,6 +71,11 @@
     "openFolder": "Open containing folder",
     "remove": "Remove"
   },
+  "recentThoughts": {
+    "openTaskCenterTitle": "Open Task Center to view all thoughts",
+    "more": "More",
+    "emptyThought": "(empty thought)"
+  },
   "addWorkspaceMenu": {
     "add": "Add",
     "addLocalFolder": "Add local folder",

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import {
   Loader2,
   RefreshCw,
@@ -47,6 +48,7 @@ function wait(ms: number): Promise<void> {
 
 
 export default function Space({ isActive }: { isActive: boolean }) {
+  const { t } = useTranslation('app');
   const toast = useToast();
   const { projects } = useConfig();
   const spaceData = useSpaceData({ isActive });
@@ -86,8 +88,8 @@ export default function Space({ isActive }: { isActive: boolean }) {
   const spaceCacheKey = useCallback((id: string) => `${activeCacheSpaceId}\n${id}`, [activeCacheSpaceId]);
 
   const tagOptions = useMemo<SelectOption[]>(
-    () => [{ value: '', label: '全部标签' }, ...tags.map((tag) => ({ value: tag.id, label: tag.name }))],
-    [tags],
+    () => [{ value: '', label: t('space.filters.allTags') }, ...tags.map((tag) => ({ value: tag.id, label: tag.name }))],
+    [tags, t],
   );
 
   useEffect(() => {
@@ -215,7 +217,7 @@ export default function Space({ isActive }: { isActive: boolean }) {
           if (cancelled) return;
           if (result.status === 'done') {
             stopAuth();
-            toast.success('已登录 MyAgents 社区');
+            toast.success(t('space.toasts.loginSuccess'));
             await actions.ensureBootstrapped({ force: true });
             void spaceAuthAck(authFlow.token).catch((error) => {
               console.warn('[Space] auth ack failed:', errMessage(error));
@@ -224,7 +226,7 @@ export default function Space({ isActive }: { isActive: boolean }) {
           }
           if (result.status === 'failed') {
             stopAuth();
-            toast.error(String(result.error ?? '登录失败'));
+            toast.error(String(result.error ?? t('space.toasts.loginFailed')));
             void spaceAuthAck(authFlow.token).catch((error) => {
               console.warn('[Space] auth ack failed:', errMessage(error));
             });
@@ -234,7 +236,7 @@ export default function Space({ isActive }: { isActive: boolean }) {
           if (cancelled) return;
           if (!authPollWarningShownRef.current && Date.now() < authFlow.expiresAt) {
             authPollWarningShownRef.current = true;
-            toast.warning('登录状态同步较慢，正在继续重试');
+            toast.warning(t('space.toasts.loginSlow'));
           }
         }
         const elapsed = Date.now() - startedAt;
@@ -243,7 +245,7 @@ export default function Space({ isActive }: { isActive: boolean }) {
 
       if (!cancelled) {
         stopAuth();
-        toast.error('登录等待超时，请重新发起 Google 登录');
+        toast.error(t('space.toasts.loginTimeout'));
       }
     };
 
@@ -251,12 +253,12 @@ export default function Space({ isActive }: { isActive: boolean }) {
     return () => {
       cancelled = true;
     };
-  }, [actions, authFlow, toast]);
+  }, [actions, authFlow, t, toast]);
 
   const runDispatchProcessing = useCallback(async () => {
     if (!session || localAgents.length === 0) return;
     const result = await actions.processDispatchesOnce();
-    if (result.processed > 0) toast.success(`已处理 ${result.processed} 个 Space 派发任务`);
+    if (result.processed > 0) toast.success(t('space.toasts.dispatchProcessed', { count: result.processed }));
     for (const error of result.errors) toast.error(error);
     if (result.processed > 0 || result.delivered > 0) {
       await Promise.all([
@@ -265,7 +267,7 @@ export default function Space({ isActive }: { isActive: boolean }) {
         actions.refreshRegisteredAgents({ force: true, silent: true }),
       ]);
     }
-  }, [actions, localAgents.length, session, toast]);
+  }, [actions, localAgents.length, session, t, toast]);
 
   const processDispatches = useCallback(async () => {
     await runDispatchProcessing();
@@ -285,12 +287,12 @@ export default function Space({ isActive }: { isActive: boolean }) {
         token: result.loginToken,
         expiresAt: Date.now() + result.expiresInSeconds * 1000,
       });
-      toast.info('已打开浏览器登录');
+      toast.info(t('space.toasts.browserLoginOpened'));
     } catch (error) {
       setAuthBusy(false);
       toast.error(spaceErrorMessage(error));
     }
-  }, [toast]);
+  }, [t, toast]);
 
   const selectSpaceTab = useCallback((next: ViewMode) => {
     setMode(next);
@@ -306,24 +308,24 @@ export default function Space({ isActive }: { isActive: boolean }) {
         actions.refreshRegisteredAgents({ force: true }),
       ]);
     }
-    toast.success('已刷新');
-  }, [actions, issueQuery, mode, toast]);
+    toast.success(t('space.toasts.refreshed'));
+  }, [actions, issueQuery, mode, t, toast]);
 
   const logout = useCallback(async () => {
     try {
       await actions.logout();
       setIssueDetailId(null);
-      toast.success('已退出 Space');
+      toast.success(t('space.toasts.logoutSuccess'));
     } catch (error) {
       toast.error(spaceErrorMessage(error));
     }
-  }, [actions, toast]);
+  }, [actions, t, toast]);
 
   if (spaceData.boot === 'idle' || spaceData.boot === 'loading') {
     return (
       <div className="flex h-full items-center justify-center bg-[var(--paper)] text-sm text-[var(--ink-muted)]">
         <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-        加载团队
+        {t('space.common.loadingTeam')}
       </div>
     );
   }
@@ -332,14 +334,14 @@ export default function Space({ isActive }: { isActive: boolean }) {
     return (
       <div className="flex h-full items-center justify-center bg-[var(--paper)] text-sm text-[var(--ink-muted)]">
         <div className="text-center">
-          <p>{spaceData.bootError ?? '团队数据加载失败'}</p>
+          <p>{spaceData.bootError ?? t('space.common.teamLoadFailed')}</p>
           <button
             type="button"
             onClick={() => void actions.ensureBootstrapped({ force: true }).catch((error) => toast.error(spaceErrorMessage(error)))}
             className="mt-3 inline-flex h-9 items-center gap-2 rounded-lg bg-[var(--button-secondary-bg)] px-3 text-sm font-semibold text-[var(--button-secondary-text)] hover:bg-[var(--button-secondary-bg-hover)]"
           >
             <RefreshCw className="h-4 w-4" />
-            重试
+            {t('space.common.retry')}
           </button>
         </div>
       </div>

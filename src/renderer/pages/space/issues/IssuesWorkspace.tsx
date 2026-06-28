@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Loader2, Plus, RefreshCw, Search, X } from 'lucide-react';
 
 import type { SpaceIssue } from '@/api/spaceCloud';
@@ -6,11 +7,6 @@ import CustomSelect, { type SelectOption } from '@/components/CustomSelect';
 import { ISSUE_STATUSES, issueDisplayTitle, issueStatusLabel } from '@/pages/space/spaceHelpers';
 import { recordSpaceMetric } from '@/pages/space/spaceMetrics';
 import { formatTime, statusPillClass } from '@/pages/space/spaceUi';
-
-const STATUS_FILTER_OPTIONS: SelectOption[] = [
-  { value: '', label: '全部状态' },
-  ...ISSUE_STATUSES.map((status) => ({ value: status, label: issueStatusLabel(status) })),
-];
 
 export function IssuesWorkspace({
   admin,
@@ -43,9 +39,14 @@ export function IssuesWorkspace({
   onCreate: () => void;
   onOpenIssue: (id: string) => void;
 }) {
+  const { t } = useTranslation('app');
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const searchActive = searchOpen || issueQ.trim().length > 0;
+  const statusFilterOptions: SelectOption[] = [
+    { value: '', label: t('space.filters.allStatuses') },
+    ...ISSUE_STATUSES.map((status) => ({ value: status, label: issueStatusLabel(status) })),
+  ];
 
   useEffect(() => {
     recordSpaceMetric('space_issue_list_render_count', { count: issues.length });
@@ -75,7 +76,7 @@ export function IssuesWorkspace({
                 }
               }}
               className="h-9 w-full rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)]/85 pl-9 pr-10 text-sm text-[var(--ink)] outline-none transition-colors placeholder:text-[var(--ink-muted)] focus:border-[var(--accent-warm)]"
-              placeholder="搜索标题"
+              placeholder={t('space.issues.searchPlaceholder')}
             />
             <button
               type="button"
@@ -84,7 +85,7 @@ export function IssuesWorkspace({
                 setSearchOpen(false);
               }}
               className="absolute right-1.5 top-1/2 grid h-7 w-7 -translate-y-1/2 place-items-center rounded-lg text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
-              aria-label="关闭搜索"
+              aria-label={t('space.issues.closeSearch')}
             >
               <X className="h-3.5 w-3.5" />
             </button>
@@ -95,19 +96,19 @@ export function IssuesWorkspace({
               type="button"
               onClick={() => setSearchOpen(true)}
               className="grid h-9 w-9 shrink-0 place-items-center rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)]/70 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
-              aria-label="搜索 Issue"
-              title="搜索 Issue"
+              aria-label={t('space.issues.searchIssue')}
+              title={t('space.issues.searchIssue')}
             >
               <Search className="h-4 w-4" />
             </button>
-            <CustomSelect value={selectedStatus} options={STATUS_FILTER_OPTIONS} onChange={onStatusChange} size="toolbar" className="w-40 min-w-0 max-xl:w-36" />
+            <CustomSelect value={selectedStatus} options={statusFilterOptions} onChange={onStatusChange} size="toolbar" className="w-40 min-w-0 max-xl:w-36" />
             <CustomSelect value={selectedTag} options={tagOptions} onChange={onTagChange} size="toolbar" className="w-40 min-w-0 max-xl:w-36" />
             <button
               type="button"
               onClick={() => void onRefresh()}
               className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-transparent text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
-              aria-label="刷新"
-              title="刷新"
+              aria-label={t('space.common.refresh')}
+              title={t('space.common.refresh')}
             >
               {issuesLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
             </button>
@@ -119,7 +120,7 @@ export function IssuesWorkspace({
           className="ml-auto flex h-9 shrink-0 items-center justify-center gap-2 whitespace-nowrap rounded-xl bg-[var(--button-primary-bg)] px-4 text-sm font-semibold text-[var(--button-primary-text)] shadow-sm transition-colors hover:bg-[var(--button-primary-bg-hover)]"
         >
           <Plus className="h-4 w-4" />
-          创建
+          {t('space.common.create')}
         </button>
       </section>
 
@@ -138,7 +139,7 @@ export function IssuesWorkspace({
             ) : issues.length === 0 ? (
               <div className="grid min-h-44 place-items-center border-x border-dashed border-[var(--line-subtle)] text-sm text-[var(--ink-muted)]">
                 <div className="text-center">
-                  <p>暂无匹配 Issue</p>
+                  <p>{t('space.issues.empty')}</p>
                   {admin && (
                     <button
                       type="button"
@@ -146,7 +147,7 @@ export function IssuesWorkspace({
                       className="mt-3 inline-flex h-9 items-center gap-2 rounded-xl bg-[var(--button-secondary-bg)] px-3 text-sm font-semibold text-[var(--button-secondary-text)] transition-colors hover:bg-[var(--button-secondary-bg-hover)]"
                     >
                       <Plus className="h-4 w-4" />
-                      新建 Issue
+                      {t('space.issues.createIssue')}
                     </button>
                   )}
                 </div>
@@ -180,6 +181,7 @@ function IssueStreamRow({
   index: number;
   onOpen: () => void;
 }) {
+  const { t } = useTranslation('app');
   const displayTitle = issueDisplayTitle(issue);
   const visibleTags = issue.tags ?? [];
   const authorName = issue.author?.name ?? issue.author?.id ?? 'owner';
@@ -202,7 +204,7 @@ function IssueStreamRow({
           <span className="text-[var(--line-strong)]">·</span>
           <span>{formatTime(issue.createdAt)}</span>
           <span className="text-[var(--line-strong)]">·</span>
-          <span>{issue.commentCount ?? 0} 评论</span>
+          <span>{t('space.issues.comments', { count: issue.commentCount ?? 0 })}</span>
           {visibleTags.length > 0 && <span className="text-[var(--line-strong)]">·</span>}
           {visibleTags.map((tag) => (
             <span key={tag.id} className="rounded-md bg-[var(--accent-cool)]/10 px-2 py-0.5 text-xs font-semibold text-[var(--accent-cool)]">

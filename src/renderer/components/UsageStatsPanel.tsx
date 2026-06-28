@@ -3,6 +3,7 @@
  */
 import { ArrowDownLeft, ArrowUpRight, BarChart2, Database, Loader2, MessageSquare } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 
 import { getGlobalStats, type GlobalStats } from '@/api/sessionClient';
 import { getAllProviders } from '@/config/services/providerService';
@@ -10,11 +11,7 @@ import { formatTokens } from '@/utils/formatTokens';
 
 type TimeRange = '7d' | '30d' | '60d';
 
-const RANGE_LABELS: Record<TimeRange, string> = {
-    '7d': '7天',
-    '30d': '30天',
-    '60d': '60天',
-};
+const TIME_RANGES: TimeRange[] = ['7d', '30d', '60d'];
 
 type ProviderDisplayInfo = {
     vendor: string;
@@ -22,6 +19,7 @@ type ProviderDisplayInfo = {
 };
 
 export default function UsageStatsPanel() {
+    const { t } = useTranslation('app');
     const [stats, setStats] = useState<GlobalStats | null>(null);
     const [isLoading, setIsLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
@@ -53,11 +51,11 @@ export default function UsageStatsPanel() {
                 if (data) {
                     setStats(data);
                 } else {
-                    setError('无法加载统计数据');
+                    setError(t('usageStats.loadDataFailed'));
                 }
             } catch {
                 if (!cancelled) {
-                    setError('加载失败');
+                    setError(t('usageStats.loadFailed'));
                 }
             } finally {
                 if (!cancelled) {
@@ -67,7 +65,7 @@ export default function UsageStatsPanel() {
         };
         load();
         return () => { cancelled = true; };
-    }, [range]);
+    }, [range, t]);
 
     const totalTokens = (stats?.summary.totalInputTokens ?? 0) + (stats?.summary.totalOutputTokens ?? 0);
 
@@ -76,11 +74,11 @@ export default function UsageStatsPanel() {
             {/* Header */}
             <div className="flex items-center justify-between">
                 <div>
-                    <h2 className="text-lg font-semibold text-[var(--ink)]">使用统计</h2>
-                    <p className="mt-1 text-sm text-[var(--ink-muted)]">全局 Token 消耗统计</p>
+                    <h2 className="text-lg font-semibold text-[var(--ink)]">{t('usageStats.title')}</h2>
+                    <p className="mt-1 text-sm text-[var(--ink-muted)]">{t('usageStats.description')}</p>
                 </div>
                 <div className="flex gap-1 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] p-1">
-                    {(Object.keys(RANGE_LABELS) as TimeRange[]).map((r) => (
+                    {TIME_RANGES.map((r) => (
                         <button
                             key={r}
                             onClick={() => setRange(r)}
@@ -90,7 +88,7 @@ export default function UsageStatsPanel() {
                                     : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
                             }`}
                         >
-                            {RANGE_LABELS[r]}
+                            {t(`usageStats.ranges.${r}`)}
                         </button>
                     ))}
                 </div>
@@ -99,7 +97,7 @@ export default function UsageStatsPanel() {
             {isLoading ? (
                 <div className="flex h-48 items-center justify-center gap-2 text-[var(--ink-muted)]">
                     <Loader2 className="h-5 w-5 animate-spin" />
-                    <span className="text-sm">加载中...</span>
+                    <span className="text-sm">{t('usageStats.loading')}</span>
                 </div>
             ) : error ? (
                 <div className="flex h-48 items-center justify-center text-[var(--error)]">
@@ -124,29 +122,30 @@ export default function UsageStatsPanel() {
 // ============= Summary Cards =============
 
 function SummaryCards({ stats, totalTokens }: { stats: GlobalStats; totalTokens: number }) {
+    const { t } = useTranslation('app');
     const cards = [
         {
-            label: '总 Token',
+            label: t('usageStats.summary.totalTokens'),
             value: formatTokens(totalTokens),
             icon: BarChart2,
         },
         {
-            label: '输入 Token',
+            label: t('usageStats.summary.inputTokens'),
             value: formatTokens(stats.summary.totalInputTokens),
             icon: ArrowUpRight,
         },
         {
-            label: '输出 Token',
+            label: t('usageStats.summary.outputTokens'),
             value: formatTokens(stats.summary.totalOutputTokens),
             icon: ArrowDownLeft,
         },
         {
-            label: '输入缓存',
+            label: t('usageStats.summary.cacheInput'),
             value: formatTokens(stats.summary.totalCacheReadTokens + stats.summary.totalCacheCreationTokens),
             icon: Database,
         },
         {
-            label: '对话轮次',
+            label: t('usageStats.summary.messageCount'),
             value: String(stats.summary.messageCount),
             icon: MessageSquare,
         },
@@ -185,6 +184,7 @@ interface TooltipState {
 }
 
 function DailyTrendChart({ daily, totalTokens }: { daily: GlobalStats['daily']; totalTokens: number }) {
+    const { t } = useTranslation('app');
     const containerRef = useRef<HTMLDivElement>(null);
     const [tooltip, setTooltip] = useState<TooltipState | null>(null);
     const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
@@ -214,10 +214,10 @@ function DailyTrendChart({ daily, totalTokens }: { daily: GlobalStats['daily']; 
         return (
             <div>
                 <div className="mb-3 flex items-center justify-between">
-                    <h3 className="text-sm font-semibold text-[var(--ink)]">每日用量趋势</h3>
+                    <h3 className="text-sm font-semibold text-[var(--ink)]">{t('usageStats.dailyTrend')}</h3>
                 </div>
                 <div className="flex h-48 items-center justify-center rounded-lg border border-[var(--line)] text-sm text-[var(--ink-muted)]">
-                    暂无数据
+                    {t('usageStats.empty')}
                 </div>
             </div>
         );
@@ -248,9 +248,9 @@ function DailyTrendChart({ daily, totalTokens }: { daily: GlobalStats['daily']; 
     return (
         <div>
             <div className="mb-3 flex items-center justify-between">
-                <h3 className="text-sm font-semibold text-[var(--ink)]">每日用量趋势</h3>
+                <h3 className="text-sm font-semibold text-[var(--ink)]">{t('usageStats.dailyTrend')}</h3>
                 <span className="text-xs text-[var(--ink-muted)]">
-                    总消耗: {formatTokens(totalTokens)} tokens
+                    {t('usageStats.totalConsumption', { tokens: formatTokens(totalTokens) })}
                 </span>
             </div>
             <div
@@ -342,9 +342,9 @@ function DailyTrendChart({ daily, totalTokens }: { daily: GlobalStats['daily']; 
                     >
                         <div className="text-xs font-medium text-[var(--ink)]">{tooltip.date}</div>
                         <div className="mt-1 space-y-0.5 text-xs text-[var(--ink-muted)]">
-                            <div>输入: {formatTokens(tooltip.inputTokens)}</div>
-                            <div>输出: {formatTokens(tooltip.outputTokens)}</div>
-                            <div>对话: {tooltip.messageCount} 轮</div>
+                            <div>{t('usageStats.tooltip.input', { tokens: formatTokens(tooltip.inputTokens) })}</div>
+                            <div>{t('usageStats.tooltip.output', { tokens: formatTokens(tooltip.outputTokens) })}</div>
+                            <div>{t('usageStats.tooltip.messages', { count: tooltip.messageCount })}</div>
                         </div>
                     </div>
                 )}
@@ -353,11 +353,11 @@ function DailyTrendChart({ daily, totalTokens }: { daily: GlobalStats['daily']; 
                 <div className="mt-2 flex items-center justify-center gap-4 text-xs text-[var(--ink-muted)]">
                     <div className="flex items-center gap-1.5">
                         <div className="h-2.5 w-2.5 rounded-sm" style={{ backgroundColor: 'var(--accent-warm-muted)' }} />
-                        <span>输入</span>
+                        <span>{t('usageStats.legend.input')}</span>
                     </div>
                     <div className="flex items-center gap-1.5">
                         <div className="h-2.5 w-2.5 rounded-sm opacity-40" style={{ backgroundColor: 'var(--accent)' }} />
-                        <span>输出</span>
+                        <span>{t('usageStats.legend.output')}</span>
                     </div>
                 </div>
             </div>
@@ -367,14 +367,15 @@ function DailyTrendChart({ daily, totalTokens }: { daily: GlobalStats['daily']; 
 
 // ============= Model Distribution Table =============
 
-const ALL_VENDOR = '全部';
-const OTHER_VENDOR = '其他';
+const ALL_VENDOR = '__all__';
+const OTHER_VENDOR = '__other__';
 
 function ModelTable({ byModel, totalTokens, providerInfoMap }: {
     byModel: GlobalStats['byModel'];
     totalTokens: number;
     providerInfoMap: Record<string, ProviderDisplayInfo>;
 }) {
+    const { t } = useTranslation('app');
     const [selectedVendor, setSelectedVendor] = useState(ALL_VENDOR);
 
     const models = Object.entries(byModel);
@@ -421,7 +422,7 @@ function ModelTable({ byModel, totalTokens, providerInfoMap }: {
     return (
         <div>
             <div className="mb-3 flex flex-wrap items-center gap-2">
-                <h3 className="mr-1 text-sm font-semibold text-[var(--ink)]">模型用量分布</h3>
+                <h3 className="mr-1 text-sm font-semibold text-[var(--ink)]">{t('usageStats.modelDistribution')}</h3>
                 {vendors.length > 2 && (
                     <div className="flex gap-1 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] p-1">
                         {vendors.map((v) => (
@@ -434,13 +435,13 @@ function ModelTable({ byModel, totalTokens, providerInfoMap }: {
                                         : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
                                 }`}
                             >
-                                {v}
+                                {v === ALL_VENDOR ? t('usageStats.vendors.all') : v === OTHER_VENDOR ? t('usageStats.vendors.other') : v}
                             </button>
                         ))}
                     </div>
                 )}
                 <span className="ml-auto text-xs text-[var(--ink-muted)]">
-                    总消耗: {formatTokens(selectedVendor === ALL_VENDOR ? totalTokens : filteredTotal)} tokens
+                    {t('usageStats.totalConsumption', { tokens: formatTokens(selectedVendor === ALL_VENDOR ? totalTokens : filteredTotal) })}
                 </span>
             </div>
             <div className="overflow-x-auto rounded-lg border border-[var(--line)]">
@@ -448,22 +449,22 @@ function ModelTable({ byModel, totalTokens, providerInfoMap }: {
                     <thead className="bg-[var(--paper-elevated)]">
                         <tr>
                             <th className="px-4 py-2 text-left text-xs font-medium text-[var(--ink-muted)]">
-                                模型
+                                {t('usageStats.table.model')}
                             </th>
                             <th className="px-4 py-2 text-right text-xs font-medium text-[var(--ink-muted)]">
-                                总 Token
+                                {t('usageStats.table.totalTokens')}
                             </th>
                             <th className="px-4 py-2 text-right text-xs font-medium text-[var(--ink-muted)]">
-                                输入
+                                {t('usageStats.table.input')}
                             </th>
                             <th className="px-4 py-2 text-right text-xs font-medium text-[var(--ink-muted)]">
-                                输出
+                                {t('usageStats.table.output')}
                             </th>
                             <th className="px-4 py-2 text-right text-xs font-medium text-[var(--ink-muted)]">
-                                输入缓存
+                                {t('usageStats.table.cacheInput')}
                             </th>
                             <th className="px-4 py-2 text-right text-xs font-medium text-[var(--ink-muted)]">
-                                次数
+                                {t('usageStats.table.count')}
                             </th>
                         </tr>
                     </thead>

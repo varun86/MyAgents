@@ -71,6 +71,11 @@
     "openFolder": "打开所在文件夹",
     "remove": "移除"
   },
+  "recentThoughts": {
+    "openTaskCenterTitle": "打开任务中心查看全部想法",
+    "more": "更多",
+    "emptyThought": "（空想法）"
+  },
   "addWorkspaceMenu": {
     "add": "添加",
     "addLocalFolder": "添加本地文件夹",

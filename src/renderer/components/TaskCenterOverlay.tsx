@@ -13,6 +13,7 @@
  */
 
 import { memo, useCallback, useEffect, useMemo, useState, useRef } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Search, Loader2, BarChart2, Clock, Star, Trash2, X } from 'lucide-react';
 
 import { useCloseLayer } from '@/hooks/useCloseLayer';
@@ -44,12 +45,12 @@ interface TaskCenterOverlayProps {
 
 type StatusFilter = 'all' | 'favorite' | 'active' | 'desktop' | 'bot';
 
-const FILTER_OPTIONS: { key: StatusFilter; label: string }[] = [
-    { key: 'all', label: '全部' },
-    { key: 'favorite', label: '收藏' },
-    { key: 'active', label: '活跃中' },
-    { key: 'desktop', label: '桌面' },
-    { key: 'bot', label: '聊天机器人' },
+const FILTER_OPTIONS: { key: StatusFilter; labelKey: string }[] = [
+    { key: 'all', labelKey: 'historyOverlay.filters.all' },
+    { key: 'favorite', labelKey: 'historyOverlay.filters.favorite' },
+    { key: 'active', labelKey: 'historyOverlay.filters.active' },
+    { key: 'desktop', labelKey: 'historyOverlay.filters.desktop' },
+    { key: 'bot', labelKey: 'historyOverlay.filters.bot' },
 ];
 
 export default memo(function TaskCenterOverlay({
@@ -59,6 +60,7 @@ export default memo(function TaskCenterOverlay({
     taskCenterData,
     initialMode = 'default',
 }: TaskCenterOverlayProps) {
+    const { t } = useTranslation('app');
     useCloseLayer(() => { onClose(); return true; }, 40);
     const { sessions, cronTasks, sessionTagsMap, refresh, actions } = taskCenterData;
     const toast = useToast();
@@ -108,13 +110,13 @@ export default memo(function TaskCenterOverlay({
 
     // Memoize CustomSelect options to avoid re-creating JSX icons each render
     const workspaceSelectOptions = useMemo(() => [
-        { value: 'all', label: '全部工作区' },
+        { value: 'all', label: t('historyOverlay.allWorkspaces') },
         ...workspaceOptions.map(({ name, icon }) => ({
             value: name,
             label: name,
             icon: <WorkspaceIcon icon={icon} size={14} />,
         })),
-    ], [workspaceOptions]);
+    ], [workspaceOptions, t]);
 
     // Filter sessions
     const filteredSessions = useMemo(() => {
@@ -223,15 +225,15 @@ export default memo(function TaskCenterOverlay({
         try {
             const success = await actions.deleteSession(id);
             if (success) {
-                toast.success('已删除');
+                toast.success(t('historyOverlay.deleted'));
             } else {
-                toast.error('删除失败，请重试');
+                toast.error(t('historyOverlay.deleteFailedRetry'));
             }
         } catch (err) {
             console.error('[TaskCenterOverlay] Delete session failed:', err);
-            toast.error('删除失败');
+            toast.error(t('historyOverlay.deleteFailed'));
         }
-    }, [actions, pendingDeleteSession, toast]);
+    }, [actions, pendingDeleteSession, t, toast]);
 
     const handleShowStats = useCallback((e: React.MouseEvent, session: SessionMetadata) => {
         e.stopPropagation();
@@ -242,12 +244,12 @@ export default memo(function TaskCenterOverlay({
         e.stopPropagation();
         try {
             const success = await actions.setSessionFavorite(session.id, !session.favorite);
-            if (!success) toast.error('收藏失败，请重试');
+            if (!success) toast.error(t('historyOverlay.favoriteFailed'));
         } catch (err) {
             console.error('[TaskCenterOverlay] Toggle favorite failed:', err);
-            toast.error('收藏失败，请重试');
+            toast.error(t('historyOverlay.favoriteFailed'));
         }
-    }, [actions, toast]);
+    }, [actions, t, toast]);
 
     return (
         <OverlayBackdrop onClose={onClose} className="z-40" style={{ animation: 'overlayFadeIn 200ms ease-out' }}>
@@ -259,7 +261,7 @@ export default memo(function TaskCenterOverlay({
                     match the new domain of this overlay (Chat sessions only;
                     Tasks live in the Task Center singleton tab). */}
                 <div className="mb-4 flex items-center justify-between">
-                    <h2 className="text-lg font-semibold text-[var(--ink)]">历史对话</h2>
+                    <h2 className="text-lg font-semibold text-[var(--ink)]">{t('historyOverlay.title')}</h2>
                     <button
                         onClick={onClose}
                         className="rounded-md p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
@@ -286,7 +288,7 @@ export default memo(function TaskCenterOverlay({
                                         type="text"
                                         value={searchQuery}
                                         onChange={(e) => setSearchQuery(e.target.value)}
-                                        placeholder="搜索历史记录的内容或标题..."
+                                        placeholder={t('historyOverlay.searchPlaceholder')}
                                         className="h-full w-full rounded-md outline-none border border-[var(--line)] bg-transparent py-1 pl-8 pr-10 text-sm text-[var(--ink)] transition-colors placeholder:text-[var(--ink-muted)]/60 focus:border-[var(--accent)]"
                                         onKeyDown={(e) => {
                                             if (e.key === "Escape") {
@@ -309,7 +311,7 @@ export default memo(function TaskCenterOverlay({
                                                 setSearchQuery("");
                                                 setSearchResults([]);
                                             }}
-                                            title="退出搜索"
+                                            title={t('historyOverlay.exitSearch')}
                                             className="flex items-center text-[var(--ink-muted)]/50 transition-colors hover:text-[var(--ink)]"
                                         >
                                             <X className="h-3.5 w-3.5" />
@@ -330,7 +332,7 @@ export default memo(function TaskCenterOverlay({
                                                         : 'text-[var(--ink-muted)] hover:bg-[var(--hover-bg)]'
                                                 }`}
                                             >
-                                                {opt.label}
+                                                {t(opt.labelKey)}
                                             </button>
                                         ))}
                                     </div>
@@ -368,7 +370,7 @@ export default memo(function TaskCenterOverlay({
                                 directSessionMatch.kind === 'found' ? (
                                     <div className="space-y-2">
                                         <div className="px-1 text-xs text-[var(--ink-muted)]/60">
-                                            匹配到会话 · 回车或点击打开
+                                            {t('historyOverlay.directMatch')}
                                         </div>
                                         <div
                                             role="button"
@@ -392,19 +394,19 @@ export default memo(function TaskCenterOverlay({
                                     </div>
                                 ) : (
                                     <div className="py-8 text-center text-sm text-[var(--ink-muted)]/60">
-                                        未找到该 SessionID 对应的会话
+                                        {t('historyOverlay.sessionNotFound')}
                                     </div>
                                 )
                             ) : filteredSessions.length === 0 ? (
                                 <div className="py-8 text-center text-sm text-[var(--ink-muted)]/60">
-                                    暂无匹配的历史对话
+                                    {t('historyOverlay.empty')}
                                 </div>
                             ) : (
                                 <div className="space-y-0.5">
                                     {isSearchMode && searchQuery.trim() !== '' ? (
                                         searchResults.length === 0 && !isSearching ? (
                                             <div className="py-8 text-center text-sm text-[var(--ink-muted)]/60">
-                                                未找到结果
+                                                {t('historyOverlay.noResults')}
                                             </div>
                                         ) : (
                                             searchResults.map(hit => {
@@ -468,10 +470,10 @@ export default memo(function TaskCenterOverlay({
                                                     <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:opacity-100">
                                                         <div className="h-full w-10 bg-gradient-to-r from-[var(--paper-inset-a0)] to-[var(--paper-inset)]" />
                                                         <div className="flex h-full items-center gap-1 bg-[var(--paper-inset)] pr-3">
-                                                            <Tip label={session.favorite ? '取消收藏' : '收藏'} position="bottom">
+                                                            <Tip label={session.favorite ? t('historyOverlay.unfavorite') : t('historyOverlay.favorite')} position="bottom">
                                                                 <button
                                                                     onClick={e => handleToggleFavorite(e, session)}
-                                                                    aria-label={session.favorite ? '取消收藏' : '收藏'}
+                                                                    aria-label={session.favorite ? t('historyOverlay.unfavorite') : t('historyOverlay.favorite')}
                                                                     className={`flex h-7 w-7 items-center justify-center rounded-md transition-colors hover:bg-[var(--paper)] ${
                                                                         session.favorite
                                                                             ? 'text-[var(--accent)]'
@@ -481,30 +483,30 @@ export default memo(function TaskCenterOverlay({
                                                                     <Star className="h-3.5 w-3.5" fill={session.favorite ? 'currentColor' : 'none'} />
                                                                 </button>
                                                             </Tip>
-                                                            <Tip label="查看统计" position="bottom">
+                                                            <Tip label={t('historyOverlay.viewStats')} position="bottom">
                                                                 <button
                                                                     onClick={e => handleShowStats(e, session)}
-                                                                    aria-label="查看统计"
+                                                                    aria-label={t('historyOverlay.viewStats')}
                                                                     className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper)] hover:text-[var(--ink)]"
                                                                 >
                                                                     <BarChart2 className="h-3.5 w-3.5" />
                                                                 </button>
                                                             </Tip>
                                                             {isCronProtected ? (
-                                                                <Tip label="请先停止定时任务后再删除" position="bottom">
+                                                                <Tip label={t('historyOverlay.deleteBlocked')} position="bottom">
                                                                     <button
                                                                         disabled
-                                                                        aria-label="删除（请先停止定时任务）"
+                                                                        aria-label={t('historyOverlay.deleteBlockedAria')}
                                                                         className="flex h-7 w-7 cursor-not-allowed items-center justify-center rounded-md text-[var(--ink-muted)] opacity-40"
                                                                     >
                                                                         <Trash2 className="h-3.5 w-3.5" />
                                                                     </button>
                                                                 </Tip>
                                                             ) : (
-                                                                <Tip label="删除" position="bottom">
+                                                                <Tip label={t('historyOverlay.delete')} position="bottom">
                                                                     <button
                                                                         onClick={e => handleDeleteClick(e, session)}
-                                                                        aria-label="删除"
+                                                                        aria-label={t('historyOverlay.delete')}
                                                                         className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--ink-muted)] transition-colors hover:bg-[var(--error-bg)] hover:text-[var(--error)]"
                                                                     >
                                                                         <Trash2 className="h-3.5 w-3.5" />
@@ -526,9 +528,9 @@ export default memo(function TaskCenterOverlay({
 
             {pendingDeleteSession && (
                 <ConfirmDialog
-                    title="删除对话"
-                    message={`确定要删除「${pendingDeleteSession.title}」吗？此操作不可撤销。`}
-                    confirmText="删除"
+                    title={t('historyOverlay.deleteTitle')}
+                    message={t('historyOverlay.deleteMessage', { title: pendingDeleteSession.title })}
+                    confirmText={t('historyOverlay.delete')}
                     confirmVariant="danger"
                     onConfirm={handleConfirmDelete}
                     onCancel={() => setPendingDeleteSession(null)}

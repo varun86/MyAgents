@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Bot, ChevronDown, Loader2, LogIn, LogOut, MessageSquare, Package, User } from 'lucide-react';
 
 import type { SpaceSession } from '@/api/spaceCloud';
@@ -23,6 +24,7 @@ export function SpaceLogin({
   authFlow: { token: string; expiresAt: number } | null;
   onLogin: () => void;
 }) {
+  const { t } = useTranslation('app');
   return (
     <div className="relative flex h-full items-center justify-center overflow-hidden bg-[var(--paper)] px-6">
       <div aria-hidden className="pointer-events-none absolute inset-0 opacity-40" style={PAPER_GRID_STYLE} />
@@ -30,9 +32,9 @@ export function SpaceLogin({
         <div className="mb-6 flex items-center gap-3">
           <img src={myagentsWebLogo} alt="" className="h-11 w-11 rounded-xl shadow-sm" />
           <div className="min-w-0">
-            <p className="text-xs font-medium text-[var(--accent-warm)]">Official Space</p>
-            <h1 className="truncate text-xl font-semibold text-[var(--ink)]">MyAgents 社区</h1>
-            <p className="text-sm text-[var(--ink-muted)]">使用 Google 账号进入官方 Space</p>
+            <p className="text-xs font-medium text-[var(--accent-warm)]">{t('space.login.eyebrow')}</p>
+            <h1 className="truncate text-xl font-semibold text-[var(--ink)]">{t('space.login.title')}</h1>
+            <p className="text-sm text-[var(--ink-muted)]">{t('space.login.description')}</p>
           </div>
         </div>
         <button
@@ -42,9 +44,9 @@ export function SpaceLogin({
           className="flex h-10 w-full items-center justify-center gap-2 rounded-lg bg-[var(--button-primary-bg)] px-4 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:cursor-wait disabled:opacity-70"
         >
           {authBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <LogIn className="h-4 w-4" />}
-          {authFlow ? '等待浏览器授权完成' : '继续使用 Google'}
+          {authFlow ? t('space.login.waiting') : t('space.login.continueWithGoogle')}
         </button>
-        <p className="mt-3 text-center text-xs text-[var(--ink-muted)]">授权完成后会自动回到 MyAgents。</p>
+        <p className="mt-3 text-center text-xs text-[var(--ink-muted)]">{t('space.login.returnHint')}</p>
       </div>
     </div>
   );
@@ -61,6 +63,7 @@ export function SpaceSidebar({
   onSpaceTabChange: (mode: SpaceViewMode) => void;
   onLogout: () => void;
 }) {
+  const { t } = useTranslation('app');
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
   useCloseLayer(() => {
     if (!accountMenuOpen) return false;
@@ -89,7 +92,7 @@ export function SpaceSidebar({
               </span>
               <span className="mt-0.5 flex items-center gap-1.5 text-xs font-medium text-[var(--ink-muted)]">
                 <span>Official Space</span>
-                <span>开放加入</span>
+                <span>{t('space.sidebar.openJoin')}</span>
               </span>
             </span>
             <ChevronDown className="h-4 w-4 -rotate-90 text-[var(--ink-muted)] transition-transform group-open/space:rotate-0" />
@@ -135,7 +138,7 @@ export function SpaceSidebar({
           }`}
         >
           <div className="mb-1 border-b border-[var(--line-subtle)] px-2 py-2 text-xs leading-5 text-[var(--ink-muted)]">
-            已通过 Google 登录<br />
+            {t('space.sidebar.signedInWithGoogle')}<br />
             {session.user.email}
           </div>
           <button
@@ -147,7 +150,7 @@ export function SpaceSidebar({
             className="flex h-8 w-full items-center gap-2 rounded-lg px-2 text-left text-xs font-semibold text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
           >
             <LogOut className="h-3.5 w-3.5" />
-            退出登录
+            {t('space.sidebar.logout')}
           </button>
         </div>
       </div>

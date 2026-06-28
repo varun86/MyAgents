@@ -4,6 +4,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { Trans, useTranslation } from 'react-i18next';
 
 import { useCloseLayer } from '@/hooks/useCloseLayer';
 import type { LogEntry, LogLevel, LogSource } from '@/types/log';
@@ -64,9 +65,9 @@ const LEVEL_FILTERS: { value: LogLevel | 'all'; label: string }[] = [
 
 // Hide filter options (multi-select)
 type HideFilter = 'stream_event' | 'analytics';
-const HIDE_FILTERS: { value: HideFilter; label: string }[] = [
+const HIDE_FILTERS: { value: HideFilter; labelKey?: string; label?: string }[] = [
     { value: 'stream_event', label: 'Stream Event' },
-    { value: 'analytics', label: '统计日志' },
+    { value: 'analytics', labelKey: 'logsPanel.hideAnalytics' },
 ];
 const DEFAULT_HIDE_FILTERS = new Set<HideFilter>(['stream_event', 'analytics']);
 
@@ -93,6 +94,7 @@ function highlightText(text: string, query: string): React.ReactNode {
 }
 
 export function UnifiedLogsPanel({ sseLogs, isVisible, onClose, onClearAll }: UnifiedLogsPanelProps) {
+    const { t } = useTranslation('app');
     useCloseLayer(() => { if (!isVisible) return false; onClose(); return true; }, 50);
     // All logs (React + Node + Rust) now come from sseLogs prop via TabProvider
     const [filter, setFilter] = useState<LogSource | 'all'>('all');
@@ -300,7 +302,7 @@ export function UnifiedLogsPanel({ sseLogs, isVisible, onClose, onClearAll }: Un
                                         navigateMatch(e.shiftKey ? 'prev' : 'next');
                                     }
                                 }}
-                                placeholder="搜索日志... (⌘F)"
+                                placeholder={t('logsPanel.searchPlaceholder')}
                                 className="w-40 bg-transparent text-xs text-[var(--ink)] placeholder:text-[var(--ink-subtle)] focus:outline-none"
                             />
                             {searchQuery && (
@@ -308,13 +310,13 @@ export function UnifiedLogsPanel({ sseLogs, isVisible, onClose, onClearAll }: Un
                                     <span className="text-xs text-[var(--ink-muted)] tabular-nums">
                                         {matchIndices.length > 0 ? `${activeMatchIndex + 1}/${matchIndices.length}` : '0/0'}
                                     </span>
-                                    <button onClick={() => navigateMatch('prev')} className="rounded p-0.5 text-[var(--ink-muted)] hover:bg-[var(--paper-inset)]" title="上一个 (Shift+Enter)">
+                                    <button onClick={() => navigateMatch('prev')} className="rounded p-0.5 text-[var(--ink-muted)] hover:bg-[var(--paper-inset)]" title={t('logsPanel.previous')}>
                                         <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="18 15 12 9 6 15" /></svg>
                                     </button>
-                                    <button onClick={() => navigateMatch('next')} className="rounded p-0.5 text-[var(--ink-muted)] hover:bg-[var(--paper-inset)]" title="下一个 (Enter)">
+                                    <button onClick={() => navigateMatch('next')} className="rounded p-0.5 text-[var(--ink-muted)] hover:bg-[var(--paper-inset)]" title={t('logsPanel.next')}>
                                         <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="6 9 12 15 18 9" /></svg>
                                     </button>
-                                    <button onClick={() => { setSearchQuery(''); searchInputRef.current?.focus(); }} className="rounded p-0.5 text-[var(--ink-muted)] hover:bg-[var(--paper-inset)]" title="清空">
+                                    <button onClick={() => { setSearchQuery(''); searchInputRef.current?.focus(); }} className="rounded p-0.5 text-[var(--ink-muted)] hover:bg-[var(--paper-inset)]" title={t('logsPanel.clearSearch')}>
                                         <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
                                     </button>
                                 </>
@@ -327,7 +329,7 @@ export function UnifiedLogsPanel({ sseLogs, isVisible, onClose, onClearAll }: Un
                         <button
                             onClick={handleDownload}
                             className="rounded p-1.5 text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
-                            title="导出日志"
+                            title={t('logsPanel.export')}
                         >
                             <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                                 <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" />
@@ -337,7 +339,7 @@ export function UnifiedLogsPanel({ sseLogs, isVisible, onClose, onClearAll }: Un
                         <button
                             onClick={handleClearAll}
                             className="rounded p-1.5 text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
-                            title="清空日志"
+                            title={t('logsPanel.clear')}
                         >
                             <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                                 <polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
@@ -347,7 +349,7 @@ export function UnifiedLogsPanel({ sseLogs, isVisible, onClose, onClearAll }: Un
                         <button
                             onClick={onClose}
                             className="rounded-lg p-1.5 text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
-                            aria-label="Close"
+                            aria-label={t('logsPanel.close')}
                         >
                             <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
                                 <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
@@ -360,7 +362,7 @@ export function UnifiedLogsPanel({ sseLogs, isVisible, onClose, onClearAll }: Un
                 <div className="flex flex-wrap items-center gap-4 border-b border-[var(--line)] px-6 py-2">
                     {/* 范围 (单选) */}
                     <div className="flex items-center gap-1.5">
-                        <span className="text-xs font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60">范围</span>
+                        <span className="text-xs font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60">{t('logsPanel.scope')}</span>
                         <div className="flex gap-0.5">
                             {SOURCE_FILTERS.map(({ value, label }) => (
                                 <button
@@ -381,7 +383,7 @@ export function UnifiedLogsPanel({ sseLogs, isVisible, onClose, onClearAll }: Un
 
                     {/* 类型 (单选) */}
                     <div className="flex items-center gap-1.5">
-                        <span className="text-xs font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60">类型</span>
+                        <span className="text-xs font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60">{t('logsPanel.type')}</span>
                         <div className="flex gap-0.5">
                             {LEVEL_FILTERS.map(({ value, label }) => (
                                 <button
@@ -402,9 +404,9 @@ export function UnifiedLogsPanel({ sseLogs, isVisible, onClose, onClearAll }: Un
 
                     {/* 隐藏 (多选) */}
                     <div className="flex items-center gap-1.5">
-                        <span className="text-xs font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60">隐藏</span>
+                        <span className="text-xs font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60">{t('logsPanel.hide')}</span>
                         <div className="flex gap-1">
-                            {HIDE_FILTERS.map(({ value, label }) => (
+                            {HIDE_FILTERS.map(({ value, label, labelKey }) => (
                                 <button
                                     key={value}
                                     onClick={() => toggleHideFilter(value)}
@@ -413,7 +415,7 @@ export function UnifiedLogsPanel({ sseLogs, isVisible, onClose, onClearAll }: Un
                                         : 'bg-[var(--paper-inset)] text-[var(--ink-muted)] hover:bg-[var(--line)]'
                                         }`}
                                 >
-                                    {label}
+                                    {labelKey ? t(labelKey) : label}
                                 </button>
                             ))}
                         </div>
@@ -428,7 +430,7 @@ export function UnifiedLogsPanel({ sseLogs, isVisible, onClose, onClearAll }: Un
                 >
                     {filteredLogs.length === 0 ? (
                         <div className="flex h-full items-center justify-center text-[var(--ink-muted)]">
-                            No logs yet.
+                            {t('logsPanel.empty')}
                         </div>
                     ) : (
                         <div className="space-y-0.5">
@@ -480,10 +482,14 @@ export function UnifiedLogsPanel({ sseLogs, isVisible, onClose, onClearAll }: Un
                         <span className="text-blue-600 dark:text-blue-400">REACT: {logCounts.react}</span>
                         <span className="text-green-600 dark:text-green-400">NODE: {logCounts.bun}</span>
                         <span className="text-orange-600 dark:text-orange-400">RUST: {logCounts.rust}</span>
-                        <span className="text-[var(--ink-muted)]">Total: {allLogs.length}</span>
+                        <span className="text-[var(--ink-muted)]">{t('logsPanel.total', { count: allLogs.length })}</span>
                     </div>
                     <div>
-                        Press <kbd className="rounded bg-[var(--paper-elevated)] px-1.5 py-0.5 font-mono text-xs">ESC</kbd> to close
+                        <Trans
+                            i18nKey="logsPanel.escToClose"
+                            ns="app"
+                            components={{ key: <kbd className="rounded bg-[var(--paper-elevated)] px-1.5 py-0.5 font-mono text-xs" /> }}
+                        />
                     </div>
                 </div>
             </div>
