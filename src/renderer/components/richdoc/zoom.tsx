@@ -15,6 +15,7 @@
  *  - WebKit (WKWebView on macOS) also fires non-standard `gesturestart/change`.
  */
 import { useCallback, useEffect, useRef, useState, type RefObject } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Minus, Plus } from 'lucide-react';
 
 const MIN_ZOOM = 0.5;
@@ -88,22 +89,23 @@ export function ZoomControls({
   onZoomOut: () => void;
   onReset: () => void;
 }) {
+  const { t } = useTranslation('app');
   const btn =
     'flex h-6 w-6 items-center justify-center rounded-full text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] disabled:opacity-40 disabled:hover:bg-transparent';
   return (
     <div className="absolute bottom-4 right-4 z-10 flex items-center gap-0.5 rounded-full border border-[var(--line)] bg-[var(--paper-elevated)] px-1 py-1 shadow-md">
-      <button type="button" onClick={onZoomOut} disabled={zoom <= MIN_ZOOM} className={btn} title="缩小">
+      <button type="button" onClick={onZoomOut} disabled={zoom <= MIN_ZOOM} className={btn} title={t('imagePreview.zoomOut')}>
         <Minus className="h-3.5 w-3.5" />
       </button>
       <button
         type="button"
         onClick={onReset}
         className="min-w-[44px] rounded-full px-1 text-center text-xs font-medium tabular-nums text-[var(--ink-muted)] transition-colors hover:text-[var(--ink)]"
-        title="重置为 100%"
+        title={t('richDoc.resetZoom')}
       >
         {Math.round(zoom * 100)}%
       </button>
-      <button type="button" onClick={onZoomIn} disabled={zoom >= MAX_ZOOM} className={btn} title="放大">
+      <button type="button" onClick={onZoomIn} disabled={zoom >= MAX_ZOOM} className={btn} title={t('imagePreview.zoomIn')}>
         <Plus className="h-3.5 w-3.5" />
       </button>
     </div>

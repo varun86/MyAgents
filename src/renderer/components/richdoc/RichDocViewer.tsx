@@ -24,6 +24,7 @@ import {
   type ComponentType,
   type LazyExoticComponent,
 } from 'react';
+import { useTranslation } from 'react-i18next';
 import { ExternalLink, FileText, FileWarning, Loader2 } from 'lucide-react';
 
 import { useWorkspaceFileService } from '@/hooks/useWorkspaceFileService';
@@ -60,6 +61,7 @@ const Spinner = (
 );
 
 export default function RichDocViewer({ kind, path, workspacePath, localPath = null }: RichDocViewerProps) {
+  const { t } = useTranslation('app');
   // `useWorkspaceFileService` returns a useMemo-stable object (per its own docs),
   // so it's safe to depend on directly in effects/callbacks without a ref mirror.
   const fileService = useWorkspaceFileService(workspacePath);
@@ -125,10 +127,10 @@ export default function RichDocViewer({ kind, path, workspacePath, localPath = n
         <FileWarning className="h-9 w-9 text-[var(--ink-subtle)]" />
         <p className="max-w-md text-sm text-[var(--ink-muted)]">
           {tooLarge
-            ? '文件超过 50MB，暂不支持内联预览。'
+            ? t('richDoc.tooLarge')
             : renderError
-              ? '无法渲染此文件。'
-              : '无法读取此文件。'}
+              ? t('richDoc.renderFailed')
+              : t('richDoc.readFailed')}
         </p>
         <button
           type="button"
@@ -136,7 +138,7 @@ export default function RichDocViewer({ kind, path, workspacePath, localPath = n
           className="inline-flex items-center gap-1.5 rounded-md border border-[var(--line-strong)] bg-[var(--button-secondary-bg)] px-3 py-1.5 text-sm font-semibold text-[var(--ink)] shadow-sm transition-all duration-150 hover:bg-[var(--button-secondary-bg-hover)] hover:shadow-md active:scale-[0.98]"
         >
           <ExternalLink className="h-3.5 w-3.5" />
-          用默认程序打开
+          {t('richDoc.openDefault')}
         </button>
       </div>
     );
@@ -146,7 +148,7 @@ export default function RichDocViewer({ kind, path, workspacePath, localPath = n
     return (
       <div className="flex h-full flex-col items-center justify-center gap-3 bg-[var(--paper-elevated)] px-6 text-center">
         <FileText className="h-10 w-10 text-[var(--ink-subtle)] opacity-40" />
-        <p className="text-sm text-[var(--ink-muted)]">此文档没有内容</p>
+        <p className="text-sm text-[var(--ink-muted)]">{t('richDoc.empty')}</p>
       </div>
     );
   }

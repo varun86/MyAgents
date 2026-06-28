@@ -41,6 +41,52 @@
     "teamBuildUnavailable": "当前构建未启用团队功能",
     "teamUnavailable": "团队功能尚未开放"
   },
+  "common": {
+    "loading": "加载中...",
+    "selectPlaceholder": "请选择"
+  },
+  "browserPanel": {
+    "urlPlaceholder": "输入网址或搜索…",
+    "openFailed": "无法打开内嵌浏览器：{{message}}",
+    "back": "后退",
+    "forward": "前进",
+    "stop": "停止",
+    "reload": "刷新",
+    "editSource": "编辑源码",
+    "openExternal": "在浏览器中打开",
+    "close": "关闭浏览器",
+    "newTab": "新标签页",
+    "blankHint": "在上方地址栏输入网址或粘贴链接"
+  },
+  "imagePreview": {
+    "zoomOut": "缩小",
+    "zoomIn": "放大",
+    "rotate": "旋转",
+    "reset": "重置",
+    "closeEsc": "关闭 (Esc)",
+    "hint": "双击图片放大 · 按 Esc 关闭"
+  },
+  "errorBoundary": {
+    "title": "界面渲染出错",
+    "unknown": "发生了未知错误",
+    "reload": "重新加载"
+  },
+  "dropZone": {
+    "defaultMessage": "松手将文件加入工作区"
+  },
+  "richDoc": {
+    "tooLarge": "文件超过 50MB，暂不支持内联预览。",
+    "renderFailed": "无法渲染此文件。",
+    "readFailed": "无法读取此文件。",
+    "openDefault": "用默认程序打开",
+    "empty": "此文档没有内容",
+    "sheetParseFailed": "表格解析失败",
+    "sheetTruncated": "表格较大，已截断显示前 {{rows}} 行 × {{cols}} 列。完整内容请「用默认程序打开」。",
+    "resetZoom": "重置为 100%",
+    "wordRenderFailed": "Word 文档渲染失败",
+    "pdfRenderFailed": "PDF 渲染失败",
+    "pptRenderFailed": "演示文稿渲染失败"
+  },
   "space": {
     "login": {
       "eyebrow": "Official Space",

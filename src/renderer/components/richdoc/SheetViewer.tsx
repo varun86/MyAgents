@@ -12,6 +12,7 @@
  * "open with default app" fallback instead of a blank screen.
  */
 import { useEffect, useMemo, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import * as XLSX from 'xlsx';
 import { clampSheetRange } from './sheetMetrics';
 import type { RichDocSubViewerProps } from './types';
@@ -27,6 +28,7 @@ interface SheetData {
 }
 
 export default function SheetViewer({ bytes, onError, onEmpty }: RichDocSubViewerProps) {
+  const { t } = useTranslation('app');
   // Parse purely in render — RichDocViewer keys this by path, so a file switch
   // remounts (recomputes) and resets `active` to 0 for free. Parse errors are
   // surfaced via an effect (not during render) so we never call a parent setter
@@ -63,9 +65,9 @@ export default function SheetViewer({ bytes, onError, onEmpty }: RichDocSubViewe
       });
       return { sheets, error: null, empty: false };
     } catch (e) {
-      return { sheets: null, error: e instanceof Error ? e.message : '表格解析失败', empty: false };
+      return { sheets: null, error: e instanceof Error ? e.message : t('richDoc.sheetParseFailed'), empty: false };
     }
-  }, [bytes]);
+  }, [bytes, t]);
 
   const [active, setActive] = useState(0);
 
@@ -83,7 +85,7 @@ export default function SheetViewer({ bytes, onError, onEmpty }: RichDocSubViewe
       <div className="flex-1 overflow-auto overscroll-contain p-3">
         {current.truncated && (
           <div className="mb-2 rounded-[var(--radius-sm)] bg-[var(--paper-inset)] px-3 py-1.5 text-xs text-[var(--ink-muted)]">
-            表格较大，已截断显示前 {MAX_ROWS} 行 × {MAX_COLS} 列。完整内容请「用默认程序打开」。
+            {t('richDoc.sheetTruncated', { rows: MAX_ROWS, cols: MAX_COLS })}
           </div>
         )}
         <div

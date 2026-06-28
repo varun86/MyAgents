@@ -22,6 +22,7 @@
  * the zip; the guard neutralizes any external-URL reference.
  */
 import { useEffect, useRef, useState } from 'react';
+import { i18n } from '@/i18n';
 import { Loader2 } from 'lucide-react';
 import { renderAsync } from 'docx-preview';
 import { revokeBlobUrls } from './docxBlobUrls';
@@ -55,7 +56,7 @@ export default function DocxViewer({ bytes, onError }: RichDocSubViewerProps) {
         if (!cancelled) setLoading(false);
       })
       .catch((e) => {
-        if (!cancelled) onError(e instanceof Error ? e.message : 'Word 文档渲染失败');
+        if (!cancelled) onError(e instanceof Error ? e.message : i18n.t('app:richDoc.wordRenderFailed'));
       });
 
     return () => {

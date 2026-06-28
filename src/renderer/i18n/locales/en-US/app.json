@@ -41,6 +41,52 @@
     "teamBuildUnavailable": "Team is not enabled in this build",
     "teamUnavailable": "Team is not available yet"
   },
+  "common": {
+    "loading": "Loading...",
+    "selectPlaceholder": "Select"
+  },
+  "browserPanel": {
+    "urlPlaceholder": "Enter a URL or search...",
+    "openFailed": "Failed to open embedded browser: {{message}}",
+    "back": "Back",
+    "forward": "Forward",
+    "stop": "Stop",
+    "reload": "Reload",
+    "editSource": "Edit source",
+    "openExternal": "Open in browser",
+    "close": "Close browser",
+    "newTab": "New tab",
+    "blankHint": "Enter a URL or paste a link in the address bar above"
+  },
+  "imagePreview": {
+    "zoomOut": "Zoom out",
+    "zoomIn": "Zoom in",
+    "rotate": "Rotate",
+    "reset": "Reset",
+    "closeEsc": "Close (Esc)",
+    "hint": "Double-click image to zoom · Press Esc to close"
+  },
+  "errorBoundary": {
+    "title": "Interface render error",
+    "unknown": "An unknown error occurred",
+    "reload": "Reload"
+  },
+  "dropZone": {
+    "defaultMessage": "Release to add files to the workspace"
+  },
+  "richDoc": {
+    "tooLarge": "This file is over 50 MB and cannot be previewed inline.",
+    "renderFailed": "Cannot render this file.",
+    "readFailed": "Cannot read this file.",
+    "openDefault": "Open with default app",
+    "empty": "This document has no content",
+    "sheetParseFailed": "Failed to parse spreadsheet",
+    "sheetTruncated": "Large spreadsheet truncated to the first {{rows}} rows x {{cols}} columns. Open with the default app to view the full content.",
+    "resetZoom": "Reset to 100%",
+    "wordRenderFailed": "Failed to render Word document",
+    "pdfRenderFailed": "Failed to render PDF",
+    "pptRenderFailed": "Failed to render presentation"
+  },
   "space": {
     "login": {
       "eyebrow": "Official Space",
