@@ -3919,7 +3919,9 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                             </div>
 
                             <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
-                                <div className="flex items-center justify-between gap-4">
+                                <h3 className="text-base font-medium text-[var(--ink)]">{tSettings('general.appearanceTitle')}</h3>
+
+                                <div className="mt-4 flex items-center justify-between gap-4">
                                     <div className="flex-1 pr-4">
                                         <p className="text-sm font-medium text-[var(--ink)]">{tSettings('general.languageTitle')}</p>
                                         <p className="text-xs text-[var(--ink-muted)]">
@@ -3936,6 +3938,28 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                         triggerIcon={<Globe className="h-3.5 w-3.5" />}
                                         className="w-[220px]"
                                     />
+                                </div>
+
+                                <div className="mt-4 flex items-center justify-between gap-4">
+                                    <div className="flex-1 pr-4">
+                                        <p className="text-sm font-medium text-[var(--ink)]">{tSettings('general.themeTitle')}</p>
+                                        <p className="mt-0.5 text-xs text-[var(--ink-muted)]">{tSettings('general.themeDescription')}</p>
+                                    </div>
+                                    <div className="flex shrink-0 gap-0.5 rounded-full bg-[var(--paper-inset)] p-0.5">
+                                        {(['system', 'light', 'dark'] as const).map((mode) => (
+                                            <button
+                                                key={mode}
+                                                onClick={() => updateConfig({ theme: mode })}
+                                                className={`rounded-full px-3 py-1 text-xs font-medium transition-all ${
+                                                    config.theme === mode
+                                                        ? 'bg-[var(--paper-elevated)] text-[var(--ink)] shadow-sm'
+                                                        : 'text-[var(--ink-muted)] hover:text-[var(--ink-secondary)]'
+                                                }`}
+                                            >
+                                                {tSettings(`general.theme.${mode}`)}
+                                            </button>
+                                        ))}
+                                    </div>
                                 </div>
                             </div>
 
@@ -4084,29 +4108,6 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                             },
                                         }}
                                     />
-                                </div>
-
-                            {/* 主题 */}
-                            <div className="mt-6 flex items-center justify-between">
-                                <div>
-                                    <p className="text-sm font-medium text-[var(--ink)]">{tSettings('general.themeTitle')}</p>
-                                    <p className="mt-0.5 text-xs text-[var(--ink-muted)]">{tSettings('general.themeDescription')}</p>
-                                </div>
-                                    <div className="flex gap-0.5 rounded-full bg-[var(--paper-inset)] p-0.5">
-                                        {(['system', 'light', 'dark'] as const).map((mode) => (
-                                            <button
-                                                key={mode}
-                                                onClick={() => updateConfig({ theme: mode })}
-                                                className={`rounded-full px-3 py-1 text-xs font-medium transition-all ${
-                                                    config.theme === mode
-                                                        ? 'bg-[var(--paper-elevated)] text-[var(--ink)] shadow-sm'
-                                                        : 'text-[var(--ink-muted)] hover:text-[var(--ink-secondary)]'
-                                                }`}
-                                            >
-                                                {tSettings(`general.theme.${mode}`)}
-                                            </button>
-                                        ))}
-                                    </div>
                                 </div>
                             </div>
 
