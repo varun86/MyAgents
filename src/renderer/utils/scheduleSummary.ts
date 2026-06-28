@@ -15,7 +15,7 @@
 // Chinese + computing the next trigger time + a rough countdown.
 
 import type { Task, TaskExecutionMode } from '@/../shared/types/task';
-import { formatAbsoluteDateTime } from '@/i18n/format';
+import { currentSupportedLocale, formatAbsoluteDateTime } from '@/i18n/format';
 import { humanizeCron } from '@/utils/taskCenterUtils';
 import type { SupportedLocale } from '../../shared/i18n';
 
@@ -44,7 +44,7 @@ export interface ScheduleSummary {
 export async function summarizeSchedule(
   task: Task,
   nextExecutionAtMs?: number | null,
-  locale: SupportedLocale = 'zh-CN',
+  locale: SupportedLocale = currentSupportedLocale(),
 ): Promise<ScheduleSummary> {
   const mode = task.executionMode;
 

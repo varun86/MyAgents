@@ -1,4 +1,5 @@
 import type { ChannelSurface } from '@/hooks/useSessionSurfaces';
+import { i18n } from '@/i18n';
 
 interface ChannelBoundSessionTransitionOptions {
   sessionId: string;
@@ -8,6 +9,14 @@ interface ChannelBoundSessionTransitionOptions {
   resetSession: () => Promise<boolean>;
   reportError: (message: string) => void;
   allowPlainResetFallback: boolean;
+}
+
+function channelTransitionError(allowPlainResetFallback: boolean): string {
+  return String(i18n.t(
+    allowPlainResetFallback
+      ? 'chat:shell.toasts.channelRebindFailedReset'
+      : 'chat:shell.toasts.channelRebindFailedDeleteCancelled',
+  ));
 }
 
 /**
@@ -47,12 +56,12 @@ export async function transitionChannelBoundSession(
     }
 
     console.warn('[Chat] migrateChannelToNewSession returned null');
-    reportError(allowPlainResetFallback ? 'Channel 重绑失败，已就地重置' : 'Channel 重绑失败，已取消删除');
+    reportError(channelTransitionError(allowPlainResetFallback));
     if (!allowPlainResetFallback) return false;
     return await resetSession();
   } catch (err) {
     console.error('[Chat] Channel surface migration failed:', err);
-    reportError(allowPlainResetFallback ? 'Channel 重绑失败，已就地重置' : 'Channel 重绑失败，已取消删除');
+    reportError(channelTransitionError(allowPlainResetFallback));
     if (!allowPlainResetFallback) return false;
     return await resetSession();
   }

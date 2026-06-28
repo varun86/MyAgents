@@ -1,5 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 
+import { i18n } from '@/i18n';
 import type { Task } from '../../shared/types/task';
 import { summarizeSchedule } from './scheduleSummary';
 
@@ -20,6 +21,10 @@ function task(partial: Partial<Task>): Task {
 }
 
 describe('summarizeSchedule i18n', () => {
+  beforeEach(async () => {
+    await i18n.changeLanguage('zh-CN');
+  });
+
   it('formats interval schedules in English when locale is explicit', async () => {
     await expect(
       summarizeSchedule(task({ executionMode: 'recurring', intervalMinutes: 120 }), null, 'en-US'),
@@ -29,12 +34,13 @@ describe('summarizeSchedule i18n', () => {
     });
   });
 
-  it('keeps the default Chinese copy for existing callers', async () => {
+  it('defaults to the active UI locale', async () => {
+    await i18n.changeLanguage('en-US');
     await expect(
       summarizeSchedule(task({ executionMode: 'recurring', intervalMinutes: 120 })),
     ).resolves.toMatchObject({
       mode: 'recurring',
-      title: '每 2 小时',
+      title: 'Every 2 hours',
     });
   });
 });

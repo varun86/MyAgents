@@ -5,7 +5,7 @@
 
 import type { SessionMetadata } from '@/api/sessionClient';
 import { findPromotedPlugin } from '@/components/ImSettings/promotedPlugins';
-import { formatPastRelativeTime } from '@/i18n/format';
+import { currentSupportedLocale, formatPastRelativeTime } from '@/i18n/format';
 import type { SupportedLocale } from '../../shared/i18n';
 export { getSessionDisplayText } from '@/utils/sessionDisplay';
 
@@ -26,7 +26,7 @@ export function getFolderName(path: string): string {
 export function formatTime(
     isoString: string,
     now: Date = new Date(),
-    locale: SupportedLocale = 'zh-CN',
+    locale: SupportedLocale = currentSupportedLocale(),
 ): string {
     const date = new Date(isoString);
     if (Number.isNaN(date.getTime())) return '';
@@ -123,7 +123,7 @@ const BUILTIN_PLATFORM_NAMES: Record<string, string> = {
  */
 export function formatMessageCount(
     session: SessionMetadata,
-    locale: SupportedLocale = 'zh-CN',
+    locale: SupportedLocale = currentSupportedLocale(),
 ): string | null {
     const count = session.stats?.messageCount;
     if (!count || count <= 0) return null;
@@ -143,7 +143,7 @@ export function formatMessageCount(
  */
 export function relativeTime(
     ts: number,
-    locale: SupportedLocale = 'zh-CN',
+    locale: SupportedLocale = currentSupportedLocale(),
 ): string {
     return formatPastRelativeTime(ts, locale);
 }
@@ -154,7 +154,7 @@ const WEEKDAY_LABEL_EN = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 /**
  * 时间段标签:0-4 凌晨 · 5-8 早上 · 9-11 上午 · 12 中午 · 13-17 下午 · 18-23 晚上.
  */
-export function periodOfHour(hour: number, locale: SupportedLocale = 'zh-CN'): string {
+export function periodOfHour(hour: number, locale: SupportedLocale = currentSupportedLocale()): string {
     if (locale === 'en-US') {
         if (hour < 12) return 'AM';
         if (hour === 12) return 'noon';
@@ -174,7 +174,7 @@ export function periodOfHour(hour: number, locale: SupportedLocale = 'zh-CN'): s
 export function formatClockCN(
     hour: number,
     minute: number,
-    locale: SupportedLocale = 'zh-CN',
+    locale: SupportedLocale = currentSupportedLocale(),
 ): string {
     if (locale === 'en-US') {
         const period = hour < 12 ? 'AM' : 'PM';
@@ -201,7 +201,7 @@ export function formatClockCN(
  */
 export function humanizeCron(
     expr: string,
-    locale: SupportedLocale = 'zh-CN',
+    locale: SupportedLocale = currentSupportedLocale(),
 ): string | null {
     const parts = expr.trim().split(/\s+/);
     if (parts.length !== 5) return null;

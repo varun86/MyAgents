@@ -851,6 +851,8 @@
       "providerSwitchChannelTransferFailed": "The new chat opened, but the Channel binding was not migrated.",
       "createNewSessionFailed": "Failed to create new chat.",
       "imagesNotTransferred": "Image attachments cannot be carried into the new chat. Add them again.",
+      "channelRebindFailedReset": "Channel rebind failed. The chat was reset locally.",
+      "channelRebindFailedDeleteCancelled": "Channel rebind failed. Delete was cancelled.",
       "reselectModelFirst": "Select the model again in the model picker first.",
       "submitFailedRetry": "Submit failed. Please try again.",
       "unknownError": "Unknown error",
