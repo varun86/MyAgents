@@ -1748,6 +1748,7 @@
     "checking": "检查中...",
     "checkUpdates": "检查更新",
     "releaseNotes": "更新记录",
+    "slogan": "Your intent, amplified",
     "downloadingVersion": "发现新版本 v{{version}}，正在下载{{progress}}",
     "updateReady": "发现新版本 v{{version}}",
     "installing": "安装中…",

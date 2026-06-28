@@ -1748,6 +1748,7 @@
     "checking": "Checking...",
     "checkUpdates": "Check for Updates",
     "releaseNotes": "Release Notes",
+    "slogan": "Your intent, amplified",
     "downloadingVersion": "New version v{{version}} found, downloading{{progress}}",
     "updateReady": "New version v{{version}} found",
     "installing": "Installing...",

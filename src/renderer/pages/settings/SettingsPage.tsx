@@ -4443,7 +4443,7 @@ export default function Settings({ initialSection, initialMcpId, initialOfficial
                                         </ExternalLink>
                                     </div>
                                     <p className="mt-3 text-base text-[var(--ink-secondary)]">
-                                        Your Intent, Amplified
+                                        {tSettings('about.slogan')}
                                     </p>
                                     {updateDownloading && propUpdateVersion && (
                                         <div className="mt-3 space-y-2">
