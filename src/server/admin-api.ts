@@ -1444,6 +1444,25 @@ Options for 'oauth start' (manual mode):
   --scopes         Scopes (comma or space separated)
   --callback-port  Local callback port`,
 
+  vision: `myagents vision — Official image-understanding helper
+
+Commands:
+  readme                   Show the full image-understanding tool guide
+  analyze                  Analyze one or more local workspace image paths
+
+Options for 'analyze':
+  --image <path>           Image path inside the current MyAgents workspace (repeatable)
+  --prompt-file <path>     Workspace-relative text file with the inspection request
+  --prompt '<text>'        Short literal request authored by the agent
+  --json                   Output machine-readable JSON
+
+Examples:
+  myagents vision readme
+  myagents vision analyze --image @myagents_files/screenshot.png --prompt-file inspect.txt
+
+Use --prompt-file for user-provided, multiline, quoted, or shell-sensitive text.
+The configured image-understanding model is selected in Settings -> Toolbox.`,
+
   model: `myagents model — Manage model providers
 
 Commands:

@@ -75,6 +75,31 @@ afterEach(() => {
   rmSync(scratch, { recursive: true, force: true });
 });
 
+describe('admin-api help registry', () => {
+  it('documents the official vision command group for myagents vision --help', async () => {
+    const { handleHelp } = await import('./admin-api');
+
+    const result = handleHelp({ path: ['vision'] });
+    const text = (result.data as { text?: string } | undefined)?.text ?? '';
+
+    expect(result.success).toBe(true);
+    expect(text).toContain('myagents vision');
+    expect(text).toContain('analyze');
+    expect(text).not.toContain('Unknown command group');
+  });
+
+  it('includes vision in the derived command group list', async () => {
+    const { handleHelp } = await import('./admin-api');
+
+    const result = handleHelp({ path: ['definitely-not-a-command'] });
+    const text = (result.data as { text?: string } | undefined)?.text ?? '';
+
+    expect(result.success).toBe(true);
+    expect(text).toContain('Unknown command group "definitely-not-a-command"');
+    expect(text).toContain('vision');
+  });
+});
+
 describe('admin-api MCP project scope', () => {
   it('fails project-only enable when the current workspace is not registered', async () => {
     const { handleMcpEnable } = await import('./admin-api');
