@@ -72,6 +72,7 @@
 | SDK `canUseTool` / 工具权限回调 | `tech_docs/sdk_canUseTool_guide.md` |
 | SDK 自定义 Tool / `createSdkMcpServer` | `tech_docs/sdk_custom_tools_guide.md` |
 | React 稳定性 5 条规则 | `tech_docs/react_stability_rules.md` |
+| UI 国际化 / 语言设置 / 文案资源 / native 托盘语言 | `tech_docs/i18n_architecture.md` |
 | Tool Attachment 管道 / 富媒体产物归一化 | `tech_docs/tool_attachment_pipeline.md` |
 | Claude Plugin 加载（PRD 0.2.17）/ SDK Options.plugins / 安装管线 | `tech_docs/plugin_loading.md` |
 

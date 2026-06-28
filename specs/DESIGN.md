@@ -585,6 +585,22 @@ Item 选中: 文字 var(--accent-warm)
 > 注：v2.3 之前本表的 px 标注（14px/12px）与实际 token 值不符——v2.3-2.4 真值为 `text-sm`=13px、
 > `text-xs`=11px 才是当时真值；v2.5 双合并后 text-sm=14px、text-xs=12px，与 Tailwind 官方一致。
 
+### 6.12 文案国际化 (UI Copy I18n)
+
+新增或重构产品 UI 文案时，用户可见的稳定产品文案 SHOULD 进入 i18n resource，而不是直接硬编码在组件里。例外包括：用户/AI 生成内容、日志原文、调试输出、供应商返回的原始错误、仍未接入 i18n 的旧页面存量文案。
+
+设计实现约束：
+
+| 场景 | 要求 |
+|------|------|
+| 按钮 / 菜单 / Tooltip / Placeholder | 使用 `useTranslation()` 从对应 namespace 取文案 |
+| 多语言长度差异 | 容器必须允许换行或有稳定宽度；不要按中文短文本假设按钮宽度 |
+| 图标按钮 | 图标仍按本设计规范选择；`title` / `aria-label` 文案走 i18n |
+| 时间 / 数量 / Cron 摘要 | 用 locale-aware formatter；不要手拼只适合中文的单位和语序 |
+| Native chrome（托盘等） | 文案归 Rust native i18n 表；普通 React UI 文案归 renderer JSON |
+
+语言设置 UI 使用 `CustomSelect`，不能使用原生 `<select>`。新增语言的完整技术流程见 `tech_docs/i18n_architecture.md`。
+
 ---
 
 ## 7. 布局规范
