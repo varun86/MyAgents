@@ -4,10 +4,11 @@
 
 1. [Windows 构建脚本常见问题](#windows-构建脚本常见问题)
 2. [macOS Claude SDK native binary 签名失败](#macos-claude-sdk-native-binary-签名失败)
-3. [CSP 配置错误](#csp-配置错误)
-4. [Rust toolchain / rustfmt 漂移](#rust-toolchain--rustfmt-漂移)
-5. [Resources 缓存问题](#resources-缓存问题)
-6. [代理配置问题](#代理配置问题)
+3. [macOS esbuild native binary 架构不匹配](#macos-esbuild-native-binary-架构不匹配)
+4. [CSP 配置错误](#csp-配置错误)
+5. [Rust toolchain / rustfmt 漂移](#rust-toolchain--rustfmt-漂移)
+6. [Resources 缓存问题](#resources-缓存问题)
+7. [代理配置问题](#代理配置问题)
 
 ---
 
@@ -133,6 +134,52 @@ npm install --force --no-save --no-audit --no-fund --ignore-scripts \
 ```
 
 版本号必须与项目 `package.json` 中的 optional dependency 保持一致。
+
+---
+
+## macOS esbuild native binary 架构不匹配
+
+### 问题：重新运行 `build_macos.sh` 时 `@esbuild/darwin-x64` / `darwin-arm64` 报错
+
+**症状**：
+
+```
+Error:
+You installed esbuild for another platform than the one you're currently using.
+
+Specifically the "@esbuild/darwin-x64" package is present but this platform
+needs the "@esbuild/darwin-arm64" package instead.
+```
+
+**根本原因**：
+
+`esbuild` 与 Claude SDK native binary 都通过 npm optionalDependencies 提供
+platform-specific 包。npm 的 optional dependency reify 是按当前
+`--os` / `--cpu` 过滤的，不适合在同一个根 `node_modules` 里反复切换架构。
+
+典型触发链路：
+
+1. Both 模式构建 x64 阶段发现 `@anthropic-ai/claude-agent-sdk-darwin-x64`
+   损坏或缺失。
+2. 旧版脚本在项目根目录执行 `npm install --os=darwin --cpu=x64 ...`
+   修 Claude SDK。
+3. npm 顺手把根 `node_modules` 的 native optional 包切到 x64，其中包括
+   `@esbuild/darwin-x64`。
+4. 下一次重新运行脚本时，host Node 是 arm64，`npm run build:server`
+   先加载 esbuild，于是报需要 `@esbuild/darwin-arm64`。
+
+**快速修复当前 checkout**：
+
+```bash
+ESBUILD_VERSION=$(node -p "require('./node_modules/esbuild/package.json').version")
+npm install --no-save --no-audit --no-fund --ignore-scripts \
+  --os=darwin --cpu="$(node -p "process.arch")" \
+  "@esbuild/darwin-$(node -p "process.arch")@$ESBUILD_VERSION"
+```
+
+当前 `build_macos.sh` 已在 Step 5 前自动校验并修复 host Node 对应的
+esbuild native binary；Claude SDK 的跨架构补包也改为临时目录安装后复制目标
+package，避免再次污染根 `node_modules`。
 
 ---
 

@@ -204,8 +204,49 @@ fi
 echo -e "${GREEN}✓ cuse 已就绪${NC}"
 echo ""
 
+# npm optionalDependencies are platform-filtered. A previous cross-arch repair
+# (for example installing the x64 Claude SDK on an arm64 host) can leave the
+# root node_modules with @esbuild/darwin-x64 while the current Node process is
+# arm64. esbuild then fails before Tauri build starts. Repair the host-Node
+# esbuild binary up front; later cross-arch SDK installs are done in temp dirs
+# and copied into place, so they no longer mutate the root dependency tree.
+ensure_host_esbuild() {
+    if node -e "require('esbuild').transformSync('let x = 1', { loader: 'js' })" >/dev/null 2>&1; then
+        return
+    fi
+
+    local NODE_ARCH ESBUILD_VERSION ESBUILD_PKG
+    NODE_ARCH=$(node -p "process.arch")
+    case "$NODE_ARCH" in
+        arm64|x64) ;;
+        *)
+            echo -e "${RED}✗ 不支持的 Node 架构: ${NODE_ARCH}${NC}"
+            exit 1
+            ;;
+    esac
+
+    ESBUILD_VERSION=$(node -p "require('./node_modules/esbuild/package.json').version" 2>/dev/null || true)
+    if [ -z "$ESBUILD_VERSION" ]; then
+        echo -e "${RED}✗ 无法读取 node_modules/esbuild/package.json，请先运行 npm install${NC}"
+        exit 1
+    fi
+
+    ESBUILD_PKG="@esbuild/darwin-${NODE_ARCH}@${ESBUILD_VERSION}"
+    echo -e "  ${YELLOW}⚠ esbuild native binary 与当前 Node(${NODE_ARCH}) 不匹配，正在修复 ${ESBUILD_PKG}...${NC}"
+    npm install --no-save --no-audit --no-fund --ignore-scripts \
+        --os=darwin --cpu="$NODE_ARCH" \
+        "$ESBUILD_PKG"
+
+    if ! node -e "require('esbuild').transformSync('let x = 1', { loader: 'js' })" >/dev/null 2>&1; then
+        echo -e "${RED}✗ esbuild native binary 修复后仍不可用${NC}"
+        exit 1
+    fi
+    echo -e "  ${GREEN}✓ esbuild native binary 已匹配当前 Node(${NODE_ARCH})${NC}"
+}
+
 # 构建前端和服务端
 echo -e "${BLUE}[5/7] 构建前端和服务端...${NC}"
+ensure_host_esbuild
 
 # Sidecar / Bridge / CLI 三件套都走 `npm run build:*` —— 后台是
 # `node scripts/esbuild-bundle.mjs <target>`。单一配置入口（entry /
@@ -506,10 +547,27 @@ ensure_claude_sdk_package() {
     fi
 
     echo -e "${BLUE}[7.0/7] 修复 Claude SDK darwin-${ARCH}@${SDK_VERSION}...${NC}"
-    rm -rf "$PKG_DIR"
-    (cd "${PROJECT_DIR}" && npm install --force --no-save --no-audit --no-fund --ignore-scripts \
+    local TMP_DIR="${PROJECT_DIR}/.tmp-claude-sdk-${ARCH}-$$"
+    rm -rf "$TMP_DIR"
+    mkdir -p "$TMP_DIR"
+    if ! npm install --prefix "$TMP_DIR" --force --no-save --package-lock=false --no-audit --no-fund --ignore-scripts \
         --os=darwin --cpu="$ARCH" \
-        "${PKG_NAME}@${SDK_VERSION}")
+        "${PKG_NAME}@${SDK_VERSION}"; then
+        rm -rf "$TMP_DIR"
+        echo -e "${RED}✗ darwin-${ARCH} 临时安装失败${NC}"
+        exit 1
+    fi
+
+    if [ ! -d "${TMP_DIR}/node_modules/${PKG_NAME}" ]; then
+        rm -rf "$TMP_DIR"
+        echo -e "${RED}✗ darwin-${ARCH} 临时安装未产出 ${PKG_NAME}${NC}"
+        exit 1
+    fi
+
+    rm -rf "$PKG_DIR"
+    mkdir -p "$(dirname "$PKG_DIR")"
+    cp -R "${TMP_DIR}/node_modules/${PKG_NAME}" "$PKG_DIR"
+    rm -rf "$TMP_DIR"
     if ! validate_claude_sdk_package "$ARCH"; then
         echo -e "${RED}✗ darwin-${ARCH} 安装后仍未通过完整性校验: ${PKG_DIR}/claude${NC}"
         exit 1
