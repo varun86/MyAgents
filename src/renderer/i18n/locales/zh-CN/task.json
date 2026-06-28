@@ -6,6 +6,7 @@
   },
   "common": {
     "cancel": "取消",
+    "close": "关闭",
     "delete": "删除",
     "edit": "编辑",
     "loading": "加载中…",
@@ -116,6 +117,173 @@
       "runNow": "立即执行",
       "stop": "中止"
     }
+  },
+  "dispatch": {
+    "titleFromThought": "派发为任务",
+    "titleNew": "新建任务",
+    "subtitleFromThought": "基于当前想法创建并立即派发",
+    "subtitleNew": "从空白开始创建一个任务",
+    "closeEsc": "关闭 (Esc)",
+    "name": "任务名称",
+    "namePlaceholder": "例如: 升级 OpenClaw lark 适配器到 v2.4",
+    "taskMd": "任务需求 Task.md",
+    "taskMdPlaceholder": "AI 执行时看到的 prompt，默认取自想法原文。你可以补充细节、目标、约束。",
+    "verifyTitle": "验收清单",
+    "verifyHint": "（可选 · verify.md · AI 在 verifying 阶段读取）",
+    "verifyPlaceholder": "例如:\n- curl /health 返回 200\n- npm test 全绿",
+    "verifyDescription": "留空则跳过验证阶段。创建后也可以随时编辑。",
+    "workspace": "Agent 工作区",
+    "workspacePlaceholder": "选择工作区",
+    "workspaceHint": "默认使用该 Agent 的 runtime / 模型 / 权限 / MCP 工具。可在下方「高级配置」单独覆盖。",
+    "tags": "标签",
+    "tagsHint": "（可选）",
+    "tagsPlaceholder": "以逗号分隔，例如 MyAgents, 维护",
+    "sectionExecution": "执行模式",
+    "sectionEndConditions": "结束条件",
+    "sectionNotifications": "任务通知",
+    "submitDispatching": "派发中…",
+    "submitCreating": "创建中…",
+    "submitDispatch": "派发任务",
+    "submitCreate": "创建任务",
+    "validation": {
+      "nameRequired": "请填写任务名",
+      "workspaceRequired": "请选择工作区",
+      "taskMdRequired": "task.md 不能为空",
+      "futureTimeRequired": "执行时间必须在未来",
+      "intervalTooShort": "周期间隔不能小于 5 分钟",
+      "endConditionRequired": "请至少设置一个结束条件"
+    },
+    "toast": {
+      "verifyWriteFailed": "任务已创建，但写入 verify.md 失败：{{message}}",
+      "dispatched": "任务「{{name}}」已派发，AI 正在执行",
+      "startFailed": "任务已创建，但启动执行失败：{{message}}",
+      "created": "任务「{{name}}」已创建"
+    }
+  },
+  "execution": {
+    "modes": {
+      "once": {
+        "label": "立即执行",
+        "description": "创建后立刻开始执行；任务会出现在右侧任务列表。"
+      },
+      "scheduled": {
+        "label": "定时一次",
+        "description": "在指定时间触发一次，然后停止"
+      },
+      "recurring": {
+        "label": "周期触发",
+        "description": "每隔固定时间触发一次，可设置结束条件"
+      },
+      "loop": {
+        "label": "Ralph Loop",
+        "description": "完成后立即下一轮（同会话持续打磨），必须设置退出条件"
+      }
+    },
+    "scheduledTime": "执行时间",
+    "sessionStrategy": "会话策略",
+    "loopSessionStrategy": "连续对话（保持上下文）— Ralph Loop 固定使用此模式",
+    "newSession": "新开对话",
+    "singleSession": "连续对话",
+    "newSessionDescription": "每次执行创建新会话，无历史记忆，上下文干净",
+    "singleSessionDescription": "所有轮次复用同一会话，AI 能记住之前内容"
+  },
+  "endConditions": {
+    "forever": "永久运行",
+    "conditional": "条件停止",
+    "deadline": "截止时间",
+    "maxExecutions": "执行次数",
+    "timesSuffix": "次",
+    "conditionalHint": "可多选，满足任一条件时任务将自动停止",
+    "aiCanExit": "允许 AI 自主结束任务"
+  },
+  "notifications": {
+    "desktopTitle": "桌面通知",
+    "desktopDescription": "任务状态变化时弹出系统通知",
+    "desktopAria": "桌面通知开关",
+    "imBot": "投递到 IM Bot",
+    "optional": "（可选）",
+    "desktopDefault": "桌面通知（默认）",
+    "noChannels": "该工作区还没有可用的 IM 频道。仅发送桌面通知。"
+  },
+  "advanced": {
+    "title": "高级配置",
+    "subtitle": "（可选 — 覆盖本次任务的 runtime / 模型 / 权限 / MCP）",
+    "runtimeHintWithWorkspace": "不选择时跟随 {{workspace}}",
+    "runtimeHintDefault": "不选择时跟随 Agent 工作区",
+    "runtimePlaceholder": "跟随 Agent 工作区",
+    "followAgentWorkspaceCurrent": "跟随 Agent 工作区（当前 {{value}}）",
+    "followAgentWorkspace": "跟随 Agent 工作区",
+    "followAgentCurrent": "跟随 Agent（当前 {{value}}）",
+    "followAgentCurrentModel": "跟随 Agent 当前模型",
+    "externalNotice": "当前任务的运行环境为 {{runtime}}，MCP 工具由 {{runtime}} 自身管理。下方模型 / 权限模式为该 runtime 的可选项，可单独覆盖。",
+    "permissionLabel": "权限模式",
+    "permissionHint": "不选择时使用所选 runtime 的最大权限（无人值守任务默认）；选择后强制使用该模式",
+    "permissionPlaceholder": "跟随默认（最大权限）",
+    "permissionFollow": "跟随默认（最大权限）",
+    "modelLabel": "模型",
+    "modelHintBuiltin": "不选择时跟随 Agent 当前模型；选择 provider + model 后强制使用",
+    "modelHintExternal": "不选择时跟随 Agent 当前模型；选择后将传入 {{runtime}}",
+    "mcpTools": "MCP 工具",
+    "noMcp": "尚未在「设置 → MCP 工具」中安装任何 MCP，无法在此覆盖。",
+    "mcpFollowing": "当前跟随 Agent 工作区的 MCP 启用列表",
+    "mcpEnabled": "当前启用 {{count}} 个 MCP 工具",
+    "restoreFollowAgent": "恢复跟随 Agent",
+    "providerUnavailableTitle": "该 provider 已删除 API Key 或不可用，请重新选择",
+    "providerUnavailableShort": "⚠ 暂不可用",
+    "noProviders": "还没有可用的供应商 — 请先到「设置 → 模型供应商」添加 API Key 或完成订阅登录。",
+    "selectedProvider": "⚠ 当前选中：{{provider}}{{model}}",
+    "providerModelSeparator": " / {{model}}",
+    "providerMissingKey": "该 provider 缺少 API Key — 请先在「设置 → 模型供应商」配置，或在上方挑选其它 provider。",
+    "providerDeleted": "该 provider 已从配置中删除 — 请在上方挑选可用 provider。",
+    "queryingModels": "正在向 CLI 查询模型列表…",
+    "noRuntimeModels": "该 runtime 暂未提供模型列表。",
+    "permissionModes": {
+      "claude-code": {
+        "default": "每次工具调用都需要确认",
+        "plan": "规划模式，只读不执行",
+        "acceptEdits": "自动接受文件编辑，其他需确认",
+        "bypassPermissions": "跳过所有权限确认"
+      },
+      "gemini": {
+        "default": "每次工具调用都需要确认",
+        "autoEdit": "自动接受文件编辑，其他需确认",
+        "yolo": "跳过所有工具确认",
+        "plan": "规划模式，只读不执行"
+      },
+      "builtin": {
+        "auto": "默认模式，工具按需申请权限",
+        "plan": "规划模式，只读不执行",
+        "fullAgency": "跳过所有权限确认（Cron 任务默认）",
+        "custom": "用户自定义的权限规则"
+      },
+      "codex": {
+        "suggest": "仅信任的命令自动执行，其他需确认",
+        "auto-edit": "自动编辑文件，沙箱内执行命令",
+        "full-auto": "沙箱内自主执行，按需询问",
+        "no-restrictions": "跳过所有审批和沙箱限制"
+      }
+    }
+  },
+  "schedule": {
+    "frequency": {
+      "interval": "固定周期",
+      "daily": "每天",
+      "weekdays": "工作日",
+      "weekly": "每周",
+      "monthly": "每月"
+    },
+    "weekdays": ["一", "二", "三", "四", "五", "六", "日"],
+    "monthDay": "{{day}} 号",
+    "every": "每",
+    "intervalSuffix": "分钟触发一次(最少 {{min}} 分钟)",
+    "time": "时间",
+    "weekday": "周几",
+    "date": "日期",
+    "useCron": "使用 Cron 表达式",
+    "backToVisual": "返回可视化设置",
+    "unsupportedVisual": "当前表达式不支持可视化编辑",
+    "timezone": "时区",
+    "invalidCron": "无效的 Cron 表达式"
   },
   "badges": {
     "category": {

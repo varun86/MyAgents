@@ -15,6 +15,7 @@
 // the user-facing escape hatch when they want a stricter mode.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { ChevronDown, Settings2 } from 'lucide-react';
 import CustomSelect from '@/components/CustomSelect';
 import { useConfig } from '@/hooks/useConfig';
@@ -74,6 +75,7 @@ interface Props {
 }
 
 export function TaskAdvancedConfigEditor(props: Props) {
+  const { t } = useTranslation('task');
   const {
     workspacePath,
     runtime,
@@ -363,14 +365,14 @@ export function TaskAdvancedConfigEditor(props: Props) {
         // separate hint line. `agentRuntimeLabel` is always truthy because
         // the fallback chain (`RUNTIME_DISPLAY_NAMES[r] ?? r`) covers every
         // possible RuntimeType.
-        label: `跟随 Agent 工作区（当前 ${agentRuntimeLabel}）`,
+        label: t('advanced.followAgentWorkspaceCurrent', { value: agentRuntimeLabel }),
       },
       ...VALID_RUNTIMES.map((r) => ({
         value: r,
         label: RUNTIME_DISPLAY_NAMES[r],
       })),
     ],
-    [agentRuntimeLabel],
+    [agentRuntimeLabel, t],
   );
 
   // Permission-mode options — runtime-specific. Each runtime defines its
@@ -383,13 +385,15 @@ export function TaskAdvancedConfigEditor(props: Props) {
   // surfaces them automatically.
   const permissionOptions = useMemo(
     () => [
-      { value: FOLLOW_VALUE, label: '跟随默认（最大权限）' },
+      { value: FOLLOW_VALUE, label: t('advanced.permissionFollow') },
       ...getRuntimePermissionModes(effectiveRuntime).map((m) => ({
         value: m.value,
-        label: m.description ? `${m.label} · ${m.description}` : m.label,
+        label: m.description
+          ? `${m.label} · ${t(`advanced.permissionModes.${effectiveRuntime}.${m.value}`, { defaultValue: m.description })}`
+          : m.label,
       })),
     ],
-    [effectiveRuntime],
+    [effectiveRuntime, t],
   );
 
   // Toggle a single MCP server in the override list.
@@ -421,9 +425,9 @@ export function TaskAdvancedConfigEditor(props: Props) {
       >
         <Settings2 className="h-4 w-4 text-[var(--ink-muted)]" strokeWidth={1.5} />
         <span className="flex-1 text-sm font-medium text-[var(--ink)]">
-          高级配置
+          {t('advanced.title')}
           <span className="ml-1.5 text-xs font-normal text-[var(--ink-muted)]">
-            （可选 — 覆盖本次任务的 runtime / 模型 / 权限 / MCP）
+            {t('advanced.subtitle')}
           </span>
         </span>
         <ChevronDown
@@ -443,15 +447,15 @@ export function TaskAdvancedConfigEditor(props: Props) {
               label="Runtime"
               hint={
                 workspaceDisplayName
-                  ? `不选择时跟随 ${workspaceDisplayName}`
-                  : '不选择时跟随 Agent 工作区'
+                  ? t('advanced.runtimeHintWithWorkspace', { workspace: workspaceDisplayName })
+                  : t('advanced.runtimeHintDefault')
               }
             >
               <CustomSelect
                 value={runtime ?? FOLLOW_VALUE}
                 options={runtimeOptions}
                 onChange={(v) => setRuntime(v ? (v as RuntimeType) : undefined)}
-                placeholder="跟随 Agent 工作区"
+                placeholder={t('advanced.runtimePlaceholder')}
                 size="md"
               />
             </FieldRow>
@@ -463,9 +467,7 @@ export function TaskAdvancedConfigEditor(props: Props) {
               WorkspaceBasicsSection's treatment of the same situation. */}
           {!isBuiltin && (
             <p className="rounded-[var(--radius-md)] bg-[var(--accent-warm-subtle)] px-3.5 py-2.5 text-xs leading-relaxed text-[var(--ink-muted)]">
-              当前任务的运行环境为
-              <span className="mx-1 font-medium text-[var(--ink-secondary)]">{effectiveRuntimeLabel}</span>
-              ，MCP 工具由 {effectiveRuntimeLabel} 自身管理。下方模型 / 权限模式为该 runtime 的可选项，可单独覆盖。
+              {t('advanced.externalNotice', { runtime: effectiveRuntimeLabel })}
             </p>
           )}
 
@@ -476,14 +478,14 @@ export function TaskAdvancedConfigEditor(props: Props) {
               "跟随默认（最大权限）" sentinel means: at execution time, fall
               back to the runtime's max permission (cron is unattended). */}
           <FieldRow
-            label="权限模式"
-            hint="不选择时使用所选 runtime 的最大权限（无人值守任务默认）；选择后强制使用该模式"
+            label={t('advanced.permissionLabel')}
+            hint={t('advanced.permissionHint')}
           >
             <CustomSelect
               value={permissionMode ?? FOLLOW_VALUE}
               options={permissionOptions}
               onChange={(v) => setPermissionMode(v ? v : undefined)}
-              placeholder="跟随默认（最大权限）"
+              placeholder={t('advanced.permissionPlaceholder')}
               size="md"
             />
           </FieldRow>
@@ -495,11 +497,11 @@ export function TaskAdvancedConfigEditor(props: Props) {
               reads `runtimeModels` (CC_MODELS / codexModels / geminiModels)
               and writes `runtimeConfig.model`. */}
           <FieldRow
-            label="模型"
+            label={t('advanced.modelLabel')}
             hint={
               isBuiltin
-                ? '不选择时跟随 Agent 当前模型；选择 provider + model 后强制使用'
-                : `不选择时跟随 Agent 当前模型；选择后将传入 ${effectiveRuntimeLabel}`
+                ? t('advanced.modelHintBuiltin')
+                : t('advanced.modelHintExternal', { runtime: effectiveRuntimeLabel })
             }
           >
             <ModelPicker
@@ -536,10 +538,10 @@ export function TaskAdvancedConfigEditor(props: Props) {
               since a disabled button reads as "I should be able to click
               this but can't" while no button reads as "nothing to do here"). */}
           {isBuiltin && (
-            <FieldRow label="MCP 工具">
+            <FieldRow label={t('advanced.mcpTools')}>
               {mcpCatalogue.length === 0 ? (
                 <div className="rounded-[var(--radius-md)] border border-dashed border-[var(--line)] px-3 py-3 text-xs text-[var(--ink-muted)]">
-                  尚未在「设置 → MCP 工具」中安装任何 MCP，无法在此覆盖。
+                  {t('advanced.noMcp')}
                 </div>
               ) : (
                 <>
@@ -571,8 +573,8 @@ export function TaskAdvancedConfigEditor(props: Props) {
                   <div className="mt-2 flex items-center justify-between gap-3 text-xs leading-snug text-[var(--ink-muted)]">
                     <span>
                       {mcpEnabledServers === undefined
-                        ? '当前跟随 Agent 工作区的 MCP 启用列表'
-                        : `当前启用 ${mcpEnabledServers.length} 个 MCP 工具`}
+                        ? t('advanced.mcpFollowing')
+                        : t('advanced.mcpEnabled', { count: mcpEnabledServers.length })}
                     </span>
                     {mcpEnabledServers !== undefined && (
                       <button
@@ -580,7 +582,7 @@ export function TaskAdvancedConfigEditor(props: Props) {
                         onClick={resetMcpToFollow}
                         className="shrink-0 text-[var(--ink-muted)] transition-colors hover:text-[var(--accent-warm)]"
                       >
-                        恢复跟随 Agent
+                        {t('advanced.restoreFollowAgent')}
                       </button>
                     )}
                   </div>
@@ -655,6 +657,7 @@ function ModelPicker(props: {
   onSelectExternalFollow: () => void;
   onSelectExternalModel: (model: string) => void;
 }) {
+  const { t } = useTranslation('task');
   const {
     isBuiltin,
     open,
@@ -694,13 +697,15 @@ function ModelPicker(props: {
       const modelName = pickedModelLabel || model;
       closedLabel = (
         <span className="flex min-w-0 items-center gap-2">
-          <span className="truncate">{providerName} / {modelName}</span>
+          <span className="truncate">
+            {providerName}{t('advanced.providerModelSeparator', { model: modelName })}
+          </span>
           {!pickedProviderAvailable && (
             <span
               className="shrink-0 rounded px-1.5 py-0.5 text-xs font-medium text-[var(--warning)]"
-              title="该 provider 已删除 API Key 或不可用，请重新选择"
+              title={t('advanced.providerUnavailableTitle')}
             >
-              ⚠ 暂不可用
+              {t('advanced.providerUnavailableShort')}
             </span>
           )}
         </span>
@@ -709,8 +714,8 @@ function ModelPicker(props: {
       closedLabel = (
         <span className="truncate">
           {workspaceDefaultModelLabel
-            ? `跟随 Agent（当前 ${workspaceDefaultModelLabel}）`
-            : '跟随 Agent 工作区'}
+            ? t('advanced.followAgentCurrent', { value: workspaceDefaultModelLabel })
+            : t('advanced.followAgentWorkspace')}
         </span>
       );
     }
@@ -724,7 +729,7 @@ function ModelPicker(props: {
       );
     } else {
       closedLabel = (
-        <span className="truncate">跟随 Agent 当前模型</span>
+        <span className="truncate">{t('advanced.followAgentCurrentModel')}</span>
       );
     }
   }
@@ -771,12 +776,12 @@ function ModelPicker(props: {
                   onClick={onSelectBuiltinFollow}
                 >
                   {workspaceDefaultModelLabel
-                    ? `跟随 Agent（当前 ${workspaceDefaultModelLabel}）`
-                    : '跟随 Agent 工作区'}
+                    ? t('advanced.followAgentCurrent', { value: workspaceDefaultModelLabel })
+                    : t('advanced.followAgentWorkspace')}
                 </button>
                 {availableProviders.length === 0 ? (
                   <div className="px-3 py-3 text-xs leading-relaxed text-[var(--ink-muted)]">
-                    还没有可用的供应商 — 请先到「设置 → 模型供应商」添加 API Key 或完成订阅登录。
+                    {t('advanced.noProviders')}
                   </div>
                 ) : (
                   availableProviders.map((p) => (
@@ -817,12 +822,17 @@ function ModelPicker(props: {
                     return (
                       <div className="mt-2 rounded-[var(--radius-sm)] border border-dashed border-[var(--warning)]/50 bg-[var(--warning-subtle)]/40 px-3 py-2 text-xs leading-relaxed text-[var(--ink-muted)]">
                         <div className="font-medium text-[var(--ink)]">
-                          ⚠ 当前选中：{providerLabel}{modelLabel ? ` / ${modelLabel}` : ''}
+                          {t('advanced.selectedProvider', {
+                            provider: providerLabel,
+                            model: modelLabel
+                              ? t('advanced.providerModelSeparator', { model: modelLabel })
+                              : '',
+                          })}
                         </div>
                         <div className="mt-1">
                           {p
-                            ? '该 provider 缺少 API Key — 请先在「设置 → 模型供应商」配置，或在上方挑选其它 provider。'
-                            : '该 provider 已从配置中删除 — 请在上方挑选可用 provider。'}
+                            ? t('advanced.providerMissingKey')
+                            : t('advanced.providerDeleted')}
                         </div>
                       </div>
                     );
@@ -839,13 +849,13 @@ function ModelPicker(props: {
                   }`}
                   onClick={onSelectExternalFollow}
                 >
-                  跟随 Agent 当前模型
+                  {t('advanced.followAgentCurrentModel')}
                 </button>
                 {externalRuntimeModels.length === 0 ? (
                   <div className="px-3 py-3 text-xs leading-relaxed text-[var(--ink-muted)]">
                     {effectiveRuntime === 'codex' || effectiveRuntime === 'gemini'
-                      ? '正在向 CLI 查询模型列表…'
-                      : '该 runtime 暂未提供模型列表。'}
+                      ? t('advanced.queryingModels')
+                      : t('advanced.noRuntimeModels')}
                   </div>
                 ) : (
                   externalRuntimeModels.map((m) => (

@@ -6,6 +6,7 @@
   },
   "common": {
     "cancel": "Cancel",
+    "close": "Close",
     "delete": "Delete",
     "edit": "Edit",
     "loading": "Loading...",
@@ -116,6 +117,173 @@
       "runNow": "Run now",
       "stop": "Stop"
     }
+  },
+  "dispatch": {
+    "titleFromThought": "Dispatch as task",
+    "titleNew": "New task",
+    "subtitleFromThought": "Create from the current thought and dispatch immediately",
+    "subtitleNew": "Create a task from scratch",
+    "closeEsc": "Close (Esc)",
+    "name": "Task name",
+    "namePlaceholder": "Example: Upgrade the OpenClaw Lark adapter to v2.4",
+    "taskMd": "Task requirements Task.md",
+    "taskMdPlaceholder": "Prompt the AI will execute. It defaults to the thought text; add details, goals, or constraints.",
+    "verifyTitle": "Acceptance checklist",
+    "verifyHint": "(Optional · verify.md · read by AI during verifying)",
+    "verifyPlaceholder": "Example:\n- curl /health returns 200\n- npm test passes",
+    "verifyDescription": "Leave empty to skip the verification stage. You can edit it after creation.",
+    "workspace": "Agent workspace",
+    "workspacePlaceholder": "Choose workspace",
+    "workspaceHint": "Uses this Agent's runtime, model, permissions, and MCP tools by default. Override them below in Advanced config.",
+    "tags": "Tags",
+    "tagsHint": "(Optional)",
+    "tagsPlaceholder": "Comma-separated, for example MyAgents, maintenance",
+    "sectionExecution": "Execution mode",
+    "sectionEndConditions": "End conditions",
+    "sectionNotifications": "Task notifications",
+    "submitDispatching": "Dispatching...",
+    "submitCreating": "Creating...",
+    "submitDispatch": "Dispatch task",
+    "submitCreate": "Create task",
+    "validation": {
+      "nameRequired": "Enter a task name",
+      "workspaceRequired": "Choose a workspace",
+      "taskMdRequired": "task.md cannot be empty",
+      "futureTimeRequired": "Execution time must be in the future",
+      "intervalTooShort": "Recurring interval cannot be shorter than 5 minutes",
+      "endConditionRequired": "Set at least one end condition"
+    },
+    "toast": {
+      "verifyWriteFailed": "Task was created, but writing verify.md failed: {{message}}",
+      "dispatched": "Task \"{{name}}\" was dispatched. AI is running it.",
+      "startFailed": "Task was created, but starting execution failed: {{message}}",
+      "created": "Task \"{{name}}\" was created"
+    }
+  },
+  "execution": {
+    "modes": {
+      "once": {
+        "label": "Run now",
+        "description": "Start immediately after creation; the task appears in the task list."
+      },
+      "scheduled": {
+        "label": "Scheduled once",
+        "description": "Trigger once at the specified time, then stop"
+      },
+      "recurring": {
+        "label": "Recurring",
+        "description": "Trigger repeatedly at a fixed cadence; end conditions are available"
+      },
+      "loop": {
+        "label": "Ralph Loop",
+        "description": "Start the next round immediately after completion in the same session; requires an exit condition"
+      }
+    },
+    "scheduledTime": "Execution time",
+    "sessionStrategy": "Session strategy",
+    "loopSessionStrategy": "Continuous conversation (keeps context) - Ralph Loop always uses this mode",
+    "newSession": "New conversation",
+    "singleSession": "Continuous conversation",
+    "newSessionDescription": "Each run creates a fresh session with no history, keeping context clean",
+    "singleSessionDescription": "All runs reuse one session, so AI remembers previous context"
+  },
+  "endConditions": {
+    "forever": "Run indefinitely",
+    "conditional": "Stop by condition",
+    "deadline": "Deadline",
+    "maxExecutions": "Run count",
+    "timesSuffix": "times",
+    "conditionalHint": "Select one or more. The task stops when any selected condition is met.",
+    "aiCanExit": "Allow AI to end the task"
+  },
+  "notifications": {
+    "desktopTitle": "Desktop notification",
+    "desktopDescription": "Show a system notification when task status changes",
+    "desktopAria": "Desktop notification toggle",
+    "imBot": "Deliver to IM Bot",
+    "optional": "(Optional)",
+    "desktopDefault": "Desktop notification (default)",
+    "noChannels": "This workspace has no available IM channels. Only desktop notifications will be sent."
+  },
+  "advanced": {
+    "title": "Advanced config",
+    "subtitle": "(Optional - override runtime, model, permissions, or MCP for this task)",
+    "runtimeHintWithWorkspace": "Leave empty to follow {{workspace}}",
+    "runtimeHintDefault": "Leave empty to follow the Agent workspace",
+    "runtimePlaceholder": "Follow Agent workspace",
+    "followAgentWorkspaceCurrent": "Follow Agent workspace (currently {{value}})",
+    "followAgentWorkspace": "Follow Agent workspace",
+    "followAgentCurrent": "Follow Agent (currently {{value}})",
+    "followAgentCurrentModel": "Follow Agent current model",
+    "externalNotice": "This task runs on {{runtime}}. MCP tools are managed by {{runtime}} itself. Model and permission mode below are optional overrides for this runtime.",
+    "permissionLabel": "Permission mode",
+    "permissionHint": "Leave empty to use the selected runtime's maximum permission mode for unattended tasks; choose a mode to force it.",
+    "permissionPlaceholder": "Follow default (maximum permissions)",
+    "permissionFollow": "Follow default (maximum permissions)",
+    "modelLabel": "Model",
+    "modelHintBuiltin": "Leave empty to follow the Agent current model; choose provider + model to force it",
+    "modelHintExternal": "Leave empty to follow the Agent current model; choose a model to pass it to {{runtime}}",
+    "mcpTools": "MCP tools",
+    "noMcp": "No MCP tools are installed in Settings -> MCP Tools, so there is nothing to override here.",
+    "mcpFollowing": "Currently following the Agent workspace MCP enable list",
+    "mcpEnabled": "{{count}} MCP tool(s) currently enabled",
+    "restoreFollowAgent": "Restore Follow Agent",
+    "providerUnavailableTitle": "This provider has no API key or is unavailable. Choose another one.",
+    "providerUnavailableShort": "⚠ Unavailable",
+    "noProviders": "No available providers yet. Add an API key or complete subscription login in Settings -> Model Providers.",
+    "selectedProvider": "⚠ Selected: {{provider}}{{model}}",
+    "providerModelSeparator": " / {{model}}",
+    "providerMissingKey": "This provider is missing an API key. Configure it in Settings -> Model Providers, or choose another provider above.",
+    "providerDeleted": "This provider was removed from config. Choose an available provider above.",
+    "queryingModels": "Querying model list from the CLI...",
+    "noRuntimeModels": "This runtime has not provided a model list yet.",
+    "permissionModes": {
+      "claude-code": {
+        "default": "Confirm every tool call",
+        "plan": "Planning mode; read-only and does not execute",
+        "acceptEdits": "Automatically accept file edits; confirm other actions",
+        "bypassPermissions": "Skip all permission confirmations"
+      },
+      "gemini": {
+        "default": "Confirm every tool call",
+        "autoEdit": "Automatically accept file edits; confirm other actions",
+        "yolo": "Skip all tool confirmations",
+        "plan": "Planning mode; read-only and does not execute"
+      },
+      "builtin": {
+        "auto": "Default mode; tools request permission as needed",
+        "plan": "Planning mode; read-only and does not execute",
+        "fullAgency": "Skip all permission confirmations (Cron task default)",
+        "custom": "User-defined permission rules"
+      },
+      "codex": {
+        "suggest": "Run only trusted commands automatically; confirm the rest",
+        "auto-edit": "Edit files automatically and run commands in the sandbox",
+        "full-auto": "Act autonomously in the sandbox and ask as needed",
+        "no-restrictions": "Skip all approvals and sandbox restrictions"
+      }
+    }
+  },
+  "schedule": {
+    "frequency": {
+      "interval": "Fixed interval",
+      "daily": "Daily",
+      "weekdays": "Weekdays",
+      "weekly": "Weekly",
+      "monthly": "Monthly"
+    },
+    "weekdays": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
+    "monthDay": "Day {{day}}",
+    "every": "Every",
+    "intervalSuffix": "minutes (minimum {{min}} minutes)",
+    "time": "Time",
+    "weekday": "Weekday",
+    "date": "Date",
+    "useCron": "Use Cron expression",
+    "backToVisual": "Back to visual settings",
+    "unsupportedVisual": "This expression cannot be edited visually",
+    "timezone": "Timezone",
+    "invalidCron": "Invalid Cron expression"
   },
   "badges": {
     "category": {

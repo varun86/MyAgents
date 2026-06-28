@@ -5,8 +5,10 @@
  */
 
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import { useTranslation } from 'react-i18next';
 import { AlertCircle, Code2 } from 'lucide-react';
 import CustomSelect from '@/components/CustomSelect';
+import { isSupportedLocale } from '@/../shared/i18n';
 
 interface CronExpressionInputProps {
   expr: string;
@@ -33,7 +35,6 @@ const MIN_INTERVAL = 5;
 const MAX_INTERVAL = 10080; // 7 days in minutes
 const DEFAULT_INTERVAL = 30;
 
-const WEEKDAY_LABELS = ['一', '二', '三', '四', '五', '六', '日'];
 const WEEKDAY_CRON = [1, 2, 3, 4, 5, 6, 0]; // cron weekday values (0=Sun, 1=Mon...)
 
 /** Parse a cron expression into visual state, or null if not parseable */
@@ -81,13 +82,7 @@ function buildCronFromVisual(freq: Frequency, hour: number, minute: number, week
   }
 }
 
-const FREQ_OPTIONS: { value: Frequency; label: string }[] = [
-  { value: 'interval', label: '固定周期' },
-  { value: 'daily', label: '每天' },
-  { value: 'weekdays', label: '工作日' },
-  { value: 'weekly', label: '每周' },
-  { value: 'monthly', label: '每月' },
-];
+const FREQUENCY_VALUES: Frequency[] = ['interval', 'daily', 'weekdays', 'weekly', 'monthly'];
 
 const HOUR_OPTIONS = Array.from({ length: 24 }, (_, i) => ({
   value: String(i), label: String(i).padStart(2, '0'),
@@ -95,10 +90,6 @@ const HOUR_OPTIONS = Array.from({ length: 24 }, (_, i) => ({
 const MINUTE_OPTIONS = [0, 5, 10, 15, 20, 30, 45].map(m => ({
   value: String(m), label: String(m).padStart(2, '0'),
 }));
-const MONTHDAY_OPTIONS = Array.from({ length: 28 }, (_, i) => ({
-  value: String(i + 1), label: `${i + 1} 号`,
-}));
-
 export default function CronExpressionInput({
   expr,
   tz,
@@ -106,13 +97,32 @@ export default function CronExpressionInput({
   intervalMinutes,
   onIntervalChange,
 }: CronExpressionInputProps) {
+  const { t, i18n } = useTranslation('task');
+  const locale = isSupportedLocale(i18n.language) ? i18n.language : 'zh-CN';
   const intervalEnabled = intervalMinutes !== undefined && onIntervalChange !== undefined;
   const visibleFreqOptions = useMemo(
+    () => {
+      const values = intervalEnabled
+        ? FREQUENCY_VALUES
+        : FREQUENCY_VALUES.filter((value) => value !== 'interval');
+      return values.map((value) => ({
+        value,
+        label: t(`schedule.frequency.${value}`),
+      }));
+    },
+    [intervalEnabled, t],
+  );
+  const weekdayLabels = useMemo(
+    () => t('schedule.weekdays', { returnObjects: true }) as unknown as string[],
+    [t],
+  );
+  const monthDayOptions = useMemo(
     () =>
-      intervalEnabled
-        ? FREQ_OPTIONS
-        : FREQ_OPTIONS.filter((o) => o.value !== 'interval'),
-    [intervalEnabled],
+      Array.from({ length: 28 }, (_, i) => ({
+        value: String(i + 1),
+        label: t('schedule.monthDay', { day: i + 1 }),
+      })),
+    [t],
   );
 
   // Try to parse existing expr into visual mode. Initial freq priority:
@@ -203,10 +213,10 @@ export default function CronExpressionInput({
       try {
         const cronstrueModule = await import('cronstrue/i18n');
         const toStr = cronstrueModule.toString as (e: string, o?: Record<string, unknown>) => string;
-        const desc = toStr(currentExpr, { locale: 'zh_CN' });
+        const desc = toStr(currentExpr, { locale: locale === 'zh-CN' ? 'zh_CN' : 'en' });
         if (!cancelled) { setDescription(desc); setParseError(''); }
       } catch {
-        if (!cancelled) { setDescription(''); setParseError('无效的 Cron 表达式'); setNextTimes([]); return; }
+        if (!cancelled) { setDescription(''); setParseError(t('schedule.invalidCron')); setNextTimes([]); return; }
       }
 
       try {
@@ -215,7 +225,7 @@ export default function CronExpressionInput({
         const times: string[] = [];
         for (let i = 0; i < 3; i++) {
           const next = interval.next();
-          times.push(next.toDate().toLocaleString('zh-CN', {
+          times.push(next.toDate().toLocaleString(locale, {
             month: 'short', day: 'numeric', weekday: 'short', hour: '2-digit', minute: '2-digit',
           }));
         }
@@ -226,7 +236,7 @@ export default function CronExpressionInput({
     }
     parse();
     return () => { cancelled = true; };
-  }, [mode, customExpr, freq, hour, minute, weekdays, monthDay, tz]);
+  }, [mode, customExpr, freq, hour, minute, weekdays, monthDay, tz, locale, t]);
 
   const handleFreqChange = useCallback((f: Frequency) => {
     setFreq(f);
@@ -321,7 +331,7 @@ export default function CronExpressionInput({
               pickers are meaningless here. */}
           {freq === 'interval' ? (
             <div className="flex items-center gap-2">
-              <span className="text-xs text-[var(--ink-muted)]">每</span>
+              <span className="text-xs text-[var(--ink-muted)]">{t('schedule.every')}</span>
               <input
                 type="number"
                 min={MIN_INTERVAL}
@@ -331,14 +341,14 @@ export default function CronExpressionInput({
                 className="w-24 rounded-[var(--radius-sm)] border border-[var(--line)] bg-transparent px-3 py-1.5 text-sm text-[var(--ink)] focus:border-[var(--accent)] focus:outline-none"
               />
               <span className="text-xs text-[var(--ink-muted)]">
-                分钟触发一次(最少 {MIN_INTERVAL} 分钟)
+                {t('schedule.intervalSuffix', { min: MIN_INTERVAL })}
               </span>
             </div>
           ) : (
             <>
               {/* Time picker — shared by daily / weekdays / weekly / monthly */}
               <div className="flex items-center gap-2">
-                <span className="text-xs text-[var(--ink-muted)]">时间</span>
+                <span className="text-xs text-[var(--ink-muted)]">{t('schedule.time')}</span>
                 <CustomSelect value={String(hour)} options={HOUR_OPTIONS} onChange={v => setHour(Number(v))} compact className="w-20" />
                 <span className="text-sm text-[var(--ink-muted)]">:</span>
                 <CustomSelect value={String(minute)} options={MINUTE_OPTIONS} onChange={v => setMinute(Number(v))} compact className="w-20" />
@@ -347,8 +357,8 @@ export default function CronExpressionInput({
               {/* Weekly: day picker */}
               {freq === 'weekly' && (
                 <div className="flex items-center gap-1.5">
-                  <span className="mr-1 text-xs text-[var(--ink-muted)]">周几</span>
-                  {WEEKDAY_LABELS.map((label, i) => {
+                  <span className="mr-1 text-xs text-[var(--ink-muted)]">{t('schedule.weekday')}</span>
+                  {weekdayLabels.map((label, i) => {
                     const cronDay = WEEKDAY_CRON[i];
                     const isSelected = weekdays.includes(cronDay);
                     return (
@@ -372,8 +382,8 @@ export default function CronExpressionInput({
               {/* Monthly: day picker */}
               {freq === 'monthly' && (
                 <div className="flex items-center gap-2">
-                  <span className="text-xs text-[var(--ink-muted)]">日期</span>
-                  <CustomSelect value={String(monthDay)} options={MONTHDAY_OPTIONS} onChange={v => setMonthDay(Number(v))} compact className="w-24" />
+                  <span className="text-xs text-[var(--ink-muted)]">{t('schedule.date')}</span>
+                  <CustomSelect value={String(monthDay)} options={monthDayOptions} onChange={v => setMonthDay(Number(v))} compact className="w-24" />
                 </div>
               )}
 
@@ -385,7 +395,7 @@ export default function CronExpressionInput({
                 className="flex items-center gap-1 text-xs text-[var(--ink-muted)]/60 hover:text-[var(--ink-muted)] transition-colors"
               >
                 <Code2 className="h-3 w-3" />
-                使用 Cron 表达式
+                {t('schedule.useCron')}
               </button>
             </>
           )}
@@ -422,7 +432,7 @@ export default function CronExpressionInput({
                 : 'text-[var(--ink-subtle)] cursor-not-allowed'
             }`}
           >
-            {canSwitchToVisual ? '返回可视化设置' : '当前表达式不支持可视化编辑'}
+            {canSwitchToVisual ? t('schedule.backToVisual') : t('schedule.unsupportedVisual')}
           </button>
         </>
       )}
@@ -449,7 +459,7 @@ export default function CronExpressionInput({
           cadence is timezone-independent). */}
       {!(mode === 'visual' && freq === 'interval') && (
         <div className="flex items-center gap-2">
-          <span className="text-xs text-[var(--ink-muted)]">时区</span>
+          <span className="text-xs text-[var(--ink-muted)]">{t('schedule.timezone')}</span>
           <CustomSelect value={tz} options={tzOptions} onChange={v => onChangeRef.current(mode === 'custom' ? customExpr : buildCronFromVisual(freq, hour, minute, weekdays, monthDay), v)} compact className="w-48" />
         </div>
       )}
