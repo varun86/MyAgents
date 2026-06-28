@@ -15,6 +15,11 @@
   },
   "titlebar": {
     "helper": "AI Helper",
+    "feedbackTitle": "Help & feedback",
+    "helperDescription": "Ask the helper for product help, issue reports, or suggestions.",
+    "communityTitle": "Join the user community",
+    "communityDescription": "Scan to join and discuss usage with other users.",
+    "communityQrAlt": "User community QR code",
     "team": "Team",
     "task": "Tasks",
     "taskCenterTitle": "Task Center ({{shortcut}})",

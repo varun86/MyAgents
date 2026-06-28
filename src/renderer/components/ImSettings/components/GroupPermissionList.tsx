@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Check, X, Trash2 } from 'lucide-react';
 import ConfirmDialog from '@/components/ConfirmDialog';
 import type { GroupPermission } from '../../../../shared/types/im';
@@ -14,6 +15,7 @@ export default function GroupPermissionList({
     onReject: (groupId: string) => Promise<void>;
     onRemove: (groupId: string) => Promise<void>;
 }) {
+    const { t } = useTranslation('settings');
     const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
     const [loading, setLoading] = useState<string | null>(null);
     const [error, setError] = useState<string | null>(null);
@@ -45,7 +47,9 @@ export default function GroupPermissionList({
             {/* Pending groups */}
             {pending.length > 0 && (
                 <div className="space-y-2">
-                    <label className="text-xs font-medium text-[var(--warning)]">待审核</label>
+                    <label className="text-xs font-medium text-[var(--warning)]">
+                        {t('agentSettings.imComponents.pendingReview')}
+                    </label>
                     {pending.map(g => (
                         <div
                             key={g.groupId}
@@ -54,8 +58,8 @@ export default function GroupPermissionList({
                             <div className="min-w-0 flex-1">
                                 <p className="truncate text-sm font-medium text-[var(--ink)]">{g.groupName}</p>
                                 <p className="text-xs text-[var(--ink-muted)]">
-                                    {g.platform === 'telegram' ? 'Telegram' : g.platform === 'dingtalk' ? '钉钉' : '飞书'}
-                                    {g.addedBy && ` · 由 ${g.addedBy} 添加`}
+	                                    {g.platform === 'telegram' ? 'Telegram' : g.platform === 'dingtalk' ? '钉钉' : '飞书'}
+                                    {g.addedBy && ` · ${t('agentSettings.imComponents.addedBy', { name: g.addedBy })}`}
                                 </p>
                             </div>
                             <div className="ml-3 flex items-center gap-1.5">
@@ -63,7 +67,7 @@ export default function GroupPermissionList({
                                     onClick={() => handleAction(() => onApprove(g.groupId), g.groupId)}
                                     disabled={loading === g.groupId}
                                     className="rounded-md bg-[var(--accent)] p-1.5 text-white transition-colors hover:brightness-110 disabled:opacity-50"
-                                    title="允许"
+                                    title={t('agentSettings.imComponents.allow')}
                                 >
                                     <Check className="h-3.5 w-3.5" />
                                 </button>
@@ -71,7 +75,7 @@ export default function GroupPermissionList({
                                     onClick={() => handleAction(() => onReject(g.groupId), g.groupId)}
                                     disabled={loading === g.groupId}
                                     className="rounded-md bg-[var(--paper-inset)] p-1.5 text-[var(--ink-muted)] transition-colors hover:text-[var(--error)] disabled:opacity-50"
-                                    title="拒绝"
+                                    title={t('agentSettings.imComponents.reject')}
                                 >
                                     <X className="h-3.5 w-3.5" />
                                 </button>
@@ -84,7 +88,9 @@ export default function GroupPermissionList({
             {/* Approved groups */}
             {approved.length > 0 && (
                 <div className="space-y-2">
-                    <label className="text-xs font-medium text-[var(--ink-muted)]">已授权群聊</label>
+                    <label className="text-xs font-medium text-[var(--ink-muted)]">
+                        {t('agentSettings.imComponents.approvedGroups')}
+                    </label>
                     {approved.map(g => (
                         <div
                             key={g.groupId}
@@ -99,7 +105,7 @@ export default function GroupPermissionList({
                             <button
                                 onClick={() => setConfirmRemove(g.groupId)}
                                 className="ml-3 rounded-md p-1.5 text-[var(--ink-muted)] opacity-0 transition-all hover:text-[var(--error)] group-hover:opacity-100"
-                                title="移除"
+                                title={t('agentSettings.imComponents.remove')}
                             >
                                 <Trash2 className="h-3.5 w-3.5" />
                             </button>
@@ -111,17 +117,19 @@ export default function GroupPermissionList({
             {/* Empty state */}
             {permissions.length === 0 && (
                 <p className="text-xs text-[var(--ink-muted)]">
-                    暂无群聊。将 Bot 拉入群后，在群内发送任意一条消息即可被识别，届时群聊会出现在这里等待授权。
+                    {t('agentSettings.imComponents.groupsEmpty')}
                 </p>
             )}
 
             {/* Remove confirmation */}
             {confirmRemove && (
                 <ConfirmDialog
-                    title="移除群聊"
-                    message={`确定要移除群聊「${approved.find(g => g.groupId === confirmRemove)?.groupName ?? confirmRemove}」的授权吗？`}
-                    confirmText="移除"
-                    cancelText="取消"
+                    title={t('agentSettings.imComponents.removeGroupTitle')}
+                    message={t('agentSettings.imComponents.removeGroupMessage', {
+                        name: approved.find(g => g.groupId === confirmRemove)?.groupName ?? confirmRemove,
+                    })}
+                    confirmText={t('agentSettings.imComponents.removeGroupConfirm')}
+                    cancelText={t('agentSettings.botRegistry.cancel')}
                     confirmVariant="danger"
                     onConfirm={async () => {
                         try {

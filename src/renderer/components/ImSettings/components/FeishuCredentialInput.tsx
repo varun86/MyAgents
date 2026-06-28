@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Eye, EyeOff, ExternalLink } from 'lucide-react';
 
 export default function FeishuCredentialInput({
@@ -18,6 +19,7 @@ export default function FeishuCredentialInput({
     botName?: string;
     showGuide?: boolean;
 }) {
+    const { t } = useTranslation('settings');
     const [showSecret, setShowSecret] = useState(false);
     // Local state for responsive typing, debounced save to disk
     const [localAppId, setLocalAppId] = useState(appId);
@@ -90,31 +92,33 @@ export default function FeishuCredentialInput({
             {verifyStatus === 'valid' && botName && (
                 <div className="flex items-center gap-2 text-xs text-[var(--success)]">
                     <span className="h-1.5 w-1.5 rounded-full bg-[var(--success)]" />
-                    已验证: {botName}
+                    {t('agentSettings.imComponents.verified', { name: botName })}
                 </div>
             )}
             {verifyStatus === 'invalid' && (
                 <div className="text-xs text-[var(--error)]">
-                    凭证验证失败，请检查 App ID 和 App Secret
+                    {t('agentSettings.imComponents.credentialsInvalid', { fields: 'App ID / App Secret' })}
                 </div>
             )}
 
             {/* Tutorial */}
             {showGuide && (
                 <div className="rounded-lg bg-[var(--paper-inset)] p-3">
-                    <p className="text-xs font-medium text-[var(--ink)]">如何获取飞书应用凭证？</p>
+                    <p className="text-xs font-medium text-[var(--ink)]">
+                        {t('agentSettings.imComponents.feishuGuideTitle')}
+                    </p>
                     <ol className="mt-2 space-y-1.5 text-xs text-[var(--ink-muted)]">
-                        <li>1. 登录<a
+                        <li>1. {t('agentSettings.imComponents.feishuGuideStep1Prefix')}<a
                             href="https://open.feishu.cn/app"
                             target="_blank"
                             rel="noopener noreferrer"
                             className="mx-0.5 inline-flex items-center gap-0.5 text-[var(--button-primary-bg)] hover:underline"
                         >
-                            飞书开放平台<ExternalLink className="inline h-2.5 w-2.5" />
-                        </a>并创建自建应用</li>
-                        <li>2. 在「凭证与基础信息」页获取 App ID 和 App Secret</li>
-                        <li>3. 在「权限管理」中开启消息相关权限</li>
-                        <li>4. 发布应用版本后即可使用</li>
+                            {t('agentSettings.imComponents.feishuOpenPlatform')}<ExternalLink className="inline h-2.5 w-2.5" />
+                        </a>{t('agentSettings.imComponents.feishuGuideStep1Suffix')}</li>
+                        <li>2. {t('agentSettings.imComponents.feishuGuideStep2')}</li>
+                        <li>3. {t('agentSettings.imComponents.feishuGuideStep3')}</li>
+                        <li>4. {t('agentSettings.imComponents.feishuGuideStep4')}</li>
                     </ol>
                 </div>
             )}

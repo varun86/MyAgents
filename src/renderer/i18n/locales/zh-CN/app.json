@@ -15,6 +15,11 @@
   },
   "titlebar": {
     "helper": "小助理",
+    "feedbackTitle": "帮助与反馈",
+    "helperDescription": "不会使用、反馈问题或提出建议，都可以找小助理。",
+    "communityTitle": "加入用户交流群",
+    "communityDescription": "扫码加入，与其他用户交流使用心得",
+    "communityQrAlt": "用户交流群二维码",
     "team": "团队",
     "task": "任务",
     "taskCenterTitle": "任务中心 ({{shortcut}})",

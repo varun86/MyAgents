@@ -1,4 +1,5 @@
 import React from 'react';
+import { useTranslation } from 'react-i18next';
 import CustomSelect from '@/components/CustomSelect';
 
 export default function AiConfigCard({
@@ -14,39 +15,46 @@ export default function AiConfigCard({
     providerOptions: { value: string; label: string }[];
     modelOptions: { value: string; label: string }[];
     onProviderChange: (providerId: string) => void;
-    onModelChange: (model: string) => void;
+	onModelChange: (model: string) => void;
 }) {
+    const { t } = useTranslation('settings');
     return (
         <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
-            <h3 className="mb-4 text-sm font-semibold text-[var(--ink)]">AI 配置</h3>
+            <h3 className="mb-4 text-sm font-semibold text-[var(--ink)]">
+                {t('agentSettings.imComponents.aiConfigTitle')}
+            </h3>
             <div className="space-y-4">
                 <div className="flex items-center justify-between">
                     <div className="flex-1 pr-4">
-                        <p className="text-sm font-medium text-[var(--ink)]">供应商</p>
+                        <p className="text-sm font-medium text-[var(--ink)]">
+                            {t('agentSettings.imComponents.provider')}
+                        </p>
                         <p className="text-xs text-[var(--ink-muted)]">
-                            Bot 使用的 AI 供应商（独立于客户端设置）
+                            {t('agentSettings.imComponents.providerDescription')}
                         </p>
                     </div>
                     <CustomSelect
                         value={providerId}
                         options={providerOptions}
                         onChange={onProviderChange}
-                        placeholder="选择供应商"
+                        placeholder={t('agentSettings.imComponents.providerPlaceholder')}
                         className="w-[240px]"
                     />
                 </div>
                 <div className="flex items-center justify-between">
                     <div className="flex-1 pr-4">
-                        <p className="text-sm font-medium text-[var(--ink)]">模型</p>
+                        <p className="text-sm font-medium text-[var(--ink)]">
+                            {t('agentSettings.imComponents.model')}
+                        </p>
                         <p className="text-xs text-[var(--ink-muted)]">
-                            可在 Telegram 中使用 <code className="rounded bg-[var(--paper-inset)] px-1 py-0.5 text-xs">/model</code> 命令切换
+                            {t('agentSettings.imComponents.modelDescription')}
                         </p>
                     </div>
                     <CustomSelect
                         value={model}
                         options={modelOptions}
                         onChange={onModelChange}
-                        placeholder="选择模型"
+                        placeholder={t('agentSettings.imComponents.modelPlaceholder')}
                         className="w-[240px]"
                     />
                 </div>

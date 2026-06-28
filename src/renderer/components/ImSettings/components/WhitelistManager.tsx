@@ -1,4 +1,5 @@
 import React, { useCallback, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Plus, X } from 'lucide-react';
 import type { ImPlatform } from '../../../../shared/types/im';
 
@@ -10,12 +11,13 @@ export default function WhitelistManager({
     users: string[];
     onChange: (users: string[]) => void;
     platform?: ImPlatform;
-}) {
+	}) {
+    const { t } = useTranslation('settings');
     const [newUser, setNewUser] = useState('');
-    const placeholderText = platform === 'telegram' ? 'Telegram 用户名或 User ID'
-        : platform === 'feishu' ? '飞书 Open ID'
-        : platform === 'dingtalk' ? '钉钉 User ID'
-        : '用户 ID';
+    const placeholderText = platform === 'telegram' ? t('agentSettings.imComponents.placeholderTelegram')
+        : platform === 'feishu' ? t('agentSettings.imComponents.placeholderFeishu')
+        : platform === 'dingtalk' ? t('agentSettings.imComponents.placeholderDingtalk')
+        : t('agentSettings.imComponents.placeholderUser');
 
     const handleAdd = useCallback(() => {
         const trimmed = newUser.trim();
@@ -37,7 +39,9 @@ export default function WhitelistManager({
     if (isBindCodePlatform) {
         return (
             <div className="space-y-3">
-                <label className="text-sm font-medium text-[var(--ink)]">已绑定用户</label>
+                <label className="text-sm font-medium text-[var(--ink)]">
+                    {t('agentSettings.imComponents.boundUsers')}
+                </label>
                 {users.length > 0 ? (
                     <div className="flex flex-wrap gap-2">
                         {users.map((user) => (
@@ -57,7 +61,7 @@ export default function WhitelistManager({
                     </div>
                 ) : (
                     <p className="text-xs text-[var(--ink-muted)]">
-                        暂无绑定用户。启动 Bot 后，通过口令绑定添加用户。
+                        {t('agentSettings.imComponents.noBoundUsers')}
                     </p>
                 )}
             </div>
@@ -67,7 +71,9 @@ export default function WhitelistManager({
     // Telegram: manual add input + tag list
     return (
         <div className="space-y-3">
-            <label className="text-sm font-medium text-[var(--ink)]">手动添加用户白名单</label>
+            <label className="text-sm font-medium text-[var(--ink)]">
+                {t('agentSettings.imComponents.manualWhitelist')}
+            </label>
             <div className="flex items-center gap-2">
                 <input
                     type="text"
@@ -105,7 +111,7 @@ export default function WhitelistManager({
                 </div>
             ) : (
                 <p className="text-xs text-[var(--ink-muted)]">
-                    未添加白名单用户。启动 Bot 后可通过口令绑定，或手动添加用户 ID。
+                    {t('agentSettings.imComponents.noWhitelistUsers')}
                 </p>
             )}
         </div>
