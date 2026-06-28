@@ -1,4 +1,5 @@
 import { Globe, ImageIcon, Loader2, Plus, Settings2, Wrench } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 
 import { CliToolsSection } from '@/components/CliToolsSection';
 import type { McpServerDefinition } from '@/config/types';
@@ -39,15 +40,24 @@ export function ToolboxSection({
   onEditOfficialTool,
   onToggleOfficialTool,
 }: ToolboxSectionProps) {
+  const { t } = useTranslation('settings');
   const totalTools = mcpServers.length + officialTools.length;
+  const toggleTitle = (isEnabling: boolean, isEnabled: boolean) => (
+    isEnabling
+      ? t('toolbox.tools.enabling')
+      : isEnabled
+        ? t('toolbox.tools.enabled')
+        : t('toolbox.tools.clickToEnable')
+  );
+
   return (
     <div className="mx-auto max-w-4xl px-8 py-8">
-      <h2 className="mb-7 text-lg font-semibold text-[var(--ink)]">工具箱</h2>
+      <h2 className="mb-7 text-lg font-semibold text-[var(--ink)]">{t('toolbox.title')}</h2>
 
       <div className="flex items-center gap-2.5">
         <h3 className="flex items-center gap-2 text-lg font-semibold text-[var(--ink)]">
           <Wrench className="h-4 w-4 text-[var(--ink-muted)]" />
-          工具
+          {t('toolbox.tools.title')}
           <span className="rounded-full bg-[var(--paper-inset)] px-2 py-0.5 text-xs font-medium text-[var(--ink-muted)]">
             {totalTools}
           </span>
@@ -58,12 +68,12 @@ export function ToolboxSection({
           className="flex items-center gap-1.5 rounded-lg bg-[var(--button-primary-bg)] px-3 py-1.5 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)]"
         >
           <Plus className="h-3.5 w-3.5" />
-          添加
+          {t('toolbox.tools.add')}
         </button>
       </div>
 
       <p className="mb-4 mt-1 text-xs text-[var(--ink-muted)]">
-        可在对话中启用的工具；包含 MCP 标准协议工具和 MyAgents 官方 CLI 工具
+        {t('toolbox.tools.description')}
       </p>
 
       <div className="grid grid-cols-2 gap-4">
@@ -82,7 +92,7 @@ export function ToolboxSection({
                     <ImageIcon className="h-4 w-4 shrink-0 text-[var(--accent-warm)]/70" />
                     <h3 className="truncate font-semibold text-[var(--ink)]" title={tool.name}>{tool.name}</h3>
                     <span className="shrink-0 rounded-full border border-[var(--info)]/20 bg-[var(--info-bg)] px-2 py-0.5 text-xs font-medium text-[var(--info)]">
-                      预设
+                      {t('toolbox.tools.presetBadge')}
                     </span>
                     <span className="shrink-0 rounded-full border border-[var(--line)] bg-[var(--paper-inset)] px-2 py-0.5 text-xs font-medium text-[var(--ink-muted)]">
                       {tool.badge ?? 'CLI'}
@@ -96,7 +106,7 @@ export function ToolboxSection({
                   </p>
                   {needsConfig && (
                     <p className="mt-1 text-xs text-[var(--warning)]">
-                      需要配置支持图片理解的模型
+                      {t('toolbox.tools.needsVisionModel')}
                     </p>
                   )}
                   <p className="mt-2 truncate font-mono text-xs text-[var(--ink-muted)]" title="myagents vision analyze --image <path>">
@@ -107,7 +117,7 @@ export function ToolboxSection({
                   <button
                     onClick={() => onEditOfficialTool?.(tool)}
                     className="rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
-                    title="设置"
+                    title={t('toolbox.tools.settings')}
                   >
                     <Settings2 className="h-4 w-4" />
                   </button>
@@ -121,7 +131,7 @@ export function ToolboxSection({
                           ? 'cursor-pointer bg-[var(--accent)]'
                           : 'cursor-pointer bg-[var(--line-strong)]'
                     }`}
-                    title={isEnabling ? '启用中...' : isEnabled ? '已启用' : '点击启用'}
+                    title={toggleTitle(isEnabling, isEnabled)}
                   >
                     <span
                       className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-[var(--toggle-thumb)] shadow transition-transform ${isEnabled ? 'translate-x-5' : 'translate-x-0'}`}
@@ -147,12 +157,12 @@ export function ToolboxSection({
                     <h3 className="truncate font-semibold text-[var(--ink)]" title={server.name}>{server.name}</h3>
                     {server.isBuiltin && (
                       <span className="shrink-0 rounded-full border border-[var(--info)]/20 bg-[var(--info-bg)] px-2 py-0.5 text-xs font-medium text-[var(--info)]">
-                        预设
+                        {t('toolbox.tools.presetBadge')}
                       </span>
                     )}
                     {server.isFree && (
                       <span className="shrink-0 rounded-full border border-[var(--success)]/20 bg-[var(--success-bg)] px-2 py-0.5 text-xs font-medium text-[var(--success)]">
-                        免费
+                        {t('toolbox.tools.freeBadge')}
                       </span>
                     )}
                     {isEnabling && (
@@ -166,7 +176,7 @@ export function ToolboxSection({
                   )}
                   {mcpNeedsConfig[server.id] && (
                     <p className="mt-1 text-xs text-[var(--warning)]">
-                      ⚠️ 需要配置 API Key
+                      {t('toolbox.tools.needsApiKey')}
                     </p>
                   )}
                   {server.command !== '__builtin__' && server.command !== '__bundled_cuse__' && (
@@ -179,7 +189,7 @@ export function ToolboxSection({
                   <button
                     onClick={() => server.isBuiltin ? onEditBuiltinMcp(server) : onEditMcp(server)}
                     className="rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
-                    title="设置"
+                    title={t('toolbox.tools.settings')}
                   >
                     <Settings2 className="h-4 w-4" />
                   </button>
@@ -193,7 +203,7 @@ export function ToolboxSection({
                           ? 'cursor-pointer bg-[var(--accent)]'
                           : 'cursor-pointer bg-[var(--line-strong)]'
                     }`}
-                    title={isEnabling ? '启用中...' : isEnabled ? '已启用' : '点击启用'}
+                    title={toggleTitle(isEnabling, isEnabled)}
                   >
                     <span
                       className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-[var(--toggle-thumb)] shadow transition-transform ${isEnabled ? 'translate-x-5' : 'translate-x-0'}`}

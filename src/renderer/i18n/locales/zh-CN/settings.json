@@ -1125,6 +1125,20 @@
     }
   },
   "toolbox": {
+    "title": "工具箱",
+    "tools": {
+      "title": "工具",
+      "add": "添加",
+      "description": "可在对话中启用的工具；包含 MCP 标准协议工具和 MyAgents 官方 CLI 工具",
+      "presetBadge": "预设",
+      "freeBadge": "免费",
+      "needsVisionModel": "需要配置支持图片理解的模型",
+      "needsApiKey": "⚠️ 需要配置 API Key",
+      "settings": "设置",
+      "enabling": "启用中...",
+      "enabled": "已启用",
+      "clickToEnable": "点击启用"
+    },
     "cliTools": {
       "title": "CLI 工具",
       "description": "由 AI 创建并注册的命令行工具，全部 Runtime 与终端都能直接调用；开关控制是否让 AI 自动发现。",

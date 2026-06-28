@@ -1125,6 +1125,20 @@
     }
   },
   "toolbox": {
+    "title": "Toolbox",
+    "tools": {
+      "title": "Tools",
+      "add": "Add",
+      "description": "Tools that can be enabled in chats, including MCP standard-protocol tools and official MyAgents CLI tools.",
+      "presetBadge": "Preset",
+      "freeBadge": "Free",
+      "needsVisionModel": "Configure a model that supports image understanding",
+      "needsApiKey": "⚠️ API Key required",
+      "settings": "Settings",
+      "enabling": "Enabling...",
+      "enabled": "Enabled",
+      "clickToEnable": "Click to enable"
+    },
     "cliTools": {
       "title": "CLI Tools",
       "description": "Command-line tools created and registered by AI. Every runtime and terminal can call them directly; the toggle controls whether AI can discover them automatically.",
