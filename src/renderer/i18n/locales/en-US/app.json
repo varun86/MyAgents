@@ -87,6 +87,78 @@
     "pdfRenderFailed": "Failed to render PDF",
     "pptRenderFailed": "Failed to render presentation"
   },
+  "message": {
+    "turnDuration": "This turn took {{duration}}",
+    "replyFileName": "{{date}}_reply.md",
+    "actions": {
+      "copy": "Copy",
+      "copied": "Copied",
+      "exportMarkdown": "Export markdown",
+      "retry": "Retry",
+      "fork": "Fork",
+      "rewind": "Rewind"
+    },
+    "systemTags": {
+      "heartbeat": "Heartbeat",
+      "cronTask": "Scheduled task",
+      "floatingContext": "Floating context"
+    },
+    "taskStatus": {
+      "completed": "completed",
+      "error": "errored",
+      "failed": "failed",
+      "stopped": "stopped"
+    },
+    "backgroundTask": "Background task",
+    "systemInfo": "System info",
+    "expand": "Expand"
+  },
+  "fileActions": {
+    "copy": "Copy",
+    "copied": "Copied",
+    "copyFailed": "Copy failed",
+    "reference": "Reference",
+    "openContainingFolder": "Open containing folder",
+    "openMyAgentsPreview": "Open MyAgents preview",
+    "preview": "Preview",
+    "open": "Open",
+    "revealInTree": "Reveal in file tree"
+  },
+  "markdown": {
+    "copyCode": "Copy code",
+    "copy": "Copy",
+    "copied": "Copied",
+    "preview": "Preview",
+    "code": "Code",
+    "updating": "Updating...",
+    "diagramRendering": "Rendering diagram...",
+    "renderDiagram": "Rendering diagram..."
+  },
+  "inlineCode": {
+    "pause": "Pause",
+    "playAudio": "Play audio",
+    "folderTitle": "Folder: {{path}}",
+    "fileTitle": "File: {{path}}"
+  },
+  "linkContext": {
+    "previewInternal": "Preview (embedded browser)",
+    "copyLink": "Copy link",
+    "copied": "Link copied",
+    "copyFailed": "Copy failed",
+    "openSystem": "Open in system browser"
+  },
+  "monacoFind": {
+    "close": "Close",
+    "previousMatch": "Previous match",
+    "nextMatch": "Next match",
+    "matchCase": "Match case",
+    "matchWholeWord": "Match whole word",
+    "useRegularExpression": "Use regular expression",
+    "findInSelection": "Find in selection",
+    "toggleReplace": "Toggle replace",
+    "replaceAll": "Replace all",
+    "replace": "Replace"
+  },
   "space": {
     "login": {
       "eyebrow": "Official Space",

@@ -87,6 +87,78 @@
     "pdfRenderFailed": "PDF 渲染失败",
     "pptRenderFailed": "演示文稿渲染失败"
   },
+  "message": {
+    "turnDuration": "本轮耗时 {{duration}}",
+    "replyFileName": "{{date}}_回复.md",
+    "actions": {
+      "copy": "复制",
+      "copied": "已复制",
+      "exportMarkdown": "导出 markdown",
+      "retry": "重试",
+      "fork": "分支",
+      "rewind": "时间回溯"
+    },
+    "systemTags": {
+      "heartbeat": "心跳感知",
+      "cronTask": "定时任务",
+      "floatingContext": "悬浮上下文"
+    },
+    "taskStatus": {
+      "completed": "已完成",
+      "error": "出错",
+      "failed": "失败",
+      "stopped": "已停止"
+    },
+    "backgroundTask": "后台任务",
+    "systemInfo": "系统信息",
+    "expand": "展开"
+  },
+  "fileActions": {
+    "copy": "复制",
+    "copied": "已复制",
+    "copyFailed": "复制失败",
+    "reference": "引用",
+    "openContainingFolder": "打开所在文件夹",
+    "openMyAgentsPreview": "打开 MyAgents 预览",
+    "preview": "预览",
+    "open": "打开",
+    "revealInTree": "在文件目录中展示"
+  },
+  "markdown": {
+    "copyCode": "复制代码",
+    "copy": "复制",
+    "copied": "已复制",
+    "preview": "预览",
+    "code": "代码",
+    "updating": "更新中...",
+    "diagramRendering": "图表渲染中...",
+    "renderDiagram": "渲染图表..."
+  },
+  "inlineCode": {
+    "pause": "暂停",
+    "playAudio": "播放音频",
+    "folderTitle": "文件夹: {{path}}",
+    "fileTitle": "文件: {{path}}"
+  },
+  "linkContext": {
+    "previewInternal": "预览（内置浏览器）",
+    "copyLink": "拷贝链接",
+    "copied": "已拷贝链接",
+    "copyFailed": "拷贝失败",
+    "openSystem": "在系统浏览器中打开"
+  },
+  "monacoFind": {
+    "close": "关闭",
+    "previousMatch": "上一个匹配",
+    "nextMatch": "下一个匹配",
+    "matchCase": "区分大小写",
+    "matchWholeWord": "全词匹配",
+    "useRegularExpression": "使用正则表达式",
+    "findInSelection": "在选区中查找",
+    "toggleReplace": "切换替换",
+    "replaceAll": "全部替换",
+    "replace": "替换"
+  },
   "space": {
     "login": {
       "eyebrow": "Official Space",

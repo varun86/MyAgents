@@ -5,6 +5,7 @@
 
 import { Check, Copy } from 'lucide-react';
 import { useCallback, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
 
@@ -42,6 +43,7 @@ export const codeBlockSyntaxTheme = {
 const customTheme = codeBlockSyntaxTheme;
 
 export default function CodeBlock({ children, language, className }: CodeBlockProps) {
+    const { t } = useTranslation('app');
     const [copied, setCopied] = useState(false);
 
     // Extract language from className if not provided directly
@@ -68,17 +70,17 @@ export default function CodeBlock({ children, language, className }: CodeBlockPr
                     type="button"
                     onClick={handleCopy}
                     className="flex items-center gap-1.5 rounded px-2 py-1 text-[var(--code-line-number)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
-                    title={copied ? '已复制' : '复制代码'}
+                    title={copied ? t('markdown.copied') : t('markdown.copyCode')}
                 >
                     {copied ? (
                         <>
                             <Check className="size-3.5" />
-                            <span>已复制</span>
+                            <span>{t('markdown.copied')}</span>
                         </>
                     ) : (
                         <>
                             <Copy className="size-3.5" />
-                            <span>复制</span>
+                            <span>{t('markdown.copy')}</span>
                         </>
                     )}
                 </button>

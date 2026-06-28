@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { createPortal } from 'react-dom';
 
 import ContextMenu, { type ContextMenuItem } from './ContextMenu';
@@ -34,6 +35,7 @@ interface MenuState {
 }
 
 export default function LinkContextMenuProvider({ children }: { children: React.ReactNode }) {
+    const { t } = useTranslation('app');
     const [menu, setMenu] = useState<MenuState | null>(null);
     const toast = useToast();
 
@@ -65,7 +67,7 @@ export default function LinkContextMenuProvider({ children }: { children: React.
     const items: ContextMenuItem[] = menu
         ? [
               {
-                  label: '预览（内置浏览器）',
+                  label: t('linkContext.previewInternal'),
                   onClick: () => {
                       const url = menu.href;
                       const event = new CustomEvent(CUSTOM_EVENTS.OPEN_IN_BROWSER_PANEL, {
@@ -81,16 +83,16 @@ export default function LinkContextMenuProvider({ children }: { children: React.
                   },
               },
               {
-                  label: '拷贝链接',
+                  label: t('linkContext.copyLink'),
                   onClick: () => {
                       navigator.clipboard.writeText(menu.href).then(
-                          () => toast.success('已拷贝链接'),
-                          () => toast.error('拷贝失败'),
+                          () => toast.success(t('linkContext.copied')),
+                          () => toast.error(t('linkContext.copyFailed')),
                       );
                   },
               },
               {
-                  label: '在系统浏览器中打开',
+                  label: t('linkContext.openSystem'),
                   onClick: () => {
                       void openExternal(menu.href);
                   },

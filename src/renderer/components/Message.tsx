@@ -1,5 +1,6 @@
 import { Fragment, memo, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { ChevronDown, Copy, Check, Undo2, RotateCcw, GitBranch, CheckCircle, XCircle, AlertCircle, Download } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 
 import { track } from '@/analytics';
 import AttachmentPreviewList from '@/components/AttachmentPreviewList';
@@ -47,10 +48,10 @@ function areMessageUsagesEqual(a: MessageType['usage'], b: MessageType['usage'])
     && a.model === b.model;
 }
 
-function getTurnMetaLabel(message: MessageType): string | null {
+function getTurnMetaLabel(message: MessageType, t: (key: string, options?: Record<string, unknown>) => string): string | null {
   const parts: string[] = [];
   if (typeof message.durationMs === 'number' && Number.isFinite(message.durationMs) && message.durationMs > 0) {
-    parts.push(`本轮耗时 ${formatDuration(message.durationMs)}`);
+    parts.push(t('message.turnDuration', { duration: formatDuration(message.durationMs) }));
   }
 
   const usage = message.usage;
@@ -177,6 +178,7 @@ function AssistantActions({ message, onRetry, onFork, className = '' }: {
   onFork?: (id: string) => void;
   className?: string;
 }) {
+  const { t } = useTranslation('app');
   const [copied, setCopied] = useState(false);
   const timerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
   const exportingRef = useRef(false);
@@ -187,7 +189,7 @@ function AssistantActions({ message, onRetry, onFork, className = '' }: {
   }, []);
 
   const text = extractAssistantText(message.content);
-  const turnMetaLabel = getTurnMetaLabel(message);
+  const turnMetaLabel = getTurnMetaLabel(message, t);
 
   const handleExport = async () => {
     // In-flight guard against double-click → duplicate download + toast.
@@ -195,7 +197,7 @@ function AssistantActions({ message, onRetry, onFork, className = '' }: {
     exportingRef.current = true;
     try {
       track('message_export', {});
-      const fileName = `${localDateStr()}_回复.md`;
+      const fileName = t('message.replyFileName', { date: localDateStr() });
       toast?.success(await downloadMarkdown(fileName, buildReplyMarkdown(text)));
     } finally {
       exportingRef.current = false;
@@ -204,9 +206,9 @@ function AssistantActions({ message, onRetry, onFork, className = '' }: {
 
   return (
     <div className={`group/actions flex min-h-7 w-full items-center gap-2 -ml-1 pt-1 ${className}`}>
-      <Tip label={copied ? '已复制' : '复制'}>
+      <Tip label={copied ? t('message.actions.copied') : t('message.actions.copy')}>
         <button type="button"
-          aria-label="复制"
+          aria-label={t('message.actions.copy')}
           onClick={() => {
             navigator.clipboard.writeText(text).catch(() => {});
             track('message_copy', {});
@@ -218,18 +220,18 @@ function AssistantActions({ message, onRetry, onFork, className = '' }: {
           {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
         </button>
       </Tip>
-      <Tip label="导出 markdown">
+      <Tip label={t('message.actions.exportMarkdown')}>
         <button type="button"
-          aria-label="导出 markdown"
+          aria-label={t('message.actions.exportMarkdown')}
           onClick={handleExport}
           className="rounded-lg p-1 text-[var(--ink-muted)] transition-all hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]">
           <Download className="size-3.5" />
         </button>
       </Tip>
       {onRetry && (
-        <Tip label="重试">
+        <Tip label={t('message.actions.retry')}>
           <button type="button"
-            aria-label="重试"
+            aria-label={t('message.actions.retry')}
             onClick={() => onRetry(message.id)}
             className="rounded-lg p-1 text-[var(--ink-muted)] transition-all hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]">
             <RotateCcw className="size-3.5" />
@@ -237,9 +239,9 @@ function AssistantActions({ message, onRetry, onFork, className = '' }: {
         </Tip>
       )}
       {onFork && message.sdkUuid && (
-        <Tip label="分支">
+        <Tip label={t('message.actions.fork')}>
           <button type="button"
-            aria-label="分支"
+            aria-label={t('message.actions.fork')}
             onClick={() => onFork(message.id)}
             className="rounded-lg p-1 text-[var(--ink-muted)] transition-all hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]">
             <GitBranch className="size-3.5" />
@@ -258,12 +260,12 @@ function AssistantActions({ message, onRetry, onFork, className = '' }: {
   );
 }
 
-/** Whitelist: system-injection tags → display label (for user message badge) */
-const SYSTEM_TAG_MAP: Record<string, string> = {
-  'HEARTBEAT': '心跳感知',
-  'CRON_TASK': '定时任务',
-  [FLOATING_BALL_CONTEXT_TAG]: '悬浮上下文',
-};
+function systemTagLabel(kind: string, t: (key: string) => string): string | null {
+  if (kind === 'HEARTBEAT') return t('message.systemTags.heartbeat');
+  if (kind === 'CRON_TASK') return t('message.systemTags.cronTask');
+  if (kind === FLOATING_BALL_CONTEXT_TAG) return t('message.systemTags.floatingContext');
+  return null;
+}
 
 function renderWidgetSegments(text: string, isLoading: boolean): ReactNode {
   const segments = parseWidgetTags(text);
@@ -296,6 +298,7 @@ function renderWidgetSegments(text: string, isLoading: boolean): ReactNode {
  * History messages won't re-render when streaming message updates.
  */
 const Message = memo(function Message({ message, isLoading = false, onRewind, onRetry, onFork, exitPlanModeSlot }: MessageProps) {
+  const { t } = useTranslation('app');
   const { openPreview } = useImagePreview();
   const [copied, setCopied] = useState(false);
   const copiedTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
@@ -346,9 +349,7 @@ const Message = memo(function Message({ message, isLoading = false, onRewind, on
 
     // Detect system injection type from <system-reminder><TAG> wrapper (whitelist)
     let systemTag: string | null = null;
-    if (reminder.kind && reminder.kind in SYSTEM_TAG_MAP) {
-      systemTag = SYSTEM_TAG_MAP[reminder.kind];
-    }
+    if (reminder.kind) systemTag = systemTagLabel(reminder.kind, t);
 
     // Strip system injection tags that wrap delivered content. These HTML-like tags trigger
     // Markdown's HTML block mode, breaking \n rendering and Markdown syntax.
@@ -381,13 +382,13 @@ const Message = memo(function Message({ message, isLoading = false, onRewind, on
       const isSuccess = taskNotif.status === 'completed';
       const StatusIcon = isSuccess ? CheckCircle : taskNotif.status === 'error' || taskNotif.status === 'failed' ? XCircle : AlertCircle;
       const statusColor = isSuccess ? 'var(--success)' : 'var(--error)';
-      const statusLabel = isSuccess ? '已完成' : taskNotif.status === 'error' ? '出错' : taskNotif.status === 'failed' ? '失败' : '已停止';
-      const displayText = taskNotif.description || taskNotif.summary || taskNotif.taskId || '后台任务';
+      const statusLabel = isSuccess ? t('message.taskStatus.completed') : taskNotif.status === 'error' ? t('message.taskStatus.error') : taskNotif.status === 'failed' ? t('message.taskStatus.failed') : t('message.taskStatus.stopped');
+      const displayText = taskNotif.description || taskNotif.summary || taskNotif.taskId || t('message.backgroundTask');
       return (
         <div className="flex justify-start w-full px-4 py-1.5 select-none">
           <div className="flex items-center gap-2 rounded-lg px-3 py-2 text-xs text-[var(--ink-muted)]">
             <StatusIcon className="h-3.5 w-3.5 flex-shrink-0" style={{ color: statusColor }} />
-            <span>后台任务</span>
+            <span>{t('message.backgroundTask')}</span>
             <span className="font-medium text-[var(--ink-secondary)]">&ldquo;{displayText}&rdquo;</span>
             <span>{statusLabel}</span>
             {taskNotif.summary && taskNotif.summary !== taskNotif.description && (
@@ -407,7 +408,7 @@ const Message = memo(function Message({ message, isLoading = false, onRewind, on
       return (
         <div className="flex justify-start w-full px-4 py-2 select-none">
           <div className="w-full max-w-none rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)]/50 p-4">
-            <div className="text-xs font-medium text-[var(--ink-muted)] mb-2">系统信息</div>
+            <div className="text-xs font-medium text-[var(--ink-muted)] mb-2">{t('message.systemInfo')}</div>
             <div className="text-sm text-[var(--ink)] select-text">
               <Markdown>{formattedContent}</Markdown>
             </div>
@@ -474,7 +475,7 @@ const Message = memo(function Message({ message, isLoading = false, onRewind, on
                     className="flex w-full items-center justify-center gap-1 rounded-b-2xl bg-[var(--message-user-bg)] py-1.5 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:text-[var(--ink)]"
                   >
                     <ChevronDown className="size-3.5" />
-                    展开
+                    {t('message.expand')}
                   </button>
                 </div>
               )}
@@ -484,9 +485,9 @@ const Message = memo(function Message({ message, isLoading = false, onRewind, on
               <span className="mr-1 text-xs text-[var(--ink-muted)]">{formatTimestamp(message.timestamp)}</span>
               {onRewind && (
                 <span data-rewind-btn>
-                  <Tip label="时间回溯">
+                  <Tip label={t('message.actions.rewind')}>
                     <button type="button"
-                      aria-label="时间回溯"
+                      aria-label={t('message.actions.rewind')}
                       onClick={() => onRewind(message.id)}
                       className="rounded-lg p-1 text-[var(--ink-muted)] transition-all hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]">
                       <Undo2 className="size-3.5" />
@@ -494,9 +495,9 @@ const Message = memo(function Message({ message, isLoading = false, onRewind, on
                   </Tip>
                 </span>
               )}
-              <Tip label={copied ? '已复制' : '复制'}>
+              <Tip label={copied ? t('message.actions.copied') : t('message.actions.copy')}>
                 <button type="button"
-                  aria-label="复制"
+                  aria-label={t('message.actions.copy')}
                   onClick={() => {
                     navigator.clipboard.writeText(userContent).catch(() => {});
                     setCopied(true);
