@@ -108,6 +108,18 @@
       "resetTitle": "Restore default shortcut",
       "resetDefault": "Reset"
     },
+    "recorder": {
+      "cancelled": "Cancelled",
+      "recordingDisplay": "Press shortcut... (Esc cancels)",
+      "recordingTitle": "Recording: press a shortcut or press Esc to cancel",
+      "idleTitle": "Click to change shortcut",
+      "errors": {
+        "missingMainKey": "Choose a regular key",
+        "blockedKey": "This key cannot be used as a shortcut",
+        "missingModifier": "Add at least one modifier (Cmd/Ctrl/Alt/Shift)",
+        "shiftLetterConflict": "Shift+letter conflicts with text input. Add Cmd/Ctrl/Alt."
+      }
+    },
     "app": {
       "title": "App Shortcuts",
       "description": "These shortcuts work globally inside the app and cannot be customized yet.",
@@ -478,6 +490,20 @@
       "deleteMessage": "Delete {{filename}}? This cannot be undone.",
       "fileDeleted": "File deleted",
       "templateApplied": "Template applied to this workspace"
+    },
+    "templateApply": {
+      "back": "Back",
+      "close": "Close",
+      "pickTitle": "Apply a template to the current workspace",
+      "confirmTitle": "Confirm apply",
+      "builtin": "Built-in",
+      "confirmMerge": "Merge the \"{{name}}\" template into the current workspace. Matching files will be overwritten; other files in the workspace stay unchanged.",
+      "overwriteFiles": "Will overwrite {{count}} file(s)",
+      "addFiles": "Will add {{count}} file(s)",
+      "empty": "This template is empty. No files can be applied.",
+      "cancel": "Cancel",
+      "next": "Next",
+      "confirmApply": "Apply"
     },
     "introduction": {
       "saveSuccess": "Guide saved",

@@ -182,6 +182,37 @@
     "replaceAll": "Replace all",
     "replace": "Replace"
   },
+  "monacoContext": {
+    "cut": "Cut",
+    "copy": "Copy",
+    "paste": "Paste",
+    "selectAll": "Select all",
+    "find": "Find"
+  },
+  "dropdown": {
+    "moreActions": "More actions"
+  },
+  "notifications": {
+    "messageCompleteTitle": "MyAgents - Task complete",
+    "messageCompleteBody": "Please review the result",
+    "permissionTitle": "MyAgents - Permission request",
+    "permissionBody": "AI requested tool access - {{toolName}}",
+    "askUserTitle": "MyAgents - Confirmation needed",
+    "askUserBody": "AI is waiting for your confirmation",
+    "planModeTitle": "MyAgents - Plan review",
+    "planModeBody": "AI is waiting for you to review the plan"
+  },
+  "contextUsage": {
+    "windowDefault": "No limit configured. Estimated with default {{window}}",
+    "windowRuntime": "Window {{window}} · runtime live value",
+    "windowModelConfig": "Window {{window}} from model configuration",
+    "autoCompactFootnote": "{{windowDesc}} · auto-compacts at about {{threshold}}",
+    "aria": "Context usage {{percent}}%",
+    "title": "Context usage",
+    "compactTip": "Compact context to free up more usable space",
+    "compact": "Compact",
+    "usedLabel": "Used context window"
+  },
   "space": {
     "login": {
       "eyebrow": "Official Space",

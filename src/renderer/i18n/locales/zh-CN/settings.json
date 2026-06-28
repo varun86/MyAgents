@@ -108,6 +108,18 @@
       "resetTitle": "恢复默认快捷键",
       "resetDefault": "重置默认"
     },
+    "recorder": {
+      "cancelled": "已取消",
+      "recordingDisplay": "请按下快捷键...（Esc 取消）",
+      "recordingTitle": "正在录制：请按下快捷键，或按 Esc 取消",
+      "idleTitle": "点击修改快捷键",
+      "errors": {
+        "missingMainKey": "请选择一个普通按键",
+        "blockedKey": "该按键不能作为快捷键",
+        "missingModifier": "请至少加一个修饰键（Cmd/Ctrl/Alt/Shift）",
+        "shiftLetterConflict": "仅 Shift+字母 与文字输入冲突，请加 Cmd/Ctrl/Alt"
+      }
+    },
     "app": {
       "title": "应用快捷键",
       "description": "以下快捷键在应用内全局生效（暂不支持自定义）",
@@ -478,6 +490,20 @@
       "deleteMessage": "确认删除 {{filename}}？此操作不可恢复。",
       "fileDeleted": "文件已删除",
       "templateApplied": "模板已应用到当前工作区"
+    },
+    "templateApply": {
+      "back": "返回",
+      "close": "关闭",
+      "pickTitle": "选择模板应用到当前工作区",
+      "confirmTitle": "确认应用",
+      "builtin": "内置",
+      "confirmMerge": "将「{{name}}」模板的内容合并到当前工作区。同名文件会被覆盖，工作区中其它文件保留不变。",
+      "overwriteFiles": "将覆盖 {{count}} 个文件",
+      "addFiles": "将新增 {{count}} 个文件",
+      "empty": "模板为空，无文件可应用。",
+      "cancel": "取消",
+      "next": "下一步",
+      "confirmApply": "确认应用"
     },
     "introduction": {
       "saveSuccess": "使用指南保存成功",

@@ -182,6 +182,37 @@
     "replaceAll": "全部替换",
     "replace": "替换"
   },
+  "monacoContext": {
+    "cut": "剪切",
+    "copy": "复制",
+    "paste": "粘贴",
+    "selectAll": "全选",
+    "find": "查找"
+  },
+  "dropdown": {
+    "moreActions": "更多操作"
+  },
+  "notifications": {
+    "messageCompleteTitle": "MyAgents - 任务完成",
+    "messageCompleteBody": "请您查看结果",
+    "permissionTitle": "MyAgents - 权限请求",
+    "permissionBody": "AI 请求使用工具 - {{toolName}}",
+    "askUserTitle": "MyAgents - 需求确认",
+    "askUserBody": "AI 等待您的确认相关信息",
+    "planModeTitle": "MyAgents - 方案审核",
+    "planModeBody": "AI 等待您审核方案"
+  },
+  "contextUsage": {
+    "windowDefault": "未配置上限，按默认 {{window}} 估算",
+    "windowRuntime": "窗口 {{window}} · runtime 实时",
+    "windowModelConfig": "窗口 {{window}} 来自模型配置",
+    "autoCompactFootnote": "{{windowDesc}} · 约 {{threshold}} 时自动压缩",
+    "aria": "上下文已使用 {{percent}}%",
+    "title": "上下文用量",
+    "compactTip": "智能压缩上下文，提供更大可用空间",
+    "compact": "智能压缩",
+    "usedLabel": "已用 context 窗口"
+  },
   "space": {
     "login": {
       "eyebrow": "Official Space",
