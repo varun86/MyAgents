@@ -1,11 +1,16 @@
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 
+import { i18n } from '@/i18n';
 import {
   computeMonacoFindTooltipPosition,
   normalizeMonacoFindTooltipLabel,
 } from './monacoFindTooltip';
 
 describe('monacoFindTooltip', () => {
+  beforeEach(async () => {
+    await i18n.changeLanguage('zh-CN');
+  });
+
   it('localizes Monaco find widget labels while preserving keybinding suffixes', () => {
     expect(normalizeMonacoFindTooltipLabel('Close (Escape)')).toBe('关闭 (Escape)');
     expect(normalizeMonacoFindTooltipLabel('Match Case')).toBe('区分大小写');

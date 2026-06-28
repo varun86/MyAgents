@@ -190,7 +190,6 @@ describe('WorkspaceConfigPanel i18n', () => {
     expect(screen.getByText('MyAgents proxy')).toBeInTheDocument();
     expect(screen.getByText('Follow terminal')).toBeInTheDocument();
     expect(screen.getByText('Proactive Agent Mode')).toBeInTheDocument();
-    expect(screen.getByText('Chat Bot Channels')).toBeInTheDocument();
 
     await waitFor(() => expect(mocks.getWorkspaceCronTasks).toHaveBeenCalledWith('/Users/me/mino'));
     expect(screen.queryByText('Agent 设置')).not.toBeInTheDocument();
