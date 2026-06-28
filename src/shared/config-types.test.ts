@@ -8,6 +8,7 @@ import {
   MANAGED_CODEX_PROVIDER,
   MANAGED_CODEX_REQUIRED_RUNTIME,
   PRESET_PROVIDERS,
+  SUBSCRIPTION_PROVIDER_ID,
   applyManagedCodexProviderReadiness,
   getManagedCodexProviderReadiness,
   isManagedCodexRequiredRuntimeInstalled,
@@ -27,6 +28,30 @@ import {
 describe('normalizeProviderOrder', () => {
   it('honors the saved order, then appends known providers missing from it', () => {
     expect(normalizeProviderOrder(['a', 'b', 'c'], ['c', 'a'])).toEqual(['c', 'a', 'b']);
+  });
+
+  it('places newly introduced Codex subscription after Anthropic subscription when the saved order is missing it', () => {
+    expect(normalizeProviderOrder(
+      [SUBSCRIPTION_PROVIDER_ID, CODEX_SUBSCRIPTION_PROVIDER_ID, 'anthropic-api', 'deepseek'],
+      [SUBSCRIPTION_PROVIDER_ID, 'anthropic-api', 'deepseek'],
+    )).toEqual([
+      SUBSCRIPTION_PROVIDER_ID,
+      CODEX_SUBSCRIPTION_PROVIDER_ID,
+      'anthropic-api',
+      'deepseek',
+    ]);
+  });
+
+  it('honors an explicit saved Codex subscription position', () => {
+    expect(normalizeProviderOrder(
+      [SUBSCRIPTION_PROVIDER_ID, CODEX_SUBSCRIPTION_PROVIDER_ID, 'anthropic-api', 'deepseek'],
+      ['deepseek', CODEX_SUBSCRIPTION_PROVIDER_ID, SUBSCRIPTION_PROVIDER_ID],
+    )).toEqual([
+      'deepseek',
+      CODEX_SUBSCRIPTION_PROVIDER_ID,
+      SUBSCRIPTION_PROVIDER_ID,
+      'anthropic-api',
+    ]);
   });
 
   it('drops ids in the order that are no longer known', () => {
@@ -143,6 +168,18 @@ describe('Managed Codex provider readiness', () => {
     expect(withManagedCodexProviderCatalog([MANAGED_CODEX_PROVIDER], {
       managedCodexProviderDevGate: false,
     }).some(provider => provider.id === CODEX_SUBSCRIPTION_PROVIDER_ID)).toBe(false);
+  });
+
+  it('inserts the provider after Anthropic subscription in the default catalogue', () => {
+    const catalog = withManagedCodexProviderCatalog(PRESET_PROVIDERS, {
+      managedCodexProviderDevGate: true,
+    });
+
+    expect(catalog.slice(0, 3).map(provider => provider.id)).toEqual([
+      SUBSCRIPTION_PROVIDER_ID,
+      CODEX_SUBSCRIPTION_PROVIDER_ID,
+      'anthropic-api',
+    ]);
   });
 
   it('shows the provider card behind the developer gate but keeps it unselectable until ready', () => {

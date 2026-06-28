@@ -106,9 +106,19 @@ export interface ProviderOrderSettings {
   disabledProviderIds?: string[];
 }
 
+/** Subscription provider ID for verification caching */
+export const SUBSCRIPTION_PROVIDER_ID = 'anthropic-sub';
+
+/** Runtime-backed Codex subscription provider ID. */
+export const CODEX_SUBSCRIPTION_PROVIDER_ID = 'codex-sub';
+
 type ProviderOrderable = {
   id: string;
   enabled?: unknown;
+};
+
+const MISSING_PROVIDER_INSERT_AFTER: Record<string, string> = {
+  [CODEX_SUBSCRIPTION_PROVIDER_ID]: SUBSCRIPTION_PROVIDER_ID,
 };
 
 export function normalizeProviderOrder(providerIds: string[], providerOrder?: string[]): string[] {
@@ -125,7 +135,13 @@ export function normalizeProviderOrder(providerIds: string[], providerOrder?: st
   for (const id of providerIds) {
     if (seen.has(id)) continue;
     seen.add(id);
-    ordered.push(id);
+    const insertAfter = MISSING_PROVIDER_INSERT_AFTER[id];
+    const insertAfterIndex = insertAfter ? ordered.indexOf(insertAfter) : -1;
+    if (insertAfterIndex >= 0) {
+      ordered.splice(insertAfterIndex + 1, 0, id);
+    } else {
+      ordered.push(id);
+    }
   }
 
   return ordered;
@@ -474,12 +490,6 @@ export interface ProviderVerifyStatus {
 
 /** Verification expiry in days */
 export const VERIFY_EXPIRY_DAYS = 30;
-
-/** Subscription provider ID for verification caching */
-export const SUBSCRIPTION_PROVIDER_ID = 'anthropic-sub';
-
-/** Runtime-backed Codex subscription provider ID. */
-export const CODEX_SUBSCRIPTION_PROVIDER_ID = 'codex-sub';
 
 export type ManagedCodexInstallStatus =
   | 'not-installed'
@@ -1013,9 +1023,13 @@ export function withManagedCodexProviderCatalog(
 ): Provider[] {
   const withoutManagedCodex = providers.filter(provider => provider.id !== CODEX_SUBSCRIPTION_PROVIDER_ID);
   if (config.managedCodexProviderDevGate !== true) return withoutManagedCodex;
+  const managedCodexProvider = withManagedCodexRuntimeModels(MANAGED_CODEX_PROVIDER, runtimeModels);
+  const insertAfterIndex = withoutManagedCodex.findIndex(provider => provider.id === SUBSCRIPTION_PROVIDER_ID);
+  if (insertAfterIndex < 0) return [...withoutManagedCodex, managedCodexProvider];
   return [
-    ...withoutManagedCodex,
-    withManagedCodexRuntimeModels(MANAGED_CODEX_PROVIDER, runtimeModels),
+    ...withoutManagedCodex.slice(0, insertAfterIndex + 1),
+    managedCodexProvider,
+    ...withoutManagedCodex.slice(insertAfterIndex + 1),
   ];
 }
 
