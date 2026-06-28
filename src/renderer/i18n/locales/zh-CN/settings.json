@@ -398,6 +398,27 @@
       "remove": "移除",
       "removeRef": "移除引用"
     },
+    "globalAgents": {
+      "unsavedWarning": "请先保存或取消编辑",
+      "syncAdded": "新增 {{count}}",
+      "syncOverwritten": "覆盖 {{count}}",
+      "syncSkipped": "跳过 {{count}}",
+      "syncFailedCount": "失败 {{count}}",
+      "syncSeparator": "，",
+      "noSyncableAgents": "没有可同步的 Agent",
+      "syncFailed": "同步失败",
+      "backToList": "返回列表",
+      "title": "用户 Agent",
+      "syncFromClaude": "从 Claude Code 同步 ({{count}})",
+      "emptyTitle": "还没有用户 Agent",
+      "emptyDescription": "Sub-Agent 可以被 AI 自主委派来处理特定任务",
+      "newAgentTitle": "新建 Agent",
+      "conflictTitle": "同步冲突",
+      "conflictMessage": "以下 {{count}} 个 Agent 已存在，请选择处理方式：",
+      "skipExisting": "跳过已存在",
+      "overwriteAll": "全部覆盖",
+      "storageHint": "用户 Agent 存储在 ~/.myagents/agents/ 目录下，对所有项目生效"
+    },
     "agentDetail": {
       "inheritModel": "继承主模型 (inherit)",
       "defaultPermission": "默认",

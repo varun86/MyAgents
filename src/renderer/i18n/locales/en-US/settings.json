@@ -398,6 +398,27 @@
       "remove": "Remove",
       "removeRef": "Remove reference"
     },
+    "globalAgents": {
+      "unsavedWarning": "Save or cancel editing first",
+      "syncAdded": "Added {{count}}",
+      "syncOverwritten": "Overwritten {{count}}",
+      "syncSkipped": "Skipped {{count}}",
+      "syncFailedCount": "Failed {{count}}",
+      "syncSeparator": ", ",
+      "noSyncableAgents": "No Agents to sync",
+      "syncFailed": "Sync failed",
+      "backToList": "Back to list",
+      "title": "User Agents",
+      "syncFromClaude": "Sync from Claude Code ({{count}})",
+      "emptyTitle": "No user Agents yet",
+      "emptyDescription": "Sub-Agents can be delegated by AI to handle specialized tasks.",
+      "newAgentTitle": "New Agent",
+      "conflictTitle": "Sync conflict",
+      "conflictMessage": "{{count}} Agent(s) already exist. Choose how to proceed:",
+      "skipExisting": "Skip existing",
+      "overwriteAll": "Overwrite all",
+      "storageHint": "User Agents are stored in ~/.myagents/agents/ and apply to all projects."
+    },
     "agentDetail": {
       "inheritModel": "Inherit main model (inherit)",
       "defaultPermission": "Default",
