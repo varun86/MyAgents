@@ -759,6 +759,115 @@
       "deleteConfirmMessage": "Delete this Channel? This cannot be undone.",
       "deleteConfirm": "Delete"
     },
+    "channelWizard": {
+      "toast": {
+        "userBound": "User {{name}} bound",
+        "channelStarted": "Channel started. Complete user binding.",
+        "startFailed": "Failed to start: {{message}}",
+        "scanLoginSuccess": "QR login successful",
+        "verificationFailed": "Verification failed: {{message}}"
+      },
+      "validation": {
+        "feishuCredentials": "Enter App ID and App Secret",
+        "dingtalkCredentials": "Enter Client ID and Client Secret",
+        "botToken": "Enter Bot Token",
+        "duplicateFeishu": "These Feishu app credentials are already used by another Channel",
+        "duplicateDingtalk": "These DingTalk app credentials are already used by another Channel",
+        "duplicateBotToken": "This Bot Token is already used by another Channel"
+      },
+      "qr": {
+        "startingPlugin": "Starting plugin...",
+        "loading": "Getting QR code...",
+        "loadFailed": "Failed to get QR code",
+        "scanWith": "Scan the QR code with {{name}}",
+        "loginSuccessStarting": "Login successful. Starting...",
+        "maxRetries": "Maximum retry count reached ({{count}}). Retry manually.",
+        "loginFailed": "Login failed: {{message}}",
+        "refreshed": "QR code refreshed ({{current}}/{{max}}). Scan it.",
+        "loadFailedRetry": "Failed to get QR code. Retry manually.",
+        "startFailed": "Failed to start: {{message}}",
+        "scanAlt": "Scan to log in",
+        "failed": "Failed to load",
+        "retry": "Retry"
+      },
+      "platform": {
+        "feishu": "Feishu",
+        "dingtalk": "DingTalk",
+        "telegram": "Telegram",
+        "wecom": "WeCom"
+      },
+      "steps": {
+        "qrLogin": "Scan to log in",
+        "bindUser": "Bind user",
+        "configurePlugin": "Configure plugin",
+        "confirmAndStart": "Confirm and start",
+        "configureCredentials": "Configure app credentials",
+        "configurePermissionsCapabilities": "Configure permissions and capabilities",
+        "configurePermissionsEvents": "Configure permissions and events",
+        "bindDingtalk": "Bind your DingTalk account",
+        "bindFeishu": "Bind your Feishu account",
+        "configureBotToken": "Configure Bot Token",
+        "bindTelegram": "Bind your Telegram account"
+      },
+      "nav": {
+        "back": "Back",
+        "cancel": "Cancel",
+        "next": "Next",
+        "finish": "Finish",
+        "starting": "Starting...",
+        "startChannel": "Start Channel"
+      },
+      "header": {
+        "title": "Add {{platform}} Channel",
+        "stepIndicator": "Step {{step}}/{{total}}: {{label}}"
+      },
+      "dual": {
+        "scanMode": "Scan to add",
+        "manualMode": "Manual setup",
+        "scanCreateBot": "Create bot by scanning",
+        "scanDescription": "Scan the QR code below with the {{app}} app to create a bot and fetch credentials automatically.",
+        "wecomScanAlt": "WeCom QR scan",
+        "scanSuccess": "Scan successful",
+        "credentialsReceived": "Bot ID and Secret received automatically",
+        "qrExpiredMultiple": "QR code expired multiple times",
+        "qrExpiredRefreshing": "QR code expired. Refreshing ({{current}}/{{max}})...",
+        "scanWithWecom": "Scan the QR code with the WeCom app",
+        "credentialsReady": "Credentials are ready. Click Next to continue.",
+        "qrExpiredRetry": "QR code expired multiple times. Check the network and retry.",
+        "networkRetry": "Check the network and retry.",
+        "scanNote": "Scanning creates a new smart bot. To connect an existing bot, switch to Manual setup.",
+        "wecomAdmin": "WeCom Admin Console",
+        "wecomCredentialSuffix": " to create a smart bot and get credentials",
+        "manualMethod": "Creation path: WeCom client -> Workbench -> Smart Bot -> Create Bot -> Manual Create -> API Mode -> Long connection"
+      },
+      "config": {
+        "pluginConfig": "Plugin configuration",
+        "goToPrefix": "Go to ",
+        "inputPluginParams": "Enter the configuration parameters required by the plugin",
+        "fieldPlaceholder": "Enter {{field}}",
+        "projectHomepage": "Project homepage",
+        "openPlatform": "{{name}} Open Platform",
+        "createAppSuffix": " to create an app and get credentials",
+        "inputPluginParamsExample": "Enter plugin configuration parameters, such as appId and clientSecret",
+        "customConfig": "Custom configuration",
+        "keyPlaceholder": "Key",
+        "valuePlaceholder": "Value",
+        "addConfigItem": "Add config item",
+        "setupGuide": "Setup guide"
+      },
+      "openclaw": {
+        "credentialsEntered": "{{name}} credentials entered",
+        "larkNextHint": "Complete permissions, event subscription, and bot capability in Feishu Open Platform using the three steps below. Then click Start Channel above to verify and start.",
+        "confirmTitle": "Confirm configuration",
+        "confirmDescription": "After completing the settings above, click Start Channel.",
+        "configItems": "Config items",
+        "configItemsCount": "{{count}} item(s)"
+      },
+      "binding": {
+        "title": "User binding",
+        "qrOnly": "Scanning is enough to use this Channel. No manual user binding is required."
+      }
+    },
     "imComponents": {
       "statusOnline": "Running",
       "statusConnecting": "Connecting",

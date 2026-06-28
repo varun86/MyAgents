@@ -759,6 +759,115 @@
       "deleteConfirmMessage": "确定要删除此 Channel 吗？此操作不可撤销。",
       "deleteConfirm": "删除"
     },
+    "channelWizard": {
+      "toast": {
+        "userBound": "用户 {{name}} 已绑定",
+        "channelStarted": "Channel 启动成功，请完成用户绑定",
+        "startFailed": "启动失败: {{message}}",
+        "scanLoginSuccess": "扫码登录成功",
+        "verificationFailed": "验证失败: {{message}}"
+      },
+      "validation": {
+        "feishuCredentials": "请输入 App ID 和 App Secret",
+        "dingtalkCredentials": "请输入 Client ID 和 Client Secret",
+        "botToken": "请输入 Bot Token",
+        "duplicateFeishu": "该飞书应用凭证已被其他 Channel 使用",
+        "duplicateDingtalk": "该钉钉应用凭证已被其他 Channel 使用",
+        "duplicateBotToken": "该 Bot Token 已被其他 Channel 使用"
+      },
+      "qr": {
+        "startingPlugin": "正在启动插件...",
+        "loading": "正在获取二维码...",
+        "loadFailed": "获取二维码失败",
+        "scanWith": "请使用{{name}}扫描二维码",
+        "loginSuccessStarting": "登录成功！正在启动...",
+        "maxRetries": "超过最大重试次数 ({{count}})，请手动重试",
+        "loginFailed": "登录失败: {{message}}",
+        "refreshed": "二维码已刷新 ({{current}}/{{max}})，请扫描",
+        "loadFailedRetry": "二维码获取失败，请手动重试",
+        "startFailed": "启动失败: {{message}}",
+        "scanAlt": "扫码登录",
+        "failed": "获取失败",
+        "retry": "重试"
+      },
+      "platform": {
+        "feishu": "飞书",
+        "dingtalk": "钉钉",
+        "telegram": "Telegram",
+        "wecom": "企业微信"
+      },
+      "steps": {
+        "qrLogin": "扫码登录",
+        "bindUser": "绑定用户",
+        "configurePlugin": "配置插件",
+        "confirmAndStart": "确认并启动",
+        "configureCredentials": "配置应用凭证",
+        "configurePermissionsCapabilities": "配置权限与能力",
+        "configurePermissionsEvents": "配置权限与事件",
+        "bindDingtalk": "绑定你的钉钉账号",
+        "bindFeishu": "绑定你的飞书账号",
+        "configureBotToken": "配置 Bot Token",
+        "bindTelegram": "绑定你的 Telegram 账号"
+      },
+      "nav": {
+        "back": "上一步",
+        "cancel": "取消",
+        "next": "下一步",
+        "finish": "完成",
+        "starting": "启动中…",
+        "startChannel": "启动 Channel"
+      },
+      "header": {
+        "title": "添加 {{platform}} Channel",
+        "stepIndicator": "步骤 {{step}}/{{total}}: {{label}}"
+      },
+      "dual": {
+        "scanMode": "扫码添加",
+        "manualMode": "手动配置",
+        "scanCreateBot": "扫码创建机器人",
+        "scanDescription": "使用 {{app}} App 扫描下方二维码，一键创建机器人并自动获取凭证",
+        "wecomScanAlt": "企业微信扫码",
+        "scanSuccess": "扫码成功",
+        "credentialsReceived": "Bot ID 和 Secret 已自动获取",
+        "qrExpiredMultiple": "二维码多次过期",
+        "qrExpiredRefreshing": "二维码已过期，正在刷新 ({{current}}/{{max}})...",
+        "scanWithWecom": "请使用企业微信 App 扫描二维码",
+        "credentialsReady": "凭证已就绪，点击「下一步」继续",
+        "qrExpiredRetry": "二维码多次过期，请检查网络后重试",
+        "networkRetry": "请检查网络后重试",
+        "scanNote": "扫码后将创建新的智能机器人。如需关联已有机器人，请切换到「手动配置」",
+        "wecomAdmin": "企业微信管理后台",
+        "wecomCredentialSuffix": " 创建智能机器人，获取凭证",
+        "manualMethod": "创建方法：企微客户端 → 工作台 → 智能机器人 → 创建机器人 → 手动创建 → API 模式创建 → 使用长连接"
+      },
+      "config": {
+        "pluginConfig": "插件配置",
+        "goToPrefix": "前往 ",
+        "inputPluginParams": "输入插件需要的配置参数",
+        "fieldPlaceholder": "输入 {{field}}",
+        "projectHomepage": "项目主页",
+        "openPlatform": "{{name}} 开放平台",
+        "createAppSuffix": " 创建应用，获取凭证",
+        "inputPluginParamsExample": "输入插件需要的配置参数（如 appId、clientSecret 等）",
+        "customConfig": "自定义配置",
+        "keyPlaceholder": "配置名",
+        "valuePlaceholder": "值",
+        "addConfigItem": "添加配置项",
+        "setupGuide": "配置指引"
+      },
+      "openclaw": {
+        "credentialsEntered": "已填入 {{name}} 凭证",
+        "larkNextHint": "按照下面 3 步在飞书开放平台完成权限、事件订阅、添加机器人能力，全部完成后点上方「启动 Channel」验证并启动。",
+        "confirmTitle": "确认配置",
+        "confirmDescription": "确认以上设置完成后，点击「启动 Channel」",
+        "configItems": "配置项",
+        "configItemsCount": "{{count}} 个"
+      },
+      "binding": {
+        "title": "用户绑定",
+        "qrOnly": "扫码即可使用，无需手动绑定用户。"
+      }
+    },
     "imComponents": {
       "statusOnline": "运行中",
       "statusConnecting": "连接中",
