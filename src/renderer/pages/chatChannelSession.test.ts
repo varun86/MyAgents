@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { i18n } from '@/i18n';
 import type { ChannelSurface } from '@/hooks/useSessionSurfaces';
 import { transitionChannelBoundSession } from './chatChannelSession';
 
@@ -37,7 +38,8 @@ function runTransition(allowPlainResetFallback: boolean) {
 }
 
 describe('transitionChannelBoundSession', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
+    await i18n.changeLanguage('zh-CN');
     vi.clearAllMocks();
     mocks.adoptMigratedSession.mockResolvedValue(true);
     mocks.resetSession.mockResolvedValue(true);

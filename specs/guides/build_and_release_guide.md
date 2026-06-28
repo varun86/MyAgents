@@ -177,6 +177,31 @@ myagents-releases/
 | `R2_SECRET_ACCESS_KEY` | Cloudflare R2 Secret Key |
 | `R2_ACCOUNT_ID` | Cloudflare Account ID |
 
+### publish_managed_codex_runtime.sh
+
+**用途**：单独打包并上传 MyAgents 托管的 Codex Runtime 到 R2。它是开发 / 发版准备阶段的资源发布入口，不属于桌面 App 的 `publish_release.sh` / `publish_windows.ps1` 流程。
+
+桌面 App 客户端会锁定一个固定的 runtime set manifest 地址，例如 `runtimes/codex/sets/codex-0.142.2/...`。多个 App 版本可以复用同一个 runtime set；只有决定升级内置 Codex runtime 时，才上传新的 runtime set 并在客户端代码里改 manifest base URL。脚本默认会检查远端 manifest，发现同一个 runtime set 已存在时拒绝覆盖；只有显式传 `--force-republish` 才允许重发同一路径。
+
+**运行方式**：
+```bash
+./publish_managed_codex_runtime.sh
+```
+
+默认读取 `src-tauri/src/managed_codex.rs` 中锁定的 `REQUIRED_RUNTIME_SET` 与 `REQUIRED_VERSION`，而不是读取 `tauri.conf.json` 的桌面应用版本。因此当前运行中的 Managed Codex 请求 `sets/codex-0.142.2` 时，可直接补发对应目录：
+
+```bash
+./publish_managed_codex_runtime.sh --runtime-set codex-0.142.2
+```
+
+脚本复用 `.env` 凭证、R2 bucket、`download.myagents.io` 域名、Cloudflare purge 和上传后 HTTP 验证。正式上传仍要求 `scripts/package-managed-codex-runtime.mjs` 完成 manifest/artifact 签名校验；开发用 unsigned 包只应使用 `npm run package:managed-codex` 本地生成，不应上传到正式 R2 路径。
+
+Runtime set 是按平台分片补发的：macOS 主机默认发布 `darwin-arm64,darwin-x64`，Windows 主机使用 `publish_managed_codex_runtime.ps1` 发布 `win32-x64`。两边上传到同一个 `sets/<runtime-set>/` 前缀，默认只允许新增缺失平台；如果同平台 manifest 已存在会拒绝覆盖。
+
+```powershell
+.\publish_managed_codex_runtime.ps1 -RuntimeSet codex-0.142.2
+```
+
 ---
 
 ## 清单文件格式
@@ -272,6 +297,8 @@ const downloadUrl = isMacARM
 - `src-tauri/target/x86_64-apple-darwin/release/bundle/macos/*.app.tar.gz.sig`
 
 ### 4. 发布到 R2
+
+发布脚本只上传桌面 App 安装包、自动更新包和更新清单；不会打包或上传 Managed Codex Runtime。若本客户端版本锁定了新的 Codex runtime set，必须在发布 App 前通过 `publish_managed_codex_runtime.sh` / `publish_managed_codex_runtime.ps1` 确认对应平台资源已经上传。
 
 ```bash
 ./publish_release.sh

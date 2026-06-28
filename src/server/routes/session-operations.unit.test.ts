@@ -180,6 +180,25 @@ describe('handleSessionOperationRoute', () => {
 
     expect(response?.status).toBe(200);
     expect(await readJson(response as Response)).toEqual({ sessionId: 'im-new' });
-    expect(mocks.engine.resetForNewImSession).toHaveBeenCalledWith('/workspace');
+    expect(mocks.engine.resetForNewImSession).toHaveBeenCalledWith('/workspace', {
+      metadataBirthPending: false,
+    });
+  });
+
+  it('passes birth-pending state when resetting IM sessions', async () => {
+    const response = await handleSessionOperationRoute(
+      '/api/im/session/new',
+      new Request('http://local/api/im/session/new', {
+        method: 'POST',
+        body: JSON.stringify({ metadataBirthPending: true }),
+      }),
+      { workspacePath: '/workspace' },
+    );
+
+    expect(response?.status).toBe(200);
+    expect(await readJson(response as Response)).toEqual({ sessionId: 'im-new' });
+    expect(mocks.engine.resetForNewImSession).toHaveBeenCalledWith('/workspace', {
+      metadataBirthPending: true,
+    });
   });
 });

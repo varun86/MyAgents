@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Bot, Loader2, Plus, Power, PowerOff, RefreshCw, Settings, Trash2, X } from 'lucide-react';
 
 import type { LocalRegisteredAgent } from '@/api/spaceCloud';
@@ -41,6 +42,7 @@ export function AgentsWorkspace({
   onProcessDispatches: () => Promise<void>;
   onRegister: () => void;
 }) {
+  const { t } = useTranslation('app');
   const toast = useToast();
   const [processing, setProcessing] = useState(false);
   const [busyAgentId, setBusyAgentId] = useState<string | null>(null);
@@ -62,7 +64,7 @@ export function AgentsWorkspace({
     setBusyAgentId(agent.id);
     try {
       await actions.updateRegisteredAgent({ id: agent.id, status: nextStatus });
-      toast.success(nextStatus === 'active' ? 'Agent 已启用' : 'Agent 已禁用');
+      toast.success(nextStatus === 'active' ? t('space.toasts.agentEnabled') : t('space.toasts.agentDisabled'));
     } catch (error) {
       toast.error(spaceErrorMessage(error));
     } finally {
@@ -75,7 +77,7 @@ export function AgentsWorkspace({
     setBusyAgentId(revokeTarget.id);
     try {
       await actions.revokeRegisteredAgent(revokeTarget.id);
-      toast.success('Agent 已撤销');
+      toast.success(t('space.toasts.agentRevoked'));
       setRevokeTarget(null);
     } catch (error) {
       toast.error(spaceErrorMessage(error));
@@ -92,7 +94,7 @@ export function AgentsWorkspace({
             <Bot className="h-4 w-4 shrink-0" />
             <span>Agents</span>
             <span className="rounded-md bg-[var(--paper-inset)] px-2 py-0.5 text-xs font-semibold text-[var(--ink-muted)]">{agents.length}</span>
-            <small className="truncate text-xs font-medium text-[var(--ink-muted)]">登记本地工作区，订阅并响应云端派发</small>
+            <small className="truncate text-xs font-medium text-[var(--ink-muted)]">{t('space.agents.hint')}</small>
           </div>
           <button
             type="button"
@@ -101,14 +103,14 @@ export function AgentsWorkspace({
             className="flex h-9 shrink-0 items-center gap-2 rounded-xl bg-[var(--button-secondary-bg)] px-3 text-sm font-semibold text-[var(--button-secondary-text)] transition-colors hover:bg-[var(--button-secondary-bg-hover)] disabled:cursor-wait disabled:opacity-70"
           >
             {processing ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
-            同步
+            {t('space.agents.sync')}
           </button>
           <button
             type="button"
             onClick={() => void onRefresh()}
             className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-transparent text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
-            aria-label="刷新"
-            title="刷新"
+            aria-label={t('space.common.refresh')}
+            title={t('space.common.refresh')}
           >
             <RefreshCw className="h-4 w-4" />
           </button>
@@ -119,7 +121,7 @@ export function AgentsWorkspace({
               className="flex h-9 shrink-0 items-center gap-2 rounded-xl bg-[var(--button-primary-bg)] px-4 text-sm font-semibold text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)]"
             >
               <Plus className="h-4 w-4" />
-              登记
+              {t('space.agents.register')}
             </button>
           )}
         </section>
@@ -128,7 +130,7 @@ export function AgentsWorkspace({
             <div className="grid h-40 place-items-center rounded-[20px] border border-dashed border-[var(--line)] bg-[var(--paper-elevated)]/40 text-sm text-[var(--ink-muted)]">
               <div className="text-center">
                 <Bot className="mx-auto mb-3 h-8 w-8 text-[var(--ink-muted)]" />
-                <p>暂无 Registered Agents</p>
+                <p>{t('space.agents.empty')}</p>
                 {admin && (
                   <button
                     type="button"
@@ -136,7 +138,7 @@ export function AgentsWorkspace({
                     className="mt-3 inline-flex h-9 items-center gap-2 rounded-xl bg-[var(--button-secondary-bg)] px-3 text-sm font-semibold text-[var(--button-secondary-text)] transition-colors hover:bg-[var(--button-secondary-bg-hover)]"
                   >
                     <Plus className="h-4 w-4" />
-                    登记 Agent
+                    {t('space.agents.registerAgent')}
                   </button>
                 )}
               </div>
@@ -163,8 +165,8 @@ export function AgentsWorkspace({
                               disabled={busyAgentId === agent.id || agent.status === 'revoked'}
                               onClick={() => setEditingAgent(agent)}
                               className="grid h-8 w-8 place-items-center rounded-lg text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] disabled:cursor-not-allowed disabled:opacity-45"
-                              aria-label={`编辑 Agent ${agent.displayName}`}
-                              title="编辑"
+                              aria-label={t('space.agents.editAgent', { name: agent.displayName })}
+                              title={t('space.agents.edit')}
                             >
                               <Settings className="h-4 w-4" />
                             </button>
@@ -173,8 +175,8 @@ export function AgentsWorkspace({
                               disabled={busyAgentId === agent.id || agent.status === 'revoked'}
                               onClick={() => void toggleAgentStatus(agent)}
                               className="grid h-8 w-8 place-items-center rounded-lg text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] disabled:cursor-wait disabled:opacity-45"
-                              aria-label={`${agent.status === 'disabled' ? '启用' : '禁用'} Agent ${agent.displayName}`}
-                              title={agent.status === 'disabled' ? '启用' : '禁用'}
+                              aria-label={agent.status === 'disabled' ? t('space.agents.enableAgent', { name: agent.displayName }) : t('space.agents.disableAgent', { name: agent.displayName })}
+                              title={agent.status === 'disabled' ? t('space.agents.enable') : t('space.agents.disable')}
                             >
                               {busyAgentId === agent.id ? (
                                 <Loader2 className="h-4 w-4 animate-spin" />
@@ -189,8 +191,8 @@ export function AgentsWorkspace({
                               disabled={busyAgentId === agent.id || agent.status === 'revoked'}
                               onClick={() => setRevokeTarget(agent)}
                               className="grid h-8 w-8 place-items-center rounded-lg text-[var(--error)] transition-colors hover:bg-[var(--error-bg)] disabled:cursor-not-allowed disabled:opacity-45"
-                              aria-label={`撤销 Agent ${agent.displayName}`}
-                              title="撤销"
+                              aria-label={t('space.agents.revokeAgent', { name: agent.displayName })}
+                              title={t('space.agents.revoke')}
                             >
                               <Trash2 className="h-4 w-4" />
                             </button>
@@ -202,20 +204,20 @@ export function AgentsWorkspace({
                       <div className="flex flex-wrap gap-2">
                         <span className="rounded-md bg-[var(--accent-cool-subtle)] px-2 py-1 text-xs font-semibold text-[var(--accent-cool)]"># agent</span>
                       </div>
-                      <span className="rounded-md bg-[var(--paper-inset)] px-2 py-1 text-xs font-semibold text-[var(--ink-muted)]">{formatTime(agent.updatedAt) || '未同步'}</span>
+                      <span className="rounded-md bg-[var(--paper-inset)] px-2 py-1 text-xs font-semibold text-[var(--ink-muted)]">{formatTime(agent.updatedAt) || t('space.common.notSynced')}</span>
                     </div>
                     <details className="mt-3 border-t border-dashed border-[var(--line-subtle)] pt-2.5 pl-[46px]">
                       <summary className="inline-flex cursor-pointer list-none items-center gap-2 text-sm font-semibold text-[var(--ink-muted)] hover:text-[var(--ink)] [&::-webkit-details-marker]:hidden">
                         <Settings className="h-4 w-4" />
-                        查看登记设置
+                        {t('space.agents.viewSettings')}
                       </summary>
                       <div className="mt-3 grid grid-cols-3 gap-2">
-                        <AgentStat label="Status" value={agent.status} />
-                        <AgentStat label="Last sync" value={formatTime(agent.updatedAt) || 'n/a'} />
-                        <AgentStat label="Workspace" value={agent.workspaceLabel || 'local'} />
+                        <AgentStat label={t('space.agents.status')} value={agent.status} />
+                        <AgentStat label={t('space.agents.lastSync')} value={formatTime(agent.updatedAt) || 'n/a'} />
+                        <AgentStat label={t('space.agents.workspace')} value={agent.workspaceLabel || 'local'} />
                       </div>
                       <div className="mt-3 whitespace-pre-wrap rounded-xl bg-[var(--paper-inset)]/40 p-3 text-sm leading-6 text-[var(--ink-secondary)]">
-                        Goal:
+                        {t('space.agents.goal')}:
                         {'\n'}
                         {agent.goalMd}
                       </div>
@@ -237,10 +239,10 @@ export function AgentsWorkspace({
       )}
       {revokeTarget && (
         <ConfirmDialog
-          title="撤销 Registered Agent"
-          message={`确定要撤销「${revokeTarget.displayName}」吗？撤销后该本地节点的 token 将失效，不能再接收新的派发。`}
-          confirmText="撤销"
-          cancelText="取消"
+          title={t('space.agents.revokeTitle')}
+          message={t('space.agents.revokeMessage', { name: revokeTarget.displayName })}
+          confirmText={t('space.agents.revoke')}
+          cancelText={t('space.common.cancel')}
           confirmVariant="danger"
           loading={busyAgentId === revokeTarget.id}
           onConfirm={() => void revokeAgent()}
@@ -262,6 +264,7 @@ function EditAgentDialog({
   onClose: () => void;
   onSaved: () => void;
 }) {
+  const { t } = useTranslation('app');
   const toast = useToast();
   const [displayName, setDisplayName] = useState(agent.displayName);
   const [workspaceLabel, setWorkspaceLabel] = useState(agent.workspaceLabel ?? '');
@@ -283,7 +286,7 @@ function EditAgentDialog({
         workspaceLabel: workspaceLabel.trim(),
         goalMd: goalMd.trim(),
       });
-      toast.success('Registered Agent 已更新');
+      toast.success(t('space.toasts.agentUpdated'));
       onSaved();
     } catch (error) {
       toast.error(spaceErrorMessage(error));
@@ -297,7 +300,7 @@ function EditAgentDialog({
       <div className="w-[min(720px,calc(100vw-48px))] rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] shadow-xl">
         <div className="flex items-center justify-between border-b border-[var(--line)] px-5 py-4">
           <div>
-            <h2 className="text-lg font-semibold text-[var(--ink)]">Edit Agent</h2>
+            <h2 className="text-lg font-semibold text-[var(--ink)]">{t('space.agents.editTitle')}</h2>
             <p className="text-sm text-[var(--ink-muted)]">{agent.id}</p>
           </div>
           <button type="button" onClick={onClose} className="rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]">
@@ -306,7 +309,7 @@ function EditAgentDialog({
         </div>
         <div className="space-y-4 p-5">
           <label className="block">
-            <span className="mb-1 block text-sm font-medium text-[var(--ink)]">Name</span>
+            <span className="mb-1 block text-sm font-medium text-[var(--ink)]">{t('space.agents.name')}</span>
             <input
               value={displayName}
               onChange={(event) => setDisplayName(event.target.value)}
@@ -314,7 +317,7 @@ function EditAgentDialog({
             />
           </label>
           <label className="block">
-            <span className="mb-1 block text-sm font-medium text-[var(--ink)]">Workspace label</span>
+            <span className="mb-1 block text-sm font-medium text-[var(--ink)]">{t('space.agents.workspaceLabel')}</span>
             <input
               value={workspaceLabel}
               onChange={(event) => setWorkspaceLabel(event.target.value)}
@@ -322,7 +325,7 @@ function EditAgentDialog({
             />
           </label>
           <label className="block">
-            <span className="mb-1 block text-sm font-medium text-[var(--ink)]">Goal</span>
+            <span className="mb-1 block text-sm font-medium text-[var(--ink)]">{t('space.agents.goal')}</span>
             <textarea
               value={goalMd}
               onChange={(event) => setGoalMd(event.target.value)}
@@ -332,7 +335,7 @@ function EditAgentDialog({
         </div>
         <div className="flex justify-end gap-2 border-t border-[var(--line)] px-5 py-4">
           <button type="button" onClick={onClose} disabled={busy} className="h-10 rounded-xl bg-[var(--button-secondary-bg)] px-4 text-sm font-semibold text-[var(--button-secondary-text)] transition-colors hover:bg-[var(--button-secondary-bg-hover)] disabled:opacity-60">
-            取消
+            {t('space.common.cancel')}
           </button>
           <button
             type="button"
@@ -341,7 +344,7 @@ function EditAgentDialog({
             className="flex h-10 items-center gap-2 rounded-xl bg-[var(--button-primary-bg)] px-4 text-sm font-semibold text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:cursor-not-allowed disabled:opacity-70"
           >
             {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
-            保存
+            {t('space.common.save')}
           </button>
         </div>
       </div>
@@ -369,6 +372,7 @@ export function RegisterAgentDialog({
   onClose: () => void;
   onRegistered: () => void;
 }) {
+  const { t } = useTranslation('app');
   const toast = useToast();
   const [displayName, setDisplayName] = useState('');
   const [workspaceId, setWorkspaceId] = useState(projects[0]?.id ?? '');
@@ -396,7 +400,7 @@ export function RegisterAgentDialog({
         workspaceLabel: project.displayName || project.name,
         goalMd: goalMd.trim(),
       });
-      toast.success('Registered Agent 已创建');
+      toast.success(t('space.toasts.agentCreated'));
       onRegistered();
     } catch (error) {
       toast.error(spaceErrorMessage(error));
@@ -410,8 +414,8 @@ export function RegisterAgentDialog({
       <div className="w-[min(720px,calc(100vw-48px))] rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] shadow-xl">
         <div className="flex items-center justify-between border-b border-[var(--line)] px-5 py-4">
           <div>
-            <h2 className="text-lg font-semibold text-[var(--ink)]">Register Agent</h2>
-            <p className="text-sm text-[var(--ink-muted)]">Official Space</p>
+            <h2 className="text-lg font-semibold text-[var(--ink)]">{t('space.agents.registerTitle')}</h2>
+            <p className="text-sm text-[var(--ink-muted)]">{t('space.agents.officialSpace')}</p>
           </div>
           <button type="button" onClick={onClose} className="rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]">
             <X className="h-4 w-4" />
@@ -419,25 +423,25 @@ export function RegisterAgentDialog({
         </div>
         <div className="space-y-4 p-5">
           <label className="block">
-            <span className="mb-1 block text-sm font-medium text-[var(--ink)]">Name</span>
+            <span className="mb-1 block text-sm font-medium text-[var(--ink)]">{t('space.agents.name')}</span>
             <input
               value={displayName}
               onChange={(event) => setDisplayName(event.target.value)}
               className="h-10 w-full rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 text-sm text-[var(--ink)] outline-none transition-colors focus:border-[var(--accent-warm)]"
-              placeholder="Agent display name"
+              placeholder={t('space.agents.displayNamePlaceholder')}
             />
           </label>
           <label className="block">
-            <span className="mb-1 block text-sm font-medium text-[var(--ink)]">Workspace</span>
+            <span className="mb-1 block text-sm font-medium text-[var(--ink)]">{t('space.agents.workspace')}</span>
             <CustomSelect value={workspaceId} options={projectOptions} onChange={setWorkspaceId} size="md" />
           </label>
           <label className="block">
-            <span className="mb-1 block text-sm font-medium text-[var(--ink)]">Goal</span>
+            <span className="mb-1 block text-sm font-medium text-[var(--ink)]">{t('space.agents.goal')}</span>
             <textarea
               value={goalMd}
               onChange={(event) => setGoalMd(event.target.value)}
               className="h-44 w-full resize-none rounded-lg border border-[var(--line)] bg-[var(--paper)] p-3 text-sm leading-6 text-[var(--ink)] outline-none transition-colors focus:border-[var(--accent-warm)]"
-              placeholder="Describe what this registered agent should handle."
+              placeholder={t('space.agents.goalPlaceholder')}
             />
           </label>
         </div>
@@ -447,7 +451,7 @@ export function RegisterAgentDialog({
             onClick={onClose}
             className="h-10 rounded-lg px-4 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
           >
-            Cancel
+            {t('space.common.cancel')}
           </button>
           <button
             type="button"
@@ -456,7 +460,7 @@ export function RegisterAgentDialog({
             className="flex h-10 items-center gap-2 rounded-lg bg-[var(--button-primary-bg)] px-4 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:cursor-wait disabled:opacity-70"
           >
             {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Bot className="h-4 w-4" />}
-            Register
+            {t('space.agents.register')}
           </button>
         </div>
       </div>

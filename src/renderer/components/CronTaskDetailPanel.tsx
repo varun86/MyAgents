@@ -5,18 +5,16 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowUpToLine, BarChart2, Bell, Check, Clock, FileText, Flag, FolderOpen, History, MessageSquare, Pencil, Play, Square, Trash2, X } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 
 import type { CronTask, CronSchedule, CronEndConditions } from '@/types/cronTask';
 import {
-    getCronStatusText,
     getCronStatusColor,
-    formatScheduleDescription,
-    formatNextExecution,
-    checkCanResume,
     MIN_CRON_INTERVAL,
 } from '@/types/cronTask';
 import { getFolderName } from '@/utils/taskCenterUtils';
 import { workspacePathsEqual } from '@/../shared/workspacePath';
+import { isSupportedLocale } from '@/../shared/i18n';
 import WorkspaceIcon from './launcher/WorkspaceIcon';
 import { useToast } from './Toast';
 import { useConfig } from '@/hooks/useConfig';
@@ -30,6 +28,13 @@ import { patchAgentConfig } from '@/config/services/agentConfigService';
 import { useDeliveryChannels } from '@/hooks/useDeliveryChannels';
 import { useCloseLayer } from '@/hooks/useCloseLayer';
 import OverlayBackdrop from '@/components/OverlayBackdrop';
+import { buildAgentPatchFromSessionSnapshot } from '@/utils/sessionSnapshotAgentSync';
+import {
+    formatCronNextExecution,
+    formatCronResumeBlockReason,
+    formatCronScheduleDescription,
+    formatCronStatusText,
+} from '@/utils/cronTaskI18n';
 
 interface CronTaskDetailPanelProps {
     task: CronTask;
@@ -78,13 +83,19 @@ function Checkbox({ checked, onChange, label }: { checked: boolean; onChange: (v
 }
 
 export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, onResume, onStop, onOpenSession }: CronTaskDetailPanelProps) {
+    const { t, i18n } = useTranslation('task');
+    const locale = isSupportedLocale(i18n.language) ? i18n.language : 'zh-CN';
     useCloseLayer(() => { onClose(); return true; }, 50);
 
     const toast = useToast();
-    const { projects } = useConfig();
+    const { config, projects } = useConfig();
     const isMountedRef = useRef(true);
     useEffect(() => () => { isMountedRef.current = false; }, []);
     const project = useMemo(() => projects.find(p => workspacePathsEqual(p.path, task.workspacePath)), [projects, task.workspacePath]);
+    const agent = useMemo(
+        () => project?.agentId ? config.agents?.find(a => a.id === project.agentId) : undefined,
+        [config.agents, project?.agentId],
+    );
     const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
     const [showStopConfirm, setShowStopConfirm] = useState(false);
     const [showSyncConfirm, setShowSyncConfirm] = useState(false);
@@ -168,10 +179,10 @@ export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, 
                 ...deliveryFields,
             });
             if (!isMountedRef.current) return;
-            toast.success('任务已更新'); onClose(); // Close to refresh — cron:task-updated event triggers parent list reload
-        } catch (err) { if (!isMountedRef.current) return; toast.error(`更新失败: ${err instanceof Error ? err.message : String(err)}`); }
+            toast.success(t('cron.detail.updateSuccess')); onClose(); // Close to refresh — cron:task-updated event triggers parent list reload
+        } catch (err) { if (!isMountedRef.current) return; toast.error(t('cron.detail.updateFailed', { message: err instanceof Error ? err.message : String(err) })); }
         finally { if (isMountedRef.current) setIsSaving(false); }
-    }, [task.id, editName, editPrompt, editSchedule, editInterval, editEndMode, editDeadline, editMaxExec, editAiCanExit, editNotify, editDeliveryBotId, resolveDelivery, isAtSchedule, toast, onClose]);
+    }, [task.id, editName, editPrompt, editSchedule, editInterval, editEndMode, editDeadline, editMaxExec, editAiCanExit, editNotify, editDeliveryBotId, resolveDelivery, isAtSchedule, toast, onClose, t]);
 
     const handleDelete = useCallback(async () => {
         setIsDeleting(true); try { await onDelete(task.id); onClose(); } catch { /* caller handles */ } finally { if (isMountedRef.current) { setIsDeleting(false); setShowDeleteConfirm(false); } }
@@ -187,42 +198,40 @@ export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, 
         if (!sessionMeta || !project?.agentId) return;
         setIsSyncing(true);
         try {
-            await patchAgentConfig(project.agentId, {
-                model: sessionMeta.model,
-                permissionMode: sessionMeta.permissionMode,
-                mcpEnabledServers: sessionMeta.mcpEnabledServers,
-                providerId: sessionMeta.providerId,
-            });
+            await patchAgentConfig(
+                project.agentId,
+                buildAgentPatchFromSessionSnapshot(sessionMeta, agent),
+            );
             if (!isMountedRef.current) return;
-            toast.success('已同步到 Agent');
+            toast.success(t('cron.detail.syncSuccess'));
             setShowSyncConfirm(false);
         } catch (err) {
             if (!isMountedRef.current) return;
-            toast.error(`同步失败: ${err instanceof Error ? err.message : String(err)}`);
+            toast.error(t('cron.detail.syncFailed', { message: err instanceof Error ? err.message : String(err) }));
         } finally {
             if (isMountedRef.current) setIsSyncing(false);
         }
-    }, [sessionMeta, project?.agentId, toast]);
+    }, [agent, sessionMeta, project?.agentId, toast, t]);
 
-    const resumeCheck = checkCanResume(task);
+    const resumeBlockReason = formatCronResumeBlockReason(task, t);
     const displayName = task.name || task.prompt.slice(0, 40) + (task.prompt.length > 40 ? '...' : '');
-    const scheduleDesc = formatScheduleDescription(task);
-    const nextExec = formatNextExecution(task.nextExecutionAt, task.status);
-    const runModeLabel = task.runMode === 'single_session' ? '连续对话（保持上下文）' : '新开对话（无记忆）';
+    const scheduleDesc = formatCronScheduleDescription(task, t, locale);
+    const nextExec = formatCronNextExecution(task.nextExecutionAt, task.status, t, locale);
+    const runModeLabel = task.runMode === 'single_session' ? t('cron.detail.runModeSingle') : t('cron.detail.runModeNew');
 
     const editErrors = useMemo(() => {
         if (!isEditing) return [];
         const errs: string[] = [];
-        if (!editPrompt.trim()) errs.push('请输入 AI 指令');
-        if (!editSchedule && editInterval < MIN_CRON_INTERVAL) errs.push(`间隔不能小于 ${MIN_CRON_INTERVAL} 分钟`);
+        if (!editPrompt.trim()) errs.push(t('cron.detail.validation.promptRequired'));
+        if (!editSchedule && editInterval < MIN_CRON_INTERVAL) errs.push(t('cron.detail.validation.intervalTooShort', { min: MIN_CRON_INTERVAL }));
         return errs;
-    }, [isEditing, editPrompt, editSchedule, editInterval]);
+    }, [isEditing, editPrompt, editSchedule, editInterval, t]);
 
     return (
         <>
-            {showDeleteConfirm && <ConfirmDialog title="删除定时任务" message={`确定要删除「${displayName}」吗？此操作不可撤销。`} confirmText="删除" cancelText="取消" confirmVariant="danger" loading={isDeleting} onConfirm={handleDelete} onCancel={() => setShowDeleteConfirm(false)} />}
-            {showStopConfirm && <ConfirmDialog title="停止定时任务" message={`确定要停止「${displayName}」吗？停止后可以重新恢复。`} confirmText="停止" cancelText="取消" confirmVariant="danger" loading={isStopping} onConfirm={handleStop} onCancel={() => setShowStopConfirm(false)} />}
-            {showSyncConfirm && <ConfirmDialog title="同步到 Agent" message={`将该任务的会话配置（模型、权限模式、MCP 启用列表、供应商）写回所属 Agent。这会覆盖 Agent 当前的默认值，影响之后新开的会话。确定继续？`} confirmText="同步" cancelText="取消" loading={isSyncing} onConfirm={handleSyncToAgent} onCancel={() => setShowSyncConfirm(false)} />}
+            {showDeleteConfirm && <ConfirmDialog title={t('cron.detail.deleteTitle')} message={t('cron.detail.deleteMessage', { name: displayName })} confirmText={t('cron.detail.deleteConfirm')} cancelText={t('cron.detail.cancelConfirm')} confirmVariant="danger" loading={isDeleting} onConfirm={handleDelete} onCancel={() => setShowDeleteConfirm(false)} />}
+            {showStopConfirm && <ConfirmDialog title={t('cron.detail.stopTitle')} message={t('cron.detail.stopMessage', { name: displayName })} confirmText={t('cron.detail.stopConfirm')} cancelText={t('cron.detail.cancelConfirm')} confirmVariant="danger" loading={isStopping} onConfirm={handleStop} onCancel={() => setShowStopConfirm(false)} />}
+            {showSyncConfirm && <ConfirmDialog title={t('cron.detail.syncTitle')} message={t('cron.detail.syncMessage')} confirmText={t('cron.detail.syncConfirm')} cancelText={t('cron.detail.cancelConfirm')} loading={isSyncing} onConfirm={handleSyncToAgent} onCancel={() => setShowSyncConfirm(false)} />}
 
             <OverlayBackdrop onClose={onClose} className="z-50" style={{ animation: 'overlayFadeIn 200ms ease-out' }}>
                 <div className="flex h-[80vh] w-full max-w-lg flex-col rounded-2xl bg-[var(--paper-elevated)] shadow-lg"
@@ -233,9 +242,9 @@ export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, 
                         <div className="flex min-w-0 items-center gap-2.5">
                             <Clock className="h-4 w-4 shrink-0 text-[var(--accent)]" />
                             <h3 className="min-w-0 truncate text-lg font-semibold text-[var(--ink)]">
-                                {isEditing ? '编辑定时任务' : displayName}
+                                {isEditing ? t('cron.detail.editTitle') : displayName}
                             </h3>
-                            {!isEditing && <span className={`shrink-0 text-xs font-medium ${getCronStatusColor(task.status)}`}>{getCronStatusText(task.status)}</span>}
+                            {!isEditing && <span className={`shrink-0 text-xs font-medium ${getCronStatusColor(task.status)}`}>{formatCronStatusText(task.status, t)}</span>}
                         </div>
                         <button onClick={() => isEditing ? setIsEditing(false) : onClose()} className="ml-2 shrink-0 rounded-lg p-1.5 text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] transition-colors">
                             <X className="h-4 w-4" />
@@ -248,15 +257,15 @@ export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, 
                             /* ====== EDIT MODE ====== */
                             <>
                                 <div>
-                                    <SectionHeader icon={FileText}>基本信息</SectionHeader>
+                                    <SectionHeader icon={FileText}>{t('cron.detail.sectionBasic')}</SectionHeader>
                                     <div className="mt-3 space-y-4">
                                         <div>
-                                            <label className="mb-1.5 block text-sm font-medium text-[var(--ink-secondary)]">任务名称<span className="ml-1 font-normal text-[var(--ink-muted)]">（可选）</span></label>
-                                            <input type="text" value={editName} onChange={e => setEditName(e.target.value)} maxLength={50} placeholder="例如: 每日新闻摘要" className={INPUT_CLS} />
+                                            <label className="mb-1.5 block text-sm font-medium text-[var(--ink-secondary)]">{t('cron.detail.taskName')}<span className="ml-1 font-normal text-[var(--ink-muted)]">{t('cron.detail.optional')}</span></label>
+                                            <input type="text" value={editName} onChange={e => setEditName(e.target.value)} maxLength={50} placeholder={t('cron.detail.namePlaceholder')} className={INPUT_CLS} />
                                         </div>
                                         <div>
-                                            <label className="mb-1.5 block text-sm font-medium text-[var(--ink-secondary)]">AI 指令</label>
-                                            <textarea value={editPrompt} onChange={e => setEditPrompt(e.target.value)} rows={5} placeholder="描述你希望 AI 定时执行的任务..." className={`${INPUT_CLS} resize-none`} />
+                                            <label className="mb-1.5 block text-sm font-medium text-[var(--ink-secondary)]">{t('cron.detail.sectionAiPrompt')}</label>
+                                            <textarea value={editPrompt} onChange={e => setEditPrompt(e.target.value)} rows={5} placeholder={t('cron.detail.promptPlaceholder')} className={`${INPUT_CLS} resize-none`} />
                                         </div>
                                     </div>
                                 </div>
@@ -264,7 +273,7 @@ export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, 
                                 <div className="border-t border-[var(--line)]" />
 
                                 <div>
-                                    <SectionHeader icon={Clock}>执行计划</SectionHeader>
+                                    <SectionHeader icon={Clock}>{t('cron.detail.sectionSchedule')}</SectionHeader>
                                     <div className="mt-3"><ScheduleTypeTabs value={editSchedule} intervalMinutes={editInterval} onChange={(s, m) => { setEditSchedule(s); setEditInterval(m); }} /></div>
                                 </div>
 
@@ -272,25 +281,25 @@ export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, 
 
                                 {!isAtSchedule && (
                                     <div>
-                                        <SectionHeader icon={Flag}>结束条件</SectionHeader>
+                                        <SectionHeader icon={Flag}>{t('cron.detail.sectionEndConditions')}</SectionHeader>
                                         <div className="mt-3 space-y-3">
                                             <div className="flex gap-1.5 rounded-[var(--radius-md)] bg-[var(--paper-inset)] p-1">
-                                                <button type="button" onClick={() => setEditEndMode('forever')} className={`flex flex-1 items-center justify-center rounded-[var(--radius-sm)] px-3 py-1.5 text-sm font-medium transition-colors ${editEndMode === 'forever' ? 'bg-[var(--paper-elevated)] text-[var(--ink)] shadow-xs' : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'}`}>永久运行</button>
-                                                <button type="button" onClick={() => setEditEndMode('conditional')} className={`flex flex-1 items-center justify-center rounded-[var(--radius-sm)] px-3 py-1.5 text-sm font-medium transition-colors ${editEndMode === 'conditional' ? 'bg-[var(--paper-elevated)] text-[var(--ink)] shadow-xs' : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'}`}>条件停止</button>
+                                                <button type="button" onClick={() => setEditEndMode('forever')} className={`flex flex-1 items-center justify-center rounded-[var(--radius-sm)] px-3 py-1.5 text-sm font-medium transition-colors ${editEndMode === 'forever' ? 'bg-[var(--paper-elevated)] text-[var(--ink)] shadow-xs' : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'}`}>{t('cron.settingsModal.forever')}</button>
+                                                <button type="button" onClick={() => setEditEndMode('conditional')} className={`flex flex-1 items-center justify-center rounded-[var(--radius-sm)] px-3 py-1.5 text-sm font-medium transition-colors ${editEndMode === 'conditional' ? 'bg-[var(--paper-elevated)] text-[var(--ink)] shadow-xs' : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'}`}>{t('cron.settingsModal.conditional')}</button>
                                             </div>
                                             {editEndMode === 'conditional' && (
                                             <div className="rounded-lg border border-[var(--line)] bg-[var(--paper)]">
                                                 <div className="flex cursor-pointer items-center justify-between border-b border-[var(--line)] px-3 py-2.5" onClick={() => setEditDeadline(editDeadline ? '' : new Date(Date.now() + 86400000).toISOString().slice(0, 16))}>
-                                                    <Checkbox checked={!!editDeadline} onChange={v => setEditDeadline(v ? new Date(Date.now() + 86400000).toISOString().slice(0, 16) : '')} label="截止时间" />
+                                                    <Checkbox checked={!!editDeadline} onChange={v => setEditDeadline(v ? new Date(Date.now() + 86400000).toISOString().slice(0, 16) : '')} label={t('cron.settingsModal.deadline')} />
                                                     <input type="datetime-local" value={editDeadline.slice(0, 16)} onChange={e => setEditDeadline(e.target.value)} onClick={e => e.stopPropagation()}
                                                         className={`w-44 rounded-md border border-[var(--line)] bg-[var(--paper)] px-2 py-1 text-sm text-[var(--ink)] focus:border-[var(--accent)] focus:outline-none ${!editDeadline ? 'opacity-50' : ''}`} />
                                                 </div>
                                                 <div className="flex cursor-pointer items-center justify-between border-b border-[var(--line)] px-3 py-2.5" onClick={() => setEditMaxExec(editMaxExec ? '' : '10')}>
-                                                    <Checkbox checked={!!editMaxExec} onChange={v => setEditMaxExec(v ? '10' : '')} label="执行次数" />
+                                                    <Checkbox checked={!!editMaxExec} onChange={v => setEditMaxExec(v ? '10' : '')} label={t('cron.settingsModal.maxExecutions')} />
                                                     <div className="flex items-center gap-1.5" onClick={e => e.stopPropagation()}>
                                                         <input type="number" min={1} max={999} value={editMaxExec || 10} onChange={e => setEditMaxExec(e.target.value)}
                                                             className={`w-16 rounded-md border border-[var(--line)] bg-[var(--paper)] px-2 py-1 text-center text-sm text-[var(--ink)] focus:border-[var(--accent)] focus:outline-none ${!editMaxExec ? 'opacity-50' : ''}`} />
-                                                        <span className={`text-sm text-[var(--ink-secondary)] ${!editMaxExec ? 'opacity-50' : ''}`}>次</span>
+                                                        <span className={`text-sm text-[var(--ink-secondary)] ${!editMaxExec ? 'opacity-50' : ''}`}>{t('cron.settingsModal.timesSuffix')}</span>
                                                     </div>
                                                 </div>
                                             </div>
@@ -298,7 +307,7 @@ export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, 
 
                                             {/* AI 自主结束 — 在永久运行和条件停止模式下都显示 */}
                                             <div className="flex cursor-pointer items-center justify-between rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2.5" onClick={() => setEditAiCanExit(!editAiCanExit)}>
-                                                <Checkbox checked={editAiCanExit} onChange={setEditAiCanExit} label="允许 AI 自主结束任务" />
+                                                <Checkbox checked={editAiCanExit} onChange={setEditAiCanExit} label={t('cron.settingsModal.aiCanExit')} />
                                             </div>
                                         </div>
                                     </div>
@@ -306,16 +315,16 @@ export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, 
 
                                 {/* 任务通知 */}
                                 <div>
-                                    <SectionHeader icon={Bell}>任务通知</SectionHeader>
+                                    <SectionHeader icon={Bell}>{t('cron.detail.sectionNotifications')}</SectionHeader>
                                     <div className="mt-2 space-y-3">
                                         <div className="flex items-center justify-between rounded-lg border border-[var(--line)] bg-[var(--paper)] px-4 py-3">
-                                            <span className="text-sm text-[var(--ink)]">每次执行完即发送通知</span>
+                                            <span className="text-sm text-[var(--ink)]">{t('cron.settingsModal.notifyOnCompletion')}</span>
                                             <ToggleSwitch enabled={editNotify} onChange={setEditNotify} />
                                         </div>
                                         {editNotify && hasChannels && (
                                             <div className="space-y-2">
-                                                <label className="text-sm font-medium text-[var(--ink)]">投递渠道</label>
-                                                <CustomSelect value={editDeliveryBotId} options={deliveryOptions} onChange={setEditDeliveryBotId} placeholder="桌面通知（默认）" />
+                                                <label className="text-sm font-medium text-[var(--ink)]">{t('cron.settingsModal.deliveryChannel')}</label>
+                                                <CustomSelect value={editDeliveryBotId} options={deliveryOptions} onChange={setEditDeliveryBotId} placeholder={t('cron.settingsModal.desktopDefault')} />
                                             </div>
                                         )}
                                     </div>
@@ -326,14 +335,14 @@ export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, 
                             <>
                                 {/* 基本信息 — compact left-right rows */}
                                 <div>
-                                    <SectionHeader icon={FolderOpen}>基本信息</SectionHeader>
+                                    <SectionHeader icon={FolderOpen}>{t('cron.detail.sectionBasic')}</SectionHeader>
                                     <div className="mt-2 space-y-1.5">
                                         <div className="flex items-center justify-between py-1">
-                                            <span className="text-sm text-[var(--ink-muted)]">任务名称</span>
+                                            <span className="text-sm text-[var(--ink-muted)]">{t('cron.detail.taskName')}</span>
                                             <span className="text-sm text-[var(--ink)]">{displayName}</span>
                                         </div>
                                         <div className="flex items-center justify-between py-1">
-                                            <span className="text-sm text-[var(--ink-muted)]">执行 Agent</span>
+                                            <span className="text-sm text-[var(--ink-muted)]">{t('cron.detail.executeAgent')}</span>
                                             <div className="flex items-center gap-1.5">
                                                 <WorkspaceIcon icon={project?.icon} size={14} />
                                                 <span className="text-sm text-[var(--ink)]">{getFolderName(task.workspacePath)}</span>
@@ -341,7 +350,7 @@ export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, 
                                         </div>
                                         {botInfo && (
                                             <div className="flex items-center justify-between py-1">
-                                                <span className="text-sm text-[var(--ink-muted)]">来源</span>
+                                                <span className="text-sm text-[var(--ink-muted)]">{t('cron.detail.source')}</span>
                                                 <span className="text-sm text-[var(--ink)]">{botInfo.name} ({botInfo.platform})</span>
                                             </div>
                                         )}
@@ -354,7 +363,7 @@ export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, 
                                 {task.prompt && (
                                     <>
                                         <div>
-                                            <SectionHeader icon={FileText}>AI 指令</SectionHeader>
+                                            <SectionHeader icon={FileText}>{t('cron.detail.sectionAiPrompt')}</SectionHeader>
                                             <div className="mt-2 rounded-lg border border-[var(--line)] px-3.5 py-3 text-sm leading-relaxed text-[var(--ink-secondary)] whitespace-pre-wrap break-words">{task.prompt}</div>
                                         </div>
                                         <div className="border-t border-[var(--line)]" />
@@ -363,7 +372,7 @@ export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, 
 
                                 {/* 执行模式 */}
                                 <div>
-                                    <SectionHeader icon={MessageSquare}>执行模式</SectionHeader>
+                                    <SectionHeader icon={MessageSquare}>{t('cron.detail.sectionRunMode')}</SectionHeader>
                                     <p className="mt-2 text-sm text-[var(--ink)]">{runModeLabel}</p>
                                 </div>
 
@@ -371,11 +380,11 @@ export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, 
 
                                 {/* 执行计划 */}
                                 <div>
-                                    <SectionHeader icon={Clock}>执行计划</SectionHeader>
+                                    <SectionHeader icon={Clock}>{t('cron.detail.sectionSchedule')}</SectionHeader>
                                     <div className="mt-2 flex items-center justify-between rounded-lg border border-[var(--line)] px-3.5 py-3">
                                         <span className="text-sm font-medium text-[var(--ink)]">{scheduleDesc}</span>
                                         <span className={`text-xs ${task.status === 'running' ? 'text-[var(--ink-secondary)]' : 'text-[var(--ink-muted)]/50'}`}>
-                                            {task.status === 'running' ? `下次: ${nextExec}` : '已停止'}
+                                            {task.status === 'running' ? t('cron.detail.next', { time: nextExec }) : t('cron.detail.stopped')}
                                         </span>
                                     </div>
                                 </div>
@@ -384,11 +393,11 @@ export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, 
 
                                 {/* 结束条件 */}
                                 <div>
-                                    <SectionHeader icon={Flag}>结束条件</SectionHeader>
+                                    <SectionHeader icon={Flag}>{t('cron.detail.sectionEndConditions')}</SectionHeader>
                                     <div className="mt-2 flex flex-wrap gap-2">
-                                        <DetailTag label={task.endConditions.deadline ? `截止 ${new Date(task.endConditions.deadline).toLocaleString('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}` : '无截止'} />
-                                        <DetailTag label={task.endConditions.maxExecutions ? `最多 ${task.endConditions.maxExecutions} 次` : '无限次'} />
-                                        <DetailTag label={task.endConditions.aiCanExit ? 'AI 可退出' : 'AI 不可退出'} />
+                                        <DetailTag label={task.endConditions.deadline ? t('cron.detail.deadline', { time: new Date(task.endConditions.deadline).toLocaleString(locale, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) }) : t('cron.detail.noDeadline')} />
+                                        <DetailTag label={task.endConditions.maxExecutions ? t('cron.detail.maxExecutions', { count: task.endConditions.maxExecutions }) : t('cron.detail.unlimited')} />
+                                        <DetailTag label={task.endConditions.aiCanExit ? t('cron.detail.aiCanExit') : t('cron.detail.aiCannotExit')} />
                                     </div>
                                 </div>
 
@@ -396,13 +405,13 @@ export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, 
 
                                 {/* 任务通知 */}
                                 <div>
-                                    <SectionHeader icon={Bell}>任务通知</SectionHeader>
+                                    <SectionHeader icon={Bell}>{t('cron.detail.sectionNotifications')}</SectionHeader>
                                     <div className="mt-2 flex flex-wrap gap-2">
-                                        <DetailTag label={task.notifyEnabled ? '通知开启' : '通知关闭'} />
+                                        <DetailTag label={task.notifyEnabled ? t('cron.detail.notificationOn') : t('cron.detail.notificationOff')} />
                                         {(() => {
-                                            if (!task.delivery) return <DetailTag label="桌面通知" />;
+                                            if (!task.delivery) return <DetailTag label={t('cron.detail.desktopNotification')} />;
                                             const info = getChannelInfo(task.delivery.botId);
-                                            if (!info) return <DetailTag label={`${task.delivery.botId} · 已移除`} />;
+                                            if (!info) return <DetailTag label={t('cron.detail.removedChannel', { id: task.delivery.botId })} />;
                                             return <DetailTag label={`${info.agentName}: ${info.name}`} />;
                                         })()}
                                     </div>
@@ -412,19 +421,19 @@ export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, 
 
                                 {/* 运行统计 */}
                                 <div>
-                                    <SectionHeader icon={BarChart2}>运行统计</SectionHeader>
+                                    <SectionHeader icon={BarChart2}>{t('cron.detail.sectionStats')}</SectionHeader>
                                     <div className="mt-2 grid grid-cols-3 gap-3">
                                         <div>
-                                            <span className="text-xs text-[var(--ink-muted)]">执行次数</span>
-                                            <p className="mt-0.5 text-sm font-medium text-[var(--ink)]">{task.endConditions.maxExecutions ? `${task.executionCount} / ${task.endConditions.maxExecutions}` : `${task.executionCount} 次`}</p>
+                                            <span className="text-xs text-[var(--ink-muted)]">{t('cron.detail.executionCount')}</span>
+                                            <p className="mt-0.5 text-sm font-medium text-[var(--ink)]">{task.endConditions.maxExecutions ? `${task.executionCount} / ${task.endConditions.maxExecutions}` : t('cron.detail.executionCountValue', { count: task.executionCount })}</p>
                                         </div>
                                         <div>
-                                            <span className="text-xs text-[var(--ink-muted)]">上次执行</span>
-                                            <p className="mt-0.5 text-sm font-medium text-[var(--ink)]">{task.lastExecutedAt ? new Date(task.lastExecutedAt).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—'}</p>
+                                            <span className="text-xs text-[var(--ink-muted)]">{t('cron.detail.lastRun')}</span>
+                                            <p className="mt-0.5 text-sm font-medium text-[var(--ink)]">{task.lastExecutedAt ? new Date(task.lastExecutedAt).toLocaleString(locale, { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—'}</p>
                                         </div>
                                         {task.exitReason && (
                                             <div>
-                                                <span className="text-xs text-[var(--ink-muted)]">退出原因</span>
+                                                <span className="text-xs text-[var(--ink-muted)]">{t('cron.detail.exitReason')}</span>
                                                 <p className="mt-0.5 text-sm font-medium text-[var(--ink)]">{task.exitReason}</p>
                                             </div>
                                         )}
@@ -436,7 +445,7 @@ export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, 
 
                                 {/* 执行历史 */}
                                 <div>
-                                    <SectionHeader icon={History}>执行历史</SectionHeader>
+                                    <SectionHeader icon={History}>{t('cron.detail.sectionHistory')}</SectionHeader>
                                     <div className="mt-2"><TaskRunHistory taskId={task.id} sessionId={task.internalSessionId || task.sessionId} onOpenSession={onOpenSession ? (sid) => { onOpenSession(sid); onClose(); } : undefined} /></div>
                                 </div>
                             </>
@@ -449,43 +458,43 @@ export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, 
                             <>
                                 {editErrors.length > 0 ? <p className="text-xs text-[var(--error)]">{editErrors[0]}</p> : <div />}
                                 <div className="flex items-center gap-2.5">
-                                    <button onClick={() => setIsEditing(false)} className="rounded-lg px-4 py-2 text-sm font-medium text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] transition-colors">取消</button>
+                                    <button onClick={() => setIsEditing(false)} className="rounded-lg px-4 py-2 text-sm font-medium text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] transition-colors">{t('cron.detail.cancel')}</button>
                                     <button onClick={handleSave} disabled={editErrors.length > 0 || isSaving}
                                         className="rounded-lg bg-[var(--accent)] px-5 py-2 text-sm font-medium text-white transition hover:bg-[var(--accent-warm-hover)] disabled:opacity-50 disabled:cursor-not-allowed">
-                                        {isSaving ? '保存中...' : '保存'}
+                                        {isSaving ? t('cron.detail.saving') : t('cron.detail.save')}
                                     </button>
                                 </div>
                             </>
                         ) : (
                             <>
                                 <button onClick={() => setShowDeleteConfirm(true)} className="flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium text-[var(--error)] hover:bg-[var(--error-bg)] transition-colors">
-                                    <Trash2 className="h-3.5 w-3.5" />删除
+                                    <Trash2 className="h-3.5 w-3.5" />{t('cron.detail.delete')}
                                 </button>
                                 <div className="flex items-center gap-2.5">
                                     {canSyncToAgent && (
                                         <button
                                             onClick={() => setShowSyncConfirm(true)}
-                                            title="将该会话的锁定配置（模型 / 权限 / MCP / 供应商）写回 Agent 默认值"
+                                            title={t('cron.detail.syncTooltip')}
                                             className="flex items-center gap-1.5 rounded-lg border border-[var(--line)] px-4 py-2 text-sm font-medium text-[var(--ink-muted)] hover:border-[var(--line-strong)] hover:text-[var(--ink)] transition-colors"
                                         >
-                                            <ArrowUpToLine className="h-3.5 w-3.5" />同步到 Agent
+                                            <ArrowUpToLine className="h-3.5 w-3.5" />{t('cron.detail.syncToAgent')}
                                         </button>
                                     )}
                                     <button onClick={startEditing} className="flex items-center gap-1.5 rounded-lg border border-[var(--line)] px-4 py-2 text-sm font-medium text-[var(--ink-muted)] hover:border-[var(--line-strong)] hover:text-[var(--ink)] transition-colors">
-                                        <Pencil className="h-3.5 w-3.5" />编辑
+                                        <Pencil className="h-3.5 w-3.5" />{t('cron.detail.edit')}
                                     </button>
                                     {task.status === 'running' && onStop && (
                                         <button onClick={() => setShowStopConfirm(true)} disabled={isStopping}
                                             className="flex items-center gap-1.5 rounded-lg border border-[var(--error)]/30 px-4 py-2 text-sm font-medium text-[var(--error)] hover:bg-[var(--error-bg)] disabled:opacity-50 transition-colors">
-                                            <Square className="h-3.5 w-3.5" />{isStopping ? '停止中...' : '停止'}
+                                            <Square className="h-3.5 w-3.5" />{isStopping ? t('cron.detail.stopping') : t('cron.detail.stop')}
                                         </button>
                                     )}
-                                    {task.status === 'stopped' && (resumeCheck.canResume ? (
+                                    {task.status === 'stopped' && (!resumeBlockReason ? (
                                         <button onClick={handleResume} disabled={isResuming}
                                             className="flex items-center gap-1.5 rounded-lg bg-[var(--accent)] px-5 py-2 text-sm font-medium text-white hover:bg-[var(--accent-warm-hover)] disabled:opacity-50 transition-colors">
-                                            <Play className="h-3.5 w-3.5" />{isResuming ? '恢复中...' : '恢复'}
+                                            <Play className="h-3.5 w-3.5" />{isResuming ? t('cron.detail.resuming') : t('cron.detail.resume')}
                                         </button>
-                                    ) : <span className="text-xs text-[var(--ink-muted)]/50">{resumeCheck.reason}</span>)}
+                                    ) : <span className="text-xs text-[var(--ink-muted)]/50">{resumeBlockReason}</span>)}
                                 </div>
                             </>
                         )}

@@ -1,6 +1,7 @@
-import { Check, ChevronDown, Download, FolderOpen, KeyRound, Link, Loader2, Plus, RefreshCw, SlidersHorizontal, Square, Trash2, Unlink, X, AlertCircle, Globe, ExternalLink as ExternalLinkIcon, Settings2 } from 'lucide-react';
+import { Check, ChevronDown, Copy, Download, FolderOpen, ImageIcon, KeyRound, Link, Loader2, Plus, RefreshCw, SlidersHorizontal, Square, Trash2, Unlink, X, AlertCircle, Globe, ExternalLink as ExternalLinkIcon, Settings2 } from 'lucide-react';
 import { ExternalLink } from '@/components/ExternalLink';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { getVersion } from '@tauri-apps/api/app';
 import { invoke } from '@tauri-apps/api/core';
 import { listenWithCleanup } from '@/utils/tauriListen';
@@ -22,6 +23,7 @@ import ModelManagementPanel from '@/components/ModelManagementPanel';
 import UsageStatsPanel from '@/components/UsageStatsPanel';
 import {
     getEffectiveModelAliases,
+    CODEX_SUBSCRIPTION_PROVIDER_ID,
     normalizeDisabledProviderIds,
     normalizeProviderOrder,
     splitProviderModelInput,
@@ -39,6 +41,8 @@ import {
     DEFAULT_CLAUDE_TRANSCRIPT_CLEANUP_PERIOD_DAYS,
     normalizeClaudeTranscriptCleanupPeriodDays,
     normalizeChatQueueResponseMode,
+    getManagedCodexProviderReadiness,
+    isManagedCodexProviderGateEnabled,
     type ChatQueueResponseMode,
 } from '@/config/types';
 import {
@@ -76,7 +80,16 @@ import ShortcutRecorder from '@/components/ShortcutRecorder';
 import { VISIBLE_APP_SHORTCUTS } from '@/utils/appShortcuts';
 import { shouldDebounceAutoVerify } from '@/utils/apiKeyAutoVerify';
 import { DEFAULT_SUMMON_ACCELERATOR } from '../../../shared/config-types';
+import {
+    IMAGE_UNDERSTANDING_TOOL_ID,
+    OFFICIAL_TOOLS,
+    isImageUnderstandingToolConfigured,
+    normalizeOfficialToolIds,
+    type OfficialToolDefinition,
+} from '../../../shared/official-tools';
+import { isRuntimeBackedProvider } from '../../../shared/providerExecution';
 import { workspacePathsEqual } from '../../../shared/workspacePath';
+import type { UiLanguage } from '../../../shared/i18n';
 import ProviderEnableOrderDialog from '@/components/ProviderEnableOrderDialog';
 import FloatingBallPetSettings from '@/components/FloatingBallPetSettings';
 import {
@@ -114,7 +127,94 @@ async function getPlaywrightDefaultArgs(): Promise<string[]> {
     return [`--user-data-dir=${profilePath}`];
 }
 
-export default function Settings({ initialSection, initialMcpId, initialSelect, onSectionChange, isActive, updateReady: propUpdateReady, updateVersion: propUpdateVersion, updateChecking, updateDownloading, updateInstalling, updatePreparing, onCheckForUpdate, onRestartAndUpdate }: SettingsProps) {
+type ManagedCodexLoginStatus = 'idle' | 'starting' | 'waiting' | 'succeeded' | 'cancelled' | 'error';
+
+interface ManagedCodexLoginAttemptState {
+    status: ManagedCodexLoginStatus;
+    loginUrl?: string | null;
+    startedAt?: string | null;
+    error?: string | null;
+}
+
+const EMPTY_MANAGED_CODEX_LOGIN_STATE: ManagedCodexLoginAttemptState = {
+    status: 'idle',
+    loginUrl: null,
+    startedAt: null,
+    error: null,
+};
+
+function visionModelOptionValue(providerId: string, model: string): string {
+    return JSON.stringify([providerId, model]);
+}
+
+function parseVisionModelOptionValue(value: string): { providerId: string; model: string } | null {
+    try {
+        const parsed = JSON.parse(value) as unknown;
+        if (!Array.isArray(parsed) || parsed.length !== 2) return null;
+        const [providerId, model] = parsed;
+        if (typeof providerId !== 'string' || typeof model !== 'string') return null;
+        if (!providerId.trim() || !model.trim()) return null;
+        return { providerId, model };
+    } catch {
+        return null;
+    }
+}
+
+function normalizeManagedCodexLoginState(raw: unknown): ManagedCodexLoginAttemptState {
+    if (!raw || typeof raw !== 'object') return EMPTY_MANAGED_CODEX_LOGIN_STATE;
+    const value = raw as Record<string, unknown>;
+    const status = typeof value.status === 'string' ? value.status : 'idle';
+    return {
+        status: ['starting', 'waiting', 'succeeded', 'cancelled', 'error'].includes(status)
+            ? status as ManagedCodexLoginStatus
+            : 'idle',
+        loginUrl: typeof value.loginUrl === 'string' ? value.loginUrl : null,
+        startedAt: typeof value.startedAt === 'string' ? value.startedAt : null,
+        error: typeof value.error === 'string' ? value.error : null,
+    };
+}
+
+type SubscriptionLoginStatus = 'idle' | 'starting' | 'waiting' | 'succeeded' | 'cancelled' | 'error';
+
+interface SubscriptionLoginAttemptState {
+    status: SubscriptionLoginStatus;
+    loginUrl?: string | null;
+    manualUrl?: string | null;
+    automaticUrl?: string | null;
+    startedAt?: string | null;
+    error?: string | null;
+}
+
+const EMPTY_SUBSCRIPTION_LOGIN_STATE: SubscriptionLoginAttemptState = {
+    status: 'idle',
+    loginUrl: null,
+    manualUrl: null,
+    automaticUrl: null,
+    startedAt: null,
+    error: null,
+};
+
+function normalizeSubscriptionLoginState(raw: unknown): SubscriptionLoginAttemptState {
+    if (!raw || typeof raw !== 'object') return EMPTY_SUBSCRIPTION_LOGIN_STATE;
+    const value = raw as Record<string, unknown>;
+    const status = typeof value.status === 'string' ? value.status : 'idle';
+    return {
+        status: ['starting', 'waiting', 'succeeded', 'cancelled', 'error'].includes(status)
+            ? status as SubscriptionLoginStatus
+            : 'idle',
+        loginUrl: typeof value.loginUrl === 'string' ? value.loginUrl : null,
+        manualUrl: typeof value.manualUrl === 'string' ? value.manualUrl : null,
+        automaticUrl: typeof value.automaticUrl === 'string' ? value.automaticUrl : null,
+        startedAt: typeof value.startedAt === 'string' ? value.startedAt : null,
+        error: typeof value.error === 'string' ? value.error : null,
+    };
+}
+
+function isSubscriptionLoginActiveStatus(status: SubscriptionLoginStatus): boolean {
+    return status === 'starting' || status === 'waiting';
+}
+
+export default function Settings({ initialSection, initialMcpId, initialOfficialToolId, initialSelect, onSectionChange, isActive, updateReady: propUpdateReady, updateVersion: propUpdateVersion, updateChecking, updateDownloading, updateInstalling, updatePreparing, onCheckForUpdate, onRestartAndUpdate }: SettingsProps) {
     const {
         apiKeys,
         saveApiKey,
@@ -140,9 +240,13 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
     } = useConfig();
     const spaceBuildCapability = useSpaceBuildCapability();
     const toast = useToast();
+    const { t: tSettings } = useTranslation('settings');
+    const { t: tCommon } = useTranslation('common');
     // Stabilize toast reference to avoid unnecessary effect re-runs
     const toastRef = useRef(toast);
     toastRef.current = toast;
+    const tSettingsRef = useRef(tSettings);
+    tSettingsRef.current = tSettings;
 
     // Autostart hook for managing launch on startup
     const { isEnabled: autostartEnabled, isLoading: autostartLoading, setAutostart } = useAutostart();
@@ -150,10 +254,21 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
         () => normalizeClaudeTranscriptCleanupPeriodDays(config.claudeTranscriptCleanupPeriodDays),
         [config.claudeTranscriptCleanupPeriodDays],
     );
+    const languageOptions = useMemo(() => [
+        { value: 'system', label: tCommon('language.system') },
+        { value: 'zh-CN', label: tCommon('language.zhCN') },
+        { value: 'en-US', label: tCommon('language.enUS') },
+    ], [tCommon]);
     const [claudeTranscriptCleanupDaysDraft, setClaudeTranscriptCleanupDaysDraft] = useState(
         String(DEFAULT_CLAUDE_TRANSCRIPT_CLEANUP_PERIOD_DAYS),
     );
     const [floatingBallGateBusy, setFloatingBallGateBusy] = useState(false);
+    const [managedCodexBusy, setManagedCodexBusy] = useState<null | 'status' | 'download' | 'login' | 'logout'>(null);
+    const managedCodexBusyRef = useRef<typeof managedCodexBusy>(null);
+    managedCodexBusyRef.current = managedCodexBusy;
+    const [managedCodexDetailsOpen, setManagedCodexDetailsOpen] = useState(false);
+    const [managedCodexLoginDialogOpen, setManagedCodexLoginDialogOpen] = useState(false);
+    const [managedCodexLoginState, setManagedCodexLoginState] = useState<ManagedCodexLoginAttemptState>(EMPTY_MANAGED_CODEX_LOGIN_STATE);
     useEffect(() => {
         setClaudeTranscriptCleanupDaysDraft(String(claudeTranscriptCleanupPeriodDays));
     }, [claudeTranscriptCleanupPeriodDays]);
@@ -179,13 +294,16 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                 floatingBallEnabled: next,
             });
             track('floating_ball_toggle', { gate: true, enabled: next });
-            toast.success(next ? '已启用桌面宠物' : '已关闭桌面宠物');
+            toast.success(next ? tSettings('about.desktopPetEnabled') : tSettings('about.desktopPetDisabled'));
         } catch (err) {
-            toast.error(`${next ? '启用' : '关闭'}桌面宠物失败：${describeNativeFloatingBallError(err)}`);
+            toast.error(tSettings('about.desktopPetToggleFailed', {
+                action: tSettings(next ? 'about.enableAction' : 'about.disableAction'),
+                message: describeNativeFloatingBallError(err),
+            }));
         } finally {
             setFloatingBallGateBusy(false);
         }
-    }, [config.floatingBallDevGate, floatingBallGateBusy, toast, updateConfig]);
+    }, [config.floatingBallDevGate, floatingBallGateBusy, tSettings, toast, updateConfig]);
 
     const {
         activeSection,
@@ -235,12 +353,12 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                 enabled: next.enabled,
                 accelerator: next.accelerator,
             });
-            toastRef.current.success(next.enabled ? '快捷键已生效' : '快捷键已关闭');
+            toastRef.current.success(tSettingsRef.current(next.enabled ? 'shortcuts.toasts.enabled' : 'shortcuts.toasts.disabled'));
         } catch (e) {
             setSummonEnabled(prevEnabled);
             setSummonAccelerator(prevAccelerator);
             const msg = e instanceof Error ? e.message : String(e);
-            toastRef.current.error(`快捷键设置失败：${msg}`);
+            toastRef.current.error(tSettingsRef.current('shortcuts.toasts.saveFailed', { message: msg }));
         }
     }, [summonEnabled, summonAccelerator]);
 
@@ -380,7 +498,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                     if (proxyProbeGenerationRef.current !== generation) return;
                     setProxyProbeState({
                         status: 'error',
-                        message: '代理检测失败，请稍后重试',
+                        message: tSettings('general.proxyProbeFailed'),
                         detail: error instanceof Error ? error.message : String(error),
                     });
                 });
@@ -392,6 +510,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
         config.proxySettings?.protocol,
         config.proxySettings?.host,
         config.proxySettings?.port,
+        tSettings,
     ]);
 
     const [showCustomForm, setShowCustomForm] = useState(false);
@@ -568,6 +687,28 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
     // Anthropic subscription status
     const [subscriptionStatus, setSubscriptionStatus] = useState<SubscriptionStatus | null>(null);
     const [subscriptionVerifying, setSubscriptionVerifying] = useState(false);
+    const [subscriptionLoginDialogOpen, setSubscriptionLoginDialogOpen] = useState(false);
+    const [subscriptionLoginState, setSubscriptionLoginState] = useState<SubscriptionLoginAttemptState>(EMPTY_SUBSCRIPTION_LOGIN_STATE);
+    const [subscriptionLoginBusy, setSubscriptionLoginBusy] = useState(false);
+    const subscriptionLoginSuccessHandledRef = useRef(false);
+    const subscriptionFallbackProbeInFlightRef = useRef(false);
+    const subscriptionFallbackProbeLastAtRef = useRef(0);
+    const cancelSubscriptionLoginAttempt = useCallback(async (startedAt?: string | null) => {
+        try {
+            const state = normalizeSubscriptionLoginState(
+                await apiPostJson('/api/subscription/login/cancel', { startedAt }),
+            );
+            setSubscriptionLoginState(prev => startedAt && prev.startedAt !== startedAt ? prev : state);
+        } catch (error) {
+            console.warn('[Settings] Subscription login cancel failed:', error);
+        }
+    }, []);
+    const closeSubscriptionLoginDialog = useCallback(() => {
+        setSubscriptionLoginDialogOpen(false);
+        if (isSubscriptionLoginActiveStatus(subscriptionLoginState.status)) {
+            void cancelSubscriptionLoginAttempt(subscriptionLoginState.startedAt ?? null);
+        }
+    }, [cancelSubscriptionLoginAttempt, subscriptionLoginState.startedAt, subscriptionLoginState.status]);
 
     // Ref for verify timeout cleanup
     const verifyTimeoutRef = useRef<Record<string, NodeJS.Timeout>>({});
@@ -627,6 +768,43 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
 
     // Track which MCP servers need configuration (missing required fields)
     const [mcpNeedsConfig, setMcpNeedsConfig] = useState<Record<string, boolean>>({});
+
+    // Official MyAgents CLI tools shown in the same Toolbox list as MCP.
+    const [officialToolEnabling, setOfficialToolEnabling] = useState<Record<string, boolean>>({});
+    const [visionToolSettingsOpen, setVisionToolSettingsOpen] = useState(false);
+    const [visionToolDraftValue, setVisionToolDraftValue] = useState('');
+
+    const officialEnabledIds = useMemo(
+        () => normalizeOfficialToolIds(config.enabledOfficialToolIds ?? []),
+        [config.enabledOfficialToolIds],
+    );
+
+    const visionModelOptions = useMemo(() => {
+        return providers
+            .filter(provider =>
+                isProviderAvailable(provider, apiKeys, providerVerifyStatus)
+                && !isRuntimeBackedProvider(provider),
+            )
+            .flatMap(provider =>
+                provider.models
+                    .filter(model => Array.isArray(model.inputModalities) && model.inputModalities.includes('image'))
+                    .map(model => ({
+                        value: visionModelOptionValue(provider.id, model.model),
+                        label: `${provider.name} / ${model.modelName || model.model}`,
+                    })),
+            );
+    }, [providers, apiKeys, providerVerifyStatus]);
+
+    const savedVisionModelValue = useMemo(() => {
+        const saved = config.officialToolSettings?.imageUnderstanding;
+        return saved?.providerId && saved.model
+            ? visionModelOptionValue(saved.providerId, saved.model)
+            : '';
+    }, [config.officialToolSettings?.imageUnderstanding]);
+    const savedVisionModelStillValid = !!savedVisionModelValue
+        && visionModelOptions.some(option => option.value === savedVisionModelValue);
+    const visionToolNeedsConfig = !isImageUnderstandingToolConfigured(config.officialToolSettings)
+        || !savedVisionModelStillValid;
 
     // Builtin MCP settings dialog state
     const [builtinMcpSettings, setBuiltinMcpSettings] = useState<{
@@ -736,7 +914,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
 
     const [mcpFormMode, setMcpFormMode] = useState<'form' | 'json'>('form');
     const [mcpJsonInput, setMcpJsonInput] = useState('');
-    const [mcpJsonError, setMcpJsonError] = useState('');
+    const [mcpJsonError, setMcpJsonError] = useState<{ key: string; params?: Record<string, number | string> } | null>(null);
 
     // OAuth state for MCP servers
     const [mcpOAuthStatus, setMcpOAuthStatus] = useState<Record<string, 'disconnected' | 'connecting' | 'connected' | 'expired' | 'error'>>({});
@@ -794,11 +972,15 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
         // z-[60]: delete confirmation (highest)
         if (deleteConfirmProvider) { setDeleteConfirmProvider(null); return true; }
         // z-50: all other inline overlays
+        if (subscriptionLoginDialogOpen) { closeSubscriptionLoginDialog(); return true; }
+        if (managedCodexLoginDialogOpen) { setManagedCodexLoginDialogOpen(false); return true; }
+        if (managedCodexDetailsOpen) { setManagedCodexDetailsOpen(false); return true; }
         if (runtimeDialog.show) { setRuntimeDialog(prev => ({ ...prev, show: false })); return true; }
         if (editingProvider) { setEditingProvider(null); return true; }
         if (showProviderOrderDialog) { setShowProviderOrderDialog(false); return true; }
         if (showCustomForm) { setShowCustomForm(false); return true; }
         if (showMcpForm) { setShowMcpForm(false); setEditingMcpId(null); return true; }
+        if (visionToolSettingsOpen) { setVisionToolSettingsOpen(false); return true; }
         if (builtinMcpSettings) { setBuiltinMcpSettings(null); return true; }
         if (geminiImageSettings) { setGeminiImageSettings(null); return true; }
         if (playwrightSettings) { setPlaywrightSettings(null); return true; }
@@ -865,7 +1047,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
             // Just disable
             await toggleMcpServerEnabled(server.id, false);
             setMcpEnabledIds(prev => prev.filter(id => id !== server.id));
-            toast.success('MCP 已禁用');
+            toast.success(tSettings('toolbox.toasts.mcpDisabled'));
             return;
         }
 
@@ -874,7 +1056,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
             const savedEnv = await getMcpServerEnv(server.id);
             const missingKeys = server.requiresConfig.filter(key => !savedEnv?.[key]?.trim());
             if (missingKeys.length > 0) {
-                toast.error(`请先配置 ${server.name}（点击 ⚙️ 设置）`);
+                toast.error(tSettings('toolbox.toasts.configureServerFirst', { name: server.name }));
                 // Auto-open settings dialog for convenience
                 handleEditBuiltinMcp(server);
                 return;
@@ -911,7 +1093,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                     }
                 }
 
-                toast.success('MCP 已启用');
+                toast.success(tSettings('toolbox.toasts.mcpEnabled'));
             } else if (result.error) {
                 // Handle different error types
                 if (result.error.type === 'command_not_found' && result.error.downloadUrl) {
@@ -924,22 +1106,79 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                     });
                 } else {
                     // Show toast for other errors
-                    toast.error(result.error.message || '启用失败');
+                    toast.error(result.error.message || tSettings('toolbox.toasts.mcpEnableFailed'));
                 }
             }
         } catch (err) {
-            const errorMsg = err instanceof Error ? err.message : '启用失败';
+            const errorMsg = err instanceof Error ? err.message : tSettings('toolbox.toasts.mcpEnableFailed');
             toast.error(errorMsg);
         } finally {
             setMcpEnabling(prev => ({ ...prev, [server.id]: false }));
         }
     };
 
+    const openOfficialToolSettings = useCallback((tool: OfficialToolDefinition) => {
+        if (tool.id !== IMAGE_UNDERSTANDING_TOOL_ID) return;
+        const initial = savedVisionModelStillValid
+            ? savedVisionModelValue
+            : (visionModelOptions[0]?.value ?? '');
+        setVisionToolDraftValue(initial);
+        setVisionToolSettingsOpen(true);
+    }, [savedVisionModelStillValid, savedVisionModelValue, visionModelOptions]);
+
+    const handleOfficialToolToggle = useCallback(async (tool: OfficialToolDefinition, enabled: boolean) => {
+        setOfficialToolEnabling(prev => ({ ...prev, [tool.id]: true }));
+        try {
+            await atomicModifyConfig(current => {
+                const existing = normalizeOfficialToolIds(current.enabledOfficialToolIds ?? []);
+                const next = enabled
+                    ? normalizeOfficialToolIds([...existing, tool.id])
+                    : existing.filter(id => id !== tool.id);
+                return { ...current, enabledOfficialToolIds: next };
+            });
+            await refreshConfig();
+            toast.success(enabled
+                ? tSettings('toolbox.toasts.officialToolEnabled')
+                : tSettings('toolbox.toasts.officialToolDisabled'));
+            if (enabled && tool.id === IMAGE_UNDERSTANDING_TOOL_ID && visionToolNeedsConfig) {
+                openOfficialToolSettings(tool);
+            }
+        } catch (err) {
+            console.error('[Settings] Failed to toggle official tool:', err);
+            toast.error(tSettings('toolbox.toasts.officialToolToggleFailed'));
+        } finally {
+            setOfficialToolEnabling(prev => ({ ...prev, [tool.id]: false }));
+        }
+    }, [openOfficialToolSettings, refreshConfig, tSettings, toast, visionToolNeedsConfig]);
+
+    const saveVisionToolSettings = useCallback(async () => {
+        const parsed = parseVisionModelOptionValue(visionToolDraftValue);
+        if (!parsed) {
+            toast.error(tSettings('toolbox.toasts.visionModelRequired'));
+            return;
+        }
+        try {
+            await atomicModifyConfig(current => ({
+                ...current,
+                officialToolSettings: {
+                    ...(current.officialToolSettings ?? {}),
+                    imageUnderstanding: parsed,
+                },
+            }));
+            await refreshConfig();
+            setVisionToolSettingsOpen(false);
+            toast.success(tSettings('toolbox.toasts.visionModelSaved'));
+        } catch (err) {
+            console.error('[Settings] Failed to save vision tool settings:', err);
+            toast.error(tSettings('toolbox.toasts.saveFailed'));
+        }
+    }, [refreshConfig, tSettings, toast, visionToolDraftValue]);
+
     const resetMcpForm = () => {
         setEditingMcpId(null);
         setMcpFormMode('form');
         setMcpJsonInput('');
-        setMcpJsonError('');
+        setMcpJsonError(null);
         setMcpForm({
             id: '', name: '', type: 'stdio', command: '', args: [], newArg: '', url: '',
             env: {}, newEnvKey: '', newEnvValue: '', headers: {}, newHeaderKey: '', newHeaderValue: '',
@@ -1066,9 +1305,9 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
             const servers = await getAllMcpServers();
             setMcpServersState(servers);
             setBuiltinMcpSettings(null);
-            toast.success('设置已保存');
+            toast.success(tSettings('toolbox.toasts.saveSuccess'));
         } catch {
-            toast.error('保存失败');
+            toast.error(tSettings('toolbox.toasts.saveFailed'));
         }
     };
 
@@ -1093,9 +1332,9 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
             setMcpServersState(servers);
             await checkMcpConfigStatus(servers);
             setGeminiImageSettings(null);
-            toast.success('Gemini 图片生成设置已保存');
+            toast.success(tSettings('toolbox.toasts.geminiImageSaved'));
         } catch {
-            toast.error('保存失败');
+            toast.error(tSettings('toolbox.toasts.saveFailed'));
         }
     };
 
@@ -1104,7 +1343,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
         if (!cookieForm) return;
         const { editIndex, domain, name, value, path } = cookieForm;
         if (!domain.trim() || !name.trim() || !value.trim()) {
-            toast.error('域名、名称和值不能为空');
+            toast.error(tSettings('toolbox.toasts.cookieRequired'));
             return;
         }
         try {
@@ -1154,10 +1393,12 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
             await writeTextFile(ssPath, JSON.stringify(storageState, null, 2));
 
             setCookieForm(null);
-            toast.success(editIndex !== null ? 'Cookie 已更新' : 'Cookie 已添加');
+            toast.success(editIndex !== null
+                ? tSettings('toolbox.toasts.cookieUpdated')
+                : tSettings('toolbox.toasts.cookieAdded'));
             await reloadStorageStateInfo();
         } catch {
-            toast.error('保存失败');
+            toast.error(tSettings('toolbox.toasts.saveFailed'));
         }
     };
 
@@ -1170,10 +1411,10 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
             const storageState = JSON.parse(await readTextFile(ssPath));
             storageState.cookies.splice(idx, 1);
             await writeTextFile(ssPath, JSON.stringify(storageState, null, 2));
-            toast.success('Cookie 已删除');
+            toast.success(tSettings('toolbox.toasts.cookieDeleted'));
             await reloadStorageStateInfo();
         } catch {
-            toast.error('删除失败');
+            toast.error(tSettings('toolbox.toasts.deleteFailed'));
         }
     };
 
@@ -1243,9 +1484,9 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
             const servers = await getAllMcpServers();
             setMcpServersState(servers);
             setPlaywrightSettings(null);
-            toast.success('Playwright 设置已保存');
+            toast.success(tSettings('toolbox.toasts.playwrightSaved'));
         } catch {
-            toast.error('保存失败');
+            toast.error(tSettings('toolbox.toasts.saveFailed'));
         }
     };
 
@@ -1270,9 +1511,9 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
             setMcpServersState(servers);
             await checkMcpConfigStatus(servers);
             setEdgeTtsSettings(null);
-            toast.success('Edge TTS 设置已保存');
+            toast.success(tSettings('toolbox.toasts.edgeTtsSaved'));
         } catch {
-            toast.error('保存失败');
+            toast.error(tSettings('toolbox.toasts.saveFailed'));
         }
     };
 
@@ -1330,14 +1571,14 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                 };
                 audio.onerror = () => {
                     URL.revokeObjectURL(blobUrl);
-                    toast.error('音频播放失败');
+                    toast.error(tSettings('toolbox.toasts.audioPlayFailed'));
                     setTtsPreviewPlaying(false);
                     ttsAudioRef.current = null;
                 };
                 await audio.play();
                 setTtsPreviewPlaying(true);
             } else {
-                toast.error(result.error || '试听失败');
+                toast.error(result.error || tSettings('toolbox.toasts.ttsPreviewFailed'));
             }
         } catch {
             // Clean up blob URL on play() rejection to avoid memory leak
@@ -1348,7 +1589,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                 ttsAudioRef.current = null;
                 if (src.startsWith('blob:')) URL.revokeObjectURL(src);
             }
-            toast.error('试听请求失败');
+            toast.error(tSettings('toolbox.toasts.ttsPreviewRequestFailed'));
         } finally {
             setTtsPreviewLoading(false);
         }
@@ -1373,7 +1614,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
     // OAuth: start OAuth flow (auto mode = no clientId, manual mode = with clientId)
     const handleMcpOAuthConnect = async (serverId: string, serverUrl: string, manual?: boolean) => {
         if (manual && !mcpForm.oauthClientId) {
-            toast.error('请填写 Client ID');
+            toast.error(tSettingsRef.current('toolbox.toasts.oauthClientIdRequired'));
             return;
         }
         setMcpOAuthConnecting(serverId);
@@ -1396,7 +1637,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
             if (result.success && result.authUrl) {
                 const { openExternal } = await import('@/utils/openExternal');
                 await openExternal(result.authUrl);
-                toast.success('已在浏览器中打开授权页面，请完成授权');
+                toast.success(tSettingsRef.current('toolbox.toasts.oauthOpened'));
                 setMcpOAuthStatus(prev => ({ ...prev, [serverId]: 'connecting' }));
                 // Clean up any previous poll
                 if (oauthPollIntervalRef.current) clearInterval(oauthPollIntervalRef.current);
@@ -1410,7 +1651,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                             oauthPollIntervalRef.current = null;
                             setMcpOAuthStatus(prev => ({ ...prev, [serverId]: 'connected' }));
                             setMcpOAuthConnecting(null);
-                            toast.success('OAuth 授权成功');
+                            toast.success(tSettingsRef.current('toolbox.toasts.oauthSuccess'));
                         } else if (status.success && status.status === 'disconnected') {
                             setMcpOAuthConnecting(prev => {
                                 if (prev === serverId) {
@@ -1432,11 +1673,11 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                     setMcpOAuthConnecting(null);
                 }, 5 * 60 * 1000);
             } else {
-                toast.error(result.error || 'OAuth 启动失败');
+                toast.error(result.error || tSettingsRef.current('toolbox.toasts.oauthStartFailed'));
                 setMcpOAuthConnecting(null);
             }
         } catch (err) {
-            toast.error(`OAuth 错误: ${err instanceof Error ? err.message : String(err)}`);
+            toast.error(tSettingsRef.current('toolbox.toasts.oauthError', { message: err instanceof Error ? err.message : String(err) }));
             setMcpOAuthConnecting(null);
         }
     };
@@ -1453,9 +1694,9 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                 throw new Error(`HTTP ${response.status}`);
             }
             setMcpOAuthStatus(prev => ({ ...prev, [serverId]: 'disconnected' }));
-            toast.success('OAuth 连接已断开');
+            toast.success(tSettingsRef.current('toolbox.toasts.oauthDisconnected'));
         } catch {
-            toast.error('断开 OAuth 失败');
+            toast.error(tSettingsRef.current('toolbox.toasts.oauthDisconnectFailed'));
         }
     };
 
@@ -1519,6 +1760,13 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
         // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally only triggers on initialMcpId change
     }, [initialMcpId, mcpServers]);
 
+    useEffect(() => {
+        if (!initialOfficialToolId) return;
+        const tool = OFFICIAL_TOOLS.find(item => item.id === initialOfficialToolId);
+        if (tool) openOfficialToolSettings(tool);
+        notifySectionChange();
+    }, [initialOfficialToolId, openOfficialToolSettings, notifySectionChange]);
+
     // Add custom MCP server - auto-install after adding
     const handleAddMcp = async () => {
         // Validate based on transport type
@@ -1556,7 +1804,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
             // Track mcp_add event
             if (!editingMcpId) track('mcp_add', { type: mcpForm.type });
 
-            toast.success(editingMcpId ? 'MCP 服务器已保存' : 'MCP 服务器已添加');
+            toast.success(tSettingsRef.current(editingMcpId ? 'toolbox.toasts.mcpServerSaved' : 'toolbox.toasts.mcpServerAdded'));
 
             // Auto-probe OAuth for HTTP/SSE servers after adding/saving
             if ((mcpForm.type === 'http' || mcpForm.type === 'sse') && mcpForm.url) {
@@ -1570,23 +1818,23 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                         handleMcpOAuthConnect(savedId, savedUrl);
                     } else {
                         // Manual config needed — inform user
-                        toast.info('此 MCP 需要 OAuth 授权，请在设置中配置 OAuth 参数');
+                        toast.info(tSettingsRef.current('toolbox.toasts.mcpOAuthRequired'));
                     }
                 }).catch(() => { /* probe failed — server may not need OAuth */ });
             }
         } catch {
-            toast.error(editingMcpId ? '保存失败' : '添加失败');
+            toast.error(tSettingsRef.current(editingMcpId ? 'toolbox.toasts.mcpSaveFailed' : 'toolbox.toasts.mcpAddFailed'));
         }
     };
 
     // Add MCP servers from JSON (batch import)
     const handleAddMcpFromJson = async () => {
-        setMcpJsonError('');
+        setMcpJsonError(null);
         let parsed: Record<string, unknown>;
         try {
             parsed = JSON.parse(mcpJsonInput);
         } catch {
-            setMcpJsonError('JSON 格式错误，请检查语法');
+            setMcpJsonError({ key: 'toolbox.dialogs.customMcp.jsonInvalid' });
             return;
         }
 
@@ -1597,7 +1845,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
             ([, v]) => v && typeof v === 'object' && !Array.isArray(v)
         );
         if (entries.length === 0) {
-            setMcpJsonError('未找到有效的 MCP 服务器配置');
+            setMcpJsonError({ key: 'toolbox.dialogs.customMcp.jsonNoValidServers' });
             return;
         }
 
@@ -1653,15 +1901,15 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
         }
 
         if (added.length > 0 && skipped.length === 0) {
-            toast.success(`已添加 ${added.length} 个 MCP 服务器`);
+            toast.success(tSettingsRef.current('toolbox.toasts.mcpJsonAdded', { count: added.length }));
             resetMcpForm();
             setShowMcpForm(false);
         } else if (added.length > 0 && skipped.length > 0) {
-            toast.success(`已添加 ${added.length} 个，跳过 ${skipped.length} 个已存在的（${skipped.join(', ')}）`);
+            toast.success(tSettingsRef.current('toolbox.toasts.mcpJsonAddedSkipped', { added: added.length, skipped: skipped.length, names: skipped.join(', ') }));
             resetMcpForm();
             setShowMcpForm(false);
         } else if (skipped.length > 0) {
-            setMcpJsonError(`所有服务器均已存在：${skipped.join(', ')}`);
+            setMcpJsonError({ key: 'toolbox.dialogs.customMcp.jsonAllExist', params: { names: skipped.join(', ') } });
         }
     };
 
@@ -1676,9 +1924,9 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
             // Track mcp_remove event
             track('mcp_remove');
 
-            toast.success('已删除');
+            toast.success(tSettingsRef.current('toolbox.toasts.deleteSuccess'));
         } catch {
-            toast.error('删除失败');
+            toast.error(tSettingsRef.current('toolbox.toasts.deleteFailed'));
         }
     };
 
@@ -1770,7 +2018,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                     setSubscriptionStatus((prev: SubscriptionStatus | null) => prev ? {
                         ...prev,
                         verifyStatus: 'invalid',
-                        verifyError: err instanceof Error ? err.message : '验证失败'
+                        verifyError: err instanceof Error ? err.message : tSettingsRef.current('providers.verify.failed')
                     } : prev);
                 }
             }
@@ -1827,10 +2075,10 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
             if (result.success) {
                 // Only cache successful verifications
                 await saveProviderVerifyStatus(SUBSCRIPTION_PROVIDER_ID, 'valid', currentEmail);
-                toast.success('验证成功');
+                toast.success(tSettings('providers.verify.success'));
             } else {
                 // Don't cache failures - they will be retried next time
-                toast.error(result.error || '验证失败');
+                toast.error(result.error || tSettings('providers.verify.failed'));
             }
 
             setSubscriptionStatus(prev => prev ? {
@@ -1845,13 +2093,95 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
             setSubscriptionStatus(prev => prev ? {
                 ...prev,
                 verifyStatus: 'invalid',
-                verifyError: err instanceof Error ? err.message : '验证失败'
+                verifyError: err instanceof Error ? err.message : tSettings('providers.verify.failed')
             } : prev);
-            toast.error('验证失败');
+            toast.error(tSettings('providers.verify.failed'));
         } finally {
             setSubscriptionVerifying(false);
         }
-    }, [subscriptionStatus, saveProviderVerifyStatus, toast]);
+    }, [subscriptionStatus, saveProviderVerifyStatus, tSettings, toast]);
+
+    const refreshSubscriptionStatusAfterLogin = useCallback(async (): Promise<boolean> => {
+        try {
+            const status = await apiGetJson<SubscriptionStatus>('/api/subscription/status');
+            setSubscriptionStatus({ ...status, verifyStatus: 'idle' });
+            if (!status.available) {
+                return false;
+            }
+
+            const currentEmail = status.info?.email;
+            setSubscriptionVerifying(true);
+            setSubscriptionStatus(prev => prev ? { ...prev, verifyStatus: 'loading', verifyError: undefined } : prev);
+            const result = await apiPostJson<{ success: boolean; error?: string; detail?: string }>('/api/subscription/verify', {});
+            const nextStatus = result.success ? 'valid' : 'invalid';
+            if (result.success) {
+                await saveProviderVerifyStatus(SUBSCRIPTION_PROVIDER_ID, 'valid', currentEmail);
+            }
+            const errorMsg = result.error && result.detail && result.detail !== result.error
+                ? `${result.error} (${result.detail.slice(0, 100)})`
+                : result.error;
+            setSubscriptionStatus(prev => prev ? {
+                ...prev,
+                verifyStatus: nextStatus,
+                verifyError: errorMsg,
+            } : prev);
+            return result.success;
+        } catch (error) {
+            console.warn('[Settings] Failed to refresh subscription after login:', error);
+            setSubscriptionStatus(prev => prev ? {
+                ...prev,
+                verifyStatus: 'invalid',
+                verifyError: error instanceof Error ? error.message : tSettings('providers.verify.failed'),
+            } : prev);
+            return false;
+        } finally {
+            setSubscriptionVerifying(false);
+        }
+    }, [saveProviderVerifyStatus, tSettings]);
+
+    const handleSubscriptionLoginSucceeded = useCallback(async () => {
+        if (subscriptionLoginSuccessHandledRef.current) return;
+        subscriptionLoginSuccessHandledRef.current = true;
+        await refreshSubscriptionStatusAfterLogin();
+        toast.success(tSettings('providers.codexToast.claudeLoginSucceeded'));
+    }, [refreshSubscriptionStatusAfterLogin, tSettings, toast]);
+
+    const probeSubscriptionFallbackLogin = useCallback(async () => {
+        if (subscriptionLoginSuccessHandledRef.current || subscriptionFallbackProbeInFlightRef.current) {
+            return;
+        }
+        const now = Date.now();
+        if (now - subscriptionFallbackProbeLastAtRef.current < 10000) {
+            return;
+        }
+        subscriptionFallbackProbeLastAtRef.current = now;
+        subscriptionFallbackProbeInFlightRef.current = true;
+        try {
+            const status = await apiGetJson<SubscriptionStatus>('/api/subscription/status');
+            if (!status.available) {
+                return;
+            }
+
+            const currentEmail = status.info?.email;
+            setSubscriptionStatus({ ...status, verifyStatus: 'loading', verifyError: undefined });
+            const result = await apiPostJson<{ success: boolean; error?: string; detail?: string }>('/api/subscription/verify', {});
+            if (!result.success) {
+                return;
+            }
+
+            await saveProviderVerifyStatus(SUBSCRIPTION_PROVIDER_ID, 'valid', currentEmail);
+            subscriptionLoginSuccessHandledRef.current = true;
+            setSubscriptionStatus({ ...status, verifyStatus: 'valid', verifyError: undefined });
+            setSubscriptionLoginState(prev => isSubscriptionLoginActiveStatus(prev.status)
+                ? { ...prev, status: 'succeeded', error: null }
+                : prev);
+            toast.success(tSettings('providers.codexToast.claudeLoginSucceeded'));
+        } catch (error) {
+            console.warn('[Settings] Subscription fallback login probe failed:', error);
+        } finally {
+            subscriptionFallbackProbeInFlightRef.current = false;
+        }
+    }, [saveProviderVerifyStatus, tSettings, toast]);
 
     // Verify API key for a provider
     const verifyProvider = useCallback(async (provider: Provider, apiKey: string) => {
@@ -1897,12 +2227,12 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                 setVerifyError((prev) => ({
                     ...prev,
                     [provider.id]: {
-                        error: `当前网络无法连接 ${provider.name}，请检查网络或`,
+                        error: tSettings('providers.verify.networkError', { name: provider.name }),
                         detail: detailParts.length > 0 ? detailParts.join('; ') : undefined,
                         action: 'proxy-settings',
                     },
                 }));
-                toastRef.current.error(`${provider.name}: 当前网络不可达，请检查代理设置`);
+                toastRef.current.error(tSettings('providers.verify.networkToast', { name: provider.name }));
                 return;
             }
 
@@ -1930,7 +2260,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                 await saveProviderVerifyStatus(provider.id, 'valid');
             } else {
                 await saveProviderVerifyStatus(provider.id, 'invalid');
-                const errorMsg = result.error || '验证失败';
+                const errorMsg = result.error || tSettings('providers.verify.failed');
                 setVerifyError((prev) => ({ ...prev, [provider.id]: { error: errorMsg, detail: result.detail } }));
                 toastRef.current.error(`${provider.name}: ${errorMsg}`);
             }
@@ -1940,7 +2270,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
 
             console.error('[verifyProvider] Exception:', err);
             await saveProviderVerifyStatus(provider.id, 'invalid');
-            const errorMsg = err instanceof Error ? err.message : '验证失败';
+            const errorMsg = err instanceof Error ? err.message : tSettings('providers.verify.failed');
             setVerifyError((prev) => ({ ...prev, [provider.id]: { error: errorMsg } }));
             toastRef.current.error(`${provider.name}: ${errorMsg}`);
         } finally {
@@ -1949,7 +2279,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                 setVerifyLoading((prev) => ({ ...prev, [provider.id]: false }));
             }
         }
-    }, [saveProviderVerifyStatus]);
+    }, [saveProviderVerifyStatus, tSettings]);
 
     // Auto-verify when API key changes (with debounce)
     const handleSaveApiKey = useCallback(async (provider: Provider, key: string) => {
@@ -2000,7 +2330,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
             return null;
         }
         if (customForm.models.length === 0) {
-            toast.error('请添加至少一个模型 ID');
+            toast.error(tSettings('providers.toast.addAtLeastOneModel'));
             return null;
         }
         const newProvider: Provider = {
@@ -2048,10 +2378,10 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
             if (customForm.apiKey) {
                 verifyProvider(newProvider, customForm.apiKey);
             }
-            toast.success('服务商添加成功');
+            toast.success(tSettings('providers.toast.providerAdded'));
         } catch (error) {
             console.error('[Settings] Failed to add custom provider:', error);
-            toast.error('添加服务商失败');
+            toast.error(tSettings('providers.toast.providerAddFailed'));
             return null;
         }
 
@@ -2085,10 +2415,10 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
 
             // Delete from disk, remove API key, and refresh providers list
             await deleteCustomProviderService(providerId);
-            toast.success('服务商已删除');
+            toast.success(tSettings('providers.toast.providerDeleted'));
         } catch (error) {
             console.error('[Settings] Failed to delete custom provider:', error);
-            toast.error('删除服务商失败');
+            toast.error(tSettings('providers.toast.providerDeleteFailed'));
         }
         setDeleteConfirmProvider(null);
         setEditingProvider(null);
@@ -2096,6 +2426,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
 
     // Open provider management panel
     const openProviderManage = (provider: Provider) => {
+        if (provider.id === CODEX_SUBSCRIPTION_PROVIDER_ID) return;
         // For preset providers, we allow adding custom models
         // For custom providers, we can edit all fields
         const effectiveAliases = getEffectiveModelAliases(provider, config.providerModelAliases);
@@ -2151,30 +2482,30 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
             try {
                 await savePresetCustomModels(provider.id, finalCustomModels);
                 if (customModels.length > 0 || removedModels.length > 0) {
-                    toast.success('模型配置已更新');
+                    toast.success(tSettings('providers.toast.modelConfigUpdated'));
                 }
             } catch (error) {
                 console.error('[Settings] Failed to save preset custom models:', error);
-                toast.error('保存失败');
+                toast.error(tSettings('providers.toast.saveFailed'));
                 return;
             }
         } else {
             // 验证必填字段
             if (!editName?.trim() || !editBaseUrl?.trim()) {
-                toast.error('名称和 Base URL 不能为空');
+                toast.error(tSettings('providers.toast.nameAndBaseUrlRequired'));
                 return;
             }
             // 验证 Base URL 格式
             const trimmedUrl = editBaseUrl.trim();
             if (!trimmedUrl.startsWith('http://') && !trimmedUrl.startsWith('https://')) {
-                toast.error('Base URL 必须以 http:// 或 https:// 开头');
+                toast.error(tSettings('providers.toast.baseUrlProtocolRequired'));
                 return;
             }
             // Filter out removed models from existing list, then add new custom models
             const remainingModels = provider.models.filter(m => !removedModels.includes(m.model));
             // Validate: at least one model must remain
             if (remainingModels.length === 0 && customModels.length === 0) {
-                toast.error('供应商至少需要保留一个模型');
+                toast.error(tSettings('providers.toast.atLeastOneModelRequired'));
                 return;
             }
             const finalModels = [
@@ -2211,10 +2542,10 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
             };
             try {
                 await updateCustomProvider(updatedProvider);
-                toast.success('服务商已更新');
+                toast.success(tSettings('providers.toast.providerUpdated'));
             } catch (error) {
                 console.error('[Settings] Failed to update custom provider:', error);
-                toast.error('更新服务商失败');
+                toast.error(tSettings('providers.toast.providerUpdateFailed'));
             }
         }
         setEditingProvider(null);
@@ -2222,6 +2553,13 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
 
     // providers from useConfig includes both preset and custom providers
     const allProviders = providers;
+    const managedCodexProviderGateEnabled = isManagedCodexProviderGateEnabled(config);
+    const managedCodexReadiness = useMemo(
+        () => getManagedCodexProviderReadiness(config),
+        [
+            config,
+        ],
+    );
     const visibleProviders = useMemo(
         () => providers.filter(provider => provider.enabled !== false),
         [providers],
@@ -2234,6 +2572,235 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
             .map(provider => provider.id));
         setShowProviderOrderDialog(true);
     }, [allProviders]);
+
+    const refreshManagedCodexStatus = useCallback(async () => {
+        if (!isTauriEnvironment()) return;
+        if (managedCodexBusyRef.current === 'download') {
+            await refreshConfig();
+            return;
+        }
+        setManagedCodexBusy('status');
+        try {
+            await invoke('cmd_managed_codex_status');
+            await refreshConfig();
+        } catch (error) {
+            console.warn('[Settings] Managed Codex status failed:', error);
+        } finally {
+            setManagedCodexBusy(prev => prev === 'status' ? null : prev);
+        }
+    }, [refreshConfig]);
+
+    useEffect(() => {
+        if (activeSection !== 'providers') return;
+        if (!managedCodexProviderGateEnabled) return;
+        void refreshManagedCodexStatus();
+    }, [activeSection, managedCodexProviderGateEnabled, refreshManagedCodexStatus]);
+
+    useEffect(() => {
+        if (activeSection !== 'providers') return;
+        if (!managedCodexProviderGateEnabled) return;
+        const isDownloading = managedCodexBusy === 'download'
+            || config.managedCodexRuntimeInstall?.status === 'downloading';
+        if (!isDownloading) return;
+        const interval = window.setInterval(() => {
+            void refreshConfig();
+        }, 500);
+        return () => window.clearInterval(interval);
+    }, [
+        activeSection,
+        managedCodexProviderGateEnabled,
+        config.managedCodexRuntimeInstall?.status,
+        managedCodexBusy,
+        refreshConfig,
+    ]);
+
+    const runManagedCodexCommand = useCallback(async (
+        action: 'download' | 'login' | 'logout',
+        command: 'cmd_managed_codex_download' | 'cmd_managed_codex_login' | 'cmd_managed_codex_logout',
+    ) => {
+        if (!isTauriEnvironment()) {
+            toast.error(tSettings('providers.codexToast.unsupportedManagement'));
+            return;
+        }
+        if (managedCodexBusy) return;
+        setManagedCodexBusy(action);
+        try {
+            await invoke(command);
+            await refreshConfig();
+            if (action === 'download') toast.success(tSettings('providers.codexToast.runtimeReady'));
+            if (action === 'login') toast.success(tSettings('providers.codexToast.loginUpdated'));
+            if (action === 'logout') toast.success(tSettings('providers.codexToast.loggedOut'));
+        } catch (error) {
+            await refreshConfig().catch(() => {});
+            const message = error instanceof Error ? error.message : String(error);
+            if (action === 'download') toast.error(tSettings('providers.codexToast.downloadFailed', { message }));
+            if (action === 'login') toast.error(tSettings('providers.codexToast.loginFailed', { message }));
+            if (action === 'logout') toast.error(tSettings('providers.codexToast.logoutFailed', { message }));
+        } finally {
+            setManagedCodexBusy(null);
+        }
+    }, [managedCodexBusy, refreshConfig, tSettings, toast]);
+
+    const startManagedCodexLogin = useCallback(async () => {
+        if (!isTauriEnvironment()) {
+            toast.error(tSettings('providers.codexToast.unsupportedLogin'));
+            return;
+        }
+        if (managedCodexBusyRef.current === 'download') return;
+        setManagedCodexLoginDialogOpen(true);
+        setManagedCodexBusy('login');
+        try {
+            const state = normalizeManagedCodexLoginState(
+                await invoke('cmd_managed_codex_login_start'),
+            );
+            setManagedCodexLoginState(state);
+            await refreshConfig();
+            if (state.status === 'succeeded') {
+                toast.success(tSettings('providers.codexToast.loginSucceeded'));
+            }
+        } catch (error) {
+            await refreshConfig().catch(() => {});
+            const message = error instanceof Error ? error.message : String(error);
+            setManagedCodexLoginState({
+                status: 'error',
+                loginUrl: null,
+                startedAt: null,
+                error: message,
+            });
+            toast.error(tSettings('providers.codexToast.loginFailed', { message }));
+        } finally {
+            setManagedCodexBusy(prev => prev === 'login' ? null : prev);
+        }
+    }, [refreshConfig, tSettings, toast]);
+
+    const refreshManagedCodexLoginState = useCallback(async () => {
+        if (!isTauriEnvironment()) return;
+        try {
+            const state = normalizeManagedCodexLoginState(
+                await invoke('cmd_managed_codex_login_status'),
+            );
+            setManagedCodexLoginState(state);
+            if (state.status === 'succeeded' || state.status === 'cancelled' || state.status === 'error') {
+                await refreshConfig();
+            }
+        } catch (error) {
+            console.warn('[Settings] Managed Codex login status failed:', error);
+        }
+    }, [refreshConfig]);
+
+    useEffect(() => {
+        if (!managedCodexLoginDialogOpen) return;
+        if (!['starting', 'waiting'].includes(managedCodexLoginState.status)) return;
+        const interval = window.setInterval(() => {
+            void refreshManagedCodexLoginState();
+        }, 1000);
+        return () => window.clearInterval(interval);
+    }, [
+        managedCodexLoginDialogOpen,
+        managedCodexLoginState.status,
+        refreshManagedCodexLoginState,
+    ]);
+
+    const copyManagedCodexLoginUrl = useCallback(async () => {
+        const url = managedCodexLoginState.loginUrl;
+        if (!url) return;
+        try {
+            await navigator.clipboard.writeText(url);
+            toast.success(tSettings('providers.codexToast.urlCopied'));
+        } catch (error) {
+            console.warn('[Settings] Failed to copy Managed Codex login URL:', error);
+            toast.error(tSettings('providers.codexToast.urlCopyFailed'));
+        }
+    }, [managedCodexLoginState.loginUrl, tSettings, toast]);
+
+    const startSubscriptionLogin = useCallback(async () => {
+        if (subscriptionLoginBusy) return;
+        subscriptionLoginSuccessHandledRef.current = false;
+        subscriptionFallbackProbeInFlightRef.current = false;
+        subscriptionFallbackProbeLastAtRef.current = 0;
+        setSubscriptionLoginDialogOpen(true);
+        setSubscriptionLoginBusy(true);
+        setSubscriptionLoginState({
+            ...EMPTY_SUBSCRIPTION_LOGIN_STATE,
+            status: 'starting',
+        });
+        try {
+            const state = normalizeSubscriptionLoginState(
+                await apiPostJson('/api/subscription/login/start', {}),
+            );
+            setSubscriptionLoginState(state);
+            const urlToOpen = state.automaticUrl ?? state.loginUrl ?? state.manualUrl;
+            if (urlToOpen) {
+                const { openExternal } = await import('@/utils/openExternal');
+                await openExternal(urlToOpen);
+            }
+            if (state.status === 'succeeded') {
+                await handleSubscriptionLoginSucceeded();
+            }
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            setSubscriptionLoginState({
+                status: 'error',
+                loginUrl: null,
+                manualUrl: null,
+                automaticUrl: null,
+                startedAt: null,
+                error: message,
+            });
+            toast.error(tSettings('providers.codexToast.claudeLoginFailed', { message }));
+        } finally {
+            setSubscriptionLoginBusy(false);
+        }
+    }, [handleSubscriptionLoginSucceeded, subscriptionLoginBusy, tSettings, toast]);
+
+    const refreshSubscriptionLoginState = useCallback(async () => {
+        try {
+            const state = normalizeSubscriptionLoginState(
+                await apiGetJson('/api/subscription/login/status'),
+            );
+            setSubscriptionLoginState(state);
+            if (state.status === 'succeeded') {
+                await handleSubscriptionLoginSucceeded();
+            } else if (isSubscriptionLoginActiveStatus(state.status)) {
+                void probeSubscriptionFallbackLogin();
+            }
+        } catch (error) {
+            console.warn('[Settings] Subscription login status failed:', error);
+        }
+    }, [handleSubscriptionLoginSucceeded, probeSubscriptionFallbackLogin]);
+
+    useEffect(() => {
+        if (!subscriptionLoginDialogOpen) return;
+        if (!['starting', 'waiting'].includes(subscriptionLoginState.status)) return;
+        const interval = window.setInterval(() => {
+            void refreshSubscriptionLoginState();
+        }, 1000);
+        return () => window.clearInterval(interval);
+    }, [
+        refreshSubscriptionLoginState,
+        subscriptionLoginDialogOpen,
+        subscriptionLoginState.status,
+    ]);
+
+    const copySubscriptionLoginUrl = useCallback(async () => {
+        const url = subscriptionLoginState.manualUrl
+            ?? subscriptionLoginState.loginUrl
+            ?? subscriptionLoginState.automaticUrl;
+        if (!url) return;
+        try {
+            await navigator.clipboard.writeText(url);
+            toast.success(tSettings('providers.codexToast.urlCopied'));
+        } catch (error) {
+            console.warn('[Settings] Failed to copy subscription login URL:', error);
+            toast.error(tSettings('providers.codexToast.urlCopyFailed'));
+        }
+    }, [
+        subscriptionLoginState.automaticUrl,
+        subscriptionLoginState.loginUrl,
+        subscriptionLoginState.manualUrl,
+        tSettings,
+        toast,
+    ]);
 
     const saveProviderOrderSettings = useCallback(async () => {
         const providerIds = allProviders.map(provider => provider.id);
@@ -2251,12 +2818,12 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
             await updateConfig(updates);
             await rebuildAndPersistAvailableProviders();
             setShowProviderOrderDialog(false);
-            toast.success('供应商启用和排序已保存');
+            toast.success(tSettings('providers.toast.providerOrderSaved'));
         } catch (error) {
             console.error('[Settings] Failed to save provider order settings:', error);
-            toast.error('保存供应商启用和排序失败');
+            toast.error(tSettings('providers.toast.providerOrderSaveFailed'));
         }
-    }, [allProviders, config.defaultProviderId, disabledProviderDraft, providerOrderDraft, toast, updateConfig]);
+    }, [allProviders, config.defaultProviderId, disabledProviderDraft, providerOrderDraft, tSettings, toast, updateConfig]);
 
     // Refs for API Key expiry check (P2 fix - avoid stale closures)
     const allProvidersRef = useRef(allProviders);
@@ -2311,6 +2878,607 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
         return () => document.removeEventListener('mousedown', handleClick);
     }, [errorDetailOpenId, verifyError]);
 
+    const renderSubscriptionProviderContent = () => {
+        const isLoginActive = subscriptionLoginBusy
+            || subscriptionLoginState.status === 'starting'
+            || subscriptionLoginState.status === 'waiting';
+        const isLoggedIn = subscriptionStatus?.available && subscriptionStatus.verifyStatus === 'valid';
+        const isVerifyInvalid = subscriptionStatus?.verifyStatus === 'invalid';
+        const needsLogin = !subscriptionStatus?.available || isVerifyInvalid;
+        const accountLabel = subscriptionStatus?.info?.email ?? tSettings('providers.subscription.localCredential');
+        const statusText = isLoginActive
+            ? tSettings('providers.subscription.loginInProgress')
+            : isVerifyInvalid
+                ? tSettings('providers.subscription.verifyFailed')
+                : subscriptionStatus?.available
+                    ? accountLabel
+                    : tSettings('providers.subscription.notLoggedIn');
+
+        return (
+            <div className="space-y-3">
+                <p className="text-sm text-[var(--ink-muted)]">
+                    {tSettings('providers.subscription.description')}
+                </p>
+                <div className="flex items-center justify-between gap-3">
+                    <div className="flex min-w-0 flex-wrap items-center gap-2 text-xs">
+                        {isLoggedIn ? (
+                            <>
+                                <span className="truncate font-mono text-xs text-[var(--ink-muted)]">
+                                    {accountLabel}
+                                </span>
+                                <span className="shrink-0 rounded bg-[var(--success-bg)] px-1.5 py-0.5 text-xs font-medium text-[var(--success)]">
+                                    {tSettings('providers.verified')}
+                                </span>
+                            </>
+                        ) : (
+                            <>
+                                <span className="truncate text-xs text-[var(--ink-muted)]">
+                                    {statusText}
+                                </span>
+                                {isLoginActive && (
+                                    <span className="shrink-0 rounded bg-[var(--info-bg)] px-1.5 py-0.5 text-xs font-medium text-[var(--info)]">
+                                        {tSettings('providers.loggingIn')}
+                                    </span>
+                                )}
+                                {subscriptionStatus?.verifyStatus === 'loading' && !isLoginActive && (
+                                    <span className="flex shrink-0 items-center gap-1 rounded bg-[var(--info-bg)] px-1.5 py-0.5 text-xs font-medium text-[var(--info)]">
+                                        <Loader2 className="h-3 w-3 animate-spin" />
+                                        {tSettings('providers.verifying')}
+                                    </span>
+                                )}
+                                {isVerifyInvalid && (
+                                    <span className="shrink-0 rounded bg-[var(--error-bg)] px-1.5 py-0.5 text-xs font-medium text-[var(--error)]">
+                                        {tSettings('providers.verifyFailed')}
+                                    </span>
+                                )}
+                            </>
+                        )}
+                    </div>
+                    <div className="flex shrink-0 items-center gap-2">
+                        {subscriptionStatus?.available && (
+                            <button
+                                type="button"
+                                onClick={handleReVerifySubscription}
+                                disabled={subscriptionVerifying || isLoginActive}
+                                className="rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] disabled:cursor-wait disabled:opacity-50"
+                                title={tSettings('providers.reverify')}
+                            >
+                                <RefreshCw className={`h-4 w-4 ${subscriptionVerifying ? 'animate-spin' : ''}`} />
+                            </button>
+                        )}
+                        {needsLogin && (
+                            <button
+                                type="button"
+                                disabled={isLoginActive || subscriptionVerifying}
+                                onClick={() => void startSubscriptionLogin()}
+                                className="flex shrink-0 items-center gap-1.5 rounded-lg bg-[var(--button-primary-bg)] px-3 py-1.5 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:cursor-wait disabled:opacity-60"
+                            >
+                                {isLoginActive
+                                    ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                    : <Link className="h-3.5 w-3.5" />}
+                                {tSettings('providers.login')}
+                            </button>
+                        )}
+                    </div>
+                </div>
+                {isVerifyInvalid && subscriptionStatus?.verifyError && (
+                    <p className="break-words text-xs text-[var(--error)]">
+                        {subscriptionStatus.verifyError}
+                    </p>
+                )}
+                {subscriptionLoginState.status === 'error' && subscriptionLoginState.error && (
+                    <p className="break-words text-xs text-[var(--error)]">
+                        {subscriptionLoginState.error}
+                    </p>
+                )}
+            </div>
+        );
+    };
+
+    const renderManagedCodexProviderCard = (provider: Provider) => {
+        const install = config.managedCodexRuntimeInstall;
+        const auth = config.managedCodexAuth;
+        const installStatus = install?.status;
+        const authStatus = auth?.status;
+        const isDownloadingRuntime = managedCodexBusy === 'download'
+            || installStatus === 'downloading'
+            || managedCodexReadiness.reason === 'runtime-downloading';
+        const isCommandBusy = managedCodexBusy !== null;
+        const busy = isCommandBusy || isDownloadingRuntime;
+        const needsDownload = managedCodexReadiness.reason === 'runtime-not-installed'
+            || managedCodexReadiness.reason === 'runtime-error'
+            || managedCodexReadiness.reason === 'runtime-update-required';
+        const showDownloadRow = needsDownload || isDownloadingRuntime;
+        const needsLogin = managedCodexReadiness.reason === 'auth-missing'
+            || managedCodexReadiness.reason === 'auth-invalid'
+            || managedCodexReadiness.reason === 'auth-error'
+            || managedCodexReadiness.reason === 'auth-logging-in';
+        const rawProgress = install?.progressPercent;
+        const progressPercent = typeof rawProgress === 'number' && Number.isFinite(rawProgress)
+            ? Math.max(0, Math.min(100, Math.round(rawProgress)))
+            : null;
+        const downloadButtonLabel = isDownloadingRuntime
+            ? (progressPercent == null ? tSettings('providers.managedCodex.downloading') : `${progressPercent}%`)
+            : installStatus === 'update-required' ? tSettings('providers.managedCodex.update') : tSettings('providers.managedCodex.download');
+        const modelLine = provider.models
+            .map(model => model.modelName || model.model)
+            .join(', ');
+        const loginInProgress = managedCodexBusy === 'login' || authStatus === 'logging-in';
+        const isLoggedIn = authStatus === 'valid';
+        const accountLabel = auth?.accountEmail ?? tSettings('providers.managedCodex.account');
+        const statusText = loginInProgress
+            ? tSettings('providers.managedCodex.loginInProgress')
+            : authStatus === 'error' || authStatus === 'invalid'
+                ? tSettings('providers.managedCodex.verifyFailed')
+                : tSettings('providers.managedCodex.notLoggedIn');
+        const runtimeError = install?.error && (managedCodexReadiness.reason === 'runtime-error'
+            || managedCodexReadiness.reason === 'runtime-update-required')
+            ? install.error
+            : null;
+
+        return (
+            <div
+                key={provider.id}
+                className="min-w-0 rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5"
+            >
+                <div className="mb-4 flex min-w-0 items-start justify-between gap-3">
+                    <div className="min-w-0">
+                        <div className="flex min-w-0 items-center gap-2">
+                            <h3 className="truncate text-lg font-semibold text-[var(--ink)]">{provider.name}</h3>
+                            <span className="shrink-0 rounded bg-[var(--paper-inset)] px-1.5 py-0.5 text-xs font-medium text-[var(--ink-muted)]">
+                                {tSettings('providers.official')}
+                            </span>
+                        </div>
+                        <p className="mt-1 truncate text-xs text-[var(--ink-muted)]">
+                            {modelLine}
+                        </p>
+                    </div>
+                    {!showDownloadRow && (
+                        <button
+                            type="button"
+                            onClick={() => setManagedCodexDetailsOpen(true)}
+                            className="shrink-0 rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+                            title={tSettings('providers.managedCodex.settingsTitle')}
+                        >
+                            <Settings2 className="h-4 w-4" />
+                        </button>
+                    )}
+                </div>
+
+                {showDownloadRow ? (
+                    <div className="space-y-2">
+                        <div className="flex items-center justify-between gap-3 rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2.5">
+                            <div className="flex min-w-0 items-center gap-2">
+                                <Download className="h-4 w-4 shrink-0 text-[var(--accent)]" />
+                                <span className="truncate text-sm font-semibold text-[var(--ink)]">
+                                    {tSettings('providers.managedCodex.downloadRuntime')}
+                                </span>
+                            </div>
+                            <button
+                                type="button"
+                                disabled={busy}
+                                onClick={() => runManagedCodexCommand('download', 'cmd_managed_codex_download')}
+                                className="flex min-w-16 items-center justify-center gap-1.5 rounded-lg bg-[var(--button-primary-bg)] px-3 py-1.5 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:cursor-wait disabled:opacity-70"
+                            >
+                                {isDownloadingRuntime && progressPercent == null && (
+                                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                )}
+                                {downloadButtonLabel}
+                            </button>
+                        </div>
+                        {runtimeError && (
+                            <p className="text-xs text-[var(--error)]">{runtimeError}</p>
+                        )}
+                    </div>
+                ) : (
+                    <div className="space-y-3">
+                        <p className="text-sm text-[var(--ink-muted)]">
+                            {tSettings('providers.managedCodex.description')}
+                        </p>
+                        <div className="flex items-center justify-between gap-3">
+                            <div className="flex min-w-0 flex-wrap items-center gap-2 text-xs">
+                                {isLoggedIn ? (
+                                    <>
+                                        <span className="truncate font-mono text-xs text-[var(--ink-muted)]">
+                                            {accountLabel}
+                                        </span>
+                                        <span className="shrink-0 rounded bg-[var(--success-bg)] px-1.5 py-0.5 text-xs font-medium text-[var(--success)]">
+                                            {tSettings('providers.verified')}
+                                        </span>
+                                    </>
+                                ) : (
+                                    <>
+                                        <span className="truncate text-xs text-[var(--ink-muted)]">
+                                            {statusText}
+                                        </span>
+                                        {loginInProgress && (
+                                            <span className="shrink-0 rounded bg-[var(--info-bg)] px-1.5 py-0.5 text-xs font-medium text-[var(--info)]">
+                                                {tSettings('providers.loggingIn')}
+                                            </span>
+                                        )}
+                                        {(authStatus === 'error' || authStatus === 'invalid') && (
+                                            <span className="shrink-0 rounded bg-[var(--error-bg)] px-1.5 py-0.5 text-xs font-medium text-[var(--error)]">
+                                                {tSettings('providers.verifyFailed')}
+                                            </span>
+                                        )}
+                                    </>
+                                )}
+                            </div>
+                            {needsLogin && (
+                                <button
+                                    type="button"
+                                    disabled={busy}
+                                    onClick={() => void startManagedCodexLogin()}
+                                    className="flex shrink-0 items-center gap-1.5 rounded-lg bg-[var(--button-primary-bg)] px-3 py-1.5 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:cursor-wait disabled:opacity-60"
+                                >
+                                    {loginInProgress
+                                        ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                        : <Link className="h-3.5 w-3.5" />}
+                                    {tSettings('providers.login')}
+                                </button>
+                            )}
+                        </div>
+                    </div>
+                )}
+            </div>
+        );
+    };
+
+    const renderManagedCodexDetailsDialog = () => {
+        if (!managedCodexDetailsOpen) return null;
+        const install = config.managedCodexRuntimeInstall;
+        const auth = config.managedCodexAuth;
+        const runtimeVersion = install?.installedVersion ?? managedCodexReadiness.requiredVersion;
+        const authStatus = auth?.status;
+        const isLoggedIn = authStatus === 'valid';
+        const loginInProgress = managedCodexBusy === 'login' || authStatus === 'logging-in';
+        const accountLabel = auth?.accountEmail ?? tSettings('providers.managedCodex.account');
+        const authBadgeClass = isLoggedIn
+            ? 'bg-[var(--success-bg)] text-[var(--success)]'
+            : authStatus === 'error' || authStatus === 'invalid'
+                ? 'bg-[var(--error-bg)] text-[var(--error)]'
+                : loginInProgress
+                    ? 'bg-[var(--info-bg)] text-[var(--info)]'
+                    : 'bg-[var(--paper-inset)] text-[var(--ink-muted)]';
+        const authBadgeLabel = isLoggedIn
+            ? tSettings('providers.managedCodex.loggedIn')
+            : loginInProgress
+                ? tSettings('providers.loggingIn')
+                : authStatus === 'error'
+                    ? tSettings('providers.managedCodex.errorBadge')
+                    : tSettings('providers.managedCodex.notLoggedInBadge');
+        const authError = auth?.error && (managedCodexReadiness.reason === 'auth-error'
+            || managedCodexReadiness.reason === 'auth-invalid')
+            ? auth.error
+            : null;
+
+        return (
+            <OverlayBackdrop onClose={() => setManagedCodexDetailsOpen(false)} className="z-50 overflow-y-auto py-8">
+                <div className="mx-4 flex max-h-[90vh] w-full max-w-lg flex-col rounded-2xl bg-[var(--paper-elevated)] shadow-xl">
+                    <div className="flex shrink-0 items-start justify-between gap-4 border-b border-[var(--line-subtle)] px-6 py-5">
+                        <div className="min-w-0">
+                            <h3 className="text-lg font-semibold text-[var(--ink)]">{tSettings('providers.managedCodex.settingsTitle')}</h3>
+                            <p className="mt-1 text-sm text-[var(--ink-muted)]">{tSettings('providers.managedCodex.settingsDescription')}</p>
+                        </div>
+                        <button
+                            type="button"
+                            onClick={() => setManagedCodexDetailsOpen(false)}
+                            className="rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+                        >
+                            <X className="h-4 w-4" />
+                        </button>
+                    </div>
+
+                    <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-6 py-5">
+                        <section>
+                            <div className="flex items-start justify-between gap-4">
+                                <div className="min-w-0">
+                                    <p className="text-sm font-medium text-[var(--ink)]">{tSettings('providers.managedCodex.runtime')}</p>
+                                    <p className="mt-1 text-sm font-semibold text-[var(--ink)]">v{runtimeVersion}</p>
+                                    <p className="mt-1 truncate text-xs text-[var(--ink-muted)]">
+                                        {install?.platform ?? tSettings('providers.managedCodex.currentPlatform')}
+                                    </p>
+                                </div>
+                                <button
+                                    type="button"
+                                    disabled={managedCodexBusy === 'status'}
+                                    onClick={() => void refreshManagedCodexStatus()}
+                                    className="flex shrink-0 items-center gap-1.5 rounded-lg border border-[var(--line)] px-3 py-1.5 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)] disabled:cursor-wait disabled:opacity-60"
+                                >
+                                    <RefreshCw className={`h-3.5 w-3.5 ${managedCodexBusy === 'status' ? 'animate-spin' : ''}`} />
+                                    {tSettings('providers.managedCodex.refresh')}
+                                </button>
+                            </div>
+                        </section>
+
+                        <section className="border-t border-[var(--line-subtle)] pt-5">
+                            <div className="flex items-start justify-between gap-4">
+                                <div className="min-w-0">
+                                    <div className="flex items-center gap-2">
+                                        <p className="text-sm font-medium text-[var(--ink)]">{tSettings('providers.managedCodex.loginStatus')}</p>
+                                        <span className={`rounded px-1.5 py-0.5 text-xs font-medium ${authBadgeClass}`}>
+                                            {authBadgeLabel}
+                                        </span>
+                                    </div>
+                                    <p className="mt-1 truncate text-sm text-[var(--ink-muted)]">
+                                        {isLoggedIn ? accountLabel : tSettings('providers.managedCodex.account')}
+                                    </p>
+                                </div>
+                                {isLoggedIn ? (
+                                    <button
+                                        type="button"
+                                        disabled={managedCodexBusy === 'logout'}
+                                        onClick={() => runManagedCodexCommand('logout', 'cmd_managed_codex_logout')}
+                                        className="flex shrink-0 items-center gap-1.5 rounded-lg border border-[var(--line)] px-3 py-1.5 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)] disabled:cursor-wait disabled:opacity-60"
+                                    >
+                                        {managedCodexBusy === 'logout'
+                                            ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                            : <Unlink className="h-3.5 w-3.5" />}
+                                        {tSettings('providers.managedCodex.logout')}
+                                    </button>
+                                ) : (
+                                    <button
+                                        type="button"
+                                        disabled={managedCodexBusy === 'login'}
+                                        onClick={() => void startManagedCodexLogin()}
+                                        className="flex shrink-0 items-center gap-1.5 rounded-lg bg-[var(--button-primary-bg)] px-3 py-1.5 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:cursor-wait disabled:opacity-60"
+                                    >
+                                        {managedCodexBusy === 'login'
+                                            ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                            : <Link className="h-3.5 w-3.5" />}
+                                        {tSettings('providers.login')}
+                                    </button>
+                                )}
+                            </div>
+                            {authError && (
+                                <p className="mt-3 break-words text-xs text-[var(--error)]">{authError}</p>
+                            )}
+                        </section>
+                    </div>
+                </div>
+            </OverlayBackdrop>
+        );
+    };
+
+    const renderManagedCodexLoginDialog = () => {
+        if (!managedCodexLoginDialogOpen) return null;
+        const state = managedCodexLoginState;
+        const isActiveLogin = state.status === 'starting' || state.status === 'waiting';
+        const statusLabel = state.status === 'succeeded'
+            ? tSettings('providers.loginDialog.statusDone')
+            : state.status === 'cancelled'
+                ? tSettings('providers.loginDialog.statusCancelled')
+                : state.status === 'error'
+                    ? tSettings('providers.loginDialog.statusError')
+                    : tSettings('providers.loginDialog.statusWaiting');
+        const statusClass = state.status === 'succeeded'
+            ? 'bg-[var(--success-bg)] text-[var(--success)]'
+            : state.status === 'cancelled' || state.status === 'error'
+                ? 'bg-[var(--error-bg)] text-[var(--error)]'
+                : 'bg-[var(--info-bg)] text-[var(--info)]';
+
+        return (
+            <OverlayBackdrop onClose={() => setManagedCodexLoginDialogOpen(false)} className="z-50 overflow-y-auto px-4 py-8">
+                <div className="w-full max-w-xl rounded-2xl bg-[var(--paper-elevated)] shadow-xl">
+                    <div className="flex items-start justify-between gap-4 border-b border-[var(--line-subtle)] px-6 py-5">
+                        <div className="min-w-0">
+                            <div className="flex items-center gap-2">
+                                <h3 className="text-lg font-semibold text-[var(--ink)]">{tSettings('providers.loginDialog.codexTitle')}</h3>
+                                <span className={`rounded px-1.5 py-0.5 text-xs font-medium ${statusClass}`}>
+                                    {statusLabel}
+                                </span>
+                            </div>
+                            <p className="mt-1 text-sm text-[var(--ink-muted)]">
+                                {tSettings('providers.loginDialog.codexDescription')}
+                            </p>
+                        </div>
+                        <button
+                            type="button"
+                            onClick={() => setManagedCodexLoginDialogOpen(false)}
+                            className="rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+                        >
+                            <X className="h-4 w-4" />
+                        </button>
+                    </div>
+
+                    <div className="space-y-5 px-6 py-5">
+                        <section>
+                            <div className="flex items-center gap-2">
+                                {isActiveLogin ? (
+                                    <Loader2 className="h-4 w-4 animate-spin text-[var(--info)]" />
+                                ) : state.status === 'succeeded' ? (
+                                    <Check className="h-4 w-4 text-[var(--success)]" />
+                                ) : (
+                                    <AlertCircle className="h-4 w-4 text-[var(--error)]" />
+                                )}
+                                <p className="text-sm font-medium text-[var(--ink)]">{tSettings('providers.loginDialog.autoOpenBrowser')}</p>
+                            </div>
+                            <p className="mt-2 text-sm leading-relaxed text-[var(--ink-muted)]">
+                                {tSettings('providers.loginDialog.codexAutoOpenDescription')}
+                            </p>
+                            <div className="mt-3 flex min-w-0 items-center gap-2 rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2">
+                                <p className="min-w-0 flex-1 truncate font-mono text-xs text-[var(--ink-muted)]">
+                                    {state.loginUrl ?? tSettings('providers.loginDialog.waitingCodexUrl')}
+                                </p>
+                                <button
+                                    type="button"
+                                    disabled={!state.loginUrl}
+                                    onClick={() => void copyManagedCodexLoginUrl()}
+                                    className="flex shrink-0 items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)] disabled:cursor-not-allowed disabled:opacity-50"
+                                >
+                                    <Copy className="h-3.5 w-3.5" />
+                                    {tSettings('providers.loginDialog.copy')}
+                                </button>
+                            </div>
+                        </section>
+
+                        <section className="border-t border-[var(--line-subtle)] pt-5">
+                            <p className="text-sm font-medium text-[var(--ink)]">{tSettings('providers.loginDialog.remoteTitle')}</p>
+                            <p className="mt-2 text-sm leading-relaxed text-[var(--ink-muted)]">
+                                {tSettings('providers.loginDialog.codexRemoteDescription')}
+                                <code className="mx-1 rounded bg-[var(--paper-inset)] px-1.5 py-0.5 font-mono text-xs text-[var(--ink)]">
+                                    codex login --device-auth
+                                </code>
+                            </p>
+                        </section>
+
+                        {state.status === 'succeeded' && (
+                            <p className="rounded-lg bg-[var(--success-bg)] px-3 py-2 text-sm text-[var(--success)]">
+                                {tSettings('providers.loginDialog.completed')}
+                            </p>
+                        )}
+                        {(state.status === 'cancelled' || state.status === 'error') && (
+                            <p className="break-words rounded-lg bg-[var(--error-bg)] px-3 py-2 text-sm text-[var(--error)]">
+                                {state.error ?? tSettings('providers.loginDialog.notCompleted')}
+                            </p>
+                        )}
+                    </div>
+
+                    <div className="flex items-center justify-end gap-3 border-t border-[var(--line-subtle)] px-6 py-4">
+                        <button
+                            type="button"
+                            onClick={() => setManagedCodexLoginDialogOpen(false)}
+                            className="rounded-lg border border-[var(--line)] px-4 py-2 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)]"
+                        >
+                            {tSettings('providers.loginDialog.close')}
+                        </button>
+                        {(state.status === 'cancelled' || state.status === 'error') && (
+                            <button
+                                type="button"
+                                disabled={managedCodexBusy === 'login'}
+                                onClick={() => void startManagedCodexLogin()}
+                                className="flex items-center gap-1.5 rounded-lg bg-[var(--button-primary-bg)] px-4 py-2 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:cursor-wait disabled:opacity-60"
+                            >
+                                {managedCodexBusy === 'login' && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                                {tSettings('providers.loginDialog.retryLogin')}
+                            </button>
+                        )}
+                    </div>
+                </div>
+            </OverlayBackdrop>
+        );
+    };
+
+    const renderSubscriptionLoginDialog = () => {
+        if (!subscriptionLoginDialogOpen) return null;
+        const state = subscriptionLoginState;
+        const isActiveLogin = state.status === 'starting' || state.status === 'waiting';
+        const displayUrl = state.manualUrl ?? state.loginUrl ?? state.automaticUrl;
+        const statusLabel = state.status === 'succeeded'
+            ? tSettings('providers.loginDialog.statusDone')
+            : state.status === 'cancelled'
+                ? tSettings('providers.loginDialog.statusCancelled')
+                : state.status === 'error'
+                    ? tSettings('providers.loginDialog.statusError')
+                    : tSettings('providers.loginDialog.statusWaiting');
+        const statusClass = state.status === 'succeeded'
+            ? 'bg-[var(--success-bg)] text-[var(--success)]'
+            : state.status === 'cancelled' || state.status === 'error'
+                ? 'bg-[var(--error-bg)] text-[var(--error)]'
+                : 'bg-[var(--info-bg)] text-[var(--info)]';
+
+        return (
+            <OverlayBackdrop onClose={closeSubscriptionLoginDialog} className="z-50 overflow-y-auto px-4 py-8">
+                <div className="w-full max-w-xl rounded-2xl bg-[var(--paper-elevated)] shadow-xl">
+                    <div className="flex items-start justify-between gap-4 border-b border-[var(--line-subtle)] px-6 py-5">
+                        <div className="min-w-0">
+                            <div className="flex items-center gap-2">
+                                <h3 className="text-lg font-semibold text-[var(--ink)]">{tSettings('providers.loginDialog.claudeTitle')}</h3>
+                                <span className={`rounded px-1.5 py-0.5 text-xs font-medium ${statusClass}`}>
+                                    {statusLabel}
+                                </span>
+                            </div>
+                            <p className="mt-1 text-sm text-[var(--ink-muted)]">
+                                {tSettings('providers.loginDialog.claudeDescription')}
+                            </p>
+                        </div>
+                        <button
+                            type="button"
+                            onClick={closeSubscriptionLoginDialog}
+                            className="rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+                        >
+                            <X className="h-4 w-4" />
+                        </button>
+                    </div>
+
+                    <div className="space-y-5 px-6 py-5">
+                        <section>
+                            <div className="flex items-center gap-2">
+                                {isActiveLogin ? (
+                                    <Loader2 className="h-4 w-4 animate-spin text-[var(--info)]" />
+                                ) : state.status === 'succeeded' ? (
+                                    <Check className="h-4 w-4 text-[var(--success)]" />
+                                ) : (
+                                    <AlertCircle className="h-4 w-4 text-[var(--error)]" />
+                                )}
+                                <p className="text-sm font-medium text-[var(--ink)]">{tSettings('providers.loginDialog.autoOpenBrowser')}</p>
+                            </div>
+                            <p className="mt-2 text-sm leading-relaxed text-[var(--ink-muted)]">
+                                {tSettings('providers.loginDialog.claudeAutoOpenDescription')}
+                            </p>
+                            <div className="mt-3 flex min-w-0 items-center gap-2 rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2">
+                                <p className="min-w-0 flex-1 truncate font-mono text-xs text-[var(--ink-muted)]">
+                                    {displayUrl ?? tSettings('providers.loginDialog.waitingClaudeUrl')}
+                                </p>
+                                <button
+                                    type="button"
+                                    disabled={!displayUrl}
+                                    onClick={() => void copySubscriptionLoginUrl()}
+                                    className="flex shrink-0 items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)] disabled:cursor-not-allowed disabled:opacity-50"
+                                >
+                                    <Copy className="h-3.5 w-3.5" />
+                                    {tSettings('providers.loginDialog.copy')}
+                                </button>
+                            </div>
+                        </section>
+
+                        <section className="border-t border-[var(--line-subtle)] pt-5">
+                            <p className="text-sm font-medium text-[var(--ink)]">{tSettings('providers.loginDialog.remoteTitle')}</p>
+                            <p className="mt-2 text-sm leading-relaxed text-[var(--ink-muted)]">
+                                {tSettings('providers.loginDialog.claudeRemoteDescription')}
+                                <code className="mx-1 rounded bg-[var(--paper-inset)] px-1.5 py-0.5 font-mono text-xs text-[var(--ink)]">
+                                    claude auth login
+                                </code>
+                            </p>
+                        </section>
+
+                        {state.status === 'succeeded' && (
+                            <p className="rounded-lg bg-[var(--success-bg)] px-3 py-2 text-sm text-[var(--success)]">
+                                {tSettings('providers.loginDialog.completed')}
+                            </p>
+                        )}
+                        {(state.status === 'cancelled' || state.status === 'error') && (
+                            <p className="break-words rounded-lg bg-[var(--error-bg)] px-3 py-2 text-sm text-[var(--error)]">
+                                {state.error ?? tSettings('providers.loginDialog.notCompleted')}
+                            </p>
+                        )}
+                    </div>
+
+                    <div className="flex items-center justify-end gap-3 border-t border-[var(--line-subtle)] px-6 py-4">
+                        <button
+                            type="button"
+                            onClick={closeSubscriptionLoginDialog}
+                            className="rounded-lg border border-[var(--line)] px-4 py-2 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)]"
+                        >
+                            {tSettings('providers.loginDialog.close')}
+                        </button>
+                        {(state.status === 'cancelled' || state.status === 'error') && (
+                            <button
+                                type="button"
+                                disabled={subscriptionLoginBusy}
+                                onClick={() => void startSubscriptionLogin()}
+                                className="flex items-center gap-1.5 rounded-lg bg-[var(--button-primary-bg)] px-4 py-2 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:cursor-wait disabled:opacity-60"
+                            >
+                                {subscriptionLoginBusy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                                {tSettings('providers.loginDialog.retryLogin')}
+                            </button>
+                        )}
+                    </div>
+                </div>
+            </OverlayBackdrop>
+        );
+    };
+
     // Render verification status indicator (icon row)
     const renderVerifyStatus = (provider: Provider) => {
         const isLoading = verifyLoading[provider.id];
@@ -2340,7 +3508,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                     </div>
                 )}
                 {!isLoading && !verifyStatus && (
-                    <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-[var(--warning-bg)]" title="待验证">
+                    <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-[var(--warning-bg)]" title={tSettings('providers.verifyPending')}>
                         <AlertCircle className="h-4 w-4 text-[var(--warning)]" />
                     </div>
                 )}
@@ -2351,7 +3519,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                         onClick={() => verifyProvider(provider, apiKeys[provider.id])}
                         disabled={isLoading}
                         className="flex h-10 w-10 items-center justify-center rounded-lg text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] disabled:opacity-50"
-                        title="重新验证"
+                        title={tSettings('providers.reverify')}
                     >
                         <RefreshCw className={`h-4 w-4 ${isLoading ? 'animate-spin' : ''}`} />
                     </button>
@@ -2377,7 +3545,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                 onClick={navigateToProxySettings}
                                 className="mx-1 font-medium text-[var(--accent)] underline decoration-dotted underline-offset-2 transition-colors hover:text-[var(--accent-warm-hover)]"
                             >
-                                配置代理
+                                {tSettings('providers.verify.configureProxy')}
                             </button>
                             <span>。</span>
                         </>
@@ -2392,14 +3560,14 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                             )}
                             className="whitespace-nowrap text-[var(--ink-muted)] underline decoration-dotted transition-colors hover:text-[var(--ink)]"
                         >
-                            详情
+                            {tSettings('providers.verify.details')}
                         </button>
                         {errorDetailOpenId === provider.id && (
                             <div
                                 ref={errorDetailPopoverRef}
                                 className="absolute right-0 top-6 z-50 w-80 max-w-[90vw] rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] p-3 shadow-lg"
                             >
-                                <p className="mb-1 text-xs font-medium uppercase tracking-wider text-[var(--ink-muted)]">错误详情</p>
+                                <p className="mb-1 text-xs font-medium uppercase tracking-wider text-[var(--ink-muted)]">{tSettings('providers.verify.errorDetails')}</p>
                                 <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all font-mono text-xs text-[var(--ink-secondary)]">{errObj.detail}</pre>
                             </div>
                         )}
@@ -2479,36 +3647,38 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                             />
                         )}
                         <div className="mb-8 flex items-center justify-between">
-                            <h2 className="text-lg font-semibold text-[var(--ink)]">模型供应商</h2>
+                            <h2 className="text-lg font-semibold text-[var(--ink)]">{tSettings('providers.title')}</h2>
                             <div className="flex items-center gap-2">
                                 <button
                                     onClick={openProviderOrderDialog}
                                     className="flex items-center gap-1.5 rounded-lg border border-[var(--line)] px-3 py-1.5 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)]"
                                 >
                                     <SlidersHorizontal className="h-3.5 w-3.5" />
-                                    启用和排序
+                                    {tSettings('providers.enableAndSort')}
                                 </button>
                                 <button
                                     onClick={() => setShowCustomForm(true)}
                                     className="flex items-center gap-1.5 rounded-lg bg-[var(--button-primary-bg)] px-3 py-1.5 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)]"
                                 >
                                     <Plus className="h-3.5 w-3.5" />
-                                    添加供应商
+                                    {tSettings('providers.addProvider')}
                                 </button>
                             </div>
                         </div>
 
                         <p className="mb-6 text-sm text-[var(--ink-muted)]">
-                            配置 API 密钥以使用不同的模型供应商
+                            {tSettings('providers.description')}
                         </p>
 
                         {/* Provider list */}
                         <div className="grid grid-cols-2 gap-4">
                             {visibleProviders.map((provider) => (
-                                <div
-                                    key={provider.id}
-                                    className="min-w-0 rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5"
-                                >
+                                provider.id === CODEX_SUBSCRIPTION_PROVIDER_ID
+                                    ? renderManagedCodexProviderCard(provider)
+                                    : <div
+                                        key={provider.id}
+                                        className="min-w-0 rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5"
+                                    >
                                     {/* Provider header */}
                                     <div className="mb-4 flex items-start justify-between gap-2">
                                         <div className="min-w-0 flex-1">
@@ -2519,14 +3689,14 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                                 </span>
                                                 {provider.apiProtocol === 'openai' && (
                                                     <span className="shrink-0 rounded bg-[var(--paper-inset)] px-1.5 py-0.5 text-xs font-medium text-[var(--ink-muted)]">
-                                                        OpenAI 协议
+                                                        {tSettings('providers.openaiProtocol')}
                                                     </span>
                                                 )}
                                             </div>
                                             <p className="mt-1 truncate text-xs text-[var(--ink-muted)]">
                                                 {provider.models.length > 0
                                                     ? provider.models.map(m => m.modelName || m.model).join(', ')
-                                                    : '暂无模型'}
+                                                    : tSettings('providers.noModels')}
                                             </p>
                                         </div>
                                         <div className="flex shrink-0 items-center gap-1">
@@ -2535,13 +3705,13 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                                     href={provider.websiteUrl}
                                                     className="rounded-lg px-1.5 py-1.5 text-xs text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
                                                 >
-                                                    去官网
+                                                    {tSettings('providers.website')}
                                                 </ExternalLink>
                                             )}
                                             <button
                                                 onClick={() => openProviderManage(provider)}
                                                 className="rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
-                                                title="管理"
+                                                title={tSettings('providers.manage')}
                                             >
                                                 <Settings2 className="h-4 w-4" />
                                             </button>
@@ -2556,7 +3726,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                                     <KeyRound className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--ink-muted)]" />
                                                     <input
                                                         type="password"
-                                                        placeholder="输入 API Key"
+                                                        placeholder={tSettings('providers.apiKeyPlaceholder')}
                                                         value={apiKeys[provider.id] || ''}
                                                         onChange={(e) => handleSaveApiKey(provider, e.target.value)}
                                                         className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper)] py-2.5 pl-10 pr-4 text-sm text-[var(--ink)] placeholder-[var(--ink-muted)] transition-colors focus:border-[var(--focus-border)] focus:outline-none"
@@ -2570,83 +3740,14 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
 
                                     {/* Subscription type - show status */}
                                     {provider.type === 'subscription' && (
-                                        <div className="space-y-2">
-                                            <p className="text-sm text-[var(--ink-muted)]">
-                                                使用 Anthropic 订阅账户，无需 API Key
-                                            </p>
-                                            {/* Subscription status display */}
-                                            <div className="flex items-center gap-2 text-xs flex-wrap">
-                                                {subscriptionStatus?.available ? (
-                                                    <>
-                                                        {/* Email display first; Issue #203: info may be empty
-                                                            when the user just did `claude auth login` without
-                                                            ever opening the CLI REPL. */}
-                                                        <span className="text-[var(--ink-muted)] font-mono text-xs">
-                                                            {subscriptionStatus.info?.email ?? '已检测到本地 OAuth 凭证'}
-                                                        </span>
-                                                        {/* Verification status after email */}
-                                                        {subscriptionStatus.verifyStatus === 'loading' && (
-                                                            <div className="flex items-center gap-1.5 text-[var(--ink-muted)]">
-                                                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                                                                <span>验证中...</span>
-                                                            </div>
-                                                        )}
-                                                        {subscriptionStatus.verifyStatus === 'valid' && (
-                                                            <div className="flex items-center gap-1.5 text-[var(--success)]">
-                                                                <Check className="h-3.5 w-3.5" />
-                                                                <span className="font-medium">已验证</span>
-                                                                <button
-                                                                    type="button"
-                                                                    onClick={handleReVerifySubscription}
-                                                                    disabled={subscriptionVerifying}
-                                                                    className="ml-1 rounded p-0.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] disabled:opacity-50"
-                                                                    title="重新验证"
-                                                                >
-                                                                    <RefreshCw className={`h-3 w-3 ${subscriptionVerifying ? 'animate-spin' : ''}`} />
-                                                                </button>
-                                                            </div>
-                                                        )}
-                                                        {subscriptionStatus.verifyStatus === 'invalid' && (
-                                                            <div className="flex items-center gap-1.5 text-[var(--error)]">
-                                                                <AlertCircle className="h-3.5 w-3.5" />
-                                                                <span className="font-medium">验证失败</span>
-                                                                <button
-                                                                    type="button"
-                                                                    onClick={handleReVerifySubscription}
-                                                                    disabled={subscriptionVerifying}
-                                                                    className="ml-1 rounded p-0.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] disabled:opacity-50"
-                                                                    title="重新验证"
-                                                                >
-                                                                    <RefreshCw className={`h-3 w-3 ${subscriptionVerifying ? 'animate-spin' : ''}`} />
-                                                                </button>
-                                                            </div>
-                                                        )}
-                                                        {subscriptionStatus.verifyStatus === 'idle' && (
-                                                            <div className="flex items-center gap-1.5 text-[var(--ink-muted)]">
-                                                                <span>检测中...</span>
-                                                            </div>
-                                                        )}
-                                                        {/* Error message */}
-                                                        {subscriptionStatus.verifyStatus === 'invalid' && subscriptionStatus.verifyError && (
-                                                            <span className="text-[var(--error)] text-xs w-full mt-1">
-                                                                {subscriptionStatus.verifyError}
-                                                            </span>
-                                                        )}
-                                                    </>
-                                                ) : (
-                                                    <span className="text-[var(--ink-muted)]">
-                                                        未登录，请先使用 Claude Code CLI 登录 (claude --login)
-                                                    </span>
-                                                )}
-                                            </div>
-                                        </div>
+                                        renderSubscriptionProviderContent()
                                     )}
-                                </div>
+                                    </div>
                             ))}
                             {visibleProviders.length === 0 && (
                                 <div className="col-span-2 rounded-xl border border-dashed border-[var(--line)] bg-[var(--paper-elevated)] p-8 text-center">
-                                    <p className="text-sm font-medium text-[var(--ink)]">没有已启用的供应商</p>
-                                    <p className="mt-1 text-xs text-[var(--ink-muted)]">打开“启用和排序”重新启用供应商。</p>
+                                    <p className="text-sm font-medium text-[var(--ink)]">{tSettings('providers.noEnabledTitle')}</p>
+                                    <p className="mt-1 text-xs text-[var(--ink-muted)]">{tSettings('providers.noEnabledDescription')}</p>
                                 </div>
                             )}
                         </div>
@@ -2663,10 +3764,16 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                         mcpEnabledIds={mcpEnabledIds}
                         mcpEnabling={mcpEnabling}
                         mcpNeedsConfig={mcpNeedsConfig}
+                        officialTools={OFFICIAL_TOOLS}
+                        officialEnabledIds={officialEnabledIds}
+                        officialToolEnabling={officialToolEnabling}
+                        officialToolNeedsConfig={{ [IMAGE_UNDERSTANDING_TOOL_ID]: visionToolNeedsConfig }}
                         onAddMcp={() => { resetMcpForm(); setShowMcpForm(true); }}
                         onEditMcp={handleEditMcp}
                         onEditBuiltinMcp={handleEditBuiltinMcp}
                         onToggleMcp={handleMcpToggle}
+                        onEditOfficialTool={openOfficialToolSettings}
+                        onToggleOfficialTool={handleOfficialToolToggle}
                     />
                 )}
 
@@ -2676,26 +3783,26 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                     {activeSection === 'shortcuts' && (
                         <div className="space-y-6">
                             <div>
-                                <h2 className="text-lg font-semibold text-[var(--ink)]">快捷键</h2>
+                                <h2 className="text-lg font-semibold text-[var(--ink)]">{tSettings('shortcuts.title')}</h2>
                                 <p className="mt-1 text-xs text-[var(--ink-muted)]">
-                                    管理消息发送与全局唤起快捷键
+                                    {tSettings('shortcuts.description')}
                                 </p>
                             </div>
 
                             {/* 消息发送 — applies to every "AI conversation" composer:
                                 主对话框 / AI 小助理 / 问题反馈 (shared via utils/chatSendKey). */}
                             <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
-                                <h3 className="text-base font-medium text-[var(--ink)]">消息发送</h3>
+                                <h3 className="text-base font-medium text-[var(--ink)]">{tSettings('shortcuts.messageSend.title')}</h3>
                                 <p className="mt-1 text-xs text-[var(--ink-muted)]">
-                                    设置在对话、AI 小助理、问题反馈中如何用键盘发送消息
+                                    {tSettings('shortcuts.messageSend.description')}
                                 </p>
                                 <div className="mt-4 flex items-center justify-between">
                                     <div className="flex-1 pr-4">
-                                        <p className="text-sm font-medium text-[var(--ink)]">发送快捷键</p>
+                                        <p className="text-sm font-medium text-[var(--ink)]">{tSettings('shortcuts.messageSend.shortcutTitle')}</p>
                                         <p className="text-xs text-[var(--ink-muted)]">
                                             {(config.chatSendShortcut ?? 'enter') === 'modEnter'
-                                                ? `${isMac ? '⌘' : 'Ctrl'} + Enter 发送，Enter 换行`
-                                                : 'Enter 发送，Shift + Enter 换行'}
+                                                ? tSettings('shortcuts.messageSend.modEnterSummary', { mod: isMac ? '⌘' : 'Ctrl' })
+                                                : tSettings('shortcuts.messageSend.enterSummary')}
                                         </p>
                                     </div>
                                     <div className="flex gap-0.5 rounded-full bg-[var(--paper-inset)] p-0.5">
@@ -2722,17 +3829,17 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                             {/* Global Summon Shortcut (PRD 0.2.16) — relocated here from
                                 通用设置 in 0.2.29 so all keyboard shortcuts live together. */}
                             <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
-                                <h3 className="text-base font-medium text-[var(--ink)]">全局唤起快捷键</h3>
+                                <h3 className="text-base font-medium text-[var(--ink)]">{tSettings('shortcuts.summon.title')}</h3>
                                 <p className="mt-1 text-xs text-[var(--ink-muted)]">
-                                    在任何应用中按下快捷键，快速唤起 MyAgents 并自动定位到启动页输入框。再按一次隐藏窗口。
+                                    {tSettings('shortcuts.summon.description')}
                                 </p>
 
                                 {/* Enable toggle */}
                                 <div className="mt-4 flex items-center justify-between">
                                     <div className="flex-1 pr-4">
-                                        <p className="text-sm font-medium text-[var(--ink)]">启用快捷键</p>
+                                        <p className="text-sm font-medium text-[var(--ink)]">{tSettings('shortcuts.summon.enableTitle')}</p>
                                         <p className="text-xs text-[var(--ink-muted)]">
-                                            {isTauriEnvironment() ? '关闭后该快捷键不再被注册' : '仅桌面版有效'}
+                                            {isTauriEnvironment() ? tSettings('shortcuts.summon.enableDescription') : tSettings('shortcuts.desktopOnly')}
                                         </p>
                                     </div>
                                     <button
@@ -2757,8 +3864,8 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                 {/* Shortcut recorder + reset */}
                                 <div className="mt-4 flex items-center justify-between">
                                     <div className="flex-1 pr-4">
-                                        <p className="text-sm font-medium text-[var(--ink)]">当前快捷键</p>
-                                        <p className="text-xs text-[var(--ink-muted)]">点击右侧键位修改</p>
+                                        <p className="text-sm font-medium text-[var(--ink)]">{tSettings('shortcuts.summon.currentTitle')}</p>
+                                        <p className="text-xs text-[var(--ink-muted)]">{tSettings('shortcuts.summon.currentDescription')}</p>
                                     </div>
                                     <div className="flex items-center gap-2">
                                         <ShortcutRecorder
@@ -2775,9 +3882,9 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                                     ? 'opacity-40 cursor-not-allowed'
                                                     : 'cursor-pointer'
                                             }`}
-                                            title="恢复默认快捷键"
+                                            title={tSettings('shortcuts.summon.resetTitle')}
                                         >
-                                            重置默认
+                                            {tSettings('shortcuts.summon.resetDefault')}
                                         </button>
                                     </div>
                                 </div>
@@ -2786,14 +3893,14 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                             {/* 应用快捷键 reference — read-only, sourced from the same
                                 APP_SHORTCUTS table App.tsx dispatches from (no drift). */}
                             <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
-                                <h3 className="text-base font-medium text-[var(--ink)]">应用快捷键</h3>
+                                <h3 className="text-base font-medium text-[var(--ink)]">{tSettings('shortcuts.app.title')}</h3>
                                 <p className="mt-1 text-xs text-[var(--ink-muted)]">
-                                    以下快捷键在应用内全局生效（暂不支持自定义）
+                                    {tSettings('shortcuts.app.description')}
                                 </p>
                                 <div className="mt-4 space-y-2.5">
                                     {VISIBLE_APP_SHORTCUTS.map((s) => (
                                         <div key={s.id} className="flex items-center justify-between gap-4">
-                                            <p className="text-sm text-[var(--ink-secondary)]">{s.label}</p>
+                                            <p className="text-sm text-[var(--ink-secondary)]">{tSettings(`shortcuts.app.items.${s.id}`)}</p>
                                             <kbd className="shrink-0 rounded-md border border-[var(--line)] bg-[var(--paper-inset)] px-2 py-0.5 font-mono text-xs text-[var(--ink-muted)]">
                                                 {s.keys?.(isMac)}
                                             </kbd>
@@ -2807,31 +3914,76 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                     {activeSection === 'general' && (
                         <div className="space-y-6">
                             <div>
-                                <h2 className="text-lg font-semibold text-[var(--ink)]">通用设置</h2>
+                                <h2 className="text-lg font-semibold text-[var(--ink)]">{tSettings('general.title')}</h2>
                                 <p className="mt-1 text-xs text-[var(--ink-muted)]">
-                                    配置应用程序的通用行为
+                                    {tSettings('general.description')}
                                 </p>
+                            </div>
+
+                            <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
+                                <h3 className="text-base font-medium text-[var(--ink)]">{tSettings('general.appearanceTitle')}</h3>
+
+                                <div className="mt-4 flex items-center justify-between gap-4">
+                                    <div className="flex-1 pr-4">
+                                        <p className="text-sm font-medium text-[var(--ink)]">{tSettings('general.languageTitle')}</p>
+                                        <p className="text-xs text-[var(--ink-muted)]">
+                                            {tSettings('general.languageDescription')}
+                                        </p>
+                                    </div>
+                                    <CustomSelect
+                                        value={config.uiLanguage ?? 'system'}
+                                        options={languageOptions}
+                                        onChange={async (value) => {
+                                            await updateConfig({ uiLanguage: value as UiLanguage });
+                                            toast.success(tSettings('general.languageChanged'));
+                                        }}
+                                        triggerIcon={<Globe className="h-3.5 w-3.5" />}
+                                        className="w-[220px]"
+                                    />
+                                </div>
+
+                                <div className="mt-4 flex items-center justify-between gap-4">
+                                    <div className="flex-1 pr-4">
+                                        <p className="text-sm font-medium text-[var(--ink)]">{tSettings('general.themeTitle')}</p>
+                                        <p className="mt-0.5 text-xs text-[var(--ink-muted)]">{tSettings('general.themeDescription')}</p>
+                                    </div>
+                                    <div className="flex shrink-0 gap-0.5 rounded-full bg-[var(--paper-inset)] p-0.5">
+                                        {(['system', 'light', 'dark'] as const).map((mode) => (
+                                            <button
+                                                key={mode}
+                                                onClick={() => updateConfig({ theme: mode })}
+                                                className={`rounded-full px-3 py-1 text-xs font-medium transition-all ${
+                                                    config.theme === mode
+                                                        ? 'bg-[var(--paper-elevated)] text-[var(--ink)] shadow-sm'
+                                                        : 'text-[var(--ink-muted)] hover:text-[var(--ink-secondary)]'
+                                                }`}
+                                            >
+                                                {tSettings(`general.theme.${mode}`)}
+                                            </button>
+                                        ))}
+                                    </div>
+                                </div>
                             </div>
 
                             {/* Startup Settings */}
                             <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
-                                <h3 className="text-base font-medium text-[var(--ink)]">启动设置</h3>
+                                <h3 className="text-base font-medium text-[var(--ink)]">{tSettings('general.startupTitle')}</h3>
 
                                 {/* Auto Start */}
                                 <div className="mt-4 flex items-center justify-between">
                                     <div className="flex-1 pr-4">
-                                        <p className="text-sm font-medium text-[var(--ink)]">开机启动</p>
+                                        <p className="text-sm font-medium text-[var(--ink)]">{tSettings('general.autostartTitle')}</p>
                                         <p className="text-xs text-[var(--ink-muted)]">
-                                            系统启动时自动运行 MyAgents
+                                            {tSettings('general.autostartDescription')}
                                         </p>
                                     </div>
                                     <button
                                         onClick={async () => {
                                             const success = await setAutostart(!autostartEnabled);
                                             if (success) {
-                                                toast.success(autostartEnabled ? '已关闭开机启动' : '已开启开机启动');
+                                                toast.success(autostartEnabled ? tSettings('general.autostartDisabled') : tSettings('general.autostartEnabled'));
                                             } else {
-                                                toast.error('设置失败，请重试');
+                                                toast.error(tSettings('general.saveFailedRetry'));
                                             }
                                         }}
                                         disabled={autostartLoading}
@@ -2854,15 +4006,15 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                 {/* Minimize to Tray */}
                                 <div className="mt-4 flex items-center justify-between">
                                     <div className="flex-1 pr-4">
-                                        <p className="text-sm font-medium text-[var(--ink)]">最小化到托盘</p>
+                                        <p className="text-sm font-medium text-[var(--ink)]">{tSettings('general.minimizeToTrayTitle')}</p>
                                         <p className="text-xs text-[var(--ink-muted)]">
-                                            关闭窗口时最小化到系统托盘而非退出应用
+                                            {tSettings('general.minimizeToTrayDescription')}
                                         </p>
                                     </div>
                                     <button
                                         onClick={() => {
                                             updateConfig({ minimizeToTray: !config.minimizeToTray });
-                                            toast.success(config.minimizeToTray ? '已关闭最小化到托盘' : '已开启最小化到托盘');
+                                            toast.success(config.minimizeToTray ? tSettings('general.minimizeToTrayDisabled') : tSettings('general.minimizeToTrayEnabled'));
                                         }}
                                         className={`relative h-6 w-11 shrink-0 cursor-pointer rounded-full transition-colors ${
                                             config.minimizeToTray
@@ -2886,16 +4038,16 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                     cmd_set_force_wake_lock,本组件保持和 minimizeToTray 同构。 */}
                                 <div className="mt-4 flex items-center justify-between">
                                     <div className="flex-1 pr-4">
-                                        <p className="text-sm font-medium text-[var(--ink)]">始终阻止电脑睡眠</p>
+                                        <p className="text-sm font-medium text-[var(--ink)]">{tSettings('general.forceWakeTitle')}</p>
                                         <p className="text-xs text-[var(--ink-muted)]">
-                                            开启后即使 AI 没有在运行,电脑也不会自动睡眠。注意:合上盖子仍会睡眠,且会更快消耗电池。
+                                            {tSettings('general.forceWakeDescription')}
                                         </p>
                                     </div>
                                     <button
                                         onClick={() => {
                                             const next = !config.forceWakeLock;
                                             updateConfig({ forceWakeLock: next });
-                                            toast.success(next ? '已开启常开阻睡' : '已关闭常开阻睡');
+                                            toast.success(next ? tSettings('general.forceWakeEnabled') : tSettings('general.forceWakeDisabled'));
                                         }}
                                         className={`relative h-6 w-11 shrink-0 cursor-pointer rounded-full transition-colors ${
                                             config.forceWakeLock
@@ -2914,13 +4066,13 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                 {/* Default Workspace */}
                                 <div className="mt-4 flex items-center justify-between">
                                     <div className="flex-1 pr-4">
-                                        <p className="text-sm font-medium text-[var(--ink)]">启动时打开的工作区</p>
-                                        <p className="text-xs text-[var(--ink-muted)]">启动页默认使用的工作区路径</p>
+                                        <p className="text-sm font-medium text-[var(--ink)]">{tSettings('general.defaultWorkspaceTitle')}</p>
+                                        <p className="text-xs text-[var(--ink-muted)]">{tSettings('general.defaultWorkspaceDescription')}</p>
                                     </div>
                                     <CustomSelect
                                         value={config.defaultWorkspacePath ?? ''}
                                         options={[
-                                            { value: '', label: '无' },
+                                            { value: '', label: tSettings('general.defaultWorkspaceNone') },
                                             ...projects.map(p => ({
                                                 value: p.path,
                                                 label: shortenPathForDisplay(p.path),
@@ -2932,25 +4084,25 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                                 await updateConfig({ defaultWorkspacePath: undefined });
                                             } else {
                                                 await updateConfig({ defaultWorkspacePath: val });
-                                                toast.success('已设置默认工作区');
+                                                toast.success(tSettings('general.defaultWorkspaceSaved'));
                                             }
                                         }}
-                                        placeholder="无"
+                                        placeholder={tSettings('general.defaultWorkspaceNone')}
                                         triggerIcon={<FolderOpen className="h-3.5 w-3.5" />}
                                         className="w-[240px]"
                                         footerAction={{
-                                            label: '选择文件夹...',
+                                            label: tSettings('general.defaultWorkspaceBrowse'),
                                             icon: <Plus className="h-3.5 w-3.5" />,
                                             onClick: async () => {
                                                 try {
                                                     const { open } = await import('@tauri-apps/plugin-dialog');
-                                                    const selected = await open({ directory: true, multiple: false, title: '选择默认工作区' });
+                                                    const selected = await open({ directory: true, multiple: false, title: tSettings('general.defaultWorkspacePickTitle') });
                                                     if (selected && typeof selected === 'string') {
                                                         if (!projects.find(p => workspacePathsEqual(p.path, selected))) {
                                                             await addProject(selected);
                                                         }
                                                         await updateConfig({ defaultWorkspacePath: selected });
-                                                        toast.success('已设置默认工作区');
+                                                        toast.success(tSettings('general.defaultWorkspaceSaved'));
                                                     }
                                                 } catch (err) {
                                                     console.error('[Settings] Browse folder failed:', err);
@@ -2959,47 +4111,24 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                         }}
                                     />
                                 </div>
-
-                                {/* 主题 */}
-                                <div className="mt-6 flex items-center justify-between">
-                                    <div>
-                                        <p className="text-sm font-medium text-[var(--ink)]">主题</p>
-                                        <p className="mt-0.5 text-xs text-[var(--ink-muted)]">设置应用外观模式</p>
-                                    </div>
-                                    <div className="flex gap-0.5 rounded-full bg-[var(--paper-inset)] p-0.5">
-                                        {(['system', 'light', 'dark'] as const).map((mode) => (
-                                            <button
-                                                key={mode}
-                                                onClick={() => updateConfig({ theme: mode })}
-                                                className={`rounded-full px-3 py-1 text-xs font-medium transition-all ${
-                                                    config.theme === mode
-                                                        ? 'bg-[var(--paper-elevated)] text-[var(--ink)] shadow-sm'
-                                                        : 'text-[var(--ink-muted)] hover:text-[var(--ink-secondary)]'
-                                                }`}
-                                            >
-                                                {mode === 'system' ? '跟随系统' : mode === 'light' ? '日间模式' : '夜间模式'}
-                                            </button>
-                                        ))}
-                                    </div>
-                                </div>
                             </div>
 
                             {/* Chat Queue Response Mode */}
                             <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
-                                <h3 className="text-base font-medium text-[var(--ink)]">连续发送消息</h3>
+                                <h3 className="text-base font-medium text-[var(--ink)]">{tSettings('general.queueTitle')}</h3>
                                 <div className="mt-4 flex items-center justify-between gap-4">
                                     <div className="flex-1">
-                                        <p className="text-sm font-medium text-[var(--ink)]">队列响应模式</p>
+                                        <p className="text-sm font-medium text-[var(--ink)]">{tSettings('general.queueModeTitle')}</p>
                                         <p className="text-xs text-[var(--ink-muted)]">
                                             {normalizeChatQueueResponseMode(config.chatQueueResponseMode) === 'turn'
-                                                ? '仅在 AI 完成一个执行轮次后，自动发送下一条消息'
-                                                : 'AI 执行过程中会阅读消息，自主判断响应时机'}
+                                                ? tSettings('general.queueTurnDescription')
+                                                : tSettings('general.queueRealtimeDescription')}
                                         </p>
                                     </div>
                                     <div className="flex shrink-0 gap-0.5 rounded-full bg-[var(--paper-inset)] p-0.5">
                                         {([
-                                            { value: 'realtime', label: '实时响应' },
-                                            { value: 'turn', label: '轮次响应' },
+                                            { value: 'realtime', label: tSettings('general.queueRealtime') },
+                                            { value: 'turn', label: tSettings('general.queueTurn') },
                                         ] as const satisfies ReadonlyArray<{ value: ChatQueueResponseMode; label: string }>).map((opt) => {
                                             const active = normalizeChatQueueResponseMode(config.chatQueueResponseMode) === opt.value;
                                             return (
@@ -3022,20 +4151,20 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
 
                             {/* Notification Settings */}
                             <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
-                                <h3 className="text-base font-medium text-[var(--ink)]">任务消息通知</h3>
+                                <h3 className="text-base font-medium text-[var(--ink)]">{tSettings('general.notificationTitle')}</h3>
 
                                 {/* Task Notifications */}
                                 <div className="mt-4 flex items-center justify-between">
                                     <div className="flex-1 pr-4">
-                                        <p className="text-sm font-medium text-[var(--ink)]">启用通知</p>
+                                        <p className="text-sm font-medium text-[var(--ink)]">{tSettings('general.notificationEnableTitle')}</p>
                                         <p className="text-xs text-[var(--ink-muted)]">
-                                            AI 完成任务或需要用户确认时通知提醒
+                                            {tSettings('general.notificationEnableDescription')}
                                         </p>
                                     </div>
                                     <button
                                         onClick={() => {
                                             updateConfig({ osNotifications: !config.osNotifications });
-                                            toast.success(config.osNotifications ? '已关闭通知' : '已开启通知');
+                                            toast.success(config.osNotifications ? tSettings('general.notificationDisabled') : tSettings('general.notificationEnabled'));
                                         }}
                                         className={`relative h-6 w-11 shrink-0 cursor-pointer rounded-full transition-colors ${
                                             config.osNotifications
@@ -3057,15 +4186,15 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                 {config.osNotifications && (
                                     <div className="mt-4 flex items-center justify-between">
                                         <div className="flex-1 pr-4">
-                                            <p className="text-sm font-medium text-[var(--ink)]">通知提醒声音</p>
+                                            <p className="text-sm font-medium text-[var(--ink)]">{tSettings('general.notificationSoundTitle')}</p>
                                             <p className="text-xs text-[var(--ink-muted)]">
-                                                系统通知弹出时播放声音
+                                                {tSettings('general.notificationSoundDescription')}
                                             </p>
                                         </div>
                                         <button
                                             onClick={() => {
                                                 updateConfig({ notificationSound: !config.notificationSound });
-                                                toast.success(config.notificationSound ? '已关闭通知声音' : '已开启通知声音');
+                                                toast.success(config.notificationSound ? tSettings('general.notificationSoundDisabled') : tSettings('general.notificationSoundEnabled'));
                                             }}
                                             className={`relative h-6 w-11 shrink-0 cursor-pointer rounded-full transition-colors ${
                                                 config.notificationSound
@@ -3092,17 +4221,17 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                         : 'border-[var(--line)]'
                                 }`}
                             >
-                                <h3 className="text-base font-medium text-[var(--ink)]">网络代理</h3>
+                                <h3 className="text-base font-medium text-[var(--ink)]">{tSettings('general.proxyTitle')}</h3>
                                 <p className="mt-1 text-xs text-[var(--ink-muted)]">
-                                    配置 HTTP/SOCKS5 代理，用于外部 API 请求（如 Clash、V2Ray 等）
+                                    {tSettings('general.proxyDescription')}
                                 </p>
 
                                 {/* Enable toggle */}
                                 <div className="mt-4 flex items-center justify-between">
                                     <div className="flex-1 pr-4">
-                                        <p className="text-sm font-medium text-[var(--ink)]">启用代理</p>
+                                        <p className="text-sm font-medium text-[var(--ink)]">{tSettings('general.proxyEnableTitle')}</p>
                                         <p className="text-xs text-[var(--ink-muted)]">
-                                            开启后所有 API 请求将通过代理服务器转发
+                                            {tSettings('general.proxyEnableDescription')}
                                         </p>
                                     </div>
                                     <button
@@ -3131,7 +4260,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                     <div className="mt-4 space-y-3 border-t border-[var(--line)] pt-4">
                                         {/* Protocol */}
                                         <div className="flex items-center gap-3">
-                                            <label className="w-16 text-xs text-[var(--ink-muted)]">协议</label>
+                                            <label className="w-16 text-xs text-[var(--ink-muted)]">{tSettings('general.proxyProtocol')}</label>
                                             <CustomSelect
                                                 value={config.proxySettings?.protocol || PROXY_DEFAULTS.protocol}
                                                 options={[
@@ -3147,7 +4276,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
 
                                         {/* Host */}
                                         <div className="flex items-center gap-3">
-                                            <label className="w-16 text-xs text-[var(--ink-muted)]">服务器</label>
+                                            <label className="w-16 text-xs text-[var(--ink-muted)]">{tSettings('general.proxyServer')}</label>
                                             <input
                                                 type="text"
                                                 value={proxyHostDraft}
@@ -3161,7 +4290,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
 
                                         {/* Port */}
                                         <div className="flex items-center gap-3">
-                                            <label className="w-16 text-xs text-[var(--ink-muted)]">端口</label>
+                                            <label className="w-16 text-xs text-[var(--ink-muted)]">{tSettings('general.proxyPort')}</label>
                                             <input
                                                 type="text"
                                                 inputMode="numeric"
@@ -3180,7 +4309,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
 
                                         {/* Preview */}
                                         <div className="mt-2 rounded-lg bg-[var(--paper-inset)] px-3 py-2">
-                                            <span className="text-xs text-[var(--ink-muted)]">代理地址: </span>
+                                            <span className="text-xs text-[var(--ink-muted)]">{tSettings('general.proxyAddress')}</span>
                                             <code className="text-xs font-mono text-[var(--ink)]">
                                                 {config.proxySettings?.protocol || PROXY_DEFAULTS.protocol}://{proxyHostDraft || PROXY_DEFAULTS.host}:{proxyPortDraft || PROXY_DEFAULTS.port}
                                             </code>
@@ -3206,14 +4335,14 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                                 )}
                                                 <span className="min-w-0 break-words">
                                                     {proxyProbeState.status === 'checking'
-                                                        ? '正在检测代理连通性...'
+                                                        ? tSettings('general.proxyChecking')
                                                         : proxyProbeState.message}
                                                 </span>
                                             </div>
                                         )}
 
                                         <p className="text-xs text-[var(--ink-faint)]">
-                                            修改后会自动应用到运行中的会话
+                                            {tSettings('general.proxyAppliedHint')}
                                         </p>
                                     </div>
                                 )}
@@ -3223,9 +4352,9 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                             <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
                                 <div className="flex items-center justify-between">
                                     <div>
-                                        <h3 className="text-base font-medium text-[var(--ink)]">运行日志</h3>
+                                        <h3 className="text-base font-medium text-[var(--ink)]">{tSettings('general.logsTitle')}</h3>
                                         <p className="mt-1 text-xs text-[var(--ink-muted)]">
-                                            支持导出近 3 天运行日志排查问题
+                                            {tSettings('general.logsDescription')}
                                         </p>
                                     </div>
                                     <button
@@ -3235,12 +4364,12 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                             try {
                                                 const result = await apiGetJson<{ success: boolean; path?: string; error?: string }>('/api/logs/export');
                                                 if (result.success && result.path) {
-                                                    toast.success(`已导出至 ${result.path}`);
+                                                    toast.success(tSettings('general.logsExported', { path: result.path }));
                                                 } else {
-                                                    toast.error(result.error || '导出失败');
+                                                    toast.error(result.error || tSettings('general.logsExportFailed'));
                                                 }
                                             } catch {
-                                                toast.error('导出失败，请重试');
+                                                toast.error(tSettings('general.logsExportFailedRetry'));
                                             } finally {
                                                 setLogExporting(false);
                                             }
@@ -3251,12 +4380,12 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                         {logExporting ? (
                                             <>
                                                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                                                导出中...
+                                                {tSettings('general.logsExporting')}
                                             </>
                                         ) : (
                                             <>
                                                 <Download className="h-3.5 w-3.5" />
-                                                导出
+                                                {tSettings('general.logsExport')}
                                             </>
                                         )}
                                     </button>
@@ -3286,16 +4415,16 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                                 type="button"
                                                 onClick={async () => {
                                                     if (!onCheckForUpdate) {
-                                                        toast.error('此功能仅在桌面应用中可用');
+                                                        toast.error(tSettings('about.desktopOnly'));
                                                         return;
                                                     }
                                                     const result = await onCheckForUpdate();
                                                     if (result === 'up-to-date') {
-                                                        toast.info('当前已是最新版本');
+                                                        toast.info(tSettings('about.upToDate'));
                                                     } else if (result === 'downloading') {
-                                                        toast.info('发现新版本，正在下载...');
+                                                        toast.info(tSettings('about.foundDownloading'));
                                                     } else if (result === 'error') {
-                                                        toast.error('检查更新失败，请稍后重试');
+                                                        toast.error(tSettings('about.checkFailed'));
                                                     }
                                                 }}
                                                 disabled={updateChecking}
@@ -3304,28 +4433,30 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                                 {updateChecking ? (
                                                     <span className="flex items-center gap-1">
                                                         <Loader2 className="h-3 w-3 animate-spin" />
-                                                        检查中...
+                                                        {tSettings('about.checking')}
                                                     </span>
-                                                ) : '检查更新'}
+                                                ) : tSettings('about.checkUpdates')}
                                             </button>
                                         )}
                                         <ExternalLink
                                             href={MYAGENTS_RELEASES_URL}
                                             className="rounded-lg bg-[var(--paper-inset)] px-2 py-0.5 text-xs text-[var(--ink-secondary)] transition-colors hover:bg-[var(--paper-elevated)]"
                                         >
-                                            更新记录
+                                            {tSettings('about.releaseNotes')}
                                         </ExternalLink>
                                     </div>
                                     <p className="mt-3 text-base text-[var(--ink-secondary)]">
-                                        Your Intent, Amplified
+                                        {tSettings('about.slogan')}
                                     </p>
                                     {updateDownloading && propUpdateVersion && (
                                         <div className="mt-3 space-y-2">
                                             <div className="flex items-center gap-2 text-sm text-[var(--ink-secondary)]">
                                                 <Loader2 className="h-4 w-4 animate-spin text-[var(--accent)]" />
                                                 <span>
-                                                    发现新版本 v{propUpdateVersion}，正在下载
-                                                    {downloadProgress != null ? `… ${downloadProgress}%` : '…'}
+                                                    {tSettings('about.downloadingVersion', {
+                                                        version: propUpdateVersion,
+                                                        progress: downloadProgress != null ? `... ${downloadProgress}%` : '...',
+                                                    })}
                                                 </span>
                                             </div>
                                             {downloadProgress != null && (
@@ -3343,14 +4474,16 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                         are mid-replacement, click would hit inconsistent state. */}
                                     {propUpdateReady && propUpdateVersion && !updatePreparing && (
                                         <div className="mt-3 flex items-center gap-2">
-                                            <span className="text-sm text-[var(--success)]">发现新版本 v{propUpdateVersion}</span>
+                                            <span className="text-sm text-[var(--success)]">
+                                                {tSettings('about.updateReady', { version: propUpdateVersion })}
+                                            </span>
                                             <button
                                                 type="button"
                                                 onClick={updateInstalling ? undefined : onRestartAndUpdate}
                                                 disabled={updateInstalling}
                                                 className="rounded-lg bg-[var(--success)] px-3 py-1.5 text-xs font-medium text-white transition-colors hover:opacity-90 disabled:opacity-80 disabled:cursor-wait"
                                             >
-                                                {updateInstalling ? '安装中…' : '重启安装'}
+                                                {updateInstalling ? tSettings('about.installing') : tSettings('about.restartInstall')}
                                             </button>
                                         </div>
                                     )}
@@ -3359,32 +4492,32 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
 
                             {/* Product Description — Developer Letter */}
                             <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] px-7 py-6">
-                                <p className="text-xs font-medium uppercase tracking-widest text-[var(--ink-muted)]/50">From the Developer</p>
+                                <p className="text-xs font-medium uppercase tracking-widest text-[var(--ink-muted)]/50">{tSettings('about.developerLabel')}</p>
                                 <div className="mt-4 space-y-5 text-sm leading-[1.9] text-[var(--ink-secondary)]">
                                     <p>
-                                        <span className="font-semibold text-[var(--ink)]">MyAgents</span> 是一款住在你电脑里的 AI Agent 桌面客户端，你的个人 AI 中心。基于 Claude Agent SDK 运行，同时支持接入各家大模型与快速切换。所有操作都在本地完成，数据始终留在你的电脑里。
+                                        {tSettings('about.developerParagraph1')}
                                     </p>
                                     <p>
-                                        Claude Code 让开发者率先体会到了 AI 加持下的无限生产力，OpenClaw 又让普通人看到了像伙伴一样的主动型 Agent 助手的雏形。而 MyAgents 要做的，是让本地 Agent 成为完全体——当你在电脑前，它能触达你的文件、项目与一切工具，与你精细化地协同工作，完成高质量的产出；当你不在电脑前，它也能像你的分身，7×24 小时感知世界，按照你的意图持续行动。
+                                        {tSettings('about.developerParagraph2')}
                                     </p>
                                     <p>
-                                        不同于每次对话都要重新自我介绍的 AI 工具，MyAgents 里的 Agent 与你的生活、工作深度同步，是一个越来越懂你的搭档。我们希望它成为每个人意图的超级放大器——
+                                        {tSettings('about.developerParagraph3')}
                                     </p>
                                     <p className="text-center text-base font-medium italic tracking-wide text-[var(--ink)]">
-                                        你有一个想法，And it&apos;s done.
+                                        {tSettings('about.developerQuote')}
                                     </p>
                                 </div>
                             </div>
 
                             {/* 实验室 */}
                             <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
-                                <h3 className="text-base font-medium text-[var(--ink)]">实验室</h3>
+                                <h3 className="text-base font-medium text-[var(--ink)]">{tSettings('about.labTitle')}</h3>
 
                                 <div className="mt-4 flex items-center justify-between">
                                     <div className="flex-1 pr-4">
-                                        <p className="text-sm font-medium text-[var(--ink)]">更多 Agent Runtime</p>
+                                        <p className="text-sm font-medium text-[var(--ink)]">{tSettings('about.runtimeTitle')}</p>
                                         <p className="text-xs text-[var(--ink-muted)]">
-                                            启用后可在输入框和Agent设置中选择外部 Runtime 例如 Claude Code CLI、Codex CLI。若关闭，则恢复使用内置 Runtime。
+                                            {tSettings('about.runtimeDescription')}
                                         </p>
                                     </div>
                                     <button
@@ -3401,9 +4534,9 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
 
                                 <div className="mt-4 flex items-center justify-between border-t border-[var(--line)] pt-4">
                                     <div className="flex-1 pr-4">
-                                        <p className="text-sm font-medium text-[var(--ink)]">CLI 工具注册表</p>
+                                        <p className="text-sm font-medium text-[var(--ink)]">{tSettings('about.cliRegistryTitle')}</p>
                                         <p className="text-xs text-[var(--ink-muted)]">
-                                            允许 AI 创建并注册命令行小工具，并在工具箱中管理；开启后新会话可自动发现已启用工具。MCP 与 myagents 内置 CLI 能力不受影响。
+                                            {tSettings('about.cliRegistryDescription')}
                                         </p>
                                     </div>
                                     <button
@@ -3421,9 +4554,9 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                 {/* Floating Ball Dev Gate (PRD 0.2.35 — 先开发不发布，D10) */}
                                 <div className="mt-4 flex items-center justify-between border-t border-[var(--line)] pt-4">
                                     <div className="flex-1 pr-4">
-                                        <p className="text-sm font-medium text-[var(--ink)]">桌面宠物</p>
+                                        <p className="text-sm font-medium text-[var(--ink)]">{tSettings('about.desktopPetTitle')}</p>
                                         <p className="text-xs text-[var(--ink-muted)]">
-                                            Mino 的桌面宠物：屏幕边缘常驻悬浮球，hover 瞥一眼、点击即问，发完就走由球替你跑。开启后可在设置页管理桌面宠物。
+                                            {tSettings('about.desktopPetDescription')}
                                         </p>
                                     </div>
                                     <button
@@ -3445,16 +4578,16 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                             <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
                                 <div className="flex items-center justify-between">
                                     <div>
-                                        <h3 className="text-base font-medium text-[var(--ink)]">AI 小助理</h3>
+                                        <h3 className="text-base font-medium text-[var(--ink)]">{tSettings('about.helperTitle')}</h3>
                                         <p className="mt-1 text-xs text-[var(--ink-muted)]">
-                                            AI 小助理将分析本地日志进行功能答疑、上报问题或建议
+                                            {tSettings('about.helperDescription')}
                                         </p>
                                     </div>
                                     <button
                                         onClick={() => setShowBugReport(true)}
                                         className="rounded-lg bg-[var(--paper-inset)] px-3 py-1.5 text-xs font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-elevated)]"
                                     >
-                                        反馈问题
+                                        {tSettings('about.feedback')}
                                     </button>
                                 </div>
                             </div>
@@ -3463,8 +4596,8 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                             {(qrCodeLoading || qrCodeDataUrl) && (
                                 <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
                                     <div className="flex flex-col items-center text-center">
-                                        <p className="text-sm font-medium text-[var(--ink)]">加入用户交流群</p>
-                                        <p className="mt-1 text-xs text-[var(--ink-muted)]">扫码加入，与其他用户交流使用心得</p>
+                                        <p className="text-sm font-medium text-[var(--ink)]">{tSettings('about.communityTitle')}</p>
+                                        <p className="mt-1 text-xs text-[var(--ink-muted)]">{tSettings('about.communityDescription')}</p>
                                         {qrCodeLoading ? (
                                             <div className="mt-4 h-36 w-36 flex items-center justify-center">
                                                 <Loader2 className="h-8 w-8 animate-spin text-[var(--ink-muted)]" />
@@ -3472,7 +4605,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                         ) : (
                                             <img
                                                 src={qrCodeDataUrl!}
-                                                alt="用户交流群二维码"
+                                                alt={tSettings('about.communityQrAlt')}
                                                 className="mt-4 h-36 w-36 rounded-lg"
                                             />
                                         )}
@@ -3525,15 +4658,15 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                             {/* Developer Section - Hidden by default, unlocked by tapping logo 5 times */}
                             {devSectionVisible && (
                                 <div>
-                                    <h2 className="mb-4 text-base font-medium text-[var(--ink-muted)]">开发者</h2>
+                                    <h2 className="mb-4 text-base font-medium text-[var(--ink-muted)]">{tSettings('about.developerSection')}</h2>
                                     <div className="space-y-4">
                                         {/* Developer Mode Toggle */}
                                         <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
                                             <div className="flex items-center justify-between">
                                                 <div>
-                                                    <h3 className="text-sm font-medium text-[var(--ink)]">开发者模式</h3>
+                                                    <h3 className="text-sm font-medium text-[var(--ink)]">{tSettings('about.developer.devModeTitle')}</h3>
                                                     <p className="mt-1 text-xs text-[var(--ink-muted)]">
-                                                        显示页面上的日志入口按钮（如 Logs、System Info 等）。
+                                                        {tSettings('about.developer.devModeDescription')}
                                                     </p>
                                                 </div>
                                                 <button
@@ -3549,17 +4682,46 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                             </div>
                                         </div>
 
+                                        {/* Managed Codex Provider Gate */}
+                                        <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
+                                            <div className="flex items-center justify-between">
+                                                <div className="flex-1 pr-4">
+                                                    <h3 className="text-sm font-medium text-[var(--ink)]">{tSettings('about.developer.codexProviderTitle')}</h3>
+                                                    <p className="mt-1 text-xs text-[var(--ink-muted)]">
+                                                        {tSettings('about.developer.codexProviderDescription')}
+                                                    </p>
+                                                </div>
+                                                <button
+                                                    onClick={() => {
+                                                        const nextEnabled = !managedCodexProviderGateEnabled;
+                                                        console.info(
+                                                            `[managed-codex] developer gate toggle requested runtime=codex runtimeSource=managed-provider enabled=${nextEnabled}`,
+                                                        );
+                                                        updateConfig({ managedCodexProviderDevGate: nextEnabled });
+                                                    }}
+                                                    aria-pressed={managedCodexProviderGateEnabled}
+                                                    className={`relative h-6 w-11 shrink-0 cursor-pointer rounded-full transition-colors ${managedCodexProviderGateEnabled ? 'bg-[var(--accent)]' : 'bg-[var(--line-strong)]'
+                                                        }`}
+                                                >
+                                                    <span
+                                                        className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-[var(--toggle-thumb)] shadow transition-transform ${managedCodexProviderGateEnabled ? 'translate-x-5' : 'translate-x-0'
+                                                            }`}
+                                                    />
+                                                </button>
+                                            </div>
+                                        </div>
+
                                         {/* Team Space Gate */}
                                         <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
                                             <div className="flex items-center justify-between">
                                                 <div className="flex-1 pr-4">
-                                                    <h3 className="text-sm font-medium text-[var(--ink)]">团队入口</h3>
+                                                    <h3 className="text-sm font-medium text-[var(--ink)]">{tSettings('about.developer.teamTitle')}</h3>
                                                     <p className="mt-1 text-xs text-[var(--ink-muted)]">
                                                         {spaceBuildCapability.isLoading
-                                                            ? '正在读取团队服务构建状态...'
+                                                            ? tSettings('about.developer.teamLoading')
                                                             : spaceBuildCapability.available
-                                                            ? '显示标题栏中的「团队」tab。该功能仍在开发中，默认关闭，关闭时已打开的团队页面也会被隐藏。'
-                                                            : `当前构建未包含团队服务。构建时设置 MYAGENTS_SPACE_ENABLED=true 与 MYAGENTS_SPACE_BASE_URL 后才可开启。${spaceBuildCapability.reason ? ` (${spaceBuildCapability.reason})` : ''}`}
+                                                            ? tSettings('about.developer.teamAvailable')
+                                                            : tSettings(spaceBuildCapability.reason ? 'about.developer.teamUnavailableWithReason' : 'about.developer.teamUnavailable', { reason: spaceBuildCapability.reason })}
                                                     </p>
                                                 </div>
                                                 <button
@@ -3584,9 +4746,9 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                         <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
                                             <div className="flex items-center justify-between">
                                                 <div>
-                                                    <h3 className="text-sm font-medium text-[var(--ink)]">分屏预览（实验性）</h3>
+                                                    <h3 className="text-sm font-medium text-[var(--ink)]">{tSettings('about.developer.splitViewTitle')}</h3>
                                                     <p className="mt-1 text-xs text-[var(--ink-muted)]">
-                                                        点击文件在右侧分屏打开预览，而非弹窗。
+                                                        {tSettings('about.developer.splitViewDescription')}
                                                     </p>
                                                 </div>
                                                 <button
@@ -3606,16 +4768,16 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                         <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
                                             <div className="flex items-center justify-between">
                                                 <div className="flex-1 pr-4">
-                                                    <h3 className="text-sm font-medium text-[var(--ink)]">后台 Agent 权限</h3>
+                                                    <h3 className="text-sm font-medium text-[var(--ink)]">{tSettings('about.developer.backgroundAgentPermissionTitle')}</h3>
                                                     <p className="mt-1 text-xs text-[var(--ink-muted)]">
-                                                        通过 <span className="font-mono">run_in_background</span> 启动的后台 Agent 没有权限弹窗。「继承已授权」只放行你已点过「始终允许」的工具，其余拒绝并提示；「全自动」允许后台 Agent 使用所有非交互工具（权限更宽，请谨慎）。
+                                                        {tSettings('about.developer.backgroundAgentPermissionPrefix')} <span className="font-mono">run_in_background</span> {tSettings('about.developer.backgroundAgentPermissionSuffix')}
                                                     </p>
                                                 </div>
                                                 <CustomSelect
                                                     value={config.backgroundAgentPermissionMode ?? 'inherit'}
                                                     options={[
-                                                        { value: 'inherit', label: '继承已授权' },
-                                                        { value: 'fullAgency', label: '全自动' },
+                                                        { value: 'inherit', label: tSettings('about.developer.backgroundAgentPermissionInherit') },
+                                                        { value: 'fullAgency', label: tSettings('about.developer.backgroundAgentPermissionFullAgency') },
                                                     ]}
                                                     onChange={(val) => {
                                                         updateConfig({ backgroundAgentPermissionMode: val as 'inherit' | 'fullAgency' });
@@ -3629,9 +4791,9 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                         <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
                                             <div className="flex items-center justify-between">
                                                 <div>
-                                                    <h3 className="text-sm font-medium text-[var(--ink)]">模型数据自动更新（LiteLLM）</h3>
+                                                    <h3 className="text-sm font-medium text-[var(--ink)]">{tSettings('about.developer.liteLlmRefreshTitle')}</h3>
                                                     <p className="mt-1 text-xs text-[var(--ink-muted)]">
-                                                        定期从 GitHub 拉取 LiteLLM 模型库，作为模型上下文长度的兜底数据源（启动检查 + 每日增量，未改动几乎不耗流量）。
+                                                        {tSettings('about.developer.liteLlmRefreshDescription')}
                                                     </p>
                                                 </div>
                                                 <button
@@ -3651,9 +4813,9 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                         <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
                                             <div className="flex items-center justify-between">
                                                 <div>
-                                                    <h3 className="text-sm font-medium text-[var(--ink)]">急切 Fork（实验性）</h3>
+                                                    <h3 className="text-sm font-medium text-[var(--ink)]">{tSettings('about.developer.eagerForkTitle')}</h3>
                                                     <p className="mt-1 text-xs text-[var(--ink-muted)]">
-                                                        Fork 会话时用 SDK 独立 forkSession() 急切分叉（点击即创建 + UUID 重映射），消除旧的懒分叉状态机。关掉则回退稳定的旧路径。
+                                                        {tSettings('about.developer.eagerForkDescription')}
                                                     </p>
                                                 </div>
                                                 <button
@@ -3673,9 +4835,9 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                         <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
                                             <div className="flex items-start justify-between gap-4">
                                                 <div className="min-w-0">
-                                                    <h3 className="text-sm font-medium text-[var(--ink)]">Claude 会话保留天数</h3>
+                                                    <h3 className="text-sm font-medium text-[var(--ink)]">{tSettings('about.developer.claudeTranscriptRetentionTitle')}</h3>
                                                     <p className="mt-1 text-xs text-[var(--ink-muted)]">
-                                                        写入 Claude Agent SDK 的 cleanupPeriodDays，用于控制本地 transcript 自动清理周期。
+                                                        {tSettings('about.developer.claudeTranscriptRetentionDescription')}
                                                     </p>
                                                 </div>
                                                 <div className="flex shrink-0 items-center gap-2">
@@ -3686,18 +4848,18 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                                         onChange={(e) => setClaudeTranscriptCleanupDaysDraft(e.target.value.replace(/[^0-9]/g, ''))}
                                                         onBlur={commitClaudeTranscriptCleanupDays}
                                                         onKeyDown={(e) => { if (e.key === 'Enter') e.currentTarget.blur(); }}
-                                                        aria-label="Claude 会话保留天数"
+                                                        aria-label={tSettings('about.developer.claudeTranscriptRetentionTitle')}
                                                         className="w-24 rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-1.5 text-right text-xs text-[var(--ink)] placeholder:text-[var(--ink-faint)] focus:border-[var(--focus-border)] focus:outline-none"
                                                         placeholder={String(DEFAULT_CLAUDE_TRANSCRIPT_CLEANUP_PERIOD_DAYS)}
                                                     />
-                                                    <span className="text-xs text-[var(--ink-muted)]">天</span>
+                                                    <span className="text-xs text-[var(--ink-muted)]">{tSettings('about.developer.daysUnit')}</span>
                                                 </div>
                                             </div>
                                         </div>
 
                                         {/* Build Versions */}
                                         <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
-                                            <h3 className="mb-3 text-sm font-medium text-[var(--ink)]">构建信息</h3>
+                                            <h3 className="mb-3 text-sm font-medium text-[var(--ink)]">{tSettings('about.developer.buildInfoTitle')}</h3>
                                             <div className="space-y-2 text-xs">
                                                 {(() => {
                                                     const versions = getBuildVersions();
@@ -3725,16 +4887,16 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                         <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
                                             <div className="flex items-center justify-between">
                                                 <div>
-                                                    <h3 className="text-sm font-medium text-[var(--ink)]">循环任务</h3>
+                                                    <h3 className="text-sm font-medium text-[var(--ink)]">{tSettings('about.developer.cronTaskTitle')}</h3>
                                                     <p className="mt-1 text-xs text-[var(--ink-muted)]">
-                                                        查看和管理运行中的循环任务（开发调试用）
+                                                        {tSettings('about.developer.cronTaskDescription')}
                                                     </p>
                                                 </div>
                                                 <button
                                                     onClick={() => setShowCronDebugPanel(true)}
                                                     className="rounded-lg bg-[var(--paper-inset)] px-3 py-1.5 text-xs font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-elevated)]"
                                                 >
-                                                    打开面板
+                                                    {tSettings('about.developer.openPanel')}
                                                 </button>
                                             </div>
                                         </div>
@@ -3753,6 +4915,69 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                 </div>
             </div>
 
+            {/* Official image understanding tool settings */}
+            {visionToolSettingsOpen && (
+                <OverlayBackdrop onClose={() => setVisionToolSettingsOpen(false)} className="z-50">
+                    <div className="mx-4 flex max-h-[85vh] w-full max-w-lg flex-col rounded-2xl bg-[var(--paper-elevated)] shadow-xl">
+                        <div className="flex items-center justify-between border-b border-[var(--line)] px-6 py-4">
+                            <div className="min-w-0 flex-1">
+                                <h2 className="flex items-center gap-2 text-lg font-semibold text-[var(--ink)]">
+                                    <ImageIcon className="h-4 w-4 text-[var(--accent-warm)]" />
+                                    {tSettings('toolbox.dialogs.vision.title')}
+                                </h2>
+                                <p className="mt-0.5 text-xs text-[var(--ink-muted)]">
+                                    {tSettings('toolbox.dialogs.vision.description')}
+                                </p>
+                            </div>
+                            <button
+                                onClick={() => setVisionToolSettingsOpen(false)}
+                                className="shrink-0 rounded-lg p-1 text-[var(--ink-muted)] hover:bg-[var(--paper-inset)]"
+                            >
+                                <X className="h-5 w-5" />
+                            </button>
+                        </div>
+
+                        <div className="space-y-4 overflow-y-auto p-6">
+                            <div>
+                                <label className="mb-2 block text-sm font-medium text-[var(--ink)]">
+                                    {tSettings('toolbox.dialogs.vision.model')}
+                                </label>
+                                <CustomSelect
+                                    value={visionToolDraftValue}
+                                    options={visionModelOptions}
+                                    onChange={setVisionToolDraftValue}
+                                    placeholder={visionModelOptions.length > 0
+                                        ? tSettings('toolbox.dialogs.vision.selectModel')
+                                        : tSettings('toolbox.dialogs.vision.noImageModels')}
+                                    size="md"
+                                />
+                                {visionModelOptions.length === 0 && (
+                                    <p className="mt-2 text-xs text-[var(--warning)]">
+                                        {tSettings('toolbox.dialogs.vision.noImageModelsWarning')}
+                                    </p>
+                                )}
+                            </div>
+                        </div>
+
+                        <div className="flex justify-end gap-2 border-t border-[var(--line)] px-6 py-4">
+                            <button
+                                onClick={() => setVisionToolSettingsOpen(false)}
+                                className="rounded-lg border border-[var(--line)] px-4 py-2 text-sm text-[var(--ink-muted)] hover:bg-[var(--paper-inset)]"
+                            >
+                                {tSettings('toolbox.common.cancel')}
+                            </button>
+                            <button
+                                onClick={() => void saveVisionToolSettings()}
+                                disabled={!parseVisionModelOptionValue(visionToolDraftValue)}
+                                className="rounded-lg bg-[var(--button-primary-bg)] px-4 py-2 text-sm font-medium text-[var(--button-primary-text)] hover:bg-[var(--button-primary-bg-hover)] disabled:cursor-not-allowed disabled:opacity-50"
+                            >
+                                {tSettings('toolbox.common.save')}
+                            </button>
+                        </div>
+                    </div>
+                </OverlayBackdrop>
+            )}
+
             {/* Builtin MCP Settings Modal */}
             {builtinMcpSettings && (
                 <OverlayBackdrop className="z-50">
@@ -3760,7 +4985,9 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                         {/* Header */}
                         <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--line)]">
                             <div className="min-w-0 flex-1">
-                                <h2 className="text-lg font-semibold text-[var(--ink)]">{builtinMcpSettings.server.name} 设置</h2>
+                                <h2 className="text-lg font-semibold text-[var(--ink)]">
+                                    {tSettings('toolbox.dialogs.builtinMcp.title', { name: builtinMcpSettings.server.name })}
+                                </h2>
                                 {builtinMcpSettings.server.description && (
                                     <p className="mt-0.5 text-xs text-[var(--ink-muted)]">{builtinMcpSettings.server.description}</p>
                                 )}
@@ -3775,7 +5002,9 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                             {/* Preset command/URL (read-only) */}
                             <div>
                                 <label className="block text-sm font-medium text-[var(--ink)] mb-1">
-                                    {builtinMcpSettings.server.type === 'stdio' ? '预设命令' : '服务地址'}
+                                    {builtinMcpSettings.server.type === 'stdio'
+                                        ? tSettings('toolbox.dialogs.builtinMcp.presetCommand')
+                                        : tSettings('toolbox.dialogs.builtinMcp.serviceUrl')}
                                 </label>
                                 <div className="rounded-lg bg-[var(--paper-inset)] px-3 py-2 font-mono text-xs text-[var(--ink-muted)]">
                                     {builtinMcpSettings.server.type === 'stdio'
@@ -3788,8 +5017,12 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
 
                             {/* Extra Args (stdio only) */}
                             {builtinMcpSettings.server.type === 'stdio' && <div>
-                                <label className="block text-sm font-medium text-[var(--ink)] mb-1">额外参数</label>
-                                <p className="text-xs text-[var(--ink-muted)] mb-2">以下参数将追加到预设命令之后</p>
+                                <label className="block text-sm font-medium text-[var(--ink)] mb-1">
+                                    {tSettings('toolbox.dialogs.builtinMcp.extraArgs')}
+                                </label>
+                                <p className="text-xs text-[var(--ink-muted)] mb-2">
+                                    {tSettings('toolbox.dialogs.builtinMcp.extraArgsHint')}
+                                </p>
                                 <div className="space-y-2">
                                     {builtinMcpSettings.extraArgs.map((arg, idx) => (
                                         <div key={idx} className="flex items-center gap-2">
@@ -3821,7 +5054,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                                     } : null);
                                                 }
                                             }}
-                                            placeholder="输入参数，如 --headless"
+                                            placeholder={tSettings('toolbox.dialogs.builtinMcp.argPlaceholder')}
                                             className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-1.5 text-sm text-[var(--ink)] placeholder-[var(--ink-muted)]/50 outline-none focus:border-[var(--accent)]"
                                         />
                                         <button
@@ -3853,7 +5086,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                             href={builtinMcpSettings.server.websiteUrl}
                                             className="ml-auto shrink-0 font-medium text-[var(--accent)] hover:underline"
                                         >
-                                            去注册
+                                            {tSettings('toolbox.dialogs.builtinMcp.register')}
                                         </ExternalLink>
                                     )}
                                 </div>
@@ -3861,7 +5094,9 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
 
                             {/* Environment Variables */}
                             <div>
-                                <label className="block text-sm font-medium text-[var(--ink)] mb-1">环境变量</label>
+                                <label className="block text-sm font-medium text-[var(--ink)] mb-1">
+                                    {tSettings('toolbox.dialogs.builtinMcp.environmentVariables')}
+                                </label>
                                 <div className="space-y-2">
                                     {Object.entries(builtinMcpSettings.env).map(([key, value]) => (
                                         <div key={key} className="flex items-center gap-2">
@@ -3895,14 +5130,14 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                             type="text"
                                             value={builtinMcpSettings.newEnvKey}
                                             onChange={e => setBuiltinMcpSettings(prev => prev ? { ...prev, newEnvKey: e.target.value } : null)}
-                                            placeholder="变量名"
+                                            placeholder={tSettings('toolbox.common.envKeyPlaceholder')}
                                             className="w-1/3 rounded-lg border border-[var(--line)] bg-[var(--paper)] px-2 py-1.5 font-mono text-sm text-[var(--ink)] placeholder-[var(--ink-muted)]/50 outline-none focus:border-[var(--accent)]"
                                         />
                                         <input
                                             type="text"
                                             value={builtinMcpSettings.newEnvValue}
                                             onChange={e => setBuiltinMcpSettings(prev => prev ? { ...prev, newEnvValue: e.target.value } : null)}
-                                            placeholder="值"
+                                            placeholder={tSettings('toolbox.common.valuePlaceholder')}
                                             className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper)] px-2 py-1.5 font-mono text-sm text-[var(--ink)] placeholder-[var(--ink-muted)]/50 outline-none focus:border-[var(--accent)]"
                                             onKeyDown={e => {
                                                 if (e.key === 'Enter') {
@@ -3947,13 +5182,13 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                 onClick={() => setBuiltinMcpSettings(null)}
                                 className="rounded-lg px-4 py-2 text-sm text-[var(--ink-muted)] hover:bg-[var(--paper-inset)]"
                             >
-                                取消
+                                {tSettings('toolbox.common.cancel')}
                             </button>
                             <button
                                 onClick={handleSaveBuiltinMcp}
                                 className="rounded-lg bg-[var(--accent)] px-4 py-2 text-sm font-medium text-white hover:bg-[var(--accent)]/90"
                             >
-                                保存
+                                {tSettings('toolbox.common.save')}
                             </button>
                         </div>
                     </div>
@@ -3967,7 +5202,9 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                         {/* Header */}
                         <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--line)]">
                             <div className="min-w-0 flex-1">
-                                <h2 className="text-lg font-semibold text-[var(--ink)]">Gemini 图片生成 设置</h2>
+                                <h2 className="text-lg font-semibold text-[var(--ink)]">
+                                    {tSettings('toolbox.dialogs.geminiImage.title')}
+                                </h2>
                                 {getPresetMcpServer('gemini-image')?.description && (
                                     <p className="mt-0.5 text-xs text-[var(--ink-muted)]">{getPresetMcpServer('gemini-image')?.description}</p>
                                 )}
@@ -3990,7 +5227,9 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                     className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 text-sm text-[var(--ink)] placeholder-[var(--ink-muted)]/50 outline-none focus:border-[var(--accent)] font-mono"
                                 />
                                 <p className="mt-1 text-xs text-[var(--ink-muted)]">
-                                    从 <a href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer" className="text-[var(--accent)] hover:underline">aistudio.google.com</a> 免费获取
+                                    {tSettings('toolbox.dialogs.geminiImage.apiKeyHintPrefix')}
+                                    <a href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer" className="text-[var(--accent)] hover:underline">aistudio.google.com</a>
+                                    {tSettings('toolbox.dialogs.geminiImage.apiKeyHintSuffix')}
                                 </p>
                             </div>
 
@@ -4001,20 +5240,24 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                     type="text"
                                     value={geminiImageSettings.baseUrl}
                                     onChange={e => setGeminiImageSettings(prev => prev ? { ...prev, baseUrl: e.target.value } : null)}
-                                    placeholder="留空使用官方端点"
+                                    placeholder={tSettings('toolbox.dialogs.geminiImage.baseUrlPlaceholder')}
                                     className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 text-sm text-[var(--ink)] placeholder-[var(--ink-muted)]/50 outline-none focus:border-[var(--accent)] font-mono"
                                 />
-                                <p className="mt-1 text-xs text-[var(--ink-muted)]">留空使用官方端点。支持兼容 Gemini 原生协议的第三方中转</p>
+                                <p className="mt-1 text-xs text-[var(--ink-muted)]">
+                                    {tSettings('toolbox.dialogs.geminiImage.baseUrlHint')}
+                                </p>
                             </div>
 
                             {/* Model */}
                             <div>
-                                <label className="block text-sm font-medium text-[var(--ink)] mb-2">模型</label>
+                                <label className="block text-sm font-medium text-[var(--ink)] mb-2">
+                                    {tSettings('toolbox.dialogs.geminiImage.model')}
+                                </label>
                                 <div className="flex flex-wrap gap-2">
                                     {[
-                                        { id: 'gemini-2.5-flash-image', label: 'Nano Banana', desc: 'Stable · 速度快 · 免费额度多' },
-                                        { id: 'gemini-3-pro-image-preview', label: 'Nano Banana Pro', desc: 'Preview · 质量最高 · 文字渲染最佳' },
-                                        { id: 'gemini-3.1-flash-image-preview', label: 'Nano Banana 2', desc: 'Preview · 速度+质量平衡（推荐）' },
+                                        { id: 'gemini-2.5-flash-image', label: 'Nano Banana', desc: tSettings('toolbox.dialogs.geminiImage.modelDescStable') },
+                                        { id: 'gemini-3-pro-image-preview', label: 'Nano Banana Pro', desc: tSettings('toolbox.dialogs.geminiImage.modelDescBestQuality') },
+                                        { id: 'gemini-3.1-flash-image-preview', label: 'Nano Banana 2', desc: tSettings('toolbox.dialogs.geminiImage.modelDescBalanced') },
                                     ].map(m => (
                                         <button
                                             key={m.id}
@@ -4034,7 +5277,9 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
 
                             {/* Aspect Ratio */}
                             <div>
-                                <label className="block text-sm font-medium text-[var(--ink)] mb-2">默认宽高比</label>
+                                <label className="block text-sm font-medium text-[var(--ink)] mb-2">
+                                    {tSettings('toolbox.dialogs.geminiImage.defaultAspectRatio')}
+                                </label>
                                 <div className="flex flex-wrap gap-1.5">
                                     {['auto', '1:1', '3:4', '4:3', '9:16', '16:9', '2:3', '3:2', '4:5', '5:4', '21:9'].map(r => (
                                         <button
@@ -4046,16 +5291,20 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                                     : 'bg-[var(--paper-inset)] text-[var(--ink-muted)] hover:text-[var(--ink)]'
                                             }`}
                                         >
-                                            {r === 'auto' ? '自动' : r}
+                                            {r === 'auto' ? tSettings('toolbox.common.auto') : r}
                                         </button>
                                     ))}
                                 </div>
-                                <p className="mt-1 text-xs text-[var(--ink-muted)]">自动 = 不传参数，由模型决定（默认 1:1）</p>
+                                <p className="mt-1 text-xs text-[var(--ink-muted)]">
+                                    {tSettings('toolbox.dialogs.geminiImage.autoAspectHint')}
+                                </p>
                             </div>
 
                             {/* Resolution */}
                             <div>
-                                <label className="block text-sm font-medium text-[var(--ink)] mb-2">默认分辨率</label>
+                                <label className="block text-sm font-medium text-[var(--ink)] mb-2">
+                                    {tSettings('toolbox.dialogs.geminiImage.defaultResolution')}
+                                </label>
                                 <div className="flex gap-2">
                                     {['auto', '1K', '2K', '4K'].map(s => (
                                         <button
@@ -4067,26 +5316,32 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                                     : 'bg-[var(--paper-inset)] text-[var(--ink-muted)] hover:text-[var(--ink)]'
                                             }`}
                                         >
-                                            {s === 'auto' ? '自动' : s}
+                                            {s === 'auto' ? tSettings('toolbox.common.auto') : s}
                                         </button>
                                     ))}
                                 </div>
-                                <p className="mt-1 text-xs text-[var(--ink-muted)]">自动 = 不传参数，由模型决定（默认 1K）</p>
+                                <p className="mt-1 text-xs text-[var(--ink-muted)]">
+                                    {tSettings('toolbox.dialogs.geminiImage.autoResolutionHint')}
+                                </p>
                             </div>
 
                             {/* Advanced Section Divider */}
                             <div className="border-t border-[var(--line)] pt-4">
-                                <span className="text-sm font-medium text-[var(--ink-muted)]">高级设置</span>
+                                <span className="text-sm font-medium text-[var(--ink-muted)]">
+                                    {tSettings('toolbox.common.advancedSettings')}
+                                </span>
                             </div>
 
                             {/* Thinking Level */}
                             <div>
-                                <label className="block text-sm font-medium text-[var(--ink)] mb-2">推理深度</label>
+                                <label className="block text-sm font-medium text-[var(--ink)] mb-2">
+                                    {tSettings('toolbox.dialogs.geminiImage.thinkingLevel')}
+                                </label>
                                 <div className="flex gap-2">
                                     {[
-                                        { id: 'auto', label: '自动', desc: '不传参数 · 由模型决定' },
-                                        { id: 'minimal', label: '快速', desc: '速度优先（模型默认值）' },
-                                        { id: 'high', label: '高质量', desc: '推理更深 · 生成更精细但更慢' },
+                                        { id: 'auto', label: tSettings('toolbox.dialogs.geminiImage.thinkingAuto'), desc: tSettings('toolbox.dialogs.geminiImage.thinkingAutoDesc') },
+                                        { id: 'minimal', label: tSettings('toolbox.dialogs.geminiImage.thinkingMinimal'), desc: tSettings('toolbox.dialogs.geminiImage.thinkingMinimalDesc') },
+                                        { id: 'high', label: tSettings('toolbox.dialogs.geminiImage.thinkingHigh'), desc: tSettings('toolbox.dialogs.geminiImage.thinkingHighDesc') },
                                     ].map(t => (
                                         <button
                                             key={t.id}
@@ -4106,8 +5361,12 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                             {/* Search Grounding */}
                             <div className="flex items-center justify-between">
                                 <div>
-                                    <div className="text-sm font-medium text-[var(--ink)]">搜索增强</div>
-                                    <div className="text-xs text-[var(--ink-muted)]">生成前搜索 Google 获取实时信息（人物、事件、天气等）</div>
+                                    <div className="text-sm font-medium text-[var(--ink)]">
+                                        {tSettings('toolbox.dialogs.geminiImage.searchGrounding')}
+                                    </div>
+                                    <div className="text-xs text-[var(--ink-muted)]">
+                                        {tSettings('toolbox.dialogs.geminiImage.searchGroundingDescription')}
+                                    </div>
                                 </div>
                                 <button
                                     onClick={() => setGeminiImageSettings(prev => prev ? { ...prev, searchGrounding: !prev.searchGrounding } : null)}
@@ -4123,7 +5382,9 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
 
                             {/* Max Context Turns */}
                             <div>
-                                <label className="block text-sm font-medium text-[var(--ink)] mb-1">单次图片会话最大编辑轮次</label>
+                                <label className="block text-sm font-medium text-[var(--ink)] mb-1">
+                                    {tSettings('toolbox.dialogs.geminiImage.maxContextTurns')}
+                                </label>
                                 <input
                                     type="number"
                                     min={2}
@@ -4132,7 +5393,9 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                     onChange={e => setGeminiImageSettings(prev => prev ? { ...prev, maxContextTurns: parseInt(e.target.value, 10) || 20 } : null)}
                                     className="w-20 rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-1.5 text-sm text-[var(--ink)] outline-none focus:border-[var(--accent)]"
                                 />
-                                <p className="mt-1 text-xs text-[var(--ink-muted)]">超过后自动开始新会话（防止请求体过大）</p>
+                                <p className="mt-1 text-xs text-[var(--ink-muted)]">
+                                    {tSettings('toolbox.dialogs.geminiImage.maxContextTurnsHint')}
+                                </p>
                             </div>
 
                         </div>
@@ -4143,14 +5406,14 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                 onClick={() => setGeminiImageSettings(null)}
                                 className="rounded-lg px-4 py-2 text-sm text-[var(--ink-muted)] hover:bg-[var(--paper-inset)]"
                             >
-                                取消
+                                {tSettings('toolbox.common.cancel')}
                             </button>
                             <button
                                 onClick={handleSaveGeminiImage}
                                 disabled={!geminiImageSettings.apiKey.trim()}
                                 className="rounded-lg bg-[var(--accent)] px-4 py-2 text-sm font-medium text-white hover:bg-[var(--accent)]/90 disabled:opacity-40"
                             >
-                                保存
+                                {tSettings('toolbox.common.save')}
                             </button>
                         </div>
                     </div>
@@ -4164,7 +5427,9 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                         {/* Header */}
                         <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--line)]">
                             <div className="min-w-0 flex-1">
-                                <h2 className="text-lg font-semibold text-[var(--ink)]">Playwright 浏览器设置</h2>
+                                <h2 className="text-lg font-semibold text-[var(--ink)]">
+                                    {tSettings('toolbox.dialogs.playwright.title')}
+                                </h2>
                                 {getPresetMcpServer('playwright')?.description && (
                                     <p className="mt-0.5 text-xs text-[var(--ink-muted)]">{getPresetMcpServer('playwright')?.description}</p>
                                 )}
@@ -4179,8 +5444,12 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                             {/* Headless Mode */}
                             <div className="flex items-center justify-between">
                                 <div>
-                                    <div className="text-sm font-medium text-[var(--ink)]">无头模式</div>
-                                    <div className="text-xs text-[var(--ink-muted)]">后台运行，不弹出浏览器窗口</div>
+                                    <div className="text-sm font-medium text-[var(--ink)]">
+                                        {tSettings('toolbox.dialogs.playwright.headless')}
+                                    </div>
+                                    <div className="text-xs text-[var(--ink-muted)]">
+                                        {tSettings('toolbox.dialogs.playwright.headlessDescription')}
+                                    </div>
                                 </div>
                                 <button
                                     onClick={() => setPlaywrightSettings(prev => prev ? { ...prev, headless: !prev.headless } : null)}
@@ -4196,11 +5465,13 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
 
                             {/* Browser */}
                             <div>
-                                <label className="block text-sm font-medium text-[var(--ink)] mb-2">浏览器</label>
+                                <label className="block text-sm font-medium text-[var(--ink)] mb-2">
+                                    {tSettings('toolbox.dialogs.playwright.browser')}
+                                </label>
                                 <div className="flex flex-wrap gap-1.5">
                                     {(() => {
                                         const knownBrowsers = [
-                                            { id: '', label: '默认 (Chromium)' },
+                                            { id: '', label: tSettings('toolbox.dialogs.playwright.defaultChromium') },
                                             { id: 'chrome', label: 'Chrome' },
                                             { id: 'firefox', label: 'Firefox' },
                                             { id: 'webkit', label: 'WebKit' },
@@ -4227,12 +5498,14 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
 
                             {/* Device Emulation */}
                             <div>
-                                <label className="block text-sm font-medium text-[var(--ink)] mb-2">设备模拟</label>
+                                <label className="block text-sm font-medium text-[var(--ink)] mb-2">
+                                    {tSettings('toolbox.dialogs.playwright.deviceEmulation')}
+                                </label>
                                 <div className="flex flex-wrap gap-1.5">
                                     {[
-                                        { id: '', label: '不模拟' },
+                                        { id: '', label: tSettings('toolbox.dialogs.playwright.noEmulation') },
                                         ...PLAYWRIGHT_DEVICE_PRESETS.map(name => ({ id: name, label: name })),
-                                        { id: '__custom__', label: '自定义' },
+                                        { id: '__custom__', label: tSettings('toolbox.dialogs.playwright.custom') },
                                     ].map(d => (
                                         <button
                                             key={d.id}
@@ -4252,7 +5525,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                         type="text"
                                         value={playwrightSettings.customDevice}
                                         onChange={e => setPlaywrightSettings(prev => prev ? { ...prev, customDevice: e.target.value } : null)}
-                                        placeholder="输入设备名称，如 Galaxy S24"
+                                        placeholder={tSettings('toolbox.dialogs.playwright.customDevicePlaceholder')}
                                         className="mt-2 w-full rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 text-sm text-[var(--ink)] placeholder-[var(--ink-muted)]/50 outline-none focus:border-[var(--accent)]"
                                     />
                                 )}
@@ -4260,7 +5533,9 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
 
                             {/* Browser Mode Selector */}
                             <div>
-                                <label className="block text-sm font-medium text-[var(--ink)] mb-2">浏览器模式</label>
+                                <label className="block text-sm font-medium text-[var(--ink)] mb-2">
+                                    {tSettings('toolbox.dialogs.playwright.browserMode')}
+                                </label>
                                 <div className="grid grid-cols-2 gap-2">
                                     <button
                                         onClick={() => setPlaywrightSettings(prev => prev ? { ...prev, mode: 'persistent' } : null)}
@@ -4271,10 +5546,10 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                         }`}
                                     >
                                         <div className={`text-xs font-medium ${playwrightSettings.mode === 'persistent' ? 'text-[var(--accent)]' : 'text-[var(--ink)]'}`}>
-                                            持久化模式
+                                            {tSettings('toolbox.dialogs.playwright.persistentMode')}
                                         </div>
                                         <div className="text-xs text-[var(--ink-muted)] mt-0.5 leading-tight">
-                                            登录态完整保留，同一时间仅一个对话可使用
+                                            {tSettings('toolbox.dialogs.playwright.persistentModeDescription')}
                                         </div>
                                     </button>
                                     <button
@@ -4286,10 +5561,10 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                         }`}
                                     >
                                         <div className={`text-xs font-medium ${playwrightSettings.mode === 'isolated' ? 'text-[var(--accent)]' : 'text-[var(--ink)]'}`}>
-                                            独立模式
+                                            {tSettings('toolbox.dialogs.playwright.isolatedMode')}
                                         </div>
                                         <div className="text-xs text-[var(--ink-muted)] mt-0.5 leading-tight">
-                                            多对话可同时使用，登录态通过快照共享
+                                            {tSettings('toolbox.dialogs.playwright.isolatedModeDescription')}
                                         </div>
                                     </button>
                                 </div>
@@ -4298,7 +5573,9 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                             {/* Persistent Mode: user-data-dir + warning */}
                             {playwrightSettings.mode === 'persistent' && (
                                 <div>
-                                    <label className="block text-sm font-medium text-[var(--ink)] mb-1">浏览器数据目录</label>
+                                    <label className="block text-sm font-medium text-[var(--ink)] mb-1">
+                                        {tSettings('toolbox.dialogs.playwright.userDataDir')}
+                                    </label>
                                     <input
                                         type="text"
                                         value={playwrightSettings.userDataDir}
@@ -4307,7 +5584,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                         className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 text-sm text-[var(--ink)] placeholder-[var(--ink-muted)]/50 outline-none focus:border-[var(--accent)] font-mono"
                                     />
                                     <div className="mt-2 rounded-lg bg-[var(--warning-bg)] px-3 py-2 text-xs text-[var(--warning)]">
-                                        持久化模式下，同一时间只能有一个对话使用浏览器，其他对话需等待
+                                        {tSettings('toolbox.dialogs.playwright.persistentWarning')}
                                     </div>
                                 </div>
                             )}
@@ -4317,17 +5594,19 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                 <div className="space-y-3">
                                     <div>
                                         <div className="flex items-center justify-between mb-1.5">
-                                            <label className="text-sm font-medium text-[var(--ink)]">登录态管理</label>
+                                            <label className="text-sm font-medium text-[var(--ink)]">
+                                                {tSettings('toolbox.dialogs.playwright.loginState')}
+                                            </label>
                                             <button
                                                 onClick={() => setCookieForm({ editIndex: null, domain: '', name: '', value: '', path: '/' })}
                                                 className="flex items-center gap-1 rounded-md px-2 py-1 text-xs text-[var(--accent)] hover:bg-[var(--accent)]/10 transition-colors"
                                             >
                                                 <Plus className="h-3 w-3" />
-                                                添加 Cookie
+                                                {tSettings('toolbox.dialogs.playwright.addCookie')}
                                             </button>
                                         </div>
                                         <p className="text-xs text-[var(--ink-muted)] mb-2">
-                                            每个对话使用独立浏览器，登录状态通过 Cookie 快照跨对话共享
+                                            {tSettings('toolbox.dialogs.playwright.loginStateDescription')}
                                         </p>
                                     </div>
 
@@ -4369,10 +5648,10 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                     ) : (
                                         <div className="rounded-lg border border-dashed border-[var(--line)] bg-[var(--paper-inset)] px-3 py-4 text-center">
                                             <div className="text-xs text-[var(--ink-muted)]">
-                                                暂无已保存的 Cookie
+                                                {tSettings('toolbox.dialogs.playwright.emptyCookies')}
                                             </div>
                                             <div className="text-xs text-[var(--ink-muted)] mt-0.5">
-                                                AI 使用浏览器登录后会自动保存，也可手动添加
+                                                {tSettings('toolbox.dialogs.playwright.emptyCookiesDescription')}
                                             </div>
                                         </div>
                                     )}
@@ -4381,11 +5660,15 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                     {cookieForm && (
                                         <div className="rounded-lg border border-[var(--accent)]/30 bg-[var(--paper)] p-3 space-y-2.5">
                                             <div className="text-xs font-medium text-[var(--ink)]">
-                                                {cookieForm.editIndex !== null ? '编辑 Cookie' : '添加 Cookie'}
+                                                {cookieForm.editIndex !== null
+                                                    ? tSettings('toolbox.dialogs.playwright.editCookie')
+                                                    : tSettings('toolbox.dialogs.playwright.addCookie')}
                                             </div>
                                             <div className="grid grid-cols-2 gap-2">
                                                 <div>
-                                                    <label className="block text-xs text-[var(--ink-muted)] mb-0.5">域名 *</label>
+                                                    <label className="block text-xs text-[var(--ink-muted)] mb-0.5">
+                                                        {tSettings('toolbox.dialogs.playwright.domain')}
+                                                    </label>
                                                     <input
                                                         type="text"
                                                         value={cookieForm.domain}
@@ -4395,7 +5678,9 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                                     />
                                                 </div>
                                                 <div>
-                                                    <label className="block text-xs text-[var(--ink-muted)] mb-0.5">路径</label>
+                                                    <label className="block text-xs text-[var(--ink-muted)] mb-0.5">
+                                                        {tSettings('toolbox.dialogs.playwright.path')}
+                                                    </label>
                                                     <input
                                                         type="text"
                                                         value={cookieForm.path}
@@ -4406,7 +5691,9 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                                 </div>
                                             </div>
                                             <div>
-                                                <label className="block text-xs text-[var(--ink-muted)] mb-0.5">名称 *</label>
+                                                <label className="block text-xs text-[var(--ink-muted)] mb-0.5">
+                                                    {tSettings('toolbox.dialogs.playwright.name')}
+                                                </label>
                                                 <input
                                                     type="text"
                                                     value={cookieForm.name}
@@ -4416,7 +5703,9 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                                 />
                                             </div>
                                             <div>
-                                                <label className="block text-xs text-[var(--ink-muted)] mb-0.5">值 *</label>
+                                                <label className="block text-xs text-[var(--ink-muted)] mb-0.5">
+                                                    {tSettings('toolbox.dialogs.playwright.value')}
+                                                </label>
                                                 <input
                                                     type="text"
                                                     value={cookieForm.value}
@@ -4430,14 +5719,16 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                                     onClick={() => setCookieForm(null)}
                                                     className="rounded-md px-3 py-1.5 text-xs text-[var(--ink-muted)] hover:bg-[var(--paper-inset)]"
                                                 >
-                                                    取消
+                                                    {tSettings('toolbox.common.cancel')}
                                                 </button>
                                                 <button
                                                     onClick={handleSaveCookie}
                                                     disabled={!cookieForm.domain.trim() || !cookieForm.name.trim() || !cookieForm.value.trim()}
                                                     className="rounded-md bg-[var(--accent)] px-3 py-1.5 text-xs font-medium text-white disabled:opacity-40"
                                                 >
-                                                    {cookieForm.editIndex !== null ? '更新' : '添加'}
+                                                    {cookieForm.editIndex !== null
+                                                        ? tSettings('toolbox.dialogs.playwright.update')
+                                                        : tSettings('toolbox.common.add')}
                                                 </button>
                                             </div>
                                         </div>
@@ -4447,13 +5738,19 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
 
                             {/* Advanced Section Divider */}
                             <div className="border-t border-[var(--line)] pt-4">
-                                <span className="text-sm font-medium text-[var(--ink-muted)]">高级设置</span>
+                                <span className="text-sm font-medium text-[var(--ink-muted)]">
+                                    {tSettings('toolbox.common.advancedSettings')}
+                                </span>
                             </div>
 
                             {/* Extra Args */}
                             <div>
-                                <label className="block text-sm font-medium text-[var(--ink)] mb-1">额外参数</label>
-                                <p className="text-xs text-[var(--ink-muted)] mb-2">如 --proxy-server=... 等（独立模式下 --caps= 会自动合并 storage）</p>
+                                <label className="block text-sm font-medium text-[var(--ink)] mb-1">
+                                    {tSettings('toolbox.dialogs.playwright.extraArgs')}
+                                </label>
+                                <p className="text-xs text-[var(--ink-muted)] mb-2">
+                                    {tSettings('toolbox.dialogs.playwright.extraArgsHint')}
+                                </p>
                                 <div className="space-y-2">
                                     {playwrightSettings.extraArgs.map((arg, idx) => (
                                         <div key={idx} className="flex items-center gap-2">
@@ -4485,7 +5782,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                                     } : null);
                                                 }
                                             }}
-                                            placeholder="输入参数，如 --proxy-server=http://..."
+                                            placeholder={tSettings('toolbox.dialogs.playwright.argPlaceholder')}
                                             className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-1.5 text-sm text-[var(--ink)] placeholder-[var(--ink-muted)]/50 outline-none focus:border-[var(--accent)]"
                                         />
                                         <button
@@ -4514,13 +5811,13 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                 onClick={() => setPlaywrightSettings(null)}
                                 className="rounded-lg px-4 py-2 text-sm text-[var(--ink-muted)] hover:bg-[var(--paper-inset)]"
                             >
-                                取消
+                                {tSettings('toolbox.common.cancel')}
                             </button>
                             <button
                                 onClick={handleSavePlaywright}
                                 className="rounded-lg bg-[var(--accent)] px-4 py-2 text-sm font-medium text-white hover:bg-[var(--accent)]/90"
                             >
-                                保存
+                                {tSettings('toolbox.common.save')}
                             </button>
                         </div>
                     </div>
@@ -4534,7 +5831,9 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                         {/* Header */}
                         <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--line)]">
                             <div className="min-w-0 flex-1">
-                                <h2 className="text-lg font-semibold text-[var(--ink)]">Edge TTS 语音合成 设置</h2>
+                                <h2 className="text-lg font-semibold text-[var(--ink)]">
+                                    {tSettings('toolbox.dialogs.edgeTts.title')}
+                                </h2>
                                 {getPresetMcpServer('edge-tts')?.description && (
                                     <p className="mt-0.5 text-xs text-[var(--ink-muted)]">{getPresetMcpServer('edge-tts')?.description}</p>
                                 )}
@@ -4550,13 +5849,15 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                             <div className="rounded-lg bg-[var(--success-bg)] border border-[var(--success)]/20 px-3 py-2">
                                 <div className="flex items-center gap-2 text-xs text-[var(--success)]">
                                     <Check className="h-3.5 w-3.5" />
-                                    免费服务，无需 API Key，开箱即用
+                                    {tSettings('toolbox.dialogs.edgeTts.freeNotice')}
                                 </div>
                             </div>
 
                             {/* Default Voice */}
                             <div>
-                                <label className="block text-sm font-medium text-[var(--ink)] mb-1">默认语音</label>
+                                <label className="block text-sm font-medium text-[var(--ink)] mb-1">
+                                    {tSettings('toolbox.dialogs.edgeTts.defaultVoice')}
+                                </label>
                                 <input
                                     type="text"
                                     value={edgeTtsSettings.defaultVoice}
@@ -4566,10 +5867,10 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                 />
                                 <div className="mt-2 flex flex-wrap gap-1.5">
                                     {[
-                                        { id: 'zh-CN-XiaoxiaoNeural', label: '晓晓 · 甜美女声' },
-                                        { id: 'zh-CN-YunxiNeural', label: '云希 · 叙事男声' },
-                                        { id: 'zh-CN-XiaomoNeural', label: '晓墨 · 温柔女声' },
-                                        { id: 'zh-CN-YunjianNeural', label: '云健 · 新闻男声' },
+                                        { id: 'zh-CN-XiaoxiaoNeural', label: tSettings('toolbox.dialogs.edgeTts.voiceXiaoxiao') },
+                                        { id: 'zh-CN-YunxiNeural', label: tSettings('toolbox.dialogs.edgeTts.voiceYunxi') },
+                                        { id: 'zh-CN-XiaomoNeural', label: tSettings('toolbox.dialogs.edgeTts.voiceXiaomo') },
+                                        { id: 'zh-CN-YunjianNeural', label: tSettings('toolbox.dialogs.edgeTts.voiceYunjian') },
                                         { id: 'en-US-JennyNeural', label: 'Jenny · English' },
                                         { id: 'en-US-GuyNeural', label: 'Guy · English' },
                                     ].map(v => (
@@ -4590,10 +5891,12 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
 
                             {/* Output Format */}
                             <div>
-                                <label className="block text-sm font-medium text-[var(--ink)] mb-2">输出格式</label>
+                                <label className="block text-sm font-medium text-[var(--ink)] mb-2">
+                                    {tSettings('toolbox.dialogs.edgeTts.outputFormat')}
+                                </label>
                                 <div className="flex gap-2">
                                     {[
-                                        { id: 'audio-24khz-48kbitrate-mono-mp3', label: 'MP3（推荐）' },
+                                        { id: 'audio-24khz-48kbitrate-mono-mp3', label: tSettings('toolbox.dialogs.edgeTts.mp3Recommended') },
                                         { id: 'webm-24khz-16bit-mono-opus', label: 'WebM' },
                                         { id: 'ogg-24khz-16bit-mono-opus', label: 'OGG' },
                                     ].map(f => (
@@ -4614,13 +5917,17 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
 
                             {/* Voice Parameters Divider */}
                             <div className="border-t border-[var(--line)] pt-4">
-                                <span className="text-sm font-medium text-[var(--ink-muted)]">语音参数</span>
+                                <span className="text-sm font-medium text-[var(--ink-muted)]">
+                                    {tSettings('toolbox.dialogs.edgeTts.voiceParameters')}
+                                </span>
                             </div>
 
                             {/* Rate Slider */}
                             <div>
                                 <div className="flex items-center justify-between mb-1">
-                                    <label className="text-sm font-medium text-[var(--ink-muted)]">语速</label>
+                                    <label className="text-sm font-medium text-[var(--ink-muted)]">
+                                        {tSettings('toolbox.dialogs.edgeTts.rate')}
+                                    </label>
                                     <div className="flex items-center gap-2">
                                         <span className="text-xs font-mono text-[var(--ink)]">{edgeTtsSettings.defaultRate >= 0 ? '+' : ''}{edgeTtsSettings.defaultRate}%</span>
                                         {edgeTtsSettings.defaultRate !== 0 && (
@@ -4628,7 +5935,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                                 onClick={() => setEdgeTtsSettings(prev => prev ? { ...prev, defaultRate: 0 } : null)}
                                                 className="text-xs text-[var(--ink-muted)] hover:text-[var(--accent)]"
                                             >
-                                                重置
+                                                {tSettings('toolbox.common.reset')}
                                             </button>
                                         )}
                                     </div>
@@ -4651,7 +5958,9 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                             {/* Volume Slider */}
                             <div>
                                 <div className="flex items-center justify-between mb-1">
-                                    <label className="text-sm font-medium text-[var(--ink-muted)]">音量</label>
+                                    <label className="text-sm font-medium text-[var(--ink-muted)]">
+                                        {tSettings('toolbox.dialogs.edgeTts.volume')}
+                                    </label>
                                     <div className="flex items-center gap-2">
                                         <span className="text-xs font-mono text-[var(--ink)]">{edgeTtsSettings.defaultVolume >= 0 ? '+' : ''}{edgeTtsSettings.defaultVolume}%</span>
                                         {edgeTtsSettings.defaultVolume !== 0 && (
@@ -4659,7 +5968,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                                 onClick={() => setEdgeTtsSettings(prev => prev ? { ...prev, defaultVolume: 0 } : null)}
                                                 className="text-xs text-[var(--ink-muted)] hover:text-[var(--accent)]"
                                             >
-                                                重置
+                                                {tSettings('toolbox.common.reset')}
                                             </button>
                                         )}
                                     </div>
@@ -4682,7 +5991,9 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                             {/* Pitch Slider */}
                             <div>
                                 <div className="flex items-center justify-between mb-1">
-                                    <label className="text-sm font-medium text-[var(--ink-muted)]">音调</label>
+                                    <label className="text-sm font-medium text-[var(--ink-muted)]">
+                                        {tSettings('toolbox.dialogs.edgeTts.pitch')}
+                                    </label>
                                     <div className="flex items-center gap-2">
                                         <span className="text-xs font-mono text-[var(--ink)]">{edgeTtsSettings.defaultPitch >= 0 ? '+' : ''}{edgeTtsSettings.defaultPitch}Hz</span>
                                         {edgeTtsSettings.defaultPitch !== 0 && (
@@ -4690,7 +6001,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                                 onClick={() => setEdgeTtsSettings(prev => prev ? { ...prev, defaultPitch: 0 } : null)}
                                                 className="text-xs text-[var(--ink-muted)] hover:text-[var(--accent)]"
                                             >
-                                                重置
+                                                {tSettings('toolbox.common.reset')}
                                             </button>
                                         )}
                                     </div>
@@ -4712,7 +6023,9 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
 
                             {/* Preview Section Divider */}
                             <div className="border-t border-[var(--line)] pt-4">
-                                <span className="text-sm font-medium text-[var(--ink-muted)]">试听</span>
+                                <span className="text-sm font-medium text-[var(--ink-muted)]">
+                                    {tSettings('toolbox.dialogs.edgeTts.preview')}
+                                </span>
                             </div>
 
                             {/* Preview */}
@@ -4722,14 +6035,16 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                         value={ttsPreviewText}
                                         onChange={e => setTtsPreviewText(e.target.value)}
                                         rows={2}
-                                        placeholder="输入试听文本..."
+                                        placeholder={tSettings('toolbox.dialogs.edgeTts.previewPlaceholder')}
                                         className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 text-sm text-[var(--ink)] placeholder-[var(--ink-muted)]/50 outline-none focus:border-[var(--accent)] resize-none"
                                     />
                                     <button
                                         onClick={handlePreviewTts}
                                         disabled={ttsPreviewLoading || !ttsPreviewText.trim()}
                                         className="shrink-0 h-10 w-10 rounded-full bg-[var(--accent)] text-white flex items-center justify-center hover:bg-[var(--accent)]/90 disabled:opacity-40 transition-colors self-center"
-                                        title={ttsPreviewPlaying ? '停止' : '试听'}
+                                        title={ttsPreviewPlaying
+                                            ? tSettings('toolbox.dialogs.edgeTts.stop')
+                                            : tSettings('toolbox.dialogs.edgeTts.play')}
                                     >
                                         {ttsPreviewLoading ? (
                                             <Loader2 className="h-4 w-4 animate-spin" />
@@ -4751,13 +6066,13 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                 onClick={() => setEdgeTtsSettings(null)}
                                 className="rounded-lg px-4 py-2 text-sm text-[var(--ink-muted)] hover:bg-[var(--paper-inset)]"
                             >
-                                取消
+                                {tSettings('toolbox.common.cancel')}
                             </button>
                             <button
                                 onClick={handleSaveEdgeTts}
                                 className="rounded-lg bg-[var(--accent)] px-4 py-2 text-sm font-medium text-white hover:bg-[var(--accent)]/90"
                             >
-                                保存
+                                {tSettings('toolbox.common.save')}
                             </button>
                         </div>
                     </div>
@@ -4770,17 +6085,17 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                     <div className="mx-4 w-full max-w-lg rounded-2xl bg-[var(--paper-elevated)] shadow-xl max-h-[85vh] flex flex-col">
                         {/* Header */}
                         <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--line)]">
-                            <h3 className="text-lg font-semibold text-[var(--ink)]">{editingMcpId ? '编辑 MCP 服务器' : '添加 MCP 服务器'}</h3>
+                            <h3 className="text-lg font-semibold text-[var(--ink)]">{editingMcpId ? tSettings('toolbox.dialogs.customMcp.editTitle') : tSettings('toolbox.dialogs.customMcp.addTitle')}</h3>
                             <div className="flex items-center gap-2">
                                 {!editingMcpId && (
                                     <button
                                         onClick={() => {
                                             setMcpFormMode(m => m === 'form' ? 'json' : 'form');
-                                            setMcpJsonError('');
+                                            setMcpJsonError(null);
                                         }}
                                         className="text-sm text-[var(--accent)] hover:underline"
                                     >
-                                        {mcpFormMode === 'form' ? '切换为 JSON 配置' : '切换为添加面板'}
+                                        {mcpFormMode === 'form' ? tSettings('toolbox.dialogs.customMcp.switchToJson') : tSettings('toolbox.dialogs.customMcp.switchToForm')}
                                     </button>
                                 )}
                                 <button
@@ -4798,24 +6113,24 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                             <div className="space-y-3">
                               <textarea
                                 value={mcpJsonInput}
-                                onChange={e => { setMcpJsonInput(e.target.value); setMcpJsonError(''); }}
-                                placeholder={'请粘贴完整的 JSON 配置，例如：\n{\n  "mcpServers": {\n    "ddg-search": {\n      "command": "uvx",\n      "args": ["duckduckgo-mcp-server"]\n    }\n  }\n}'}
+                                onChange={e => { setMcpJsonInput(e.target.value); setMcpJsonError(null); }}
+                                placeholder={tSettings('toolbox.dialogs.customMcp.jsonPlaceholder')}
                                 className="w-full h-64 rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 font-mono text-sm text-[var(--ink)] placeholder:text-[var(--ink-muted)]/50 focus:border-[var(--accent)] focus:outline-none focus:ring-1 focus:ring-[var(--accent)] resize-none"
                                 spellCheck={false}
                               />
                               {mcpJsonError && (
-                                <p className="text-sm text-[var(--error)]">{mcpJsonError}</p>
+                                <p className="text-sm text-[var(--error)]">{tSettings(mcpJsonError.key, mcpJsonError.params)}</p>
                               )}
                             </div>
                           ) : (
                           <>
                             {/* Transport Type Selector */}
                             <div className="mb-5">
-                                <label className="mb-2 block text-sm font-medium text-[var(--ink-muted)]">传输协议</label>
+                                <label className="mb-2 block text-sm font-medium text-[var(--ink-muted)]">{tSettings('toolbox.dialogs.customMcp.transport')}</label>
                                 <div className="grid grid-cols-3 gap-2">
                                     {[
-                                        { type: 'stdio' as const, icon: '💻', name: 'STDIO', desc: '本地命令行' },
-                                        { type: 'http' as const, icon: '🌐', name: 'Streamable HTTP', desc: '远程服务器' },
+                                        { type: 'stdio' as const, icon: '💻', name: 'STDIO', desc: tSettings('toolbox.dialogs.customMcp.localCommand') },
+                                        { type: 'http' as const, icon: '🌐', name: 'Streamable HTTP', desc: tSettings('toolbox.dialogs.customMcp.remoteServer') },
                                         { type: 'sse' as const, icon: '📡', name: 'SSE', desc: 'Server-Sent Events' },
                                     ].map((t) => (
                                         <button
@@ -4846,23 +6161,23 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                         type="text"
                                         value={mcpForm.id}
                                         onChange={(e) => setMcpForm((p) => ({ ...p, id: e.target.value.toLowerCase().replace(/\s/g, '-') }))}
-                                        placeholder="例如: my-mcp-server"
+                                        placeholder={tSettings('toolbox.dialogs.customMcp.idPlaceholder')}
                                         disabled={!!editingMcpId}
                                         className={`w-full rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2.5 text-sm font-mono transition-colors focus:border-[var(--focus-border)] focus:outline-none ${editingMcpId ? 'opacity-50 cursor-not-allowed' : ''}`}
                                     />
-                                    <p className="mt-1 text-xs text-[var(--ink-muted)]">唯一标识符，用于在配置中引用</p>
+                                    <p className="mt-1 text-xs text-[var(--ink-muted)]">{tSettings('toolbox.dialogs.customMcp.idHint')}</p>
                                 </div>
 
                                 {/* Name - Common */}
                                 <div>
                                     <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">
-                                        名称 <span className="font-mono text-[var(--ink-muted)]">name</span> <span className="text-[var(--error)]">*</span>
+                                        {tSettings('toolbox.dialogs.customMcp.name')} <span className="font-mono text-[var(--ink-muted)]">name</span> <span className="text-[var(--error)]">*</span>
                                     </label>
                                     <input
                                         type="text"
                                         value={mcpForm.name}
                                         onChange={(e) => setMcpForm((p) => ({ ...p, name: e.target.value }))}
-                                        placeholder="例如: 我的 MCP 服务器"
+                                        placeholder={tSettings('toolbox.dialogs.customMcp.namePlaceholder')}
                                         className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2.5 text-sm transition-colors focus:border-[var(--focus-border)] focus:outline-none"
                                     />
                                 </div>
@@ -4872,22 +6187,22 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                     <>
                                         <div>
                                             <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">
-                                                命令 <span className="font-mono text-[var(--ink-muted)]">command</span> <span className="text-[var(--error)]">*</span>
+                                                {tSettings('toolbox.dialogs.customMcp.command')} <span className="font-mono text-[var(--ink-muted)]">command</span> <span className="text-[var(--error)]">*</span>
                                             </label>
                                             <input
                                                 type="text"
                                                 value={mcpForm.command}
                                                 onChange={(e) => setMcpForm((p) => ({ ...p, command: e.target.value }))}
-                                                placeholder="例如: npx, uvx, node, python"
+                                                placeholder={tSettings('toolbox.dialogs.customMcp.commandPlaceholder')}
                                                 className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2.5 text-sm font-mono transition-colors focus:border-[var(--focus-border)] focus:outline-none"
                                             />
-                                            <p className="mt-1 text-xs text-[var(--ink-muted)]">启动服务器的命令</p>
+                                            <p className="mt-1 text-xs text-[var(--ink-muted)]">{tSettings('toolbox.dialogs.customMcp.commandHint')}</p>
                                         </div>
 
                                         {/* Args - array input */}
                                         <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-inset)] p-4">
                                             <label className="mb-3 block text-sm font-medium text-[var(--ink)]">
-                                                参数 <span className="font-mono text-[var(--ink-muted)]">args</span>
+                                                {tSettings('toolbox.dialogs.customMcp.args')} <span className="font-mono text-[var(--ink-muted)]">args</span>
                                             </label>
 
                                             {/* Existing args */}
@@ -4918,7 +6233,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                                     type="text"
                                                     value={mcpForm.newArg}
                                                     onChange={(e) => setMcpForm((p) => ({ ...p, newArg: e.target.value }))}
-                                                    placeholder="例如: @playwright/mcp@latest"
+                                                    placeholder={tSettings('toolbox.dialogs.customMcp.argPlaceholder')}
                                                     className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2 text-sm font-mono transition-colors focus:border-[var(--focus-border)] focus:outline-none"
                                                     onKeyDown={(e) => {
                                                         if (e.key === 'Enter') {
@@ -4947,16 +6262,16 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                                     className="flex items-center gap-1.5 rounded-lg border border-[var(--ink)] px-3 py-2 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)] disabled:opacity-50"
                                                 >
                                                     <Plus className="h-4 w-4" />
-                                                    添加
+                                                    {tSettings('toolbox.common.add')}
                                                 </button>
                                             </div>
-                                            <p className="mt-2 text-xs text-[var(--ink-muted)]">一次填写一个参数，按 Enter 或点击添加</p>
+                                            <p className="mt-2 text-xs text-[var(--ink-muted)]">{tSettings('toolbox.dialogs.customMcp.argHint')}</p>
                                         </div>
 
                                         {/* Environment Variables */}
                                         <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-inset)] p-4">
                                             <label className="mb-3 flex items-center gap-2 text-sm font-medium text-[var(--ink)]">
-                                                <span>🔐</span> 环境变量 <span className="font-mono text-[var(--ink-muted)]">env</span>（可选）
+                                                <span>🔐</span> {tSettings('toolbox.dialogs.customMcp.envVars')} <span className="font-mono text-[var(--ink-muted)]">env</span>{tSettings('toolbox.dialogs.customMcp.optionalSuffix')}
                                             </label>
 
                                             {/* Existing env vars */}
@@ -4970,7 +6285,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                                             ...p,
                                                             env: { ...p.env, [key]: e.target.value }
                                                         }))}
-                                                        placeholder="值"
+                                                        placeholder={tSettings('toolbox.common.valuePlaceholder')}
                                                         className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2 text-sm transition-colors focus:border-[var(--focus-border)] focus:outline-none"
                                                     />
                                                     <button
@@ -4992,14 +6307,14 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                                     type="text"
                                                     value={mcpForm.newEnvKey}
                                                     onChange={(e) => setMcpForm((p) => ({ ...p, newEnvKey: e.target.value.toUpperCase().replace(/\s/g, '_') }))}
-                                                    placeholder="变量名"
+                                                    placeholder={tSettings('toolbox.common.envKeyPlaceholder')}
                                                     className="w-[140px] shrink-0 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2 text-sm font-mono transition-colors focus:border-[var(--focus-border)] focus:outline-none"
                                                 />
                                                 <input
                                                     type="text"
                                                     value={mcpForm.newEnvValue}
                                                     onChange={(e) => setMcpForm((p) => ({ ...p, newEnvValue: e.target.value }))}
-                                                    placeholder="值"
+                                                    placeholder={tSettings('toolbox.common.valuePlaceholder')}
                                                     className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2 text-sm font-mono transition-colors focus:border-[var(--focus-border)] focus:outline-none"
                                                     onKeyDown={(e) => {
                                                         if (e.key === 'Enter') {
@@ -5032,7 +6347,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                                     className="flex items-center gap-1.5 rounded-lg border border-[var(--ink)] px-3 py-2 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)] disabled:opacity-50"
                                                 >
                                                     <Plus className="h-4 w-4" />
-                                                    添加
+                                                    {tSettings('toolbox.common.add')}
                                                 </button>
                                             </div>
                                         </div>
@@ -5044,17 +6359,17 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                     <>
                                         <div>
                                             <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">
-                                                服务器 <span className="font-mono text-[var(--ink-muted)]">url</span> <span className="text-[var(--error)]">*</span>
+                                                {tSettings('toolbox.dialogs.customMcp.serverUrl')} <span className="font-mono text-[var(--ink-muted)]">url</span> <span className="text-[var(--error)]">*</span>
                                             </label>
                                             <input
                                                 type="url"
                                                 value={mcpForm.url}
                                                 onChange={(e) => setMcpForm((p) => ({ ...p, url: e.target.value }))}
-                                                placeholder={mcpForm.type === 'sse' ? "例如: https://example.com/sse" : "例如: https://example.com/mcp"}
+                                                placeholder={mcpForm.type === 'sse' ? tSettings('toolbox.dialogs.customMcp.urlPlaceholderSse') : tSettings('toolbox.dialogs.customMcp.urlPlaceholderHttp')}
                                                 className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2.5 text-sm font-mono transition-colors focus:border-[var(--focus-border)] focus:outline-none"
                                             />
                                             <p className="mt-1 text-xs text-[var(--ink-muted)]">
-                                                {mcpForm.type === 'sse' ? 'SSE 事件流端点地址' : 'MCP 服务器的 HTTP 端点地址'}
+                                                {mcpForm.type === 'sse' ? tSettings('toolbox.dialogs.customMcp.urlHintSse') : tSettings('toolbox.dialogs.customMcp.urlHintHttp')}
                                             </p>
                                         </div>
 
@@ -5066,7 +6381,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                                 className="flex w-full items-center justify-between p-4 text-sm font-medium text-[var(--ink)]"
                                             >
                                                 <span className="flex items-center gap-2">
-                                                    <KeyRound className="h-4 w-4" /> 请求头 <span className="font-mono text-[var(--ink-muted)]">headers</span>
+                                                    <KeyRound className="h-4 w-4" /> {tSettings('toolbox.dialogs.customMcp.headers')} <span className="font-mono text-[var(--ink-muted)]">headers</span>
                                                     {Object.keys(mcpForm.headers).length > 0 && (
                                                         <span className="rounded-full bg-[var(--accent)]/10 px-1.5 py-0.5 text-xs text-[var(--accent)]">{Object.keys(mcpForm.headers).length}</span>
                                                     )}
@@ -5091,7 +6406,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                                                     ...p,
                                                                     headers: { ...p.headers, [key]: e.target.value }
                                                                 }))}
-                                                                placeholder="值"
+                                                                placeholder={tSettings('toolbox.common.valuePlaceholder')}
                                                                 className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2 text-sm font-mono transition-colors focus:border-[var(--focus-border)] focus:outline-none"
                                                             />
                                                             <button
@@ -5113,14 +6428,14 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                                             type="text"
                                                             value={mcpForm.newHeaderKey}
                                                             onChange={(e) => setMcpForm((p) => ({ ...p, newHeaderKey: e.target.value }))}
-                                                            placeholder="名称"
+                                                            placeholder={tSettings('toolbox.dialogs.customMcp.headerNamePlaceholder')}
                                                             className="w-[140px] shrink-0 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2 text-sm font-mono transition-colors focus:border-[var(--focus-border)] focus:outline-none"
                                                         />
                                                         <input
                                                             type="text"
                                                             value={mcpForm.newHeaderValue}
                                                             onChange={(e) => setMcpForm((p) => ({ ...p, newHeaderValue: e.target.value }))}
-                                                            placeholder="值"
+                                                            placeholder={tSettings('toolbox.common.valuePlaceholder')}
                                                             className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2 text-sm font-mono transition-colors focus:border-[var(--focus-border)] focus:outline-none"
                                                             onKeyDown={(e) => {
                                                                 if (e.key === 'Enter') {
@@ -5153,7 +6468,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                                             <Plus className="h-4 w-4" />
                                                         </button>
                                                     </div>
-                                                    <p className="mt-2 text-xs text-[var(--ink-muted)]">用于认证的 HTTP 请求头，如 Authorization: Bearer token</p>
+                                                    <p className="mt-2 text-xs text-[var(--ink-muted)]">{tSettings('toolbox.dialogs.customMcp.authHeaderHint')}</p>
                                                 </div>
                                             )}
                                         </div>
@@ -5163,17 +6478,17 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                             <div className="p-4">
                                                 <div className="flex items-center justify-between">
                                                     <span className="flex items-center gap-2 text-sm font-medium text-[var(--ink)]">
-                                                        <Link className="h-4 w-4" /> OAuth 2.0 授权
+                                                        <Link className="h-4 w-4" /> {tSettings('toolbox.dialogs.customMcp.oauthTitle')}
                                                     </span>
                                                     <span className="flex items-center gap-2">
                                                         {mcpOAuthStatus[mcpForm.id] === 'connected' && (
                                                             <span className="flex items-center gap-1 rounded-full bg-[var(--success)]/10 px-2 py-0.5 text-xs text-[var(--success)]">
-                                                                <Check className="h-3 w-3" /> 已授权
+                                                                <Check className="h-3 w-3" /> {tSettings('toolbox.dialogs.customMcp.oauthAuthorized')}
                                                             </span>
                                                         )}
                                                         {mcpOAuthStatus[mcpForm.id] === 'expired' && (
                                                             <span className="flex items-center gap-1 rounded-full bg-[var(--warning)]/10 px-2 py-0.5 text-xs text-[var(--warning)]">
-                                                                <AlertCircle className="h-3 w-3" /> 已过期
+                                                                <AlertCircle className="h-3 w-3" /> {tSettings('toolbox.dialogs.customMcp.oauthExpired')}
                                                             </span>
                                                         )}
                                                     </span>
@@ -5186,7 +6501,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                                             onClick={() => handleMcpOAuthDisconnect(mcpForm.id)}
                                                             className="flex items-center gap-1.5 rounded-lg border border-[var(--error)] px-3 py-2 text-sm font-medium text-[var(--error)] transition-colors hover:bg-[var(--error-bg)]"
                                                         >
-                                                            <Unlink className="h-4 w-4" /> 撤销授权
+                                                            <Unlink className="h-4 w-4" /> {tSettings('toolbox.dialogs.customMcp.revokeAuthorization')}
                                                         </button>
                                                     </div>
                                                 )}
@@ -5200,9 +6515,9 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                                             className="flex items-center gap-1.5 rounded-lg border border-[var(--warning)] px-3 py-2 text-sm font-medium text-[var(--warning)] transition-colors hover:bg-[var(--warning)]/10 disabled:opacity-50"
                                                         >
                                                             {mcpOAuthConnecting === mcpForm.id ? (
-                                                                <><Loader2 className="h-4 w-4 animate-spin" /> 等待授权...</>
+                                                                <><Loader2 className="h-4 w-4 animate-spin" /> {tSettings('toolbox.dialogs.customMcp.waitingAuthorization')}</>
                                                             ) : (
-                                                                <><Link className="h-4 w-4" /> 重新授权</>
+                                                                <><Link className="h-4 w-4" /> {tSettings('toolbox.dialogs.customMcp.reauthorize')}</>
                                                             )}
                                                         </button>
                                                     </div>
@@ -5230,9 +6545,9 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                                                     className="flex items-center gap-1.5 rounded-lg bg-[var(--accent)] px-4 py-2 text-sm font-medium text-white transition-colors hover:opacity-90 disabled:opacity-50"
                                                                 >
                                                                     {mcpOAuthConnecting === mcpForm.id ? (
-                                                                        <><Loader2 className="h-4 w-4 animate-spin" /> 等待授权...</>
+                                                                        <><Loader2 className="h-4 w-4 animate-spin" /> {tSettings('toolbox.dialogs.customMcp.waitingAuthorization')}</>
                                                                     ) : (
-                                                                        <><Link className="h-4 w-4" /> 授权登录</>
+                                                                        <><Link className="h-4 w-4" /> {tSettings('toolbox.dialogs.customMcp.authorizeLogin')}</>
                                                                     )}
                                                                 </button>
                                                                 <button
@@ -5240,7 +6555,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                                                     onClick={() => setMcpOAuthExpanded(v => !v)}
                                                                     className="text-xs text-[var(--ink-muted)] hover:text-[var(--ink)] transition-colors"
                                                                 >
-                                                                    {mcpOAuthExpanded ? '收起高级选项' : '手动配置 (高级)'}
+                                                                    {mcpOAuthExpanded ? tSettings('toolbox.dialogs.customMcp.collapseAdvanced') : tSettings('toolbox.dialogs.customMcp.manualConfig')}
                                                                 </button>
                                                             </div>
                                                         )}
@@ -5249,14 +6564,14 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                                         {mcpOAuthProbe[mcpForm.id]?.supportsDynamicRegistration === false && !mcpOAuthExpanded && (
                                                             <div>
                                                                 <p className="mb-2 text-xs text-[var(--ink-muted)]">
-                                                                    该服务不支持自动注册，请手动配置 OAuth 凭证。
+                                                                    {tSettings('toolbox.dialogs.customMcp.manualFallbackNote')}
                                                                 </p>
                                                                 <button
                                                                     type="button"
                                                                     onClick={() => setMcpOAuthExpanded(true)}
                                                                     className="text-xs text-[var(--accent)] hover:underline"
                                                                 >
-                                                                    展开手动配置
+                                                                    {tSettings('toolbox.dialogs.customMcp.expandManualConfig')}
                                                                 </button>
                                                             </div>
                                                         )}
@@ -5268,14 +6583,14 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                                                     type="text"
                                                                     value={mcpForm.oauthClientId}
                                                                     onChange={(e) => setMcpForm(p => ({ ...p, oauthClientId: e.target.value }))}
-                                                                    placeholder="Client ID *"
+                                                                    placeholder={tSettings('toolbox.dialogs.customMcp.clientIdPlaceholder')}
                                                                     className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2 text-sm font-mono transition-colors focus:border-[var(--focus-border)] focus:outline-none"
                                                                 />
                                                                 <input
                                                                     type="password"
                                                                     value={mcpForm.oauthClientSecret}
                                                                     onChange={(e) => setMcpForm(p => ({ ...p, oauthClientSecret: e.target.value }))}
-                                                                    placeholder="Client Secret（可选）"
+                                                                    placeholder={tSettings('toolbox.dialogs.customMcp.clientSecretPlaceholder')}
                                                                     className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2 text-sm font-mono transition-colors focus:border-[var(--focus-border)] focus:outline-none"
                                                                 />
                                                                 <div className="grid grid-cols-2 gap-2">
@@ -5283,14 +6598,14 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                                                         type="text"
                                                                         value={mcpForm.oauthScopes}
                                                                         onChange={(e) => setMcpForm(p => ({ ...p, oauthScopes: e.target.value }))}
-                                                                        placeholder="Scopes（空格分隔）"
+                                                                        placeholder={tSettings('toolbox.dialogs.customMcp.scopesPlaceholder')}
                                                                         className="rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2 text-sm font-mono transition-colors focus:border-[var(--focus-border)] focus:outline-none"
                                                                     />
                                                                     <input
                                                                         type="text"
                                                                         value={mcpForm.oauthCallbackPort}
                                                                         onChange={(e) => setMcpForm(p => ({ ...p, oauthCallbackPort: e.target.value.replace(/\D/g, '') }))}
-                                                                        placeholder="回调端口（留空随机）"
+                                                                        placeholder={tSettings('toolbox.dialogs.customMcp.callbackPortPlaceholder')}
                                                                         className="rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2 text-sm font-mono transition-colors focus:border-[var(--focus-border)] focus:outline-none"
                                                                     />
                                                                 </div>
@@ -5299,14 +6614,14 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                                                         type="url"
                                                                         value={mcpForm.oauthAuthUrl}
                                                                         onChange={(e) => setMcpForm(p => ({ ...p, oauthAuthUrl: e.target.value }))}
-                                                                        placeholder="Authorization URL（留空自动发现）"
+                                                                        placeholder={tSettings('toolbox.dialogs.customMcp.authUrlPlaceholder')}
                                                                         className="rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2 text-sm font-mono transition-colors focus:border-[var(--focus-border)] focus:outline-none"
                                                                     />
                                                                     <input
                                                                         type="url"
                                                                         value={mcpForm.oauthTokenUrl}
                                                                         onChange={(e) => setMcpForm(p => ({ ...p, oauthTokenUrl: e.target.value }))}
-                                                                        placeholder="Token URL（留空自动发现）"
+                                                                        placeholder={tSettings('toolbox.dialogs.customMcp.tokenUrlPlaceholder')}
                                                                         className="rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2 text-sm font-mono transition-colors focus:border-[var(--focus-border)] focus:outline-none"
                                                                     />
                                                                 </div>
@@ -5316,9 +6631,9 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                                                     className="flex items-center gap-1.5 rounded-lg border border-[var(--accent)] px-3 py-2 text-sm font-medium text-[var(--accent)] transition-colors hover:bg-[var(--accent)]/10 disabled:opacity-50"
                                                                 >
                                                                     {mcpOAuthConnecting === mcpForm.id ? (
-                                                                        <><Loader2 className="h-4 w-4 animate-spin" /> 等待授权...</>
+                                                                        <><Loader2 className="h-4 w-4 animate-spin" /> {tSettings('toolbox.dialogs.customMcp.waitingAuthorization')}</>
                                                                     ) : (
-                                                                        <><Link className="h-4 w-4" /> 手动连接</>
+                                                                        <><Link className="h-4 w-4" /> {tSettings('toolbox.dialogs.customMcp.manualConnect')}</>
                                                                     )}
                                                                 </button>
                                                             </div>
@@ -5341,14 +6656,14 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                 onClick={() => { setShowMcpForm(false); resetMcpForm(); }}
                                 className="flex-1 rounded-lg border border-[var(--line)] px-4 py-2.5 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)]"
                             >
-                                取消
+                                {tSettings('toolbox.common.cancel')}
                             </button>
                             <button
                                 onClick={handleAddMcpFromJson}
                                 disabled={!mcpJsonInput.trim()}
                                 className="flex-1 rounded-lg bg-[var(--button-primary-bg)] px-4 py-2.5 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:opacity-50"
                             >
-                                导入
+                                {tSettings('toolbox.dialogs.customMcp.import')}
                             </button>
                         </div>
                         ) : (
@@ -5359,7 +6674,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                     className="flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium text-[var(--error)] transition-colors hover:bg-[var(--error-bg)]"
                                 >
                                     <Trash2 className="h-4 w-4" />
-                                    删除
+                                    {tSettings('toolbox.dialogs.customMcp.delete')}
                                 </button>
                             )}
                             <div className={editingMcpId ? 'flex gap-3' : 'flex gap-3 flex-1'}>
@@ -5367,7 +6682,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                     onClick={() => { setShowMcpForm(false); resetMcpForm(); }}
                                     className={`rounded-lg border border-[var(--line)] px-4 py-2.5 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)] ${editingMcpId ? '' : 'flex-1'}`}
                                 >
-                                    取消
+                                    {tSettings('toolbox.common.cancel')}
                                 </button>
                                 <button
                                     onClick={handleAddMcp}
@@ -5378,7 +6693,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                     }
                                     className={`rounded-lg bg-[var(--button-primary-bg)] px-4 py-2.5 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:opacity-50 ${editingMcpId ? '' : 'flex-1'}`}
                                 >
-                                    {editingMcpId ? '保存修改' : '添加服务器'}
+                                    {editingMcpId ? tSettings('toolbox.dialogs.customMcp.saveChanges') : tSettings('toolbox.dialogs.customMcp.addServer')}
                                 </button>
                             </div>
                         </div>
@@ -5386,6 +6701,10 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                     </div>
                 </OverlayBackdrop>
             )}
+
+            {renderManagedCodexDetailsDialog()}
+            {renderManagedCodexLoginDialog()}
+            {renderSubscriptionLoginDialog()}
 
             {/* Provider Enablement / Ordering Modal */}
             {showProviderOrderDialog && (
@@ -5406,7 +6725,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                     <div className="mx-4 w-full max-w-md flex max-h-[90vh] flex-col rounded-2xl bg-[var(--paper-elevated)] shadow-xl">
                         <div className="flex-shrink-0 px-6 pt-6 pb-4">
                             <div className="flex items-center justify-between">
-                                <h3 className="text-lg font-semibold text-[var(--ink)]">添加自定义供应商</h3>
+                                <h3 className="text-lg font-semibold text-[var(--ink)]">{tSettings('providers.custom.addTitle')}</h3>
                                 <button
                                     onClick={() => {
                                         setShowCustomForm(false);
@@ -5422,33 +6741,33 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                         <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-6 pb-4">
                             <div>
                                 <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">
-                                    供应商名称 <span className="text-[var(--error)]">*</span>
+                                    {tSettings('providers.custom.providerName')} <span className="text-[var(--error)]">*</span>
                                 </label>
                                 <input
                                     type="text"
                                     value={customForm.name}
                                     onChange={(e) => setCustomForm((p) => ({ ...p, name: e.target.value }))}
-                                    placeholder="例如: My Custom Provider"
+                                    placeholder={tSettings('providers.custom.providerNamePlaceholder')}
                                     className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2.5 text-sm transition-colors focus:border-[var(--focus-border)] focus:outline-none"
                                 />
                             </div>
 
                             <div>
-                                <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">服务商标签</label>
+                                <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">{tSettings('providers.custom.cloudProvider')}</label>
                                 <input
                                     type="text"
                                     value={customForm.cloudProvider}
                                     onChange={(e) => setCustomForm((p) => ({ ...p, cloudProvider: e.target.value }))}
-                                    placeholder="例如: 云服务商"
+                                    placeholder={tSettings('providers.custom.cloudProviderPlaceholder')}
                                     className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2.5 text-sm transition-colors focus:border-[var(--focus-border)] focus:outline-none"
                                 />
                             </div>
 
                             <div>
-                                <label className="mb-0.5 block text-sm font-medium text-[var(--ink)]">API 协议</label>
+                                <label className="mb-0.5 block text-sm font-medium text-[var(--ink)]">{tSettings('providers.custom.apiProtocol')}</label>
                                 {customForm.apiProtocol === 'openai' && (
                                     <p className="mb-1.5 text-xs text-[var(--ink-muted)]">
-                                        通过内置桥接自动转换为 Anthropic 协议，存在稳定性风险
+                                        {tSettings('providers.custom.bridgeWarning')}
                                     </p>
                                 )}
                                 <div className={`flex gap-4${customForm.apiProtocol !== 'openai' ? ' mt-1' : ''}`}>
@@ -5461,7 +6780,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                             onChange={() => setCustomForm((p) => ({ ...p, apiProtocol: 'anthropic', authType: 'auth_token' }))}
                                             className="accent-[var(--ink)]"
                                         />
-                                        <span className="text-sm text-[var(--ink)]">Anthropic 协议</span>
+                                        <span className="text-sm text-[var(--ink)]">{tSettings('providers.custom.anthropicProtocol')}</span>
                                     </label>
                                     <label className="flex items-center gap-2 cursor-pointer">
                                         <input
@@ -5472,14 +6791,14 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                             onChange={() => setCustomForm((p) => ({ ...p, apiProtocol: 'openai', authType: 'api_key' }))}
                                             className="accent-[var(--ink)]"
                                         />
-                                        <span className="text-sm text-[var(--ink)]">OpenAI 协议</span>
+                                        <span className="text-sm text-[var(--ink)]">{tSettings('providers.custom.openaiProtocol')}</span>
                                     </label>
                                 </div>
                             </div>
 
                             <div>
                                 <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">
-                                    API Base URL <span className="text-[var(--error)]">*</span>
+                                    {tSettings('providers.custom.baseUrl')} <span className="text-[var(--error)]">*</span>
                                 </label>
                                 <input
                                     type="url"
@@ -5493,7 +6812,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                             {customForm.apiProtocol === 'openai' && (
                                 <>
                                     <div>
-                                        <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">接口格式</label>
+                                        <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">{tSettings('providers.custom.upstreamFormat')}</label>
                                         <div className="flex gap-4">
                                             <label className="flex items-center gap-2 cursor-pointer">
                                                 <input
@@ -5520,7 +6839,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                         </div>
                                     </div>
                                     <div>
-                                        <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">最大输出 Token</label>
+                                        <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">{tSettings('providers.custom.maxOutputTokens')}</label>
                                         <div className="flex gap-2 items-center">
                                             <CustomSelect
                                                 value={customForm.maxOutputTokensParamName}
@@ -5536,7 +6855,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                                 type="number"
                                                 value={customForm.maxOutputTokens}
                                                 onChange={(e) => setCustomForm((p) => ({ ...p, maxOutputTokens: e.target.value }))}
-                                                placeholder="留空则不限制"
+                                                placeholder={tSettings('providers.custom.unlimitedPlaceholder')}
                                                 className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2.5 text-sm transition-colors focus:border-[var(--focus-border)] focus:outline-none"
                                             />
                                         </div>
@@ -5547,9 +6866,9 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                             {/* Auth Type - only meaningful for Anthropic protocol (controls x-api-key vs Authorization header) */}
                             {customForm.apiProtocol !== 'openai' && (
                                 <div>
-                                    <label className="mb-0.5 block text-sm font-medium text-[var(--ink)]">认证方式</label>
+                                    <label className="mb-0.5 block text-sm font-medium text-[var(--ink)]">{tSettings('providers.custom.authType')}</label>
                                     <p className="mb-1.5 text-xs text-[var(--ink-muted)]">
-                                        请根据供应商认证参数进行选择
+                                        {tSettings('providers.custom.authTypeDescription')}
                                     </p>
                                     <div className="flex gap-4">
                                         <label className="flex items-center gap-2 cursor-pointer">
@@ -5581,7 +6900,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                             {/* Models — inline input, no dependency on provider creation */}
                             <div>
                                 <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">
-                                    模型 <span className="text-[var(--error)]">*</span>
+                                    {tSettings('providers.custom.models')} <span className="text-[var(--error)]">*</span>
                                 </label>
                                 {customForm.models.length > 0 && (
                                     <div className="mb-2 flex flex-wrap gap-1.5">
@@ -5606,7 +6925,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                     <input
                                         ref={customModelInputRef}
                                         type="text"
-                                        placeholder="输入模型 ID，回车添加"
+                                        placeholder={tSettings('providers.custom.modelInputPlaceholder')}
                                         className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2.5 text-sm transition-colors placeholder:text-[var(--ink-muted)] focus:border-[var(--focus-border)] focus:outline-none"
                                         onKeyDown={(e) => {
                                             if (e.key === 'Enter') {
@@ -5637,14 +6956,14 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                     }}
                                     className="flex-1 rounded-lg border border-[var(--line)] px-4 py-2.5 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)]"
                                 >
-                                    取消
+                                    {tSettings('providers.custom.cancel')}
                                 </button>
                                 <button
                                     onClick={handleAddCustomProvider}
                                     disabled={!customForm.name || !customForm.baseUrl || customForm.models.length === 0}
                                     className="flex-1 rounded-lg bg-[var(--button-primary-bg)] px-4 py-2.5 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:opacity-50"
                                 >
-                                    添加
+                                    {tSettings('providers.custom.add')}
                                 </button>
                             </div>
                         </div>
@@ -5659,7 +6978,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                         <div className="flex-shrink-0 px-6 pt-6 pb-4">
                             <div className="flex items-center justify-between">
                                 <h3 className="text-lg font-semibold text-[var(--ink)]">
-                                    {editingProvider.provider.isBuiltin ? '管理供应商' : '编辑供应商'}
+                                    {editingProvider.provider.isBuiltin ? tSettings('providers.custom.manageTitle') : tSettings('providers.custom.editTitle')}
                                 </h3>
                                 <button
                                     onClick={() => setEditingProvider(null)}
@@ -5673,7 +6992,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                         <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-6 pb-6">
                             {/* Provider info - editable for custom, read-only for preset */}
                             <div>
-                                <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">供应商名称</label>
+                                <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">{tSettings('providers.custom.providerName')}</label>
                                 {editingProvider.provider.isBuiltin ? (
                                     <div className="rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2.5 text-sm text-[var(--ink-muted)]">
                                         {editingProvider.provider.name}
@@ -5683,7 +7002,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                         type="text"
                                         value={editingProvider.editName || ''}
                                         onChange={(e) => setEditingProvider((p) => p ? { ...p, editName: e.target.value } : null)}
-                                        placeholder="输入供应商名称"
+                                        placeholder={tSettings('providers.custom.providerNameEditPlaceholder')}
                                         className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2.5 text-sm transition-colors focus:border-[var(--focus-border)] focus:outline-none"
                                     />
                                 )}
@@ -5692,12 +7011,12 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                             {/* 云服务商标签 - only for custom providers */}
                             {!editingProvider.provider.isBuiltin && (
                                 <div>
-                                    <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">云服务商标签</label>
+                                    <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">{tSettings('providers.custom.cloudProvider')}</label>
                                     <input
                                         type="text"
                                         value={editingProvider.editCloudProvider || ''}
                                         onChange={(e) => setEditingProvider((p) => p ? { ...p, editCloudProvider: e.target.value } : null)}
-                                        placeholder="例如：自定义、代理"
+                                        placeholder={tSettings('providers.custom.cloudProviderEditPlaceholder')}
                                         className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2.5 text-sm transition-colors focus:border-[var(--focus-border)] focus:outline-none"
                                     />
                                 </div>
@@ -5706,10 +7025,10 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                             {/* API Protocol - only for custom providers */}
                             {!editingProvider.provider.isBuiltin && (
                                 <div>
-                                    <label className="mb-0.5 block text-sm font-medium text-[var(--ink)]">API 协议</label>
+                                    <label className="mb-0.5 block text-sm font-medium text-[var(--ink)]">{tSettings('providers.custom.apiProtocol')}</label>
                                     {editingProvider.editApiProtocol === 'openai' && (
                                         <p className="mb-1.5 text-xs text-[var(--ink-muted)]">
-                                            通过内置桥接自动转换为 Anthropic 协议，存在稳定性风险
+                                            {tSettings('providers.custom.bridgeWarning')}
                                         </p>
                                     )}
                                     <div className={`flex gap-4${editingProvider.editApiProtocol !== 'openai' ? ' mt-1' : ''}`}>
@@ -5722,7 +7041,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                                 onChange={() => setEditingProvider((p) => p ? { ...p, editApiProtocol: 'anthropic', editAuthType: 'auth_token' } : null)}
                                                 className="accent-[var(--ink)]"
                                             />
-                                            <span className="text-sm text-[var(--ink)]">Anthropic 协议</span>
+                                            <span className="text-sm text-[var(--ink)]">{tSettings('providers.custom.anthropicProtocol')}</span>
                                         </label>
                                         <label className="flex items-center gap-2 cursor-pointer">
                                             <input
@@ -5733,7 +7052,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                                 onChange={() => setEditingProvider((p) => p ? { ...p, editApiProtocol: 'openai', editAuthType: 'api_key' } : null)}
                                                 className="accent-[var(--ink)]"
                                             />
-                                            <span className="text-sm text-[var(--ink)]">OpenAI 协议</span>
+                                            <span className="text-sm text-[var(--ink)]">{tSettings('providers.custom.openaiProtocol')}</span>
                                         </label>
                                     </div>
                                 </div>
@@ -5741,7 +7060,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
 
                             {/* Base URL */}
                             <div>
-                                <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">API Base URL</label>
+                                <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">{tSettings('providers.custom.baseUrl')}</label>
                                 {editingProvider.provider.isBuiltin ? (
                                     editingProvider.provider.config.baseUrl && (
                                         <div className="rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2.5 text-sm text-[var(--ink-muted)] font-mono text-xs break-all">
@@ -5763,7 +7082,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                             {!editingProvider.provider.isBuiltin && editingProvider.editApiProtocol === 'openai' && (
                                 <>
                                     <div>
-                                        <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">接口格式</label>
+                                        <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">{tSettings('providers.custom.upstreamFormat')}</label>
                                         <div className="flex gap-4">
                                             <label className="flex items-center gap-2 cursor-pointer">
                                                 <input
@@ -5790,7 +7109,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                         </div>
                                     </div>
                                     <div>
-                                        <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">最大输出 Token</label>
+                                        <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">{tSettings('providers.custom.maxOutputTokens')}</label>
                                         <div className="flex gap-2 items-center">
                                             <CustomSelect
                                                 value={editingProvider.editMaxOutputTokensParamName ?? 'max_tokens'}
@@ -5806,7 +7125,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                                 type="number"
                                                 value={editingProvider.editMaxOutputTokens || ''}
                                                 onChange={(e) => setEditingProvider((p) => p ? { ...p, editMaxOutputTokens: e.target.value } : null)}
-                                                placeholder="留空则不限制"
+                                                placeholder={tSettings('providers.custom.unlimitedPlaceholder')}
                                                 className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2.5 text-sm transition-colors focus:border-[var(--focus-border)] focus:outline-none"
                                             />
                                         </div>
@@ -5817,9 +7136,9 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                             {/* Auth Type - only for custom providers with Anthropic protocol */}
                             {!editingProvider.provider.isBuiltin && editingProvider.editApiProtocol !== 'openai' && (
                                 <div>
-                                    <label className="mb-0.5 block text-sm font-medium text-[var(--ink)]">认证方式</label>
+                                    <label className="mb-0.5 block text-sm font-medium text-[var(--ink)]">{tSettings('providers.custom.authType')}</label>
                                     <p className="mb-1.5 text-xs text-[var(--ink-muted)]">
-                                        请根据供应商认证参数进行选择
+                                        {tSettings('providers.custom.authTypeDescription')}
                                     </p>
                                     <div className="flex gap-4">
                                         <label className="flex items-center gap-2 cursor-pointer">
@@ -5852,7 +7171,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                             <div>
                                 <div className="mb-1.5 flex items-center justify-between">
                                     <label className="text-sm font-medium text-[var(--ink)]">
-                                        模型
+                                        {tSettings('providers.custom.models')}
                                     </label>
                                     <button
                                         type="button"
@@ -5860,13 +7179,13 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                         className="flex items-center gap-1 rounded-lg px-2 py-1 text-sm font-medium text-[var(--accent)] transition-colors hover:bg-[var(--accent-warm-subtle)]"
                                     >
                                         <Settings2 className="h-3.5 w-3.5" />
-                                        管理可用模型
+                                        {tSettings('providers.custom.manageModels')}
                                     </button>
                                 </div>
                                 <p className="truncate text-sm text-[var(--ink-muted)]">
                                     {editingProvider.provider.models.length > 0
                                         ? editingProvider.provider.models.map(m => m.modelName || m.model).join(', ')
-                                        : '暂无模型'}
+                                        : tSettings('providers.noModels')}
                                 </p>
                             </div>
 
@@ -5879,26 +7198,26 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                         className="flex w-full items-center gap-1.5 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:text-[var(--ink)]"
                                     >
                                         <ChevronDown className={`h-4 w-4 transition-transform ${editingProvider.showAdvanced ? '' : '-rotate-90'}`} />
-                                        高级选项
+                                        {tSettings('providers.custom.advanced')}
                                     </button>
                                     {editingProvider.showAdvanced && (() => {
                                         const aliasModels = [
-                                            { value: '', label: '未设置' },
+                                            { value: '', label: tSettings('providers.custom.unset') },
                                             ...editingProvider.provider.models
                                                 .filter(m => !editingProvider.removedModels.includes(m.model))
                                                 .map(m => ({ value: m.model, label: m.modelName })),
                                             ...editingProvider.customModels.map(m => ({ value: m, label: m })),
                                         ];
                                         const ALIAS_LABELS: Record<string, string> = {
-                                            opus: 'Opus（大杯）',
-                                            sonnet: 'Sonnet（中杯）',
-                                            haiku: 'Haiku（小杯）',
+                                            opus: tSettings('providers.custom.aliasOpus'),
+                                            sonnet: tSettings('providers.custom.aliasSonnet'),
+                                            haiku: tSettings('providers.custom.aliasHaiku'),
                                         };
                                         return (
                                             <div className="mt-3">
-                                                <label className="mb-1 block text-sm font-medium text-[var(--ink)]">子 Agent 模型映射</label>
+                                                <label className="mb-1 block text-sm font-medium text-[var(--ink)]">{tSettings('providers.custom.aliasMapping')}</label>
                                                 <p className="mb-3 text-xs leading-relaxed text-[var(--ink-muted)]">
-                                                    Opus 大杯、Sonnet 中杯、Haiku 小杯 — 映射到此供应商的实际模型
+                                                    {tSettings('providers.custom.aliasDescription')}
                                                 </p>
                                                 <div className="space-y-2.5">
                                                     {(['opus', 'sonnet', 'haiku'] as const).map((alias) => (
@@ -5911,7 +7230,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                                                     ...p,
                                                                     editModelAliases: { ...p.editModelAliases, [alias]: v },
                                                                 } : null)}
-                                                                placeholder="未设置"
+                                                                placeholder={tSettings('providers.custom.unset')}
                                                                 compact
                                                                 className="flex-1"
                                                             />
@@ -5933,7 +7252,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                         className="flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium text-[var(--error)] transition-colors hover:bg-[var(--error-bg)]"
                                     >
                                         <Trash2 className="h-4 w-4" />
-                                        删除
+                                        {tSettings('providers.custom.delete')}
                                     </button>
                                 ) : (
                                     <div />
@@ -5944,13 +7263,13 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                         onClick={() => setEditingProvider(null)}
                                         className="rounded-lg border border-[var(--line)] px-4 py-2.5 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)]"
                                     >
-                                        取消
+                                        {tSettings('providers.custom.cancel')}
                                     </button>
                                     <button
                                         onClick={saveProviderEdits}
                                         className="rounded-lg bg-[var(--button-primary-bg)] px-4 py-2.5 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)]"
                                     >
-                                        保存
+                                        {tSettings('providers.custom.save')}
                                     </button>
                                 </div>
                             </div>
@@ -5988,23 +7307,23 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                             <div className="flex h-10 w-10 items-center justify-center rounded-full bg-[var(--error-bg)]">
                                 <Trash2 className="h-5 w-5 text-[var(--error)]" />
                             </div>
-                            <h3 className="text-lg font-semibold text-[var(--ink)]">删除供应商</h3>
+                            <h3 className="text-lg font-semibold text-[var(--ink)]">{tSettings('providers.custom.deleteTitle')}</h3>
                         </div>
                         <p className="mb-6 text-sm text-[var(--ink-muted)]">
-                            确定要删除「{deleteConfirmProvider.name}」吗？此操作无法撤销。
+                            {tSettings('providers.custom.deleteMessage', { name: deleteConfirmProvider.name })}
                         </p>
                         <div className="flex gap-3">
                             <button
                                 onClick={() => setDeleteConfirmProvider(null)}
                                 className="flex-1 rounded-lg border border-[var(--line)] px-4 py-2.5 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)]"
                             >
-                                取消
+                                {tSettings('providers.custom.cancel')}
                             </button>
                             <button
                                 onClick={confirmDeleteCustomProvider}
                                 className="flex-1 rounded-lg bg-[var(--error)] px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-[var(--error-hover)]"
                             >
-                                删除
+                                {tSettings('providers.custom.delete')}
                             </button>
                         </div>
                     </div>
@@ -6021,17 +7340,17 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                             <div className="flex h-10 w-10 items-center justify-center rounded-full bg-[var(--warning-bg)]">
                                 <AlertCircle className="h-5 w-5 text-[var(--warning)]" />
                             </div>
-                            <h3 className="flex-1 text-lg font-semibold text-[var(--ink)]">缺少运行环境</h3>
+                            <h3 className="flex-1 text-lg font-semibold text-[var(--ink)]">{tSettings('toolbox.dialogs.runtimeMissing.title')}</h3>
                             <button
                                 onClick={() => setRuntimeDialog({ show: false })}
-                                aria-label="关闭"
+                                aria-label={tSettings('toolbox.dialogs.runtimeMissing.close')}
                                 className="flex h-8 w-8 items-center justify-center rounded-lg text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
                             >
                                 <X className="h-4 w-4" />
                             </button>
                         </div>
                         <p className="mt-4 text-sm text-[var(--ink-muted)]">
-                            此 MCP 服务依赖 <span className="font-medium text-[var(--ink)]">{runtimeDialog.runtimeName}</span> 运行，请先安装后再启用。
+                            {tSettings('toolbox.dialogs.runtimeMissing.descriptionPrefix')} <span className="font-medium text-[var(--ink)]">{runtimeDialog.runtimeName}</span> {tSettings('toolbox.dialogs.runtimeMissing.descriptionSuffix')}
                         </p>
                         <div className="mt-6 flex gap-3">
                             <div className="flex-1" onClick={() => setRuntimeDialog({ show: false })}>
@@ -6039,7 +7358,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                     href={runtimeDialog.downloadUrl || '#'}
                                     className="flex w-full items-center justify-center gap-2 rounded-lg border border-[var(--line)] px-4 py-2.5 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)]"
                                 >
-                                    去官网下载
+                                    {tSettings('toolbox.dialogs.runtimeMissing.downloadOfficial')}
                                     <ExternalLinkIcon className="h-3.5 w-3.5" />
                                 </ExternalLink>
                             </div>
@@ -6048,7 +7367,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                     onClick={handleAiInstallRuntime}
                                     className="flex-1 rounded-lg bg-[var(--accent)] px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-[var(--accent-warm-hover)]"
                                 >
-                                    让 AI 小助理安装
+                                    {tSettings('toolbox.dialogs.runtimeMissing.askHelperInstall')}
                                 </button>
                             )}
                         </div>

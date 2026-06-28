@@ -1,4 +1,4 @@
-import { render } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 
 import type { Message as MessageType } from '@/types/chat';
@@ -32,6 +32,27 @@ describe('Message — user bubble spacing', () => {
     const content = container.querySelector('.user-message-content');
     expect(content).toBeInTheDocument();
     expect(content?.querySelector('p')).toHaveTextContent('你可以帮我写个 v3');
+  });
+
+  it('scopes timestamp and action visibility to the local user bubble group', () => {
+    render(
+      <Message
+        message={userMsg('检查一下 hover 行为', {
+          timestamp: new Date(2026, 5, 25, 22, 43, 15),
+        })}
+      />
+    );
+
+    const timestamp = screen.getByText('2026-06-25 22:43:15');
+    const actionRow = timestamp.parentElement;
+    expect(actionRow).toHaveClass(
+      'opacity-0',
+      'group-hover/user-actions:opacity-100',
+      'group-focus-within/user-actions:opacity-100',
+    );
+
+    const localHoverScope = actionRow?.parentElement;
+    expect(localHoverScope).toHaveClass('group/user-actions', 'w-fit', 'max-w-[85%]');
   });
 
   it('renders sent image attachments as a fixed-height ratio-preserving strip', () => {

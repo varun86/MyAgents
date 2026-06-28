@@ -20,13 +20,6 @@
 export const EDITABLE_MODALITIES = ['text', 'image', 'video', 'audio'] as const;
 export type EditableModality = (typeof EDITABLE_MODALITIES)[number];
 
-export const MODALITY_LABELS: Record<EditableModality, string> = {
-  text: '文本',
-  image: '图片',
-  video: '视频',
-  audio: '音频',
-};
-
 /** Upper sanity bound for a context window. MUST match the sidecar registry's
  *  `MAX_PLAUSIBLE_TOKENS` (src/server/utils/model-capabilities.ts) — the
  *  registry silently drops values above its cap, so accepting a larger number

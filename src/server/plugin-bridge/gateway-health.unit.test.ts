@@ -20,15 +20,60 @@ describe('plugin bridge gateway health', () => {
     });
   });
 
-  it('reports stale plugin gateway status as unfunctional', () => {
+  it('maps fresh openclaw-weixin lastEventAt to poll heartbeat', () => {
     expect(buildFunctionalHealth({
       ...baseInput,
+      pluginId: 'openclaw-weixin',
+      gatewayStatus: { running: true, lastEventAt: 950_000 },
+    })).toMatchObject({
+      status: 200,
+      body: {
+        state: 'functional',
+        reason: 'gateway-poll',
+        heartbeatSource: 'lastEventAt:openclaw-weixin',
+      },
+    });
+  });
+
+  it('reports stale openclaw-weixin lastEventAt heartbeat as unfunctional', () => {
+    expect(buildFunctionalHealth({
+      ...baseInput,
+      pluginId: 'openclaw-weixin',
       gatewayStatus: { running: true, lastEventAt: 800_000 },
     })).toMatchObject({
       status: 503,
       body: {
         state: 'unfunctional',
-        reason: 'gateway-status-stale',
+        reason: 'gateway-poll-stale',
+      },
+    });
+  });
+
+  it('does not treat generic stale lastEventAt as a functional failure', () => {
+    expect(buildFunctionalHealth({
+      ...baseInput,
+      pluginId: 'generic-plugin',
+      gatewayStatus: { running: true, lastEventAt: 800_000 },
+    })).toMatchObject({
+      status: 200,
+      body: {
+        state: 'unknown',
+        rawLastEventAt: 800_000,
+      },
+    });
+  });
+
+  it('reports stale explicit poll heartbeat as unfunctional for generic plugins', () => {
+    expect(buildFunctionalHealth({
+      ...baseInput,
+      pluginId: 'generic-plugin',
+      gatewayStatus: { running: true, lastPollSuccessAt: 800_000 },
+    })).toMatchObject({
+      status: 503,
+      body: {
+        state: 'unfunctional',
+        reason: 'gateway-poll-stale',
+        heartbeatSource: 'lastPollSuccessAt',
       },
     });
   });
@@ -53,15 +98,15 @@ describe('plugin bridge gateway health', () => {
     });
   });
 
-  it('accepts recent plugin gateway status as functional', () => {
+  it('accepts recent explicit heartbeat status as functional', () => {
     expect(buildFunctionalHealth({
       ...baseInput,
-      gatewayStatus: { running: true, lastEventAt: 950_000 },
+      gatewayStatus: { running: true, lastHeartbeatAt: 950_000 },
     })).toMatchObject({
       status: 200,
       body: {
         state: 'functional',
-        reason: 'gateway-status',
+        reason: 'gateway-poll',
       },
     });
   });
@@ -77,6 +122,20 @@ describe('plugin bridge gateway health', () => {
       body: {
         state: 'functional',
         reason: 'awaiting-qr-login',
+      },
+    });
+  });
+
+  it('reports gateway errors as unready and unfunctional', () => {
+    expect(buildFunctionalHealth({
+      ...baseInput,
+      gatewayError: 'boom',
+    })).toMatchObject({
+      status: 503,
+      body: {
+        state: 'unready',
+        reason: 'gateway-error',
+        error: 'boom',
       },
     });
   });

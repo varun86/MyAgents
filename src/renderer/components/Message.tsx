@@ -1,5 +1,6 @@
 import { Fragment, memo, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { ChevronDown, Copy, Check, Undo2, RotateCcw, GitBranch, CheckCircle, XCircle, AlertCircle, Download } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 
 import { track } from '@/analytics';
 import AttachmentPreviewList from '@/components/AttachmentPreviewList';
@@ -11,6 +12,7 @@ import { parseWidgetTags, hasWidgetTags } from '@/components/tools/widgetTagPars
 import Tip from '@/components/Tip';
 import ToolAttachmentGallery from '@/components/tools/ToolAttachmentGallery';
 import { buildReplyMarkdown, downloadMarkdown, localDateStr } from '@/utils/markdownExport';
+import { formatDuration, formatTokens } from '@/utils/formatTokens';
 import { groupContentBlocksForDisplay } from '@/utils/contentBlockDisplay';
 import { useImagePreview } from '@/context/ImagePreviewContext';
 import type { ContentBlock, Message as MessageType } from '@/types/chat';
@@ -33,6 +35,34 @@ interface MessageProps {
 function formatTimestamp(date: Date): string {
   const pad = (n: number) => String(n).padStart(2, '0');
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+function areMessageUsagesEqual(a: MessageType['usage'], b: MessageType['usage']): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return a.inputTokens === b.inputTokens
+    && a.outputTokens === b.outputTokens
+    && a.cacheReadTokens === b.cacheReadTokens
+    && a.cacheCreationTokens === b.cacheCreationTokens
+    && a.providerId === b.providerId
+    && a.model === b.model;
+}
+
+function getTurnMetaLabel(message: MessageType, t: (key: string, options?: Record<string, unknown>) => string): string | null {
+  const parts: string[] = [];
+  if (typeof message.durationMs === 'number' && Number.isFinite(message.durationMs) && message.durationMs > 0) {
+    parts.push(t('message.turnDuration', { duration: formatDuration(message.durationMs) }));
+  }
+
+  const usage = message.usage;
+  if (usage) {
+    const totalTokens = (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0);
+    if (totalTokens > 0) {
+      parts.push(`${formatTokens(totalTokens)} tokens`);
+    }
+  }
+
+  return parts.length > 0 ? parts.join(' · ') : null;
 }
 
 /**
@@ -67,6 +97,10 @@ function areMessagesEqual(prev: MessageProps, next: MessageProps): boolean {
 
   // Tail-fade gating depends on this flag even when content/id are unchanged.
   if (prevMsg.streamingTextActive !== nextMsg.streamingTextActive) return false;
+
+  if (prevMsg.durationMs !== nextMsg.durationMs) return false;
+  if (prevMsg.toolCount !== nextMsg.toolCount) return false;
+  if (!areMessageUsagesEqual(prevMsg.usage, nextMsg.usage)) return false;
 
   // For streaming messages, check content changes
   if (typeof prevMsg.content === 'string' && typeof nextMsg.content === 'string') {
@@ -144,6 +178,7 @@ function AssistantActions({ message, onRetry, onFork, className = '' }: {
   onFork?: (id: string) => void;
   className?: string;
 }) {
+  const { t } = useTranslation('app');
   const [copied, setCopied] = useState(false);
   const timerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
   const exportingRef = useRef(false);
@@ -154,6 +189,7 @@ function AssistantActions({ message, onRetry, onFork, className = '' }: {
   }, []);
 
   const text = extractAssistantText(message.content);
+  const turnMetaLabel = getTurnMetaLabel(message, t);
 
   const handleExport = async () => {
     // In-flight guard against double-click → duplicate download + toast.
@@ -161,7 +197,7 @@ function AssistantActions({ message, onRetry, onFork, className = '' }: {
     exportingRef.current = true;
     try {
       track('message_export', {});
-      const fileName = `${localDateStr()}_回复.md`;
+      const fileName = t('message.replyFileName', { date: localDateStr() });
       toast?.success(await downloadMarkdown(fileName, buildReplyMarkdown(text)));
     } finally {
       exportingRef.current = false;
@@ -169,10 +205,10 @@ function AssistantActions({ message, onRetry, onFork, className = '' }: {
   };
 
   return (
-    <div className={`flex items-center gap-2 -ml-1 pt-1 ${className}`}>
-      <Tip label={copied ? '已复制' : '复制'}>
+    <div className={`group/actions flex min-h-7 w-full items-center gap-2 -ml-1 pt-1 ${className}`}>
+      <Tip label={copied ? t('message.actions.copied') : t('message.actions.copy')}>
         <button type="button"
-          aria-label="复制"
+          aria-label={t('message.actions.copy')}
           onClick={() => {
             navigator.clipboard.writeText(text).catch(() => {});
             track('message_copy', {});
@@ -184,18 +220,18 @@ function AssistantActions({ message, onRetry, onFork, className = '' }: {
           {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
         </button>
       </Tip>
-      <Tip label="导出 markdown">
+      <Tip label={t('message.actions.exportMarkdown')}>
         <button type="button"
-          aria-label="导出 markdown"
+          aria-label={t('message.actions.exportMarkdown')}
           onClick={handleExport}
           className="rounded-lg p-1 text-[var(--ink-muted)] transition-all hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]">
           <Download className="size-3.5" />
         </button>
       </Tip>
       {onRetry && (
-        <Tip label="重试">
+        <Tip label={t('message.actions.retry')}>
           <button type="button"
-            aria-label="重试"
+            aria-label={t('message.actions.retry')}
             onClick={() => onRetry(message.id)}
             className="rounded-lg p-1 text-[var(--ink-muted)] transition-all hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]">
             <RotateCcw className="size-3.5" />
@@ -203,25 +239,33 @@ function AssistantActions({ message, onRetry, onFork, className = '' }: {
         </Tip>
       )}
       {onFork && message.sdkUuid && (
-        <Tip label="分支">
+        <Tip label={t('message.actions.fork')}>
           <button type="button"
-            aria-label="分支"
+            aria-label={t('message.actions.fork')}
             onClick={() => onFork(message.id)}
             className="rounded-lg p-1 text-[var(--ink-muted)] transition-all hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]">
             <GitBranch className="size-3.5" />
           </button>
         </Tip>
       )}
+      {turnMetaLabel && (
+        <span
+          className="ml-2 min-w-0 flex-1 truncate text-xs text-[var(--ink-muted)]/60 opacity-0 transition-opacity duration-150 group-hover/actions:opacity-100 group-focus-within/actions:opacity-100"
+          title={turnMetaLabel}
+        >
+          {turnMetaLabel}
+        </span>
+      )}
     </div>
   );
 }
 
-/** Whitelist: system-injection tags → display label (for user message badge) */
-const SYSTEM_TAG_MAP: Record<string, string> = {
-  'HEARTBEAT': '心跳感知',
-  'CRON_TASK': '定时任务',
-  [FLOATING_BALL_CONTEXT_TAG]: '悬浮上下文',
-};
+function systemTagLabel(kind: string, t: (key: string) => string): string | null {
+  if (kind === 'HEARTBEAT') return t('message.systemTags.heartbeat');
+  if (kind === 'CRON_TASK') return t('message.systemTags.cronTask');
+  if (kind === FLOATING_BALL_CONTEXT_TAG) return t('message.systemTags.floatingContext');
+  return null;
+}
 
 function renderWidgetSegments(text: string, isLoading: boolean): ReactNode {
   const segments = parseWidgetTags(text);
@@ -254,10 +298,10 @@ function renderWidgetSegments(text: string, isLoading: boolean): ReactNode {
  * History messages won't re-render when streaming message updates.
  */
 const Message = memo(function Message({ message, isLoading = false, onRewind, onRetry, onFork, exitPlanModeSlot }: MessageProps) {
+  const { t } = useTranslation('app');
   const { openPreview } = useImagePreview();
   const [copied, setCopied] = useState(false);
   const copiedTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
-  const [userHovered, setUserHovered] = useState(false);
   // User message collapse: default collapsed, expand on click (no re-collapse)
   const [userExpanded, setUserExpanded] = useState(false);
   const userContentRef = useRef<HTMLDivElement>(null);
@@ -305,9 +349,7 @@ const Message = memo(function Message({ message, isLoading = false, onRewind, on
 
     // Detect system injection type from <system-reminder><TAG> wrapper (whitelist)
     let systemTag: string | null = null;
-    if (reminder.kind && reminder.kind in SYSTEM_TAG_MAP) {
-      systemTag = SYSTEM_TAG_MAP[reminder.kind];
-    }
+    if (reminder.kind) systemTag = systemTagLabel(reminder.kind, t);
 
     // Strip system injection tags that wrap delivered content. These HTML-like tags trigger
     // Markdown's HTML block mode, breaking \n rendering and Markdown syntax.
@@ -340,13 +382,13 @@ const Message = memo(function Message({ message, isLoading = false, onRewind, on
       const isSuccess = taskNotif.status === 'completed';
       const StatusIcon = isSuccess ? CheckCircle : taskNotif.status === 'error' || taskNotif.status === 'failed' ? XCircle : AlertCircle;
       const statusColor = isSuccess ? 'var(--success)' : 'var(--error)';
-      const statusLabel = isSuccess ? '已完成' : taskNotif.status === 'error' ? '出错' : taskNotif.status === 'failed' ? '失败' : '已停止';
-      const displayText = taskNotif.description || taskNotif.summary || taskNotif.taskId || '后台任务';
+      const statusLabel = isSuccess ? t('message.taskStatus.completed') : taskNotif.status === 'error' ? t('message.taskStatus.error') : taskNotif.status === 'failed' ? t('message.taskStatus.failed') : t('message.taskStatus.stopped');
+      const displayText = taskNotif.description || taskNotif.summary || taskNotif.taskId || t('message.backgroundTask');
       return (
         <div className="flex justify-start w-full px-4 py-1.5 select-none">
           <div className="flex items-center gap-2 rounded-lg px-3 py-2 text-xs text-[var(--ink-muted)]">
             <StatusIcon className="h-3.5 w-3.5 flex-shrink-0" style={{ color: statusColor }} />
-            <span>后台任务</span>
+            <span>{t('message.backgroundTask')}</span>
             <span className="font-medium text-[var(--ink-secondary)]">&ldquo;{displayText}&rdquo;</span>
             <span>{statusLabel}</span>
             {taskNotif.summary && taskNotif.summary !== taskNotif.description && (
@@ -366,7 +408,7 @@ const Message = memo(function Message({ message, isLoading = false, onRewind, on
       return (
         <div className="flex justify-start w-full px-4 py-2 select-none">
           <div className="w-full max-w-none rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)]/50 p-4">
-            <div className="text-xs font-medium text-[var(--ink-muted)] mb-2">系统信息</div>
+            <div className="text-xs font-medium text-[var(--ink-muted)] mb-2">{t('message.systemInfo')}</div>
             <div className="text-sm text-[var(--ink)] select-text">
               <Markdown>{formattedContent}</Markdown>
             </div>
@@ -381,9 +423,7 @@ const Message = memo(function Message({ message, isLoading = false, onRewind, on
 
     return (
       <div className="flex justify-end px-1 select-none"
-           data-role="user" data-message-id={message.id}
-           onMouseEnter={() => setUserHovered(true)}
-           onMouseLeave={() => setUserHovered(false)}>
+           data-role="user" data-message-id={message.id}>
         <div className="flex w-full flex-col items-end">
           {/* IM source indicator */}
           {isImMessage && (
@@ -394,79 +434,81 @@ const Message = memo(function Message({ message, isLoading = false, onRewind, on
           )}
           {/* text-base 自带 1.7 行高（@theme 配对），与 .ai-message-content 一致 —— 用户气泡
               与 AI 正文同为 prose 档，行高不再分叉（PRD 0.2.34 P2-5） */}
-          <article className="relative w-fit max-w-[85%] rounded-2xl border border-[var(--line)] bg-[var(--message-user-bg)] p-4 text-base text-[var(--ink)] select-text">
-            {/* System injection tag badge */}
-            {systemTag && (
-              <div className="mb-2 -mt-0.5">
-                <span className="inline-block rounded-md bg-[var(--accent-warm-subtle)] px-1.5 py-0.5 text-xs font-medium text-[var(--accent-warm)]">
-                  {systemTag}
-                </span>
-              </div>
-            )}
-            {/* Collapsible content wrapper: max 50vh when collapsed */}
-            <div
-              ref={userContentRef}
-              className={!userExpanded && userOverflows ? 'overflow-hidden' : ''}
-              style={!userExpanded && userOverflows ? { maxHeight: `${USER_COLLAPSE_HEIGHT}px` } : undefined}
-            >
-              {hasAttachments && (
-                <div className={hasText ? 'mb-2' : ''}>
-                  <AttachmentPreviewList
-                    attachments={attachmentItems}
-                    compact
-                    onPreview={openPreview}
-                  />
+          <div className="group/user-actions flex w-fit max-w-[85%] flex-col items-end">
+            <article className="relative w-fit max-w-full rounded-2xl border border-[var(--line)] bg-[var(--message-user-bg)] p-4 text-base text-[var(--ink)] select-text">
+              {/* System injection tag badge */}
+              {systemTag && (
+                <div className="mb-2 -mt-0.5">
+                  <span className="inline-block rounded-md bg-[var(--accent-warm-subtle)] px-1.5 py-0.5 text-xs font-medium text-[var(--accent-warm)]">
+                    {systemTag}
+                  </span>
                 </div>
               )}
-              {hasText && (
-                <div className="user-message-content text-[var(--ink)]">
-                  <Markdown preserveNewlines>{userContent}</Markdown>
-                </div>
-              )}
-            </div>
-            {/* Expand button with gradient fade — gradient overlaps bottom of content */}
-            {!userExpanded && userOverflows && (
-              <div className="relative z-10 -mx-4 -mb-4 -mt-14">
-                <div className="pointer-events-none h-14 bg-gradient-to-t from-[var(--message-user-bg)] to-[var(--message-user-bg-a0)]" />
-                <button
-                  type="button"
-                  onClick={() => setUserExpanded(true)}
-                  className="flex w-full items-center justify-center gap-1 rounded-b-2xl bg-[var(--message-user-bg)] py-1.5 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:text-[var(--ink)]"
-                >
-                  <ChevronDown className="size-3.5" />
-                  展开
-                </button>
+              {/* Collapsible content wrapper: max 50vh when collapsed */}
+              <div
+                ref={userContentRef}
+                className={!userExpanded && userOverflows ? 'overflow-hidden' : ''}
+                style={!userExpanded && userOverflows ? { maxHeight: `${USER_COLLAPSE_HEIGHT}px` } : undefined}
+              >
+                {hasAttachments && (
+                  <div className={hasText ? 'mb-2' : ''}>
+                    <AttachmentPreviewList
+                      attachments={attachmentItems}
+                      compact
+                      onPreview={openPreview}
+                    />
+                  </div>
+                )}
+                {hasText && (
+                  <div className="user-message-content text-[var(--ink)]">
+                    <Markdown preserveNewlines>{userContent}</Markdown>
+                  </div>
+                )}
               </div>
-            )}
-          </article>
-          {/* 操作栏：时间 + 图标按钮，hover 淡入 */}
-          <div className={`mr-2 mt-1 flex items-center gap-2 transition-opacity ${userHovered ? 'opacity-100' : 'opacity-0'}`}>
-            <span className="text-xs text-[var(--ink-muted)] mr-1">{formatTimestamp(message.timestamp)}</span>
-            {onRewind && (
-              <span data-rewind-btn>
-                <Tip label="时间回溯">
-                  <button type="button"
-                    aria-label="时间回溯"
-                    onClick={() => onRewind(message.id)}
-                    className="rounded-lg p-1 text-[var(--ink-muted)] transition-all hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]">
-                    <Undo2 className="size-3.5" />
+              {/* Expand button with gradient fade — gradient overlaps bottom of content */}
+              {!userExpanded && userOverflows && (
+                <div className="relative z-10 -mx-4 -mb-4 -mt-14">
+                  <div className="pointer-events-none h-14 bg-gradient-to-t from-[var(--message-user-bg)] to-[var(--message-user-bg-a0)]" />
+                  <button
+                    type="button"
+                    onClick={() => setUserExpanded(true)}
+                    className="flex w-full items-center justify-center gap-1 rounded-b-2xl bg-[var(--message-user-bg)] py-1.5 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:text-[var(--ink)]"
+                  >
+                    <ChevronDown className="size-3.5" />
+                    {t('message.expand')}
                   </button>
-                </Tip>
-              </span>
-            )}
-            <Tip label={copied ? '已复制' : '复制'}>
-              <button type="button"
-                aria-label="复制"
-                onClick={() => {
-                  navigator.clipboard.writeText(userContent).catch(() => {});
-                  setCopied(true);
-                  if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current);
-                  copiedTimerRef.current = setTimeout(() => setCopied(false), 1500);
-                }}
-                className="rounded-lg p-1 text-[var(--ink-muted)] transition-all hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]">
-                {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
-              </button>
-            </Tip>
+                </div>
+              )}
+            </article>
+            {/* 操作栏：时间 + 图标按钮，随气泡/操作栏局部 hover 或键盘 focus 淡入 */}
+            <div className="mr-2 mt-1 flex items-center gap-2 opacity-0 transition-opacity duration-150 group-hover/user-actions:opacity-100 group-focus-within/user-actions:opacity-100">
+              <span className="mr-1 text-xs text-[var(--ink-muted)]">{formatTimestamp(message.timestamp)}</span>
+              {onRewind && (
+                <span data-rewind-btn>
+                  <Tip label={t('message.actions.rewind')}>
+                    <button type="button"
+                      aria-label={t('message.actions.rewind')}
+                      onClick={() => onRewind(message.id)}
+                      className="rounded-lg p-1 text-[var(--ink-muted)] transition-all hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]">
+                      <Undo2 className="size-3.5" />
+                    </button>
+                  </Tip>
+                </span>
+              )}
+              <Tip label={copied ? t('message.actions.copied') : t('message.actions.copy')}>
+                <button type="button"
+                  aria-label={t('message.actions.copy')}
+                  onClick={() => {
+                    navigator.clipboard.writeText(userContent).catch(() => {});
+                    setCopied(true);
+                    if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current);
+                    copiedTimerRef.current = setTimeout(() => setCopied(false), 1500);
+                  }}
+                  className="rounded-lg p-1 text-[var(--ink-muted)] transition-all hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]">
+                  {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+                </button>
+              </Tip>
+            </div>
           </div>
         </div>
       </div>

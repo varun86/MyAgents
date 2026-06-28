@@ -1,4 +1,5 @@
 import { Upload } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 
 interface DropZoneOverlayProps {
   /** Whether the overlay is visible */
@@ -17,9 +18,10 @@ interface DropZoneOverlayProps {
  */
 export default function DropZoneOverlay({
   isVisible,
-  message = '松手将文件加入工作区',
+  message,
   subtitle,
 }: DropZoneOverlayProps) {
+  const { t } = useTranslation('app');
   if (!isVisible) {
     return null;
   }
@@ -31,7 +33,7 @@ export default function DropZoneOverlay({
           <Upload className="h-8 w-8 text-[var(--accent)]" />
         </div>
         <div className="text-center">
-          <p className="text-lg font-semibold text-[var(--ink)]">{message}</p>
+          <p className="text-lg font-semibold text-[var(--ink)]">{message ?? t('dropZone.defaultMessage')}</p>
           {subtitle && (
             <p className="mt-1 text-sm text-[var(--ink-muted)]">{subtitle}</p>
           )}

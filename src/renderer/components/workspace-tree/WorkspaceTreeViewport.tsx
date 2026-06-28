@@ -12,6 +12,7 @@ import { Virtuoso } from "react-virtuoso";
 import type { Components, ContextProp } from "react-virtuoso";
 import type { VirtuosoHandle } from "react-virtuoso";
 import { useDroppable } from "@dnd-kit/core";
+import { useTranslation } from "react-i18next";
 
 import { runAfterNextPaint } from "@/utils/afterPaint";
 import { EMPTY_HINT_DROP_PREFIX, ROOT_DROP_ID } from "./dropTarget";
@@ -71,6 +72,7 @@ const WorkspaceTreeEmptyHintRow = memo(function WorkspaceTreeEmptyHintRow({
   rowHeight: number;
   onContextMenu: (path: string, event: React.MouseEvent) => void;
 }) {
+  const { t } = useTranslation("app");
   const { setNodeRef } = useDroppable({
     id: `${EMPTY_HINT_DROP_PREFIX}${parentDir}`,
   });
@@ -83,7 +85,7 @@ const WorkspaceTreeEmptyHintRow = memo(function WorkspaceTreeEmptyHintRow({
       style={{ height: rowHeight, paddingLeft: `${12 + depth * 16 + 20}px` }}
       onContextMenu={(e) => onContextMenu(parentDir, e)}
     >
-      空文件夹 — 拖入文件或右键新建
+      {t("workspaceTree.emptyFolderHint")}
     </div>
   );
 });

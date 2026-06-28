@@ -26,6 +26,7 @@ import {
 import { normalizeStringifiedJsonFields, promoteAgentMcpJsonToGlobal } from './configNormalize';
 import { workspacePathsEqual } from '../../../shared/workspacePath';
 import { type ImBotConfig, DEFAULT_IM_BOT_CONFIG } from '../../../shared/types/im';
+import { normalizeUiLanguage } from '../../../shared/i18n';
 // Agent migration is triggered from ConfigProvider after both config + projects are loaded
 import { isDebugMode } from '@/utils/debug';
 
@@ -107,9 +108,20 @@ export function migrateImBotConfig(config: AppConfig): AppConfig {
 }
 
 function normalizeDeveloperSettings(config: AppConfig): AppConfig {
+    config.uiLanguage = normalizeUiLanguage(config.uiLanguage);
     config.claudeTranscriptCleanupPeriodDays = normalizeClaudeTranscriptCleanupPeriodDays(
         config.claudeTranscriptCleanupPeriodDays,
     );
+    return config;
+}
+
+export function migrateUiLanguageField(config: AppConfig): AppConfig {
+    const raw = config as unknown as Record<string, unknown>;
+    if (!('uiLanguage' in raw)) {
+        config.uiLanguage = 'zh-CN';
+        return config;
+    }
+    config.uiLanguage = normalizeUiLanguage(raw['uiLanguage']);
     return config;
 }
 
@@ -117,6 +129,40 @@ function normalizeLoadedConfig(config: AppConfig): AppConfig {
     normalizeStringifiedJsonFields(config);
     promoteAgentMcpJsonToGlobal(config);
     return normalizeDeveloperSettings(config);
+}
+
+export async function ensureManagedCodexProviderDevGateDefault(): Promise<void> {
+    if (isBrowserDevMode()) {
+        let latest: Partial<AppConfig> = {};
+        try {
+            const stored = localStorage.getItem('myagents:config');
+            latest = stored ? JSON.parse(stored) as Partial<AppConfig> : {};
+        } catch {
+            latest = {};
+        }
+        if (Object.prototype.hasOwnProperty.call(latest, 'managedCodexProviderDevGate')) {
+            return;
+        }
+        localStorage.setItem('myagents:config', JSON.stringify({
+            ...latest,
+            managedCodexProviderDevGate: true,
+        }));
+        return;
+    }
+
+    await withConfigLock(async () => {
+        await ensureConfigDir();
+        const dir = await getConfigDir();
+        const configPath = await join(dir, CONFIG_FILE);
+        const latest = await safeLoadJson<Partial<AppConfig>>(configPath, isValidAppConfig) ?? {};
+        if (Object.prototype.hasOwnProperty.call(latest, 'managedCodexProviderDevGate')) {
+            return;
+        }
+        await safeWriteJson(configPath, {
+            ...latest,
+            managedCodexProviderDevGate: true,
+        });
+    });
 }
 
 // ============= Load / Save =============
@@ -130,6 +176,9 @@ export async function loadAppConfig(): Promise<AppConfig> {
     if (isBrowserDevMode()) {
         console.log('[configService] Browser mode: loading from localStorage');
         const loaded = mockLoadConfig();
+        if (Object.keys(loaded).length > 0) {
+            migrateUiLanguageField(loaded);
+        }
         return normalizeLoadedConfig({ ...dynamicDefault, ...loaded });
     }
 
@@ -140,6 +189,7 @@ export async function loadAppConfig(): Promise<AppConfig> {
 
         const loaded = await safeLoadJson<AppConfig>(configPath, isValidAppConfig);
         if (loaded) {
+            migrateUiLanguageField(loaded);
             // Run the cronNotifications migration BEFORE the dynamicDefault
             // merge — once the default supplies `osNotifications: true`, the
             // legacy field is masked and we can no longer distinguish "user

@@ -25,7 +25,7 @@ import { useConfigData } from '@/config/useConfigData';
 import { getAgentByWorkspacePath } from '@/config/services/agentConfigService';
 import { notifyConfigChanged } from '@/config/services/appConfigService';
 import { normalizeRuntime, resolveEffectiveRuntime } from '@/utils/sessionOpenPlan';
-import type { RuntimeType } from '@/../shared/types/runtime';
+import type { RuntimeDiagnostics, RuntimeSource, RuntimeType } from '@/../shared/types/runtime';
 import type { SessionMetadata } from '@/api/sessionClient';
 import { createSseConnection, type SseConnection } from '@/api/SseConnection';
 import type { ImageAttachment } from '@/components/SimpleChatInput';
@@ -34,7 +34,7 @@ import type { AskUserQuestionRequest, AskUserQuestion } from '../../shared/types
 import type { ExitPlanModeRequest, EnterPlanModeRequest, ExitPlanModeAllowedPrompt } from '../../shared/types/planMode';
 import { CUSTOM_EVENTS, isPendingSessionId } from '../../shared/constants';
 import { TabContext, TabApiContext, TabActiveContext, type AdoptMigratedSessionOptions, type SessionState, type SystemNotice, type TabContextValue, type TabApiContextValue } from './TabContext';
-import { shouldSkipHistoryReplay, shouldClearHistoryOnInit } from './sessionRestoreGuards';
+import { appendUniqueMessageById, upsertMessageById, updateMessageById, shouldSkipHistoryReplay, shouldClearHistoryOnInit } from './sessionRestoreGuards';
 import {
     decidePersistedContextUsageSeed,
     shouldAcceptSessionScopedSseSnapshot,
@@ -44,13 +44,13 @@ import { isSubagentContainerTool } from '@/components/tools/toolBadgeConfig';
 import type { AgentStatusTodoSnapshot, Message, MessageAttachment, ContentBlock, ToolUseSimple, ToolInput, TaskStats, SubagentToolCall } from '@/types/chat';
 import type { ToolUse } from '@/types/stream';
 import type { SystemInitInfo } from '../../shared/types/system';
-import type { RuntimeDiagnostics } from '../../shared/types/runtime';
 import type { ContextUsage } from '../../shared/types/context-usage';
 import type { TerminalReason } from '../../shared/terminalReason';
 import type { SlashCommand } from '../../shared/slashCommands';
 import type { LogEntry } from '@/types/log';
 import type { ProviderRoute } from '../../shared/providerRoute';
 import { parsePartialJson } from '@/utils/parsePartialJson';
+import { i18n } from '@/i18n';
 import { subscribeFrontendLogs, setCurrentTabId } from '@/utils/frontendLogger';
 import { getTabServerUrl, proxyFetch, isTauri, getSessionActivation, getSessionPort, ensureSessionSidecar, resetTabServerUrlCache, setActiveCorrelation } from '@/api/tauriClient';
 import { resolveAttachmentUrl } from '@/utils/attachmentUrl';
@@ -73,6 +73,10 @@ import { setBackgroundTaskStatus, setBackgroundTaskDescription, getBackgroundTas
 // via the /refs/:id endpoint when oversize).
 const TOOL_RESULT_DISPLAY_CAP = 8 * 1024;
 const TOOL_RESULT_TAIL_KEEP = 1024;
+
+function appText(key: string, options?: Record<string, unknown>): string {
+    return String(i18n.t(`app:${key}`, options));
+}
 
 function imageAttachmentName(img: ImageAttachment): string {
     return img.name || img.file.name;
@@ -132,6 +136,64 @@ type WireMessageAttachment = {
     previewUrl?: string;
     isImage?: boolean;
 };
+
+type WireMessageUsage = NonNullable<Message['usage']>;
+
+type WireSessionMessage = {
+    id: string;
+    role: 'user' | 'assistant';
+    content: string | ContentBlock[];
+    timestamp: string;
+    sdkUuid?: string;
+    metadata?: Message['metadata'];
+    attachments?: WireMessageAttachment[];
+    usage?: WireMessageUsage;
+    toolCount?: number;
+    durationMs?: number | null;
+};
+
+type AssistantCompletionPatch = {
+    realId?: string;
+    sdkUuid?: string;
+    usage?: Message['usage'];
+    toolCount?: number;
+    durationMs?: number;
+};
+
+function applyAssistantCompletionPatch(message: Message, patch: AssistantCompletionPatch | undefined): Message {
+    if (!patch || message.role !== 'assistant') return message;
+    const needsUuid = patch.sdkUuid && message.sdkUuid !== patch.sdkUuid;
+    const needsId = patch.realId && message.id !== patch.realId;
+    const needsUsage = patch.usage && message.usage !== patch.usage;
+    const needsToolCount = patch.toolCount !== undefined && message.toolCount !== patch.toolCount;
+    const needsDuration = patch.durationMs !== undefined && message.durationMs !== patch.durationMs;
+    if (!needsUuid && !needsId && !needsUsage && !needsToolCount && !needsDuration) return message;
+    return {
+        ...message,
+        ...(needsId ? { id: patch.realId } : {}),
+        ...(needsUuid ? { sdkUuid: patch.sdkUuid } : {}),
+        ...(patch.usage ? { usage: patch.usage } : {}),
+        ...(patch.toolCount !== undefined ? { toolCount: patch.toolCount } : {}),
+        ...(patch.durationMs !== undefined ? { durationMs: patch.durationMs } : {}),
+    };
+}
+
+function normalizeFiniteNumber(value: number | null | undefined): number | undefined {
+    return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+function normalizeTurnDurationMs(value: number | null | undefined): number | undefined {
+    return normalizeFiniteNumber(value);
+}
+
+function getAssistantTurnMetrics(msg: Pick<WireSessionMessage, 'role' | 'usage' | 'toolCount' | 'durationMs'>): Pick<Message, 'usage' | 'toolCount' | 'durationMs'> {
+    if (msg.role !== 'assistant') return {};
+    return {
+        usage: msg.usage,
+        toolCount: typeof msg.toolCount === 'number' && Number.isFinite(msg.toolCount) ? msg.toolCount : undefined,
+        durationMs: normalizeTurnDurationMs(msg.durationMs),
+    };
+}
 
 function normalizeWireAttachments(
     attachments: WireMessageAttachment[] | undefined,
@@ -336,17 +398,28 @@ interface TabApiCallOptions {
     signal?: AbortSignal;
 }
 
+function tabCorrelationHeaders(tabId: string, sessionId?: string | null): Record<string, string> {
+    return {
+        'X-MyAgents-Tab-Id': tabId,
+        ...(sessionId ? { 'X-MyAgents-Session-Id': sessionId } : {}),
+    };
+}
+
 /**
  * Create a Tab-scoped POST function
  * Uses Session-centric port lookup when sessionId is available
  */
 function createPostJson(tabId: string, sessionIdRef: React.MutableRefObject<string | null>) {
     return async <T,>(path: string, body?: unknown, opts?: TabApiCallOptions): Promise<T> => {
-        const baseUrl = await getBaseUrl(tabId, sessionIdRef.current);
+        const sessionId = sessionIdRef.current;
+        const baseUrl = await getBaseUrl(tabId, sessionId);
         const url = `${baseUrl}${path}`;
         const response = await proxyFetch(url, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: {
+                'Content-Type': 'application/json',
+                ...tabCorrelationHeaders(tabId, sessionId),
+            },
             body: body ? JSON.stringify(body) : undefined,
             signal: opts?.signal,
         });
@@ -360,9 +433,13 @@ function createPostJson(tabId: string, sessionIdRef: React.MutableRefObject<stri
  */
 function createApiGetJson(tabId: string, sessionIdRef: React.MutableRefObject<string | null>) {
     return async <T,>(path: string, opts?: TabApiCallOptions): Promise<T> => {
-        const baseUrl = await getBaseUrl(tabId, sessionIdRef.current);
+        const sessionId = sessionIdRef.current;
+        const baseUrl = await getBaseUrl(tabId, sessionId);
         const url = `${baseUrl}${path}`;
-        const response = await proxyFetch(url, { signal: opts?.signal });
+        const response = await proxyFetch(url, {
+            headers: tabCorrelationHeaders(tabId, sessionId),
+            signal: opts?.signal,
+        });
         return handleApiResponse<T>(response);
     };
 }
@@ -373,11 +450,15 @@ function createApiGetJson(tabId: string, sessionIdRef: React.MutableRefObject<st
  */
 function createApiPutJson(tabId: string, sessionIdRef: React.MutableRefObject<string | null>) {
     return async <T,>(path: string, body?: unknown, opts?: TabApiCallOptions): Promise<T> => {
-        const baseUrl = await getBaseUrl(tabId, sessionIdRef.current);
+        const sessionId = sessionIdRef.current;
+        const baseUrl = await getBaseUrl(tabId, sessionId);
         const url = `${baseUrl}${path}`;
         const response = await proxyFetch(url, {
             method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
+            headers: {
+                'Content-Type': 'application/json',
+                ...tabCorrelationHeaders(tabId, sessionId),
+            },
             body: body ? JSON.stringify(body) : undefined,
             signal: opts?.signal,
         });
@@ -391,9 +472,14 @@ function createApiPutJson(tabId: string, sessionIdRef: React.MutableRefObject<st
  */
 function createApiDelete(tabId: string, sessionIdRef: React.MutableRefObject<string | null>) {
     return async <T,>(path: string, opts?: TabApiCallOptions): Promise<T> => {
-        const baseUrl = await getBaseUrl(tabId, sessionIdRef.current);
+        const sessionId = sessionIdRef.current;
+        const baseUrl = await getBaseUrl(tabId, sessionId);
         const url = `${baseUrl}${path}`;
-        const response = await proxyFetch(url, { method: 'DELETE', signal: opts?.signal });
+        const response = await proxyFetch(url, {
+            method: 'DELETE',
+            headers: tabCorrelationHeaders(tabId, sessionId),
+            signal: opts?.signal,
+        });
         return handleApiResponse<T>(response);
     };
 }
@@ -529,6 +615,7 @@ export default function TabProvider({
     const loadingOlderRef = useRef(false);
     const [sessionState, setSessionState] = useState<SessionState>('idle');
     const [sessionRuntime, setSessionRuntime] = useState<string | null>(null);
+    const [sessionRuntimeSource, setSessionRuntimeSource] = useState<RuntimeSource | null>(null);
     // Populate analyticsMetaRef (declared above). The session-FROZEN runtime is
     // authoritative once known — it mirrors the runtime the sidecar was actually
     // spawned with (Rust resolve_session_runtime takes precedence over agent
@@ -788,6 +875,7 @@ export default function TabProvider({
         setUnifiedLogs([]);
         setLogs([]);
         setSessionMeta(null);
+        setSessionRuntimeSource(null);
         // Issue #194 (Codex review #6) — clear runtime diagnostics on reset so
         // a stale Codex banner from the previous session doesn't leak into a
         // new one (or a Tab that just switched to builtin runtime).
@@ -908,6 +996,7 @@ export default function TabProvider({
         setUnifiedLogs([]);
         setLogs([]);
         setSessionMeta(null);
+        setSessionRuntimeSource(null);
         clearInteractiveState();
 
         // Reset tab title so SortableTabItem falls back to folder name.
@@ -1311,7 +1400,10 @@ export default function TabProvider({
      * Move the current streaming message into history, marking incomplete blocks as finished.
      * Replaces the old markIncompleteBlocksAsFinished — does everything in one atomic step.
      */
-    const moveStreamingToHistory = useCallback((status: 'completed' | 'stopped' | 'failed') => {
+    const moveStreamingToHistory = useCallback((
+        status: 'completed' | 'stopped' | 'failed',
+        completionPatch?: AssistantCompletionPatch,
+    ) => {
         // Stop the reveal loop + drain ALL un-revealed text into the streaming message before
         // finalizing — history must capture the full text. flushPendingTextNow drains with
         // expectedId=null (append to current message), and the finalize updater below is
@@ -1372,9 +1464,14 @@ export default function TabProvider({
                 }
             }
 
+            finalMsg = applyAssistantCompletionPatch(finalMsg, completionPatch);
+
             // Side effect inside updater — technically impure, but safe because:
             // (1) StrictMode is off (no double invocation), (2) same pattern as setMessages (line 243).
-            setHistoryMessages(prevHistory => [...prevHistory, finalMsg]);
+            setHistoryMessages(prevHistory => {
+                seenIdsRef.current.add(finalMsg.id);
+                return upsertMessageById(prevHistory, finalMsg);
+            });
             // Set isStreamingRef inside the updater so pending message-chunk updaters
             // (which check isStreamingRef.current) still see true and correctly append
             // rather than creating a new message. Must NOT be set before this updater runs.
@@ -1483,7 +1580,7 @@ export default function TabProvider({
             }
 
             case 'chat:message-replay': {
-                const payload = data as { message: { id: string; role: 'user' | 'assistant'; content: string | ContentBlock[]; timestamp: string; sdkUuid?: string; metadata?: Message['metadata']; attachments?: WireMessageAttachment[] }; replayKind?: 'cold-history' } | null;
+                const payload = data as { message: WireSessionMessage; replayKind?: 'cold-history' } | null;
                 if (!payload?.message) break;
                 const msg = payload.message;
                 // `chat:message-replay` is OVERLOADED: the SSE-connect backfill carries
@@ -1534,12 +1631,17 @@ export default function TabProvider({
                     }
                 }
 
-                setHistoryMessages(prev => [...prev, {
-                    ...msg,
+                const replayMessage: Message = {
+                    id: msg.id,
+                    role: msg.role,
                     content: replayContent,
                     timestamp: new Date(msg.timestamp),
+                    sdkUuid: msg.sdkUuid,
                     attachments,
-                }]);
+                    metadata: msg.metadata,
+                    ...getAssistantTurnMetrics(msg),
+                };
+                setHistoryMessages(prev => appendUniqueMessageById(prev, replayMessage));
                 break;
             }
 
@@ -1640,10 +1742,10 @@ export default function TabProvider({
                     setSystemNotice({
                         kind: 'compact',
                         level: 'success',
-                        message: '上下文已压缩',
+                        message: appText('tabProvider.compactSuccess'),
                     });
                 } else if (payload?.compactResult === 'failed') {
-                    const message = payload.compactError?.trim() || '上下文压缩失败';
+                    const message = payload.compactError?.trim() || appText('tabProvider.compactFailed');
                     setSystemNotice({
                         kind: 'compact',
                         level: 'error',
@@ -2134,38 +2236,6 @@ export default function TabProvider({
 
             case 'chat:message-complete': {
                 console.log(`[TabProvider ${tabId}] message-complete received`);
-                // Pattern 3 §3.2.2 — drain all pending RAF-batched tool deltas
-                // before finalising the message; otherwise stragglers would
-                // land on a freshly-cleared streaming slot.
-                flushAllPendingToolDeltas();
-                flushSync(() => {
-                    // NOTE: isStreamingRef.current is set to false inside moveStreamingToHistory's
-                    // updater, NOT here. Setting it here would cause pending message-chunk updaters
-                    // (queued by React batching) to see false and create a new message instead
-                    // of appending, losing the accumulated content.
-                    moveStreamingToHistory('completed');
-                    // Finalize the message in the same synchronous commit as the loading-state
-                    // cleanup so ultra-short one-chunk responses do not disappear between batches.
-                    setIsLoading(false);
-                    setSessionState('idle');  // Reset session state to idle
-                    setSystemStatus(null);  // Clear system status (e.g., 'compacting') when message completes
-                    clearRuntimePlanTodos();
-                    // Do NOT clear agentError here — chat:agent-error is only emitted for terminal,
-                    // unrecoverable errors (rate_limit, auth fail, SDK is_error result, timeouts).
-                    // Clearing on message-complete would hide the banner in the race where the error
-                    // fires ~ms before the turn closes (e.g. five-hour quota hit mid-turn).
-                    // Transient recoveries use chat:api-retry, not chat:agent-error.
-                    // Banner is cleared on: new send, session load, api-retry resolved, reset.
-                });
-
-                // Send system notification if user is not focused on the app
-                notifyMessageComplete(tabId);
-
-                // Mark tab as unread if user is viewing a different tab
-                if (!isActiveRef.current) {
-                    onUnreadChangeRef.current?.(true);
-                }
-
                 // Track message_complete event with usage data
                 const completePayload = data as {
                     model?: string;
@@ -2180,6 +2250,85 @@ export default function TabProvider({
                     assistant_message_id?: string;
                     compact_result?: 'success';
                 } | null;
+                const inputTokens = normalizeFiniteNumber(completePayload?.input_tokens);
+                const outputTokens = normalizeFiniteNumber(completePayload?.output_tokens);
+                const cacheReadTokens = normalizeFiniteNumber(completePayload?.cache_read_tokens);
+                const cacheCreationTokens = normalizeFiniteNumber(completePayload?.cache_creation_tokens);
+                const hasUsagePayload =
+                    inputTokens !== undefined ||
+                    outputTokens !== undefined ||
+                    cacheReadTokens !== undefined ||
+                    cacheCreationTokens !== undefined;
+                const completedUsage: Message['usage'] | undefined = hasUsagePayload
+                    ? {
+                        inputTokens: inputTokens ?? 0,
+                        outputTokens: outputTokens ?? 0,
+                        cacheReadTokens,
+                        cacheCreationTokens,
+                        model: completePayload?.model,
+                    }
+                    : undefined;
+                const completedToolCount = normalizeFiniteNumber(completePayload?.tool_count);
+                const completedDurationMs = normalizeTurnDurationMs(completePayload?.duration_ms);
+                const completionPatch: AssistantCompletionPatch | undefined =
+                    completePayload?.assistant_sdk_uuid ||
+                    completePayload?.assistant_message_id ||
+                    completedUsage ||
+                    completedToolCount !== undefined ||
+                    completedDurationMs !== undefined
+                        ? {
+                            sdkUuid: completePayload?.assistant_sdk_uuid,
+                            realId: completePayload?.assistant_message_id,
+                            usage: completedUsage,
+                            toolCount: completedToolCount,
+                            durationMs: completedDurationMs,
+                        }
+                        : undefined;
+                // Pattern 3 §3.2.2 — drain all pending RAF-batched tool deltas
+                // before finalising the message; otherwise stragglers would
+                // land on a freshly-cleared streaming slot.
+                flushAllPendingToolDeltas();
+                flushSync(() => {
+                    // NOTE: isStreamingRef.current is set to false inside moveStreamingToHistory's
+                    // updater, NOT here. Setting it here would cause pending message-chunk updaters
+                    // (queued by React batching) to see false and create a new message instead
+                    // of appending, losing the accumulated content.
+                    moveStreamingToHistory('completed', completionPatch);
+                    // Finalize the message in the same synchronous commit as the loading-state
+                    // cleanup so ultra-short one-chunk responses do not disappear between batches.
+                    setIsLoading(false);
+                    setSessionState('idle');  // Reset session state to idle
+                    setSystemStatus(null);  // Clear system status (e.g., 'compacting') when message completes
+                    clearRuntimePlanTodos();
+                    // Do NOT clear agentError here — chat:agent-error is only emitted for terminal,
+                    // unrecoverable errors (rate_limit, auth fail, SDK is_error result, timeouts).
+                    // Clearing on message-complete would hide the banner in the race where the error
+                    // fires ~ms before the turn closes (e.g. five-hour quota hit mid-turn).
+                    // Transient recoveries use chat:api-retry, not chat:agent-error.
+                    // Banner is cleared on: new send, session load, api-retry resolved, reset.
+                });
+                if (completionPatch?.realId) {
+                    const realId = completionPatch.realId;
+                    setHistoryMessages(prev => {
+                        const next = updateMessageById(
+                            prev,
+                            realId,
+                            message => applyAssistantCompletionPatch(message, completionPatch),
+                        );
+                        if (next !== prev) {
+                            seenIdsRef.current.add(realId);
+                        }
+                        return next;
+                    });
+                }
+
+                // Send system notification if user is not focused on the app
+                notifyMessageComplete(tabId);
+
+                // Mark tab as unread if user is viewing a different tab
+                if (!isActiveRef.current) {
+                    onUnreadChangeRef.current?.(true);
+                }
 
                 // SDK 0.2.91+: map terminal_reason to UI banner. Only SET when reason is
                 // explicitly provided and non-completed — do NOT wipe to null on every
@@ -2199,28 +2348,7 @@ export default function TabProvider({
                     setSystemNotice({
                         kind: 'compact',
                         level: 'success',
-                        message: '上下文已压缩',
-                    });
-                }
-
-                // Apply backend's real message ID + sdkUuid to the just-moved history message.
-                // Streaming messages use Date.now() IDs that don't match backend's messageSequence IDs.
-                // Without this, fork/rewind pass the wrong ID to the backend.
-                if (completePayload?.assistant_sdk_uuid || completePayload?.assistant_message_id) {
-                    const uuid = completePayload.assistant_sdk_uuid;
-                    const realId = completePayload.assistant_message_id;
-                    setHistoryMessages(prev => {
-                        if (prev.length === 0) return prev;
-                        const last = prev[prev.length - 1];
-                        if (last.role !== 'assistant') return prev;
-                        const needsUuid = uuid && last.sdkUuid !== uuid;
-                        const needsId = realId && last.id !== realId;
-                        if (!needsUuid && !needsId) return prev;
-                        return [...prev.slice(0, -1), {
-                            ...last,
-                            ...(needsId ? { id: realId } : {}),
-                            ...(needsUuid ? { sdkUuid: uuid } : {}),
-                        }];
+                        message: appText('tabProvider.compactSuccess'),
                     });
                 }
                 // Always track message_complete, use defaults if payload is missing
@@ -2356,7 +2484,13 @@ export default function TabProvider({
             }
 
             case 'chat:system-init': {
-                const payload = data as { info: SystemInitInfo; sessionId?: string; prewarm?: boolean; runtime?: string } | null;
+                const payload = data as {
+                    info: SystemInitInfo;
+                    sessionId?: string;
+                    prewarm?: boolean;
+                    runtime?: string;
+                    runtimeSource?: RuntimeSource;
+                } | null;
                 if (payload?.info) {
                     setSystemInitInfo(payload.info);
                     // v0.1.69: backend tags every system-init with the runtime that
@@ -2367,8 +2501,12 @@ export default function TabProvider({
                     // currentRuntime = sessionRuntime ?? agentRuntime then keeps the
                     // bottom-bar display consistent with how messages route.
                     if (payload.runtime) {
-                        setSessionRuntime(payload.runtime);
-                        if (payload.runtime !== 'builtin') {
+                        const runtime = normalizeRuntime(payload.runtime);
+                        setSessionRuntime(runtime);
+                        setSessionRuntimeSource(runtime === 'builtin'
+                            ? null
+                            : (payload.runtimeSource ?? 'system-cli'));
+                        if (runtime !== 'builtin') {
                             setSdkSlashCommands([]);
                         }
                     }
@@ -3488,7 +3626,7 @@ export default function TabProvider({
                 if (localQueueId) {
                     setQueuedMessages(prev => prev.filter(q => q.queueId !== localQueueId));
                 }
-                setAgentError(response.error ?? '发送失败');
+                setAgentError(response.error ?? appText('tabProvider.sendFailed'));
                 pendingAttachmentsRef.current = null;
             }
         }).catch((error) => {
@@ -3496,8 +3634,8 @@ export default function TabProvider({
             if (localQueueId) {
                 setQueuedMessages(prev => prev.filter(q => q.queueId !== localQueueId));
             }
-            const msg = error instanceof Error ? error.message : '网络错误';
-            setAgentError(msg === 'Failed to fetch' ? '网络连接中断，请重试' : msg);
+            const msg = error instanceof Error ? error.message : appText('tabProvider.networkError');
+            setAgentError(msg === 'Failed to fetch' ? appText('tabProvider.networkDisconnected') : msg);
             pendingAttachmentsRef.current = null;
         });
 
@@ -3624,7 +3762,7 @@ export default function TabProvider({
             // startReached handler pulls older history lazily via `?before=<id>`
             // as the user scrolls up. Keeps first-paint JSON body tiny on 600+
             // message sessions.
-            const response = await apiGetJson<{ success: boolean; session?: SessionMetadata & { liveSessionState?: SessionState; liveStreamingMessage?: { id: string; role: 'assistant'; content: string; timestamp: string; sdkUuid?: string }; messages: Array<{ id: string; role: 'user' | 'assistant'; content: string; timestamp: string; sdkUuid?: string; attachments?: Array<{ id: string; name: string; mimeType: string; path: string; previewUrl?: string }>; metadata?: Message['metadata'] }>; totalCount?: number; hasMoreBefore?: boolean } }>(`/sessions/${targetSessionId}?limit=${INITIAL_PAGE_SIZE}`);
+            const response = await apiGetJson<{ success: boolean; session?: SessionMetadata & { liveSessionState?: SessionState; liveStreamingMessage?: WireSessionMessage | null; messages: WireSessionMessage[]; totalCount?: number; hasMoreBefore?: boolean } }>(`/sessions/${targetSessionId}?limit=${INITIAL_PAGE_SIZE}`);
 
             if (!response.success || !response.session) {
                 // Session not found is not necessarily an error - it may have been deleted
@@ -3682,19 +3820,24 @@ export default function TabProvider({
                     content: parsedContent,
                     timestamp: new Date(msg.timestamp),
                     sdkUuid: msg.sdkUuid,
-                    attachments: msg.attachments?.map((att: { id: string; name: string; mimeType: string; path: string; previewUrl?: string }) => ({
+                    attachments: msg.attachments?.map((att) => ({
                         id: att.id,
                         name: att.name,
                         size: 0,
                         mimeType: att.mimeType,
-                        savedPath: att.path,
-                        relativePath: att.path,
+                        savedPath: att.path ?? att.savedPath,
+                        relativePath: att.path ?? att.relativePath ?? att.savedPath,
                         // Server no longer embeds base64 previews — resolve to
                         // `myagents://` (Tauri) or `/api/attachment/*` (dev).
-                        previewUrl: resolveAttachmentUrl({ savedPath: att.path, previewUrl: att.previewUrl }),
+                        previewUrl: resolveAttachmentUrl({
+                            savedPath: att.path ?? att.savedPath ?? att.relativePath,
+                            relativePath: att.relativePath,
+                            previewUrl: att.previewUrl,
+                        }),
                         isImage: att.mimeType.startsWith('image/'),
                     })),
                     metadata: msg.metadata,
+                    ...getAssistantTurnMetrics(msg),
                 };
             });
 
@@ -3715,6 +3858,7 @@ export default function TabProvider({
                     content: parsedLiveContent,
                     timestamp: new Date(liveMsg.timestamp),
                     sdkUuid: liveMsg.sdkUuid,
+                    ...getAssistantTurnMetrics(liveMsg),
                 };
             }
 
@@ -3773,7 +3917,11 @@ export default function TabProvider({
             }
             // Old sessions (pre-v0.1.60) have no runtime field → treat as 'builtin'.
             // null is reserved strictly for "session not loaded yet" (initial state).
-            setSessionRuntime(response.session.runtime || 'builtin');
+            const loadedRuntime = response.session.runtime || 'builtin';
+            setSessionRuntime(loadedRuntime);
+            setSessionRuntimeSource(loadedRuntime === 'builtin'
+                ? null
+                : (response.session.runtimeSource ?? 'system-cli'));
             // Strip SessionData.messages so sessionMeta holds just the metadata slice
             // (prevents accidental reliance on .messages elsewhere and keeps the
             // snapshot concept clean — SessionData is a superset of SessionMetadata).
@@ -3864,15 +4012,7 @@ export default function TabProvider({
             const resp = await apiGetJson<{
                 success: boolean;
                 session?: {
-                    messages: Array<{
-                        id: string;
-                        role: 'user' | 'assistant';
-                        content: string;
-                        timestamp: string;
-                        sdkUuid?: string;
-                        attachments?: Array<{ id: string; name: string; mimeType: string; path: string }>;
-                        metadata?: Message['metadata'];
-                    }>;
+                    messages: WireSessionMessage[];
                     hasMoreBefore?: boolean;
                 };
             }>(`/sessions/${encodeURIComponent(sid)}?limit=${OLDER_PAGE_SIZE}&before=${encodeURIComponent(oldest.id)}`);
@@ -3901,12 +4041,17 @@ export default function TabProvider({
                         name: att.name,
                         size: 0,
                         mimeType: att.mimeType,
-                        savedPath: att.path,
-                        relativePath: att.path,
-                        previewUrl: resolveAttachmentUrl({ savedPath: att.path }),
+                        savedPath: att.path ?? att.savedPath,
+                        relativePath: att.path ?? att.relativePath ?? att.savedPath,
+                        previewUrl: resolveAttachmentUrl({
+                            savedPath: att.path ?? att.savedPath ?? att.relativePath,
+                            relativePath: att.relativePath,
+                            previewUrl: att.previewUrl,
+                        }),
                         isImage: att.mimeType.startsWith('image/'),
                     })),
                     metadata: msg.metadata,
+                    ...getAssistantTurnMetrics(msg),
                 };
             });
 
@@ -4346,6 +4491,7 @@ export default function TabProvider({
         isSessionLoading,
         sessionState,
         sessionRuntime,
+        sessionRuntimeSource,
         sessionMeta,
         logs,
         unifiedLogs,
@@ -4395,7 +4541,7 @@ export default function TabProvider({
         // Cron task exit handler ref (mutable, no need in deps)
         onCronTaskExitRequested: onCronTaskExitRequestedRef,
     }), [
-        tabId, agentDir, currentSessionId, messages, historyMessages, streamingMessage, firstItemIndex, hasMoreBefore, isLoading, isSessionLoading, sessionState, sessionRuntime, sessionMeta,
+        tabId, agentDir, currentSessionId, messages, historyMessages, streamingMessage, firstItemIndex, hasMoreBefore, isLoading, isSessionLoading, sessionState, sessionRuntime, sessionRuntimeSource, sessionMeta,
         logs, unifiedLogs, systemInitInfo, sdkSlashCommands, runtimeDiagnostics, agentError, systemStatus, systemNotice, contextUsage, agentPlanTodos, lastTerminalReason, pendingPermission, pendingAskUserQuestion, pendingExitPlanMode, pendingEnterPlanMode, toolCompleteCount, queuedMessages, isConnected,
         setMessages, appendLog, appendUnifiedLog, clearUnifiedLogs, sendMessage, stopResponse, loadSession, loadOlderMessages, resetSession, adoptMigratedSession,
         apiGetJson, postJson, apiPutJson, apiDeleteJson, respondPermission, respondAskUserQuestion, respondExitPlanMode, cancelQueuedMessage, forceExecuteQueuedMessage

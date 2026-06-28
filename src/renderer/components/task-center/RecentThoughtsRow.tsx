@@ -11,6 +11,7 @@
 
 import { useEffect, useState } from 'react';
 import { ArrowRight } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 import { thoughtList } from '@/api/taskCenter';
 import { relativeTime } from '@/utils/taskCenterUtils';
 import type { Thought } from '@/../shared/types/thought';
@@ -29,6 +30,7 @@ export function RecentThoughtsRow({
   onOpenTaskCenter,
   limit = 3,
 }: Props) {
+  const { t } = useTranslation('launcher');
   const [thoughts, setThoughts] = useState<Thought[]>([]);
   const [loaded, setLoaded] = useState(false);
 
@@ -75,9 +77,9 @@ export function RecentThoughtsRow({
         type="button"
         onClick={onOpenTaskCenter}
         className="flex shrink-0 items-center gap-1 rounded-[var(--radius-md)] px-2.5 py-1.5 text-xs text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--accent-warm)]"
-        title="打开任务中心查看全部想法"
+        title={t('recentThoughts.openTaskCenterTitle')}
       >
-        <span>更多</span>
+        <span>{t('recentThoughts.more')}</span>
         <ArrowRight className="h-3 w-3" />
       </button>
     </div>
@@ -90,6 +92,7 @@ interface ChipProps {
 }
 
 function ThoughtChip({ thought, onClick }: ChipProps) {
+  const { t } = useTranslation('launcher');
   const firstLine = firstNonEmptyLine(thought.content);
   // `flex-1 min-w-0` lets the chip shrink when the row is tight, while
   // `truncate` on the label adds an ellipsis so no chip overflows its slot.
@@ -101,7 +104,7 @@ function ThoughtChip({ thought, onClick }: ChipProps) {
       title={thought.content}
     >
       <span className="min-w-0 flex-1 truncate text-xs text-[var(--ink-secondary)] group-hover:text-[var(--ink)]">
-        {firstLine || '（空想法）'}
+        {firstLine || t('recentThoughts.emptyThought')}
       </span>
       <span className="shrink-0 text-xs text-[var(--ink-muted)]/70">
         {relativeTime(thought.createdAt)}

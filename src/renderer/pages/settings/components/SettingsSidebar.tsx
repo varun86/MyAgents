@@ -1,4 +1,5 @@
 import type { Dispatch, SetStateAction } from 'react';
+import { useTranslation } from 'react-i18next';
 
 import type { SettingsSection } from '../settingsSections';
 
@@ -10,17 +11,17 @@ interface SettingsSidebarProps {
   onShowLogs: () => void;
 }
 
-const NAV_ITEMS: Array<{ section: SettingsSection; label: string; activeSections?: SettingsSection[] }> = [
-  { section: 'providers', label: '模型供应商' },
-  { section: 'skills', label: '技能 Skills', activeSections: ['skills', 'sub-agents'] },
-  { section: 'plugins', label: '插件 Plugins' },
-  { section: 'mcp', label: '工具箱' },
-  { section: 'agent', label: '聊天机器人 Bot' },
-  { section: 'desktop-pet', label: '桌面宠物' },
-  { section: 'usage-stats', label: '使用统计' },
-  { section: 'general', label: '通用设置' },
-  { section: 'shortcuts', label: '快捷键' },
-  { section: 'about', label: '关于&反馈' },
+const NAV_ITEMS: Array<{ section: SettingsSection; labelKey: string; activeSections?: SettingsSection[] }> = [
+  { section: 'providers', labelKey: 'sidebar.nav.providers' },
+  { section: 'skills', labelKey: 'sidebar.nav.skills', activeSections: ['skills', 'sub-agents'] },
+  { section: 'plugins', labelKey: 'sidebar.nav.plugins' },
+  { section: 'mcp', labelKey: 'sidebar.nav.tools' },
+  { section: 'agent', labelKey: 'sidebar.nav.bots' },
+  { section: 'desktop-pet', labelKey: 'sidebar.nav.floatingBall' },
+  { section: 'usage-stats', labelKey: 'sidebar.nav.usageStats' },
+  { section: 'general', labelKey: 'sidebar.nav.general' },
+  { section: 'shortcuts', labelKey: 'sidebar.nav.shortcuts' },
+  { section: 'about', labelKey: 'sidebar.nav.about' },
 ];
 
 export function SettingsSidebar({
@@ -30,15 +31,17 @@ export function SettingsSidebar({
   floatingBallDevGate,
   onShowLogs,
 }: SettingsSidebarProps) {
+  const { t } = useTranslation('settings');
+
   return (
     <div className="settings-sidebar w-52 shrink-0 p-6">
       <div className="mb-6 flex items-center justify-between">
-        <h1 className="text-xl font-semibold text-[var(--ink)]">设置</h1>
+        <h1 className="text-xl font-semibold text-[var(--ink)]">{t('sidebar.title')}</h1>
         {showDevTools && (
           <button
             onClick={onShowLogs}
             className="rounded-lg px-2.5 py-1.5 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
-            title="查看 Rust 日志"
+            title={t('sidebar.logsTitle')}
           >
             Logs
           </button>
@@ -60,7 +63,7 @@ export function SettingsSidebar({
                   : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
               }`}
             >
-              {item.label}
+              {t(item.labelKey)}
             </button>
           );
         })}

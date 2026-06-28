@@ -18,7 +18,7 @@ import type { AgentStatusTodoSnapshot, Message } from '@/types/chat';
 import type { LogEntry } from '@/types/log';
 import type { QueuedMessageInfo } from '@/types/queue';
 import type { SystemInitInfo } from '../../shared/types/system';
-import type { RuntimeDiagnostics } from '../../shared/types/runtime';
+import type { RuntimeDiagnostics, RuntimeSource } from '../../shared/types/runtime';
 import type { PermissionMode } from '@/config/types';
 import type { PermissionRequest } from '@/components/PermissionPrompt';
 import type { AskUserQuestionRequest } from '../../shared/types/askUserQuestion';
@@ -73,6 +73,7 @@ export interface TabState {
     isSessionLoading: boolean;  // true while loadSession REST API is in-flight
     sessionState: SessionState;
     sessionRuntime: string | null;  // Runtime that created this session (null = builtin)
+    sessionRuntimeSource: RuntimeSource | null;
     /**
      * Full session metadata — includes v0.1.69 snapshot fields (model / permissionMode /
      * mcpEnabledServers / providerId / configSnapshotAt). Derivation source for Chat.tsx
@@ -254,6 +255,7 @@ const defaultContextValue: TabContextValue = {
     isSessionLoading: false,
     sessionState: 'idle',
     sessionRuntime: null,
+    sessionRuntimeSource: null,
     sessionMeta: null,
     logs: [],
     unifiedLogs: [],

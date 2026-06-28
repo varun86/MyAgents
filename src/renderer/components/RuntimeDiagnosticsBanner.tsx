@@ -31,6 +31,7 @@
 
 import { AlertTriangle, ChevronDown, ChevronRight, X } from 'lucide-react';
 import { useMemo, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 
 import type {
   RuntimeDiagnostics,
@@ -55,7 +56,9 @@ function statusError(s: RuntimeDiagnosticsCallStatus | undefined): string | null
   return null;
 }
 
-function assessBlocking(d: RuntimeDiagnostics): BlockingAssessment {
+type ChatTranslator = (key: string, options?: Record<string, unknown>) => string;
+
+function assessBlocking(d: RuntimeDiagnostics, t: ChatTranslator): BlockingAssessment {
   const allProblems: string[] = [];
 
   const authErr = statusError(d.status.auth);
@@ -64,23 +67,28 @@ function assessBlocking(d: RuntimeDiagnostics): BlockingAssessment {
   const featErr = statusError(d.status.features);
 
   // ── Collect ALL problems for expanded-view context ──
-  if (d.auth?.requiresLogin) allProblems.push('需要登录 Codex（点账户头像或运行 codex login）');
-  if (authErr) allProblems.push(`auth 查询失败：${authErr.slice(0, 80)}`);
-  if (appsErr) allProblems.push(`app 列表失败：${appsErr.slice(0, 80)}`);
-  if (mcpErr) allProblems.push(`MCP 状态查询失败：${mcpErr.slice(0, 80)}`);
-  if (featErr) allProblems.push(`feature flag 查询失败：${featErr.slice(0, 80)}`);
+  if (d.auth?.requiresLogin) allProblems.push(t('shell.runtimeDiagnostics.problems.needsCodexLogin'));
+  if (authErr) allProblems.push(t('shell.runtimeDiagnostics.problems.authQueryFailed', { error: authErr.slice(0, 80) }));
+  if (appsErr) allProblems.push(t('shell.runtimeDiagnostics.problems.appListFailed', { error: appsErr.slice(0, 80) }));
+  if (mcpErr) allProblems.push(t('shell.runtimeDiagnostics.problems.mcpStatusFailed', { error: mcpErr.slice(0, 80) }));
+  if (featErr) allProblems.push(t('shell.runtimeDiagnostics.problems.featureFlagFailed', { error: featErr.slice(0, 80) }));
   if (d.apps) {
     const inaccessible = d.apps.filter(a => a.isEnabled && !a.isAccessible);
     if (inaccessible.length > 0) {
       const names = inaccessible.map(a => a.id).slice(0, 3).join(', ');
       const more = inaccessible.length > 3 ? '…' : '';
-      allProblems.push(`${inaccessible.length} 个 app 启用但不可达：${names}${more}`);
+      allProblems.push(t('shell.runtimeDiagnostics.problems.appsInaccessible', {
+        count: inaccessible.length,
+        names: `${names}${more}`,
+      }));
     }
   }
   if (d.mcpServers) {
     const failed = d.mcpServers.filter(s => s.state === 'failed');
     if (failed.length > 0) {
-      allProblems.push(`MCP server 失败：${failed.map(s => s.name).slice(0, 3).join(', ')}`);
+      allProblems.push(t('shell.runtimeDiagnostics.problems.mcpServersFailed', {
+        names: failed.map(s => s.name).slice(0, 3).join(', '),
+      }));
     }
   }
   if (d.issues) {
@@ -100,14 +108,14 @@ function assessBlocking(d: RuntimeDiagnostics): BlockingAssessment {
   }
   // Rule A: explicitly needs login → cannot proceed
   if (d.auth?.requiresLogin) {
-    return { isBlocking: true, headline: '需要登录 Codex 才能继续使用', allProblems };
+    return { isBlocking: true, headline: t('shell.runtimeDiagnostics.headlines.needsCodexLogin'), allProblems };
   }
   // Rule B: every diagnostic RPC errored → runtime is fundamentally broken
   const allFour = [authErr, appsErr, mcpErr, featErr].filter(Boolean).length;
   if (allFour >= 4) {
     return {
       isBlocking: true,
-      headline: 'Codex 自诊断全部失败，runtime 可能未启动',
+      headline: t('shell.runtimeDiagnostics.headlines.allDiagnosticsFailed'),
       allProblems,
     };
   }
@@ -115,16 +123,19 @@ function assessBlocking(d: RuntimeDiagnostics): BlockingAssessment {
   return { isBlocking: false, headline: '', allProblems };
 }
 
-function renderStatusLabel(s: RuntimeDiagnosticsCallStatus | undefined): string {
+function renderStatusLabel(s: RuntimeDiagnosticsCallStatus | undefined, t: ChatTranslator): string {
   if (s === 'ok') return 'ok';
-  if (s === 'unsupported') return '不支持';
-  if (s && typeof s === 'object' && 'error' in s) return `失败：${String(s.error).slice(0, 100)}`;
-  return '未报告';
+  if (s === 'unsupported') return t('shell.runtimeDiagnostics.status.unsupported');
+  if (s && typeof s === 'object' && 'error' in s) {
+    return t('shell.runtimeDiagnostics.status.failed', { error: String(s.error).slice(0, 100) });
+  }
+  return t('shell.runtimeDiagnostics.status.notReported');
 }
 
 export default function RuntimeDiagnosticsBanner({
   diagnostics,
 }: RuntimeDiagnosticsBannerProps) {
+  const { t } = useTranslation('chat');
   const [expanded, setExpanded] = useState(false);
   const [dismissed, setDismissed] = useState(false);
 
@@ -146,8 +157,8 @@ export default function RuntimeDiagnosticsBanner({
   }
 
   const assessment = useMemo(
-    () => (diagnostics ? assessBlocking(diagnostics) : null),
-    [diagnostics],
+    () => (diagnostics ? assessBlocking(diagnostics, t) : null),
+    [diagnostics, t],
   );
 
   if (!diagnostics || !assessment) return null;
@@ -173,7 +184,7 @@ export default function RuntimeDiagnosticsBanner({
             <div className="mt-2 space-y-3">
               {assessment.allProblems.length > 0 && (
                 <div>
-                  <div className="font-semibold mb-1">问题</div>
+                  <div className="font-semibold mb-1">{t('shell.runtimeDiagnostics.sections.problems')}</div>
                   <ul className="list-disc pl-4 space-y-0.5">
                     {assessment.allProblems.map((p, i) => <li key={i}>{p}</li>)}
                   </ul>
@@ -181,17 +192,21 @@ export default function RuntimeDiagnosticsBanner({
               )}
 
               <div>
-                <div className="font-semibold">认证 [{renderStatusLabel(diagnostics.status.auth)}]</div>
+                <div className="font-semibold">
+                  {t('shell.runtimeDiagnostics.sections.auth')} [{renderStatusLabel(diagnostics.status.auth, t)}]
+                </div>
                 {diagnostics.auth && (
                   <div className="text-[var(--ink-muted)]">
                     method: {diagnostics.auth.authMethod ?? '(null)'}
-                    {diagnostics.auth.requiresLogin && ' • 需登录'}
+                    {diagnostics.auth.requiresLogin && t('shell.runtimeDiagnostics.requiresLoginSuffix')}
                   </div>
                 )}
               </div>
 
               <div>
-                <div className="font-semibold">Feature flags [{renderStatusLabel(diagnostics.status.features)}]</div>
+                <div className="font-semibold">
+                  {t('shell.runtimeDiagnostics.sections.featureFlags')} [{renderStatusLabel(diagnostics.status.features, t)}]
+                </div>
                 {diagnostics.features && diagnostics.features.length > 0 && (
                   <div className="text-[var(--ink-muted)] flex flex-wrap gap-x-2 gap-y-0.5">
                     {diagnostics.features.slice(0, 12).map(f => (
@@ -205,7 +220,9 @@ export default function RuntimeDiagnosticsBanner({
               </div>
 
               <div>
-                <div className="font-semibold">MCP servers [{renderStatusLabel(diagnostics.status.mcpServers)}]</div>
+                <div className="font-semibold">
+                  {t('shell.runtimeDiagnostics.sections.mcpServers')} [{renderStatusLabel(diagnostics.status.mcpServers, t)}]
+                </div>
                 {diagnostics.mcpServers && diagnostics.mcpServers.length > 0 && (
                   <ul className="list-disc pl-4 space-y-0.5 text-[var(--ink-muted)]">
                     {diagnostics.mcpServers.map(s => (
@@ -220,7 +237,9 @@ export default function RuntimeDiagnosticsBanner({
               </div>
 
               <div>
-                <div className="font-semibold">Apps [{renderStatusLabel(diagnostics.status.apps)}]</div>
+                <div className="font-semibold">
+                  {t('shell.runtimeDiagnostics.sections.apps')} [{renderStatusLabel(diagnostics.status.apps, t)}]
+                </div>
                 {diagnostics.apps && diagnostics.apps.length > 0 && (
                   <ul className="list-disc pl-4 space-y-0.5 text-[var(--ink-muted)]">
                     {diagnostics.apps.map(a => (
@@ -229,7 +248,9 @@ export default function RuntimeDiagnosticsBanner({
                         className={a.isEnabled && !a.isAccessible ? 'text-[var(--warning)]' : ''}
                       >
                         {a.isEnabled ? '✅ ' : '⚪ '}
-                        {a.isAccessible ? '可访问 ' : '不可访问 '}
+                        {a.isAccessible
+                          ? t('shell.runtimeDiagnostics.appAccessible')
+                          : t('shell.runtimeDiagnostics.appInaccessible')}
                         {a.id}
                         {a.needsAuth ? ' • needs-auth' : ''}
                       </li>
@@ -239,7 +260,7 @@ export default function RuntimeDiagnosticsBanner({
               </div>
 
               <div>
-                <div className="font-semibold">Effective env</div>
+                <div className="font-semibold">{t('shell.runtimeDiagnostics.sections.effectiveEnv')}</div>
                 <div className="text-[var(--ink-muted)] font-mono text-xs leading-tight">
                   <div>cwd: {diagnostics.effectiveEnv.cwd}</div>
                   <div>HTTP_PROXY:  {diagnostics.effectiveEnv.proxy?.http ?? '(unset)'}</div>
@@ -247,7 +268,9 @@ export default function RuntimeDiagnosticsBanner({
                   <div>NO_PROXY:    {diagnostics.effectiveEnv.proxy?.no ?? '(unset)'}</div>
                   <div>proxyPolicy: {diagnostics.effectiveEnv.proxyPolicy ?? 'myagents'}</div>
                   <div>
-                    MYAGENTS_PROXY_INJECTED: {diagnostics.effectiveEnv.myagentsProxyInjected ? 'yes' : 'no'}
+                    MYAGENTS_PROXY_INJECTED: {diagnostics.effectiveEnv.myagentsProxyInjected
+                      ? t('shell.runtimeDiagnostics.yes')
+                      : t('shell.runtimeDiagnostics.no')}
                   </div>
                   <div>
                     secrets: openai={diagnostics.effectiveEnv.hasOpenaiApiKey ? '✓' : '✗'} •
@@ -258,7 +281,7 @@ export default function RuntimeDiagnosticsBanner({
               </div>
 
               <div className="text-xs text-[var(--ink-muted)] italic">
-                诊断快照：{diagnostics.timestamp}。命令行同步信息：
+                {t('shell.runtimeDiagnostics.snapshot', { timestamp: diagnostics.timestamp })}
                 <code className="ml-1">myagents diagnose runtime {diagnostics.runtime}</code>
               </div>
             </div>
@@ -269,8 +292,8 @@ export default function RuntimeDiagnosticsBanner({
         <button
           type="button"
           onClick={() => setDismissed(true)}
-          aria-label="关闭"
-          title="关闭此提示"
+          aria-label={t('shell.common.close')}
+          title={t('shell.runtimeDiagnostics.closeTitle')}
           className="flex-shrink-0 rounded p-0.5 text-[var(--ink-muted)] hover:bg-[var(--paper-hover)] hover:text-[var(--ink)]"
         >
           <X className="h-3.5 w-3.5" />

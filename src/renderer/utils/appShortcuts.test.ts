@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
+import { resources } from '@/i18n';
 import {
   APP_SHORTCUTS,
   VISIBLE_APP_SHORTCUTS,
@@ -192,12 +193,15 @@ describe('dispatchAppShortcut', () => {
 
 describe('reference table metadata', () => {
   it('reload-block is hidden; all visible shortcuts have a key label on both platforms', () => {
+    const enItems = resources['en-US'].settings.shortcuts.app.items as Record<string, string>;
+    const zhItems = resources['zh-CN'].settings.shortcuts.app.items as Record<string, string>;
     expect(VISIBLE_APP_SHORTCUTS.some((s) => s.id === 'block-reload')).toBe(false);
     expect(VISIBLE_APP_SHORTCUTS.length).toBe(APP_SHORTCUTS.length - 1);
     for (const s of VISIBLE_APP_SHORTCUTS) {
       expect(s.keys?.(true)).toBeTruthy();
       expect(s.keys?.(false)).toBeTruthy();
-      expect(s.label.length).toBeGreaterThan(0);
+      expect(enItems[s.id]).toBeTruthy();
+      expect(zhItems[s.id]).toBeTruthy();
     }
   });
 });

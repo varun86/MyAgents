@@ -17,7 +17,12 @@
 
 import { useCallback, useMemo } from 'react';
 
+import { i18n } from '@/i18n';
 import { isTauriEnvironment } from '@/utils/browserMock';
+
+function workspaceFileText(key: string): string {
+  return String(i18n.t(`app:workspaceFile.${key}`));
+}
 
 interface CopiedFile {
   sourcePath: string;
@@ -359,7 +364,7 @@ export function useWorkspaceFileService(workspacePath: string | null): Workspace
   const invokeIfTauri = useCallback(async <T,>(cmd: string, args: Record<string, unknown>): Promise<T> => {
     if (!tauri) {
       throw new Error(
-        '工作区文件操作仅在桌面应用中可用。当前为浏览器开发模式。'
+        workspaceFileText('desktopOnly')
       );
     }
     const { invoke } = await import('@tauri-apps/api/core');
@@ -368,7 +373,7 @@ export function useWorkspaceFileService(workspacePath: string | null): Workspace
 
   const requireWorkspace = useCallback(() => {
     if (!workspacePath) {
-      throw new Error('请先选择工作区');
+      throw new Error(workspaceFileText('selectWorkspaceFirst'));
     }
     return workspacePath;
   }, [workspacePath]);

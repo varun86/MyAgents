@@ -21,8 +21,8 @@ use std::process::{Command, Stdio};
 /// was ignored" to a terminal user — the exact failure mode this whole CLI was
 /// designed to avoid for AI callers.
 const CLI_COMMANDS: &[&str] = &[
-    "mcp", "model", "agent", "runtime", "config", "status", "reload", "version", "cron", "plugin",
-    "skill", "task", "thought", "im", "session", "widget", "space",
+    "mcp", "vision", "model", "agent", "runtime", "config", "status", "reload", "version", "cron",
+    "plugin", "skill", "task", "thought", "im", "session", "widget", "space",
     // Issue #194 — `myagents diagnose runtime <type>` sugar. Without this, the
     // packaged Tauri binary launches the GUI when invoked with just `diagnose ...`.
     // `runtime diagnose <type>` still works via the "runtime" entry above.

@@ -21,6 +21,7 @@ import {
   useState,
 } from 'react';
 import { Hash, PenLine } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 import { thoughtCreate } from '@/api/taskCenter';
 import { track } from '@/analytics';
 import Tip from '@/components/Tip';
@@ -203,14 +204,16 @@ export const ThoughtInput = forwardRef<ThoughtInputHandle, Props>(function Thoug
   // *how* to tag it, so the empty state doesn't look like dead space.
   // §6.3 rules the placeholder color (--ink-muted) which is already
   // applied by the textarea className below.
-  placeholder = '写下此刻的想法… 用 #标签 归类',
+  placeholder,
   autoFocus = false,
   existingTags = [],
   minLines = 2,
   maxLines = 8,
   variant = 'compact',
 }, ref) {
+  const { t } = useTranslation('task');
   const theme = VARIANTS[variant];
+  const effectivePlaceholder = placeholder ?? t('thoughts.inputPlaceholder');
   // Layout invariant: effective max >= min. Caller-supplied maxLines
   // below minLines would produce a weird "negative growth room" state;
   // clamp up so the textarea always has at least its starting height.
@@ -523,7 +526,7 @@ export const ThoughtInput = forwardRef<ThoughtInputHandle, Props>(function Thoug
             onScroll={syncScroll}
             onCompositionStart={handleCompositionStart}
             onCompositionEnd={handleCompositionEnd}
-            placeholder={placeholder}
+              placeholder={effectivePlaceholder}
             // Height is driven by the `useLayoutEffect` above (2-row
             // minimum, 8-row max, internal scroll past that). We don't
             // set `rows={N}` here because it would re-inject a min-height
@@ -593,7 +596,7 @@ export const ThoughtInput = forwardRef<ThoughtInputHandle, Props>(function Thoug
         >
           {tagMenu && (
             <div className="px-3 pb-1 pt-0.5 text-xs font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60">
-              {tagMenu.query ? `匹配 #${tagMenu.query}` : '选择标签'}
+              {tagMenu.query ? t('thoughts.tagMenuMatch', { query: tagMenu.query }) : t('thoughts.tagMenuChoose')}
             </div>
           )}
           {filteredTags.map(([tag, n], i) => (
@@ -624,13 +627,13 @@ export const ThoughtInput = forwardRef<ThoughtInputHandle, Props>(function Thoug
               type="button"
               onClick={handleHashButton}
               disabled={busy}
-              title="插入 # 标签"
+              title={t('thoughts.insertTag')}
               className={`rounded-lg text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--accent-warm)] disabled:cursor-not-allowed disabled:opacity-50 ${theme.toolbarButtonPaddingClass}`}
             >
               <Hash className="h-4 w-4" />
             </button>
           </div>
-          <Tip label="记录想法" shortcut="⌘ + Enter" align="end">
+          <Tip label={t('thoughts.record')} shortcut="⌘ + Enter" align="end">
             <button
               type="button"
               onClick={() => void handleSubmit()}

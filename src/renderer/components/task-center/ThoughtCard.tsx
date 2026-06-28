@@ -17,6 +17,7 @@ import {
   useRef,
   useState,
 } from 'react';
+import { useTranslation } from 'react-i18next';
 import {
   Archive,
   ArchiveRestore,
@@ -40,6 +41,8 @@ import {
   findHighlightRanges,
   renderTextWithHighlights,
 } from '@/utils/highlightSearchMatches';
+import { relativeTime } from '@/utils/taskCenterUtils';
+import { isSupportedLocale } from '@/../shared/i18n';
 
 interface Props {
   thought: Thought;
@@ -90,6 +93,8 @@ export function ThoughtCard({
   const [hasOverflow, setHasOverflow] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
   const [showWorkspacePicker, setShowWorkspacePicker] = useState(false);
+  const { t, i18n } = useTranslation('task');
+  const locale = isSupportedLocale(i18n.language) ? i18n.language : 'zh-CN';
 
   const viewRef = useRef<HTMLDivElement>(null);
   const editRef = useRef<HTMLTextAreaElement>(null);
@@ -276,10 +281,10 @@ export function ThoughtCard({
           means no reflow on mode transitions. */}
       <div className="mb-2 flex h-5 items-center justify-between gap-2">
         <span className="min-w-0 truncate text-xs text-[var(--ink-muted)]/60">
-          {formatRelative(thought.updatedAt)}
+          {relativeTime(thought.updatedAt, locale)}
           {convertedCount > 0 && (
             <span className="ml-2 text-[var(--accent-warm)]">
-              已派生 {convertedCount} 个任务
+              {t('thoughts.derivedTasks', { count: convertedCount })}
             </span>
           )}
         </span>
@@ -301,11 +306,11 @@ export function ThoughtCard({
                     className="flex items-center gap-1 rounded-[var(--radius-md)] px-2 py-0.5 text-sm text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--accent-cool)]"
                   >
                     <MessageSquare className="h-3.5 w-3.5" strokeWidth={1.5} />
-                    AI 讨论
+                    {t('thoughts.aiDiscuss')}
                   </button>
                   {!showWorkspacePicker && (
                     <span className="pointer-events-none absolute -bottom-7 left-1/2 z-30 -translate-x-1/2 whitespace-nowrap rounded-md bg-[var(--button-dark-bg)] px-2 py-0.5 text-xs text-[var(--button-primary-text)] opacity-0 shadow-lg transition-opacity group-hover/discuss:opacity-100">
-                      与 AI 讨论或创建任务
+                      {t('thoughts.aiDiscussTooltip')}
                     </span>
                   )}
                 </div>
@@ -318,10 +323,10 @@ export function ThoughtCard({
                     className="flex items-center gap-1 rounded-[var(--radius-md)] px-2 py-0.5 text-sm text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--accent-warm)]"
                   >
                     <Zap className="h-3.5 w-3.5" strokeWidth={1.5} />
-                    派发
+                    {t('thoughts.dispatch')}
                   </button>
                   <span className="pointer-events-none absolute -bottom-7 left-1/2 z-30 -translate-x-1/2 whitespace-nowrap rounded-md bg-[var(--button-dark-bg)] px-2 py-0.5 text-xs text-[var(--button-primary-text)] opacity-0 shadow-lg transition-opacity group-hover/dispatch:opacity-100">
-                    直接派发任务
+                    {t('thoughts.dispatchTooltip')}
                   </span>
                 </div>
               )}
@@ -338,12 +343,12 @@ export function ThoughtCard({
                 className="min-w-[240px] max-w-[320px] py-1"
               >
                 <div className="px-3 pt-2 pb-1 text-xs font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]/70">
-                  选择 Agent 工作区
+                  {t('thoughts.workspacePicker')}
                 </div>
                 <div className="max-h-[280px] overflow-y-auto py-1">
                   {pickableWorkspaces.length === 0 ? (
                     <div className="px-3 py-4 text-xs text-[var(--ink-muted)]">
-                      暂无工作区
+                      {t('thoughts.noWorkspace')}
                     </div>
                   ) : (
                     pickableWorkspaces.map((p) => (
@@ -383,7 +388,7 @@ export function ThoughtCard({
               type="button"
               onClick={() => setShowMenu((v) => !v)}
               disabled={busy}
-              title="更多操作"
+              title={t('thoughts.moreActions')}
               className="flex h-5 w-5 items-center justify-center rounded-[var(--radius-md)] text-[var(--ink-muted)]/70 transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
             >
               <MoreHorizontal className="h-3.5 w-3.5" strokeWidth={1.5} />
@@ -404,7 +409,7 @@ export function ThoughtCard({
                 className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm text-[var(--ink-secondary)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
               >
                 <Pencil className="h-3.5 w-3.5" strokeWidth={1.5} />
-                编辑
+                {t('common.edit')}
               </button>
               {onEnterSelectMode && (
                 <button
@@ -416,7 +421,7 @@ export function ThoughtCard({
                   className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm text-[var(--ink-secondary)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
                 >
                   <CheckSquare className="h-3.5 w-3.5" strokeWidth={1.5} />
-                  多选
+                  {t('thoughts.multiSelect')}
                 </button>
               )}
               <button
@@ -428,12 +433,12 @@ export function ThoughtCard({
                 {isArchived ? (
                   <>
                     <ArchiveRestore className="h-3.5 w-3.5" strokeWidth={1.5} />
-                    取消归档
+                    {t('thoughts.unarchive')}
                   </>
                 ) : (
                   <>
                     <Archive className="h-3.5 w-3.5" strokeWidth={1.5} />
-                    归档
+                    {t('thoughts.archive')}
                   </>
                 )}
               </button>
@@ -443,7 +448,7 @@ export function ThoughtCard({
                 className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm text-[var(--error)] hover:bg-[var(--error-bg)]"
               >
                 <Trash2 className="h-3.5 w-3.5" strokeWidth={1.5} />
-                删除
+                {t('common.delete')}
               </button>
             </Popover>
           </div>
@@ -516,7 +521,7 @@ export function ThoughtCard({
           onClick={() => setExpanded((v) => !v)}
           className="mt-1 text-xs text-[var(--accent-warm)] hover:underline"
         >
-          {expanded ? '收起' : '展开全文'}
+          {expanded ? t('thoughts.collapse') : t('thoughts.expand')}
         </button>
       )}
 
@@ -537,7 +542,7 @@ export function ThoughtCard({
             disabled={busy}
             className="rounded-[var(--radius-md)] px-2 py-1 text-sm text-[var(--ink-muted)] hover:bg-[var(--paper-inset)]"
           >
-            取消
+            {t('common.cancel')}
           </button>
           <button
             type="button"
@@ -545,7 +550,7 @@ export function ThoughtCard({
             disabled={busy}
             className="rounded-[var(--radius-md)] bg-[var(--accent-warm)] px-2.5 py-1 text-sm font-medium text-white hover:bg-[var(--accent-warm-hover)]"
           >
-            保存
+            {t('common.save')}
           </button>
         </div>
       )}
@@ -597,18 +602,6 @@ function renderWithTagHighlights(
     }
     return <span key={i}>{p.value}</span>;
   });
-}
-
-function formatRelative(ts: number): string {
-  const diff = Date.now() - ts;
-  const mins = Math.floor(diff / 60_000);
-  if (mins < 1) return '刚刚';
-  if (mins < 60) return `${mins} 分钟前`;
-  const hrs = Math.floor(mins / 60);
-  if (hrs < 24) return `${hrs} 小时前`;
-  const days = Math.floor(hrs / 24);
-  if (days < 7) return `${days} 天前`;
-  return new Date(ts).toLocaleDateString();
 }
 
 export default ThoughtCard;

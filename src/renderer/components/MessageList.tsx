@@ -2,6 +2,8 @@ import { AlertCircle, CheckCircle, Loader2, X } from 'lucide-react';
 import React, { memo, useCallback, useMemo, useState, useEffect, useLayoutEffect, useRef } from 'react';
 import { Virtuoso } from 'react-virtuoso';
 import type { VirtuosoHandle } from 'react-virtuoso';
+import type { TFunction } from 'i18next';
+import { useTranslation } from 'react-i18next';
 
 import Message from '@/components/Message';
 import { PermissionPrompt, type PermissionRequest } from '@/components/PermissionPrompt';
@@ -12,13 +14,13 @@ import type { Message as MessageType } from '@/types/chat';
 import type { SessionState, SystemNotice } from '@/context/TabContext';
 import { resolveChatBottomSpacerPx } from '@/utils/chatBottomSpacer';
 
-function formatElapsedTime(totalSeconds: number): string {
+function formatElapsedTime(totalSeconds: number, t: TFunction<'chat'>): string {
   const hours = Math.floor(totalSeconds / 3600);
   const minutes = Math.floor((totalSeconds % 3600) / 60);
   const seconds = totalSeconds % 60;
-  if (hours > 0) return `${hours}小时${minutes}分钟${seconds}秒`;
-  if (minutes > 0) return `${minutes}分钟${seconds}秒`;
-  return `${seconds}秒`;
+  if (hours > 0) return t('shell.messageList.elapsed.hms', { hours, minutes, seconds });
+  if (minutes > 0) return t('shell.messageList.elapsed.ms', { minutes, seconds });
+  return t('shell.messageList.elapsed.seconds', { seconds });
 }
 
 interface MessageListProps {
@@ -73,35 +75,29 @@ interface MessageListProps {
   bottomSpacerPx?: number;
 }
 
-const STREAMING_MESSAGES = [
-  '苦思冥想中…', '深思熟虑中…', '灵光一闪中…', '绞尽脑汁中…', '思绪飞速运转中…',
-  '小脑袋瓜转啊转…', '神经元疯狂放电中…', '灵感小火花碰撞中…', '正在努力组织语言…',
-  '在知识海洋里捞答案…', '正在翻阅宇宙图书馆…', '答案正在酝酿中…', '灵感咖啡冲泡中…',
-  '递归思考中，请勿打扰…', '正在遍历可能性…', '加载智慧模块中…',
-  '容我想想…', '稍等，马上就好…', '别急，好饭不怕晚…', '正在认真对待你的问题…',
-];
-const SYSTEM_STATUS_MESSAGES: Record<string, string> = {
-  compacting: '会话内容过长，智能总结中…',
-  rewinding: '正在时间回溯中，请稍等…',
-};
+const STREAMING_MESSAGE_COUNT = 20;
 
 /** Resolve dynamic system status keys (e.g., api_retry:2:5 → human-readable) */
-function resolveSystemStatus(status: string): string {
-  if (SYSTEM_STATUS_MESSAGES[status]) return SYSTEM_STATUS_MESSAGES[status];
+function resolveSystemStatus(status: string, t: TFunction<'chat'>): string {
+  if (status === 'compacting' || status === 'rewinding') {
+    return t(`shell.messageList.systemStatus.${status}`);
+  }
   // API retry: "api_retry:{attempt}:{maxAttempts}"
   if (status.startsWith('api_retry:')) {
     const parts = status.split(':');
     const attempt = parts[1] || '1';
     const max = parts[2] || '?';
-    return `API 请求重试中（第 ${attempt}/${max} 次）…`;
+    return t('shell.messageList.systemStatus.apiRetry', { attempt, max });
   }
   return status;
 }
-function getRandomStreamingMessage(): string {
-  return STREAMING_MESSAGES[Math.floor(Math.random() * STREAMING_MESSAGES.length)];
+function getRandomStreamingMessage(t: TFunction<'chat'>): string {
+  const index = Math.floor(Math.random() * STREAMING_MESSAGE_COUNT);
+  return t(`shell.messageList.streaming.${index}`);
 }
 
 const StatusTimer = memo(function StatusTimer({ message }: { message: string }) {
+  const { t } = useTranslation('chat');
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const startTimeRef = useRef(0);
   useEffect(() => {
@@ -112,7 +108,7 @@ const StatusTimer = memo(function StatusTimer({ message }: { message: string }) 
   return (
     <div className="flex items-center gap-2 px-3 py-1.5 text-xs text-[var(--ink-muted)]">
       <Loader2 className="h-3 w-3 animate-spin" />
-      <span>{message}{elapsedSeconds > 0 && ` (${formatElapsedTime(elapsedSeconds)})`}</span>
+      <span>{message}{elapsedSeconds > 0 && ` (${formatElapsedTime(elapsedSeconds, t)})`}</span>
     </div>
   );
 });
@@ -124,6 +120,7 @@ const SystemNoticeRow = memo(function SystemNoticeRow({
   notice: SystemNotice;
   onDismiss?: () => void;
 }) {
+  const { t } = useTranslation('chat');
   const isError = notice.level === 'error';
   const Icon = isError ? AlertCircle : CheckCircle;
   return (
@@ -135,7 +132,7 @@ const SystemNoticeRow = memo(function SystemNoticeRow({
           type="button"
           onClick={onDismiss}
           className="rounded p-0.5 text-[var(--ink-subtle)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink-muted)]"
-          title="关闭"
+          title={t('shell.common.close')}
         >
           <X className="h-3 w-3" />
         </button>
@@ -235,15 +232,16 @@ const MessageList = memo(function MessageList({
   onFork,
   bottomSpacerPx,
 }: MessageListProps) {
+  const { t } = useTranslation('chat');
   const allMessages = useMemo(() =>
     streamingMessage ? [...historyMessages, streamingMessage] : historyMessages,
     [historyMessages, streamingMessage]
   );
 
   const streamingStatusMessage = useMemo(
-    () => getRandomStreamingMessage(),
+    () => getRandomStreamingMessage(t),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [historyMessages.length]
+    [historyMessages.length, t]
   );
 
   // ExitPlanMode
@@ -272,9 +270,9 @@ const MessageList = memo(function MessageList({
   // a more specific signal that overrides both starting and the generic
   // thinking line.
   const statusMessage = systemStatus
-    ? resolveSystemStatus(systemStatus)
+    ? resolveSystemStatus(systemStatus, t)
     : sessionState === 'starting'
-      ? 'AI 启动中…（首次启动可能较慢）'
+      ? t('shell.messageList.starting')
       : streamingStatusMessage;
 
   // Fade-in
@@ -600,7 +598,7 @@ const MessageList = memo(function MessageList({
         <div className="absolute inset-0 z-10 flex items-center justify-center" style={{ paddingBottom: 140 }}>
           <div className="flex items-center gap-2 text-sm text-[var(--ink-muted)]">
             <Loader2 className="h-4 w-4 animate-spin" />
-            <span>加载对话记录…</span>
+            <span>{t('shell.messageList.loadingHistory')}</span>
           </div>
         </div>
       )}

@@ -21,6 +21,7 @@ import {
 } from 'lucide-react';
 import type { ReactNode } from 'react';
 
+import { i18n } from '@/i18n';
 import type { SubagentToolCall, ToolInput, ToolUseSimple } from '@/types/chat';
 
 import { getEffectiveTodoWriteTodos } from '@/utils/todoWriteState';
@@ -41,12 +42,21 @@ import {
 
 const mcpServerNames = new Map<string, string>();
 
-// Internal MCP servers (Context-injected, not in user config) — fallback names
-const INTERNAL_MCP_NAMES: Record<string, string> = {
-  'im-cron': '定时任务',
-  'cron-tools': '定时任务',
-  'im-media': 'IM 媒体',
-  'im-bridge-tools': '插件工具',
+type ToolChromeTranslator = (key: string, options?: Record<string, unknown>) => string;
+
+function tc(t: ToolChromeTranslator | undefined, key: string, options?: Record<string, unknown>): string {
+  const fullKey = `shell.toolChrome.${key}`;
+  if (t) return t(fullKey, options);
+  return String(i18n.t(fullKey, { ns: 'chat', ...options }));
+}
+
+// Internal MCP servers (Context-injected, not in user config) — localized fallback names.
+// User-configured MCP names remain data and are returned verbatim by getMcpServerDisplayName.
+const INTERNAL_MCP_NAME_KEYS: Record<string, string> = {
+  'im-cron': 'mcpServers.imCron',
+  'cron-tools': 'mcpServers.cronTools',
+  'im-media': 'mcpServers.imMedia',
+  'im-bridge-tools': 'mcpServers.imBridgeTools',
 };
 
 /** Called by Chat.tsx when MCP server list changes */
@@ -58,8 +68,11 @@ export function syncMcpServerNames(servers: Array<{ id: string; name: string }>)
 }
 
 /** Get display name for an MCP server ID */
-function getMcpServerDisplayName(serverId: string): string {
-  return mcpServerNames.get(serverId) || INTERNAL_MCP_NAMES[serverId] || serverId;
+function getMcpServerDisplayName(serverId: string, t?: ToolChromeTranslator): string {
+  const configuredName = mcpServerNames.get(serverId);
+  if (configuredName) return configuredName;
+  const fallbackKey = INTERNAL_MCP_NAME_KEYS[serverId];
+  return fallbackKey ? tc(t, fallbackKey) : serverId;
 }
 
 /** Extract server ID from MCP tool name: mcp__<server-id>__<tool-name> → server-id */
@@ -104,7 +117,7 @@ function getSubagentStringProp(call: SubagentToolCall, key: string): string | un
 }
 
 // Generate label for subagent tool call (used in Task tool display)
-function getSubagentCallLabel(call: SubagentToolCall, maxLength = 35): string {
+function getSubagentCallLabel(call: SubagentToolCall, t?: ToolChromeTranslator, maxLength = 35): string {
   const { name } = call;
   let label = name;
 
@@ -136,25 +149,25 @@ function getSubagentCallLabel(call: SubagentToolCall, maxLength = 35): string {
     case 'Grep': {
       const pattern = getSubagentStringProp(call, 'pattern');
       if (pattern) {
-        label = `Search "${pattern}"`;
+        label = tc(t, 'labels.searchWithQuery', { query: pattern });
       }
       break;
     }
     case 'CollabAgent': {
       const action = getSubagentStringProp(call, 'tool');
-      label = action ? (COLLAB_ACTION_LABELS[action] ?? action) : 'Sub-agent control';
+      label = action ? getCollabActionLabel(action, t) : tc(t, 'labels.subAgentControl');
       break;
     }
     case 'AgentMessage':
-      label = 'Agent message';
+      label = tc(t, 'labels.agentMessage');
       break;
     case 'Thinking':
-      label = 'Thinking';
+      label = tc(t, 'labels.thinking');
       break;
     case 'Glob': {
       const pattern = getSubagentStringProp(call, 'pattern');
       if (pattern) {
-        label = `Find ${pattern}`;
+        label = tc(t, 'labels.findWithPattern', { pattern });
       }
       break;
     }
@@ -163,9 +176,9 @@ function getSubagentCallLabel(call: SubagentToolCall, maxLength = 35): string {
       if (url) {
         try {
           const parsed = new URL(url);
-          label = `Fetch ${parsed.hostname}`;
+          label = tc(t, 'labels.fetchTarget', { target: parsed.hostname });
         } catch {
-          label = `Fetch ${url}`;
+          label = tc(t, 'labels.fetchTarget', { target: url });
         }
       }
       break;
@@ -173,7 +186,7 @@ function getSubagentCallLabel(call: SubagentToolCall, maxLength = 35): string {
     case 'WebSearch': {
       const query = getSubagentStringProp(call, 'query');
       if (query) {
-        label = `Search "${query}"`;
+        label = tc(t, 'labels.searchWithQuery', { query });
       }
       break;
     }
@@ -196,13 +209,13 @@ function getSubagentCallLabel(call: SubagentToolCall, maxLength = 35): string {
   return label.length > maxLength ? `${label.substring(0, maxLength - 3)}...` : label;
 }
 
-function getTodoWriteLabel(tool: ToolUseSimple): string {
+function getTodoWriteLabel(tool: ToolUseSimple, t?: ToolChromeTranslator): string {
   const todos = getEffectiveTodoWriteTodos(tool);
   if (todos && todos.length > 0) {
     const completedCount = todos.filter((t) => t.status === 'completed').length;
-    return `Todo ${completedCount}/${todos.length}`;
+    return tc(t, 'labels.todoProgress', { completed: completedCount, total: todos.length });
   }
-  return 'Todo List';
+  return tc(t, 'labels.todoList');
 }
 
 function getFilePatchLabel(tool: ToolUseSimple): string | null {
@@ -215,29 +228,29 @@ function getFilePatchLabel(tool: ToolUseSimple): string | null {
 
 // SDK 0.3.142+ incremental Task tools (TaskCreate/TaskUpdate/TaskGet/TaskList) —
 // compact badge labels. Distinct from the sub-agent launcher 'Task'.
-function getTaskTodoLabel(tool: ToolUseSimple): string {
+function getTaskTodoLabel(tool: ToolUseSimple, t?: ToolChromeTranslator): string {
   switch (tool.name) {
     case 'TaskCreate': {
       const subject = getStringProp(tool.parsedInput, 'subject');
-      return subject ? `New: ${subject}` : 'New task';
+      return subject ? tc(t, 'labels.newTaskWithSubject', { subject }) : tc(t, 'labels.newTask');
     }
     case 'TaskUpdate': {
       const status = getStringProp(tool.parsedInput, 'status');
       const subject = getStringProp(tool.parsedInput, 'subject');
-      if (status === 'completed') return subject ? `Done: ${subject}` : 'Task done';
-      if (status === 'in_progress') return subject ? `Start: ${subject}` : 'Task started';
-      if (status === 'deleted') return subject ? `Drop: ${subject}` : 'Task dropped';
-      return subject ? `Update: ${subject}` : 'Update task';
+      if (status === 'completed') return subject ? tc(t, 'labels.taskDoneWithSubject', { subject }) : tc(t, 'labels.taskDone');
+      if (status === 'in_progress') return subject ? tc(t, 'labels.taskStartedWithSubject', { subject }) : tc(t, 'labels.taskStarted');
+      if (status === 'deleted') return subject ? tc(t, 'labels.taskDroppedWithSubject', { subject }) : tc(t, 'labels.taskDropped');
+      return subject ? tc(t, 'labels.updateTaskWithSubject', { subject }) : tc(t, 'labels.updateTask');
     }
     case 'TaskGet':
-      return 'Get task';
+      return tc(t, 'labels.getTask');
     case 'TaskList': {
       const tasks = getTaskListSnapshot(tool);
       if (tasks && tasks.length > 0) {
         const completedCount = tasks.filter((t) => t.status === 'completed').length;
-        return `Tasks ${completedCount}/${tasks.length}`;
+        return tc(t, 'labels.tasksProgress', { completed: completedCount, total: tasks.length });
       }
-      return 'Task List';
+      return tc(t, 'labels.taskList');
     }
     default:
       return tool.name;
@@ -570,24 +583,30 @@ export function getToolBadgeConfig(toolName: string): ToolBadgeConfig {
 export { isSubagentContainerTool } from './subagentActivity';
 
 // Human-readable label for a Codex collab-agent card by its action + model.
-const COLLAB_ACTION_LABELS: Record<string, string> = {
-  spawnAgent: '派生子 Agent',
-  wait: '等待子 Agent',
-  closeAgent: '关闭子 Agent',
-  sendInput: '发送指令',
-  resumeAgent: '恢复子 Agent',
+const COLLAB_ACTION_LABEL_KEYS: Record<string, string> = {
+  spawnAgent: 'labels.spawnAgent',
+  wait: 'labels.waitAgent',
+  closeAgent: 'labels.closeAgent',
+  sendInput: 'labels.sendInput',
+  resumeAgent: 'labels.resumeAgent',
 };
-function getCollabAgentLabel(tool: ToolUseSimple): string {
+
+function getCollabActionLabel(action: string, t?: ToolChromeTranslator): string {
+  const key = COLLAB_ACTION_LABEL_KEYS[action];
+  return key ? tc(t, key) : action;
+}
+
+function getCollabAgentLabel(tool: ToolUseSimple, t?: ToolChromeTranslator): string {
   const action = getStringProp(tool.parsedInput, 'tool');
   const model = getStringProp(tool.parsedInput, 'model');
-  const base = action ? (COLLAB_ACTION_LABELS[action] ?? action) : 'Sub-agent';
+  const base = action ? getCollabActionLabel(action, t) : tc(t, 'labels.subAgent');
   return model ? `${base} · ${model}` : base;
 }
 
-export function getToolMainLabel(tool: ToolUseSimple): string {
+export function getToolMainLabel(tool: ToolUseSimple, t?: ToolChromeTranslator): string {
   const displayNameOverride = getStringProp(tool.parsedInput, '_displayName');
   if (displayNameOverride) return displayNameOverride;
-  if (tool.name === 'CollabAgent') return 'Sub-agent';
+  if (tool.name === 'CollabAgent') return tc(t, 'labels.subAgent');
   if (tool.name === 'Task' || tool.name === 'Agent') {
     const subagentType = getStringProp(tool.parsedInput, 'subagent_type');
     return subagentType || tool.name;
@@ -595,20 +614,20 @@ export function getToolMainLabel(tool: ToolUseSimple): string {
   // MCP tools: use server display name
   const serverId = extractMcpServerId(tool.name);
   if (serverId) {
-    return getMcpServerDisplayName(serverId);
+    return getMcpServerDisplayName(serverId, t);
   }
   return tool.name;
 }
 
 // Unified label generation logic - extracts compact label from tool
-export function getToolLabel(tool: ToolUseSimple): string {
+export function getToolLabel(tool: ToolUseSimple, t?: ToolChromeTranslator): string {
   if (tool.name === 'TodoWrite') {
-    return getTodoWriteLabel(tool);
+    return getTodoWriteLabel(tool, t);
   }
   // Task tools read result (TaskList) / input that may be absent mid-stream —
   // handle before the `!parsedInput` early-return below.
   if (tool.name === 'TaskCreate' || tool.name === 'TaskUpdate' || tool.name === 'TaskGet' || tool.name === 'TaskList') {
-    return getTaskTodoLabel(tool);
+    return getTaskTodoLabel(tool, t);
   }
   if (tool.name === 'Write' || tool.name === 'Edit') {
     const label = getFilePatchLabel(tool);
@@ -626,28 +645,28 @@ export function getToolLabel(tool: ToolUseSimple): string {
         if (tool.name === 'Bash') {
           return parsed.description || parsed.command ?
               parsed.description || parsed.command.split(' ')[0]
-            : 'Run command';
+            : tc(t, 'labels.runCommand');
         }
         if (tool.name === 'BashOutput') {
-          return 'Bash Output';
+          return tc(t, 'labels.bashOutput');
         }
         if (tool.name === 'Skill') {
-          return parsed.skill ? `Skill(${parsed.skill})` : 'Skill';
+          return parsed.skill ? tc(t, 'labels.skillWithName', { name: parsed.skill }) : tc(t, 'labels.skill');
         }
         if (tool.name === 'Glob') {
-          return 'Find';
+          return tc(t, 'labels.find');
         }
         if (tool.name === 'Grep') {
-          return 'Search';
+          return tc(t, 'labels.search');
         }
         if (tool.name === 'WebSearch') {
-          return 'Search';
+          return tc(t, 'labels.search');
         }
         if (tool.name === 'WebFetch') {
-          return 'Fetch';
+          return tc(t, 'labels.fetch');
         }
         if (tool.name === 'KillShell') {
-          return 'Kill Shell';
+          return tc(t, 'labels.killShell');
         }
       } catch {
         if (tool.name === 'Bash') {
@@ -685,26 +704,26 @@ export function getToolLabel(tool: ToolUseSimple): string {
         const cmd = command.split(' ')[0];
         return cmd.length > 15 ? `${cmd.substring(0, 12)}...` : cmd;
       }
-      return 'Run command';
+      return tc(t, 'labels.runCommand');
     }
     case 'BashOutput': {
-      return 'Bash Output';
+      return tc(t, 'labels.bashOutput');
     }
     case 'Grep': {
       const pattern = getStringProp(tool.parsedInput, 'pattern');
       if (pattern) {
         const truncated = pattern.length > 15 ? `${pattern.substring(0, 12)}...` : pattern;
-        return `Search "${truncated}"`;
+        return tc(t, 'labels.searchWithQuery', { query: truncated });
       }
-      return 'Search';
+      return tc(t, 'labels.search');
     }
     case 'Glob': {
       const pattern = getStringProp(tool.parsedInput, 'pattern');
       if (pattern) {
         const truncated = pattern.length > 15 ? `${pattern.substring(0, 12)}...` : pattern;
-        return `Find ${truncated}`;
+        return tc(t, 'labels.findWithPattern', { pattern: truncated });
       }
-      return 'Find';
+      return tc(t, 'labels.find');
     }
     case 'Task':
     case 'Agent':
@@ -716,12 +735,12 @@ export function getToolLabel(tool: ToolUseSimple): string {
         const runningCall = [...tool.subagentCalls].reverse().find(isSubagentCallRunning);
         const latestCall = runningCall || tool.subagentCalls[tool.subagentCalls.length - 1];
         if (latestCall) {
-          return getSubagentCallLabel(latestCall);
+          return getSubagentCallLabel(latestCall, t);
         }
       }
       // Codex collab card has no description/subagent_type — label by action + model.
       if (tool.name === 'CollabAgent') {
-        return getCollabAgentLabel(tool);
+        return getCollabAgentLabel(tool, t);
       }
       // When completed or no subagent calls yet, show the description.
       // No JS truncation — CSS truncate handles overflow via max-width in ProcessRow.
@@ -741,24 +760,24 @@ export function getToolLabel(tool: ToolUseSimple): string {
           return urlStr.length > 20 ? `${urlStr.substring(0, 17)}...` : urlStr;
         }
       }
-      return 'Fetch';
+      return tc(t, 'labels.fetch');
     }
     case 'WebSearch': {
       const query = getStringProp(tool.parsedInput, 'query');
       if (query) {
         return query.length > 20 ? `${query.substring(0, 17)}...` : query;
       }
-      return 'Search';
+      return tc(t, 'labels.search');
     }
     case 'TodoWrite': {
-      return getTodoWriteLabel(tool);
+      return getTodoWriteLabel(tool, t);
     }
     case 'Skill': {
       const skill = getStringProp(tool.parsedInput, 'skill');
       if (skill) {
-        return `Skill(${skill})`;
+        return tc(t, 'labels.skillWithName', { name: skill });
       }
-      return 'Skill';
+      return tc(t, 'labels.skill');
     }
     default:
       return tool.name;
@@ -767,32 +786,32 @@ export function getToolLabel(tool: ToolUseSimple): string {
 
 // Unified expanded label generation logic - for ToolHeader in expanded state
 // Returns the base semantic label (without pattern/file details) to match collapsed badge
-export function getToolExpandedLabel(tool: ToolUseSimple): string {
+export function getToolExpandedLabel(tool: ToolUseSimple, t?: ToolChromeTranslator): string {
   // External-runtime display override — see getToolMainLabel for the rationale.
   const displayNameOverride = getStringProp(tool.parsedInput, '_displayName');
   if (displayNameOverride) return displayNameOverride;
   switch (tool.name) {
     case 'Glob':
-      return 'Find';
+      return tc(t, 'labels.find');
     case 'Grep':
-      return 'Search';
+      return tc(t, 'labels.search');
     case 'WebSearch':
-      return 'Search';
+      return tc(t, 'labels.search');
     case 'WebFetch':
-      return 'Fetch';
+      return tc(t, 'labels.fetch');
     case 'Bash': {
       const description = getStringProp(tool.parsedInput, 'description');
-      return description || 'Run command';
+      return description || tc(t, 'labels.runCommand');
     }
     case 'BashOutput':
-      return 'Bash Output';
+      return tc(t, 'labels.bashOutput');
     case 'TodoWrite':
-      return 'Todo List';
+      return tc(t, 'labels.todoList');
     case 'TaskCreate':
     case 'TaskUpdate':
     case 'TaskGet':
     case 'TaskList':
-      return getTaskTodoLabel(tool);
+      return getTaskTodoLabel(tool, t);
     case 'Task':
     case 'Agent': {
       const description = getStringProp(tool.parsedInput, 'description');
@@ -805,29 +824,30 @@ export function getToolExpandedLabel(tool: ToolUseSimple): string {
       return tool.name;
     case 'Skill': {
       const skill = getStringProp(tool.parsedInput, 'skill');
-      return skill ? `Skill(${skill})` : 'Skill';
+      return skill ? tc(t, 'labels.skillWithName', { name: skill }) : tc(t, 'labels.skill');
     }
     case 'NotebookEdit': {
       const editMode = getStringProp(tool.parsedInput, 'edit_mode') || 'replace';
-      return `${editMode.charAt(0).toUpperCase() + editMode.slice(1)} notebook cell`;
+      const mode = editMode.charAt(0).toUpperCase() + editMode.slice(1);
+      return tc(t, 'labels.notebookCell', { mode });
     }
     case 'KillShell':
-      return 'Kill Shell';
+      return tc(t, 'labels.killShell');
     default: {
       // MCP tools: show "ServerName: tool_action" or just ServerName
       const serverId = extractMcpServerId(tool.name);
       if (serverId) {
-        const serverName = getMcpServerDisplayName(serverId);
+        const serverName = getMcpServerDisplayName(serverId, t);
         // Extract tool action name (after the last __)
         const parts = tool.name.split('__');
         const toolAction = parts.length >= 3 ? parts.slice(2).join('__') : '';
 
         // Special cases with richer labels
         if (serverId === 'gemini-image') {
-          return toolAction === 'edit_image' ? '编辑图片' : '生成图片';
+          return toolAction === 'edit_image' ? tc(t, 'labels.editImage') : tc(t, 'labels.generateImage');
         }
         if (serverId === 'edge-tts') {
-          return toolAction === 'list_voices' ? '查询语音' : '语音合成';
+          return toolAction === 'list_voices' ? tc(t, 'labels.listVoices') : tc(t, 'labels.textToSpeech');
         }
         // Generic MCP: show action if distinct from server name
         if (toolAction && toolAction !== 'search' && toolAction !== 'cron') {
@@ -922,7 +942,7 @@ function renderFilePatchSummary(display: FilePatchDisplay): ReactNode {
  * Returns `null` if the tool has no useful summary or the input/result hasn't
  * arrived yet (streaming-safe).
  */
-export function getToolSummaryNode(tool: ToolUseSimple): ReactNode | null {
+export function getToolSummaryNode(tool: ToolUseSimple, t?: ToolChromeTranslator): ReactNode | null {
   switch (tool.name) {
     case 'Edit':
     case 'Write': {
@@ -932,10 +952,12 @@ export function getToolSummaryNode(tool: ToolUseSimple): ReactNode | null {
     case 'Grep': {
       const stats = parseGrepStats(tool.result);
       if (!stats) return null;
-      const filesPart = stats.files > 0 ? ` in ${stats.files} ${stats.files === 1 ? 'file' : 'files'}` : '';
+      const filesPart = stats.files > 0 ?
+        ` ${tc(t, 'labels.filesPart', { count: stats.files })}`
+        : '';
       return (
         <span className="text-xs font-mono text-[var(--ink-muted)]">
-          {stats.matches} {stats.matches === 1 ? 'match' : 'matches'}{filesPart}
+          {tc(t, 'labels.matches', { count: stats.matches })}{filesPart}
         </span>
       );
     }
@@ -944,7 +966,7 @@ export function getToolSummaryNode(tool: ToolUseSimple): ReactNode | null {
       if (!stats) return null;
       return (
         <span className="text-xs font-mono text-[var(--ink-muted)]">
-          {stats.files} {stats.files === 1 ? 'file' : 'files'}
+          {tc(t, 'labels.files', { count: stats.files })}
         </span>
       );
     }
@@ -969,7 +991,7 @@ export function getThinkingBadgeConfig(): ToolBadgeConfig {
 }
 
 // Unified thinking label generation logic
-export function getThinkingLabel(isComplete: boolean, durationMs?: number): string {
+export function getThinkingLabel(isComplete: boolean, durationMs?: number, t?: ToolChromeTranslator): string {
   const durationSeconds =
     typeof durationMs === 'number' ? Math.max(1, Math.round(durationMs / 1000)) : null;
 
@@ -977,22 +999,22 @@ export function getThinkingLabel(isComplete: boolean, durationMs?: number): stri
     return `${durationSeconds}s`;
   }
   if (isComplete) {
-    return 'Thought';
+    return tc(t, 'labels.thinking');
   }
-  return 'Thinking';
+  return tc(t, 'labels.thinking');
 }
 
 // Get expanded thinking label (more descriptive)
-export function getThinkingExpandedLabel(isComplete: boolean, durationMs?: number): string {
+export function getThinkingExpandedLabel(isComplete: boolean, durationMs?: number, t?: ToolChromeTranslator): string {
   const durationSeconds =
     typeof durationMs === 'number' ? Math.max(1, Math.round(durationMs / 1000)) : null;
 
   if (isComplete && durationSeconds) {
     const seconds = Math.round(durationMs! / 1000);
-    return `Thought for ${seconds} second${seconds === 1 ? '' : 's'}`;
+    return tc(t, 'thinking.completedWithSeconds', { seconds });
   }
   if (isComplete) {
-    return 'Thought';
+    return tc(t, 'labels.thinking');
   }
-  return 'Thinking';
+  return tc(t, 'labels.thinking');
 }

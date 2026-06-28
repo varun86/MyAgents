@@ -1,5 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 
+import { i18n } from '@/i18n';
 import {
   isImeComposingEvent,
   resolveEnterKeyAction,
@@ -68,6 +69,10 @@ describe('isImeComposingEvent', () => {
 });
 
 describe('sendKeyHint / sendHintLabel', () => {
+  beforeEach(async () => {
+    await i18n.changeLanguage('zh-CN');
+  });
+
   it("'enter' → Enter chip on both platforms", () => {
     expect(sendKeyHint('enter', true)).toEqual({ label: '发送', shortcut: 'Enter' });
     expect(sendKeyHint('enter', false)).toEqual({ label: '发送', shortcut: 'Enter' });

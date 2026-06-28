@@ -3,6 +3,7 @@
 // Removes: workspace, MCP, heartbeat (all Agent-level).
 // Adds: optional override section for provider/model/permission.
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { ChevronDown, Loader2, Power, PowerOff, Trash2 } from 'lucide-react';
 import QRCode from 'qrcode';
 import telegramIcon from '../../ImSettings/assets/telegram.png';
@@ -14,9 +15,12 @@ import { isTauriEnvironment } from '@/utils/browserMock';
 import { listenWithCleanup } from '@/utils/tauriListen';
 import { useToast } from '@/components/Toast';
 import { useConfig } from '@/hooks/useConfig';
-import { getEffectiveModelAliases, getProviderModels, isProviderEnabled } from '@/config/types';
+import { CODEX_SUBSCRIPTION_PROVIDER_ID, getEffectiveModelAliases, getProviderModels, isProviderEnabled } from '@/config/types';
+import { isProviderAvailable } from '@/config/services/providerService';
 import { patchAgentConfig, invokeStartAgentChannel, stopAndDisableAgentChannel, startAndEnableAgentChannel, channelHasCredentials } from '@/config/services/agentConfigService';
 import { resolveEffectiveConfig } from '../../../../shared/types/agent';
+import type { RuntimeConfig } from '../../../../shared/types/runtime';
+import { runtimeConfigForRuntimeBackedProviderDefault, toProviderExecutionIntent } from '../../../../shared/providerExecution';
 import BotTokenInput from '../../ImSettings/components/BotTokenInput';
 import FeishuCredentialInput from '../../ImSettings/components/FeishuCredentialInput';
 import DingtalkCredentialInput from '../../ImSettings/components/DingtalkCredentialInput';
@@ -49,15 +53,16 @@ function OpenClawConfigEditor({
     npmSpec: string;
     onChange: (config: Record<string, unknown>) => void;
 }) {
+    const { t } = useTranslation('settings');
     const entries = Object.entries(pluginConfig);
 
     return (
         <div className="space-y-4">
             <div className="flex items-center gap-2 text-xs text-[var(--ink-muted)]">
-                <span>插件: {npmSpec || pluginId}</span>
+                <span>{t('agentSettings.channelDetail.pluginLabel', { name: npmSpec || pluginId })}</span>
             </div>
             {entries.length === 0 ? (
-                <p className="text-sm text-[var(--ink-muted)]">此插件无需额外配置</p>
+                <p className="text-sm text-[var(--ink-muted)]">{t('agentSettings.channelDetail.noExtraConfig')}</p>
             ) : (
                 <div className="space-y-3">
                     {entries.map(([key, value]) => (
@@ -71,7 +76,7 @@ function OpenClawConfigEditor({
                                 onChange={(e) => {
                                     onChange({ ...pluginConfig, [key]: e.target.value });
                                 }}
-                                placeholder={`输入 ${key}`}
+                                placeholder={t('agentSettings.channelDetail.inputPlaceholder', { key })}
                                 className="w-full rounded-[var(--radius-sm)] border border-[var(--line)] bg-transparent px-3 py-2.5 text-sm text-[var(--ink)] placeholder:text-[var(--ink-muted)] focus:border-[var(--button-primary-bg)] focus:outline-none transition-colors"
                             />
                         </div>
@@ -79,7 +84,7 @@ function OpenClawConfigEditor({
                 </div>
             )}
             <p className="text-xs text-[var(--ink-muted)]">
-                修改配置后需重启 Channel 才能生效
+                {t('agentSettings.channelDetail.restartRequired')}
             </p>
         </div>
     );
@@ -87,6 +92,7 @@ function OpenClawConfigEditor({
 
 /** Inline collapsible button to view/copy Feishu permissions JSON */
 function FeishuPermissionsButton() {
+    const { t } = useTranslation('settings');
     const [expanded, setExpanded] = useState(false);
     const [copied, setCopied] = useState(false);
     return (
@@ -97,7 +103,7 @@ function FeishuPermissionsButton() {
                 className="flex items-center gap-1.5 self-start rounded-lg px-2.5 py-1.5 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
             >
                 <ChevronDown className={`h-3 w-3 transition-transform ${expanded ? '' : '-rotate-90'}`} />
-                飞书权限 JSON
+                {t('agentSettings.channelDetail.feishuPermissionsJson')}
             </button>
             {expanded && (
                 <div className="relative rounded-lg border border-[var(--line)] bg-[var(--paper-inset)] p-3">
@@ -110,7 +116,7 @@ function FeishuPermissionsButton() {
                         }}
                         className="absolute right-2 top-2 rounded-md px-2 py-1 text-xs font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-elevated)] hover:text-[var(--ink)]"
                     >
-                        {copied ? '已复制' : '复制'}
+                        {copied ? t('agentSettings.channelDetail.copied') : t('agentSettings.channelDetail.copy')}
                     </button>
                     <pre className="max-h-[240px] overflow-auto text-xs leading-relaxed text-[var(--ink-muted)]">
                         {FEISHU_PERMISSIONS_JSON}
@@ -134,7 +140,8 @@ export default function ChannelDetailView({
     onBack,
     onChanged,
 }: ChannelDetailViewProps) {
-    const { config, providers, apiKeys, refreshConfig } = useConfig();
+    const { t } = useTranslation('settings');
+    const { config, providers, apiKeys, providerVerifyStatus, refreshConfig } = useConfig();
     const toast = useToast();
     const toastRef = useRef(toast);
     toastRef.current = toast;
@@ -295,12 +302,12 @@ export default function ChannelDetailView({
                 if (!isMountedRef.current || event.payload.botId !== channelId) return;
                 const { userId, username } = event.payload;
                 const displayName = username || userId;
-                toastRef.current.success(`用户 ${displayName} 已通过二维码绑定`);
+                toastRef.current.success(t('agentSettings.channelDetail.userBound', { name: displayName }));
             },
             ac.signal,
         );
         return () => ac.abort();
-    }, [channelId]);
+    }, [channelId, t]);
 
     // Listen for group permission changes
     useEffect(() => {
@@ -311,13 +318,13 @@ export default function ChannelDetailView({
             (ev) => {
                 if (!isMountedRef.current || ev.payload.botId !== channelId) return;
                 if (ev.payload.event === 'added') {
-                    toastRef.current.info(`群聊「${ev.payload.groupName ?? ''}」待审核`);
+                    toastRef.current.info(t('agentSettings.channelDetail.groupPending', { name: ev.payload.groupName ?? '' }));
                 }
             },
             ac.signal,
         );
         return () => ac.abort();
-    }, [channelId]);
+    }, [channelId, t]);
 
     // Toggle channel start/stop
     const botStatusRef = useRef(botStatus);
@@ -338,14 +345,16 @@ export default function ChannelDetailView({
                 await stopAndDisableAgentChannel(agent.id, channelId);
                 if (isMountedRef.current) {
                     track('agent_channel_toggle', { platform: channelRef.current.type, enabled: false });
-                    toastRef.current.success('Channel 已停止');
+                    toastRef.current.success(t('agentSettings.channelDetail.stopped'));
                     setBotStatus(null);
                     onChanged();
                 }
             } else {
                 const ch = channelRef.current;
                 if (!channelHasCredentials(ch)) {
-                    toastRef.current.error(ch.type === 'telegram' ? '请先配置 Bot Token' : '请先配置应用凭证');
+                    toastRef.current.error(ch.type === 'telegram'
+                        ? t('agentSettings.channelDetail.missingBotToken')
+                        : t('agentSettings.channelDetail.missingCredentials'));
                     setToggling(false);
                     return;
                 }
@@ -356,18 +365,18 @@ export default function ChannelDetailView({
                 await startAndEnableAgentChannel(agent.id, channelId);
                 if (isMountedRef.current) {
                     track('agent_channel_toggle', { platform: channelRef.current.type, enabled: true });
-                    toastRef.current.success('Channel 已启动');
+                    toastRef.current.success(t('agentSettings.channelDetail.started'));
                     onChanged();
                 }
             }
         } catch (err) {
             if (isMountedRef.current) {
-                toastRef.current.error(`操作失败: ${err}`);
+                toastRef.current.error(t('agentSettings.channelDetail.operationFailed', { message: String(err) }));
             }
         } finally {
             if (isMountedRef.current) setToggling(false);
         }
-    }, [agent.id, channelId, onChanged]);
+    }, [agent.id, channelId, onChanged, t]);
 
     // Delete channel
     const executeDelete = useCallback(async () => {
@@ -387,17 +396,17 @@ export default function ChannelDetailView({
                 source: 'desktop',
                 platform: channelRef.current?.type ?? 'unknown',
             });
-            toastRef.current.success('Channel 已删除');
+            toastRef.current.success(t('agentSettings.channelDetail.deleted'));
             onChanged();
             onBack();
         } catch (err) {
             if (isMountedRef.current) {
-                toastRef.current.error(`删除失败: ${err}`);
+                toastRef.current.error(t('agentSettings.channelDetail.deleteFailed', { message: String(err) }));
                 setDeleting(false);
                 setShowDeleteConfirm(false);
             }
         }
-    }, [agent, channelId, onChanged, onBack]);
+    }, [agent, channelId, onChanged, onBack, t]);
 
     // === Override section: provider/model/permission ===
     // Resolve effective values (agent default or channel override)
@@ -407,16 +416,16 @@ export default function ChannelDetailView({
     );
 
     const providerOptions = useMemo(() => {
-        const options = [{ value: '', label: '默认 (继承 Agent)' }];
+        const options = [{ value: '', label: t('agentSettings.channelDetail.defaultInheritAgent') }];
         for (const p of providers) {
             if (!isProviderEnabled(p)) continue;
-            if (p.type === 'subscription') continue;
-            if (p.type === 'api' && apiKeys[p.id]) {
+            if (p.type === 'subscription' && p.id !== CODEX_SUBSCRIPTION_PROVIDER_ID) continue;
+            if (isProviderAvailable(p, apiKeys, providerVerifyStatus)) {
                 options.push({ value: p.id, label: p.name });
             }
         }
         return options;
-    }, [providers, apiKeys]);
+    }, [providers, apiKeys, providerVerifyStatus, t]);
 
     const overrideProviderId = channel?.overrides?.providerId ?? '';
     const effectiveProviderId = effective?.providerId || 'anthropic-sub';
@@ -428,12 +437,12 @@ export default function ChannelDetailView({
 
     const modelOptions = useMemo(() => {
         if (!selectedProvider) return [];
-        const options = [{ value: '', label: '默认 (继承 Agent)' }];
+        const options = [{ value: '', label: t('agentSettings.channelDetail.defaultInheritAgent') }];
         for (const m of getProviderModels(selectedProvider)) {
             options.push({ value: m.model, label: m.modelName });
         }
         return options;
-    }, [selectedProvider]);
+    }, [selectedProvider, t]);
 
     const _effectiveModel = useMemo(() => {
         if (channel?.overrides?.model) return channel.overrides.model;
@@ -501,7 +510,7 @@ export default function ChannelDetailView({
                         } catch { /* best-effort restart */ }
                     }
                     setWecomQrStatus('success');
-                    toastRef.current.success('扫码成功，凭证已更新，正在重连...');
+                    toastRef.current.success(t('agentSettings.channelDetail.wecomCredentialsUpdated'));
                     setDualDetailMode('view');
                     return;
                 }
@@ -510,7 +519,7 @@ export default function ChannelDetailView({
         } catch {
             if (isMountedRef.current) setWecomQrStatus('error');
         }
-    }, [agent, channelId, patchChannel]);
+    }, [agent, channelId, patchChannel, t]);
 
     // QR Login state — must be declared before any early return (rules-of-hooks)
     const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
@@ -535,20 +544,20 @@ export default function ChannelDetailView({
         if (!channel || !isTauriEnvironment() || !isRunning) return;
         qrAbortRef.current = false;
         setQrStatus('loading');
-        setQrMessage('正在获取二维码...');
+        setQrMessage(t('agentSettings.channelDetail.gettingQr'));
         try {
             const { invoke } = await import('@tauri-apps/api/core');
             const startResult = await invoke<{ ok: boolean; qrDataUrl?: string; message?: string; sessionKey?: string }>(
                 'cmd_plugin_qr_login_start', { agentId: agent.id, channelId: channel.id }
             );
             if (!startResult.ok || !startResult.qrDataUrl) {
-                throw new Error(startResult.message || '获取二维码失败');
+                throw new Error(startResult.message || t('agentSettings.channelDetail.qrFetchFailed'));
             }
             if (!isMountedRef.current) return;
             qrSessionKeyRef.current = startResult.sessionKey;
             setQrDataUrl(startResult.qrDataUrl);
             setQrStatus('waiting');
-            setQrMessage(`请使用${promoted?.name || channel.name || '对应 App'}扫描二维码`);
+            setQrMessage(t('agentSettings.channelDetail.scanWithName', { name: promoted?.name || channel.name || 'App' }));
             // Poll for scan completion (pass sessionKey — WeChat requires it)
             const MAX_QR_RETRIES = 10;
             let qrRetryCount = 0;
@@ -560,7 +569,7 @@ export default function ChannelDetailView({
                     if (!isMountedRef.current || qrAbortRef.current) return;
                     if (waitResult.connected) {
                         setQrStatus('connected');
-                        setQrMessage('登录成功！');
+                        setQrMessage(t('agentSettings.channelDetail.loginSuccess'));
                         await invoke('cmd_plugin_restart_gateway', { agentId: agent.id, channelId: channel.id, accountId: waitResult.accountId });
                         // Persist accountId so Bridge finds credentials on restart
                         if (waitResult.accountId) {
@@ -575,7 +584,7 @@ export default function ChannelDetailView({
                             await patchAgentConfig(agent.id, { channels: updChs });
                             await refreshConfig();
                         }
-                        toastRef.current.success('扫码登录成功');
+                        toastRef.current.success(t('agentSettings.channelDetail.scanLoginSuccess'));
                         return;
                     }
                     if (waitResult.message) setQrMessage(waitResult.message);
@@ -587,29 +596,29 @@ export default function ChannelDetailView({
                     if (isTerminal || qrRetryCount >= MAX_QR_RETRIES) {
                         setQrStatus('error');
                         setQrMessage(qrRetryCount >= MAX_QR_RETRIES
-                            ? `超过最大重试次数 (${MAX_QR_RETRIES})，请手动重试`
-                            : `登录失败: ${errMsg}`);
+                            ? t('agentSettings.channelDetail.qrMaxRetries', { count: MAX_QR_RETRIES })
+                            : t('agentSettings.channelDetail.loginFailed', { message: errMsg }));
                         return;
                     }
                     qrRetryCount++;
                     try {
                         const r = await invoke<{ ok: boolean; qrDataUrl?: string; sessionKey?: string }>('cmd_plugin_qr_login_start', { agentId: agent.id, channelId: channel.id });
-                        if (r.ok && r.qrDataUrl) { qrSessionKeyRef.current = r.sessionKey; setQrDataUrl(r.qrDataUrl); setQrMessage(`二维码已刷新 (${qrRetryCount}/${MAX_QR_RETRIES})，请扫描`); }
-                    } catch { setQrStatus('error'); setQrMessage('二维码获取失败，请手动重试'); return; }
+                        if (r.ok && r.qrDataUrl) { qrSessionKeyRef.current = r.sessionKey; setQrDataUrl(r.qrDataUrl); setQrMessage(t('agentSettings.channelDetail.qrRefreshed', { current: qrRetryCount, max: MAX_QR_RETRIES })); }
+                    } catch { setQrStatus('error'); setQrMessage(t('agentSettings.channelDetail.qrFetchFailed')); return; }
                 }
             }
         } catch (err) {
-            if (isMountedRef.current) { setQrStatus('error'); setQrMessage(`失败: ${err}`); }
+            if (isMountedRef.current) { setQrStatus('error'); setQrMessage(t('agentSettings.channelDetail.detailQrFailed', { message: String(err) })); }
         }
-    }, [isRunning, agent.id, agent.channels, channel, promoted?.name, refreshConfig]);
+    }, [isRunning, agent.id, agent.channels, channel, promoted?.name, refreshConfig, t]);
 
     // Early return AFTER all hooks (rules-of-hooks compliance)
     if (!channel) {
         return (
             <div className="text-center py-12">
-                <p className="text-sm text-[var(--ink-muted)]">Channel 配置未找到</p>
+                <p className="text-sm text-[var(--ink-muted)]">{t('agentSettings.channelDetail.channelNotFound')}</p>
                 <button onClick={onBack} className="mt-4 text-sm text-[var(--button-primary-bg)] hover:underline">
-                    返回列表
+                    {t('agentSettings.channelDetail.backToList')}
                 </button>
             </div>
         );
@@ -631,10 +640,10 @@ export default function ChannelDetailView({
         : findPromotedByPlatform(channel.type)?.name || channel.type;
 
     // Status summary for header
-    const statusText = botStatus?.status === 'online' ? '运行中'
-        : botStatus?.status === 'connecting' ? '连接中'
-        : botStatus?.status === 'error' ? '异常'
-        : '已停止';
+    const statusText = botStatus?.status === 'online' ? t('agentSettings.channelDetail.statusRunning')
+        : botStatus?.status === 'connecting' ? t('agentSettings.channelDetail.statusConnecting')
+        : botStatus?.status === 'error' ? t('agentSettings.channelDetail.statusError')
+        : t('agentSettings.channelDetail.statusStopped');
     const statusColor = botStatus?.status === 'online' ? 'var(--success)'
         : botStatus?.status === 'connecting' ? 'var(--warning)'
         : botStatus?.status === 'error' ? 'var(--error)'
@@ -669,7 +678,9 @@ export default function ChannelDetailView({
                                 <span className="text-xs text-[var(--ink-subtle)]">{uptimeText}</span>
                             )}
                             {sessionCount > 0 && (
-                                <span className="text-xs text-[var(--ink-subtle)]">{sessionCount} 个会话</span>
+                                <span className="text-xs text-[var(--ink-subtle)]">
+                                    {t('agentSettings.channelDetail.sessionCount', { count: sessionCount })}
+                                </span>
                             )}
                         </div>
                         <p className="text-xs text-[var(--ink-muted)]">{platformLabel} Channel</p>
@@ -691,7 +702,7 @@ export default function ChannelDetailView({
                     ) : (
                         <Power className="h-4 w-4" />
                     )}
-                    {isRunning ? '停止' : '启动'}
+                    {isRunning ? t('agentSettings.channelDetail.stop') : t('agentSettings.channelDetail.start')}
                 </button>
             </div>
 
@@ -700,9 +711,9 @@ export default function ChannelDetailView({
                 <div className="flex items-center gap-3 rounded-xl border border-[var(--warning)]/30 bg-[var(--warning)]/5 px-4 py-3">
                     <span className="text-base">⚠️</span>
                     <div>
-                        <p className="text-sm font-medium text-[var(--warning)]">插件已卸载</p>
+                        <p className="text-sm font-medium text-[var(--warning)]">{t('agentSettings.channelDetail.pluginUninstalledTitle')}</p>
                         <p className="text-xs text-[var(--ink-muted)]">
-                            此 Channel 依赖的社区插件已被卸载，无法启动。请重新安装插件或删除此 Channel。
+                            {t('agentSettings.channelDetail.pluginUninstalledDescription')}
                         </p>
                     </div>
                 </div>
@@ -718,12 +729,12 @@ export default function ChannelDetailView({
                     <div className="flex items-center gap-2">
                         <h3 className="text-sm font-semibold text-[var(--ink)]">
                             {isOpenClaw
-                                ? (findPromotedByPlatform(channel.type)?.setupGuide?.credentialTitle || '插件配置')
-                                : channel.type === 'feishu' ? '飞书应用凭证' : channel.type === 'dingtalk' ? '钉钉应用凭证' : 'Telegram Bot'}
+                                ? (findPromotedByPlatform(channel.type)?.setupGuide?.credentialTitle || t('agentSettings.channelDetail.pluginConfig'))
+                                : channel.type === 'feishu' ? t('agentSettings.channelDetail.credentialTitleFeishu') : channel.type === 'dingtalk' ? t('agentSettings.channelDetail.credentialTitleDingtalk') : t('agentSettings.channelDetail.credentialTitleTelegram')}
                         </h3>
                         {!isCredentialsExpanded && hasCredentials && (
                             <span className="text-xs text-[var(--success)]">
-                                {isOpenClaw ? '已配置' : botUsername ? `已验证: ${botUsername}` : '已配置'}
+                                {isOpenClaw ? t('agentSettings.channelDetail.configured') : botUsername ? t('agentSettings.channelDetail.verified', { name: botUsername }) : t('agentSettings.channelDetail.configured')}
                             </span>
                         )}
                     </div>
@@ -740,8 +751,8 @@ export default function ChannelDetailView({
                                             {(promoted?.requiredFields ?? ['botId', 'secret']).map((key) => {
                                                 const val = channel.openclawPluginConfig?.[key] ?? '';
                                                 const masked = /secret|token|password|key/i.test(key)
-                                                    ? (val ? '••••••••••••' : '未配置')
-                                                    : (val || '未配置');
+                                                    ? (val ? '••••••••••••' : t('agentSettings.channelDetail.notConfigured'))
+                                                    : (val || t('agentSettings.channelDetail.notConfigured'));
                                                 return (
                                                     <div key={key} className="flex items-center justify-between">
                                                         <span className="text-sm text-[var(--ink-muted)]">{key}</span>
@@ -755,13 +766,13 @@ export default function ChannelDetailView({
                                                 onClick={startWecomQrRescan}
                                                 className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
                                             >
-                                                重新扫码
+                                                {t('agentSettings.channelDetail.rescan')}
                                             </button>
                                             <button
                                                 onClick={() => setDualDetailMode('edit')}
                                                 className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
                                             >
-                                                编辑凭证
+                                                {t('agentSettings.channelDetail.editCredentials')}
                                             </button>
                                         </div>
                                     </>
@@ -771,18 +782,18 @@ export default function ChannelDetailView({
                                         {wecomQrStatus === 'loading' && <Loader2 className="h-6 w-6 animate-spin text-[var(--ink-muted)]" />}
                                         {wecomQrStatus === 'waiting' && wecomQrImageUrl && (
                                             <div className="rounded-xl border border-[var(--line)] bg-white p-1">
-                                                <img src={wecomQrImageUrl} alt="企业微信扫码" className="h-[180px] w-[180px] rounded-lg" />
+                                                <img src={wecomQrImageUrl} alt={t('agentSettings.channelDetail.qrAlt')} className="h-[180px] w-[180px] rounded-lg" />
                                             </div>
                                         )}
-                                        {wecomQrStatus === 'error' && <p className="text-sm text-[var(--error)]">获取二维码失败</p>}
+                                        {wecomQrStatus === 'error' && <p className="text-sm text-[var(--error)]">{t('agentSettings.channelDetail.qrFailed')}</p>}
                                         <p className="text-xs text-[var(--ink-muted)]">
-                                            {wecomQrStatus === 'loading' ? '正在获取二维码...' : wecomQrStatus === 'waiting' ? '请使用企业微信 App 扫描' : ''}
+                                            {wecomQrStatus === 'loading' ? t('agentSettings.channelDetail.loadingQr') : wecomQrStatus === 'waiting' ? t('agentSettings.channelDetail.scanWithApp') : ''}
                                         </p>
                                         <button
                                             onClick={() => { wecomQrRunIdRef.current++; setDualDetailMode('view'); }}
                                             className="text-xs text-[var(--ink-muted)] hover:text-[var(--ink)] hover:underline"
                                         >
-                                            取消
+                                            {t('agentSettings.channelDetail.cancel')}
                                         </button>
                                     </div>
                                 )}
@@ -800,7 +811,7 @@ export default function ChannelDetailView({
                                             onClick={() => setDualDetailMode('view')}
                                             className="text-xs text-[var(--ink-muted)] hover:text-[var(--ink)] hover:underline"
                                         >
-                                            返回
+                                            {t('agentSettings.channelDetail.back')}
                                         </button>
                                     </div>
                                 )}
@@ -824,7 +835,7 @@ export default function ChannelDetailView({
                                         .flatMap(a => a.channels)
                                         .filter(ch => ch.id !== channelId && ch.setupCompleted);
                                     if (allChannels.some(ch => ch.dingtalkClientId === clientId)) {
-                                        toastRef.current.error('该钉钉应用凭证已被其他 Channel 使用');
+                                        toastRef.current.error(t('agentSettings.channelDetail.duplicateDingtalk'));
                                         return;
                                     }
                                     patchChannel({ dingtalkClientId: clientId });
@@ -842,7 +853,7 @@ export default function ChannelDetailView({
                                         .flatMap(a => a.channels)
                                         .filter(ch => ch.id !== channelId && ch.setupCompleted);
                                     if (allChannels.some(ch => ch.feishuAppId === appId)) {
-                                        toastRef.current.error('该飞书应用凭证已被其他 Channel 使用');
+                                        toastRef.current.error(t('agentSettings.channelDetail.duplicateFeishu'));
                                         return;
                                     }
                                     patchChannel({ feishuAppId: appId });
@@ -859,7 +870,7 @@ export default function ChannelDetailView({
                                         .flatMap(a => a.channels)
                                         .filter(ch => ch.id !== channelId && ch.setupCompleted);
                                     if (allChannels.some(ch => ch.botToken === token)) {
-                                        toastRef.current.error('该 Bot Token 已被其他 Channel 使用');
+                                        toastRef.current.error(t('agentSettings.channelDetail.duplicateBotToken'));
                                         return;
                                     }
                                     patchChannel({ botToken: token });
@@ -897,10 +908,10 @@ export default function ChannelDetailView({
                     className="flex w-full items-center justify-between p-5"
                 >
                     <div className="flex items-center gap-2">
-                        <h3 className="text-sm font-semibold text-[var(--ink)]">用户绑定</h3>
+                        <h3 className="text-sm font-semibold text-[var(--ink)]">{t('agentSettings.channelDetail.userBinding')}</h3>
                         {!isBindingExpanded && hasUsers && (
                             <span className="text-xs text-[var(--ink-muted)]">
-                                {channel.allowedUsers!.length} 个用户
+                                {t('agentSettings.channelDetail.usersCount', { count: channel.allowedUsers!.length })}
                             </span>
                         )}
                     </div>
@@ -919,14 +930,14 @@ export default function ChannelDetailView({
                                                 <>
                                                     <div className="flex items-center gap-2">
                                                         <span className="h-2 w-2 rounded-full bg-[var(--accent-success)]" />
-                                                        <span className="text-sm font-medium text-[var(--ink)]">已登录</span>
+                                                        <span className="text-sm font-medium text-[var(--ink)]">{t('agentSettings.channelDetail.loggedIn')}</span>
                                                     </div>
                                                     <p className="text-xs text-[var(--ink-muted)] font-mono">{savedAccountId}</p>
                                                     <button
                                                         onClick={startDetailQrLogin}
                                                         className="rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-1.5 text-xs font-medium text-[var(--ink-muted)] hover:bg-[var(--paper-elevated)] hover:text-[var(--ink)]"
                                                     >
-                                                        重新扫码
+                                                        {t('agentSettings.channelDetail.rescan')}
                                                     </button>
                                                 </>
                                             );
@@ -936,7 +947,7 @@ export default function ChannelDetailView({
                                                 onClick={startDetailQrLogin}
                                                 className="rounded-lg bg-[var(--button-primary-bg)] px-4 py-2 text-sm font-medium text-[var(--button-primary-text)] hover:bg-[var(--button-primary-bg-hover)]"
                                             >
-                                                扫码登录
+                                                {t('agentSettings.channelDetail.scanLogin')}
                                             </button>
                                         );
                                     })()}
@@ -945,18 +956,18 @@ export default function ChannelDetailView({
                                     )}
                                     {(qrStatus === 'waiting') && qrImageUrl && (
                                         <div className="rounded-lg border border-[var(--line)] bg-white p-1">
-                                            <img src={qrImageUrl} alt="扫码登录" className="h-40 w-40 rounded-md" />
+                                            <img src={qrImageUrl} alt={t('agentSettings.channelDetail.qrAlt')} className="h-40 w-40 rounded-md" />
                                         </div>
                                     )}
                                     {qrStatus === 'connected' && (
-                                        <p className="text-sm font-medium text-[var(--accent-success)]">登录成功</p>
+                                        <p className="text-sm font-medium text-[var(--accent-success)]">{t('agentSettings.channelDetail.loginSuccess')}</p>
                                     )}
                                     {qrStatus === 'error' && (
                                         <button
                                             onClick={() => { setQrStatus('idle'); }}
                                             className="rounded-lg bg-[var(--button-primary-bg)] px-3 py-1.5 text-xs font-medium text-[var(--button-primary-text)] hover:bg-[var(--button-primary-bg-hover)]"
                                         >
-                                            重试
+                                            {t('agentSettings.channelDetail.retry')}
                                         </button>
                                     )}
                                     {qrMessage && <p className="text-xs text-[var(--ink-muted)]">{qrMessage}</p>}
@@ -967,7 +978,7 @@ export default function ChannelDetailView({
                             <BindCodePanel
                                 bindCode={botStatus.bindCode}
                                 hasWhitelistUsers={(channel.allowedUsers?.length ?? 0) > 0}
-                                platformName={channel.type === 'dingtalk' ? '钉钉' : channel.type === 'feishu' ? '飞书' : (channel.name || '插件 Bot')}
+                                platformName={channel.type === 'dingtalk' ? '钉钉' : channel.type === 'feishu' ? '飞书' : (channel.name || t('agentSettings.channelDetail.pluginBot'))}
                             />
                         )}
                         {isRunning && channel.type === 'telegram' && botStatus?.bindUrl && (
@@ -978,9 +989,9 @@ export default function ChannelDetailView({
                         )}
                         {isQrLoginPlugin ? (
                             <div className="space-y-3">
-                                <label className="text-sm font-medium text-[var(--ink)]">用户绑定</label>
+                                <label className="text-sm font-medium text-[var(--ink)]">{t('agentSettings.channelDetail.userBinding')}</label>
                                 <p className="text-xs text-[var(--ink-muted)]">
-                                    扫码即可使用，无需手动绑定用户。
+                                    {t('agentSettings.channelDetail.qrBindingOnly')}
                                 </p>
                             </div>
                         ) : (
@@ -1012,12 +1023,12 @@ export default function ChannelDetailView({
                             className="flex w-full items-center justify-between p-5"
                         >
                             <div className="flex items-center gap-2">
-                                <h3 className="text-sm font-semibold text-[var(--ink)]">群聊管理</h3>
+                                <h3 className="text-sm font-semibold text-[var(--ink)]">{t('agentSettings.channelDetail.groupManagement')}</h3>
                                 {!isGroupsExpanded_ && hasGroups && (
                                     <span className="text-xs text-[var(--ink-muted)]">
-                                        {approvedCount > 0 && `${approvedCount} 个群聊`}
-                                        {pendingCount > 0 && approvedCount > 0 && '，'}
-                                        {pendingCount > 0 && `${pendingCount} 个待审核`}
+                                        {approvedCount > 0 && t('agentSettings.channelDetail.groupsCount', { count: approvedCount })}
+                                        {pendingCount > 0 && approvedCount > 0 && ' · '}
+                                        {pendingCount > 0 && t('agentSettings.channelDetail.pendingCount', { count: pendingCount })}
                                     </span>
                                 )}
                                 {pendingCount > 0 && (
@@ -1037,13 +1048,13 @@ export default function ChannelDetailView({
                                     return (
                                         <div className="flex items-center justify-between">
                                             <div>
-                                                <p className="text-sm font-medium text-[var(--ink)]">群聊触发方式</p>
+                                                <p className="text-sm font-medium text-[var(--ink)]">{t('agentSettings.channelDetail.groupActivation')}</p>
                                                 <p className="text-xs text-[var(--ink-muted)]">
                                                     {isWecom
-                                                        ? '企微 AI Bot 平台仅在 @机器人 时下发群消息回调，无法接收未 @ 的消息'
+                                                        ? t('agentSettings.channelDetail.wecomMentionOnlyDescription')
                                                         : effectiveMode === 'mention'
-                                                            ? '仅在 @Bot 或回复 Bot 时响应'
-                                                            : '收到所有群消息，AI 自行判断是否回复'}
+                                                            ? t('agentSettings.channelDetail.mentionOnlyDescription')
+                                                            : t('agentSettings.channelDetail.alwaysDescription')}
                                                 </p>
                                             </div>
                                             <div className="flex rounded-lg bg-[var(--paper-inset)] p-0.5">
@@ -1054,7 +1065,7 @@ export default function ChannelDetailView({
                                                         <button
                                                             key={mode}
                                                             disabled={disabled}
-                                                            title={disabled ? '企微 AI Bot 平台限制：仅在 @机器人 时下发群消息回调，因此该模式不可用' : undefined}
+                                                            title={disabled ? t('agentSettings.channelDetail.wecomModeDisabledTitle') : undefined}
                                                             onClick={async () => {
                                                                 if (disabled) return;
                                                                 await patchChannel({ groupActivation: mode });
@@ -1067,7 +1078,7 @@ export default function ChannelDetailView({
                                                                         : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
                                                             }`}
                                                         >
-                                                            {mode === 'mention' ? '@提及' : '全部消息'}
+                                                            {mode === 'mention' ? t('agentSettings.channelDetail.mentionMode') : t('agentSettings.channelDetail.alwaysMode')}
                                                         </button>
                                                     );
                                                 })}
@@ -1121,9 +1132,9 @@ export default function ChannelDetailView({
                 <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
                     <div className="flex items-center justify-between">
                         <div>
-                            <p className="text-sm font-medium text-[var(--ink)]">Draft 流式模式</p>
+                            <p className="text-sm font-medium text-[var(--ink)]">{t('agentSettings.channelDetail.draftStreamingTitle')}</p>
                             <p className="text-xs text-[var(--ink-muted)] mt-0.5">
-                                使用 sendMessageDraft 实现打字机效果，默认开启。如果消息加载异常可以关闭此选项，修改后需重启 Channel 生效。
+                                {t('agentSettings.channelDetail.draftStreamingDescription')}
                             </p>
                         </div>
                         <button
@@ -1155,10 +1166,10 @@ export default function ChannelDetailView({
                     className="flex w-full items-center justify-between p-5"
                 >
                     <div className="flex items-center gap-2">
-                        <h3 className="text-sm font-semibold text-[var(--ink)]">配置覆盖</h3>
+                        <h3 className="text-sm font-semibold text-[var(--ink)]">{t('agentSettings.channelDetail.overridesTitle')}</h3>
                         {!overridesExpanded && hasAnyOverride && (
                             <span className="text-xs text-[var(--ink-muted)]">
-                                已自定义
+                                {t('agentSettings.channelDetail.customized')}
                             </span>
                         )}
                     </div>
@@ -1167,7 +1178,7 @@ export default function ChannelDetailView({
                 {overridesExpanded && (
                     <div className="space-y-5 px-5 pb-5">
                         <p className="text-xs text-[var(--ink-muted)]">
-                            以下选项为空时将继承 Agent 的默认配置。设置后仅对此 Channel 生效。
+                            {t('agentSettings.channelDetail.overridesDescription')}
                         </p>
 
                         {/* AI Configuration override */}
@@ -1179,11 +1190,32 @@ export default function ChannelDetailView({
                             onProviderChange={async (providerId) => {
                                 if (!providerId) {
                                     // Clear override → inherit from agent
-                                    await patchOverrides({ providerId: undefined, providerEnvJson: undefined, model: undefined });
+                                    await patchOverrides({
+                                        providerId: undefined,
+                                        providerEnvJson: undefined,
+                                        model: undefined,
+                                        runtime: undefined,
+                                        runtimeConfig: undefined,
+                                    });
                                     return;
                                 }
                                 const provider = providers.find(p => p.id === providerId);
                                 const newModel = provider ? provider.primaryModel : undefined;
+                                if (provider && newModel) {
+                                    const intent = toProviderExecutionIntent(provider, newModel);
+                                    if (intent.kind === 'runtime-backed-provider') {
+                                        await patchOverrides({
+                                            providerId,
+                                            providerEnvJson: undefined,
+                                            model: newModel,
+                                            runtime: undefined,
+                                            runtimeConfig: runtimeConfigForRuntimeBackedProviderDefault(
+                                                channel?.overrides?.runtimeConfig as RuntimeConfig | undefined,
+                                            ),
+                                        });
+                                        return;
+                                    }
+                                }
                                 let providerEnvJson: string | undefined;
                                 if (provider && provider.type !== 'subscription') {
                                     const aliases = getEffectiveModelAliases(provider, config.providerModelAliases);
@@ -1199,9 +1231,34 @@ export default function ChannelDetailView({
                                         ...(aliases ? { modelAliases: aliases } : {}),
                                     });
                                 }
-                                await patchOverrides({ providerId, providerEnvJson, model: newModel });
+                                await patchOverrides({
+                                    providerId,
+                                    providerEnvJson,
+                                    model: newModel,
+                                    runtime: undefined,
+                                    runtimeConfig: undefined,
+                                });
                             }}
                             onModelChange={async (model) => {
+                                const provider = channel?.overrides?.providerId
+                                    ? providers.find(p => p.id === channel.overrides?.providerId)
+                                    : undefined;
+                                if (provider) {
+                                    const fallbackModel = model || provider.primaryModel;
+                                    const intent = fallbackModel
+                                        ? toProviderExecutionIntent(provider, fallbackModel)
+                                        : undefined;
+                                    if (intent?.kind === 'runtime-backed-provider') {
+                                        await patchOverrides({
+                                            model: model || undefined,
+                                            runtime: undefined,
+                                            runtimeConfig: runtimeConfigForRuntimeBackedProviderDefault(
+                                                channel?.overrides?.runtimeConfig as RuntimeConfig | undefined,
+                                            ),
+                                        });
+                                        return;
+                                    }
+                                }
                                 await patchOverrides({ model: model || undefined });
                             }}
                         />
@@ -1209,13 +1266,13 @@ export default function ChannelDetailView({
                         {/* Permission mode override */}
                         <div className="rounded-xl border border-[var(--line)] bg-[var(--paper)] p-4">
                             <div className="flex items-center justify-between mb-3">
-                                <h4 className="text-sm font-medium text-[var(--ink)]">权限模式</h4>
+                                <h4 className="text-sm font-medium text-[var(--ink)]">{t('agentSettings.channelDetail.permissionMode')}</h4>
                                 {channel?.overrides?.permissionMode && (
                                     <button
                                         className="text-xs text-[var(--ink-subtle)] hover:text-[var(--ink-muted)] transition-colors"
                                         onClick={() => patchOverrides({ permissionMode: undefined })}
                                     >
-                                        恢复默认
+                                        {t('agentSettings.channelDetail.restoreDefault')}
                                     </button>
                                 )}
                             </div>
@@ -1237,23 +1294,23 @@ export default function ChannelDetailView({
 
             {/* Danger zone */}
             <div className="rounded-xl border border-[var(--error)]/20 bg-[var(--error-bg)]/50 p-5">
-                <h3 className="mb-3 text-sm font-semibold text-[var(--error)]">危险操作</h3>
+                <h3 className="mb-3 text-sm font-semibold text-[var(--error)]">{t('agentSettings.channelDetail.dangerZone')}</h3>
                 <button
                     onClick={() => setShowDeleteConfirm(true)}
                     className="flex items-center gap-2 rounded-lg bg-[var(--error-bg)] px-4 py-2 text-sm font-medium text-[var(--error)] transition-colors hover:brightness-95"
                 >
                     <Trash2 className="h-4 w-4" />
-                    删除 Channel
+                    {t('agentSettings.channelDetail.deleteChannel')}
                 </button>
             </div>
 
             {/* Delete confirmation dialog */}
             {showDeleteConfirm && (
                 <ConfirmDialog
-                    title="删除 Channel"
-                    message="确定要删除此 Channel 吗？此操作不可撤销。"
-                    confirmText="删除"
-                    cancelText="取消"
+                    title={t('agentSettings.channelDetail.deleteConfirmTitle')}
+                    message={t('agentSettings.channelDetail.deleteConfirmMessage')}
+                    confirmText={t('agentSettings.channelDetail.deleteConfirm')}
+                    cancelText={t('agentSettings.channelDetail.cancel')}
                     confirmVariant="danger"
                     loading={deleting}
                     onConfirm={executeDelete}

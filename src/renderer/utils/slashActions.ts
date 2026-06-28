@@ -13,13 +13,21 @@
 // This keeps the command and its action coupled by construction.
 
 import type { SlashCommand } from '../../shared/slashCommands';
+import { i18n } from '@/i18n';
 
 /** Built-in slash commands whose selection dispatches a renderer-side action. */
 export const CLIENT_ACTION_SLASH_COMMANDS: SlashCommand[] = [
-  { name: 'loop', description: '无限循环执行任务（Ralph Loop）', source: 'builtin' },
+  { name: 'loop', description: 'Run a task continuously (Ralph Loop)', source: 'builtin' },
 ];
 
-const CLIENT_ACTION_NAMES = new Set(CLIENT_ACTION_SLASH_COMMANDS.map((c) => c.name));
+function getClientActionSlashCommands(): SlashCommand[] {
+  return CLIENT_ACTION_SLASH_COMMANDS.map((cmd) => ({
+    ...cmd,
+    description: String(i18n.t(`chat:composer.slashCommands.${cmd.name}`, { defaultValue: cmd.description })),
+  }));
+}
+
+const CLIENT_ACTION_NAMES = new Set(['loop']);
 
 /** Whether selecting `cmd` should dispatch a client action instead of inserting text. */
 export function isClientActionCommand(cmd: SlashCommand): boolean {
@@ -27,7 +35,7 @@ export function isClientActionCommand(cmd: SlashCommand): boolean {
 }
 
 /** Reserved command names — a disk-backed skill/command may not shadow these. */
-const RESERVED_NAMES = new Set(CLIENT_ACTION_SLASH_COMMANDS.map((c) => c.name));
+const RESERVED_NAMES = new Set(CLIENT_ACTION_NAMES);
 
 /**
  * Merge client-action commands into a fetched slash-command list.
@@ -44,5 +52,5 @@ const RESERVED_NAMES = new Set(CLIENT_ACTION_SLASH_COMMANDS.map((c) => c.name));
 export function withClientActionCommands(commands: SlashCommand[], enabled: boolean): SlashCommand[] {
   if (!enabled) return commands;
   const kept = commands.filter((c) => !RESERVED_NAMES.has(c.name));
-  return [...kept, ...CLIENT_ACTION_SLASH_COMMANDS];
+  return [...kept, ...getClientActionSlashCommands()];
 }

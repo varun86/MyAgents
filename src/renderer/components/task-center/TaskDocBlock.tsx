@@ -20,6 +20,7 @@
 // new tasks that have no execution log yet.
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { ChevronDown, ChevronUp, FolderOpen } from 'lucide-react';
 
 import Markdown from '@/components/Markdown';
@@ -59,6 +60,7 @@ export function TaskDocBlock({
   reloadKey,
   onError,
 }: Props) {
+  const { t } = useTranslation('task');
   const [content, setContent] = useState('');
   // "Loaded" is derived from a snapshot of the load keys: when task.id
   // / doc / reloadKey change, `loadedFor` no longer equals the current
@@ -163,17 +165,17 @@ export function TaskDocBlock({
         <button
           type="button"
           onClick={handleOpenFolder}
-          title="在文件管理器中打开该任务的文档目录"
+          title={t('docBlock.openDocsDirTitle')}
           className="inline-flex shrink-0 items-center gap-1 rounded-[var(--radius-md)] px-2 py-0.5 text-xs text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
         >
           <FolderOpen className="h-3 w-3" />
-          打开文件夹
+          {t('docBlock.openDocsDir')}
         </button>
       </div>
 
       {!loaded ? (
         <div className="rounded-[var(--radius-lg)] border border-[var(--line-subtle)] bg-[var(--paper)] p-3 text-xs text-[var(--ink-muted)]">
-          加载中…
+          {t('docBlock.loading')}
         </div>
       ) : content ? (
         <div className="rounded-[var(--radius-lg)] border border-[var(--line-subtle)] bg-[var(--paper)]">
@@ -213,12 +215,12 @@ export function TaskDocBlock({
                 {expanded ? (
                   <>
                     <ChevronUp className="h-3.5 w-3.5" />
-                    收起
+                    {t('docBlock.collapse')}
                   </>
                 ) : (
                   <>
                     <ChevronDown className="h-3.5 w-3.5" />
-                    展开全部
+                    {t('docBlock.expandAll')}
                   </>
                 )}
               </button>

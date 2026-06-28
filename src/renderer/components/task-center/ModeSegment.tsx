@@ -22,6 +22,7 @@
 
 import { Lightbulb, Sparkles } from 'lucide-react';
 import type { ReactNode } from 'react';
+import { useTranslation } from 'react-i18next';
 
 import { retainFocusOnMouseDown } from '@/utils/focusRetention';
 
@@ -47,8 +48,9 @@ export function ModeSegment({
   suffix,
   tabSwitchHint = false,
 }: ModeSegmentProps) {
-  const taskTitle = tabSwitchHint ? '按 Tab 切换到「想法」' : undefined;
-  const thoughtTitle = tabSwitchHint ? '按 Tab 切换到「对话」' : undefined;
+  const { t } = useTranslation('chat');
+  const taskTitle = tabSwitchHint ? t('input.mode.switchToThought') : undefined;
+  const thoughtTitle = tabSwitchHint ? t('input.mode.switchToChat') : undefined;
 
   // Segment button — the `active` state gets a raised paper-elevated
   // background (so the whole row reads as a track with a sliding
@@ -87,7 +89,7 @@ export function ModeSegment({
           className={`${baseBtn} ${value === 'task' ? activeBtn : inactiveBtn}`}
         >
           <Sparkles className="h-3 w-3" strokeWidth={1.75} />
-          对话
+          {t('input.mode.chat')}
         </button>
         <button
           type="button"
@@ -98,7 +100,7 @@ export function ModeSegment({
           className={`${baseBtn} ${value === 'thought' ? activeBtn : inactiveBtn}`}
         >
           <Lightbulb className="h-3 w-3" strokeWidth={1.75} />
-          想法
+          {t('input.mode.thought')}
         </button>
       </div>
       {suffix && <span className="ml-2 flex items-center">{suffix}</span>}

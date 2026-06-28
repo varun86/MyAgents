@@ -11,6 +11,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { History, Loader2, Paperclip, Send, X } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 
 import type { Provider, ProviderVerifyStatus } from '@/config/types';
 import { useImagePreview } from '@/context/ImagePreviewContext';
@@ -25,9 +26,6 @@ import { useConfigActions } from '@/config/useConfigActions';
 import { ensureSelfAwarenessWorkspace } from '@/config/configService';
 import { useChatComposerKeydown } from '@/hooks/useChatComposerKeydown';
 import { sendKeyHint } from '@/utils/chatSendKey';
-
-const PLACEHOLDER =
-    '告诉 AI 小助理想做什么，配模型、加 MCP、查问题、吐槽反馈，提出你的要求，附上网页链接或截图，小助理都能帮你直接搞定！';
 
 interface SettingsHelperInboxProps {
     providers: Provider[];
@@ -50,6 +48,7 @@ export default function SettingsHelperInbox({
     initialModel,
     onModelChange,
 }: SettingsHelperInboxProps) {
+    const { t } = useTranslation('settings');
     const [text, setText] = useState('');
     const [isSending, setIsSending] = useState(false);
     const fileInputRef = useRef<HTMLInputElement>(null);
@@ -195,10 +194,10 @@ export default function SettingsHelperInbox({
         useChatComposerKeydown(handleSend);
 
     const submitTip = useMemo(() => {
-        if (!hasContent) return { label: '请输入想做的事或附上图片', shortcut: undefined };
-        if (!hasValidModel) return { label: '请先配置模型', shortcut: undefined };
-        return { label: '发送', shortcut: sendKeyHint(sendShortcut, isMac).shortcut };
-    }, [hasContent, hasValidModel, isMac, sendShortcut]);
+        if (!hasContent) return { label: t('helper.emptyTip'), shortcut: undefined };
+        if (!hasValidModel) return { label: t('helper.configureModelTip'), shortcut: undefined };
+        return { label: t('helper.send'), shortcut: sendKeyHint(sendShortcut, isMac).shortcut };
+    }, [hasContent, hasValidModel, isMac, sendShortcut, t]);
 
     return (
         <div className="mb-8">
@@ -209,7 +208,7 @@ export default function SettingsHelperInbox({
                 a Tab. (Issue #120) */}
             <div className="mb-4 flex items-center justify-between">
                 <h2 className="text-lg font-semibold text-[var(--ink)]">
-                    AI 小助理
+                    {t('helper.title')}
                 </h2>
                 <button
                     ref={historyBtnRef}
@@ -223,7 +222,7 @@ export default function SettingsHelperInbox({
                     }`}
                 >
                     <History className="h-3.5 w-3.5 flex-shrink-0" />
-                    <span>历史</span>
+                    <span>{t('helper.history')}</span>
                 </button>
                 {helperAgentDir && (
                     <SessionHistoryDropdown
@@ -258,7 +257,7 @@ export default function SettingsHelperInbox({
                         onCompositionStart={onCompositionStart}
                         onCompositionEnd={onCompositionEnd}
                         onPaste={pasteHandler}
-                        placeholder={PLACEHOLDER}
+                        placeholder={t('helper.placeholder')}
                         rows={4}
                         className="w-full resize-none overflow-y-auto border-0 bg-transparent text-base text-[var(--ink)] caret-[var(--accent-warm)] placeholder:text-[var(--ink-muted)] focus:outline-none"
                         style={{ maxHeight: 'calc(8 * var(--text-base--line-height) * var(--text-base))' }}
@@ -270,7 +269,7 @@ export default function SettingsHelperInbox({
                                 <div key={img.id} className="group/thumb relative">
                                     <img
                                         src={img.preview}
-                                        alt="attachment"
+                                        alt={t('helper.attachmentAlt')}
                                         className="h-16 w-16 cursor-pointer rounded-[var(--radius-md)] object-cover"
                                         onDoubleClick={() => openPreview(img.preview, img.file.name)}
                                     />
@@ -305,7 +304,7 @@ export default function SettingsHelperInbox({
                     so users see the same affordance shape across surfaces. */}
                 <div className="flex items-center justify-between border-t border-[var(--line-subtle)] px-5 py-2">
                     <div className="flex items-center gap-1">
-                        <Tip label="添加图片" position="top">
+                        <Tip label={t('helper.addImage')} position="top">
                             <button
                                 type="button"
                                 onClick={() => fileInputRef.current?.click()}
@@ -343,7 +342,7 @@ export default function SettingsHelperInbox({
                                 ) : (
                                     <Send className="h-3.5 w-3.5" />
                                 )}
-                                发送
+                                {t('helper.send')}
                             </button>
                         </Tip>
                     </div>

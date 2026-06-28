@@ -1,6 +1,7 @@
 import { act, render, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { CODEX_SUBSCRIPTION_PROVIDER_ID } from '../shared/config-types';
 import { CUSTOM_EVENTS } from '../shared/constants';
 
 const mocks = vi.hoisted(() => {
@@ -15,6 +16,9 @@ const mocks = vi.hoisted(() => {
     name: 'MA Helper',
     workspacePath: project.path,
     runtime: 'builtin',
+    permissionMode: 'auto',
+    reasoningEffort: undefined as string | undefined,
+    runtimeConfig: undefined as { permissionMode?: string; reasoningEffort?: string } | undefined,
   };
   const provider = {
     id: 'provider-1',
@@ -29,6 +33,15 @@ const mocks = vi.hoisted(() => {
     project,
     agent,
     provider,
+    multiAgentRuntime: false,
+    resolveBuiltinSelection: vi.fn(() => ({ provider, model: 'mimo-v2.5-pro' })),
+    createSession: vi.fn(async () => ({
+      id: 'prepared-managed-session',
+      agentDir: project.path,
+      title: 'Prepared',
+      createdAt: '2026-06-27T00:00:00.000Z',
+      lastActiveAt: '2026-06-27T00:00:00.000Z',
+    })),
     startGlobalSidecar: vi.fn(async () => undefined),
     initGlobalSidecarReadyPromise: vi.fn(),
     markGlobalSidecarReady: vi.fn(),
@@ -42,6 +55,7 @@ const mocks = vi.hoisted(() => {
     setAppActiveCorrelation: vi.fn(),
     setAppActiveTabId: vi.fn(),
     chatProps: [] as Array<Record<string, unknown>>,
+    launcherProps: [] as Array<Record<string, unknown>>,
   };
 });
 
@@ -98,6 +112,7 @@ vi.mock('@/api/cronTaskClient', () => ({
 }));
 
 vi.mock('@/api/sessionClient', () => ({
+  createSession: mocks.createSession,
   updateSession: vi.fn(async () => undefined),
 }));
 
@@ -139,7 +154,10 @@ vi.mock('@/pages/Chat', () => ({
 }));
 
 vi.mock('@/pages/Launcher', () => ({
-  default: () => <div data-testid="launcher-page" />,
+  default: (props: Record<string, unknown>) => {
+    mocks.launcherProps.push(props);
+    return <div data-testid="launcher-page" />;
+  },
 }));
 
 vi.mock('@/pages/Settings', () => ({
@@ -191,7 +209,7 @@ vi.mock('@/hooks/useConfig', () => ({
     config: {
       projects: [mocks.project],
       agents: [mocks.agent],
-      multiAgentRuntime: false,
+      multiAgentRuntime: mocks.multiAgentRuntime,
       defaultPermissionMode: 'auto',
     },
     isLoading: false,
@@ -260,7 +278,7 @@ vi.mock('@/utils/tauriListen', () => ({
 
 vi.mock('@/config/configService', () => ({
   ensureSelfAwarenessWorkspace: vi.fn(async () => mocks.project),
-  resolveBuiltinSelection: vi.fn(() => ({ provider: mocks.provider, model: 'mimo-v2.5-pro' })),
+  resolveBuiltinSelection: mocks.resolveBuiltinSelection,
   pairBuiltinSelection: vi.fn((_provider, model) => ({ providerId: mocks.provider.id, model })),
   isProviderAvailable: vi.fn(() => true),
 }));
@@ -276,6 +294,153 @@ describe('App helper launch', () => {
   afterEach(() => {
     vi.clearAllMocks();
     mocks.chatProps.length = 0;
+    mocks.launcherProps.length = 0;
+    mocks.agent.runtime = 'builtin';
+    mocks.agent.permissionMode = 'auto';
+    mocks.agent.reasoningEffort = undefined;
+    mocks.agent.runtimeConfig = undefined;
+    mocks.multiAgentRuntime = false;
+    mocks.resolveBuiltinSelection.mockReturnValue({ provider: mocks.provider, model: 'mimo-v2.5-pro' });
+  });
+
+  function managedCodexProvider() {
+    return {
+      ...mocks.provider,
+      id: CODEX_SUBSCRIPTION_PROVIDER_ID,
+      name: 'Codex Subscription',
+      type: 'subscription',
+      baseUrl: '',
+      execution: { kind: 'runtime-backed' as const, runtime: 'codex' as const, source: 'managed-provider' as const },
+      primaryModel: 'gpt-5.5',
+      models: [{ id: 'gpt-5.5', name: 'GPT-5.5' }],
+    };
+  }
+
+  function latestLauncherProps() {
+    const props = mocks.launcherProps.at(-1);
+    if (!props) throw new Error('Launcher props were not captured');
+    return props as {
+      onLaunchProject: (
+        project: typeof mocks.project,
+        sessionId?: string,
+        initialMessage?: unknown,
+        analyticsContext?: unknown,
+        sessionBirthHint?: unknown,
+      ) => void;
+    };
+  }
+
+  it('prepares a managed Codex provider session when opening an empty Launcher workspace', async () => {
+    mocks.agent.runtimeConfig = {
+      permissionMode: 'suggest',
+      reasoningEffort: 'xhigh',
+    };
+    mocks.resolveBuiltinSelection.mockReturnValue({
+      provider: managedCodexProvider(),
+      model: 'gpt-5.5',
+    });
+
+    render(<App />);
+
+    await act(async () => {
+      latestLauncherProps().onLaunchProject(mocks.project);
+    });
+
+    await waitFor(() => {
+      expect(mocks.createSession).toHaveBeenCalledWith(
+        mocks.project.path,
+        'codex',
+        expect.objectContaining({
+          runtimeSource: 'managed-provider',
+          providerId: CODEX_SUBSCRIPTION_PROVIDER_ID,
+          model: 'gpt-5.5',
+          permissionMode: 'suggest',
+          reasoningEffort: 'xhigh',
+          providerExecutionIdentity: expect.objectContaining({
+            kind: 'runtime-backed-provider',
+            providerId: CODEX_SUBSCRIPTION_PROVIDER_ID,
+            runtime: 'codex',
+            runtimeSource: 'managed-provider',
+            model: 'gpt-5.5',
+          }),
+        }),
+      );
+    });
+    expect(mocks.ensureSessionSidecar).toHaveBeenCalledWith(
+      'prepared-managed-session',
+      mocks.project.path,
+      'tab',
+      expect.stringMatching(/^tab-/),
+    );
+  });
+
+  it('uses a Launcher birth hint before stale config when opening an empty workspace', async () => {
+    const providerExecutionIdentity = {
+      kind: 'runtime-backed-provider' as const,
+      providerId: CODEX_SUBSCRIPTION_PROVIDER_ID,
+      runtime: 'codex' as const,
+      runtimeSource: 'managed-provider' as const,
+      model: 'gpt-5.5',
+    };
+
+    render(<App />);
+
+    await act(async () => {
+      latestLauncherProps().onLaunchProject(
+        mocks.project,
+        undefined,
+        undefined,
+        { surface: 'agent_card', entryIntent: 'open_workspace' },
+        {
+          providerExecutionIdentity,
+          permissionMode: 'fullAgency',
+          reasoningEffort: 'xhigh',
+          mcpEnabledServers: ['filesystem'],
+          enabledPluginIds: ['plugin-a'],
+        },
+      );
+    });
+
+    await waitFor(() => {
+      expect(mocks.createSession).toHaveBeenCalledWith(
+        mocks.project.path,
+        'codex',
+        expect.objectContaining({
+          runtimeSource: 'managed-provider',
+          providerExecutionIdentity,
+          providerId: CODEX_SUBSCRIPTION_PROVIDER_ID,
+          model: 'gpt-5.5',
+          permissionMode: 'no-restrictions',
+          reasoningEffort: 'xhigh',
+          mcpEnabledServers: ['filesystem'],
+          enabledPluginIds: ['plugin-a'],
+        }),
+      );
+    });
+  });
+
+  it('keeps external-runtime empty launches on the pending-session path', async () => {
+    mocks.multiAgentRuntime = true;
+    mocks.agent.runtime = 'codex';
+    mocks.resolveBuiltinSelection.mockReturnValue({
+      provider: managedCodexProvider(),
+      model: 'gpt-5.5',
+    });
+
+    render(<App />);
+
+    await act(async () => {
+      latestLauncherProps().onLaunchProject(mocks.project);
+    });
+
+    await waitFor(() => expect(mocks.ensureSessionSidecar).toHaveBeenCalled());
+    expect(mocks.createSession).not.toHaveBeenCalled();
+    expect(mocks.ensureSessionSidecar).toHaveBeenCalledWith(
+      expect.stringMatching(/^pending-tab-/),
+      mocks.project.path,
+      'tab',
+      expect.stringMatching(/^tab-/),
+    );
   });
 
   it('commits the helper tab before launching so the active tab is renderable', async () => {

@@ -1,6 +1,9 @@
 // Provider and permission configuration types
 
 import type { HeartbeatConfig, MemoryAutoUpdateConfig } from './types/im';
+import type { RuntimeModelInfo, RuntimeSource, RuntimeType } from './types/runtime';
+import type { UiLanguage } from './i18n';
+import type { OfficialToolId, OfficialToolSettings } from './official-tools';
 
 /**
  * Permission mode for agent behavior
@@ -103,9 +106,19 @@ export interface ProviderOrderSettings {
   disabledProviderIds?: string[];
 }
 
+/** Subscription provider ID for verification caching */
+export const SUBSCRIPTION_PROVIDER_ID = 'anthropic-sub';
+
+/** Runtime-backed Codex subscription provider ID. */
+export const CODEX_SUBSCRIPTION_PROVIDER_ID = 'codex-sub';
+
 type ProviderOrderable = {
   id: string;
   enabled?: unknown;
+};
+
+const MISSING_PROVIDER_INSERT_AFTER: Record<string, string> = {
+  [CODEX_SUBSCRIPTION_PROVIDER_ID]: SUBSCRIPTION_PROVIDER_ID,
 };
 
 export function normalizeProviderOrder(providerIds: string[], providerOrder?: string[]): string[] {
@@ -122,7 +135,13 @@ export function normalizeProviderOrder(providerIds: string[], providerOrder?: st
   for (const id of providerIds) {
     if (seen.has(id)) continue;
     seen.add(id);
-    ordered.push(id);
+    const insertAfter = MISSING_PROVIDER_INSERT_AFTER[id];
+    const insertAfterIndex = insertAfter ? ordered.indexOf(insertAfter) : -1;
+    if (insertAfterIndex >= 0) {
+      ordered.splice(insertAfterIndex + 1, 0, id);
+    } else {
+      ordered.push(id);
+    }
   }
 
   return ordered;
@@ -222,18 +241,29 @@ export type ProviderAuthType = 'auth_token' | 'api_key' | 'both' | 'auth_token_c
  */
 export type ApiProtocol = 'anthropic' | 'openai';
 
+export type ProviderExecution =
+  | { kind: 'builtin' }
+  | {
+      kind: 'runtime-backed';
+      runtime: Exclude<RuntimeType, 'builtin'>;
+      source: Extract<RuntimeSource, 'managed-provider'>;
+    };
+
 /**
  * Service provider configuration
  */
 export interface Provider {
   id: string;
   name: string;
+  subtitle?: string;
   vendor: string;           // 厂商名: 'Anthropic', 'DeepSeek', etc.
   cloudProvider: string;    // 云服务商: '模型官方', '云服务商', etc.
   type: 'subscription' | 'api';
+  execution?: ProviderExecution; // undefined == { kind: 'builtin' }
   primaryModel: string;     // 默认模型 API 代码
   isBuiltin: boolean;
   enabled?: boolean;        // Runtime-derived: false when globally disabled by the user
+  runtimeReady?: boolean;   // Runtime-backed providers only: true when their managed runtime/auth preconditions are ready
 
   // API 配置
   config: {
@@ -309,6 +339,8 @@ export interface Project {
   /** PRD 0.2.17 — Claude plugins enabled for this workspace (subset of globally
    *  visible plugins). Mirrors mcpEnabledServers semantics exactly. */
   enabledPluginIds?: string[];
+  /** MyAgents official CLI tools enabled for this workspace. Separate from MCP ids. */
+  enabledOfficialToolIds?: OfficialToolId[];
   /** Internal projects (e.g. ~/.myagents diagnostic workspace) hidden from Launcher */
   internal?: boolean;
   /** Custom emoji icon for display, defaults to FolderOpen if absent */
@@ -456,8 +488,42 @@ export interface ProviderVerifyStatus {
 /** Verification expiry in days */
 export const VERIFY_EXPIRY_DAYS = 30;
 
-/** Subscription provider ID for verification caching */
-export const SUBSCRIPTION_PROVIDER_ID = 'anthropic-sub';
+export type ManagedCodexInstallStatus =
+  | 'not-installed'
+  | 'checking'
+  | 'downloading'
+  | 'installed'
+  | 'update-required'
+  | 'error';
+
+export interface ManagedCodexRuntimeInstallState {
+  status: ManagedCodexInstallStatus;
+  requiredVersion?: string;
+  installedVersion?: string;
+  platform?: string;
+  installedAt?: string;
+  lastCheckedAt?: string;
+  downloadedBytes?: number;
+  totalBytes?: number;
+  progressPercent?: number;
+  error?: string;
+}
+
+export interface ManagedCodexAuthState {
+  status: 'unknown' | 'valid' | 'invalid' | 'logging-in' | 'logged-out' | 'error';
+  authMethod?: 'chatgpt' | 'api-key' | 'access-token';
+  accountEmail?: string;
+  verifiedAt?: string;
+  error?: string;
+}
+
+export const MANAGED_CODEX_REQUIRED_RUNTIME = {
+  component: 'codex',
+  version: '0.142.2',
+  runtimeSet: 'codex-0.142.2',
+  manifestBaseUrl: 'https://download.myagents.io/runtimes/codex/sets/codex-0.142.2',
+  manifestPublicKeyId: 'myagents-runtime-manifest-ed25519-2026-06',
+} as const;
 
 /** Check if verification has expired */
 export function isVerifyExpired(verifiedAt: string): boolean {
@@ -540,6 +606,9 @@ export interface AppConfig {
   backgroundAgentPermissionMode?: BackgroundAgentPermissionMode;
   // UI preferences
   theme: 'light' | 'dark' | 'system';
+  /** Product UI language. Existing pre-i18n configs missing this field migrate
+   *  to `zh-CN`; new installs default to `system`. */
+  uiLanguage?: UiLanguage;
   minimizeToTray: boolean;
   /** 全局「始终阻止电脑睡眠」开关（PRD 0.2.35）。
    *  默认 `false` ⇒ 沿用「智能模式」：AI 跑中由 sidecar.rs / cron_task.rs 各自持锁。
@@ -650,6 +719,15 @@ export interface AppConfig {
   // Provider IDs hidden from selectors and runtime resolution without deleting their settings.
   disabledProviderIds?: string[];
 
+  // ===== Managed Codex Provider (PRD 0.2.43) =====
+  // Developer gate controls visibility only; release-grade security remains required.
+  // Only explicit true enables the provider; release defaults persist true.
+  managedCodexProviderDevGate?: boolean;
+  /** @deprecated Use disabledProviderIds / providerOrder like every other provider. */
+  managedCodexProviderEnabled?: boolean;
+  managedCodexRuntimeInstall?: ManagedCodexRuntimeInstallState;
+  managedCodexAuth?: ManagedCodexAuthState;
+
   // ===== MCP Configuration =====
   // Custom MCP servers added by user (merged with presets)
   mcpServers?: McpServerDefinition[];
@@ -667,6 +745,11 @@ export interface AppConfig {
   // launcher shims read this at runtime, so env changes apply on next launch
   // without re-registration.
   cliToolEnv?: Record<string, Record<string, string>>;
+
+  // ===== Official CLI Tools =====
+  // Global visibility gate for MyAgents-owned CLI tools (not user registry tools).
+  enabledOfficialToolIds?: OfficialToolId[];
+  officialToolSettings?: OfficialToolSettings;
 
   // ===== Network Proxy (General) =====
   // HTTP/SOCKS5 proxy settings for external network requests
@@ -686,6 +769,7 @@ export interface AppConfig {
     mcpEnabledServers?: string[];
     /** PRD 0.2.17 — last-selected plugin set in Launcher, restored on next open. */
     enabledPluginIds?: string[];
+    enabledOfficialToolIds?: OfficialToolId[];
   };
 
   // ===== Agent Configuration (v0.1.41) =====
@@ -784,6 +868,189 @@ const MIMO_MODELS: ModelEntity[] = [
 ];
 
 const MIMO_ALIASES = { sonnet: 'mimo-v2.5-pro', opus: 'mimo-v2.5-pro', haiku: 'mimo-v2.5' } as const;
+
+export const MANAGED_CODEX_MODELS: ModelEntity[] = [];
+
+export function managedCodexModelsFromRuntime(
+  runtimeModels: readonly RuntimeModelInfo[] | undefined,
+): ModelEntity[] {
+  const seen = new Set<string>();
+  const models: ModelEntity[] = [];
+  for (const runtimeModel of runtimeModels ?? []) {
+    const model = runtimeModel.value.trim();
+    if (!model || seen.has(model)) continue;
+    seen.add(model);
+    models.push({
+      model,
+      modelName: runtimeModel.displayName?.trim() || model,
+      modelSeries: 'codex',
+      inputModalities: ['text', 'image'],
+      outputModalities: ['text'],
+      source: 'discovered',
+    });
+  }
+  return models;
+}
+
+export function withManagedCodexRuntimeModels(
+  provider: Provider,
+  runtimeModels: readonly RuntimeModelInfo[] | undefined,
+): Provider {
+  const models = managedCodexModelsFromRuntime(runtimeModels);
+  const defaultModel = runtimeModels?.find(model => model.isDefault && model.value.trim())?.value.trim();
+  const primaryModel = defaultModel && models.some(model => model.model === defaultModel)
+    ? defaultModel
+    : (models[0]?.model ?? '');
+  return {
+    ...provider,
+    primaryModel,
+    models,
+  };
+}
+
+export const MANAGED_CODEX_PROVIDER: Provider = {
+  id: CODEX_SUBSCRIPTION_PROVIDER_ID,
+  name: 'Codex (订阅)',
+  subtitle: '使用 ChatGPT Codex 订阅账户',
+  vendor: 'OpenAI',
+  cloudProvider: 'ChatGPT Subscription',
+  type: 'subscription',
+  execution: { kind: 'runtime-backed', runtime: 'codex', source: 'managed-provider' },
+  primaryModel: '',
+  isBuiltin: true,
+  config: {},
+  models: MANAGED_CODEX_MODELS,
+};
+
+export type ManagedCodexProviderReadinessReason =
+  | 'developer-gate-off'
+  | 'runtime-not-installed'
+  | 'runtime-downloading'
+  | 'runtime-update-required'
+  | 'runtime-error'
+  | 'auth-missing'
+  | 'auth-logging-in'
+  | 'auth-invalid'
+  | 'auth-error'
+  | 'provider-disabled'
+  | 'ready';
+
+export interface ManagedCodexProviderReadiness {
+  visible: boolean;
+  selectable: boolean;
+  reason: ManagedCodexProviderReadinessReason;
+  requiredVersion: string;
+}
+
+type ManagedCodexConfigLike = Pick<AppConfig,
+  | 'managedCodexProviderDevGate'
+  | 'disabledProviderIds'
+  | 'managedCodexRuntimeInstall'
+  | 'managedCodexAuth'
+>;
+
+export function isManagedCodexProviderGateEnabled(
+  config: Pick<AppConfig, 'managedCodexProviderDevGate'>,
+): boolean {
+  return config.managedCodexProviderDevGate === true;
+}
+
+export function isManagedCodexRequiredRuntimeInstalled(
+  state: ManagedCodexRuntimeInstallState | undefined,
+): boolean {
+  if (!state || state.status !== 'installed') return false;
+  const requiredVersion = state.requiredVersion ?? MANAGED_CODEX_REQUIRED_RUNTIME.version;
+  return requiredVersion === MANAGED_CODEX_REQUIRED_RUNTIME.version
+    && state.installedVersion === MANAGED_CODEX_REQUIRED_RUNTIME.version;
+}
+
+export function isManagedCodexSubscriptionAuthValid(
+  state: ManagedCodexAuthState | undefined,
+): boolean {
+  return state?.status === 'valid'
+    && (state.authMethod === 'chatgpt' || state.authMethod === 'access-token');
+}
+
+export function getManagedCodexProviderReadiness(
+  config: ManagedCodexConfigLike,
+): ManagedCodexProviderReadiness {
+  const requiredVersion = MANAGED_CODEX_REQUIRED_RUNTIME.version;
+  if (!isManagedCodexProviderGateEnabled(config)) {
+    return {
+      visible: false,
+      selectable: false,
+      reason: 'developer-gate-off',
+      requiredVersion,
+    };
+  }
+
+  const install = config.managedCodexRuntimeInstall;
+  if (!isManagedCodexRequiredRuntimeInstalled(install)) {
+    let reason: ManagedCodexProviderReadinessReason = 'runtime-not-installed';
+    if (install?.status === 'downloading' || install?.status === 'checking') {
+      reason = 'runtime-downloading';
+    } else if (
+      install?.status === 'update-required'
+      || (install?.installedVersion && install.installedVersion !== requiredVersion)
+    ) {
+      reason = 'runtime-update-required';
+    } else if (install?.status === 'error') {
+      reason = 'runtime-error';
+    }
+    return { visible: true, selectable: false, reason, requiredVersion };
+  }
+
+  const auth = config.managedCodexAuth;
+  if (!isManagedCodexSubscriptionAuthValid(auth)) {
+    let reason: ManagedCodexProviderReadinessReason = 'auth-missing';
+    if (auth?.status === 'logging-in') {
+      reason = 'auth-logging-in';
+    } else if (auth?.status === 'invalid' || auth?.status === 'logged-out') {
+      reason = 'auth-invalid';
+    } else if (auth?.status === 'error') {
+      reason = 'auth-error';
+    }
+    return { visible: true, selectable: false, reason, requiredVersion };
+  }
+
+  if (config.disabledProviderIds?.includes(CODEX_SUBSCRIPTION_PROVIDER_ID)) {
+    return { visible: true, selectable: false, reason: 'provider-disabled', requiredVersion };
+  }
+
+  return { visible: true, selectable: true, reason: 'ready', requiredVersion };
+}
+
+export function withManagedCodexProviderCatalog(
+  providers: readonly Provider[],
+  config: Pick<AppConfig, 'managedCodexProviderDevGate'>,
+  runtimeModels?: readonly RuntimeModelInfo[],
+): Provider[] {
+  const withoutManagedCodex = providers.filter(provider => provider.id !== CODEX_SUBSCRIPTION_PROVIDER_ID);
+  if (!isManagedCodexProviderGateEnabled(config)) return withoutManagedCodex;
+  const managedCodexProvider = withManagedCodexRuntimeModels(MANAGED_CODEX_PROVIDER, runtimeModels);
+  const insertAfterIndex = withoutManagedCodex.findIndex(provider => provider.id === SUBSCRIPTION_PROVIDER_ID);
+  if (insertAfterIndex < 0) return [...withoutManagedCodex, managedCodexProvider];
+  return [
+    ...withoutManagedCodex.slice(0, insertAfterIndex + 1),
+    managedCodexProvider,
+    ...withoutManagedCodex.slice(insertAfterIndex + 1),
+  ];
+}
+
+export function applyManagedCodexProviderReadiness(
+  providers: readonly Provider[],
+  config: ManagedCodexConfigLike,
+): Provider[] {
+  const readiness = getManagedCodexProviderReadiness(config);
+  const runtimeReady = readiness.reason === 'ready' || readiness.reason === 'provider-disabled';
+  return providers.map(provider => {
+    if (provider.id !== CODEX_SUBSCRIPTION_PROVIDER_ID) return provider;
+    return {
+      ...provider,
+      runtimeReady,
+    };
+  });
+}
 
 export const PRESET_PROVIDERS: Provider[] = [
   {
@@ -1425,12 +1692,14 @@ export const DEFAULT_CONFIG: AppConfig = {
   defaultPermissionMode: 'auto',
   backgroundAgentPermissionMode: 'inherit', // background agents inherit granted perms; nothing wider (#264)
   theme: 'system',
+  uiLanguage: 'system',
   minimizeToTray: true,   // 默认开启最小化到托盘
   forceWakeLock: false,   // 默认关闭常开阻睡（智能模式仍在跑，覆盖 AI 工作期间）
   chatQueueResponseMode: 'realtime',
   showDevTools: false,
   cliToolRegistryEnabled: false, // 默认关闭用户注册 CLI 工具注册表（实验室）
   teamSpaceEnabled: false, // 默认隐藏未发布的团队 Space 入口
+  managedCodexProviderDevGate: true, // 默认开放 Codex 订阅 Provider；只有显式 true 才启用
   floatingBallHoverPeekEnabled: true,
   liteLLMModelDataRefresh: true, // 默认开启 LiteLLM 模型数据兜底刷新（开发者可关）
   claudeTranscriptCleanupPeriodDays: DEFAULT_CLAUDE_TRANSCRIPT_CLEANUP_PERIOD_DAYS,

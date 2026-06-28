@@ -1,7 +1,8 @@
 // AgentRuntime abstraction types (v0.1.59)
 // Defines the interface that all runtime implementations must satisfy
 
-import type { RuntimeType, RuntimeModelInfo, RuntimePermissionMode, RuntimeDetection, RuntimeDiagnostics, RuntimeEnvPolicy } from '../../shared/types/runtime';
+import type { RuntimeType, RuntimeModelInfo, RuntimePermissionMode, RuntimeDetection, RuntimeDiagnostics, RuntimeEnvPolicy, RuntimeSource } from '../../shared/types/runtime';
+import type { McpServerDefinition } from '../../shared/config-types';
 import type { InteractionScenario } from '../system-prompt';
 import type { ModelUsageEntry } from '../types/session';
 import type { ToolAttachment } from '../../shared/types/tool-attachment';
@@ -68,6 +69,17 @@ export interface SessionStartOptions {
    * behaviour, preserving backwards compat.
    */
   envPolicy?: RuntimeEnvPolicy;
+  /**
+   * Runtime binary/state owner. Missing keeps historical behaviour:
+   * external CLI runtimes use the user's system CLI and native home directory.
+   */
+  runtimeSource?: RuntimeSource;
+  /**
+   * Effective MyAgents MCP servers for runtimes that accept MCP at process
+   * startup. The builtin SDK path owns live setMcpServers; managed Codex
+   * consumes this as app-server startup config.
+   */
+  mcpServers?: McpServerDefinition[];
 }
 
 /**
@@ -286,7 +298,10 @@ export interface AgentRuntime {
   detect(): Promise<RuntimeDetection>;
 
   /** Query available models from the CLI (may spawn a temporary process) */
-  queryModels(): Promise<RuntimeModelInfo[]>;
+  queryModels(options?: {
+    runtimeSource?: RuntimeSource;
+    envPolicy?: RuntimeEnvPolicy;
+  }): Promise<RuntimeModelInfo[]>;
 
   /** Get the permission modes supported by this runtime */
   getPermissionModes(): RuntimePermissionMode[];

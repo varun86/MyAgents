@@ -6,6 +6,7 @@
  */
 
 import { useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Bot, Loader2, Users, X } from 'lucide-react';
 
 import { apiGetJson } from '@/api/apiFetch';
@@ -23,6 +24,7 @@ interface FeedbackPopoverProps {
 const QR_CDN_URL = 'https://download.myagents.io/assets/feedback_qr_code.png';
 
 export default function FeedbackPopover({ open, onClose, onOpenBugReport, triggerRef }: FeedbackPopoverProps) {
+    const { t } = useTranslation('app');
     const isTauri = isTauriEnvironment();
     const [qrCodeUrl, setQrCodeUrl] = useState<string | null>(isTauri ? null : QR_CDN_URL);
     const [qrLoading, setQrLoading] = useState(isTauri);
@@ -58,11 +60,13 @@ export default function FeedbackPopover({ open, onClose, onOpenBugReport, trigge
             {/* Header */}
             <div className="flex items-center justify-between px-4 pt-3.5 pb-2">
                 <span className="text-xs font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]">
-                    帮助与反馈
+                    {t('titlebar.feedbackTitle')}
                 </span>
                 <button
                     onClick={onClose}
                     className="rounded-md p-0.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+                    title={t('titlebar.close')}
+                    aria-label={t('titlebar.close')}
                 >
                     <X className="h-3.5 w-3.5" />
                 </button>
@@ -83,9 +87,9 @@ export default function FeedbackPopover({ open, onClose, onOpenBugReport, trigge
                             <Bot className="h-4 w-4 text-[var(--accent-warm)]" />
                         </div>
                         <div className="min-w-0">
-                            <p className="text-sm font-medium text-[var(--ink)]">AI 小助理</p>
+                            <p className="text-sm font-medium text-[var(--ink)]">{t('titlebar.helper')}</p>
                             <p className="mt-0.5 text-xs leading-relaxed text-[var(--ink-muted)]">
-                                不会使用，反馈问题，意见建议快来找小助理！
+                                {t('titlebar.helperDescription')}
                             </p>
                         </div>
                     </div>
@@ -101,9 +105,9 @@ export default function FeedbackPopover({ open, onClose, onOpenBugReport, trigge
                                 <Users className="h-4 w-4 text-[var(--accent-warm)]" />
                             </div>
                             <div className="min-w-0">
-                                <p className="text-sm font-medium text-[var(--ink)]">加入用户交流群</p>
+                                <p className="text-sm font-medium text-[var(--ink)]">{t('titlebar.communityTitle')}</p>
                                 <p className="mt-0.5 text-xs leading-relaxed text-[var(--ink-muted)]">
-                                    扫码加入，交流使用心得
+                                    {t('titlebar.communityDescription')}
                                 </p>
                             </div>
                         </div>
@@ -115,7 +119,7 @@ export default function FeedbackPopover({ open, onClose, onOpenBugReport, trigge
                             ) : (
                                 <img
                                     src={qrCodeUrl!}
-                                    alt="用户交流群二维码"
+                                    alt={t('titlebar.communityQrAlt')}
                                     className="h-32 w-32 rounded-lg"
                                 />
                             )}

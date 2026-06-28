@@ -10,6 +10,7 @@
  */
 
 import { useRef, useEffect, useCallback, useState, useMemo } from 'react';
+import { useTranslation } from 'react-i18next';
 import { openExternal } from '@/utils/openExternal';
 import { buildWidgetCssVars } from './widgetCssVars';
 import { buildSandboxHtml } from './widgetSandboxHtml';
@@ -69,6 +70,9 @@ const DEBOUNCE_MS = 120;
 const MIN_HEIGHT = 60;
 
 export default function WidgetRenderer({ widgetCode, isStreaming, title }: WidgetRendererProps) {
+  const { t } = useTranslation('chat');
+  const scriptErrorPrefix = t('shell.toolChrome.widget.scriptErrorPrefix');
+  const [initialScriptErrorPrefix] = useState(() => scriptErrorPrefix);
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const iframeReady = useRef(false);
   const lastSentHtml = useRef('');
@@ -93,8 +97,10 @@ export default function WidgetRenderer({ widgetCode, isStreaming, title }: Widge
   // See that guard's comment for the full rationale.
   const srcdoc = useMemo(() => {
     const cssVars = buildWidgetCssVars();
-    return buildSandboxHtml(cssVars);
-  }, []);
+    return buildSandboxHtml(cssVars, {
+      scriptErrorPrefix: initialScriptErrorPrefix,
+    });
+  }, [initialScriptErrorPrefix]);
 
   // Send message to iframe
   const sendToIframe = useCallback((msg: Record<string, unknown>) => {
@@ -151,6 +157,7 @@ export default function WidgetRenderer({ widgetCode, isStreaming, title }: Widge
       switch (e.data.type) {
         case 'widget:ready':
           iframeReady.current = true;
+          sendToIframe({ type: 'widget:i18n', scriptErrorPrefix });
           // If we already have content, send it immediately
           if (widgetCode && !hasFinalized.current) {
             if (isStreaming) {
@@ -198,7 +205,12 @@ export default function WidgetRenderer({ widgetCode, isStreaming, title }: Widge
 
     window.addEventListener('message', onMessage);
     return () => window.removeEventListener('message', onMessage);
-  }, [widgetCode, isStreaming, sendToIframe, sendFinalize, cacheKey, title]);
+  }, [widgetCode, isStreaming, sendToIframe, sendFinalize, cacheKey, title, scriptErrorPrefix]);
+
+  useEffect(() => {
+    if (!iframeReady.current) return;
+    sendToIframe({ type: 'widget:i18n', scriptErrorPrefix });
+  }, [scriptErrorPrefix, sendToIframe]);
 
   // Theme change observer — push updated CSS vars to iframe when dark/light mode toggles
   useEffect(() => {
@@ -215,6 +227,7 @@ export default function WidgetRenderer({ widgetCode, isStreaming, title }: Widge
   const onIframeLoad = useCallback(() => {
     if (!iframeReady.current) {
       iframeReady.current = true;
+      sendToIframe({ type: 'widget:i18n', scriptErrorPrefix });
       if (widgetCode) {
         if (isStreaming) {
           const html = sanitizeForStreaming(widgetCode);
@@ -225,7 +238,7 @@ export default function WidgetRenderer({ widgetCode, isStreaming, title }: Widge
         }
       }
     }
-  }, [widgetCode, isStreaming, sendToIframe, sendFinalize]);
+  }, [widgetCode, isStreaming, sendToIframe, sendFinalize, scriptErrorPrefix]);
 
   // Streaming update: debounced, script-stripped
   useEffect(() => {

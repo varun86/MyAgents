@@ -235,10 +235,15 @@ pub(super) async fn ensure_sidecar_port_for_command<R: Runtime>(
     desired_runtime: &str,
     app_handle: &AppHandle<R>,
     manager: &ManagedSidecarManager,
+    health: &Arc<HealthManager>,
 ) -> Result<u16, String> {
-    {
+    let drift_result = {
         let mut router_guard = router.lock().await;
-        router_guard.check_and_reset_on_runtime_drift(session_key, desired_runtime, manager);
+        router_guard.check_and_reset_on_runtime_drift(session_key, desired_runtime, manager)
+    };
+    if drift_result.is_some() {
+        let _ =
+            health::persist_router_active_sessions(health, router, "command-runtime-drift").await;
     }
 
     let prep = {
@@ -253,8 +258,13 @@ pub(super) async fn ensure_sidecar_port_for_command<R: Runtime>(
             // config sync). Destructure the tuple but ignore the flag.
             let (port, _is_new) =
                 SessionRouter::create_sidecar_blocking(info.clone(), app_handle, manager).await?;
-            let mut router_guard = router.lock().await;
-            router_guard.commit_ensure_sidecar(session_key, &info, port);
+            {
+                let mut router_guard = router.lock().await;
+                router_guard.commit_ensure_sidecar(session_key, &info, port);
+            }
+            let _ =
+                health::persist_router_active_sessions(health, router, "command-ensure-sidecar")
+                    .await;
             Ok(port)
         }
     }

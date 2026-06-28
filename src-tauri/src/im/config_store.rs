@@ -1450,7 +1450,14 @@ pub(super) fn persist_agent_config_patch(
         apply_field!(setup_completed, "setupCompleted");
 
         if let Some(ref runtime_config) = patch.runtime_config {
-            agent["runtimeConfig"] = runtime_config.clone();
+            match runtime_config {
+                Some(value) => agent["runtimeConfig"] = value.clone(),
+                None => {
+                    if let Some(obj) = agent.as_object_mut() {
+                        obj.remove("runtimeConfig");
+                    }
+                }
+            }
         }
 
         if let Some(ref channels) = patch.channels {

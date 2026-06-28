@@ -1,4 +1,5 @@
 import { Clock, Play, X } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 
 import type { QueuedMessageInfo } from '@/types/queue';
 
@@ -13,6 +14,7 @@ interface QueuedMessagesPanelProps {
  * Right-aligned, semi-transparent background, compact layout.
  */
 export default function QueuedMessagesPanel({ messages, onCancel, onForceExecute }: QueuedMessagesPanelProps) {
+  const { t } = useTranslation('chat');
   if (messages.length === 0) return null;
 
   // 卡片级 DOM——父级是 SimpleChatInput 里的 `flex items-end justify-end gap-2`
@@ -28,7 +30,7 @@ export default function QueuedMessagesPanel({ messages, onCancel, onForceExecute
       {/* Header */}
       <div className="mb-1.5 flex items-center gap-1 text-xs text-[var(--ink-muted)]">
         <Clock size={11} />
-        <span>排队中 ({messages.length})</span>
+        <span>{t('shell.queue.title', { count: messages.length })}</span>
       </div>
 
       {/* Message list */}
@@ -57,14 +59,14 @@ export default function QueuedMessagesPanel({ messages, onCancel, onForceExecute
             <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
               <button
                 onClick={() => onForceExecute(qm.queueId)}
-                title="立即发送"
+                title={t('shell.queue.sendNow')}
                 className="rounded p-0.5 text-[var(--ink-muted)] hover:bg-[var(--surface-hover)] hover:text-[var(--ink)]"
               >
                 <Play size={12} />
               </button>
               <button
                 onClick={() => onCancel(qm.queueId)}
-                title={qm.isInFlight ? '撤回发送' : '取消排队'}
+                title={qm.isInFlight ? t('shell.queue.recallSend') : t('shell.queue.cancelQueued')}
                 className="rounded p-0.5 text-[var(--ink-muted)] hover:bg-[var(--surface-hover)] hover:text-[var(--ink)]"
               >
                 <X size={12} />

@@ -571,11 +571,31 @@ impl SessionRouter {
             // Just reset session metadata; next message will start a fresh sidecar with the new ID.
             if ps.sidecar_port == 0 {
                 if let Some(snapshot) = fallback_snapshot {
-                    match super::runtime_change::freeze_via_file_lock(&old_session_id, snapshot).await {
-                        Ok(()) => ulog_info!(
-                            "[im-router] froze idle session {} before /new binding reset",
-                            short_id(&old_session_id)
-                        ),
+                    let metadata_birth_pending = ps.metadata_birth_pending;
+                    match super::runtime_change::freeze_via_file_lock_status(
+                        &old_session_id,
+                        snapshot,
+                    )
+                    .await
+                    .and_then(|outcome| {
+                        super::runtime_change::resolve_peer_file_lock_freeze_outcome(
+                            outcome,
+                            metadata_birth_pending,
+                            &old_session_id,
+                        )
+                    }) {
+                        Ok(super::runtime_change::PeerFileLockFreezeDisposition::Frozen) => {
+                            ulog_info!(
+                                "[im-router] froze idle session {} before /new binding reset",
+                                short_id(&old_session_id)
+                            );
+                        }
+                        Ok(super::runtime_change::PeerFileLockFreezeDisposition::MissingBirthPending) => {
+                            ulog_info!(
+                                "[im-router] skipped freeze for birth-pending idle session {} before /new binding reset",
+                                short_id(&old_session_id)
+                            );
+                        }
                         Err(e) => {
                             ulog_warn!(
                                 "[im-router] failed to freeze idle session {} before /new binding reset: {}",
@@ -603,7 +623,9 @@ impl SessionRouter {
             let resp = self
                 .http_client
                 .post(&url)
-                .json(&json!({}))
+                .json(&json!({
+                    "metadataBirthPending": ps.metadata_birth_pending,
+                }))
                 .send()
                 .await
                 .map_err(|e| format!("Reset session error: {}", e))?;
@@ -829,6 +851,7 @@ impl SessionRouter {
                 last_sender_name: ps.last_sender_name.clone(),
                 workspace_path: ps.workspace_path.display().to_string(),
                 message_count: ps.message_count,
+                metadata_birth_pending: ps.metadata_birth_pending,
                 last_active: chrono::Duration::from_std(
                     now_instant.saturating_duration_since(ps.last_active),
                 )
@@ -884,7 +907,7 @@ impl SessionRouter {
                     source_display_name: s.source_display_name.clone(),
                     last_sender_name: s.last_sender_name.clone(),
                     message_count: s.message_count,
-                    metadata_birth_pending: false,
+                    metadata_birth_pending: s.metadata_birth_pending,
                     last_active: Instant::now(),
                 },
             );
@@ -1229,7 +1252,7 @@ mod tests {
     use super::{
         parse_session_key, persisted_session_runtime_differs, EnsureSidecarInfo, SessionRouter,
     };
-    use crate::im::types::PeerSession;
+    use crate::im::types::{ImActiveSession, PeerSession};
     use crate::sidecar::SidecarManager;
 
     fn peer(session_key: &str, session_id: &str) -> PeerSession {
@@ -1327,6 +1350,50 @@ mod tests {
 
         router.mark_metadata_birth_consumed(session_key);
         assert!(!router.metadata_birth_pending(session_key));
+    }
+
+    #[test]
+    fn active_session_restore_preserves_metadata_birth_pending() {
+        let session_key = "agent:a:feishu:private:user";
+        let mut router =
+            SessionRouter::new_for_agent(PathBuf::from("/tmp/workspace"), "a".to_string());
+        let mut pending = peer(session_key, "birth-pending-session");
+        pending.metadata_birth_pending = true;
+        router.upsert_peer_session(pending);
+
+        let active = router.active_sessions();
+        assert_eq!(active.len(), 1);
+        assert!(active[0].metadata_birth_pending);
+
+        let mut restored =
+            SessionRouter::new_for_agent(PathBuf::from("/tmp/workspace"), "a".to_string());
+        restored.restore_sessions(&active);
+
+        assert!(restored.metadata_birth_pending(session_key));
+    }
+
+    #[test]
+    fn active_session_legacy_json_defaults_metadata_birth_pending_false() {
+        let session_key = "agent:a:feishu:private:user";
+        let mut router =
+            SessionRouter::new_for_agent(PathBuf::from("/tmp/workspace"), "a".to_string());
+        router.upsert_peer_session(peer(session_key, "legacy-session"));
+
+        let mut active = router.active_sessions();
+        let mut legacy_value = serde_json::to_value(active.remove(0)).unwrap();
+        legacy_value
+            .as_object_mut()
+            .expect("active session serializes as an object")
+            .remove("metadataBirthPending");
+
+        let restored_active: ImActiveSession = serde_json::from_value(legacy_value).unwrap();
+        assert!(!restored_active.metadata_birth_pending);
+
+        let mut restored =
+            SessionRouter::new_for_agent(PathBuf::from("/tmp/workspace"), "a".to_string());
+        restored.restore_sessions(&[restored_active]);
+
+        assert!(!restored.metadata_birth_pending(session_key));
     }
 
     #[test]

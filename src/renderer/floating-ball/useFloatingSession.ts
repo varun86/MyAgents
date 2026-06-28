@@ -24,6 +24,7 @@ import type { AppConfig, Project } from '@/config/types';
 import { resolveAttachmentUrl } from '@/utils/attachmentUrl';
 import { listenWithCleanup } from '@/utils/tauriListen';
 import { parsePartialJson } from '@/utils/parsePartialJson';
+import { i18n } from '@/i18n';
 import { isSubagentContainerTool } from '@/components/tools/toolBadgeConfig';
 import { workspacePathsEqual } from '../../shared/workspacePath';
 import { localDate } from '../../shared/logTime';
@@ -96,6 +97,10 @@ const OWNER_ID = 'floating-ball';
 const HISTORY_LIMIT = 50;
 const TOOL_RESULT_DISPLAY_CAP = 8 * 1024;
 const TOOL_RESULT_TAIL_KEEP = 1024;
+
+function fbText(key: string, options?: Record<string, unknown>): string {
+    return String(i18n.t(`app:floatingSession.${key}`, options));
+}
 
 function elapsedMs(startedAt: number): string {
     return `${Date.now() - startedAt}ms`;
@@ -348,7 +353,7 @@ async function syncFloatingSidecarConfig(
     let stage = 'resolve-port';
     console.info(`[fb-session] sync config start session=${sessionId} workspace=${workspacePath}`);
     const base = await sessionBaseUrl(sessionId);
-    if (!base) throw new Error('sidecar 不可达');
+    if (!base) throw new Error(fbText('sidecarUnavailable'));
 
     try {
         const project = projects.find((p) => workspacePathsEqual(p.path, workspacePath));
@@ -416,7 +421,7 @@ async function assertRespondSucceeded(resp: Response): Promise<void> {
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const body = (await resp.json().catch(() => ({}))) as { success?: boolean; error?: string };
     if (body.success !== true) {
-        throw new Error(body.error || '后端未确认（请求可能已过期）');
+        throw new Error(body.error || fbText('backendNotConfirmed'));
     }
 }
 
@@ -812,13 +817,13 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
                             ? data
                             : data && typeof data === 'object' && 'message' in data
                                 ? String((data as { message?: unknown }).message ?? '')
-                                : '回复出错了';
+                                : fbText('replyFailed');
                     finalizeStream('failed');
                     setBusy(false);
                     setPermReq(null);
                     setAskReq(null);
                     setPlanReq(null);
-                    setError(msg || '回复出错了');
+                    setError(msg || fbText('replyFailed'));
                     break;
                 }
                 case 'chat:message-stopped': {
@@ -853,14 +858,14 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
                     // Terminal agent errors（rate limit / auth / SDK is_error）走
                     // 这条而非 message-error——漏接会让"发完就走"的任务静默死掉、
                     // 球退回 idle（review W2）。
-                    const msg = typeof data === 'string' ? data : 'Agent 出错了，点 ↗ 去主窗口查看';
+                    const msg = typeof data === 'string' ? data : fbText('agentErrorOpenMainWindow');
                     finalizeStream('failed');
                     setBusy(false);
                     // 会话失效自愈：SDK 在当前工作区找不到这条对话（典型：persisted
                     // sid 的 SDK 数据被清理）。直接轮换新 session，别让用户卡死在
                     // 一条永远发不出去的会话里。
                     if (msg.includes('No conversation found')) {
-                        setError('上一条会话已失效，已为你开启新对话');
+                        setError(fbText('sessionExpiredNewChat'));
                         const ws = workspaceRef.current;
                         if (ws) {
                             void rotateToRef.current(localDate(), { path: ws.path });
@@ -1171,7 +1176,7 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
                     projects,
                 );
                 if (!boundWs) {
-                    throw new Error('没有可用的工作区——请先在 MyAgents 中完成初始化');
+                    throw new Error(fbText('noWorkspace'));
                 }
                 console.info(`[fb-session] boot workspace resolved path=${boundWs.path} name=${boundWs.name ?? 'Mino'}`);
                 workspaceRef.current = { path: boundWs.path };
@@ -1361,7 +1366,7 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
                 await rotateTo(localDate(), { path: target.path, name: target.name });
             } catch (err) {
                 console.warn('[fb] setWorkspaceBinding failed:', err);
-                setError('切换工作区失败，请重试');
+                setError(fbText('switchWorkspaceFailed'));
             }
         },
         [rotateTo],
@@ -1382,7 +1387,7 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
             await rotateTo(localDate(), { path: target.path, name: target.name });
         } catch (err) {
             console.warn('[fb] newConversation failed:', err);
-            setError('新建对话失败，请重试');
+            setError(fbText('newConversationFailed'));
         }
     }, [rotateTo]);
 
@@ -1433,7 +1438,7 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
             );
             try {
                 const base = await sessionBaseUrl(sid);
-                if (!base) throw new Error('AI 引擎尚未就绪，稍等片刻再试');
+                if (!base) throw new Error(fbText('engineNotReady'));
                 const resp = await floatingProxyFetch(sid, `${base}/chat/send`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -1480,7 +1485,7 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
             if (!sid || !req) return;
             try {
                 const base = await sessionBaseUrl(sid);
-                if (!base) throw new Error('sidecar 不可达');
+                if (!base) throw new Error(fbText('sidecarUnavailable'));
                 const resp = await floatingProxyFetch(sid, `${base}/api/permission/respond`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -1493,7 +1498,7 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
                 setPermReq(null);
             } catch (err) {
                 console.error('[fb] permission respond failed:', err);
-                setError('确认发送失败，请重试');
+                setError(fbText('confirmSendFailed'));
             }
         },
         [permReq],
@@ -1508,7 +1513,7 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
             if (!sid || !req) return;
             try {
                 const base = await sessionBaseUrl(sid);
-                if (!base) throw new Error('sidecar 不可达');
+                if (!base) throw new Error(fbText('sidecarUnavailable'));
                 const resp = await floatingProxyFetch(sid, `${base}/api/ask-user-question/respond`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -1518,7 +1523,7 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
                 setAskReq(null);
             } catch (err) {
                 console.error('[fb] ask-user-question respond failed:', err);
-                setError('回答发送失败，请重试');
+                setError(fbText('answerSendFailed'));
             }
         },
         [askReq],
@@ -1533,7 +1538,7 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
             if (!sid || !req) return;
             try {
                 const base = await sessionBaseUrl(sid);
-                if (!base) throw new Error('sidecar 不可达');
+                if (!base) throw new Error(fbText('sidecarUnavailable'));
                 const resp = await floatingProxyFetch(sid, `${base}/api/exit-plan-mode/respond`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -1543,7 +1548,7 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
                 setPlanReq(null);
             } catch (err) {
                 console.error('[fb] exit-plan-mode respond failed:', err);
-                setError('提交失败，请重试');
+                setError(fbText('submitFailed'));
             }
         },
         [planReq],

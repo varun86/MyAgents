@@ -19,6 +19,7 @@ import {
   useState,
 } from 'react';
 import type { ReactNode } from 'react';
+import { useTranslation } from 'react-i18next';
 
 import ContextMenu from '@/components/ContextMenu';
 import type { ContextMenuItem } from '@/components/ContextMenu';
@@ -145,6 +146,7 @@ function targetFileName(path: string): string {
 }
 
 export function FileActionProvider({ children, workspacePath, onInsertReference, refreshTrigger, onFilePreviewExternal, onQuoteFile, onQuoteSelection, onRevealInTree, menuProfile = 'default', onOpenMyAgentsPreview }: FileActionProviderProps) {
+  const { t } = useTranslation('app');
   const fileService = useWorkspaceFileService(workspacePath);
   const { openPreview: openImagePreview } = useImagePreview();
 
@@ -552,10 +554,10 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
   // normalized action form; copy uses the separate `displayPath` instead.
   const handleCopyPath = useCallback((displayPath: string) => {
     void navigator.clipboard.writeText(displayPath).then(
-      () => toastRef.current?.success('已复制'),
-      () => toastRef.current?.error('复制失败'),
+      () => toastRef.current?.success(t('fileActions.copied')),
+      () => toastRef.current?.error(t('fileActions.copyFailed')),
     );
-  }, []);
+  }, [t]);
 
   const handleOpenWithDefault = useCallback((path: string, scope: FileActionScope) => {
     if (scope === 'local') {
@@ -599,22 +601,22 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
 
       return [
         {
-          label: '复制',
+          label: t('fileActions.copy'),
           icon: <Copy className="h-4 w-4" />,
           onClick: () => handleCopyPath(displayPath),
         },
         {
-          label: '引用',
+          label: t('fileActions.reference'),
           icon: <AtSign className="h-4 w-4" />,
           onClick: () => handleReference(path),
         },
         {
-          label: '打开所在文件夹',
+          label: t('fileActions.openContainingFolder'),
           icon: <FolderOpen className="h-4 w-4" />,
           onClick: () => handleOpenInFinder(path, scope),
         },
         {
-          label: '打开 MyAgents 预览',
+          label: t('fileActions.openMyAgentsPreview'),
           icon: <PanelRightOpen className="h-4 w-4" />,
           disabled: !canOpenMyAgentsPreview,
           onClick: () => handleOpenMyAgentsPreview(path, displayPath, initialLineNumber),
@@ -625,7 +627,7 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
     if (pathType === 'file') {
       const canPreview = isPreviewable(fileName) || isImageFile(fileName) || !!getRichDocKind(fileName);
       items.push({
-        label: '预览',
+        label: t('fileActions.preview'),
         icon: <Eye className="h-4 w-4" />,
         disabled: !canPreview,
         onClick: () => handlePreview(path, { scope, initialLineNumber }),
@@ -633,25 +635,25 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
     }
 
     items.push({
-      label: '复制',
+      label: t('fileActions.copy'),
       icon: <Copy className="h-4 w-4" />,
       onClick: () => handleCopyPath(displayPath),
     });
 
     items.push({
-      label: '引用',
+      label: t('fileActions.reference'),
       icon: <AtSign className="h-4 w-4" />,
       onClick: () => handleReference(path),
     });
 
     items.push({
-      label: '打开',
+      label: t('fileActions.open'),
       icon: <ExternalLink className="h-4 w-4" />,
       onClick: () => handleOpenWithDefault(path, scope),
     });
 
     items.push({
-      label: '打开所在文件夹',
+      label: t('fileActions.openContainingFolder'),
       icon: <FolderOpen className="h-4 w-4" />,
       onClick: () => handleOpenInFinder(path, scope),
     });
@@ -660,14 +662,14 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
     // (i.e. a workspace tree exists to reveal into). Works for files and dirs.
     if (scope === 'workspace' && onRevealInTreeRef.current) {
       items.push({
-        label: '在文件目录中展示',
+        label: t('fileActions.revealInTree'),
         icon: <LocateFixed className="h-4 w-4" />,
         onClick: () => handleRevealInTree(path),
       });
     }
 
     return items;
-  }, [menuState, menuProfile, handlePreview, handleCopyPath, handleReference, handleOpenWithDefault, handleOpenInFinder, handleRevealInTree, handleOpenMyAgentsPreview]);
+  }, [menuState, menuProfile, t, handlePreview, handleCopyPath, handleReference, handleOpenWithDefault, handleOpenInFinder, handleRevealInTree, handleOpenMyAgentsPreview]);
 
   // ---------- Context value ----------
   const contextValue = useMemo<FileActionContextValue>(() => ({

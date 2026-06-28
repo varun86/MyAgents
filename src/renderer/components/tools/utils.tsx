@@ -1,5 +1,6 @@
 import { cloneElement, isValidElement, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
+import { useTranslation } from 'react-i18next';
 
 import { useFileAction } from '@/context/FileActionContext';
 import type { ToolUseSimple } from '@/types/chat';
@@ -36,6 +37,7 @@ interface ToolHeaderProps {
 }
 
 export function ToolHeader({ icon, label, toolName, tool }: ToolHeaderProps) {
+  const { t } = useTranslation('chat');
   const config = toolName ? getToolBadgeConfig(toolName) : null;
   // Always use icon from unified config if toolName is provided (single source of truth)
   // Otherwise fall back to passed icon for backward compatibility
@@ -57,7 +59,7 @@ export function ToolHeader({ icon, label, toolName, tool }: ToolHeaderProps) {
   }
 
   // Use unified expanded label if tool is provided, otherwise use passed label or toolName
-  const displayLabel = tool ? getToolExpandedLabel(tool) : label || toolName || '';
+  const displayLabel = tool ? getToolExpandedLabel(tool, t) : label || toolName || '';
 
   return (
     <div
@@ -104,6 +106,7 @@ const FILE_PATH_BOX_CLASS = 'rounded border border-[var(--line-subtle)] bg-[var(
  * still unresolved / does not exist, it renders as a plain monospace chip.
  */
 export function FilePath({ path }: { path?: string | null }) {
+  const { t } = useTranslation('chat');
   const fileAction = useFileAction(); // null outside Chat
   // A file tool can arrive with NO path: a partial/streaming tool input where
   // `file_path` hasn't parsed yet, or a restored/old persisted tool block whose
@@ -149,7 +152,9 @@ export function FilePath({ path }: { path?: string | null }) {
         e.stopPropagation();
         openMenu(e.clientX, e.clientY);
       }}
-      title={pathInfo.type === 'dir' ? `文件夹: ${path}` : `文件: ${path}`}
+      title={pathInfo.type === 'dir' ?
+        t('shell.toolChrome.filePath.folder', { path })
+        : t('shell.toolChrome.filePath.file', { path })}
     >
       {path}
     </code>
@@ -243,6 +248,7 @@ export function ExpandableContainer({
   wrapperClassName = '',
   fade = 'paper-inset'
 }: ExpandableContainerProps) {
+  const { t } = useTranslation('chat');
   const ref = useRef<HTMLDivElement>(null);
   const [isExpanded, setIsExpanded] = useState(false);
   const [needsExpand, setNeedsExpand] = useState(false);
@@ -279,7 +285,7 @@ export function ExpandableContainer({
             onClick={() => setIsExpanded(true)}
             className="rounded-full border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-1 text-xs text-[var(--ink-muted)] shadow-sm hover:text-[var(--ink-secondary)] transition-colors"
           >
-            展开全部
+            {t('shell.toolChrome.common.expandAll')}
           </button>
         </div>
       )}
@@ -320,8 +326,9 @@ interface ThinkingHeaderProps {
 }
 
 export function ThinkingHeader({ isComplete, durationMs }: ThinkingHeaderProps) {
+  const { t } = useTranslation('chat');
   const config = getThinkingBadgeConfig();
-  const label = getThinkingExpandedLabel(isComplete, durationMs);
+  const label = getThinkingExpandedLabel(isComplete, durationMs, t);
 
   // Resize the icon's flat size class to size-3 for header visibility
   let displayIcon = config.icon;

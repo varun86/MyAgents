@@ -4,6 +4,7 @@
  */
 import { Plus, Bot, Loader2, Trash2, X as XIcon, Link2 } from 'lucide-react';
 import { useCallback, useEffect, useState, useMemo, useRef } from 'react';
+import { useTranslation } from 'react-i18next';
 
 import { track } from '@/analytics';
 import { apiGetJson as globalApiGet, apiPostJson as globalApiPost, apiPutJson as globalApiPut, apiDelete as globalApiDelete } from '@/api/apiFetch';
@@ -26,6 +27,7 @@ export default function WorkspaceAgentsList({
     refreshKey = 0,
     onClose: _onClose,
 }: WorkspaceAgentsListProps) {
+    const { t } = useTranslation('settings');
     const toast = useToast();
     const toastRef = useRef(toast);
     toastRef.current = toast;
@@ -86,11 +88,11 @@ export default function WorkspaceAgentsList({
             }
         } catch {
             if (!isMountedRef.current) return;
-            toastRef.current.error('加载 Agent 列表失败');
+            toastRef.current.error(t('agentSettings.workspaceAgents.loadFailed'));
         } finally {
             if (isMountedRef.current) setLoading(false);
         }
-    }, [api, isInTabContext, agentDir]);
+    }, [api, isInTabContext, agentDir, t]);
 
     useEffect(() => {
         loadData();
@@ -112,10 +114,10 @@ export default function WorkspaceAgentsList({
                 : { config: newConfig, ...(agentDir ? { agentDir } : {}) };
             await api.put<{ success: boolean }>('/api/agents/workspace-config', payload);
         } catch {
-            toastRef.current.error('保存配置失败');
+            toastRef.current.error(t('agentSettings.workspaceAgents.saveFailed'));
             setWsConfig(prevConfig);
         }
-    }, [wsConfig, api, isInTabContext, agentDir]);
+    }, [wsConfig, api, isInTabContext, agentDir, t]);
 
     const handleToggle = useCallback(async (folderName: string, type: 'local' | 'global', currentEnabled: boolean) => {
         const newConfig = { ...wsConfig };
@@ -140,12 +142,12 @@ export default function WorkspaceAgentsList({
                 onSelectAgent(response.folderName, 'project', true);
                 loadData();
             } else {
-                toastRef.current.error(response.error || '创建失败');
+                toastRef.current.error(response.error || t('agentSettings.common.createFailed'));
             }
         } catch {
-            toastRef.current.error('创建失败');
+            toastRef.current.error(t('agentSettings.common.createFailed'));
         }
-    }, [api, isInTabContext, agentDir, onSelectAgent, loadData]);
+    }, [api, isInTabContext, agentDir, onSelectAgent, loadData, t]);
 
     // Import a global agent as a reference
     const handleImportGlobal = useCallback(async (agent: AgentItem) => {
@@ -156,8 +158,8 @@ export default function WorkspaceAgentsList({
         await updateWsConfig(newConfig);
         setGlobalRefAgents(prev => [...prev, agent]);
         setShowImportPicker(false);
-        toastRef.current.success(`已引入 "${agent.name}"`);
-    }, [wsConfig, updateWsConfig]);
+        toastRef.current.success(t('agentSettings.workspaceAgents.imported', { name: agent.name }));
+    }, [wsConfig, updateWsConfig, t]);
 
     // Remove a global reference (doesn't delete the global agent)
     const handleRemoveGlobalRef = useCallback(async (folderName: string) => {
@@ -166,9 +168,9 @@ export default function WorkspaceAgentsList({
         const newConfig = { ...wsConfig, global_refs: newRefs };
         await updateWsConfig(newConfig);
         setGlobalRefAgents(prev => prev.filter(a => a.folderName !== folderName));
-        toastRef.current.success('已移除引用');
+        toastRef.current.success(t('agentSettings.workspaceAgents.refRemoved'));
         setDeleteTarget(null);
-    }, [wsConfig, updateWsConfig]);
+    }, [wsConfig, updateWsConfig, t]);
 
     // Delete a local agent (file deletion)
     const handleDeleteLocal = useCallback(async (folderName: string) => {
@@ -185,17 +187,17 @@ export default function WorkspaceAgentsList({
                 const newConfig = { ...wsConfig, local: newLocal };
                 await updateWsConfig(newConfig);
                 setLocalAgents(prev => prev.filter(a => a.folderName !== folderName));
-                toastRef.current.success('已删除');
+                toastRef.current.success(t('agentSettings.common.deleteSuccess'));
             } else {
-                toastRef.current.error(response.error || '删除失败');
+                toastRef.current.error(response.error || t('agentSettings.common.deleteFailed'));
             }
         } catch {
-            toastRef.current.error('删除失败');
+            toastRef.current.error(t('agentSettings.common.deleteFailed'));
         } finally {
             setDeleting(false);
             setDeleteTarget(null);
         }
-    }, [api, isInTabContext, agentDir, wsConfig, updateWsConfig]);
+    }, [api, isInTabContext, agentDir, wsConfig, updateWsConfig, t]);
 
     // Available global agents that haven't been imported yet
     const availableForImport = useMemo(() => {
@@ -219,23 +221,23 @@ export default function WorkspaceAgentsList({
             <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
                     <Bot className="h-5 w-5 text-[var(--ink-muted)]" />
-                    <h3 className="text-base font-semibold text-[var(--ink)]">Sub-Agents</h3>
+                    <h3 className="text-base font-semibold text-[var(--ink)]">{t('agentSettings.workspaceAgents.title')}</h3>
                 </div>
                 <button
                     onClick={handleCreateAgent}
                     className="flex items-center gap-1 rounded-lg bg-[var(--button-primary-bg)] px-3 py-1.5 text-sm font-medium text-[var(--button-primary-text)] hover:bg-[var(--button-primary-bg-hover)]"
                 >
                     <Plus className="h-4 w-4" />
-                    新建
+                    {t('agentSettings.common.new')}
                 </button>
             </div>
 
             {!hasAny && availableForImport.length === 0 ? (
                 <div className="rounded-xl border border-dashed border-[var(--line)] bg-[var(--paper-inset)]/30 py-8 text-center">
                     <Bot className="mx-auto h-10 w-10 text-[var(--ink-muted)]/30" />
-                    <p className="mt-2 text-sm text-[var(--ink-muted)]">暂无 Agent</p>
+                    <p className="mt-2 text-sm text-[var(--ink-muted)]">{t('agentSettings.workspaceAgents.emptyTitle')}</p>
                     <p className="mt-1 text-xs text-[var(--ink-muted)]">
-                        创建 Sub-Agent 让 AI 自主委派来处理特定任务
+                        {t('agentSettings.workspaceAgents.emptyDescription')}
                     </p>
                 </div>
             ) : (
@@ -244,7 +246,7 @@ export default function WorkspaceAgentsList({
                     {localAgents.length > 0 && (
                         <div>
                             <h4 className="mb-2 text-sm font-medium text-[var(--ink-muted)]">
-                                本地 Agent ({localAgents.length})
+                                {t('agentSettings.workspaceAgents.localAgents', { count: localAgents.length })}
                             </h4>
                             <div className="grid grid-cols-2 gap-3">
                                 {localAgents.map(agent => (
@@ -265,7 +267,7 @@ export default function WorkspaceAgentsList({
                     {globalRefAgents.length > 0 && (
                         <div>
                             <h4 className="mb-2 text-sm font-medium text-[var(--ink-muted)]">
-                                全局引用 Agent ({globalRefAgents.length})
+                                {t('agentSettings.workspaceAgents.globalRefAgents', { count: globalRefAgents.length })}
                             </h4>
                             <div className="grid grid-cols-2 gap-3">
                                 {globalRefAgents.map(agent => (
@@ -287,13 +289,13 @@ export default function WorkspaceAgentsList({
                     {availableForImport.length > 0 && (
                         <div>
                             <div className="flex items-center justify-between mb-2">
-                                <h4 className="text-sm font-medium text-[var(--ink-muted)]">引入全局 Agent</h4>
+                                <h4 className="text-sm font-medium text-[var(--ink-muted)]">{t('agentSettings.workspaceAgents.importGlobalTitle')}</h4>
                                 <button
                                     onClick={() => setShowImportPicker(!showImportPicker)}
                                     className="flex items-center gap-1 rounded-lg border border-[var(--line)] px-2.5 py-1 text-xs text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
                                 >
                                     <Link2 className="h-3 w-3" />
-                                    {showImportPicker ? '收起' : '引入'}
+                                    {showImportPicker ? t('agentSettings.workspaceAgents.collapse') : t('agentSettings.workspaceAgents.import')}
                                 </button>
                             </div>
                             {showImportPicker && (
@@ -310,7 +312,7 @@ export default function WorkspaceAgentsList({
                                                 onClick={() => handleImportGlobal(agent)}
                                                 className="ml-2 shrink-0 rounded-md bg-[var(--button-primary-bg)] px-2 py-1 text-xs font-medium text-[var(--button-primary-text)] hover:bg-[var(--button-primary-bg-hover)]"
                                             >
-                                                + 引入
+                                                {t('agentSettings.workspaceAgents.importAction')}
                                             </button>
                                         </div>
                                     ))}
@@ -324,14 +326,14 @@ export default function WorkspaceAgentsList({
             {/* Delete/Remove Confirmation */}
             {deleteTarget && (
                 <ConfirmDialog
-                    title={deleteTarget.type === 'local' ? '删除 Agent' : '移除全局引用'}
+                    title={deleteTarget.type === 'local' ? t('agentSettings.workspaceAgents.deleteLocalTitle') : t('agentSettings.workspaceAgents.removeRefTitle')}
                     message={
                         deleteTarget.type === 'local'
-                            ? `确定要删除本地 Agent "${deleteTarget.name}" 吗？此操作会删除文件，不可恢复。`
-                            : `确定要移除对全局 Agent "${deleteTarget.name}" 的引用吗？全局 Agent 本身不会被删除。`
+                            ? t('agentSettings.workspaceAgents.deleteLocalMessage', { name: deleteTarget.name })
+                            : t('agentSettings.workspaceAgents.removeRefMessage', { name: deleteTarget.name })
                     }
-                    confirmText={deleteTarget.type === 'local' ? '删除' : '移除'}
-                    cancelText="取消"
+                    confirmText={deleteTarget.type === 'local' ? t('agentSettings.common.delete') : t('agentSettings.workspaceAgents.remove')}
+                    cancelText={t('agentSettings.common.cancel')}
                     confirmVariant="danger"
                     onConfirm={() => {
                         if (deleteTarget.type === 'local') {
@@ -374,6 +376,7 @@ function AgentRow({
     onDelete?: () => void;
     onRemoveRef?: () => void;
 }) {
+    const { t } = useTranslation('settings');
     return (
         <div
             className={`group flex cursor-pointer flex-col gap-1.5 rounded-xl bg-[var(--paper-elevated)] px-3.5 py-3 transition-shadow hover:shadow-sm ${enabled ? '' : 'opacity-55'}`}
@@ -386,7 +389,7 @@ function AgentRow({
                 <Bot className="h-3.5 w-3.5 shrink-0 text-violet-500" />
                 {isGlobalRef && (
                     <span className="shrink-0 rounded-full bg-[var(--paper-inset)] px-2 py-0.5 text-xs font-medium tracking-[0.04em] text-[var(--ink-muted)]">
-                        全局
+                        {t('agentSettings.capabilities.scopeUser')}
                     </span>
                 )}
                 {/* Destructive action — hidden until hover so the resting
@@ -395,7 +398,7 @@ function AgentRow({
                     <button
                         onClick={e => { e.stopPropagation(); onRemoveRef(); }}
                         className="shrink-0 rounded-md p-1 text-[var(--ink-muted)] opacity-0 transition-opacity hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] group-hover:opacity-100"
-                        title="移除引用"
+                        title={t('agentSettings.workspaceAgents.removeRef')}
                     >
                         <XIcon className="h-3.5 w-3.5" />
                     </button>
@@ -404,7 +407,7 @@ function AgentRow({
                     <button
                         onClick={e => { e.stopPropagation(); onDelete(); }}
                         className="shrink-0 rounded-md p-1 text-[var(--ink-muted)] opacity-0 transition-opacity hover:bg-[var(--error-bg)] hover:text-[var(--error)] group-hover:opacity-100"
-                        title="删除"
+                        title={t('agentSettings.common.delete')}
                     >
                         <Trash2 className="h-3.5 w-3.5" />
                     </button>
@@ -423,7 +426,7 @@ function AgentRow({
                 </button>
             </div>
             <p className="line-clamp-2 min-h-[2.6em] text-sm leading-relaxed text-[var(--ink-muted)]">
-                {agent.description || '暂无描述'}
+                {agent.description || t('agentSettings.common.noDescription')}
             </p>
         </div>
     );

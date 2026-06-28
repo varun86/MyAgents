@@ -1,5 +1,6 @@
-import { AlertCircle, ChevronRight, ChevronUp, Gauge, Loader, Paperclip, Plus, Send, Square, X, FileText, AtSign, Wrench, Timer, Settings2, Unlock } from 'lucide-react';
+import { AlertCircle, ChevronRight, ChevronUp, Gauge, Loader, Paperclip, Plus, Send, Square, X, FileText, AtSign, Wrench, Timer, Settings2 } from 'lucide-react';
 import { memo, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState, forwardRef } from 'react';
+import { useTranslation } from 'react-i18next';
 
 import Tip from '@/components/Tip';
 import { useToast } from '@/components/Toast';
@@ -9,12 +10,11 @@ import { useImagePreview } from '@/context/ImagePreviewContext';
 import { useWorkspaceFileService } from '@/hooks/useWorkspaceFileService';
 import { type PermissionMode, PERMISSION_MODES, type Provider, type ProviderVerifyStatus, getModelDisplayName } from '@/config/types';
 import { useConfigData } from '@/config/useConfigData';
-import { resolveEnterKeyAction, sendHintLabel } from '@/utils/chatSendKey';
+import { resolveEnterKeyAction, sendKeyHint } from '@/utils/chatSendKey';
 import SlashCommandMenu, { type SlashCommand, filterAndSortCommands, mergeSlashCommands } from '../SlashCommandMenu';
 import { isClientActionCommand, withClientActionCommands } from '@/utils/slashActions';
 import QueuedMessagesPanel from '../QueuedMessageBubble';
 import CronTaskStatusBar from '../cron/CronTaskStatusBar';
-import CronTaskOverlay from '../cron/CronTaskOverlay';
 import { useUndoStack } from '@/hooks/useUndoStack';
 import { CUSTOM_EVENTS } from '../../../shared/constants';
 import { reasoningEffortChoices, REASONING_EFFORT_DESCRIPTIONS, REASONING_EFFORT_DEFAULT } from '../../../shared/reasoningEffort';
@@ -63,8 +63,9 @@ function isProviderWarning(
 function getCurrentModelLabel(
   provider: Provider | null | undefined,
   modelId: string | undefined,
+  fallbackLabel: string,
 ): string {
-  if (!modelId) return '当前模型';
+  if (!modelId) return fallbackLabel;
   return provider ? getModelDisplayName(provider, modelId) : modelId;
 }
 
@@ -76,13 +77,13 @@ interface FileSearchResult {
   type: 'file' | 'dir';
 }
 
-function getFileSearchParentPath(path: string, name: string): string {
+function getFileSearchParentPath(path: string, name: string, workspaceRootLabel: string): string {
   const normalized = path.replace(/\\/g, '/');
   const suffix = `/${name}`;
   if (normalized.endsWith(suffix)) {
-    return normalized.slice(0, -suffix.length) || '工作区根目录';
+    return normalized.slice(0, -suffix.length) || workspaceRootLabel;
   }
-  return normalized === name ? '工作区根目录' : normalized;
+  return normalized === name ? workspaceRootLabel : normalized;
 }
 
 const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputProps>(function SimpleChatInput({
@@ -105,7 +106,6 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   onModelChange,
   reasoningEffort = 'default',
   onReasoningEffortChange,
-  sessionUnlocked = false,
   permissionMode = 'auto',
   onPermissionModeChange,
   apiKeys = {},
@@ -113,6 +113,11 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   inputRef,
   workspaceMcpEnabled = [],
   globalMcpEnabled = [],
+  officialTools = [],
+  workspaceOfficialToolEnabled = [],
+  globalOfficialToolEnabled = [],
+  officialToolNeedsConfig = {},
+  onWorkspaceOfficialToolToggle,
   globallyVisiblePlugins = [],
   workspaceEnabledPlugins = [],
   onWorkspacePluginToggle,
@@ -124,10 +129,15 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   cronModeEnabled = false,
   cronConfig,
   cronTask,
+  stoppedCronTask,
+  cronIsExecuting = false,
+  cronExecutionNumber,
+  composerConfigLockedReason,
   onCronButtonClick,
   onCronSettings,
   onCronCancel,
   onCronStop,
+  onCronDismissStopped,
   onSlashAction,
   sdkSlashCommands = [],
   mode = 'chat',
@@ -149,6 +159,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   workspacePath = null,
   sessionId = null,
 }, ref) {
+  const { t } = useTranslation('chat');
   const isLauncherMode = mode === 'launcher';
   // Launcher-vs-Chat minimum row count, referenced by both the auto-resize
   // effect and the textarea `rows` / min/max style props. Keep as a single
@@ -161,8 +172,18 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
 
   // Compute display modes and model name based on runtime
   const displayPermissionModes = isExternalRuntime && runtimePermissionModes
-    ? runtimePermissionModes.map(m => ({ value: m.value as PermissionMode, label: m.label, icon: m.icon, description: m.description, sdkValue: m.value }))
-    : PERMISSION_MODES;
+    ? runtimePermissionModes.map(m => ({
+      value: m.value as PermissionMode,
+      label: t(`input.permissionModes.${m.value}.label`, { defaultValue: m.label }),
+      icon: m.icon,
+      description: t(`input.permissionModes.${m.value}.description`, { defaultValue: m.description }),
+      sdkValue: m.value,
+    }))
+    : PERMISSION_MODES.map(m => ({
+      ...m,
+      label: t(`input.permissionModes.${m.value}.label`, { defaultValue: m.label }),
+      description: t(`input.permissionModes.${m.value}.description`, { defaultValue: m.description }),
+    }));
   const currentModeDisplay = displayPermissionModes.find(m => m.value === permissionMode)
     ?? displayPermissionModes[0];
 
@@ -252,6 +273,13 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   // Stabilize toast reference to avoid unnecessary effect re-runs
   const toastRef = useRef(toast);
   toastRef.current = toast;
+  const configControlsLocked = !!composerConfigLockedReason;
+  const configControlLockTitle = composerConfigLockedReason ?? undefined;
+  const showConfigLockedReason = useCallback(() => {
+    if (!composerConfigLockedReason) return false;
+    toastRef.current.warning(composerConfigLockedReason, 3500);
+    return true;
+  }, [composerConfigLockedReason]);
 
   const { openPreview } = useImagePreview();
   // Use external ref if provided, otherwise use internal ref
@@ -282,6 +310,37 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   const [showModeMenu, setShowModeMenu] = useState(false);
   const [showModelMenu, setShowModelMenu] = useState(false);
   const [showToolMenu, setShowToolMenu] = useState(false);
+  useEffect(() => {
+    if (!configControlsLocked || (!showModeMenu && !showModelMenu && !showToolMenu)) return;
+    const timer = window.setTimeout(() => {
+      setShowModeMenu(false);
+      setShowModelMenu(false);
+      setShowToolMenu(false);
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [configControlsLocked, showModeMenu, showModelMenu, showToolMenu]);
+  const modeMenuOpen = showModeMenu && !configControlsLocked;
+  const modelMenuOpen = showModelMenu && !configControlsLocked;
+  const toolMenuOpen = showToolMenu && !configControlsLocked;
+  const visibleOfficialTools = useMemo(
+    () => officialTools.filter(
+      tool =>
+        globalOfficialToolEnabled.includes(tool.id) &&
+        !officialToolNeedsConfig[tool.id],
+    ),
+    [globalOfficialToolEnabled, officialToolNeedsConfig, officialTools],
+  );
+  const effectiveToolCount = useMemo(() => {
+    const effectiveMcpCount = isExternalRuntime
+      ? 0
+      : workspaceMcpEnabled.filter(
+        id => globalMcpEnabled.includes(id) && mcpServers.some(s => s.id === id),
+      ).length;
+    const effectiveOfficialCount = workspaceOfficialToolEnabled.filter(
+      id => visibleOfficialTools.some(tool => tool.id === id),
+    ).length;
+    return effectiveMcpCount + effectiveOfficialCount;
+  }, [globalMcpEnabled, isExternalRuntime, mcpServers, visibleOfficialTools, workspaceMcpEnabled, workspaceOfficialToolEnabled]);
 
   // #324 — 推理强度 submenu (fixed bottom row of the model menu). Opens on
   // hover/click of the row; 120ms close delay + an invisible hover bridge
@@ -312,22 +371,21 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   }, []);
   // Reset submenu state whenever the model menu closes (incl. outside-click).
   useEffect(() => {
-    if (!showModelMenu) setShowEffortSubmenu(false);
-  }, [showModelMenu]);
+    if (!modelMenuOpen) setShowEffortSubmenu(false);
+  }, [modelMenuOpen]);
   useEffect(() => () => {
     if (effortCloseTimerRef.current) clearTimeout(effortCloseTimerRef.current);
   }, []);
-
   // Derive current model ID from prop or provider default — no hardcoded fallback
   const currentModelId = selectedModel ?? provider?.primaryModel;
   // Get display name for current model (runtime-aware)
   const currentModelName = isExternalRuntime
     ? (runtimeModels?.find(m => m.value === selectedModel)?.displayName
       ?? runtimeModels?.find(m => m.isDefault)?.displayName
-      ?? '默认')
+      ?? t('input.modelDefault'))
     : (currentModelId
       ? (provider ? getModelDisplayName(provider, currentModelId) : currentModelId)
-      : '选择模型');
+      : t('input.selectModel'));
 
   // @file search
   const [showFileSearch, setShowFileSearch] = useState(false);
@@ -357,6 +415,13 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   const [slashPosition, setSlashPosition] = useState<number | null>(null);
 
   const clientActionsEnabled = !!onSlashAction;
+  const localizedFallbackSlashCommands = useMemo(
+    () => BUILTIN_FALLBACK_SLASH_COMMANDS.map(cmd => ({
+      ...cmd,
+      description: t(`input.slashCommands.${cmd.name}`, { defaultValue: cmd.description }),
+    })),
+    [t],
+  );
   const mergedSlashCommands = useMemo(
     () => withClientActionCommands(
       mergeSlashCommands(slashCommands, sdkSlashCommands),
@@ -468,7 +533,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
       setSlashCommands(list);
     if (!fileService.isAvailable) {
       // Fall back to builtins so the menu isn't empty in browser dev mode.
-      apply(BUILTIN_FALLBACK_SLASH_COMMANDS);
+      apply(localizedFallbackSlashCommands);
       return;
     }
     try {
@@ -477,13 +542,13 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
         apply(response.commands);
       } else {
         console.warn('[slash-commands] Rust returned empty, using builtin fallback');
-        apply(BUILTIN_FALLBACK_SLASH_COMMANDS);
+        apply(localizedFallbackSlashCommands);
       }
     } catch (err) {
       console.error('Failed to fetch slash commands, using fallback:', err);
-      apply(BUILTIN_FALLBACK_SLASH_COMMANDS);
+      apply(localizedFallbackSlashCommands);
     }
-  }, [fileService]);
+  }, [fileService, localizedFallbackSlashCommands]);
 
   // Fetch slash commands on mount or when workspacePath changes (so launcher
   // workspace switching reloads project-level skills).
@@ -814,6 +879,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   // Builtin: auto → plan → fullAgency → auto
   // External: cycle through runtimePermissionModes (CC or Codex specific modes)
   const cyclePermissionMode = useCallback(() => {
+    if (showConfigLockedReason()) return;
     const modeOrder: string[] = runtimePermissionModes?.length
       ? runtimePermissionModes.map(m => m.value)
       : ['auto', 'plan', 'fullAgency'];
@@ -825,10 +891,10 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
     // Show warning toast for dangerous modes (runtime-agnostic string check)
     const dangerousModes = new Set(['fullAgency', 'bypassPermissions', 'no-restrictions']);
     if (dangerousModes.has(nextMode)) {
-      toastRef.current.warning('自主行动已启用：Agent 可能做出不可挽回的操作，请谨慎使用', 5000);
+      toastRef.current.warning(t('input.autonomyWarning'), 5000);
     }
     onPermissionModeChange?.(nextMode);
-  }, [permissionMode, onPermissionModeChange, runtimePermissionModes]);
+  }, [permissionMode, onPermissionModeChange, runtimePermissionModes, showConfigLockedReason, t]);
 
   // Global Shift+Tab handler with capture phase to prevent default Tab behavior.
   // Gated by `active` so pressing Shift+Tab doesn't cycle permission-mode on every
@@ -892,7 +958,10 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
       !modelSupportsModality(provider, currentModelId, 'image')
     ) {
       toastRef.current.warning(
-        `${getCurrentModelLabel(provider, currentModelId)} 不支持图片，已自动过滤 ${images.length} 张图片，仅文本已送达`,
+        t('input.imageFilteredOnSend', {
+          model: getCurrentModelLabel(provider, currentModelId, t('input.currentModel')),
+          count: images.length,
+        }),
       );
     }
 
@@ -912,7 +981,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
     } finally {
       sendingRef.current = false;
     }
-  }, [onSend, images, inputValue, provider, currentModelId, isExternalRuntime, setImages]);
+  }, [onSend, images, inputValue, provider, currentModelId, isExternalRuntime, setImages, t]);
 
   // Handle keyboard navigation in file search and slash menu
   // Handler for selecting a slash command — shared by the click path
@@ -926,6 +995,11 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   // `/name ` as before.
   const handleSlashSelect = useCallback((cmd: SlashCommand) => {
     if (slashPosition === null) return;
+    if (onSlashAction && isClientActionCommand(cmd) && cmd.name === 'loop' && showConfigLockedReason()) {
+      setShowSlashMenu(false);
+      setSlashPosition(null);
+      return;
+    }
     const before = inputValue.slice(0, slashPosition);
     const after = inputValue.slice(textareaRef.current?.selectionStart || slashPosition + slashSearchQuery.length + 1);
 
@@ -942,7 +1016,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
     setShowSlashMenu(false);
     setSlashPosition(null);
   // eslint-disable-next-line react-hooks/exhaustive-deps -- textareaRef is a stable ref
-  }, [slashPosition, inputValue, slashSearchQuery, handleSkillSelect, onSlashAction]);
+  }, [slashPosition, inputValue, slashSearchQuery, handleSkillSelect, onSlashAction, showConfigLockedReason]);
 
   const handleKeyDown = useCallback(async (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
     // Shift+Tab to cycle permission mode
@@ -993,11 +1067,11 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
 
           // Show appropriate message
           if (failCount === 0) {
-            toastRef.current.success(`已撤销 ${successCount} 个文件的添加`);
+            toastRef.current.success(t('input.undoFilesAdded', { count: successCount }));
           } else if (successCount > 0) {
-            toastRef.current.warning(`已撤销 ${successCount} 个文件，${failCount} 个文件删除失败`);
+            toastRef.current.warning(t('input.undoFilesPartial', { successCount, failCount }));
           } else {
-            toastRef.current.warning('已移除引用，但文件删除失败');
+            toastRef.current.warning(t('input.undoReferenceOnly'));
           }
         }
         return;
@@ -1134,6 +1208,13 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
     // eslint-disable-next-line react-hooks/exhaustive-deps -- textareaRef is stable
   }, [cyclePermissionMode, undoStack, fileService, showSlashMenu, filteredSlashCommands, slashSearchQuery, selectedSlashIndex, slashPosition, showFileSearch, fileSearchResults, selectedFileIndex, inputValue, atPosition, fileSearchQuery, images.length, handleSend, handleSkillSelect, handleSlashSelect, mentionTab, thoughtResults]);
 
+  const showDraftCronBar = cronModeEnabled && !cronTask && !!cronConfig;
+  const activeCronTask = !isLauncherMode && cronTask?.status === 'running' && cronTask.runMode !== 'new_session'
+    ? cronTask
+    : null;
+  const visibleStoppedCronTask = !isLauncherMode ? stoppedCronTask : null;
+  const hasCronBar = showDraftCronBar || !!activeCronTask || !!visibleStoppedCronTask;
+
   return (
     <>
     <div ref={overlayRootRef} className={isLauncherMode
@@ -1190,43 +1271,45 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
         {/* Cron task status bar — shown when cron mode is enabled but the task
          *  hasn't started yet. PRD 0.2.7 D1: launcher SHOULD show this so the
          *  user sees their staged cron config; the actual cron creation happens
-         *  after handoff to chat. Overlay (running status) stays gated below
-         *  because launcher never reaches "running" — handoff fires first. */}
-        {cronModeEnabled && !cronTask && cronConfig && (
+         *  after handoff to chat. Running current-session cron also stays here
+         *  as a non-blocking bar so the composer remains usable. */}
+        {showDraftCronBar && cronConfig && (
           <CronTaskStatusBar
+            mode="draft"
             intervalMinutes={cronConfig.intervalMinutes}
             schedule={cronConfig.schedule}
             onSettings={() => onCronSettings?.()}
             onCancel={() => onCronCancel?.()}
           />
         )}
+        {activeCronTask && (
+          <CronTaskStatusBar
+            mode={cronIsExecuting ? 'executing' : 'running'}
+            intervalMinutes={activeCronTask.intervalMinutes}
+            schedule={activeCronTask.schedule}
+            executionCount={activeCronTask.executionCount}
+            maxExecutions={activeCronTask.endConditions?.maxExecutions}
+            nextExecutionAt={activeCronTask.nextExecutionAt}
+            executionNumber={cronExecutionNumber}
+            onStop={() => onCronStop?.()}
+          />
+        )}
+        {visibleStoppedCronTask && (
+          <CronTaskStatusBar
+            mode="stopped"
+            intervalMinutes={visibleStoppedCronTask.intervalMinutes}
+            schedule={visibleStoppedCronTask.schedule}
+            executionCount={visibleStoppedCronTask.executionCount}
+            maxExecutions={visibleStoppedCronTask.endConditions?.maxExecutions}
+            onDismissStopped={() => onCronDismissStopped?.()}
+          />
+        )}
 
         <div className={`relative border border-[var(--line)] bg-[var(--paper-elevated)] shadow-md ${
-          cronModeEnabled && !cronTask && cronConfig
+          hasCronBar
             ? 'rounded-b-2xl rounded-t-none border-t-0'  // StatusBar visible: no top rounded, no top border
             : 'rounded-2xl'  // Normal: fully rounded
         }`}>
-          {/* Cron task overlay - shows when task is running.
-           *  `runMode === 'new_session'` rotates a fresh sessionId per execution
-           *  (`cron_task.rs::rotate_new_session_id`), so any prior session opened
-           *  via 任务详情 →「关联会话」is already a one-shot historical chat —
-           *  it's functionally detached from the cron and the user must be able
-           *  to keep typing in it. Only `single_session` mode keeps a session as
-           *  the cron's live workbench, where the overlay is the right signal. */}
-          {!isLauncherMode && cronTask && cronTask.status === 'running' && cronTask.runMode !== 'new_session' && (
-            <CronTaskOverlay
-              status={cronTask.status}
-              intervalMinutes={cronTask.intervalMinutes}
-              schedule={cronTask.schedule}
-              executionCount={cronTask.executionCount}
-              maxExecutions={cronTask.endConditions?.maxExecutions}
-              nextExecutionTime={cronTask.lastExecutedAt
-                ? new Date(new Date(cronTask.lastExecutedAt).getTime() + cronTask.intervalMinutes * 60000)
-                : undefined}
-              onStop={() => onCronStop?.()}
-              onSettings={() => onCronSettings?.()}
-            />
-          )}
           {/* Clickable area for focus - covers input area but not toolbar */}
           <div
             className="cursor-text"
@@ -1253,7 +1336,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                     type="button"
                     onClick={() => removeImage(img.id)}
                     className="absolute -top-1.5 -right-1.5 h-5 w-5 rounded-full bg-[var(--error)] text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
-                    title="删除图片"
+                    title={t('input.deleteImage')}
                   >
                     <X className="h-3 w-3" />
                   </button>
@@ -1280,8 +1363,8 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
               onCompositionEnd={handleCompositionEnd}
               placeholder={
                 isLauncherMode
-                  ? '今天，想干点啥？'
-                  : '输入消息，使用 @ 引用文件，/ 使用技能...'
+                  ? t('input.launcherPlaceholder')
+                  : t('input.placeholder')
               }
               rows={effectiveMinLines}
               className="block w-full resize-none bg-transparent text-base leading-relaxed text-[var(--ink)] outline-none placeholder:text-[var(--ink-muted)]"
@@ -1319,7 +1402,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
               {/* Tabs header */}
               <div className="flex shrink-0 items-center gap-1 border-b border-[var(--line-subtle)] bg-[var(--paper)] p-1">
                 <MentionTabButton
-                  label="工作区文件"
+                  label={t('input.mention.workspaceFiles')}
                   active={mentionTab === 'file'}
                   onClick={() => {
                     setMentionTab('file');
@@ -1327,7 +1410,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                   }}
                 />
                 <MentionTabButton
-                  label="想法"
+                  label={t('input.mention.thoughts')}
                   active={mentionTab === 'thought'}
                   onClick={() => {
                     setMentionTab('thought');
@@ -1335,7 +1418,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                   }}
                 />
                 <span className="ml-auto pr-2 text-xs text-[var(--ink-muted)]/60">
-                  ⌘/Ctrl + ←/→ 切换
+                  {t('input.mention.switchHint')}
                 </span>
               </div>
 
@@ -1343,20 +1426,20 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                 {mentionTab === 'file' ? (
                   fileSearchQuery.length === 0 ? (
                     <div className="px-3 py-2 text-sm text-[var(--ink-muted)]">
-                      输入文件名搜索...
+                      {t('input.mention.filePlaceholder')}
                     </div>
                   ) : isFileSearching ? (
                     <div className="px-3 py-2 text-sm text-[var(--ink-muted)]">
-                      搜索中...
+                      {t('input.mention.searching')}
                     </div>
                   ) : fileSearchResults.length === 0 ? (
                     <div className="px-3 py-2 text-sm text-[var(--ink-muted)]">
-                      未找到文件
+                      {t('input.mention.noFiles')}
                     </div>
                   ) : (
                     fileSearchResults.map((file, idx) => {
                       const isSelected = idx === selectedFileIndex;
-                      const parentPath = getFileSearchParentPath(file.path, file.name);
+                      const parentPath = getFileSearchParentPath(file.path, file.name, t('input.workspaceRoot'));
                       return (
                         <div
                           key={file.path}
@@ -1399,15 +1482,17 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                   // Thought tab
                   isThoughtSearching ? (
                     <div className="px-3 py-2 text-sm text-[var(--ink-muted)]">
-                      搜索中...
+                      {t('input.mention.searching')}
                     </div>
                   ) : thoughtResults.length === 0 ? (
                     <div className="px-3 py-3 text-sm text-[var(--ink-muted)]">
                       {fileSearchQuery.length === 0
-                        ? '暂无想法，先在「任务中心」记录吧'
+                        ? t('input.mention.emptyThoughts')
                         : (
                           <>
-                            没有匹配 <span className="font-medium text-[var(--ink)]">{`"${fileSearchQuery}"`}</span> 的想法
+                            {t('input.mention.noThoughtMatchesPrefix')}{' '}
+                            <span className="font-medium text-[var(--ink)]">{`"${fileSearchQuery}"`}</span>
+                            {' '}{t('input.mention.noThoughtMatchesSuffix')}
                           </>
                         )}
                     </div>
@@ -1415,8 +1500,8 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                     <>
                       <div className="px-3 pt-2 pb-1 text-xs font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60">
                         {fileSearchQuery.length === 0
-                          ? `最近 ${Math.min(thoughtResults.length, THOUGHT_RECENT_LIMIT)} 条想法`
-                          : `匹配 "${fileSearchQuery}" 的想法 · ${thoughtResults.length} 条`}
+                          ? t('input.mention.recentThoughts', { count: Math.min(thoughtResults.length, THOUGHT_RECENT_LIMIT) })
+                          : t('input.mention.matchedThoughts', { query: fileSearchQuery, count: thoughtResults.length })}
                       </div>
                       {thoughtResults.map((thought, idx) => (
                         <ThoughtPickerRow
@@ -1440,7 +1525,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                       {fileSearchQuery.length > 0
                         && thoughtResults.length >= THOUGHT_SOFT_CAP && (
                           <div className="border-t border-[var(--line-subtle)] px-3 py-2 text-xs text-[var(--ink-muted)]/70">
-                            已显示前 {THOUGHT_SOFT_CAP} 条匹配，请输入更精确的关键词
+                            {t('input.mention.thoughtSoftCap', { count: THOUGHT_SOFT_CAP })}
                           </div>
                         )}
                     </>
@@ -1501,7 +1586,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                   setShowPlusMenu(!showPlusMenu);
                 }}
                 className="rounded-lg p-2 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
-                title="添加上下文"
+                title={t('input.addContext')}
               >
                 <Plus className="h-4 w-4" />
               </button>
@@ -1542,7 +1627,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                   className="flex w-full items-center gap-2 px-3 py-2 text-sm text-[var(--ink-muted)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
                 >
                   <AtSign className="h-4 w-4" />
-                  引用文件
+                  {t('input.referenceFile')}
                 </button>
                 <button
                   type="button"
@@ -1568,7 +1653,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                   className="flex w-full items-center gap-2 px-3 py-2 text-sm text-[var(--ink-muted)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
                 >
                   <span className="inline-flex h-4 w-4 items-center justify-center font-medium text-[var(--ink-muted)]">/</span>
-                  使用技能
+                  {t('input.useSkill')}
                 </button>
                 <button
                   type="button"
@@ -1579,7 +1664,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                   className="flex w-full items-center gap-2 px-3 py-2 text-sm text-[var(--ink-muted)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
                 >
                   <Paperclip className="h-4 w-4" />
-                  上传文件
+                  {t('input.uploadFile')}
                 </button>
               </Popover>
 
@@ -1600,6 +1685,9 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                   onChange={onRuntimeChange}
                   variant="toolbar"
                   onOpenSettings={onOpenAgentSettings}
+                  disabled={configControlsLocked}
+                  disabledReason={configControlLockTitle}
+                  onDisabledClick={showConfigLockedReason}
                 />
               )}
 
@@ -1607,29 +1695,33 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
               <button
                 ref={modeBtnRef}
                 type="button"
+                aria-disabled={configControlsLocked}
                 onClick={(e) => {
                   e.stopPropagation();
-                  setShowModeMenu(!showModeMenu);
+                  if (showConfigLockedReason()) return;
+                  setShowModeMenu(!modeMenuOpen);
                   setShowModelMenu(false);
                   setShowPlusMenu(false);
                   setShowToolMenu(false);
                 }}
-                className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
-                title="切换执行模式"
+                className={`flex items-center gap-1 rounded-lg px-2 py-1.5 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)] ${
+                  configControlsLocked ? 'cursor-not-allowed opacity-50 hover:bg-transparent hover:text-[var(--ink-muted)]' : ''
+                }`}
+                title={configControlLockTitle ?? t('input.permissionModeTitle')}
               >
                 <span>{currentModeDisplay?.icon}</span>
                 <span className="toolbar-label">{currentModeDisplay?.label}</span>
                 <ChevronUp className="h-3 w-3" />
               </button>
               <Popover
-                open={showModeMenu}
+                open={modeMenuOpen}
                 onClose={() => setShowModeMenu(false)}
                 anchorRef={modeBtnRef}
                 placement="top-start"
                 className="w-72 py-1"
               >
                 <div className="flex items-center justify-between px-3 py-2 border-b border-[var(--line)]">
-                  <span className="text-xs font-medium text-[var(--ink-muted)]">会话模式</span>
+                  <span className="text-xs font-medium text-[var(--ink-muted)]">{t('input.permissionModeHeader')}</span>
                   {onOpenAgentSettings && (
                     <button
                       type="button"
@@ -1640,7 +1732,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                       }}
                       className="text-xs font-medium text-[var(--accent)] hover:text-[var(--accent-warm-hover)] transition-colors"
                     >
-                      Agent 设置
+                      {t('input.agentSettings')}
                     </button>
                   )}
                 </div>
@@ -1651,7 +1743,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                     onClick={(e) => {
                       e.stopPropagation();
                       if (mode.value === 'fullAgency' || (mode.value as string) === 'bypassPermissions') {
-                        toastRef.current.warning('自主行动已启用：Agent 可能做出不可挽回的操作，请谨慎使用', 5000);
+                        toastRef.current.warning(t('input.autonomyWarning'), 5000);
                       }
                       onPermissionModeChange?.(mode.value);
                       setShowModeMenu(false);
@@ -1671,43 +1763,35 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                 ))}
               </Popover>
 
-              {/* Tool/MCP Dropdown - hidden for external runtimes (they use their own tools) */}
-              {!isExternalRuntime && (
+              {/* Tool/MCP Dropdown */}
               <>
-              {(() => {
-                // Count only MCPs the user will actually see *and* that are live: present in the
-                // catalogue (mcpServers), globally enabled, and workspace-enabled. Using the raw
-                // `workspaceMcpEnabled.length` drifts from the popover contents when a workspace
-                // still references IDs that were disabled globally or removed from the catalogue.
-                const effectiveMcpCount = workspaceMcpEnabled.filter(
-                  id => globalMcpEnabled.includes(id) && mcpServers.some(s => s.id === id)
-                ).length;
-                return (
               <button
                 ref={toolBtnRef}
                 type="button"
+                aria-disabled={configControlsLocked}
                 onClick={(e) => {
                   e.stopPropagation();
-                  setShowToolMenu(!showToolMenu);
+                  if (showConfigLockedReason()) return;
+                  setShowToolMenu(!toolMenuOpen);
                   setShowModeMenu(false);
                   setShowModelMenu(false);
                   setShowPlusMenu(false);
                 }}
-                className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
-                title="使用工具"
+                className={`flex items-center gap-1 rounded-lg px-2 py-1.5 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)] ${
+                  configControlsLocked ? 'cursor-not-allowed opacity-50 hover:bg-transparent hover:text-[var(--ink-muted)]' : ''
+                }`}
+                title={configControlLockTitle ?? t('input.toolsTitle')}
               >
                 <Wrench className="h-3.5 w-3.5" />
-                <span className="toolbar-label">工具</span>
-                {effectiveMcpCount > 0 && (
+                <span className="toolbar-label">{t('input.toolsLabel')}</span>
+                {effectiveToolCount > 0 && (
                   <span className="text-xs text-[var(--ink-muted)]">
-                    {effectiveMcpCount}
+                    {effectiveToolCount}
                   </span>
                 )}
               </button>
-                );
-              })()}
               <Popover
-                open={showToolMenu}
+                open={toolMenuOpen}
                 onClose={() => setShowToolMenu(false)}
                 anchorRef={toolBtnRef}
                 placement="top-start"
@@ -1719,11 +1803,60 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                 className="w-64 max-h-[50vh] overflow-y-auto py-1"
               >
                     <div className="px-3 py-2 text-xs font-medium text-[var(--ink-muted)] border-b border-[var(--line)]">
-                      工具 (在此对话中启用)
+                      {t('input.toolsHeader')}
                     </div>
-                    {globalMcpEnabled.length > 0 ? (
-                      mcpServers
-                        .filter(s => globalMcpEnabled.includes(s.id))
+                    {visibleOfficialTools.length > 0 || (!isExternalRuntime && mcpServers.some(s => globalMcpEnabled.includes(s.id))) ? (
+                      <>
+                      {visibleOfficialTools.map((tool) => {
+                        const isEnabled = workspaceOfficialToolEnabled.includes(tool.id);
+                        return (
+                          <div
+                            key={tool.id}
+                            className="flex items-center justify-between px-3 py-2"
+                          >
+                            <div className="flex-1 min-w-0">
+                              <div className="text-sm font-medium text-[var(--ink)] truncate">
+                                {tool.name}
+                              </div>
+                              {tool.description && (
+                                <div className="text-xs text-[var(--ink-muted)] truncate">
+                                  {tool.description}
+                                </div>
+                              )}
+                            </div>
+                            <button
+                              type="button"
+                              title={t('input.settings')}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setShowToolMenu(false);
+                                window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.OPEN_SETTINGS, {
+                                  detail: { section: 'mcp', officialToolId: tool.id },
+                                }));
+                              }}
+                              className="ml-2 shrink-0 rounded p-0.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+                            >
+                              <Settings2 className="h-3.5 w-3.5" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                onWorkspaceOfficialToolToggle?.(tool.id, !isEnabled);
+                              }}
+                              className={`relative ml-2 inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent transition-colors hover:opacity-80 focus:outline-none ${isEnabled ? 'bg-[var(--accent)]' : 'bg-[var(--line-strong)]'
+                                }`}
+                            >
+                              <span
+                                className={`pointer-events-none inline-block h-3.5 w-3.5 rounded-full bg-[var(--toggle-thumb)] shadow-sm ring-0 transition-transform ${isEnabled ? 'translate-x-4' : 'translate-x-0.5'
+                                  }`}
+                              />
+                            </button>
+                          </div>
+                        );
+                      })}
+                      {mcpServers
+                        .filter(s => !isExternalRuntime && globalMcpEnabled.includes(s.id))
                         .map((server) => {
                           const isEnabled = workspaceMcpEnabled.includes(server.id);
                           return (
@@ -1743,7 +1876,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                               </div>
                               <button
                                 type="button"
-                                title="设置"
+                                title={t('input.settings')}
                                 onClick={(e) => {
                                   e.stopPropagation();
                                   setShowToolMenu(false);
@@ -1769,10 +1902,11 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                               </button>
                             </div>
                           );
-                        })
+                        })}
+                      </>
                     ) : (
                       <div className="px-3 py-3 text-sm text-[var(--ink-muted)]">
-                        在
+                        {t('input.toolsEmptyPrefix')}
                         <button
                           type="button"
                           onClick={(e) => {
@@ -1783,12 +1917,16 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                           }}
                           className="mx-1 text-[var(--accent)] hover:underline"
                         >
-                          设置页面
+                          {t('input.settingsPage')}
                         </button>
-                        安装开启 MCP 工具，即可使用浏览器等更多功能
+                        {isExternalRuntime
+                          ? t('input.toolsEmptyExternal')
+                          : t('input.toolsEmptyBuiltin')}
                       </div>
                     )}
 
+                    {!isExternalRuntime && (
+                    <>
                     {/* PRD 0.2.17 — Claude Plugins section. Mirrors the MCP
                      *  block above (same toggle UI, same per-workspace
                      *  semantics). Only globally-visible plugins appear here
@@ -1802,7 +1940,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                      *  to Settings → Plugins. Matches the MCP empty-state
                      *  pattern above for visual symmetry. */}
                     <div className="px-3 py-2 mt-1 text-xs font-medium text-[var(--ink-muted)] border-t border-[var(--line)] border-b border-[var(--line)] bg-[var(--paper-inset)]/40">
-                      插件 Plugins
+                      {t('input.pluginsHeader')}
                     </div>
                     {globallyVisiblePlugins.length > 0 ? (
                       globallyVisiblePlugins.map((plugin) => {
@@ -1824,15 +1962,15 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                               {plugin.mcpServerNames && plugin.mcpServerNames.length > 0 && (
                                 <div
                                   className="mt-0.5 text-xs text-[var(--ink-muted)] truncate"
-                                  title={`启用此插件会自动加载这些 MCP server：${plugin.mcpServerNames.join(', ')}`}
+                                  title={t('input.pluginLoadsMcpTitle', { names: plugin.mcpServerNames.join(', ') })}
                                 >
-                                  🔌 {plugin.mcpServerNames.length} 个 MCP：{plugin.mcpServerNames.join(', ')}
+                                  🔌 {t('input.pluginLoadsMcp', { count: plugin.mcpServerNames.length, names: plugin.mcpServerNames.join(', ') })}
                                 </div>
                               )}
                             </div>
                             <button
                               type="button"
-                              title="管理插件"
+                              title={t('input.managePlugins')}
                               onClick={(e) => {
                                 e.stopPropagation();
                                 setShowToolMenu(false);
@@ -1861,7 +1999,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                       })
                     ) : (
                       <div className="px-3 py-3 text-sm text-[var(--ink-muted)]">
-                        还没有插件。在
+                        {t('input.noPluginsPrefix')}
                         <button
                           type="button"
                           onClick={(e) => {
@@ -1871,14 +2009,15 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                           }}
                           className="mx-1 text-[var(--accent)] hover:underline"
                         >
-                          设置 → 插件
+                          {t('input.pluginsSettings')}
                         </button>
-                        可以从 GitHub 或本地路径安装。
+                        {t('input.noPluginsSuffix')}
                       </div>
+                    )}
+                    </>
                     )}
               </Popover>
               </>
-              )}
 
               {/* Heartbeat Loop Button — PRD 0.2.7 D1: launcher exposes this
                *  too. The handler stages cron config on launcher; actual
@@ -1886,43 +2025,40 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
               {onCronButtonClick && (
                 <button
                   type="button"
+                  aria-disabled={configControlsLocked}
                   onClick={(e) => {
                     e.stopPropagation();
+                    if (showConfigLockedReason()) return;
                     onCronButtonClick();
                   }}
                   className={`flex items-center gap-1 rounded-lg px-2 py-1.5 text-sm font-medium transition-colors ${
-                    cronModeEnabled
+                    cronModeEnabled && !configControlsLocked
                       ? 'bg-[var(--heartbeat-bg)] text-[var(--heartbeat)] hover:bg-[var(--heartbeat)]/20'
+                      : configControlsLocked
+                        ? 'cursor-not-allowed text-[var(--ink-muted)] opacity-50 hover:bg-transparent hover:text-[var(--ink-muted)]'
                       : 'text-[var(--ink-muted)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]'
                   }`}
-                  title={cronModeEnabled ? '定时已启用' : '定时'}
+                  title={configControlLockTitle ?? (cronModeEnabled ? t('input.cronEnabled') : t('input.cron'))}
                 >
                   <Timer className="h-3.5 w-3.5" />
-                  <span className="toolbar-label">定时</span>
+                  <span className="toolbar-label">{t('input.cron')}</span>
                 </button>
               )}
             </div>
 
             {/* Right side - model selector + send/stop button */}
             <div className="ml-auto flex items-center gap-2 shrink-0">
-              {/* v0.1.69: Unlocked indicator for legacy pre-snapshot sessions */}
-              {sessionUnlocked && (
-                <span
-                  className="flex h-5 w-5 items-center justify-center rounded text-[var(--ink-muted)]/60"
-                  title="该 session 未锁定，跟随 agent 默认（修改 agent 会影响此会话）"
-                >
-                  <Unlock className="h-3 w-3" />
-                </span>
-              )}
               {/* PRD 0.2.32 — context 用量指示器（自取数 slot，model 按钮左侧） */}
               {contextIndicator}
               {/* Model Dropdown with Provider Selector */}
               <button
                 ref={modelBtnRef}
                 type="button"
+                aria-disabled={configControlsLocked}
                 onClick={(e) => {
                   e.stopPropagation();
-                  const willOpen = !showModelMenu;
+                  if (showConfigLockedReason()) return;
+                  const willOpen = !modelMenuOpen;
                   setShowModelMenu(willOpen);
                   setShowModeMenu(false);
                   setShowPlusMenu(false);
@@ -1932,8 +2068,10 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                     onRefreshProviders();
                   }
                 }}
-                className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
-                title="切换模型"
+                className={`flex items-center gap-1 rounded-lg px-2 py-1.5 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)] ${
+                  configControlsLocked ? 'cursor-not-allowed opacity-50 hover:bg-transparent hover:text-[var(--ink-muted)]' : ''
+                }`}
+                title={configControlLockTitle ?? t('input.switchModel')}
               >
                 <span className="max-w-[140px] truncate">{currentModelName}</span>
                 <ChevronUp className="h-3 w-3 shrink-0" />
@@ -1944,7 +2082,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                   list keeps its own scroll container below; the effort row stays
                   fixed at the bottom, outside the scroll area. */}
               <Popover
-                open={showModelMenu}
+                open={modelMenuOpen}
                 onClose={() => setShowModelMenu(false)}
                 anchorRef={modelBtnRef}
                 placement="top-end"
@@ -1955,7 +2093,9 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                 {isExternalRuntime && runtimeModels ? (
                   <>
                     <div className="px-3 pb-0.5 pt-1.5 text-xs font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60">
-                      {runtime === 'claude-code' ? 'CLAUDE CODE' : runtime === 'gemini' ? 'GEMINI CLI' : runtime?.toUpperCase()} 模型
+                      {t('input.runtimeModelHeader', {
+                        runtime: runtime === 'claude-code' ? 'CLAUDE CODE' : runtime === 'gemini' ? 'GEMINI CLI' : runtime?.toUpperCase(),
+                      })}
                     </div>
                     {runtimeModels.map(model => {
                       const isSelected = selectedModel === model.value || (!selectedModel && model.isDefault);
@@ -1996,7 +2136,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                         }}
                         className="w-full px-3 py-2.5 text-left text-sm text-[var(--accent)] transition-colors hover:bg-[var(--hover-bg)]"
                       >
-                        请先设置模型服务 →
+                        {t('input.setupModelProvider')}
                       </button>
                     );
                   }
@@ -2004,9 +2144,9 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                     <div key={p.id}>
                       {idx > 0 && <div className="mx-2 my-1 border-t border-[var(--line)]" />}
                       <div className="group/provider relative flex items-center gap-1 px-3 pb-0.5 pt-1.5 text-xs font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60">
-                        {p.name}{p.type === 'subscription' ? ' (订阅)' : ''}
+                        {p.name}
                         {isProviderWarning(p, apiKeys, providerVerifyStatus) && (
-                          <Tip label="验证未通过，部分模型可能不可用" position="bottom">
+                          <Tip label={t('input.providerWarning')} position="bottom">
                             <AlertCircle className="h-3 w-3 shrink-0 text-[var(--warning)]" />
                           </Tip>
                         )}
@@ -2069,13 +2209,13 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                       }`}
                     >
                       <Gauge className="h-3.5 w-3.5 shrink-0 text-[var(--ink-muted)]" />
-                      <span className="flex-1">推理强度</span>
+                      <span className="flex-1">{t('input.reasoningEffort')}</span>
                       <span className={`text-xs ${
                         reasoningEffort !== REASONING_EFFORT_DEFAULT
                           ? 'font-medium text-[var(--accent)]'
                           : 'text-[var(--ink-muted)]'
                       }`}>
-                        {reasoningEffort === REASONING_EFFORT_DEFAULT ? '默认' : reasoningEffort}
+                        {reasoningEffort === REASONING_EFFORT_DEFAULT ? t('input.reasoningDefault') : reasoningEffort}
                       </span>
                       <ChevronRight className="h-3 w-3 shrink-0 text-[var(--ink-muted)]" />
                     </button>
@@ -2107,7 +2247,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                                     : 'text-[var(--ink)] hover:bg-[var(--hover-bg)]'
                                 }`}
                               >
-                                <span>{level === REASONING_EFFORT_DEFAULT ? '默认' : level}</span>
+                                <span>{level === REASONING_EFFORT_DEFAULT ? t('input.reasoningDefault') : level}</span>
                                 <span className={`text-xs font-normal ${isSelected ? 'text-[var(--accent)]/70' : 'text-[var(--ink-muted)]'}`}>
                                   {REASONING_EFFORT_DESCRIPTIONS[level] ?? ''}
                                 </span>
@@ -2115,7 +2255,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                             );
                           })}
                           <div className="mt-1 whitespace-nowrap border-t border-[var(--line)] px-3 pb-1 pt-1.5 text-xs text-[var(--ink-muted)]/60">
-                            需服务商支持该参数，以实际生效为准
+                            {t('input.reasoningRequirement')}
                           </div>
                         </div>
                       </>
@@ -2141,7 +2281,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                   type="button"
                   disabled
                   className="rounded-lg bg-[var(--ink-muted)]/15 p-2 text-[var(--ink-muted)]/60"
-                  title="正在执行系统任务，请稍等"
+                  title={t('input.systemBusy')}
                 >
                   <Send className="h-4 w-4" />
                 </button>
@@ -2151,7 +2291,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                   type="button"
                   disabled
                   className="rounded-lg bg-[var(--ink-muted)]/15 p-2 text-[var(--ink-muted)]"
-                  title="正在停止..."
+                  title={t('input.stopping')}
                 >
                   <Loader className="h-4 w-4 animate-spin" />
                 </button>
@@ -2166,7 +2306,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                   type="button"
                   onClick={onStop}
                   className="rounded-lg bg-[var(--error)] p-2 text-white transition-colors hover:brightness-110"
-                  title={systemStatus?.startsWith('api_retry:') ? '停止重试' : '停止'}
+                  title={systemStatus?.startsWith('api_retry:') ? t('input.stopRetry') : t('input.stop')}
                 >
                   <Square className="h-4 w-4" />
                 </button>
@@ -2176,7 +2316,9 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                   onClick={handleSend}
                   disabled={!canSendMessage || (!inputValue.trim() && images.length === 0)}
                   className="rounded-lg bg-[var(--accent)] p-2 text-white transition-colors hover:bg-[var(--accent-warm-hover)] disabled:bg-[var(--ink-muted)]/15 disabled:text-[var(--ink-muted)]/60"
-                  title={!canSendMessage ? (providerUnavailableMessage ?? '请前往设置页面设置模型供应商') : sendHintLabel(sendShortcut, isMac)}
+                  title={!canSendMessage
+                    ? (providerUnavailableMessage ?? t('input.providerUnavailableDefault'))
+                    : `${t('input.send')} (${sendKeyHint(sendShortcut, isMac).shortcut})`}
                 >
                   <Send className="h-4 w-4" />
                 </button>
@@ -2188,10 +2330,13 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
     </div>
     {repetitionWarning && (
       <ConfirmDialog
-        title="检测到内容存在大量重复"
-        message={`同一段文字重复了约 ${repetitionWarning.count} 次（共 ${repetitionWarning.text.length.toLocaleString()} 字符）。常见于第三方输入法的语音识别异常。仍要发送吗？`}
-        confirmText="仍要发送"
-        cancelText="取消"
+        title={t('input.repetition.title')}
+        message={t('input.repetition.message', {
+          count: repetitionWarning.count,
+          chars: repetitionWarning.text.length.toLocaleString(),
+        })}
+        confirmText={t('input.repetition.confirm')}
+        cancelText={t('input.repetition.cancel')}
         confirmVariant="danger"
         // Bug #123: don't bind Enter to confirm — the user just pressed Enter
         // to trigger send, and a reflexive second Enter must not silently

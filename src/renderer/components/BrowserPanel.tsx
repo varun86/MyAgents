@@ -11,6 +11,7 @@
  */
 
 import { useEffect, useRef, useCallback, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { invoke } from '@tauri-apps/api/core';
 import { listenWithCleanup } from '@/utils/tauriListen';
 import { ChevronLeft, ChevronRight, Code2, RotateCw, ExternalLink, Loader2, Globe, X } from 'lucide-react';
@@ -56,8 +57,6 @@ interface BrowserPanelProps {
   onUrlChange?: (url: string) => void;
 }
 
-const URL_PLACEHOLDER = '输入网址或搜索…';
-
 export default function BrowserPanel({
   tabId,
   url,
@@ -73,6 +72,8 @@ export default function BrowserPanel({
   onSwitchToEditor,
   onUrlChange,
 }: BrowserPanelProps) {
+  const { t } = useTranslation('app');
+  const urlPlaceholder = t('browserPanel.urlPlaceholder');
   const containerRef = useRef<HTMLDivElement>(null);
   const [currentUrl, setCurrentUrl] = useState(url ?? '');
   const [isLoading, setIsLoading] = useState(false);
@@ -173,7 +174,7 @@ export default function BrowserPanel({
           console.error('[browser] Create failed:', err);
           if (!cancelled) {
             const msg = typeof err === 'string' ? err : (err?.message ?? String(err));
-            toastRef.current.error(`无法打开内嵌浏览器：${msg}`);
+            toastRef.current.error(t('browserPanel.openFailed', { message: msg }));
             onCreateFailed();
           }
         })
@@ -207,7 +208,7 @@ export default function BrowserPanel({
       cancelled = true;
       if (rafId) cancelAnimationFrame(rafId);
     };
-  }, [url, browserAlive, isVisible, isSplitTransitioning, tabId, onBrowserCreated, onCreateFailed, readUsableBounds]);
+  }, [url, browserAlive, isVisible, isSplitTransitioning, tabId, onBrowserCreated, onCreateFailed, readUsableBounds, t]);
 
   // ── Listen for URL/loading events from Rust ──
   useEffect(() => {
@@ -401,17 +402,17 @@ export default function BrowserPanel({
     <div className="flex h-full flex-col">
       {/* Navigation toolbar — always includes close button (single row for all states) */}
       <div className="relative flex h-9 flex-shrink-0 items-center gap-0.5 border-b border-[var(--line)] bg-[var(--paper)] px-2">
-        <Tip label="后退" position="bottom">
+        <Tip label={t('browserPanel.back')} position="bottom">
           <button type="button" className={navBtn} onClick={handleGoBack}>
             <ChevronLeft className="h-3.5 w-3.5" />
           </button>
         </Tip>
-        <Tip label="前进" position="bottom">
+        <Tip label={t('browserPanel.forward')} position="bottom">
           <button type="button" className={navBtn} onClick={handleGoForward}>
             <ChevronRight className="h-3.5 w-3.5" />
           </button>
         </Tip>
-        <Tip label={isLoading ? '停止' : '刷新'} position="bottom">
+        <Tip label={isLoading ? t('browserPanel.stop') : t('browserPanel.reload')} position="bottom">
           <button type="button" className={navBtn} onClick={handleReload}>
             {isLoading ? (
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -426,7 +427,7 @@ export default function BrowserPanel({
           <input
             ref={urlInputRef}
             autoFocus
-            placeholder={URL_PLACEHOLDER}
+            placeholder={urlPlaceholder}
             className="ml-1.5 min-w-0 flex-1 rounded-[var(--radius-sm)] border border-[var(--line)] bg-transparent px-2 py-0.5 text-xs text-[var(--ink)] outline-none placeholder:text-[var(--ink-faint)] focus:border-[var(--accent)]"
             value={urlDraft}
             onChange={(e) => setUrlDraft(e.target.value)}
@@ -439,10 +440,10 @@ export default function BrowserPanel({
             type="button"
             onClick={handleUrlClick}
             className="ml-1.5 min-w-0 flex-1 cursor-text truncate rounded-[var(--radius-sm)] px-2 py-0.5 text-left text-xs transition-colors hover:bg-[var(--paper-inset)]"
-            title={isBlankPage ? URL_PLACEHOLDER : currentUrl}
+            title={isBlankPage ? urlPlaceholder : currentUrl}
           >
             {isBlankPage ? (
-              <span className="text-[var(--ink-faint)]">{URL_PLACEHOLDER}</span>
+              <span className="text-[var(--ink-faint)]">{urlPlaceholder}</span>
             ) : (
               <span className="text-[var(--ink-muted)]">{currentUrl}</span>
             )}
@@ -451,14 +452,14 @@ export default function BrowserPanel({
 
         {/* Edit Source — only for local file previews */}
         {sourceFile && onSwitchToEditor && (
-          <Tip label="编辑源码" position="bottom" align="end">
+          <Tip label={t('browserPanel.editSource')} position="bottom" align="end">
             <button type="button" className={navBtn} onClick={onSwitchToEditor}>
               <Code2 className="h-3.5 w-3.5" />
             </button>
           </Tip>
         )}
 
-        <Tip label="在浏览器中打开" position="bottom" align="end">
+        <Tip label={t('browserPanel.openExternal')} position="bottom" align="end">
           <button
             type="button"
             className={navBtn}
@@ -470,7 +471,7 @@ export default function BrowserPanel({
         </Tip>
 
         {/* Close button — always present */}
-        <Tip label="关闭浏览器" position="bottom" align="end">
+        <Tip label={t('browserPanel.close')} position="bottom" align="end">
           <button type="button" className={navBtn} onClick={onClose}>
             <X className="h-3.5 w-3.5" />
           </button>
@@ -490,7 +491,7 @@ export default function BrowserPanel({
           <div className="flex h-full items-center justify-center">
             <div className="flex flex-col items-center gap-2 text-[var(--ink-subtle)]">
               <Globe className="h-6 w-6" />
-              <span className="text-xs">{url ? '加载中...' : ''}</span>
+              <span className="text-xs">{url ? t('common.loading') : ''}</span>
             </div>
           </div>
         )}
@@ -520,10 +521,10 @@ export default function BrowserPanel({
               </div>
               <div className="flex flex-col items-center gap-1.5">
                 <div className="text-base font-medium tracking-tight text-[var(--ink)]">
-                  新标签页
+                  {t('browserPanel.newTab')}
                 </div>
                 <div className="text-xs text-[var(--ink-muted)]">
-                  在上方地址栏输入网址或粘贴链接
+                  {t('browserPanel.blankHint')}
                 </div>
               </div>
             </div>

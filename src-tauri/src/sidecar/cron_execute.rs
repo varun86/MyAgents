@@ -91,6 +91,16 @@ pub struct CronExecuteResponse {
     pub session_id: Option<String>,
 }
 
+fn runtime_source_from_runtime_config(
+    runtime_config: Option<&serde_json::Value>,
+) -> Option<String> {
+    let source = runtime_config?.as_object()?.get("source")?.as_str()?;
+    match source {
+        "system-cli" | "managed-provider" => Some(source.to_string()),
+        _ => None,
+    }
+}
+
 /// Execute a cron task synchronously via Sidecar HTTP API
 /// This function ensures a Sidecar is running for the session and calls its /cron/execute-sync endpoint
 pub async fn execute_cron_task<R: Runtime>(
@@ -145,16 +155,19 @@ pub async fn execute_cron_task<R: Runtime>(
     let task_id_clone = payload.task_id.clone();
     let owner = SidecarOwner::CronTask(task_id_clone.clone());
     let runtime_override = payload.runtime.clone();
+    let runtime_source_override =
+        runtime_source_from_runtime_config(payload.runtime_config.as_ref());
 
     let result = tokio::task::spawn_blocking(move || {
         let workspace = PathBuf::from(&workspace_clone);
-        ensure_session_sidecar_with_runtime_override(
+        ensure_session_sidecar_with_runtime_identity_override(
             &app_handle_clone,
             &manager_clone,
             &session_id_clone,
             &workspace,
             owner,
             runtime_override,
+            runtime_source_override,
         )
     })
     .await

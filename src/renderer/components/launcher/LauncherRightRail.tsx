@@ -14,6 +14,7 @@ import {
     Star,
     Trash2,
 } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 
 import ConfirmDialog from '@/components/ConfirmDialog';
 import SessionStatsModal from '@/components/SessionStatsModal';
@@ -27,6 +28,7 @@ import type { AgentStatusData } from '@/hooks/useAgentStatuses';
 import type { SessionTag, TaskCenterData } from '@/hooks/useTaskCenterData';
 import { normalizeWorkspacePathIdentity } from '@/../shared/workspacePath';
 import type { AgentConfig } from '../../../shared/types/agent';
+import { isSupportedLocale } from '../../../shared/i18n';
 import { formatMessageCount, formatTime, getFolderName, getSessionDisplayText } from '@/utils/taskCenterUtils';
 import AddWorkspaceMenu from './AddWorkspaceMenu';
 import WorkspaceCard from './WorkspaceCard';
@@ -85,6 +87,7 @@ export default memo(function LauncherRightRail({
     onCreateFromTemplate,
     onShowLogs,
 }: LauncherRightRailProps) {
+    const { t } = useTranslation('launcher');
     const toast = useToast();
     const scrollRootRef = useRef<HTMLDivElement | null>(null);
     const loadMoreRef = useRef<HTMLDivElement | null>(null);
@@ -196,13 +199,13 @@ export default memo(function LauncherRightRail({
         setPendingDeleteSession(null);
         try {
             const success = await actions.deleteSession(id);
-            if (success) toast.success('已删除');
-            else toast.error('删除失败，请重试');
+            if (success) toast.success(t('rightRail.deleted'));
+            else toast.error(t('rightRail.deleteFailedRetry'));
         } catch (err) {
             console.error('[LauncherRightRail] Delete session failed:', err);
-            toast.error('删除失败');
+            toast.error(t('rightRail.deleteFailed'));
         }
-    }, [actions, pendingDeleteSession, toast]);
+    }, [actions, pendingDeleteSession, t, toast]);
 
     const handleShowStatsSession = useCallback((target: SessionMetadata) => {
         setStatsSession({
@@ -221,12 +224,12 @@ export default memo(function LauncherRightRail({
     const handleToggleFavoriteSession = useCallback(async (target: SessionMetadata) => {
         try {
             const success = await actions.setSessionFavorite(target.id, !target.favorite);
-            if (!success) toast.error('收藏失败，请重试');
+            if (!success) toast.error(t('rightRail.favoriteFailedRetry'));
         } catch (err) {
             console.error('[LauncherRightRail] Toggle favorite failed:', err);
-            toast.error('收藏失败，请重试');
+            toast.error(t('rightRail.favoriteFailedRetry'));
         }
-    }, [actions, toast]);
+    }, [actions, t, toast]);
 
     const showEmptyProjects = !isProjectsLoading && sortedProjects.length === 0;
     const hasMoreHistory = visibleHistoryCount < filteredSessions.length;
@@ -238,14 +241,14 @@ export default memo(function LauncherRightRail({
                     <section>
                         <div className="mb-4 flex items-center justify-between">
                             <h2 className="text-base font-semibold tracking-[0.04em] text-[var(--ink-muted)]">
-                                Agent 工作区
+                                {t('rightRail.workspaceTitle')}
                             </h2>
                             <div className="flex items-center gap-3">
                                 {showDevTools && (
                                     <button
                                         onClick={onShowLogs}
                                         className="rounded-lg px-2.5 py-1 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
-                                        title="查看 Rust 日志"
+                                        title={t('rightRail.logsTitle')}
                                     >
                                         Logs
                                     </button>
@@ -262,15 +265,15 @@ export default memo(function LauncherRightRail({
                         {isProjectsLoading ? (
                             <div className="flex flex-col items-center justify-center py-14">
                                 <Loader2 className="h-5 w-5 animate-spin text-[var(--ink-muted)]/50" />
-                                <p className="mt-4 text-sm text-[var(--ink-muted)]/70">加载中...</p>
+                                <p className="mt-4 text-sm text-[var(--ink-muted)]/70">{t('rightRail.loading')}</p>
                             </div>
                         ) : showEmptyProjects ? (
                             <div className="flex flex-col items-center justify-center py-14 text-center">
                                 <h3 className="mb-1.5 text-lg font-medium text-[var(--ink)]">
-                                    还没有工作区
+                                    {t('rightRail.emptyWorkspaceTitle')}
                                 </h3>
                                 <p className="mb-6 max-w-[220px] text-sm leading-relaxed text-[var(--ink-muted)]/60">
-                                    添加本地项目文件夹，或从模板快速创建
+                                    {t('rightRail.emptyWorkspaceDescription')}
                                 </p>
                                 <div className="flex items-center gap-3">
                                     <button
@@ -278,14 +281,14 @@ export default memo(function LauncherRightRail({
                                         className="flex items-center gap-1.5 rounded-full bg-[var(--button-secondary-bg)] px-4 py-2.5 text-sm font-medium text-[var(--button-secondary-text)] transition-all hover:bg-[var(--button-secondary-bg-hover)] hover:shadow-sm"
                                     >
                                         <FolderPlus className="h-3.5 w-3.5" />
-                                        添加文件夹
+                                        {t('rightRail.addFolder')}
                                     </button>
                                     <button
                                         onClick={onCreateFromTemplate}
                                         className="flex items-center gap-1.5 rounded-full bg-[var(--button-primary-bg)] px-4 py-2.5 text-sm font-medium text-[var(--button-primary-text)] transition-all hover:bg-[var(--button-primary-bg-hover)] hover:shadow-sm"
                                     >
                                         <LayoutTemplate className="h-3.5 w-3.5" />
-                                        从模板创建
+                                        {t('rightRail.createFromTemplate')}
                                     </button>
                                 </div>
                             </div>
@@ -324,12 +327,12 @@ export default memo(function LauncherRightRail({
                                         >
                                             {workspacesExpanded ? (
                                                 <>
-                                                    收起
+                                                    {t('rightRail.collapse')}
                                                     <ChevronUp className="h-3.5 w-3.5" />
                                                 </>
                                             ) : (
                                                 <>
-                                                    展开更多 {hiddenWorkspaceCount} 个
+                                                    {t('rightRail.expandMore', { count: hiddenWorkspaceCount })}
                                                     <ChevronDown className="h-3.5 w-3.5" />
                                                 </>
                                             )}
@@ -349,7 +352,7 @@ export default memo(function LauncherRightRail({
                             <div className="flex items-center justify-between gap-3">
                                 <div className="flex min-w-0 items-center gap-2">
                                     <h2 className="shrink-0 text-base font-semibold tracking-[0.04em] text-[var(--ink-muted)]">
-                                        历史对话
+                                        {t('rightRail.historyTitle')}
                                     </h2>
                                     <HistoryFilter
                                         projects={sortedProjects}
@@ -361,8 +364,8 @@ export default memo(function LauncherRightRail({
                                     type="button"
                                     onClick={() => onOpenOverlay('search')}
                                     className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
-                                    title="搜索历史对话"
-                                    aria-label="搜索历史对话"
+                                    title={t('rightRail.searchHistory')}
+                                    aria-label={t('rightRail.searchHistory')}
                                 >
                                     <Search className="h-4 w-4" />
                                 </button>
@@ -372,7 +375,7 @@ export default memo(function LauncherRightRail({
                         <div className="pt-3">
                             {isHistoryLoading && filteredSessions.length === 0 ? (
                                 <div className="flex items-center py-8 text-sm text-[var(--ink-muted)]/70">
-                                    加载中...
+                                    {t('rightRail.loading')}
                                 </div>
                             ) : error ? (
                                 <div className="flex items-center justify-center py-10">
@@ -384,17 +387,17 @@ export default memo(function LauncherRightRail({
                                             className="inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-sm text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
                                         >
                                             <RefreshCw className="h-3.5 w-3.5" />
-                                            重试
+                                            {t('rightRail.retry')}
                                         </button>
                                     </div>
                                 </div>
                             ) : pagedSessions.length === 0 ? (
                                 <div className="flex items-center py-10 text-sm text-[var(--ink-muted)]/70">
                                     {effectiveHistoryFilter === FAVORITE_HISTORY_FILTER
-                                        ? '暂无收藏对话'
+                                        ? t('rightRail.emptyFavorites')
                                         : effectiveHistoryFilter === 'all'
-                                            ? '暂无历史对话'
-                                            : '该工作区暂无历史对话'}
+                                            ? t('rightRail.emptyHistory')
+                                            : t('rightRail.emptyWorkspaceHistory')}
                                 </div>
                             ) : (
                                 <div className="space-y-0.5">
@@ -422,7 +425,7 @@ export default memo(function LauncherRightRail({
                                     <div ref={loadMoreRef} className="h-8">
                                         {hasMoreHistory && (
                                             <div className="py-2 text-center text-xs text-[var(--ink-muted)]/50">
-                                                加载更多...
+                                                {t('rightRail.loadMore')}
                                             </div>
                                         )}
                                     </div>
@@ -439,9 +442,9 @@ export default memo(function LauncherRightRail({
 
             {pendingDeleteSession && (
                 <ConfirmDialog
-                    title="删除对话"
-                    message={`确定要删除「${pendingDeleteSession.title}」吗？此操作不可撤销。`}
-                    confirmText="删除"
+                    title={t('rightRail.deleteDialogTitle')}
+                    message={t('rightRail.deleteDialogMessage', { title: pendingDeleteSession.title })}
+                    confirmText={t('rightRail.delete')}
                     confirmVariant="danger"
                     onConfirm={handleConfirmDelete}
                     onCancel={() => setPendingDeleteSession(null)}
@@ -465,6 +468,7 @@ interface HistoryFilterProps {
 }
 
 function HistoryFilter({ projects, value, onChange }: HistoryFilterProps) {
+    const { t } = useTranslation('launcher');
     const [open, setOpen] = useState(false);
     const buttonRef = useRef<HTMLButtonElement | null>(null);
     const selectedProject = useMemo(
@@ -472,10 +476,10 @@ function HistoryFilter({ projects, value, onChange }: HistoryFilterProps) {
         [projects, value],
     );
     const label = value === FAVORITE_HISTORY_FILTER
-        ? '我的收藏'
+        ? t('rightRail.filterFavorites')
         : value === 'all'
-            ? '全部'
-            : selectedProject ? getProjectDisplayName(selectedProject) : '全部';
+            ? t('rightRail.filterAll')
+            : selectedProject ? getProjectDisplayName(selectedProject) : t('rightRail.filterAll');
 
     const handleSelect = useCallback((next: HistoryFilterValue) => {
         onChange(next);
@@ -489,8 +493,8 @@ function HistoryFilter({ projects, value, onChange }: HistoryFilterProps) {
                 type="button"
                 onClick={() => setOpen(value => !value)}
                 className="inline-flex h-6 max-w-36 items-center gap-1 rounded-md px-2 py-0 text-xs font-medium leading-none text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
-                title="筛选历史对话"
-                aria-label={`筛选历史对话：${label}`}
+                title={t('rightRail.filterTitle')}
+                aria-label={t('rightRail.filterAria', { label })}
             >
                 <span className="min-w-0 truncate">{label}</span>
                 <ChevronDown className="h-3 w-3 shrink-0" />
@@ -504,7 +508,7 @@ function HistoryFilter({ projects, value, onChange }: HistoryFilterProps) {
             >
                 <MenuItem
                     icon={value === 'all' ? <Check className="h-3.5 w-3.5" /> : <span className="h-3.5 w-3.5" />}
-                    label="全部"
+                    label={t('rightRail.filterAll')}
                     active={value === 'all'}
                     onClick={() => handleSelect('all')}
                 />
@@ -512,7 +516,7 @@ function HistoryFilter({ projects, value, onChange }: HistoryFilterProps) {
                     icon={value === FAVORITE_HISTORY_FILTER
                         ? <Check className="h-3.5 w-3.5" />
                         : <Star className="h-3.5 w-3.5" />}
-                    label="我的收藏"
+                    label={t('rightRail.filterFavorites')}
                     active={value === FAVORITE_HISTORY_FILTER}
                     onClick={() => handleSelect(FAVORITE_HISTORY_FILTER)}
                 />
@@ -558,6 +562,8 @@ const LauncherHistoryRow = memo(function LauncherHistoryRow({
     menuOpen,
     onMenuOpenChange,
 }: LauncherHistoryRowProps) {
+    const { t, i18n } = useTranslation('launcher');
+    const locale = isSupportedLocale(i18n.language) ? i18n.language : 'zh-CN';
     const menuAnchorRef = useRef<HTMLSpanElement | null>(null);
     const [menuAnchor, setMenuAnchor] = useState<{
         x: number;
@@ -565,7 +571,7 @@ const LauncherHistoryRow = memo(function LauncherHistoryRow({
         placement: 'bottom-start' | 'bottom-end';
     } | null>(null);
     const displayText = getSessionDisplayText(session);
-    const msgCount = formatMessageCount(session);
+    const msgCount = formatMessageCount(session, locale);
 
     const closeMenu = useCallback(() => {
         setMenuAnchor(null);
@@ -611,7 +617,7 @@ const LauncherHistoryRow = memo(function LauncherHistoryRow({
             className="group relative flex w-full cursor-pointer select-none items-center gap-1 overflow-hidden rounded-lg px-3 py-2 text-left transition-all hover:bg-[var(--hover-bg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
         >
             <div className="flex w-16 shrink-0 items-center text-xs tabular-nums text-[var(--ink-muted)]/50">
-                <span className="min-w-0 truncate">{formatTime(session.lastActiveAt)}</span>
+                <span className="min-w-0 truncate">{formatTime(session.lastActiveAt, new Date(), locale)}</span>
             </div>
             <div className="flex w-16 shrink-0 items-center text-xs text-[var(--ink-muted)]/55">
                 <span className="min-w-0 truncate">{getProjectDisplayName(project)}</span>
@@ -649,8 +655,8 @@ const LauncherHistoryRow = memo(function LauncherHistoryRow({
                         onMenuOpenChange(true);
                     }}
                     className="pointer-events-auto flex h-7 w-7 items-center justify-center rounded-md text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper)] hover:text-[var(--ink)] focus-visible:opacity-100"
-                    title="更多"
-                    aria-label="更多"
+                    title={t('rightRail.more')}
+                    aria-label={t('rightRail.more')}
                 >
                     <MoreHorizontal className="h-4 w-4" />
                 </button>
@@ -672,7 +678,7 @@ const LauncherHistoryRow = memo(function LauncherHistoryRow({
                     >
                         <MenuItem
                             icon={<Star className="h-3.5 w-3.5" fill={session.favorite ? 'currentColor' : 'none'} />}
-                            label={session.favorite ? '取消收藏' : '收藏对话'}
+                            label={session.favorite ? t('rightRail.unfavorite') : t('rightRail.favorite')}
                             onClick={() => {
                                 closeMenu();
                                 onToggleFavorite(session);
@@ -680,7 +686,7 @@ const LauncherHistoryRow = memo(function LauncherHistoryRow({
                         />
                         <MenuItem
                             icon={<BarChart2 className="h-3.5 w-3.5" />}
-                            label="查看统计"
+                            label={t('rightRail.viewStats')}
                             onClick={() => {
                                 closeMenu();
                                 onShowStats(session);
@@ -688,10 +694,10 @@ const LauncherHistoryRow = memo(function LauncherHistoryRow({
                         />
                         <MenuItem
                             icon={<Trash2 className="h-3.5 w-3.5" />}
-                            label="删除"
+                            label={t('rightRail.delete')}
                             tone="danger"
                             disabled={isCronProtected}
-                            title={isCronProtected ? '请先停止定时任务后再删除' : undefined}
+                            title={isCronProtected ? t('rightRail.stopCronBeforeDelete') : undefined}
                             onClick={() => {
                                 if (isCronProtected) return;
                                 closeMenu();

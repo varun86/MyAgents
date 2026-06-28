@@ -5,6 +5,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState, lazy, Suspense } from 'react';
+import { useTranslation } from 'react-i18next';
 
 import { perfMark } from '@/utils/perfMark';
 import { RENDERER_PERF_PHASE } from '../../shared/perfTrace';
@@ -13,6 +14,8 @@ import { open } from '@tauri-apps/plugin-dialog';
 import { track } from '@/analytics';
 import type { EntryIntent, HistoryEntrySource, Surface } from '@/analytics';
 import { type ImageAttachment } from '@/components/SimpleChatInput';
+import { projectCronExecutionOverrides } from '@/utils/cronExecutionProjection';
+import { coerceRuntimeBirthPermissionMode } from '../../shared/runtimeBirthFields';
 import { useToast } from '@/components/Toast';
 import { UnifiedLogsPanel } from '@/components/UnifiedLogsPanel';
 import PathInputDialog from '@/components/PathInputDialog';
@@ -24,27 +27,39 @@ import { BrandSection, LauncherRightRail, TemplateLibraryDialog, WorkspaceEditDi
 const WorkspaceConfigPanel = lazy(() => import('@/components/WorkspaceConfigPanel'));
 import { useConfig } from '@/hooks/useConfig';
 import { useTaskCenterData } from '@/hooks/useTaskCenterData';
-import { type Project, type PermissionMode, type McpServerDefinition, type WorkspaceTemplate, isProviderEnabled, isProjectVisibleToUser, isSystemPresetProject } from '@/config/types';
+import { CODEX_SUBSCRIPTION_PROVIDER_ID, type Project, type PermissionMode, type McpServerDefinition, type WorkspaceTemplate, isProviderEnabled, isProjectVisibleToUser, isSystemPresetProject } from '@/config/types';
 import { CUSTOM_EVENTS } from '../../shared/constants';
 import { normalizeWorkspacePathIdentity, workspacePathsEqual } from '../../shared/workspacePath';
 import {
     getAllMcpServers,
     getEnabledMcpServerIds,
+    isProviderAvailable,
     resolveProvider,
     pairBuiltinSelection,
 } from '@/config/configService';
 import { patchAgentConfig, getAgentById } from '@/config/services/agentConfigService';
 import { persistInputOptionChange } from '@/api/persistInputOption';
 import { createCronTask, startCronTask, startCronScheduler } from '@/api/cronTaskClient';
-import type { RuntimeType, RuntimeModelInfo, RuntimePermissionMode, RuntimeDetections } from '../../shared/types/runtime';
+import type { RuntimeType, RuntimeModelInfo, RuntimePermissionMode, RuntimeDetections, RuntimeConfig } from '../../shared/types/runtime';
 import { CC_MODELS, CC_PERMISSION_MODES, CODEX_PERMISSION_MODES, GEMINI_PERMISSION_MODES, buildRuntimeChangePatch } from '../../shared/types/runtime';
+import {
+    isRuntimeBackedProvider,
+    toProviderExecutionIntent,
+} from '../../shared/providerExecution';
+import {
+    IMAGE_UNDERSTANDING_TOOL_ID,
+    OFFICIAL_TOOLS,
+    isImageUnderstandingToolConfigured,
+    normalizeOfficialToolIds,
+    type OfficialToolId,
+} from '../../shared/official-tools';
 import { apiGetJson } from '@/api/apiFetch';
 import { isBrowserDevMode, pickFolderForDialog } from '@/utils/browserMock';
 import { resolveLauncherProvider } from '@/utils/optionResolve';
 import { useAgentStatuses } from '@/hooks/useAgentStatuses';
 import { useWorkspaceFileService } from '@/hooks/useWorkspaceFileService';
 import type { SessionMetadata } from '@/api/sessionClient';
-import type { InitialMessage } from '@/types/tab';
+import type { InitialMessage, LaunchSessionBirthHint } from '@/types/tab';
 
 interface LauncherProps {
     onLaunchProject: (
@@ -52,6 +67,7 @@ interface LauncherProps {
         sessionId?: string,
         initialMessage?: InitialMessage,
         analyticsContext?: { surface?: Surface; entryIntent?: EntryIntent; historyEntrySource?: HistoryEntrySource },
+        sessionBirthHint?: LaunchSessionBirthHint,
     ) => void;
     isStarting?: boolean;
     startError?: string | null;
@@ -60,6 +76,7 @@ interface LauncherProps {
 }
 
 export default function Launcher({ onLaunchProject, isStarting, startError: _startError, isActive, attachmentSessionId }: LauncherProps) {
+    const { t } = useTranslation('launcher');
     const toast = useToast();
     const toastRef = useRef(toast);
     const pinToggleInFlightRef = useRef(new Set<string>());
@@ -213,6 +230,11 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
     // from launcherLastUsed once config loads (effect below); transient
     // selection is carried into the new Tab via InitialMessage.
     const [launcherEnabledPlugins, setLauncherEnabledPlugins] = useState<string[]>([]);
+    const [launcherOfficialToolEnabled, setLauncherOfficialToolEnabled] = useState<OfficialToolId[]>([]);
+    const launcherGlobalOfficialToolEnabled = useMemo(
+        () => normalizeOfficialToolIds(config.enabledOfficialToolIds ?? []),
+        [config.enabledOfficialToolIds],
+    );
 
     // Resolve AgentConfig for selected workspace (source of truth for AI settings)
     const selectedAgent = useMemo(() => {
@@ -225,7 +247,13 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
     runtimeConfigRef.current = selectedAgent?.runtimeConfig;
 
     // Runtime-aware model/permission lists — adapts input bar for external runtimes
-    const launcherRuntime: RuntimeType = multiAgentRuntimeEnabled
+    const selectedAgentRuntimeConfig = selectedAgent?.runtimeConfig as RuntimeConfig | undefined;
+    const selectedAgentUsesManagedCodexProvider =
+        selectedAgent?.providerId === CODEX_SUBSCRIPTION_PROVIDER_ID
+        || selectedAgentRuntimeConfig?.source === 'managed-provider';
+    const launcherRuntime: RuntimeType = selectedAgentUsesManagedCodexProvider
+        ? 'builtin'
+        : multiAgentRuntimeEnabled
         ? ((selectedAgent?.runtime as RuntimeType) || 'builtin') : 'builtin';
     const isExternalRuntime = launcherRuntime !== 'builtin';
 
@@ -262,6 +290,19 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
         const id = launcherProviderId ?? selectedAgent?.providerId ?? selectedWorkspace?.providerId ?? config.defaultProviderId;
         return resolveProvider(id, providers, apiKeys, providerVerifyStatus);
     }, [launcherProviderId, selectedAgent, selectedWorkspace, config.defaultProviderId, providers, apiKeys, providerVerifyStatus]);
+    const imageUnderstandingConfiguredForInput = useMemo(() => {
+        if (!isImageUnderstandingToolConfigured(config.officialToolSettings)) return false;
+        const selection = config.officialToolSettings?.imageUnderstanding;
+        const provider = providers.find(item => item.id === selection?.providerId);
+        if (!provider || isRuntimeBackedProvider(provider)) return false;
+        if (!isProviderAvailable(provider, apiKeys, providerVerifyStatus)) return false;
+        const model = provider.models.find(item => item.model === selection?.model);
+        return Array.isArray(model?.inputModalities) && model.inputModalities.includes('image');
+    }, [apiKeys, config.officialToolSettings, providerVerifyStatus, providers]);
+    const launcherOfficialToolNeedsConfig = useMemo(
+        () => ({ [IMAGE_UNDERSTANDING_TOOL_ID]: !imageUnderstandingConfiguredForInput }),
+        [imageUnderstandingConfiguredForInput],
+    );
 
     // Load MCP servers when workspace changes
     useEffect(() => {
@@ -311,6 +352,28 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
         );
     }, []);
 
+    const handleLauncherOfficialToolToggle = useCallback((toolId: OfficialToolId, enabled: boolean) => {
+        setLauncherOfficialToolEnabled(prev => {
+            const newEnabled = normalizeOfficialToolIds(
+                enabled ? [...prev, toolId] : prev.filter(id => id !== toolId),
+            );
+            if (selectedWorkspace) {
+                void persistInputOptionChange({
+                    workspaceId: selectedWorkspace.id,
+                    agentId: selectedWorkspace.agentId ?? null,
+                    isExternalRuntime,
+                    currentRuntimeConfig: runtimeConfigRef.current,
+                    currentProviderId: selectedAgent?.providerId ?? selectedWorkspace.providerId,
+                    fields: { enabledOfficialToolIds: newEnabled },
+                    patchProject,
+                    patchAgentConfig,
+                });
+            }
+            return newEnabled;
+        });
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only re-create when workspace ID changes, not on every property change
+    }, [selectedWorkspace?.id, patchProject, isExternalRuntime]);
+
     // Handle workspace MCP toggle — delegates to the shared dual-write helper
     // (PRD 0.2.7) so launcher and chat-tab persist identical fields.
     const handleWorkspaceMcpToggle = useCallback((serverId: string, enabled: boolean) => {
@@ -322,6 +385,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
                     agentId: selectedWorkspace.agentId ?? null,
                     isExternalRuntime,
                     currentRuntimeConfig: runtimeConfigRef.current,
+                    currentProviderId: selectedAgent?.providerId ?? selectedWorkspace.providerId,
                     fields: { mcpEnabledServers: newEnabled },
                     patchProject,
                     patchAgentConfig,
@@ -364,6 +428,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
         if (resolved.model) setLauncherSelectedModel(resolved.model);
         if (lastUsed.mcpEnabledServers) setLauncherWorkspaceMcpEnabled(lastUsed.mcpEnabledServers);
         if (lastUsed.enabledPluginIds) setLauncherEnabledPlugins(lastUsed.enabledPluginIds);
+        if (lastUsed.enabledOfficialToolIds) setLauncherOfficialToolEnabled(normalizeOfficialToolIds(lastUsed.enabledOfficialToolIds));
     // eslint-disable-next-line react-hooks/exhaustive-deps -- one-time restore; selected agent/workspace read at apply time, intentionally not deps
     }, [isLoading, config.launcherLastUsed]);
 
@@ -397,8 +462,9 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
         }
         setLauncherProviderId(selectedAgent?.providerId ?? selectedWorkspace.providerId ?? undefined);
         setLauncherWorkspaceMcpEnabled(selectedAgent?.mcpEnabledServers ?? selectedWorkspace.mcpEnabledServers ?? []);
+        setLauncherOfficialToolEnabled(normalizeOfficialToolIds(selectedAgent?.enabledOfficialToolIds ?? selectedWorkspace.enabledOfficialToolIds ?? []));
     // eslint-disable-next-line react-hooks/exhaustive-deps -- depend on specific agent/project fields, not object ref
-    }, [isLoading, selectedWorkspace?.id, selectedAgent?.permissionMode, selectedAgent?.model, selectedAgent?.providerId, selectedAgent?.mcpEnabledServers, selectedAgent?.runtime, selectedAgent?.reasoningEffort, agentRuntimeModel, agentRuntimePermMode, agentRuntimeReasoningEffort, selectedWorkspace?.permissionMode, selectedWorkspace?.model, selectedWorkspace?.providerId, selectedWorkspace?.mcpEnabledServers, config.defaultPermissionMode, multiAgentRuntimeEnabled, isExternalRuntime]);
+    }, [isLoading, selectedWorkspace?.id, selectedAgent?.permissionMode, selectedAgent?.model, selectedAgent?.providerId, selectedAgent?.mcpEnabledServers, selectedAgent?.enabledOfficialToolIds, selectedAgent?.runtime, selectedAgent?.reasoningEffort, agentRuntimeModel, agentRuntimePermMode, agentRuntimeReasoningEffort, selectedWorkspace?.permissionMode, selectedWorkspace?.model, selectedWorkspace?.providerId, selectedWorkspace?.mcpEnabledServers, selectedWorkspace?.enabledOfficialToolIds, config.defaultPermissionMode, multiAgentRuntimeEnabled, isExternalRuntime]);
 
     // Write-back handlers: persist Launcher setting changes to the selected project
 
@@ -410,6 +476,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
                 agentId: selectedWorkspace.agentId ?? null,
                 isExternalRuntime,
                 currentRuntimeConfig: runtimeConfigRef.current,
+                currentProviderId: selectedAgent?.providerId ?? selectedWorkspace.providerId,
                 fields: { permissionMode: mode },
                 patchProject,
                 patchAgentConfig,
@@ -421,20 +488,26 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
     const handleLauncherModelChange = useCallback((model: string | undefined) => {
         setLauncherSelectedModel(model);
         if (selectedWorkspace) {
+            const providerExecutionIntent = !isExternalRuntime && launcherProvider && model
+                ? toProviderExecutionIntent(launcherProvider, model)
+                : undefined;
             void persistInputOptionChange({
                 workspaceId: selectedWorkspace.id,
                 agentId: selectedWorkspace.agentId ?? null,
                 isExternalRuntime,
                 currentRuntimeConfig: runtimeConfigRef.current,
+                currentProviderId: selectedAgent?.providerId ?? selectedWorkspace.providerId,
                 fields: isExternalRuntime
                     ? { runtimeModel: model ?? null }
-                    : { builtinModel: model ?? null },
+                    : providerExecutionIntent?.kind === 'runtime-backed-provider'
+                        ? { runtimeBackedProviderSelection: providerExecutionIntent }
+                        : { builtinModel: model ?? null },
                 patchProject,
                 patchAgentConfig,
             });
         }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed deps; runtimeConfigRef is a ref
-    }, [selectedWorkspace?.id, patchProject, isExternalRuntime]);
+    }, [selectedWorkspace?.id, patchProject, isExternalRuntime, launcherProvider]);
 
     // #324 — 推理强度 write-back. Same dual-write shape as model/permission;
     // no live sidecar in launcher, so disk persistence is the whole job (the
@@ -447,6 +520,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
                 agentId: selectedWorkspace.agentId ?? null,
                 isExternalRuntime,
                 currentRuntimeConfig: runtimeConfigRef.current,
+                currentProviderId: selectedAgent?.providerId ?? selectedWorkspace.providerId,
                 fields: { reasoningEffort: effort },
                 patchProject,
                 patchAgentConfig,
@@ -460,7 +534,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
     // the next handoff creates a fresh sidecar with the persisted runtime.
     const handleLauncherRuntimeChange = useCallback(async (runtime: RuntimeType) => {
         if (!selectedWorkspace?.agentId) {
-            toastRef.current.warning('该工作区未配置 Agent，无法切换 Runtime');
+            toastRef.current.warning(t('toasts.runtimeNeedsAgent'));
             return;
         }
         try {
@@ -474,9 +548,9 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
             );
         } catch (err) {
             console.error('[Launcher] runtime change failed:', err);
-            toastRef.current.error('切换 Runtime 失败，请重试');
+            toastRef.current.error(t('toasts.runtimeSwitchFailed'));
         }
-    }, [selectedWorkspace?.agentId, selectedAgent?.runtimeConfig]);
+    }, [selectedWorkspace?.agentId, selectedAgent?.runtimeConfig, t]);
 
     const handleLauncherProviderChange = useCallback((providerId: string | undefined, targetModel?: string) => {
         setLauncherProviderId(providerId);
@@ -486,14 +560,22 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
             setLauncherSelectedModel(model);
         }
         if (selectedWorkspace) {
+            const providerExecutionIntent = newProvider && model
+                ? toProviderExecutionIntent(newProvider, model)
+                : undefined;
             void persistInputOptionChange({
                 workspaceId: selectedWorkspace.id,
                 agentId: selectedWorkspace.agentId ?? null,
                 isExternalRuntime,
                 currentRuntimeConfig: runtimeConfigRef.current,
+                currentProviderId: selectedAgent?.providerId ?? selectedWorkspace.providerId,
                 fields: {
-                    providerId: providerId ?? undefined,
-                    builtinModel: model ?? undefined,
+                    ...(providerExecutionIntent?.kind === 'runtime-backed-provider'
+                        ? { runtimeBackedProviderSelection: providerExecutionIntent }
+                        : {
+                            providerId: providerId ?? undefined,
+                            builtinModel: model ?? undefined,
+                        }),
                 },
                 patchProject,
                 patchAgentConfig,
@@ -520,9 +602,9 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
             await updateConfig({ defaultWorkspacePath: project.path });
         } catch (err) {
             console.error('[Launcher] failed to set default workspace:', err);
-            toastRef.current.warning('设为默认失败，请重试');
+            toastRef.current.warning(t('toasts.setDefaultFailed'));
         }
-    }, [updateConfig]);
+    }, [t, updateConfig]);
 
     // Handle send from BrandSection — `cron` is the launcher-staged cron config
     // (PRD 0.2.7 D1); when present, Chat's autoSend dispatches startCronTask
@@ -533,7 +615,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
         cron?: import('@/types/tab').InitialMessageCron,
     ) => {
         if (!selectedWorkspace) {
-            toastRef.current.error('请先选择工作区');
+            toastRef.current.error(t('toasts.selectWorkspaceFirst'));
             return;
         }
 
@@ -541,10 +623,19 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
         // pairBuiltinSelection enforces model ∈ provider.models — closing the
         // "stale agent.model paired with first-available fallback provider" hole when the
         // primary provider's key was deleted between agent setup and send.
-        const builtinSelection = (!isExternalRuntime && launcherProvider)
+        const launcherModelForProvider = launcherSelectedModel ?? launcherProvider?.primaryModel;
+        const providerExecutionIntent = (!isExternalRuntime && launcherProvider && launcherModelForProvider)
+            ? toProviderExecutionIntent(launcherProvider, launcherModelForProvider)
+            : undefined;
+        const runtimeBackedProviderIdentity = providerExecutionIntent?.kind === 'runtime-backed-provider'
+            ? providerExecutionIntent
+            : undefined;
+        const builtinSelection = (!isExternalRuntime && launcherProvider && !isRuntimeBackedProvider(launcherProvider))
             ? pairBuiltinSelection(launcherProvider, launcherSelectedModel)
             : undefined;
-        const runtimeModel = isExternalRuntime ? launcherSelectedModel : undefined;
+        const runtimeModel = isExternalRuntime
+            ? launcherSelectedModel
+            : runtimeBackedProviderIdentity?.model;
         // PRD 0.2.17 — only carry plugins that are still globally visible
         // (Settings 开关 ON) to avoid silently re-enabling hidden plugins
         // when Launcher's last-used list is older than the current visibility
@@ -557,6 +648,10 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
         const carriedEnabledPlugins = launcherEnabledPlugins.filter(id =>
             launcherVisiblePluginIds.has(id),
         );
+        const carriedOfficialTools = launcherOfficialToolEnabled.filter(id =>
+            launcherGlobalOfficialToolEnabled.includes(id)
+            && (id !== IMAGE_UNDERSTANDING_TOOL_ID || imageUnderstandingConfiguredForInput),
+        );
 
         const initialMessage: InitialMessage = {
             text,
@@ -564,8 +659,10 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
             permissionMode: launcherPermissionMode,
             mcpEnabledServers: launcherWorkspaceMcpEnabled.filter(id => launcherGlobalMcpEnabled.includes(id)),
             ...(carriedEnabledPlugins.length > 0 ? { enabledPluginIds: carriedEnabledPlugins } : {}),
+            enabledOfficialToolIds: carriedOfficialTools,
             ...(builtinSelection ? { builtinSelection } : {}),
             ...(runtimeModel ? { runtimeModel } : {}),
+            ...(runtimeBackedProviderIdentity ? { providerExecutionIdentity: runtimeBackedProviderIdentity } : {}),
             // #324 — hand-carry: don't bet the async agent-config write wins
             // the race against the new tab's mount/seed.
             ...(launcherReasoningEffort !== 'default' ? { reasoningEffort: launcherReasoningEffort } : {}),
@@ -580,6 +677,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
                 permissionMode: launcherPermissionMode,
                 mcpEnabledServers: launcherWorkspaceMcpEnabled,
                 enabledPluginIds: launcherEnabledPlugins,
+                enabledOfficialToolIds: launcherOfficialToolEnabled,
             },
         }).catch(err => console.warn('[Launcher] Failed to save launcherLastUsed:', err));
 
@@ -619,6 +717,17 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
                     !isExternalRuntime && launcherProvider
                         ? launcherProvider.id
                         : undefined;
+                const cronExecution = projectCronExecutionOverrides({
+                    providers,
+                    runtime: launcherRuntime,
+                    providerId: launcherProviderId,
+                    model: builtinSelection?.model ?? runtimeModel,
+                    runtimeConfig: isExternalRuntime ? runtimeConfigRef.current : undefined,
+                });
+                const cronPermissionMode = coerceRuntimeBirthPermissionMode(
+                    launcherPermissionMode,
+                    cronExecution.runtime ?? launcherRuntime,
+                );
                 const created = await createCronTask({
                     workspacePath: selectedWorkspace.path,
                     sessionId: standaloneSessionId,
@@ -630,17 +739,17 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
                     schedule: cron.schedule,
                     delivery: cron.delivery,
                     name: cron.name,
-                    permissionMode: launcherPermissionMode,
-                    model: builtinSelection?.model ?? runtimeModel,
-                    providerId: launcherProviderId,
+                    permissionMode: cronPermissionMode,
+                    model: cronExecution.model,
+                    providerId: cronExecution.providerId,
                     // PRD 0.2.9 — When `providerId` is set the sidecar ignores
                     // intent (live-resolve takes precedence). We still send
                     // `subscription` for the no-providerId subscription case
                     // so legacy /cron/execute paths handle it correctly until
                     // all callers move to providerId-only.
-                    providerIntent: launcherProviderId ? undefined : 'subscription',
-                    runtime: launcherRuntime,
-                    runtimeConfig: isExternalRuntime ? runtimeConfigRef.current : undefined,
+                    providerIntent: cronExecution.providerIntent,
+                    runtime: cronExecution.runtime,
+                    runtimeConfig: cronExecution.runtimeConfig,
                     // Snapshot the launcher's MCP selection so the cron task's
                     // own override branch fires at execute-sync time. The
                     // perf shortcut in /cron/execute-sync (preferring
@@ -657,12 +766,12 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
                     interval_minutes: cron.intervalMinutes,
                     schedule_kind: cron.schedule.kind,
                 });
-                toastRef.current.success('独立定时任务已创建，可在任务中心查看');
+                toastRef.current.success(t('toasts.standaloneCronCreated'));
                 setLaunchingProjectId(null);
                 return;
             } catch (err) {
                 console.error('[Launcher] Failed to create standalone cron task:', err);
-                toastRef.current.error(`创建定时任务失败：${err instanceof Error ? err.message : String(err)}`);
+                toastRef.current.error(t('toasts.createCronFailed', { message: err instanceof Error ? err.message : String(err) }));
                 setLaunchingProjectId(null);
                 return;
             }
@@ -676,8 +785,9 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
         );
     }, [selectedWorkspace, launcherProvider, launcherPermissionMode,
         launcherSelectedModel, launcherReasoningEffort, launcherWorkspaceMcpEnabled, launcherGlobalMcpEnabled,
-        launcherEnabledPlugins, config.plugins, config.enabledPlugins,
-        isExternalRuntime, launcherRuntime,
+        launcherEnabledPlugins, launcherOfficialToolEnabled, launcherGlobalOfficialToolEnabled,
+        imageUnderstandingConfiguredForInput, config.plugins, config.enabledPlugins,
+        isExternalRuntime, launcherRuntime, providers, t,
         touchProject, onLaunchProject, updateConfig]);
 
     // Path input dialog state (for browser dev mode)
@@ -697,6 +807,35 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
         touchProject(project.id).catch((err) => {
             console.warn('[Launcher] Failed to update lastOpened:', err);
         });
+        let sessionBirthHint: LaunchSessionBirthHint | undefined;
+        if (
+            !sessionId
+            && selectedWorkspace
+            && workspacePathsEqual(selectedWorkspace.path, project.path)
+            && !isExternalRuntime
+            && launcherProvider
+        ) {
+            const model = launcherSelectedModel ?? launcherProvider.primaryModel;
+            const intent = model ? toProviderExecutionIntent(launcherProvider, model) : undefined;
+            if (intent?.kind === 'runtime-backed-provider') {
+                const visiblePluginIds = new Set(
+                    (config.plugins ?? [])
+                        .filter(p => config.enabledPlugins?.[p.id] === true)
+                        .map(p => p.id),
+                );
+                sessionBirthHint = {
+                    providerExecutionIdentity: intent,
+                    permissionMode: launcherPermissionMode,
+                    reasoningEffort: launcherReasoningEffort,
+                    mcpEnabledServers: launcherWorkspaceMcpEnabled.filter(id => launcherGlobalMcpEnabled.includes(id)),
+                    enabledPluginIds: launcherEnabledPlugins.filter(id => visiblePluginIds.has(id)),
+                    enabledOfficialToolIds: launcherOfficialToolEnabled.filter(id =>
+                        launcherGlobalOfficialToolEnabled.includes(id)
+                        && (id !== IMAGE_UNDERSTANDING_TOOL_ID || imageUnderstandingConfiguredForInput),
+                    ),
+                };
+            }
+        }
         onLaunchProject(
             project,
             sessionId,
@@ -704,8 +843,26 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
             sessionId
                 ? { historyEntrySource: historyEntrySource ?? 'launcher_recent' }
                 : { surface: 'agent_card', entryIntent: 'open_workspace' },
+            sessionBirthHint,
         );
-    }, [touchProject, onLaunchProject]);
+    }, [
+        touchProject,
+        onLaunchProject,
+        selectedWorkspace,
+        isExternalRuntime,
+        launcherProvider,
+        launcherSelectedModel,
+        launcherPermissionMode,
+        launcherReasoningEffort,
+        launcherWorkspaceMcpEnabled,
+        launcherGlobalMcpEnabled,
+        launcherEnabledPlugins,
+        launcherOfficialToolEnabled,
+        launcherGlobalOfficialToolEnabled,
+        imageUnderstandingConfiguredForInput,
+        config.plugins,
+        config.enabledPlugins,
+    ]);
 
     const handleOpenTask = useCallback((session: SessionMetadata, project: Project, historyEntrySource: HistoryEntrySource = 'launcher_recent') => {
         handleLaunch(project, session.id, historyEntrySource);
@@ -739,7 +896,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
                 const selected = await open({
                     directory: true,
                     multiple: false,
-                    title: '选择项目文件夹',
+                    title: t('dialogs.pickProjectFolder'),
                 });
                 console.log('[Launcher] Dialog result:', selected);
 
@@ -755,7 +912,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
             const errorMsg = err instanceof Error ? err.message : String(err);
             console.error('[Launcher] Failed to add project:', errorMsg);
             setAddError(errorMsg);
-            toast.error(`添加项目失败: ${errorMsg}`);
+            toast.error(t('toasts.addProjectFailed', { message: errorMsg }));
         }
     };
 
@@ -776,7 +933,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
             const errorMsg = err instanceof Error ? err.message : String(err);
             console.error('[Launcher] Failed to add project:', errorMsg);
             setAddError(errorMsg);
-            toast.error(`添加项目失败: ${errorMsg}`);
+            toast.error(t('toasts.addProjectFailed', { message: errorMsg }));
         }
     };
 
@@ -799,11 +956,11 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
             });
         } catch (err) {
             console.error('[Launcher] failed to toggle workspace pin:', err);
-            toastRef.current.warning('置顶状态保存失败，请重试');
+            toastRef.current.warning(t('toasts.pinFailed'));
         } finally {
             pinToggleInFlightRef.current.delete(project.id);
         }
-    }, [patchProject, projects]);
+    }, [patchProject, projects, t]);
 
     const confirmRemoveProject = async () => {
         if (projectToRemove) {
@@ -841,9 +998,9 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
             await openPathExternal({ fullPath: project.path, workspace: null });
         } catch (err) {
             console.error('[Launcher] Failed to open project folder:', err);
-            toastRef.current.error('打开所在文件夹失败');
+            toastRef.current.error(t('toasts.openFolderFailed'));
         }
-    }, [openPathExternal]);
+    }, [openPathExternal, t]);
     const handleCloseAgentOverlay = useCallback(() => setAgentOverlay(null), []);
 
     // SystemPromptsPanel "智能生成" → close the overlay and launch the workspace into
@@ -857,20 +1014,28 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
         // first ordered provider which the user disabled in Settings → 启用和排序.
         const effectiveProvider = launcherProvider ?? providers.find(isProviderEnabled);
         if (!effectiveProvider) {
-            toastRef.current.error('没有可用的 Provider，请先在设置中配置');
+            toastRef.current.error(t('toasts.noProvider'));
             return;
         }
         setAgentOverlay(null);
         // PRD 0.2.3 + cross-review: same builtin/external split as handleBrandSend.
-        const builtinSelection = !isExternalRuntime
+        const initModelForProvider = launcherSelectedModel ?? effectiveProvider.primaryModel;
+        const providerExecutionIntent = !isExternalRuntime && initModelForProvider
+            ? toProviderExecutionIntent(effectiveProvider, initModelForProvider)
+            : undefined;
+        const runtimeBackedProviderIdentity = providerExecutionIntent?.kind === 'runtime-backed-provider'
+            ? providerExecutionIntent
+            : undefined;
+        const builtinSelection = !isExternalRuntime && !isRuntimeBackedProvider(effectiveProvider)
             ? pairBuiltinSelection(effectiveProvider, launcherSelectedModel)
             : undefined;
-        const runtimeModel = isExternalRuntime ? launcherSelectedModel : undefined;
+        const runtimeModel = isExternalRuntime ? launcherSelectedModel : runtimeBackedProviderIdentity?.model;
         const initialMessage: InitialMessage = {
             text: '/init',
             permissionMode: launcherPermissionMode,
             ...(builtinSelection ? { builtinSelection } : {}),
             ...(runtimeModel ? { runtimeModel } : {}),
+            ...(runtimeBackedProviderIdentity ? { providerExecutionIdentity: runtimeBackedProviderIdentity } : {}),
         };
         onLaunchProject(
             project,
@@ -878,7 +1043,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
             initialMessage,
             { surface: 'agent_setup', entryIntent: 'workspace_init' },
         );
-    }, [agentOverlay, projects, launcherProvider, providers, launcherPermissionMode, launcherSelectedModel, isExternalRuntime, onLaunchProject]);
+    }, [agentOverlay, projects, launcherProvider, providers, launcherPermissionMode, launcherSelectedModel, isExternalRuntime, onLaunchProject, t]);
 
     return (
         <div className="flex h-full flex-col overflow-hidden bg-[var(--paper)] text-[var(--ink)]">
@@ -901,12 +1066,11 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
             {/* Remove Workspace Confirm Dialog */}
             {projectToRemove && (
                 <ConfirmDialog
-                    title={isSystemPresetProject(projectToRemove) ? '隐藏默认工作区' : '移除工作区'}
+                    title={isSystemPresetProject(projectToRemove) ? t('dialogs.hideDefaultWorkspace') : t('dialogs.removeWorkspace')}
                     message={isSystemPresetProject(projectToRemove)
-                        ? `确定要隐藏「${projectToRemove.displayName || projectToRemove.name}」吗？此操作不会删除本地文件，后续可通过恢复入口重新显示。`
-                        : `确定要从列表中移除「${projectToRemove.name}」吗？此操作不会删除项目文件。`}
-                    confirmText={isSystemPresetProject(projectToRemove) ? '隐藏' : '移除'}
-                    cancelText="取消"
+                        ? t('dialogs.hideWorkspaceMessage', { name: projectToRemove.displayName || projectToRemove.name })
+                        : t('dialogs.removeWorkspaceMessage', { name: projectToRemove.name })}
+                    confirmText={isSystemPresetProject(projectToRemove) ? t('dialogs.hide') : t('dialogs.remove')}
                     confirmVariant="danger"
                     onConfirm={confirmRemoveProject}
                     onCancel={() => setProjectToRemove(null)}
@@ -942,6 +1106,11 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
                         globalMcpEnabled={launcherGlobalMcpEnabled}
                         mcpServers={launcherMcpServers}
                         onWorkspaceMcpToggle={handleWorkspaceMcpToggle}
+                        officialTools={OFFICIAL_TOOLS}
+                        workspaceOfficialToolEnabled={launcherOfficialToolEnabled}
+                        globalOfficialToolEnabled={launcherGlobalOfficialToolEnabled}
+                        officialToolNeedsConfig={launcherOfficialToolNeedsConfig}
+                        onWorkspaceOfficialToolToggle={handleLauncherOfficialToolToggle}
                         // PRD 0.2.17 — same plugin props as Chat. Source from
                         // AppConfig (Layer 1 visibility gate); Layer 2 is
                         // Launcher's transient selection (handed off to new

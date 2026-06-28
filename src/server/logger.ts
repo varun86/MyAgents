@@ -147,6 +147,7 @@ function createAndBroadcast(level: LogLevel, args: unknown[]): void {
         if (ctx.requestId) entry.requestId = ctx.requestId;
         if (ctx.turnId) entry.turnId = ctx.turnId;
         if (ctx.runtime) entry.runtime = ctx.runtime;
+        if (ctx.runtimeSource) entry.runtimeSource = ctx.runtimeSource;
     }
 
     // Store in history buffer (Ring Buffer)

@@ -14,8 +14,13 @@
 
 import { taskCenterAvailable, taskUpgradeLegacyCron } from '@/api/taskCenter';
 import { workspacePathsEqual } from '@/../shared/workspacePath';
+import { i18n } from '@/i18n';
 import type { Project } from '@/config/types';
 import type { Task } from '@/../shared/types/task';
+
+function legacyUpgradeText(key: string, options?: Record<string, unknown>): string {
+  return String(i18n.t(`task:tasks.legacyUpgrade.${key}`, options));
+}
 
 /** Minimal subset of the raw CronTask object we need in the renderer
  *  — we only read `id`, `workspacePath`, and `prompt` (for eligibility).
@@ -60,13 +65,13 @@ export async function upgradeLegacyCron(
   projects: Project[],
 ): Promise<UpgradeResult> {
   const cronTaskId = String(legacy.id ?? '').trim();
-  if (!cronTaskId) throw new Error('缺少 CronTask id，无法升级');
+  if (!cronTaskId) throw new Error(legacyUpgradeText('missingCronTaskId'));
   const workspacePath = getWorkspacePath(legacy);
-  if (!workspacePath) throw new Error('缺少工作区路径，无法升级');
+  if (!workspacePath) throw new Error(legacyUpgradeText('missingWorkspacePath'));
   const workspaceId = resolveWorkspaceId(workspacePath, projects);
   if (!workspaceId) {
     throw new Error(
-      `找不到工作区：${workspacePath}。请先在启动页添加该工作区，然后重试升级。`,
+      legacyUpgradeText('workspaceNotFound', { workspacePath }),
     );
   }
   return taskUpgradeLegacyCron(cronTaskId, workspaceId);

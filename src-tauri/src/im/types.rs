@@ -1,9 +1,11 @@
 // IM Bot integration types (Rust side)
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::time::Instant;
+
+const CODEX_SUBSCRIPTION_PROVIDER_ID: &str = "codex-sub";
 
 /// Partial update patch for IM Bot config.
 /// Each `None` field means "no change"; `Some("")` means "clear the field".
@@ -48,7 +50,10 @@ pub enum ImPlatform {
     Telegram,
     Feishu,
     Dingtalk,
-    /// OpenClaw channel plugin (String = channel ID, e.g. "qqbot")
+    /// OpenClaw route identity. Historical data may store either the protocol
+    /// channel ID (e.g. "qqbot") or the install plugin ID (e.g.
+    /// "wecom-openclaw-plugin"). Bridge config canonicalization resolves the
+    /// protocol channel ID from the OpenClaw manifest at runtime.
     OpenClaw(String),
 }
 
@@ -376,6 +381,8 @@ pub struct ImActiveSession {
     pub last_sender_name: Option<String>,
     pub workspace_path: String,
     pub message_count: u32,
+    #[serde(default)]
+    pub metadata_birth_pending: bool,
     pub last_active: String,
 }
 
@@ -790,6 +797,8 @@ pub struct ChannelOverrides {
     pub provider_id: Option<String>,
     pub provider_env_json: Option<String>,
     pub model: Option<String>,
+    pub runtime: Option<String>,
+    pub runtime_config: Option<serde_json::Value>,
     pub permission_mode: Option<String>,
     pub tools_deny: Option<Vec<String>>,
 }
@@ -926,6 +935,67 @@ fn default_permission_mode() -> String {
     "plan".to_string()
 }
 
+fn project_runtime_for_provider(
+    provider_id: Option<&str>,
+    model: Option<&str>,
+    runtime: Option<String>,
+    runtime_config: Option<serde_json::Value>,
+) -> (Option<String>, Option<serde_json::Value>) {
+    if provider_id != Some(CODEX_SUBSCRIPTION_PROVIDER_ID) {
+        return (runtime, runtime_config);
+    }
+    let mut config = runtime_config
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+    for key in [
+        "source",
+        "model",
+        "permissionMode",
+        "reasoningEffort",
+        "additionalArgs",
+    ] {
+        config.remove(key);
+    }
+    config.insert(
+        "source".to_string(),
+        serde_json::Value::String("managed-provider".to_string()),
+    );
+    if let Some(model) = model.filter(|m| !m.is_empty()) {
+        config.insert(
+            "model".to_string(),
+            serde_json::Value::String(model.to_string()),
+        );
+    } else {
+        config.remove("model");
+    }
+    (
+        Some("codex".to_string()),
+        Some(serde_json::Value::Object(config)),
+    )
+}
+
+fn project_permission_for_provider(provider_id: Option<&str>, permission_mode: String) -> String {
+    if provider_id != Some(CODEX_SUBSCRIPTION_PROVIDER_ID) {
+        return permission_mode;
+    }
+    let trimmed = permission_mode.trim();
+    match trimmed {
+        "suggest" | "auto-edit" | "full-auto" | "no-restrictions" => trimmed.to_string(),
+        "" | "auto" | "plan" | "fullAgency" | "custom" | "default" | "acceptEdits"
+        | "bypassPermissions" | "autoEdit" | "yolo" => "full-auto".to_string(),
+        future_mode => future_mode.to_string(),
+    }
+}
+
+fn deserialize_nullable_value<'de, D>(
+    deserializer: D,
+) -> Result<Option<Option<serde_json::Value>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<serde_json::Value>::deserialize(deserializer).map(Some)
+}
+
 /// Agent-level status (aggregates all channel statuses)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -959,6 +1029,33 @@ impl ChannelConfigRust {
     /// Convert to ImConfig for backward compatibility with existing start_im_bot logic.
     pub fn to_im_config(&self, agent: &AgentConfigRust) -> ImConfig {
         let overrides = self.overrides.as_ref();
+        let provider_id = overrides
+            .and_then(|o| o.provider_id.clone())
+            .or_else(|| self.provider_id.clone())
+            .or_else(|| agent.provider_id.clone());
+        let model = overrides
+            .and_then(|o| o.model.clone())
+            .or_else(|| self.model.clone())
+            .or_else(|| agent.model.clone());
+        let runtime = overrides
+            .and_then(|o| o.runtime.clone())
+            .or_else(|| agent.runtime.clone());
+        let runtime_config = overrides
+            .and_then(|o| o.runtime_config.clone())
+            .or_else(|| agent.runtime_config.clone());
+        let (runtime, runtime_config) = project_runtime_for_provider(
+            provider_id.as_deref(),
+            model.as_deref(),
+            runtime,
+            runtime_config,
+        );
+        let permission_mode = project_permission_for_provider(
+            provider_id.as_deref(),
+            overrides
+                .and_then(|o| o.permission_mode.clone())
+                .unwrap_or_else(|| agent.permission_mode.clone()),
+        );
+
         ImConfig {
             platform: self.channel_type.clone(),
             // For OpenClaw channels, self.name is the npm package name (e.g., "larksuite/openclaw-lark")
@@ -970,9 +1067,7 @@ impl ChannelConfigRust {
             },
             bot_token: self.bot_token.clone().unwrap_or_default(),
             allowed_users: self.allowed_users.clone(),
-            permission_mode: overrides
-                .and_then(|o| o.permission_mode.clone())
-                .unwrap_or_else(|| agent.permission_mode.clone()),
+            permission_mode,
             default_workspace_path: Some(agent.workspace_path.clone()),
             enabled: self.enabled && agent.enabled,
             feishu_app_id: self.feishu_app_id.clone(),
@@ -986,21 +1081,15 @@ impl ChannelConfigRust {
             // Channel root has higher priority than agent default because the user explicitly
             // chose a provider for this specific channel via /provider command (written to root
             // by persist_bot_config_patch before the bc06386 fix moved writes to overrides).
-            provider_id: overrides
-                .and_then(|o| o.provider_id.clone())
-                .or_else(|| self.provider_id.clone())
-                .or_else(|| agent.provider_id.clone()),
-            model: overrides
-                .and_then(|o| o.model.clone())
-                .or_else(|| self.model.clone())
-                .or_else(|| agent.model.clone()),
+            provider_id,
+            model,
             provider_env_json: overrides
                 .and_then(|o| o.provider_env_json.clone())
                 .or_else(|| self.provider_env_json.clone())
                 .or_else(|| agent.provider_env_json.clone()),
             mcp_servers_json: agent.mcp_servers_json.clone(),
-            runtime: agent.runtime.clone(),
-            runtime_config: agent.runtime_config.clone(),
+            runtime,
+            runtime_config,
             heartbeat_config: agent.heartbeat.clone(),
             group_permissions: self.group_permissions.clone(),
             group_activation: self.group_activation.clone(),
@@ -1029,9 +1118,162 @@ pub struct AgentConfigPatch {
     pub mcp_enabled_servers: Option<Vec<String>>,
     pub mcp_servers_json: Option<String>,
     pub runtime: Option<String>,
-    pub runtime_config: Option<serde_json::Value>,
+    /// Tri-state patch field: missing = do not change, null = clear,
+    /// object = replace. Tauri JSON command patches need this distinction;
+    /// `Option<Value>` would deserialize both missing and null to `None`.
+    #[serde(default, deserialize_with = "deserialize_nullable_value")]
+    pub runtime_config: Option<Option<serde_json::Value>>,
     pub heartbeat_config_json: Option<String>,
     pub memory_auto_update_config_json: Option<String>,
     pub channels: Option<Vec<ChannelConfigRust>>,
     pub setup_completed: Option<bool>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn base_agent() -> AgentConfigRust {
+        AgentConfigRust {
+            id: "agent-1".to_string(),
+            name: "Agent".to_string(),
+            icon: None,
+            enabled: true,
+            workspace_path: "/tmp/workspace".to_string(),
+            provider_id: Some("openrouter".to_string()),
+            model: Some("anthropic/claude-sonnet-4.6".to_string()),
+            provider_env_json: None,
+            permission_mode: "auto".to_string(),
+            mcp_enabled_servers: None,
+            mcp_servers_json: None,
+            heartbeat: None,
+            memory_auto_update: None,
+            channels: vec![],
+            last_active_channel: None,
+            runtime: Some("builtin".to_string()),
+            runtime_config: None,
+            setup_completed: Some(true),
+        }
+    }
+
+    fn base_channel() -> ChannelConfigRust {
+        ChannelConfigRust {
+            id: "channel-1".to_string(),
+            channel_type: ImPlatform::Telegram,
+            name: None,
+            enabled: true,
+            bot_token: Some("token".to_string()),
+            telegram_use_draft: None,
+            feishu_app_id: None,
+            feishu_app_secret: None,
+            dingtalk_client_id: None,
+            dingtalk_client_secret: None,
+            dingtalk_use_ai_card: None,
+            dingtalk_card_template_id: None,
+            openclaw_plugin_id: None,
+            openclaw_npm_spec: None,
+            openclaw_plugin_config: None,
+            openclaw_manifest: None,
+            openclaw_enabled_tool_groups: None,
+            allowed_users: vec![],
+            group_permissions: vec![],
+            group_activation: None,
+            overrides: None,
+            provider_id: None,
+            provider_env_json: None,
+            model: None,
+            setup_completed: Some(true),
+        }
+    }
+
+    #[test]
+    fn channel_override_codex_subscription_projects_to_managed_runtime() {
+        let agent = base_agent();
+        let mut channel = base_channel();
+        channel.overrides = Some(ChannelOverrides {
+            provider_id: Some(CODEX_SUBSCRIPTION_PROVIDER_ID.to_string()),
+            model: Some("gpt-5.5-codex".to_string()),
+            runtime_config: Some(serde_json::json!({
+                "envPolicy": { "proxy": "terminal" },
+                "permissionMode": "fullAgency",
+                "reasoningEffort": "max",
+                "additionalArgs": ["--legacy"]
+            })),
+            ..Default::default()
+        });
+
+        let config = channel.to_im_config(&agent);
+
+        assert_eq!(
+            config.provider_id.as_deref(),
+            Some(CODEX_SUBSCRIPTION_PROVIDER_ID)
+        );
+        assert_eq!(config.model.as_deref(), Some("gpt-5.5-codex"));
+        assert_eq!(config.runtime.as_deref(), Some("codex"));
+        assert_eq!(config.permission_mode, "full-auto");
+        assert_eq!(
+            config
+                .runtime_config
+                .as_ref()
+                .and_then(|v| v.get("source"))
+                .and_then(|v| v.as_str()),
+            Some("managed-provider")
+        );
+        assert_eq!(
+            config
+                .runtime_config
+                .as_ref()
+                .and_then(|v| v.get("model"))
+                .and_then(|v| v.as_str()),
+            Some("gpt-5.5-codex")
+        );
+        assert_eq!(
+            config
+                .runtime_config
+                .as_ref()
+                .and_then(|v| v.get("envPolicy"))
+                .and_then(|v| v.get("proxy"))
+                .and_then(|v| v.as_str()),
+            Some("terminal")
+        );
+        assert!(config
+            .runtime_config
+            .as_ref()
+            .and_then(|v| v.get("permissionMode"))
+            .is_none());
+        assert!(config
+            .runtime_config
+            .as_ref()
+            .and_then(|v| v.get("reasoningEffort"))
+            .is_none());
+        assert!(config
+            .runtime_config
+            .as_ref()
+            .and_then(|v| v.get("additionalArgs"))
+            .is_none());
+    }
+
+    #[test]
+    fn agent_config_patch_runtime_config_distinguishes_missing_null_and_value() {
+        let missing: AgentConfigPatch = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(missing.runtime_config.is_none());
+
+        let clear: AgentConfigPatch =
+            serde_json::from_value(serde_json::json!({ "runtimeConfig": null })).unwrap();
+        assert_eq!(clear.runtime_config, Some(None));
+
+        let replace: AgentConfigPatch = serde_json::from_value(serde_json::json!({
+            "runtimeConfig": { "source": "managed-provider" }
+        }))
+        .unwrap();
+        assert_eq!(
+            replace
+                .runtime_config
+                .as_ref()
+                .and_then(|v| v.as_ref())
+                .and_then(|v| v.get("source"))
+                .and_then(|v| v.as_str()),
+            Some("managed-provider")
+        );
+    }
 }

@@ -23,6 +23,7 @@
 // discard so accidental Esc / 取消 doesn't lose work.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Bell, Bot, Clock, FileText, Flag, FolderOpen, Settings2 } from 'lucide-react';
 
 import {
@@ -35,6 +36,7 @@ import ConfirmDialog from '@/components/ConfirmDialog';
 import NotificationConfigEditor from '@/components/task-center/NotificationConfigEditor';
 import TaskDocBlock from '@/components/task-center/TaskDocBlock';
 import { useToast } from '@/components/Toast';
+import { useConfig } from '@/hooks/useConfig';
 import type {
   EndConditions,
   NotificationConfig,
@@ -50,6 +52,7 @@ import {
 import { ExecutionModeEditor } from './editors/ExecutionModeEditor';
 import { INPUT_CLS, toLocalDateTimeString } from './editors/controls';
 import { TaskAdvancedConfigEditor } from './editors/TaskAdvancedConfigEditor';
+import { projectTaskExecutionOverrides } from './taskProviderProjection';
 import {
   FormSection,
   PanelFooter,
@@ -155,6 +158,7 @@ export function TaskEditPanel({
   onCancel,
   onError,
 }: TaskEditPanelProps) {
+  const { t } = useTranslation('task');
   const [draft, setDraft] = useState<Draft>(() => taskToDraft(task, '', ''));
   // Snapshot of the draft at the moment task.md / verify.md finished
   // loading. We diff against this for the dirty check so reads
@@ -174,6 +178,7 @@ export function TaskEditPanel({
   // Discard-confirmation dialog when the draft is dirty.
   const [showDiscardConfirm, setShowDiscardConfirm] = useState(false);
   const toast = useToast();
+  const { providers } = useConfig();
 
   // Refs for `focusDoc` — scroll-into-view + caret focus on open. Effect
   // runs on mount only (focusDoc is an intent, not a live mode). For
@@ -278,10 +283,10 @@ export function TaskEditPanel({
   const locked = task.status === 'running' || task.status === 'verifying';
   useEffect(() => {
     if (locked) {
-      onError('任务已开始执行，编辑已取消（PRD §9.4）。');
+      onError(t('edit.lockedError'));
       onCancel();
     }
-  }, [locked, onCancel, onError]);
+  }, [locked, onCancel, onError, t]);
 
   const isScheduled = draft.executionMode === 'scheduled';
   const isRecurring = draft.executionMode === 'recurring';
@@ -301,16 +306,16 @@ export function TaskEditPanel({
 
   const errors = useMemo(() => {
     const errs: string[] = [];
-    if (!draft.name.trim()) errs.push('请填写任务名');
+    if (!draft.name.trim()) errs.push(t('edit.validation.nameRequired'));
     if (taskMdReadState === 'failed')
-      errs.push('task.md 读取失败，无法保存（以免覆盖原内容）');
+      errs.push(t('edit.validation.taskReadFailed'));
     if (taskMdReadState === 'ok' && !draft.taskMd.trim())
-      errs.push('task.md 内容不能为空');
+      errs.push(t('edit.validation.taskRequired'));
     if (verifyMdReadState === 'failed')
-      errs.push('verify.md 读取失败，无法保存（以免覆盖原内容）');
+      errs.push(t('edit.validation.verifyReadFailed'));
     if (isScheduled) {
       const ts = Date.parse(draft.atDateTime);
-      if (Number.isNaN(ts) || ts <= Date.now()) errs.push('执行时间必须在未来');
+      if (Number.isNaN(ts) || ts <= Date.now()) errs.push(t('edit.validation.futureTimeRequired'));
     }
     if (isRecurring) {
       const advancedOn = draft.cronExpression.trim().length > 0;
@@ -318,10 +323,10 @@ export function TaskEditPanel({
         // Rust nom-cron is strict; do a shallow shape check here to catch
         // the obvious "forgot a field" mistake before the backend would.
         if (draft.cronExpression.trim().split(/\s+/).length !== 5) {
-          errs.push('Cron 表达式必须是 5 段(分 时 日 月 周)');
+          errs.push(t('edit.validation.cronPartsRequired'));
         }
       } else if (draft.intervalMinutes < 5) {
-        errs.push('周期间隔不能小于 5 分钟');
+        errs.push(t('edit.validation.intervalTooShort'));
       }
     }
     if (
@@ -331,10 +336,10 @@ export function TaskEditPanel({
       !draft.maxExecutions &&
       !draft.aiCanExit
     ) {
-      errs.push('请至少设置一个结束条件');
+      errs.push(t('edit.validation.endConditionRequired'));
     }
     return errs;
-  }, [draft, isScheduled, isRecurring, showEndConditions, taskMdReadState, verifyMdReadState]);
+  }, [draft, isScheduled, isRecurring, showEndConditions, taskMdReadState, verifyMdReadState, t]);
 
   const buildEndConditions = useCallback((): EndConditions | undefined => {
     if (!showEndConditions) return undefined;
@@ -386,6 +391,13 @@ export function TaskEditPanel({
     // mode-incompatible fields when `executionMode` flips (PRD §9.4
     // hygiene), so we just forward the draft.
     const payload: TaskUpdateInput = { id: task.id };
+    const projectedExecution = projectTaskExecutionOverrides({
+      providers,
+      runtime: draft.runtime,
+      providerId: draft.providerId,
+      model: draft.model,
+      runtimeConfig: draft.runtimeConfig,
+    });
     if (draft.name.trim() !== task.name) payload.name = draft.name.trim();
     if (draft.description.trim() !== (task.description ?? ''))
       payload.description = draft.description.trim();
@@ -444,8 +456,8 @@ export function TaskEditPanel({
     // flag so atomicity is server-enforced (Rust validator catches half-state).
     const initialProviderId = task.providerId ?? '';
     const initialModel = task.model ?? '';
-    const draftProviderId = draft.providerId ?? '';
-    const draftModel = draft.model ?? '';
+    const draftProviderId = projectedExecution.providerId ?? '';
+    const draftModel = projectedExecution.model ?? '';
     const providerOrModelChanged =
       initialProviderId !== draftProviderId || initialModel !== draftModel;
     if (providerOrModelChanged) {
@@ -468,21 +480,21 @@ export function TaskEditPanel({
     // `clearProviderOverride`) so the round-trip is unambiguous on both
     // sides.
     const initialRuntime = task.runtime ?? '';
-    const draftRuntime = draft.runtime ?? '';
+    const draftRuntime = projectedExecution.runtime ?? '';
     const initialRuntimeConfig = JSON.stringify(task.runtimeConfig ?? null);
-    const nextRuntimeConfig = JSON.stringify(draft.runtimeConfig ?? null);
+    const nextRuntimeConfig = JSON.stringify(projectedExecution.runtimeConfig ?? null);
     const runtimeChanged = initialRuntime !== draftRuntime;
     const runtimeConfigChanged = initialRuntimeConfig !== nextRuntimeConfig;
     if (runtimeChanged || runtimeConfigChanged) {
-      const goingToFollowRuntime = !draftRuntime && !draft.runtimeConfig;
+      const goingToFollowRuntime = !draftRuntime && !projectedExecution.runtimeConfig;
       if (goingToFollowRuntime) {
         payload.clearRuntimeOverride = true;
       } else {
-        if (runtimeChanged) payload.runtime = draft.runtime;
+        if (runtimeChanged) payload.runtime = projectedExecution.runtime;
         if (runtimeConfigChanged) {
           // RuntimeConfig vs RuntimeConfigSnapshot — structurally compatible,
           // see DispatchTaskDialog for the cast rationale.
-          payload.runtimeConfig = draft.runtimeConfig as Record<string, unknown> | undefined;
+          payload.runtimeConfig = projectedExecution.runtimeConfig as Record<string, unknown> | undefined;
         }
       }
     }
@@ -520,7 +532,7 @@ export function TaskEditPanel({
     // Bail if nothing changed — stay in edit mode so the user isn't
     // thrown back to read-only with no feedback.
     if (Object.keys(payload).length === 1 && !verifyChanged) {
-      onError('没有需要保存的变更');
+      onError(t('edit.noChanges'));
       return;
     }
 
@@ -558,6 +570,7 @@ export function TaskEditPanel({
     errors,
     saving,
     task,
+    providers,
     buildEndConditions,
     isScheduled,
     isRecurring,
@@ -566,6 +579,7 @@ export function TaskEditPanel({
     verifyMdReadState,
     onSaved,
     onError,
+    t,
   ]);
 
   // Esc → cancel (with dirty guard); Cmd/Ctrl+Enter → save. The discard
@@ -581,10 +595,10 @@ export function TaskEditPanel({
     <>
       {showDiscardConfirm && (
         <ConfirmDialog
-          title="放弃未保存的修改？"
-          message="离开后这些修改不会保留。"
-          confirmText="放弃"
-          cancelText="继续编辑"
+          title={t('edit.discardTitle')}
+          message={t('edit.discardMessage')}
+          confirmText={t('edit.discardConfirm')}
+          cancelText={t('edit.discardCancel')}
           confirmVariant="danger"
           onConfirm={confirmDiscard}
           onCancel={() => setShowDiscardConfirm(false)}
@@ -594,9 +608,9 @@ export function TaskEditPanel({
       <div className="flex min-h-0 flex-1 flex-col">
         <div className={`flex-1 overflow-y-auto px-6 py-5 ${SECTION_GAP}`}>
         {/* 基本信息 */}
-        <FormSection icon={FileText} title="基本信息">
+        <FormSection icon={FileText} title={t('edit.sectionBasic')}>
           <div className="space-y-4">
-            <Field label="任务名称" required>
+            <Field label={t('edit.name')} required>
               <input
                 type="text"
                 value={draft.name}
@@ -605,22 +619,22 @@ export function TaskEditPanel({
                 className={INPUT_CLS}
               />
             </Field>
-            <Field label="简短描述" hint="可选">
+            <Field label={t('edit.description')} hint={t('edit.optional')}>
               <input
                 type="text"
                 value={draft.description}
                 maxLength={200}
                 onChange={(e) => setDraft((d) => ({ ...d, description: e.target.value }))}
-                placeholder="一行话说明，任务卡会展示"
+                placeholder={t('edit.descriptionPlaceholder')}
                 className={INPUT_CLS}
               />
             </Field>
-            <Field label="标签" hint="逗号分隔">
+            <Field label={t('edit.tags')} hint={t('edit.tagsHint')}>
               <input
                 type="text"
                 value={draft.tagsInput}
                 onChange={(e) => setDraft((d) => ({ ...d, tagsInput: e.target.value }))}
-                placeholder="例如: news, weekly"
+                placeholder={t('edit.tagsPlaceholder')}
                 className={INPUT_CLS}
               />
             </Field>
@@ -633,13 +647,13 @@ export function TaskEditPanel({
             alignment.md but the user remains the source of truth here. */}
         <FormSection
           icon={FileText}
-          title="task.md · 执行 Prompt"
+          title={t('detail.taskDocTitle')}
           action={<OpenFolderButton onClick={() => void handleOpenDocsDir()} />}
         >
           <DocPathRow path={`~/.myagents/tasks/${task.id}/task.md`} />
           {taskMdReadState === 'failed' ? (
             <div className="rounded-[var(--radius-md)] border border-[var(--error)]/30 bg-[var(--error-bg)] px-3 py-2.5 text-xs text-[var(--error)]">
-              task.md 读取失败。为避免覆盖原内容，编辑已锁定。请关闭重试，或检查磁盘权限后再打开此任务。
+              {t('edit.taskReadFailed')}
             </div>
           ) : (
             <>
@@ -651,13 +665,13 @@ export function TaskEditPanel({
                 disabled={taskMdReadState !== 'ok'}
                 placeholder={
                   taskMdReadState === 'ok'
-                    ? '描述任务目标、约束、上下文'
-                    : '加载中…'
+                    ? t('edit.taskPlaceholder')
+                    : t('common.loading')
                 }
                 className={`${INPUT_CLS} resize-y font-mono text-sm`}
               />
               <p className="mt-1.5 text-xs text-[var(--ink-muted)]">
-                AI 执行时看到的 prompt。保存时原子写入上方路径。
+                {t('edit.taskDescription')}
               </p>
             </>
           )}
@@ -668,14 +682,14 @@ export function TaskEditPanel({
         {/* verify.md — always editable */}
         <FormSection
           icon={Flag}
-          title="verify.md · 验收标准"
-          hint="可选"
+          title={t('detail.verifyDocTitle')}
+          hint={t('edit.optional')}
           action={<OpenFolderButton onClick={() => void handleOpenDocsDir()} />}
         >
           <DocPathRow path={`~/.myagents/tasks/${task.id}/verify.md`} />
           {verifyMdReadState === 'failed' ? (
             <div className="rounded-[var(--radius-md)] border border-[var(--error)]/30 bg-[var(--error-bg)] px-3 py-2.5 text-xs text-[var(--error)]">
-              verify.md 读取失败。为避免覆盖原内容，编辑已锁定。
+              {t('edit.verifyReadFailed')}
             </div>
           ) : (
             <>
@@ -687,13 +701,13 @@ export function TaskEditPanel({
                 disabled={verifyMdReadState !== 'ok'}
                 placeholder={
                   verifyMdReadState === 'ok'
-                    ? '验收清单(可选)——如:「curl /health 应返回 200」「npm test 全绿」'
-                    : '加载中…'
+                    ? t('edit.verifyPlaceholder')
+                    : t('common.loading')
                 }
                 className={`${INPUT_CLS} resize-y font-mono text-sm`}
               />
               <p className="mt-1.5 text-xs text-[var(--ink-muted)]">
-                任务进入「验证中」阶段时 AI 读取此清单判定是否完成。留空则跳过验证阶段。
+                {t('edit.verifyDescription')}
               </p>
             </>
           )}
@@ -705,8 +719,8 @@ export function TaskEditPanel({
             tasks don't show an irrelevant block. */}
         <FormSection
           icon={FileText}
-          title="progress.md · 执行日志"
-          hint="只读 · 由 AI 写入"
+          title={t('detail.progressDocTitle')}
+          hint={t('edit.progressHint')}
         >
           <TaskDocBlock
             task={task}
@@ -721,7 +735,7 @@ export function TaskEditPanel({
         <div className={SECTION_DIVIDER} />
 
         {/* 高级配置 — runtime / provider / model / permission / MCP overrides (PRD 0.2.9) */}
-        <FormSection icon={Settings2} title="高级配置">
+        <FormSection icon={Settings2} title={t('edit.advanced')}>
           <TaskAdvancedConfigEditor
             workspacePath={task.workspacePath}
             runtime={draft.runtime}
@@ -744,7 +758,7 @@ export function TaskEditPanel({
         <div className={SECTION_DIVIDER} />
 
         {/* 执行模式 */}
-        <FormSection icon={Clock} title="执行模式">
+        <FormSection icon={Clock} title={t('dispatch.sectionExecution')}>
           <ExecutionModeEditor
             executionMode={draft.executionMode}
             setExecutionMode={setExecutionMode}
@@ -764,7 +778,7 @@ export function TaskEditPanel({
         {showEndConditions && (
           <>
             <div className={SECTION_DIVIDER} />
-            <FormSection icon={Bot} title="结束条件">
+            <FormSection icon={Bot} title={t('dispatch.sectionEndConditions')}>
               <EndConditionsEditor
                 mode={draft.endConditionMode}
                 setMode={(v) => setDraft((d) => ({ ...d, endConditionMode: v }))}
@@ -782,7 +796,7 @@ export function TaskEditPanel({
         <div className={SECTION_DIVIDER} />
 
         {/* 通知 */}
-        <FormSection icon={Bell} title="任务通知">
+        <FormSection icon={Bell} title={t('dispatch.sectionNotifications')}>
           <div ref={notificationRef}>
             <NotificationConfigEditor
               value={draft.notification}
@@ -799,7 +813,7 @@ export function TaskEditPanel({
           onSubmit={() => void handleSave()}
           busy={saving}
           disabled={errors.length > 0}
-          submitLabel={saving ? '保存中…' : '保存'}
+          submitLabel={saving ? t('edit.saving') : t('common.save')}
         />
       </div>
     </>
@@ -845,15 +859,16 @@ function DocPathRow({ path }: { path: string }) {
 }
 
 function OpenFolderButton({ onClick }: { onClick: () => void }) {
+  const { t } = useTranslation('task');
   return (
     <button
       type="button"
       onClick={onClick}
-      title="在文件管理器中打开该任务的文档目录"
+      title={t('edit.openDocsDirTitle')}
       className="inline-flex shrink-0 items-center gap-1 rounded-[var(--radius-md)] px-2 py-0.5 text-xs text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
     >
       <FolderOpen className="h-3 w-3" />
-      打开文件夹
+      {t('edit.openDocsDir')}
     </button>
   );
 }

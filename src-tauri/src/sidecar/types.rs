@@ -67,6 +67,7 @@ pub(super) enum ExistingSidecarReuse {
         port: u16,
         generation: u64,
         runtime: String,
+        runtime_source: Option<String>,
     },
     /// `owner_added` = whether THIS ensure call newly inserted its owner when it
     /// joined the still-starting Sidecar. Only true means a readiness-timeout
@@ -75,6 +76,7 @@ pub(super) enum ExistingSidecarReuse {
         port: u16,
         generation: u64,
         runtime: String,
+        runtime_source: Option<String>,
         owner_added: bool,
     },
 }
@@ -83,6 +85,20 @@ pub(super) fn normalize_runtime_name(runtime: Option<&str>) -> &str {
     match runtime {
         Some(runtime) if !runtime.is_empty() => runtime,
         _ => "builtin",
+    }
+}
+
+pub(super) fn normalize_runtime_source_name(
+    runtime: &str,
+    runtime_source: Option<&str>,
+) -> &'static str {
+    let runtime = normalize_runtime_name(Some(runtime));
+    if runtime == "builtin" {
+        return "builtin";
+    }
+    match runtime_source {
+        Some("managed-provider") => "managed-provider",
+        _ => "system-cli",
     }
 }
 
@@ -107,15 +123,28 @@ pub(super) fn sidecar_removal_event_policy(
     }
 }
 
+#[cfg(test)]
 pub(super) fn decide_runtime_drift_result(
     sidecar_runtime: Option<&str>,
     desired_runtime: &str,
     owners: &HashSet<SidecarOwner>,
 ) -> RuntimeDriftResult {
+    decide_runtime_identity_drift_result(sidecar_runtime, None, desired_runtime, None, owners)
+}
+
+pub(super) fn decide_runtime_identity_drift_result(
+    sidecar_runtime: Option<&str>,
+    sidecar_runtime_source: Option<&str>,
+    desired_runtime: &str,
+    desired_runtime_source: Option<&str>,
+    owners: &HashSet<SidecarOwner>,
+) -> RuntimeDriftResult {
     let sidecar_runtime = normalize_runtime_name(sidecar_runtime);
     let desired_runtime = normalize_runtime_name(Some(desired_runtime));
+    let sidecar_source = normalize_runtime_source_name(sidecar_runtime, sidecar_runtime_source);
+    let desired_source = normalize_runtime_source_name(desired_runtime, desired_runtime_source);
 
-    if sidecar_runtime == desired_runtime {
+    if sidecar_runtime == desired_runtime && sidecar_source == desired_source {
         RuntimeDriftResult::NoDrift
     } else if sidecar_has_non_agent_owner(owners) {
         RuntimeDriftResult::DetectedKeptAlive
@@ -193,6 +222,32 @@ mod lifecycle_contract_tests {
     }
 
     #[test]
+    fn runtime_source_is_part_of_drift_identity() {
+        let owners = owners(vec![SidecarOwner::Agent("agent-a".to_string())]);
+
+        assert_eq!(
+            decide_runtime_identity_drift_result(
+                Some("codex"),
+                Some("system-cli"),
+                "codex",
+                Some("managed-provider"),
+                &owners,
+            ),
+            RuntimeDriftResult::KilledAndRemoved
+        );
+        assert_eq!(
+            decide_runtime_identity_drift_result(
+                Some("codex"),
+                None,
+                "codex",
+                Some("system-cli"),
+                &owners,
+            ),
+            RuntimeDriftResult::NoDrift
+        );
+    }
+
+    #[test]
     fn desktop_style_owner_prefers_builtin_session_metadata_over_agent_runtime() {
         assert_eq!(
             resolve_runtime_for_owner(
@@ -236,7 +291,8 @@ mod lifecycle_contract_tests {
         let content = serde_json::json!([
             { "id": "missing-runtime" },
             { "id": "builtin-runtime", "runtime": "builtin" },
-            { "id": "codex-runtime", "runtime": "codex" }
+            { "id": "codex-runtime", "runtime": "codex" },
+            { "id": "managed-codex-runtime", "runtime": "codex", "runtimeSource": "managed-provider" }
         ])
         .to_string();
 
@@ -251,6 +307,20 @@ mod lifecycle_contract_tests {
         assert_eq!(
             resolve_session_runtime_identity_from_json("codex-runtime", &content),
             Some("codex".to_string())
+        );
+        assert_eq!(
+            resolve_session_runtime_identity_full_from_json("codex-runtime", &content),
+            Some(RuntimeIdentity {
+                runtime: "codex".to_string(),
+                runtime_source: Some("system-cli".to_string()),
+            })
+        );
+        assert_eq!(
+            resolve_session_runtime_identity_full_from_json("managed-codex-runtime", &content),
+            Some(RuntimeIdentity {
+                runtime: "codex".to_string(),
+                runtime_source: Some("managed-provider".to_string()),
+            })
         );
         assert_eq!(
             resolve_session_runtime_identity_from_json("unknown", &content),
@@ -349,6 +419,7 @@ mod lifecycle_contract_tests {
                 owners: owners(vec![SidecarOwner::Tab("tab-a".to_string())]),
                 created_at: std::time::Instant::now(),
                 runtime: None,
+                runtime_source: None,
             },
         );
     }
@@ -424,6 +495,9 @@ pub struct SessionSidecar {
     /// for the same peer session must not reuse a Sidecar that's still
     /// running the old runtime. None = builtin (no env var injected).
     pub runtime: Option<String>,
+    /// MYAGENTS_RUNTIME_SOURCE env var value this Sidecar was spawned with.
+    /// Missing external runtime source is treated as system-cli.
+    pub runtime_source: Option<String>,
 }
 
 impl SessionSidecar {

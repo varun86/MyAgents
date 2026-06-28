@@ -51,6 +51,7 @@ import {
   type DragOverEvent,
   type DragEndEvent,
 } from "@dnd-kit/core";
+import { useTranslation } from "react-i18next";
 
 import { useTabApi } from "@/context/TabContext";
 import { useWorkspaceFileService } from "@/hooks/useWorkspaceFileService";
@@ -320,6 +321,14 @@ const DirectoryPanel = memo(
 
     // Toast for notifications
     const toast = useToast();
+    const { t } = useTranslation("chat");
+    const tRef = useRef(t);
+    tRef.current = t;
+    const isMacPlatform =
+      typeof navigator !== "undefined" &&
+      navigator.platform.toLowerCase().includes("mac");
+    const copyShortcut = isMacPlatform ? "Cmd+C" : "Ctrl+C";
+    const pasteShortcut = isMacPlatform ? "Cmd+V" : "Ctrl+V";
 
     // Get Tab-scoped API functions and tabId
     // PRD 0.2.7 Phase D: useTabApi() return value is no longer destructured —
@@ -488,7 +497,7 @@ const DirectoryPanel = memo(
           setError(
             err instanceof Error
               ? err.message
-              : "Failed to load directory info",
+              : tRef.current("workspaceFiles.directory.errors.loadDirectoryFailed"),
           );
           console.error("[DirectoryPanel] Failed to refresh:", err);
         }
@@ -736,7 +745,9 @@ const DirectoryPanel = memo(
         // exist), but expected noise for just-created files whose watcher
         // refresh is slow — those callers pass silentIfMissing.
         const reportMissing = () => {
-          if (!options?.silentIfMissing) toast.error("文件不存在或已删除");
+          if (!options?.silentIfMissing) {
+            toast.error(tRef.current("workspaceFiles.directory.toasts.fileMissing"));
+          }
         };
 
         for (const ancestor of ancestors) {
@@ -887,11 +898,13 @@ const DirectoryPanel = memo(
       } catch (err) {
         if (myReq !== previewReqIdRef.current) return; // superseded; don't toast/commit stale error
         if (onFilePreviewExternal) {
-          toast.error("文件预览失败");
+          toast.error(tRef.current("workspaceFiles.directory.toasts.previewFailed"));
         } else {
           setPreview(null);
           setPreviewError(
-            err instanceof Error ? err.message : "Failed to preview file.",
+            err instanceof Error
+              ? err.message
+              : tRef.current("workspaceFiles.directory.toasts.previewFailed"),
           );
         }
       } finally {
@@ -951,7 +964,7 @@ const DirectoryPanel = memo(
           } catch (err) {
             if (myReq !== previewReqIdRef.current) return;
             console.error("[DirectoryPanel] Failed to load image:", err);
-            toast.error("图片加载失败");
+            toast.error(tRef.current("workspaceFiles.directory.toasts.imageLoadFailed"));
           } finally {
             if (myReq === previewReqIdRef.current) {
               setIsPreviewLoading(false);
@@ -962,7 +975,7 @@ const DirectoryPanel = memo(
         } else if (isPreviewable(data.name)) {
           void handlePreview(data);
         } else {
-          toast.info("暂不支持预览此文件类型，可右键菜单打开");
+          toast.info(tRef.current("workspaceFiles.directory.toasts.unsupportedPreview"));
         }
       },
       [fileService, handlePreview, handleRichDocPreview, openPreview, toast],
@@ -995,11 +1008,13 @@ const DirectoryPanel = memo(
         } catch (err) {
           if (myReq !== previewReqIdRef.current) return; // superseded
           if (onFilePreviewExternal) {
-            toast.error("文件预览失败");
+            toast.error(tRef.current("workspaceFiles.directory.toasts.previewFailed"));
           } else {
             setPreview(null);
             setPreviewError(
-              err instanceof Error ? err.message : "Failed to preview file.",
+              err instanceof Error
+                ? err.message
+                : tRef.current("workspaceFiles.directory.toasts.previewFailed"),
             );
           }
         } finally {
@@ -1061,7 +1076,7 @@ const DirectoryPanel = memo(
       } catch (err) {
         if (myReq !== previewReqIdRef.current) return; // superseded
         console.error("[DirectoryPanel] Failed to load image:", err);
-        toast.error("图片加载失败");
+        toast.error(tRef.current("workspaceFiles.directory.toasts.imageLoadFailed"));
       }
     };
 
@@ -1081,8 +1096,13 @@ const DirectoryPanel = memo(
       const MAX_BATCH_BYTES = 100 * 1024 * 1024; // 100MB renderer cap
       const totalBytes = Array.from(files).reduce((sum, f) => sum + f.size, 0);
       if (totalBytes > MAX_BATCH_BYTES) {
+        const maxMb = MAX_BATCH_BYTES / 1024 / 1024;
+        const currentMb = Math.round(totalBytes / 1024 / 1024);
         setError(
-          `批量上传不能超过 ${MAX_BATCH_BYTES / 1024 / 1024} MB（当前 ${Math.round(totalBytes / 1024 / 1024)} MB）。大文件请直接拖拽到目录。`,
+          tRef.current("workspaceFiles.directory.errors.batchUploadTooLarge", {
+            maxMb,
+            currentMb,
+          }),
         );
         return;
       }
@@ -1098,10 +1118,16 @@ const DirectoryPanel = memo(
           files: base64Files,
           targetDir: importTargetDir || undefined,
         });
-        if (!result.success) throw new Error("Import failed");
+        if (!result.success) {
+          throw new Error(tRef.current("workspaceFiles.directory.errors.importFailed"));
+        }
         refresh();
       } catch (err) {
-        setError(err instanceof Error ? err.message : "Import failed");
+        setError(
+          err instanceof Error
+            ? err.message
+            : tRef.current("workspaceFiles.directory.errors.importFailed"),
+        );
       } finally {
         setIsUploading(false);
         setImportTargetDir("");
@@ -1141,11 +1167,17 @@ const DirectoryPanel = memo(
             files: base64Files,
             targetDir: targetDir || undefined,
           });
-          if (!result.success) throw new Error("Import failed");
+          if (!result.success) {
+            throw new Error(tRef.current("workspaceFiles.directory.errors.importFailed"));
+          }
           refresh();
         } catch (err) {
           console.error("[DirectoryPanel] File upload error:", err);
-          setError(err instanceof Error ? err.message : "Import failed");
+          setError(
+            err instanceof Error
+              ? err.message
+              : tRef.current("workspaceFiles.directory.errors.importFailed"),
+          );
         } finally {
           setIsUploading(false);
         }
@@ -1166,11 +1198,17 @@ const DirectoryPanel = memo(
             targetDir,
             autoRename: true,
           });
-          if (!result.success) throw new Error("Copy failed");
+          if (!result.success) {
+            throw new Error(tRef.current("workspaceFiles.directory.errors.copyFailed"));
+          }
           // Per-file failures (blacklist reject, fs error) — surface like the
           // internal paste path does, instead of a silent no-op refresh.
           if (result.errors.length > 0) {
-            toast.warning(`部分文件未能导入：${result.errors[0]}`);
+            toast.warning(
+              tRef.current("workspaceFiles.directory.toasts.partialImportFailed", {
+                error: result.errors[0],
+              }),
+            );
           }
           if (isDebugMode()) {
             console.log(
@@ -1181,7 +1219,11 @@ const DirectoryPanel = memo(
           refresh();
         } catch (err) {
           console.error("[DirectoryPanel] Tauri file drop error:", err);
-          setError(err instanceof Error ? err.message : "Copy failed");
+          setError(
+            err instanceof Error
+              ? err.message
+              : tRef.current("workspaceFiles.directory.errors.copyFailed"),
+          );
         } finally {
           setIsUploading(false);
         }
@@ -1338,9 +1380,18 @@ const DirectoryPanel = memo(
       (pairs: Array<{ from: string; to: string }>) => {
         if (pairs.length === 0) return;
         if (pairs.length === 1) {
-          toast.info(`已自动重命名避免冲突：${pairs[0].from} → ${pairs[0].to}`);
+          toast.info(
+            tRef.current("workspaceFiles.directory.toasts.autoRenamedOne", {
+              from: pairs[0].from,
+              to: pairs[0].to,
+            }),
+          );
         } else {
-          toast.info(`${pairs.length} 项因重名已自动重命名`);
+          toast.info(
+            tRef.current("workspaceFiles.directory.toasts.autoRenamedMany", {
+              count: pairs.length,
+            }),
+          );
         }
       },
       [toast],
@@ -1359,7 +1410,11 @@ const DirectoryPanel = memo(
           if (result.errors && result.errors.length > 0) {
             const moved = result.movedFiles?.length ?? 0;
             toast.warning(
-              `已移动 ${moved} 项；${result.errors.length} 项失败：${result.errors[0]}`,
+              tRef.current("workspaceFiles.directory.toasts.movePartial", {
+                moved,
+                failed: result.errors.length,
+                error: result.errors[0],
+              }),
             );
           }
           if (result.movedFiles && result.movedFiles.length > 0) {
@@ -1381,7 +1436,11 @@ const DirectoryPanel = memo(
           }
           refresh();
         } catch (err) {
-          setError(err instanceof Error ? err.message : "Move failed");
+          setError(
+            err instanceof Error
+              ? err.message
+              : tRef.current("workspaceFiles.directory.errors.moveFailed"),
+          );
         }
       },
       [fileService, notifyAutoRenames, refresh, toast],
@@ -1584,7 +1643,11 @@ const DirectoryPanel = memo(
           // focused / embedded browser ate the keys) turns into an
           // unexplainable "粘贴没反应" (实测 2026-06-11).
           if (treeContainerRef.current?.contains(document.activeElement)) {
-            toast.info("剪贴板中没有可粘贴的文件——先在文件树中选中文件按 Cmd+C");
+            toast.info(
+              tRef.current("workspaceFiles.directory.toasts.clipboardNoFiles", {
+                shortcut: copyShortcut,
+              }),
+            );
           }
           return;
         }
@@ -1618,13 +1681,17 @@ const DirectoryPanel = memo(
 
       document.addEventListener("paste", handlePaste);
       return () => document.removeEventListener("paste", handlePaste);
-    }, [selectedNodes, handleExternalFileDrop, toast]);
+    }, [selectedNodes, handleExternalFileDrop, toast, copyShortcut]);
 
     const handleOpenInFinder = async (path: string) => {
       try {
         await fileService.openInFinder({ path });
       } catch (err) {
-        setError(err instanceof Error ? err.message : "Failed to open");
+        setError(
+          err instanceof Error
+            ? err.message
+            : tRef.current("workspaceFiles.directory.errors.openFailed"),
+        );
       }
     };
 
@@ -1632,7 +1699,7 @@ const DirectoryPanel = memo(
       try {
         await fileService.openInFinder({ path });
       } catch {
-        toast.error("打开所在文件夹失败");
+        toast.error(tRef.current("workspaceFiles.common.openFolderFailed"));
       }
     };
 
@@ -1640,7 +1707,11 @@ const DirectoryPanel = memo(
       try {
         await fileService.openWithDefault({ path });
       } catch (err) {
-        setError(err instanceof Error ? err.message : "Failed to open");
+        setError(
+          err instanceof Error
+            ? err.message
+            : tRef.current("workspaceFiles.directory.errors.openFailed"),
+        );
       }
     };
 
@@ -1657,28 +1728,28 @@ const DirectoryPanel = memo(
       [agentDir],
     );
 
-    const handleCopyPath = (relPath: string, label: string) => {
+    const handleCopyPath = (relPath: string, labelKey: string) => {
       navigator.clipboard
         .writeText(toAbsolutePath(relPath))
-        .then(() => toast.success(label))
-        .catch(() => toast.error("复制失败"));
+        .then(() => toast.success(tRef.current(labelKey)))
+        .catch(() => toast.error(tRef.current("workspaceFiles.common.copyFailed")));
     };
 
     const getSearchResultContextMenuItems = (
       hit: FileSearchHit,
     ): ContextMenuItem[] => [
       {
-        label: "预览",
+        label: t("workspaceFiles.common.preview"),
         icon: <Eye className="h-4 w-4" />,
         onClick: () => handlePreviewSearchHit(hit),
       },
       {
-        label: "在文件目录中展示",
+        label: t("workspaceFiles.common.revealInTree"),
         icon: <LocateFixed className="h-4 w-4" />,
         onClick: () => void handleRevealSearchResultInTree(hit.path),
       },
       {
-        label: "打开所在文件夹",
+        label: t("workspaceFiles.common.openContainingFolder"),
         icon: <FolderOpen className="h-4 w-4" />,
         onClick: () => void handleOpenSearchResultInFinder(hit.path),
       },
@@ -1688,11 +1759,15 @@ const DirectoryPanel = memo(
       try {
         const result = await fileService.deleteFile({ path });
         if (result.deleted) {
-          toast.success("已移至废纸篓");
+          toast.success(tRef.current("workspaceFiles.common.trashMoved"));
         }
         refresh();
       } catch (err) {
-        setError(err instanceof Error ? err.message : "Delete failed");
+        setError(
+          err instanceof Error
+            ? err.message
+            : tRef.current("workspaceFiles.directory.errors.deleteFailed"),
+        );
       }
     };
 
@@ -1774,7 +1849,7 @@ const DirectoryPanel = memo(
           }
         }
         if (!createdPath || !filename) {
-          setError("当前分钟内已有过多笔记，请稍后再试");
+          setError(tRef.current("workspaceFiles.directory.errors.tooManyNotes"));
           return;
         }
 
@@ -1807,7 +1882,11 @@ const DirectoryPanel = memo(
           setPreviewError(null);
         }
       } catch (err) {
-        setError(err instanceof Error ? err.message : "Create failed");
+        setError(
+          err instanceof Error
+            ? err.message
+            : tRef.current("workspaceFiles.directory.errors.createFailed"),
+        );
       }
     };
 
@@ -1917,7 +1996,11 @@ const DirectoryPanel = memo(
           // Rust rejected (collision raced in, fs error). Close the editor —
           // its commit guard has already settled — and surface the reason.
           setEditing(null);
-          toast.error(err instanceof Error ? err.message : "操作失败");
+          toast.error(
+            err instanceof Error
+              ? err.message
+              : tRef.current("workspaceFiles.common.operationFailed"),
+          );
         }
       },
       [
@@ -1946,10 +2029,25 @@ const DirectoryPanel = memo(
               : [];
         if (nodes.length === 0) return null;
         setClipboard({ mode, paths: nodes.map((n) => n.path) });
-        const label = mode === "copy" ? "已复制" : "已剪切";
+        const actionKey =
+          mode === "copy"
+            ? "workspaceFiles.directory.toasts.copied"
+            : "workspaceFiles.directory.toasts.cut";
         const what =
-          nodes.length === 1 ? `"${nodes[0].name}"` : `${nodes.length} 项`;
-        toast.success(`${label} ${what}，在目标文件夹按 Cmd+V 粘贴`);
+          nodes.length === 1
+            ? tRef.current("workspaceFiles.directory.toasts.itemName", {
+                name: nodes[0].name,
+              })
+            : tRef.current("workspaceFiles.directory.toasts.itemCount", {
+                count: nodes.length,
+              });
+        toast.success(
+          tRef.current("workspaceFiles.directory.toasts.copiedSelection", {
+            action: tRef.current(actionKey),
+            target: what,
+            shortcut: pasteShortcut,
+          }),
+        );
         const osText = nodes.map((n) => toAbsolutePath(n.path)).join("\n");
         // The DOM copy/cut event path writes via the synchronous
         // e.clipboardData.setData and skips this async write — otherwise the
@@ -1970,7 +2068,7 @@ const DirectoryPanel = memo(
         // e.clipboardData synchronously (deterministic OS-clipboard write).
         return osText;
       },
-      [selectedNodes, focusedPath, nodeMetaByPath, toAbsolutePath, toast],
+      [selectedNodes, focusedPath, nodeMetaByPath, toAbsolutePath, toast, pasteShortcut],
     );
 
     /** Paste lands where a drop would: selected dir → itself, selected file →
@@ -1988,7 +2086,7 @@ const DirectoryPanel = memo(
         if (osNow !== null && osNow !== lastWritten) {
           setClipboard(null);
           toast.info(
-            "系统剪贴板已有新内容，文件剪贴板已失效——请重新复制后粘贴",
+            tRef.current("workspaceFiles.directory.toasts.clipboardStale"),
           );
           return;
         }
@@ -2008,7 +2106,11 @@ const DirectoryPanel = memo(
             targetDir,
           });
           if (result.errors.length > 0) {
-            toast.warning(`部分粘贴失败：${result.errors[0]}`);
+            toast.warning(
+              tRef.current("workspaceFiles.directory.toasts.pastePartialFailed", {
+                error: result.errors[0],
+              }),
+            );
           }
           if (result.copiedFiles.length > 0) {
             undoJournalRef.current = pushUndoEntry(undoJournalRef.current, {
@@ -2035,7 +2137,11 @@ const DirectoryPanel = memo(
             targetDir,
           });
           if (result.errors && result.errors.length > 0) {
-            toast.warning(`部分移动失败：${result.errors[0]}`);
+            toast.warning(
+              tRef.current("workspaceFiles.directory.toasts.movePartialFailed", {
+                error: result.errors[0],
+              }),
+            );
           }
           if (result.movedFiles.length > 0) {
             undoJournalRef.current = pushUndoEntry(undoJournalRef.current, {
@@ -2062,7 +2168,11 @@ const DirectoryPanel = memo(
         }
         refresh();
       } catch (err) {
-        toast.error(err instanceof Error ? err.message : "粘贴失败");
+        toast.error(
+          err instanceof Error
+            ? err.message
+            : tRef.current("workspaceFiles.directory.errors.pasteFailed"),
+        );
       }
     }, [
       clipboard,
@@ -2152,7 +2262,7 @@ const DirectoryPanel = memo(
       const journal = undoJournalRef.current;
       const entry = journal[journal.length - 1];
       if (!entry) {
-        toast.info("没有可撤销的操作");
+        toast.info(tRef.current("workspaceFiles.directory.toasts.undoEmpty"));
         return;
       }
       undoJournalRef.current = journal.slice(0, -1);
@@ -2174,7 +2284,11 @@ const DirectoryPanel = memo(
               targetDir: step.targetDir,
             });
             if (res.errors && res.errors.length > 0) {
-              toast.warning(`撤销部分失败：${res.errors[0]}`);
+              toast.warning(
+                tRef.current("workspaceFiles.directory.toasts.undoPartialFailed", {
+                  error: res.errors[0],
+                }),
+              );
             }
             const landed = res.movedFiles[0];
             if (landed && baseNameOf(landed.newPath) !== step.desiredName) {
@@ -2190,13 +2304,21 @@ const DirectoryPanel = memo(
           }
         }
         if (renameBackFailures > 0) {
-          toast.warning(`已撤销（${renameBackFailures} 项未能恢复原文件名）`);
+          toast.warning(
+            tRef.current("workspaceFiles.directory.toasts.undoWithRenameFailures", {
+              count: renameBackFailures,
+            }),
+          );
         } else {
-          toast.success("已撤销");
+          toast.success(tRef.current("workspaceFiles.directory.toasts.undone"));
         }
       } catch (err) {
         toast.error(
-          err instanceof Error ? `撤销失败：${err.message}` : "撤销失败",
+          err instanceof Error
+            ? tRef.current("workspaceFiles.directory.toasts.undoFailed", {
+                error: err.message,
+              })
+            : tRef.current("workspaceFiles.directory.toasts.undoFailedGeneric"),
         );
       } finally {
         undoInFlightRef.current = false;
@@ -2569,10 +2691,18 @@ const DirectoryPanel = memo(
           await fileService.deleteFile({ path: node.path });
         }
         setSelectedNodes([]);
-        toast.success(`已将 ${filteredNodes.length} 项移至废纸篓`);
+        toast.success(
+          tRef.current("workspaceFiles.directory.toasts.multiTrashMoved", {
+            count: filteredNodes.length,
+          }),
+        );
         refresh();
       } catch (err) {
-        setError(err instanceof Error ? err.message : "Delete failed");
+        setError(
+          err instanceof Error
+            ? err.message
+            : tRef.current("workspaceFiles.directory.errors.deleteFailed"),
+        );
       }
     };
 
@@ -2585,17 +2715,23 @@ const DirectoryPanel = memo(
         const uniqueParentDirs = getUniqueParentDirs(selectedNodes);
         return [
           {
-            label: `复制 (${selectedNodes.length})`,
+            label: t("workspaceFiles.directory.copyCount", {
+              count: selectedNodes.length,
+            }),
             icon: <Copy className="h-4 w-4" />,
             onClick: () => copySelection("copy"),
           },
           {
-            label: `剪切 (${selectedNodes.length})`,
+            label: t("workspaceFiles.directory.cutCount", {
+              count: selectedNodes.length,
+            }),
             icon: <Scissors className="h-4 w-4" />,
             onClick: () => copySelection("cut"),
           },
           {
-            label: `打开所在文件夹 (${uniqueParentDirs.length})`,
+            label: t("workspaceFiles.directory.openFoldersCount", {
+              count: uniqueParentDirs.length,
+            }),
             icon: <FolderOpen className="h-4 w-4" />,
             onClick: () => {
               for (const dir of uniqueParentDirs) {
@@ -2604,14 +2740,18 @@ const DirectoryPanel = memo(
             },
           },
           {
-            label: `引用 (${selectedNodes.length})`,
+            label: t("workspaceFiles.directory.quoteCount", {
+              count: selectedNodes.length,
+            }),
             icon: <AtSign className="h-4 w-4" />,
             onClick: () => {
               onInsertReference?.(selectedNodes.map((n) => n.path));
             },
           },
           {
-            label: `删除 (${selectedNodes.length})`,
+            label: t("workspaceFiles.directory.deleteCount", {
+              count: selectedNodes.length,
+            }),
             icon: <Trash2 className="h-4 w-4" />,
             danger: true,
             onClick: () =>
@@ -2628,22 +2768,22 @@ const DirectoryPanel = memo(
       if (!node) {
         return [
           {
-            label: "新建笔记",
+            label: t("workspaceFiles.common.newNote"),
             icon: <NotebookPen className="h-4 w-4" />,
             onClick: () => void handleNewNote(""),
           },
           {
-            label: "新建文件",
+            label: t("workspaceFiles.common.newFile"),
             icon: <FilePlus className="h-4 w-4" />,
             onClick: () => startCreate("", "create-file"),
           },
           {
-            label: "新建文件夹",
+            label: t("workspaceFiles.common.newFolder"),
             icon: <FolderPlus className="h-4 w-4" />,
             onClick: () => startCreate("", "create-folder"),
           },
           {
-            label: "导入文件",
+            label: t("workspaceFiles.common.importFile"),
             icon: <Upload className="h-4 w-4" />,
             onClick: () => {
               setImportTargetDir("");
@@ -2651,7 +2791,7 @@ const DirectoryPanel = memo(
             },
           },
           {
-            label: "粘贴",
+            label: t("workspaceFiles.common.paste"),
             icon: <ClipboardPaste className="h-4 w-4" />,
             disabled: !clipboard,
             onClick: () => void pasteFromClipboard(),
@@ -2663,7 +2803,7 @@ const DirectoryPanel = memo(
             // This menu item stays as a discoverable / mouse-reachable entry
             // (⌘C/⌘Z are still consumed by their native menu items, so the
             // copy/undo entries below remain their only reachable path).
-            label: "全选",
+            label: t("workspaceFiles.common.selectAll"),
             icon: <ListChecks className="h-4 w-4" />,
             disabled: visibleRows.length === 0,
             onClick: () => setSelectedNodes(visibleRows.map((r) => r.data)),
@@ -2671,13 +2811,13 @@ const DirectoryPanel = memo(
           {
             // ⌘Z is consumed by the native Edit menu on macOS, so the menu
             // is the tree-undo's reachable entry point there.
-            label: "撤销上一步操作",
+            label: t("workspaceFiles.common.undoLast"),
             icon: <Undo2 className="h-4 w-4" />,
             disabled: undoJournalRef.current.length === 0,
             onClick: () => void executeUndo(),
           },
           {
-            label: "刷新",
+            label: t("workspaceFiles.common.refresh"),
             icon: <RefreshCw className="h-4 w-4" />,
             onClick: () => {
               refresh();
@@ -2697,22 +2837,22 @@ const DirectoryPanel = memo(
       if (isDir) {
         return [
           {
-            label: "新建笔记",
+            label: t("workspaceFiles.common.newNote"),
             icon: <NotebookPen className="h-4 w-4" />,
             onClick: () => void handleNewNote(node.path),
           },
           {
-            label: "新建文件",
+            label: t("workspaceFiles.common.newFile"),
             icon: <FilePlus className="h-4 w-4" />,
             onClick: () => startCreate(node.path, "create-file"),
           },
           {
-            label: "新建文件夹",
+            label: t("workspaceFiles.common.newFolder"),
             icon: <FolderPlus className="h-4 w-4" />,
             onClick: () => startCreate(node.path, "create-folder"),
           },
           {
-            label: "导入文件",
+            label: t("workspaceFiles.common.importFile"),
             icon: <Upload className="h-4 w-4" />,
             onClick: () => {
               setImportTargetDir(node.path);
@@ -2721,51 +2861,55 @@ const DirectoryPanel = memo(
           },
           { separator: true },
           {
-            label: "复制",
+            label: t("workspaceFiles.common.copy"),
             icon: <Copy className="h-4 w-4" />,
             onClick: () => copySelection("copy"),
           },
           {
-            label: "剪切",
+            label: t("workspaceFiles.common.cut"),
             icon: <Scissors className="h-4 w-4" />,
             onClick: () => copySelection("cut"),
           },
           {
-            label: "粘贴",
+            label: t("workspaceFiles.common.paste"),
             icon: <ClipboardPaste className="h-4 w-4" />,
             disabled: !clipboard,
             onClick: () => void pasteFromClipboard(),
           },
           { separator: true },
           {
-            label: "打开所在文件夹",
+            label: t("workspaceFiles.common.openContainingFolder"),
             icon: <FolderOpen className="h-4 w-4" />,
             onClick: () => handleOpenInFinder(node.path),
           },
           {
-            label: "复制文件夹路径",
+            label: t("workspaceFiles.common.copyFolderPath"),
             icon: <Copy className="h-4 w-4" />,
-            onClick: () => handleCopyPath(node.path, "已复制文件夹路径"),
+            onClick: () =>
+              handleCopyPath(
+                node.path,
+                "workspaceFiles.directory.toasts.copiedFolderPath",
+              ),
           },
           {
-            label: "引用",
+            label: t("workspaceFiles.common.quote"),
             icon: <AtSign className="h-4 w-4" />,
             onClick: () => onInsertReference?.([node.path]),
           },
           {
-            label: "重命名",
+            label: t("workspaceFiles.common.rename"),
             icon: <Pencil className="h-4 w-4" />,
             onClick: () => startRename(node.path),
           },
           {
-            label: "删除",
+            label: t("workspaceFiles.common.delete"),
             icon: <Trash2 className="h-4 w-4" />,
             danger: true,
             onClick: () => setDialog({ type: "delete", node }),
           },
           { separator: true },
           {
-            label: "刷新",
+            label: t("workspaceFiles.common.refresh"),
             icon: <RefreshCw className="h-4 w-4" />,
             onClick: () => {
               refresh();
@@ -2776,7 +2920,7 @@ const DirectoryPanel = memo(
       } else {
         return [
           {
-            label: "预览",
+            label: t("workspaceFiles.common.preview"),
             icon: <Eye className="h-4 w-4" />,
             disabled: !canPreview,
             onClick: () => {
@@ -2790,43 +2934,47 @@ const DirectoryPanel = memo(
             },
           },
           {
-            label: "引用",
+            label: t("workspaceFiles.common.quote"),
             icon: <AtSign className="h-4 w-4" />,
             onClick: () => onInsertReference?.([node.path]),
           },
           {
-            label: "打开",
+            label: t("workspaceFiles.common.open"),
             icon: <ExternalLink className="h-4 w-4" />,
             onClick: () => handleOpenWithDefault(node.path),
           },
           {
-            label: "打开所在文件夹",
+            label: t("workspaceFiles.common.openContainingFolder"),
             icon: <FolderOpen className="h-4 w-4" />,
             onClick: () => handleOpenInFinder(node.path),
           },
           { separator: true },
           {
-            label: "复制",
+            label: t("workspaceFiles.common.copy"),
             icon: <Copy className="h-4 w-4" />,
             onClick: () => copySelection("copy"),
           },
           {
-            label: "剪切",
+            label: t("workspaceFiles.common.cut"),
             icon: <Scissors className="h-4 w-4" />,
             onClick: () => copySelection("cut"),
           },
           {
-            label: "复制文件路径",
+            label: t("workspaceFiles.common.copyFilePath"),
             icon: <Copy className="h-4 w-4" />,
-            onClick: () => handleCopyPath(node.path, "已复制文件路径"),
+            onClick: () =>
+              handleCopyPath(
+                node.path,
+                "workspaceFiles.directory.toasts.copiedFilePath",
+              ),
           },
           {
-            label: "重命名",
+            label: t("workspaceFiles.common.rename"),
             icon: <Pencil className="h-4 w-4" />,
             onClick: () => startRename(node.path),
           },
           {
-            label: "删除",
+            label: t("workspaceFiles.common.delete"),
             icon: <Trash2 className="h-4 w-4" />,
             danger: true,
             onClick: () => setDialog({ type: "delete", node }),
@@ -2859,16 +3007,23 @@ const DirectoryPanel = memo(
                 type="button"
                 onClick={onCollapse}
                 className="flex h-5 w-5 items-center justify-center rounded text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
-                title="收起工作区"
+                title={t("workspaceFiles.directory.collapseWorkspace")}
               >
                 <PanelRightClose className="h-4 w-4" />
               </button>
             )}
             <span className="text-base font-semibold text-[var(--ink)]">
-              工作区
+              {t("workspaceFiles.directory.title")}
             </span>
             {/* Search toggle button */}
-            <Tip label={isSearchMode ? "关闭搜索" : "文件搜索"} position="bottom">
+            <Tip
+              label={
+                isSearchMode
+                  ? t("workspaceFiles.directory.closeSearch")
+                  : t("workspaceFiles.directory.fileSearch")
+              }
+              position="bottom"
+            >
               <button
                   type="button"
                   onClick={(e) => {
@@ -2892,7 +3047,11 @@ const DirectoryPanel = memo(
             {/* Terminal button */}
             {onOpenTerminal && (
               <Tip
-                label={terminalAlive ? "显示终端" : "打开终端"}
+                label={
+                  terminalAlive
+                    ? t("workspaceFiles.directory.showTerminal")
+                    : t("workspaceFiles.directory.openTerminal")
+                }
                 position="bottom"
               >
                 <button
@@ -2917,7 +3076,7 @@ const DirectoryPanel = memo(
             )}
             {/* Browser button */}
             {onOpenBrowser && (
-              <Tip label="浏览器" position="bottom">
+              <Tip label={t("workspaceFiles.directory.browser")} position="bottom">
                 <button
                   type="button"
                   onClick={(e) => {
@@ -2941,10 +3100,10 @@ const DirectoryPanel = memo(
                   onOpenConfig();
                 }}
                 className="flex items-center gap-1 rounded-lg px-2 py-1 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
-                title="打开 Agent 设置"
+                title={t("workspaceFiles.directory.openAgentSettings")}
               >
                 <SlidersHorizontal className="h-4 w-4" />
-                Agent 设置
+                {t("workspaceFiles.directory.agentSettings")}
               </button>
             )}
             {/* Collapse toggle button - only in narrow mode, positioned at far right */}
@@ -2956,7 +3115,11 @@ const DirectoryPanel = memo(
                   setIsCollapsed(!isCollapsed);
                 }}
                 className="flex h-6 w-6 items-center justify-center rounded text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
-                title={isCollapsed ? "展开工作区" : "折叠工作区"}
+                title={
+                  isCollapsed
+                    ? t("workspaceFiles.directory.expandWorkspace")
+                    : t("workspaceFiles.directory.foldWorkspace")
+                }
               >
                 <ChevronUp
                   className={`h-4 w-4 transition-transform ${isCollapsed ? "rotate-180" : ""}`}
@@ -2982,7 +3145,7 @@ const DirectoryPanel = memo(
                           type="text"
                           value={searchQuery}
                           onChange={(e) => setSearchQuery(e.target.value)}
-                          placeholder="搜索文件及内容..."
+                          placeholder={t("workspaceFiles.directory.searchPlaceholder")}
                           className="h-7 w-full rounded-md border border-[var(--line)] bg-transparent pl-8 pr-8 text-sm text-[var(--ink)] placeholder-[var(--ink-muted)]/50 outline-none transition-colors focus:border-[var(--accent)]"
                           onKeyDown={(e) => {
                               if (e.key === 'Escape') {
@@ -2996,7 +3159,7 @@ const DirectoryPanel = memo(
                               setIsSearchMode(false);
                               setSearchQuery('');
                           }}
-                          title="退出搜索"
+                          title={t("workspaceFiles.directory.exitSearch")}
                           className="absolute right-2 flex items-center text-[var(--ink-muted)]/50 transition-colors hover:text-[var(--ink)]"
                       >
                           <X className="h-3.5 w-3.5" />
@@ -3022,8 +3185,10 @@ const DirectoryPanel = memo(
                     )}
                     {directoryInfo && (
                       <span className="ml-auto flex-shrink-0 text-xs text-[var(--ink-muted)]">
-                        {directoryInfo.summary.totalFiles} 文件 ·{" "}
-                        {directoryInfo.summary.totalDirs} 文件夹
+                        {t("workspaceFiles.directory.stats", {
+                          files: directoryInfo.summary.totalFiles,
+                          folders: directoryInfo.summary.totalDirs,
+                        })}
                       </span>
                     )}
                   </div>
@@ -3139,7 +3304,7 @@ const DirectoryPanel = memo(
                     )}
                     {!error && !directoryInfo && (
                       <div className="px-4 py-3 text-xs text-[var(--ink-muted)]">
-                        Loading...
+                        {t("workspaceFiles.directory.loading")}
                       </div>
                     )}
                     {directoryInfo && (
@@ -3255,10 +3420,16 @@ const DirectoryPanel = memo(
             via Finder/Explorer), the copy reflects that. */}
         {dialog?.type === "delete" && dialog.node && (
           <ConfirmDialog
-            title={`删除${dialog.node.type === "dir" ? "文件夹" : "文件"}`}
-            message={`确定要删除 "${dialog.node.name}" 吗？将移至系统废纸篓。`}
-            confirmLabel="删除"
-            cancelLabel="取消"
+            title={
+              dialog.node.type === "dir"
+                ? t("workspaceFiles.directory.deleteDialog.folderTitle")
+                : t("workspaceFiles.directory.deleteDialog.fileTitle")
+            }
+            message={t("workspaceFiles.directory.deleteDialog.message", {
+              name: dialog.node.name,
+            })}
+            confirmLabel={t("workspaceFiles.common.delete")}
+            cancelLabel={t("actions.cancel", { ns: "common" })}
             danger
             onConfirm={() => {
               void handleDelete(dialog.node!.path);
@@ -3273,10 +3444,14 @@ const DirectoryPanel = memo(
           dialog.nodes &&
           dialog.nodes.length > 0 && (
             <ConfirmDialog
-              title={`删除 ${dialog.nodes.length} 个项目`}
-              message={`确定要删除选中的 ${dialog.nodes.length} 个文件/文件夹吗？将移至系统废纸篓。`}
-              confirmLabel="全部删除"
-              cancelLabel="取消"
+              title={t("workspaceFiles.directory.deleteDialog.multiTitle", {
+                count: dialog.nodes.length,
+              })}
+              message={t("workspaceFiles.directory.deleteDialog.multiMessage", {
+                count: dialog.nodes.length,
+              })}
+              confirmLabel={t("workspaceFiles.common.deleteAll")}
+              cancelLabel={t("actions.cancel", { ns: "common" })}
               danger
               onConfirm={() => {
                 void handleDeleteMultiple(dialog.nodes!);
@@ -3291,7 +3466,7 @@ const DirectoryPanel = memo(
           (preview || previewError || isPreviewLoading) && (
             <Suspense fallback={null}>
               <FilePreviewModal
-                name={preview?.name ?? "Preview"}
+                name={preview?.name ?? t("workspaceFiles.common.preview")}
                 content={preview?.content ?? ""}
                 size={preview?.size ?? 0}
                 path={preview?.path ?? ""}

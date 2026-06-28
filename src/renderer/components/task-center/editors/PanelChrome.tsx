@@ -13,6 +13,7 @@
 // instead of pasting `space-y-7` and slowly drifting apart again.
 
 import { useEffect } from 'react';
+import { useTranslation } from 'react-i18next';
 import { X } from 'lucide-react';
 
 type IconType = React.ComponentType<{ className?: string }>;
@@ -55,8 +56,9 @@ export function PanelHeader({
   trailing,
   leading,
   onClose,
-  closeTitle = '关闭',
+  closeTitle,
 }: PanelHeaderProps) {
+  const { t } = useTranslation('task');
   return (
     <div className="flex shrink-0 items-start gap-3 border-b border-[var(--line)] px-6 py-4">
       <div className="min-w-0 flex-1">
@@ -75,7 +77,7 @@ export function PanelHeader({
       <button
         type="button"
         onClick={onClose}
-        title={closeTitle}
+        title={closeTitle ?? t('common.close')}
         className="shrink-0 rounded-[var(--radius-md)] p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
       >
         <X className="h-4 w-4" />
@@ -153,10 +155,11 @@ export function PanelFooter({
   onSubmit,
   busy = false,
   disabled = false,
-  cancelLabel = '取消',
+  cancelLabel,
   submitLabel,
   extra,
 }: PanelFooterProps) {
+  const { t } = useTranslation('task');
   const blocked = busy || disabled;
   return (
     <div className="flex shrink-0 items-center justify-between border-t border-[var(--line)] px-6 py-4">
@@ -175,7 +178,7 @@ export function PanelFooter({
           disabled={busy}
           className="rounded-[var(--radius-md)] px-4 py-2 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] disabled:cursor-not-allowed disabled:opacity-50"
         >
-          {cancelLabel}
+          {cancelLabel ?? t('common.cancel')}
         </button>
         <button
           type="button"

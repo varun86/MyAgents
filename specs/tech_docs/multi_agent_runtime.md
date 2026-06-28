@@ -113,6 +113,22 @@ Runtime 内部协议差异通过 `UnifiedEvent` 联合类型统一，`external-s
 type RuntimeType = 'builtin' | 'claude-code' | 'codex' | 'gemini';
 ```
 
+### Runtime Source
+
+外部 runtime 还带有 `RuntimeConfig.source` / `MYAGENTS_RUNTIME_SOURCE`，用于区分同一个 runtime 协议由谁管理：
+
+| Source | 含义 | 典型入口 |
+|---|---|---|
+| `system-cli` | 用户自行安装并登录的本机 CLI | 实验室「更多 Agent Runtime」里选择 Codex / Claude Code / Gemini |
+| `managed-provider` | MyAgents 管理 runtime 二进制、安装状态与登录状态 | Provider 列表里的 `codex-sub`（Codex 订阅） |
+
+`managed-provider` 不受 `config.multiAgentRuntime` 门控；它由自己的 Provider readiness gate 控制：provider gate 开启、managed runtime 已安装到要求版本、managed Codex auth 有效（`chatgpt` 或兼容的 `access-token`），且 provider 未被禁用。Rust `runtime_identity.rs` 在新 session/IM/Cron sidecar 出生时根据 Agent 的 `providerId:'codex-sub'` 与这些 readiness 字段解析出 `runtime='codex'`、`source='managed-provider'`。
+
+持久化边界：
+
+- Chat session birth 保存 `runtimeSource:'managed-provider'` 与 `providerExecutionIdentity`；Task/Cron 执行 override 保存 `runtimeConfig.source:'managed-provider'` 与 model。两类 payload shape 不同，但都用于重建执行 runtime。
+- Agent/Channel 默认配置只保存 `providerId:'codex-sub'` 与 model；不得把 managed runtime projection 写入默认 `runtimeConfig`，否则会和用户手动安装的 Codex CLI runtime 混淆。
+
 ## Claude Code Runtime (`src/server/runtimes/claude-code.ts`)
 
 ### 协议：NDJSON over stdio

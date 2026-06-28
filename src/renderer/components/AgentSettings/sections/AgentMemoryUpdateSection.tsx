@@ -1,5 +1,6 @@
 // Agent memory auto-update section (v0.1.43)
 import { useState, useCallback, useRef, useEffect, Suspense, lazy } from 'react';
+import { useTranslation } from 'react-i18next';
 import type { AgentConfig } from '../../../../shared/types/agent';
 import type { MemoryAutoUpdateConfig } from '../../../../shared/types/im';
 import { DEFAULT_MEMORY_AUTO_UPDATE_CONFIG } from '../../../../shared/types/im';
@@ -13,11 +14,7 @@ interface AgentMemoryUpdateSectionProps {
   onAgentChanged: () => void;
 }
 
-const INTERVAL_OPTIONS = [
-  { value: 24, label: '24 小时' },
-  { value: 48, label: '48 小时' },
-  { value: 72, label: '72 小时' },
-] as const;
+const INTERVAL_OPTIONS = [24, 48, 72] as const;
 
 const DEFAULT_UPDATE_MEMORY_CONTENT = `---
 description: >
@@ -48,6 +45,7 @@ description: >
 `;
 
 export default function AgentMemoryUpdateSection({ agent, onAgentChanged }: AgentMemoryUpdateSectionProps) {
+  const { t } = useTranslation('settings');
   const config = agent.memoryAutoUpdate;
 
   const toast = useToast();
@@ -75,14 +73,14 @@ export default function AgentMemoryUpdateSection({ agent, onAgentChanged }: Agen
       if (existing !== null) return { ok: true, content: existing };
       // File doesn't exist — create with default content
       await invoke('cmd_write_workspace_file', { path: filePath, content: DEFAULT_UPDATE_MEMORY_CONTENT });
-      toastRef.current.success('已创建 UPDATE_MEMORY.md');
+      toastRef.current.success(t('agentSettings.memory.createdFile'));
       return { ok: true, content: DEFAULT_UPDATE_MEMORY_CONTENT };
     } catch (e) {
       console.warn('[AgentMemoryUpdateSection] File operation failed:', e);
-      toastRef.current.error('无法读写 UPDATE_MEMORY.md，请检查工作区路径');
+      toastRef.current.error(t('agentSettings.memory.fileError'));
       return { ok: false, content: '' };
     }
-  }, [filePath]);
+  }, [filePath, t]);
 
   const handleToggle = useCallback(async () => {
     const newEnabled = !(config?.enabled ?? false);
@@ -126,11 +124,11 @@ export default function AgentMemoryUpdateSection({ agent, onAgentChanged }: Agen
     const dt = new Date(lastBatchAt);
     const diffMs = Date.now() - dt.getTime();
     const diffH = Math.floor(diffMs / 3600000);
-    if (diffH < 1) lastBatchLabel = '不到 1 小时前';
-    else if (diffH < 24) lastBatchLabel = `${diffH} 小时前`;
-    else lastBatchLabel = `${Math.floor(diffH / 24)} 天前`;
+    if (diffH < 1) lastBatchLabel = t('agentSettings.memory.lessThanHourAgo');
+    else if (diffH < 24) lastBatchLabel = t('agentSettings.memory.hoursAgo', { count: diffH });
+    else lastBatchLabel = t('agentSettings.memory.daysAgo', { count: Math.floor(diffH / 24) });
     if (lastBatchCount !== undefined && lastBatchCount !== null) {
-      lastBatchLabel += ` · ${lastBatchCount} 个 session 已更新`;
+      lastBatchLabel += ` · ${t('agentSettings.memory.sessionsUpdated', { count: lastBatchCount })}`;
     }
   }
 
@@ -140,9 +138,9 @@ export default function AgentMemoryUpdateSection({ agent, onAgentChanged }: Agen
         {/* Header + Toggle */}
         <div className="flex items-center justify-between">
           <div>
-            <h3 className="text-base font-medium text-[var(--ink)]">记忆更新 Memory</h3>
+            <h3 className="text-base font-medium text-[var(--ink)]">{t('agentSettings.memory.title')}</h3>
             <p className="mt-0.5 text-xs text-[var(--ink-muted)]">
-              在夜间自动读取{' '}
+              {t('agentSettings.memory.descriptionPrefix')}{' '}
               <button
                 type="button"
                 onClick={handleOpenFile}
@@ -150,7 +148,7 @@ export default function AgentMemoryUpdateSection({ agent, onAgentChanged }: Agen
               >
                 UPDATE_MEMORY.md
               </button>
-              {' '}中的指令，对各活跃 session 执行记忆维护
+              {' '}{t('agentSettings.memory.descriptionSuffix')}
             </p>
           </div>
           <button
@@ -174,20 +172,20 @@ export default function AgentMemoryUpdateSection({ agent, onAgentChanged }: Agen
           <div className="space-y-4 pl-0">
             {/* Interval */}
             <div>
-              <label className="block text-sm font-medium text-[var(--ink)] mb-2">更新间隔</label>
+              <label className="block text-sm font-medium text-[var(--ink)] mb-2">{t('agentSettings.memory.interval')}</label>
               <div className="flex gap-2">
-                {INTERVAL_OPTIONS.map(opt => (
+                {INTERVAL_OPTIONS.map(hours => (
                   <button
-                    key={opt.value}
+                    key={hours}
                     type="button"
-                    onClick={() => updateConfig({ intervalHours: opt.value as 24 | 48 | 72 })}
+                    onClick={() => updateConfig({ intervalHours: hours })}
                     className={`rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
-                      intervalHours === opt.value
+                      intervalHours === hours
                         ? 'bg-[var(--accent)] text-white'
                         : 'bg-[var(--paper-inset)] text-[var(--ink-muted)] hover:bg-[var(--paper-hover)]'
                     }`}
                   >
-                    {opt.label}
+                    {t('agentSettings.memory.intervalHours', { count: hours })}
                   </button>
                 ))}
               </div>
@@ -195,7 +193,7 @@ export default function AgentMemoryUpdateSection({ agent, onAgentChanged }: Agen
 
             {/* Update Window */}
             <div>
-              <label className="block text-sm font-medium text-[var(--ink)] mb-2">更新时间窗口</label>
+              <label className="block text-sm font-medium text-[var(--ink)] mb-2">{t('agentSettings.memory.window')}</label>
               <div className="flex items-center gap-2">
                 <input
                   type="time"
@@ -218,9 +216,9 @@ export default function AgentMemoryUpdateSection({ agent, onAgentChanged }: Agen
 
             {/* Threshold */}
             <div>
-              <label className="block text-sm font-medium text-[var(--ink)] mb-2">触发阈值</label>
+              <label className="block text-sm font-medium text-[var(--ink)] mb-2">{t('agentSettings.memory.threshold')}</label>
               <div className="flex items-center gap-2">
-                <span className="text-xs text-[var(--ink-muted)]">自上次更新后至少</span>
+                <span className="text-xs text-[var(--ink-muted)]">{t('agentSettings.memory.thresholdPrefix')}</span>
                 <input
                   type="number"
                   min={3}
@@ -232,7 +230,7 @@ export default function AgentMemoryUpdateSection({ agent, onAgentChanged }: Agen
                   }}
                   className="w-14 rounded-md bg-[var(--paper-inset)] px-2 py-1 text-xs text-[var(--ink)] text-center border border-[var(--line)]"
                 />
-                <span className="text-xs text-[var(--ink-muted)]">条新对话才会触发</span>
+                <span className="text-xs text-[var(--ink-muted)]">{t('agentSettings.memory.thresholdSuffix')}</span>
               </div>
             </div>
 
@@ -240,7 +238,7 @@ export default function AgentMemoryUpdateSection({ agent, onAgentChanged }: Agen
             {lastBatchLabel && (
               <div className="border-t border-dashed border-[var(--line)] pt-3">
                 <span className="text-xs text-[var(--ink-muted)]">
-                  上次更新{'  '}{lastBatchLabel}
+                  {t('agentSettings.memory.lastUpdated', { time: lastBatchLabel })}
                 </span>
               </div>
             )}

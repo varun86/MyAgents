@@ -18,8 +18,10 @@
 
 import { useState, useCallback, useMemo, useEffect } from 'react';
 import { Clock, Calendar, Repeat } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 import type { CronSchedule } from '@/types/cronTask';
 import CronExpressionInput from './CronExpressionInput';
+import { formatApproxFutureDistance } from '@/utils/cronTaskI18n';
 
 /** Format a Date as local YYYY-MM-DDTHH:mm for datetime-local input */
 function toLocalDateTimeString(d: Date): string {
@@ -41,10 +43,10 @@ interface ScheduleTypeTabsProps {
   error?: string;
 }
 
-const TABS: { kind: ScheduleKind; label: string; icon: typeof Clock }[] = [
-  { kind: 'recurring', label: '周期触发', icon: Clock },
-  { kind: 'at', label: '仅一次', icon: Calendar },
-  { kind: 'loop', label: '无限循环', icon: Repeat },
+const TABS: { kind: ScheduleKind; labelKey: string; icon: typeof Clock }[] = [
+  { kind: 'recurring', labelKey: 'cron.scheduleTabs.recurring', icon: Clock },
+  { kind: 'at', labelKey: 'cron.scheduleTabs.once', icon: Calendar },
+  { kind: 'loop', labelKey: 'cron.scheduleTabs.loop', icon: Repeat },
 ];
 
 /** Map the incoming `CronSchedule` to the surface-level tab. `every` and
@@ -57,6 +59,7 @@ function deriveActiveKind(value: CronSchedule | null): ScheduleKind {
 }
 
 export default function ScheduleTypeTabs({ value, intervalMinutes, onChange, error }: ScheduleTypeTabsProps) {
+  const { t } = useTranslation('task');
   const activeKind: ScheduleKind = deriveActiveKind(value);
 
   // --- Recurring tab state (covers both "every" and "cron" variants) ---
@@ -187,7 +190,7 @@ export default function ScheduleTypeTabs({ value, intervalMinutes, onChange, err
               }`}
             >
               <Icon className="h-3.5 w-3.5" />
-              {tab.label}
+              {t(tab.labelKey)}
             </button>
           );
         })}
@@ -212,10 +215,9 @@ export default function ScheduleTypeTabs({ value, intervalMinutes, onChange, err
 
         {activeKind === 'loop' && (
           <div className="rounded-lg border border-[var(--line)] bg-[var(--paper)] px-4 py-3">
-            <p className="text-sm font-medium text-[var(--ink)]">Ralph Loop 无限循环</p>
+            <p className="text-sm font-medium text-[var(--ink)]">{t('cron.scheduleTabs.loopTitle')}</p>
             <p className="mt-1.5 text-xs leading-relaxed text-[var(--ink-muted)]">
-              让 AI 持续无限运行的模式。每次 AI 完成回复后，自动发起下一轮执行，不受时间调度约束。
-              适用于需要 AI 持续工作直到任务完成的场景。连续失败 10 次将自动停止。
+              {t('cron.scheduleTabs.loopDescription')}
             </p>
           </div>
         )}
@@ -231,16 +233,7 @@ export default function ScheduleTypeTabs({ value, intervalMinutes, onChange, err
             />
             {atDateTime && (
               <p className="mt-1.5 text-xs text-[var(--ink-muted)]">
-                距现在约{' '}
-                {(() => {
-                  const diffMs = new Date(atDateTime).getTime() - Date.now();
-                  if (diffMs <= 0) return '已过期';
-                  const mins = Math.floor(diffMs / 60000);
-                  if (mins < 60) return `${mins} 分钟`;
-                  const hrs = Math.floor(mins / 60);
-                  if (hrs < 24) return `${hrs} 小时`;
-                  return `${Math.floor(hrs / 24)} 天`;
-                })()}
+                {t('cron.scheduleTabs.approxPrefix', { distance: formatApproxFutureDistance(atDateTime, t) })}
               </p>
             )}
           </div>

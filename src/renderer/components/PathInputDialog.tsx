@@ -4,6 +4,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { X } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 
 import { useCloseLayer } from '@/hooks/useCloseLayer';
 import OverlayBackdrop from '@/components/OverlayBackdrop';
@@ -23,6 +24,7 @@ export default function PathInputDialog({
     onConfirm,
     onCancel,
 }: PathInputDialogProps) {
+    const { t } = useTranslation('app');
     useCloseLayer(() => { if (!isOpen) return false; onCancel(); return true; }, 50);
     const [path, setPath] = useState(defaultPath);
     const inputRef = useRef<HTMLInputElement>(null);
@@ -57,7 +59,7 @@ export default function PathInputDialog({
                 {/* Header */}
                 <div className="mb-4 flex items-center justify-between">
                     <h2 className="text-lg font-semibold text-[var(--ink)]">
-                        确认项目路径
+                        {t('pathInput.title')}
                     </h2>
                     <button
                         onClick={onCancel}
@@ -70,10 +72,10 @@ export default function PathInputDialog({
                 {/* Content */}
                 <div className="mb-6">
                     <p className="mb-3 text-sm text-[var(--ink-muted)]">
-                        已选择文件夹: <span className="font-medium text-[var(--ink)]">{folderName}</span>
+                        {t('pathInput.selectedFolder')} <span className="font-medium text-[var(--ink)]">{folderName}</span>
                     </p>
                     <label className="mb-2 block text-sm font-medium text-[var(--ink)]">
-                        完整路径
+                        {t('pathInput.fullPath')}
                     </label>
                     <input
                         ref={inputRef}
@@ -85,7 +87,7 @@ export default function PathInputDialog({
                         placeholder="/Users/yourname/project/folder"
                     />
                     <p className="mt-2 text-xs text-[var(--ink-muted)]">
-                        浏览器无法获取真实路径，请确认或手动修改上方路径
+                        {t('pathInput.browserPathHint')}
                     </p>
                 </div>
 
@@ -95,14 +97,14 @@ export default function PathInputDialog({
                         onClick={onCancel}
                         className="rounded-lg border border-[var(--line)] px-4 py-2 text-sm font-medium text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
                     >
-                        取消
+                        {t('common.cancel')}
                     </button>
                     <button
                         onClick={() => onConfirm(path)}
                         disabled={!path.trim()}
                         className="action-button rounded-lg px-4 py-2 text-sm font-medium disabled:opacity-50"
                     >
-                        确认添加
+                        {t('pathInput.confirm')}
                     </button>
                 </div>
             </div>

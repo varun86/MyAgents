@@ -18,6 +18,7 @@ import {
   getSessionId,
   getSessionModel,
   getSessionPermissionMode,
+  getSessionEnabledOfficialToolIds,
   getSessionProviderEnv,
   getSessionProviderId,
   getSessionReasoningEffort,
@@ -38,6 +39,7 @@ import {
   setMcpServers,
   setSessionModel,
   setSessionPermissionMode,
+  setSessionEnabledOfficialToolIds,
   setSessionProviderEnv,
   setSessionReasoningEffort,
   stripPlaywrightResults,
@@ -48,7 +50,7 @@ import type { MessageWire, PermissionMode, ProviderEnv } from '../agent-session'
 import type { AgentDefinition } from '@anthropic-ai/claude-agent-sdk';
 import type { CancelReason } from '../utils/cancellation';
 import { createConcreteProviderRoute, isConcreteProviderRoute, type ProviderRoute } from '../../shared/providerRoute';
-import { materializeProviderRouteEnv } from '../utils/admin-config';
+import { getEffectiveOfficialToolIdsForSession, materializeProviderRouteEnv } from '../utils/admin-config';
 import type {
   DesktopAdmissionResult,
   DesktopMessageRequest,
@@ -110,6 +112,13 @@ function getLatestBuiltinResult(): string {
       : NO_TEXT_RESPONSE;
   }
   return latestResult.trim() || NO_TEXT_RESPONSE;
+}
+
+function getBuiltinWorkspacePath(): string | null {
+  const state = getAgentState();
+  return typeof state.agentDir === 'string' && state.agentDir.length > 0
+    ? state.agentDir
+    : null;
 }
 
 function messageWireToSessionMessage(message: MessageWire): SessionMessage {
@@ -202,16 +211,37 @@ export function createBuiltinSessionEngine(): SessionEngine {
       const providerId = getSessionProviderId();
       const mcpServers = getMcpServers();
       const agents = getAgents();
+      const sessionId = getSessionId();
+      const session = getSessionData(sessionId);
+      const workspacePath = getBuiltinWorkspacePath();
+      const enabledOfficialToolIds = workspacePath
+        ? getEffectiveOfficialToolIdsForSession(
+          workspacePath,
+          session,
+          getSessionEnabledOfficialToolIds(),
+        )
+        : [];
       return {
         success: true,
         runtime: 'builtin',
         model: model ?? null,
         mcpServerIds: mcpServers?.map(s => s.id) ?? null,
         agentNames: agents ? Object.keys(agents) : null,
+        enabledOfficialToolIds,
         permissionMode: getSessionPermissionMode(),
         providerId,
         providerRoute: model && providerId ? createConcreteProviderRoute(providerId, model) : null,
         reasoningEffort: getSessionReasoningEffort() ?? 'default',
+      };
+    },
+
+    getCurrentSessionContext() {
+      const sessionId = getSessionId();
+      return {
+        runtime: 'builtin',
+        sessionId: sessionId || null,
+        workspacePath: getBuiltinWorkspacePath(),
+        sessionMeta: sessionId ? getSessionData(sessionId) : null,
       };
     },
 
@@ -405,6 +435,11 @@ export function createBuiltinSessionEngine(): SessionEngine {
       return { success: true };
     },
 
+    async updateOfficialToolIds(ids) {
+      setSessionEnabledOfficialToolIds(ids);
+      return { success: true };
+    },
+
     materializePendingDesktopSession(request) {
       return materializeBuiltinPendingDesktopSession({
         phase: request.phase,
@@ -413,8 +448,10 @@ export function createBuiltinSessionEngine(): SessionEngine {
       });
     },
 
-    freezeCurrentSessionForImDetach() {
-      return freezeCurrentSessionMetadataForImDetach();
+    freezeCurrentSessionForImDetach(options) {
+      return freezeCurrentSessionMetadataForImDetach(undefined, {
+        allowMissingMetadata: options?.metadataBirthPending === true,
+      });
     },
 
     async updateRuntimeConfig() {
@@ -488,8 +525,10 @@ export function createBuiltinSessionEngine(): SessionEngine {
       return { success: true, sessionId: getSessionId() };
     },
 
-    async resetForNewImSession() {
-      const freeze = await freezeCurrentSessionMetadataForImDetach();
+    async resetForNewImSession(_workspacePath, options) {
+      const freeze = await freezeCurrentSessionMetadataForImDetach(undefined, {
+        allowMissingMetadata: options?.metadataBirthPending === true,
+      });
       if (!freeze.success) {
         return { success: false, error: freeze.error ?? 'Failed to freeze current IM session before reset' };
       }

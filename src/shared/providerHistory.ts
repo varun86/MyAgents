@@ -74,7 +74,12 @@ export function getProviderHistoryIdentity(
   if (!providerEnv || !normalizedBaseUrl || normalizedBaseUrl === 'https://api.anthropic.com') {
     return 'anthropic';
   }
-  return `third-party:${providerEnv.apiProtocol ?? 'anthropic'}`;
+  // Third-party history stays portable across transport protocols. The SDK
+  // transcript remains Anthropic-shaped; OpenAI-protocol providers translate at
+  // the request boundary via the bridge. If a concrete provider/model/endpoint
+  // cannot replay another portable transcript, quarantine that exact entry via
+  // ISOLATED_PROVIDER_HISTORY_KEYS instead of splitting every protocol family.
+  return 'third-party';
 }
 
 export function canResumeAcrossProviderBoundary(

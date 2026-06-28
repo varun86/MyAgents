@@ -314,9 +314,9 @@ for TARGET in "${FOUND_TARGETS[@]}"; do
 
         if command -v tauri &> /dev/null; then
             if [ -n "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" ]; then
-                tauri signer sign -k "$TEMP_KEY_FILE" -p "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" "$TAR_GZ"
+                TAURI_PRIVATE_KEY_PASSWORD="$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" tauri signer sign -f "$TEMP_KEY_FILE" "$TAR_GZ"
             else
-                tauri signer sign -k "$TEMP_KEY_FILE" "$TAR_GZ"
+                tauri signer sign -f "$TEMP_KEY_FILE" "$TAR_GZ"
             fi
 
             if [ -f "$SIG" ]; then

@@ -11,6 +11,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { AlertCircle, Brain, Image as ImageIcon, Loader2, Settings as SettingsIcon, StopCircle, XCircle } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 
 import { listenWithCleanup } from '@/utils/tauriListen';
 import Markdown from '@/components/Markdown';
@@ -50,6 +51,11 @@ interface FbCtx {
     selection?: string | null;
 }
 
+interface FbWhoContext {
+    appName: string;
+    windowTitle?: string | null;
+}
+
 /** 📷 快门结果（Rust FbScreenshot）：图 + 快门时刻的前台窗口标识。 */
 interface FbShot {
     dataUrl: string;
@@ -84,6 +90,7 @@ function loadWinH(): number {
 
 /** cameo 式单行活动条：状态点 + 主端同款过程摘要，但不可展开。 */
 function ActivityRow({ block, isStreaming, tick }: { block: ContentBlock; isStreaming: boolean; tick: number }) {
+    const { t } = useTranslation('chat');
     const isThinking = block.type === 'thinking';
     const isTool = block.type === 'tool_use' || block.type === 'server_tool_use';
     const tool = isTool ? block.tool : undefined;
@@ -104,16 +111,22 @@ function ActivityRow({ block, isStreaming, tick }: { block: ContentBlock; isStre
         const durationMs = block.thinkingDurationMs ?? (isThinkingActive && block.thinkingStartedAt ? tick - block.thinkingStartedAt : undefined);
         const durationSec = durationMs ? Math.floor(durationMs / 1000) : 0;
         if (isThinkingActive) {
-            mainLabel = durationSec > 0 ? `思考中… (${durationSec}s)` : '思考中…';
+            mainLabel = durationSec > 0
+                ? t('floatingBall.activity.thinkingRunningWithSeconds', { seconds: durationSec })
+                : t('floatingBall.activity.thinkingRunning');
             icon = <Loader2 className="size-4 animate-spin" />;
         } else if (block.isFailed) {
-            mainLabel = durationSec > 0 ? `思考失败 (${durationSec}s)` : '思考失败';
+            mainLabel = durationSec > 0
+                ? t('floatingBall.activity.thinkingFailedWithSeconds', { seconds: durationSec })
+                : t('floatingBall.activity.thinkingFailed');
             icon = <XCircle className="size-4 text-[var(--error)]" />;
         } else if (block.isStopped) {
-            mainLabel = durationSec > 0 ? `思考中断 (${durationSec}s)` : '思考中断';
+            mainLabel = durationSec > 0
+                ? t('floatingBall.activity.thinkingStoppedWithSeconds', { seconds: durationSec })
+                : t('floatingBall.activity.thinkingStopped');
             icon = <StopCircle className="size-4 text-[var(--warning)]" />;
         } else {
-            mainLabel = `思考了 ${Math.max(durationSec, 1)}s`;
+            mainLabel = t('floatingBall.activity.thinkingDone', { seconds: Math.max(durationSec, 1) });
             icon = <Brain className="size-4" />;
         }
     } else if (tool) {
@@ -150,7 +163,7 @@ function ActivityRow({ block, isStreaming, tick }: { block: ContentBlock; isStre
             <span className="icon">{icon}</span>
             <span className="label">{mainLabel}</span>
             {isTaskTool && (tool?.parsedInput as unknown as Record<string, unknown> | undefined)?.run_in_background === true && (
-                <span className="badge">后台</span>
+                <span className="badge">{t('floatingBall.activity.background')}</span>
             )}
             {taskDuration && <span className="detail">{taskDuration}</span>}
             {subLabel && <span className="sub">{subLabel}</span>}
@@ -249,6 +262,7 @@ function shotToImageDraft(shot: FbShot): FbImageDraft {
 }
 
 export default function CompanionWindow() {
+    const { t } = useTranslation('chat');
     // `mode` drives rendering; `modeRef` mirrors it for event handlers and the
     // session hook. The ref is written ONLY inside applyMode (every mode
     // transition funnels through it) — never during render (react-hooks/refs).
@@ -266,7 +280,7 @@ export default function CompanionWindow() {
 
     const [quote, setQuote] = useState<string | null>(null);
     const [imageDrafts, setImageDrafts] = useState<FbImageDraft[]>([]);
-    const [who, setWho] = useState<string>('Mino');
+    const [whoContext, setWhoContext] = useState<FbWhoContext | null>(null);
     const [input, setInput] = useState('');
     const [axNeeded, setAxNeeded] = useState(false);
     const [providerForCapability, setProviderForCapability] = useState<Provider | null>(null);
@@ -337,6 +351,15 @@ export default function CompanionWindow() {
         const modelId = session.model ?? providerForCapability?.primaryModel ?? null;
         return modelSupportsModality(providerForCapability, modelId, 'image');
     }, [providerForCapability, session.model, session.runtime]);
+    const whoLabel = useMemo(() => {
+        if (!whoContext) return 'Mino';
+        return whoContext.windowTitle
+            ? t('floatingBall.watchingAppWindow', {
+                appName: whoContext.appName,
+                windowTitle: whoContext.windowTitle,
+            })
+            : t('floatingBall.watchingApp', { appName: whoContext.appName });
+    }, [t, whoContext]);
 
     // ── mode → 通知球（球用它决定点击语义）＋ pin 时清未读 ──
     const applyMode = useCallback(
@@ -397,9 +420,12 @@ export default function CompanionWindow() {
         async (ctx: FbCtx | null | undefined) => {
             lastCtxRef.current = ctx ?? null;
             if (ctx?.appName) {
-                setWho(`Mino · 正在看 ${ctx.appName}${ctx.windowTitle ? ` — ${ctx.windowTitle}` : ''}`);
+                setWhoContext({
+                    appName: ctx.appName,
+                    windowTitle: ctx.windowTitle ?? null,
+                });
             } else {
-                setWho('Mino');
+                setWhoContext(null);
             }
             if (ctx?.selection) {
                 setQuote(ctx.selection);
@@ -691,19 +717,21 @@ export default function CompanionWindow() {
         if (drafts.length === 0) return;
         const slots = Math.max(0, MAX_IMAGES - imageDrafts.length);
         if (slots === 0) {
-            toast.warning(`最多只能上传 ${MAX_IMAGES} 张图片`);
+            toast.warning(t('floatingBall.toasts.maxImages', { count: MAX_IMAGES }));
             return;
         }
         if (drafts.length > slots) {
-            toast.warning(`最多只能上传 ${MAX_IMAGES} 张图片`);
+            toast.warning(t('floatingBall.toasts.maxImages', { count: MAX_IMAGES }));
         }
         setImageDrafts((prev) => [...prev, ...drafts.slice(0, Math.max(0, MAX_IMAGES - prev.length))]);
-    }, [imageDrafts.length, toast]);
+    }, [imageDrafts.length, t, toast]);
 
     const importFilesAsReferences = useCallback(async (files: File[]) => {
         if (files.length === 0) return;
         if (!fileService.isAvailable) {
-            toast.error(session.workspacePath ? '无法上传文件：当前为浏览器开发模式，请使用桌面应用' : '无法上传文件：请先选择工作区');
+            toast.error(t(session.workspacePath
+                ? 'floatingBall.toasts.cannotUploadDevMode'
+                : 'floatingBall.toasts.cannotUploadNoWorkspace'));
             return;
         }
         try {
@@ -718,21 +746,23 @@ export default function CompanionWindow() {
                 targetDir: 'myagents_files',
             });
             if (!result.success || !result.files || result.files.length === 0) {
-                throw new Error('上传失败');
+                throw new Error('upload failed');
             }
             await fileService.addGitignore({ pattern: 'myagents_files/' }).catch(() => undefined);
             insertReferencePaths(result.files);
-            toast.success(`已添加 ${result.files.length} 个文件到工作区`);
+            toast.success(t('floatingBall.toasts.filesAdded', { count: result.files.length }));
         } catch (err) {
             console.error('[fb] import files failed:', err);
-            toast.error('文件上传失败');
+            toast.error(t('floatingBall.toasts.fileUploadFailed'));
         }
-    }, [fileService, insertReferencePaths, session.workspacePath, toast]);
+    }, [fileService, insertReferencePaths, session.workspacePath, t, toast]);
 
     const copyPathsAsReferences = useCallback(async (paths: string[]) => {
         if (paths.length === 0) return;
         if (!fileService.isAvailable) {
-            toast.error(session.workspacePath ? '无法处理文件：当前为浏览器开发模式，请使用桌面应用' : '无法处理文件：请先选择工作区');
+            toast.error(t(session.workspacePath
+                ? 'floatingBall.toasts.cannotProcessDevMode'
+                : 'floatingBall.toasts.cannotProcessNoWorkspace'));
             return;
         }
         try {
@@ -742,19 +772,19 @@ export default function CompanionWindow() {
                 autoRename: true,
             });
             if (!result.success || !result.copiedFiles || result.copiedFiles.length === 0) {
-                throw new Error('复制失败');
+                throw new Error('copy failed');
             }
             await fileService.addGitignore({ pattern: 'myagents_files/' }).catch(() => undefined);
             insertReferencePaths(result.copiedFiles.map((file) => file.targetPath));
-            toast.success(`已添加 ${result.copiedFiles.length} 个文件到工作区`);
+            toast.success(t('floatingBall.toasts.filesAdded', { count: result.copiedFiles.length }));
             if (result.errors?.length) {
-                toast.warning(`${result.errors.length} 个文件未能添加`);
+                toast.warning(t('floatingBall.toasts.filesNotAdded', { count: result.errors.length }));
             }
         } catch (err) {
             console.error('[fb] copy paths failed:', err);
-            toast.error('文件处理失败');
+            toast.error(t('floatingBall.toasts.fileProcessFailed'));
         }
-    }, [fileService, insertReferencePaths, session.workspacePath, toast]);
+    }, [fileService, insertReferencePaths, session.workspacePath, t, toast]);
 
     const processDroppedFiles = useCallback(async (files: File[]) => {
         if (files.length === 0) return;
@@ -769,8 +799,8 @@ export default function CompanionWindow() {
         if (oversizedImageFiles.length > 0) {
             toast.warning(
                 oversizedImageFiles.length === 1
-                    ? '图片超过 10MB，请从文件夹拖入以作为 @文件 引用'
-                    : `${oversizedImageFiles.length} 张图片超过 10MB，请从文件夹拖入以作为 @文件 引用`,
+                    ? t('floatingBall.toasts.imageTooLargeAsFile')
+                    : t('floatingBall.toasts.imagesTooLargeAsFile', { count: oversizedImageFiles.length }),
             );
             for (const image of oversizedImageFiles) {
                 const idx = imageFiles.indexOf(image);
@@ -779,7 +809,7 @@ export default function CompanionWindow() {
         }
 
         if (imageFiles.length > 0 && !canAttachImages) {
-            toast.info('当前模型不支持图片输入，已转为文件存入工作区供模型读取');
+            toast.info(t('floatingBall.toasts.imageConvertedToFile'));
             for (const image of imageFiles) otherFiles.push(renameIfBareClipboardImage(image));
             imageFiles.length = 0;
         }
@@ -788,7 +818,7 @@ export default function CompanionWindow() {
             const drafts: FbImageDraft[] = [];
             for (const file of imageFiles) {
                 if (!ALLOWED_IMAGE_MIME_TYPES.includes(file.type)) {
-                    toast.warning(`不支持的图片格式：${file.name}`);
+                    toast.warning(t('floatingBall.toasts.unsupportedImageFormat', { name: file.name }));
                     continue;
                 }
                 try {
@@ -801,12 +831,14 @@ export default function CompanionWindow() {
         }
 
         await importFilesAsReferences(otherFiles);
-    }, [addImageDrafts, canAttachImages, importFilesAsReferences, toast]);
+    }, [addImageDrafts, canAttachImages, importFilesAsReferences, t, toast]);
 
     const processDroppedFilePaths = useCallback(async (paths: string[]) => {
         if (paths.length === 0) return;
         if (!fileService.isAvailable) {
-            toast.error(session.workspacePath ? '无法处理文件：当前为浏览器开发模式，请使用桌面应用' : '无法处理文件：请先选择工作区');
+            toast.error(t(session.workspacePath
+                ? 'floatingBall.toasts.cannotProcessDevMode'
+                : 'floatingBall.toasts.cannotProcessNoWorkspace'));
             return;
         }
 
@@ -819,14 +851,14 @@ export default function CompanionWindow() {
         }
 
         if (imagePaths.length > 0 && !canAttachImages) {
-            toast.info('当前模型不支持图片输入，已转为文件存入工作区供模型读取');
+            toast.info(t('floatingBall.toasts.imageConvertedToFile'));
             otherPaths.push(...imagePaths);
             imagePaths.length = 0;
         }
 
         if (imagePaths.length > 0) {
             try {
-                if (!session.sessionId) throw new Error('会话尚未就绪');
+                if (!session.sessionId) throw new Error('session not ready');
                 const prepared = await fileService.prepareUserImageAttachments({
                     sessionId: session.sessionId,
                     paths: imagePaths,
@@ -856,8 +888,8 @@ export default function CompanionWindow() {
                 if (oversizedCount > 0) {
                     toast.info(
                         oversizedCount === 1
-                            ? '图片超过 10MB，已作为文件引用添加'
-                            : `${oversizedCount} 张图片超过 10MB，已作为文件引用添加`,
+                            ? t('floatingBall.toasts.imageTooLargeAddedAsFile')
+                            : t('floatingBall.toasts.imagesTooLargeAddedAsFile', { count: oversizedCount }),
                     );
                 }
                 addImageDrafts(drafts);
@@ -869,7 +901,7 @@ export default function CompanionWindow() {
         }
 
         await copyPathsAsReferences(otherPaths);
-    }, [addImageDrafts, canAttachImages, copyPathsAsReferences, fileService, session.sessionId, session.workspacePath, toast]);
+    }, [addImageDrafts, canAttachImages, copyPathsAsReferences, fileService, session.sessionId, session.workspacePath, t, toast]);
 
     useTauriFileDrop({
         enabled: mode !== 'hidden',
@@ -1005,7 +1037,7 @@ export default function CompanionWindow() {
             if (canAttachImages) {
                 addImageDrafts([shotToImageDraft(res)]);
             } else {
-                toast.info('当前模型不支持图片输入，已转为文件存入工作区供模型读取');
+                toast.info(t('floatingBall.toasts.imageConvertedToFile'));
                 const { mimeType, data } = splitDataUrl(res.dataUrl);
                 const ext = mimeType === 'image/jpeg' || mimeType === 'image/jpg' ? 'jpg' : 'png';
                 const fileName = `screenshot-${new Date().toISOString().replace(/[:.]/g, '-')}.${ext}`;
@@ -1013,7 +1045,10 @@ export default function CompanionWindow() {
                     files: [{ name: fileName, content: data }],
                     targetDir: 'myagents_files',
                 });
-                if (!result.success || !result.files?.length) throw new Error('截图保存失败');
+                if (!result.success || !result.files?.length) {
+                    toast.error(t('floatingBall.toasts.screenshotSaveFailed'));
+                    return;
+                }
                 await fileService.addGitignore({ pattern: 'myagents_files/' }).catch(() => undefined);
                 insertReferencePaths(result.files);
             }
@@ -1021,9 +1056,11 @@ export default function CompanionWindow() {
         } catch (err) {
             console.warn('[fb] screenshot failed:', err);
             const detail = describeNativeFloatingBallError(err).trim();
-            toast.error(detail ? `截图失败：${detail.slice(0, 160)}` : '截图失败');
+            toast.error(detail
+                ? t('floatingBall.toasts.screenshotFailedWithDetail', { detail: detail.slice(0, 160) })
+                : t('floatingBall.toasts.screenshotFailed'));
         }
-    }, [addImageDrafts, canAttachImages, fileService, insertReferencePaths, toast]);
+    }, [addImageDrafts, canAttachImages, fileService, insertReferencePaths, t, toast]);
 
     // ── 展开进主程序（唤起主窗 → 新 Tab 接上这条会话） ──
     const onExpand = useCallback(() => {
@@ -1048,9 +1085,9 @@ export default function CompanionWindow() {
     const onOpenDesktopPetSettings = useCallback(() => {
         void invoke('cmd_fb_open_desktop_pet_settings').catch((err) => {
             console.error('[fb] open desktop pet settings failed:', err);
-            toast.error('打开桌面宠物设置失败');
+            toast.error(t('floatingBall.toasts.openPetSettingsFailed'));
         });
-    }, [toast]);
+    }, [t, toast]);
 
     const onOpenMyAgentsPreview = useCallback((path: string, options?: { displayPath?: string; initialLineNumber?: number }) => {
         if (!session.sessionId || !session.workspacePath) return;
@@ -1195,14 +1232,14 @@ export default function CompanionWindow() {
         >
             {/* chrome：pin 悬停浮现 */}
             <div className="fbw-chrome">
-                <span className="who">{who}</span>
-                <button onClick={onOpenDesktopPetSettings} title="打开桌面宠物设置">
+                <span className="who">{whoLabel}</span>
+                <button onClick={onOpenDesktopPetSettings} title={t('floatingBall.chrome.openPetSettings')}>
                     <SettingsIcon className="size-4" />
                 </button>
-                <button onClick={onExpand} title="在 MyAgents 中打开（新 Tab 接上这条会话）">
+                <button onClick={onExpand} title={t('floatingBall.chrome.openInMyAgents')}>
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M7 17L17 7" /><path d="M9 7h8v8" /></svg>
                 </button>
-                <button onClick={hideSelf} title="关闭（Esc）">
+                <button onClick={hideSelf} title={t('floatingBall.chrome.closeEsc')}>
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M18 6L6 18M6 6l12 12" /></svg>
                 </button>
             </div>
@@ -1216,7 +1253,7 @@ export default function CompanionWindow() {
             >
             <div className={`fbw-convo${isBootState ? ' boot-state' : ''}`} ref={convoRef} onScroll={onConvoScroll}>
                 {!session.ready && !session.error && (
-                    <div className="fbw-divider">正在连接 {session.workspaceName}…</div>
+                    <div className="fbw-divider">{t('floatingBall.connecting', { workspace: session.workspaceName })}</div>
                 )}
                 {session.error && !session.ready && (
                     <div className="fbw-error">{session.error}</div>
@@ -1279,7 +1316,7 @@ export default function CompanionWindow() {
             {session.busy && session.activities.length === 0 && !session.liveMessage && (
                 <div className="fbw-statusline">
                     <span className="fbw-spinner" />
-                    <span style={{ flex: 1 }}>Mino 正在处理…</span>
+                    <span style={{ flex: 1 }}>{t('floatingBall.processing')}</span>
                 </div>
             )}
             {session.error && session.ready && (
@@ -1289,9 +1326,9 @@ export default function CompanionWindow() {
             {/* AX 授权引导（第一次想给引用时） */}
             {mode === 'pin' && axNeeded && (
                 <div className="fbw-ax">
-                    授权「辅助功能」后，唤起时能自动带上你选中的文字（一次授权，长期有效）。
+                    {t('floatingBall.axPrompt')}
                     <br />
-                    <button onClick={() => void onGrantAx()}>去授权</button>
+                    <button onClick={() => void onGrantAx()}>{t('floatingBall.grantAccessibility')}</button>
                 </div>
             )}
 
@@ -1301,7 +1338,7 @@ export default function CompanionWindow() {
                     <div className="fbw-quote">
                         <span className="rule" />
                         <span className="q-text">{quote}</span>
-                        <button className="q-x" onClick={() => setQuote(null)} title="去掉引用">
+                        <button className="q-x" onClick={() => setQuote(null)} title={t('floatingBall.removeQuote')}>
                             <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M18 6L6 18M6 6l12 12" /></svg>
                         </button>
                     </div>
@@ -1328,7 +1365,7 @@ export default function CompanionWindow() {
                         ref={inputRef}
                         rows={1}
                         value={input}
-                        placeholder="问问 Mino，或者派个活…"
+                        placeholder={t('input.companionPlaceholder')}
                         onChange={(e) => {
                             setInput(e.target.value);
                             // IME 组合期间不写 style（#123：触发 WebKit 候选窗重排卡顿）
@@ -1339,16 +1376,16 @@ export default function CompanionWindow() {
                         onCompositionStart={composerKeydown.onCompositionStart}
                         onCompositionEnd={composerKeydown.onCompositionEnd}
                     />
-                    <button className="cam" onClick={() => void onShot()} title="添加屏幕截图">
+                    <button className="cam" onClick={() => void onShot()} title={t('input.addScreenshot')}>
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" /><circle cx="12" cy="13" r="4" /></svg>
                     </button>
                     {/* 与主对话框同语义：运行中 = 停止（方块），否则 = 发送（箭头） */}
                     {session.busy ? (
-                        <button className="send stop" onClick={() => void session.stop()} title="停止">
+                        <button className="send stop" onClick={() => void session.stop()} title={t('input.stop')}>
                             <svg viewBox="0 0 24 24" fill="currentColor"><rect x="7" y="7" width="10" height="10" rx="1.5" /></svg>
                         </button>
                     ) : (
-                        <button className={`send${sendReady ? ' ready' : ''}`} onClick={() => void doSend()} title="发送">
+                        <button className={`send${sendReady ? ' ready' : ''}`} onClick={() => void doSend()} title={t('input.send')}>
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M12 19V5M5 12l7-7 7 7" /></svg>
                         </button>
                     )}
@@ -1356,9 +1393,9 @@ export default function CompanionWindow() {
             </div>
 
             {/* 高度调节柄 + 移动拖拽区（仅 pin） */}
-            <div className="fbw-rz top" onPointerDown={bindResize('top')} title="拖动调节高度" />
-            <div className="fbw-rz bottom" onPointerDown={bindResize('bottom')} title="拖动调节高度" />
-            <div className="fbw-mv" onPointerDown={onMoveDown} title="拖动移动窗口" />
+            <div className="fbw-rz top" onPointerDown={bindResize('top')} title={t('floatingBall.resizeHandle')} />
+            <div className="fbw-rz bottom" onPointerDown={bindResize('bottom')} title={t('floatingBall.resizeHandle')} />
+            <div className="fbw-mv" onPointerDown={onMoveDown} title={t('floatingBall.moveHandle')} />
         </div>
     );
 }

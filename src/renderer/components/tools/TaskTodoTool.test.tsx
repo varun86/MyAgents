@@ -1,12 +1,16 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { cleanup, render, screen } from '@testing-library/react';
 
+import { i18n } from '@/i18n';
 import type { ToolUseSimple } from '@/types/chat';
 
 import TaskTodoTool from './TaskTodoTool';
 import { getToolLabel } from './toolBadgeConfig';
 
-afterEach(() => cleanup());
+afterEach(async () => {
+  cleanup();
+  await i18n.changeLanguage('zh-CN');
+});
 
 function tool(overrides: Partial<ToolUseSimple>): ToolUseSimple {
   return { id: 'toolu_task', name: 'TaskCreate', input: {}, streamIndex: 0, ...overrides };
@@ -43,6 +47,14 @@ describe('TaskTodoTool', () => {
     render(<TaskTodoTool tool={tool({ name: 'TaskList' })} />);
     expect(screen.getByText('加载任务列表...')).toBeInTheDocument();
   });
+
+  it('localizes operation chrome while preserving task subject data', async () => {
+    await i18n.changeLanguage('en-US');
+
+    render(<TaskTodoTool tool={tool({ name: 'TaskCreate', parsedInput: { subject: '初始化项目', description: '' } })} />);
+
+    expect(screen.getByText('Create task: 初始化项目')).toBeInTheDocument();
+  });
 });
 
 describe('getToolLabel for Task tools', () => {
@@ -53,14 +65,14 @@ describe('getToolLabel for Task tools', () => {
         { id: 'a', subject: 'A', status: 'completed', blockedBy: [] },
         { id: 'b', subject: 'B', status: 'pending', blockedBy: [] },
       ] }),
-    }))).toBe('Tasks 1/2');
+    }))).toBe('任务 1/2');
   });
 
   it('labels a TaskCreate even when parsedInput is missing (streaming)', () => {
-    expect(getToolLabel(tool({ name: 'TaskCreate' }))).toBe('New task');
+    expect(getToolLabel(tool({ name: 'TaskCreate' }))).toBe('新建任务');
   });
 
   it('labels a completed TaskUpdate', () => {
-    expect(getToolLabel(tool({ name: 'TaskUpdate', parsedInput: { taskId: 'a', subject: 'A', status: 'completed' } }))).toBe('Done: A');
+    expect(getToolLabel(tool({ name: 'TaskUpdate', parsedInput: { taskId: 'a', subject: 'A', status: 'completed' } }))).toBe('完成：A');
   });
 });

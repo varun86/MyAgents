@@ -11,6 +11,7 @@ pub mod cron_task;
 pub mod floating_ball;
 pub mod floating_ball_pets;
 mod global_shortcut;
+pub mod i18n;
 pub mod im;
 pub mod inbox;
 pub mod legacy_upgrade;
@@ -21,6 +22,7 @@ pub mod logger;
 mod macos_arrow_filter;
 #[cfg(target_os = "macos")]
 mod macos_traffic_light;
+pub mod managed_codex;
 pub mod management_api;
 pub mod notification;
 pub mod perf_trace;
@@ -325,12 +327,22 @@ pub fn run() {
             // Platform & device info
             commands::cmd_get_platform,
             commands::cmd_get_device_id,
+            i18n::cmd_get_ui_language_state,
+            i18n::cmd_sync_ui_language_from_config,
+            i18n::cmd_set_ui_language,
             // Bundled workspace initialization
             commands::cmd_initialize_bundled_workspace,
             commands::cmd_create_bot_workspace,
             commands::cmd_remove_bot_workspace,
             // Agent Runtime detection (v0.1.59)
             commands::cmd_detect_runtimes,
+            managed_codex::cmd_managed_codex_status,
+            managed_codex::cmd_managed_codex_download,
+            managed_codex::cmd_managed_codex_check_update,
+            managed_codex::cmd_managed_codex_login_start,
+            managed_codex::cmd_managed_codex_login_status,
+            managed_codex::cmd_managed_codex_login,
+            managed_codex::cmd_managed_codex_logout,
             // Workspace template commands
             commands::cmd_create_workspace_from_template,
             commands::cmd_create_workspace_from_bundled_template,

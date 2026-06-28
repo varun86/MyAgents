@@ -16,6 +16,7 @@
 
 import { invoke } from '@tauri-apps/api/core';
 
+import { i18n } from '@/i18n';
 import { isTauriEnvironment } from '../utils/browserMock';
 
 let lastNotifyTime = 0;
@@ -64,12 +65,16 @@ async function notify(title: string, body?: string, tabId?: string): Promise<voi
     }
 }
 
+function notificationText(key: string, options?: Record<string, unknown>): string {
+    return String(i18n.t(`app:notifications.${key}`, options));
+}
+
 /**
  * Notify that AI has completed a response.
  * @param tabId - Optional deep-link target consumed when the user clicks.
  */
 export function notifyMessageComplete(tabId?: string): void {
-    void notify('MyAgents - 任务完成', '请您查看结果', tabId);
+    void notify(notificationText('messageCompleteTitle'), notificationText('messageCompleteBody'), tabId);
 }
 
 /**
@@ -83,15 +88,15 @@ export function notifyCronTaskComplete(title: string, body: string, tabId?: stri
 }
 
 export function notifyPermissionRequest(toolName: string): void {
-    void notify('MyAgents - 权限请求', `AI 请求使用工具 - ${toolName}`);
+    void notify(notificationText('permissionTitle'), notificationText('permissionBody', { toolName }));
 }
 
 export function notifyAskUserQuestion(): void {
-    void notify('MyAgents - 需求确认', 'AI 等待您的确认相关信息');
+    void notify(notificationText('askUserTitle'), notificationText('askUserBody'));
 }
 
 export function notifyPlanModeRequest(): void {
-    void notify('MyAgents - 方案审核', 'AI 等待您审核方案');
+    void notify(notificationText('planModeTitle'), notificationText('planModeBody'));
 }
 
 /**

@@ -3,6 +3,7 @@
  */
 import { BarChart2, Clock, Loader2, MessageSquare, Wrench, X } from 'lucide-react';
 import { useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 
 import { useCloseLayer } from '@/hooks/useCloseLayer';
 
@@ -21,6 +22,7 @@ export default function SessionStatsModal({
     sessionTitle,
     onClose,
 }: SessionStatsModalProps) {
+    const { t } = useTranslation('chat');
     // Cmd+W dismissal: z-[200]
     useCloseLayer(() => { onClose(); return true; }, 200);
 
@@ -37,11 +39,11 @@ export default function SessionStatsModal({
                 if (data) {
                     setStats(data);
                 } else {
-                    setError('无法加载统计数据');
+                    setError(t('shell.stats.errors.unavailable'));
                 }
             } catch {
                 if (!cancelled) {
-                    setError('加载失败');
+                    setError(t('shell.stats.errors.loadFailed'));
                 }
             } finally {
                 if (!cancelled) {
@@ -53,7 +55,7 @@ export default function SessionStatsModal({
         return () => {
             cancelled = true;
         };
-    }, [sessionId]);
+    }, [sessionId, t]);
 
     const totalTokens =
         (stats?.summary.totalInputTokens ?? 0) + (stats?.summary.totalOutputTokens ?? 0);
@@ -71,7 +73,7 @@ export default function SessionStatsModal({
                         </div>
                         <div className="min-w-0">
                             <div className="truncate text-sm font-semibold text-[var(--ink)]">
-                                会话统计
+                                {t('shell.stats.title')}
                             </div>
                             <div className="truncate text-xs text-[var(--ink-muted)]">
                                 {sessionTitle}
@@ -92,7 +94,7 @@ export default function SessionStatsModal({
                     {isLoading ? (
                         <div className="flex h-32 items-center justify-center gap-2 text-[var(--ink-muted)]">
                             <Loader2 className="h-5 w-5 animate-spin" />
-                            <span className="text-sm">加载中...</span>
+                            <span className="text-sm">{t('shell.stats.loading')}</span>
                         </div>
                     ) : error ? (
                         <div className="flex h-32 items-center justify-center text-[var(--error)]">
@@ -105,7 +107,7 @@ export default function SessionStatsModal({
                                 <div className="rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] p-4">
                                     <div className="flex items-center gap-2 text-[var(--ink-muted)]">
                                         <MessageSquare className="h-4 w-4" />
-                                        <span className="text-xs">消息数</span>
+                                        <span className="text-xs">{t('shell.stats.summary.messages')}</span>
                                     </div>
                                     <div className="mt-2 text-2xl font-semibold text-[var(--ink)]">
                                         {stats.summary.messageCount}
@@ -114,26 +116,28 @@ export default function SessionStatsModal({
                                 <div className="rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] p-4">
                                     <div className="flex items-center gap-2 text-[var(--ink-muted)]">
                                         <BarChart2 className="h-4 w-4" />
-                                        <span className="text-xs">总 Tokens</span>
+                                        <span className="text-xs">{t('shell.stats.summary.totalTokens')}</span>
                                     </div>
                                     <div className="mt-2 text-2xl font-semibold text-[var(--ink)]">
                                         {formatTokens(totalTokens)}
                                     </div>
                                     <div className="mt-1 text-xs text-[var(--ink-muted)]">
-                                        输入 {formatTokens(stats.summary.totalInputTokens)} / 输出{' '}
-                                        {formatTokens(stats.summary.totalOutputTokens)}
+                                        {t('shell.stats.summary.inputOutput', {
+                                            input: formatTokens(stats.summary.totalInputTokens),
+                                            output: formatTokens(stats.summary.totalOutputTokens),
+                                        })}
                                     </div>
                                 </div>
                                 <div className="rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] p-4">
                                     <div className="flex items-center gap-2 text-[var(--ink-muted)]">
                                         <Clock className="h-4 w-4" />
-                                        <span className="text-xs">输入缓存</span>
+                                        <span className="text-xs">{t('shell.stats.summary.inputCache')}</span>
                                     </div>
                                     <div className="mt-2 text-2xl font-semibold text-[var(--ink)]">
                                         {formatTokens((stats.summary.totalCacheReadTokens ?? 0) + (stats.summary.totalCacheCreationTokens ?? 0))}
                                     </div>
                                     <div className="mt-1 text-xs text-[var(--ink-muted)]">
-                                        输入缓存 tokens
+                                        {t('shell.stats.summary.inputCacheTokens')}
                                     </div>
                                 </div>
                             </div>
@@ -142,26 +146,26 @@ export default function SessionStatsModal({
                             {Object.keys(stats.byModel).length > 0 && (
                                 <div>
                                     <h3 className="mb-3 text-sm font-semibold text-[var(--ink)]">
-                                        按模型统计
+                                        {t('shell.stats.byModel.title')}
                                     </h3>
                                     <div className="overflow-hidden rounded-lg border border-[var(--line)]">
                                         <table className="w-full text-sm">
                                             <thead className="bg-[var(--paper-elevated)]">
                                                 <tr>
                                                     <th className="px-4 py-2 text-left text-xs font-medium text-[var(--ink-muted)]">
-                                                        模型
+                                                        {t('shell.stats.byModel.model')}
                                                     </th>
                                                     <th className="px-4 py-2 text-right text-xs font-medium text-[var(--ink-muted)]">
-                                                        输入
+                                                        {t('shell.stats.common.input')}
                                                     </th>
                                                     <th className="px-4 py-2 text-right text-xs font-medium text-[var(--ink-muted)]">
-                                                        输出
+                                                        {t('shell.stats.common.output')}
                                                     </th>
                                                     <th className="px-4 py-2 text-right text-xs font-medium text-[var(--ink-muted)]">
-                                                        输入缓存
+                                                        {t('shell.stats.common.inputCache')}
                                                     </th>
                                                     <th className="px-4 py-2 text-right text-xs font-medium text-[var(--ink-muted)]">
-                                                        次数
+                                                        {t('shell.stats.byModel.count')}
                                                     </th>
                                                 </tr>
                                             </thead>
@@ -202,7 +206,7 @@ export default function SessionStatsModal({
                             {stats.messageDetails.length > 0 && (
                                 <div>
                                     <h3 className="mb-3 text-sm font-semibold text-[var(--ink)]">
-                                        消息明细
+                                        {t('shell.stats.messageDetails.title')}
                                     </h3>
                                     <div className="overflow-hidden rounded-lg border border-[var(--line)]">
                                         <div className="max-h-64 overflow-y-auto">
@@ -210,16 +214,16 @@ export default function SessionStatsModal({
                                                 <thead className="sticky top-0 bg-[var(--paper-elevated)]">
                                                     <tr>
                                                         <th className="px-4 py-2 text-left text-xs font-medium text-[var(--ink-muted)]">
-                                                            问题
+                                                            {t('shell.stats.messageDetails.question')}
                                                         </th>
                                                         <th className="px-4 py-2 text-right text-xs font-medium text-[var(--ink-muted)]">
-                                                            输入
+                                                            {t('shell.stats.common.input')}
                                                         </th>
                                                         <th className="px-4 py-2 text-right text-xs font-medium text-[var(--ink-muted)]">
-                                                            输出
+                                                            {t('shell.stats.common.output')}
                                                         </th>
                                                         <th className="px-4 py-2 text-right text-xs font-medium text-[var(--ink-muted)]">
-                                                            输入缓存
+                                                            {t('shell.stats.common.inputCache')}
                                                         </th>
                                                         <th className="px-4 py-2 text-right text-xs font-medium text-[var(--ink-muted)]">
                                                             <Wrench className="inline h-3 w-3" />
@@ -267,7 +271,7 @@ export default function SessionStatsModal({
                             {/* Empty state */}
                             {stats.messageDetails.length === 0 && (
                                 <div className="py-8 text-center text-sm text-[var(--ink-muted)]">
-                                    暂无统计数据
+                                    {t('shell.stats.empty')}
                                 </div>
                             )}
                         </div>
@@ -281,7 +285,7 @@ export default function SessionStatsModal({
                         onClick={onClose}
                         className="rounded-md border border-[var(--line-strong)] bg-[var(--button-secondary-bg)] px-4 py-2 text-sm font-medium text-[var(--ink)] hover:bg-[var(--button-secondary-bg-hover)]"
                     >
-                        关闭
+                        {t('shell.common.close')}
                     </button>
                 </div>
             </div>

@@ -8,8 +8,10 @@ type SessionSnapshotPatchKey =
   | 'permissionMode'
   | 'mcpEnabledServers'
   | 'enabledPluginIds'
+  | 'enabledOfficialToolIds'
   | 'providerId'
   | 'providerRoute'
+  | 'providerExecutionIdentity'
   | 'providerEnvJson';
 
 export type SessionSnapshotPatchPayload = {
@@ -22,8 +24,10 @@ const SNAPSHOT_KEYS = [
   'permissionMode',
   'mcpEnabledServers',
   'enabledPluginIds',
+  'enabledOfficialToolIds',
   'providerId',
   'providerRoute',
+  'providerExecutionIdentity',
   'providerEnvJson',
 ] as const satisfies ReadonlyArray<keyof SessionSnapshotPatchPayload>;
 
@@ -96,9 +100,20 @@ export function buildSessionSnapshotPatchUpdates(args: {
     if (isConcreteProviderRoute(route)) {
       explicit.providerId = route.providerId;
       explicit.model = route.model;
+      explicit.providerExecutionIdentity = undefined;
       explicit.providerEnvJson = undefined;
     } else if (route === null) {
       explicit.providerId = undefined;
+      explicit.providerEnvJson = undefined;
+    }
+  }
+
+  if (hasOwnSnapshotPayloadKey(args.payload, 'providerExecutionIdentity')) {
+    const identity = args.payload.providerExecutionIdentity;
+    if (identity) {
+      explicit.providerId = identity.providerId;
+      explicit.model = identity.model;
+      explicit.providerRoute = undefined;
       explicit.providerEnvJson = undefined;
     }
   }

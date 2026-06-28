@@ -4,6 +4,7 @@ import { forwardRef } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 
 import type { Project } from '@/config/types';
+import { i18n } from '@/i18n';
 
 import BrandSection from './BrandSection';
 
@@ -97,5 +98,14 @@ describe('BrandSection', () => {
     fireEvent.click(screen.getByRole('button', { name: /配置模型供应商/ }));
 
     expect(onGoToSettings).toHaveBeenCalledTimes(1);
+  });
+
+  it('renders the no-provider CTA in English when the UI language is English', async () => {
+    await i18n.changeLanguage('en-US');
+
+    renderBrandSection();
+
+    expect(screen.getByText(/One step to start your AI journey/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Configure a model provider/ })).toBeInTheDocument();
   });
 });

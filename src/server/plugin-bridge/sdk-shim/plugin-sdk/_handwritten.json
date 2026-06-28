@@ -19,6 +19,7 @@
   "channel-status",
   "command-auth",
   "compat",
+  "config-runtime",
   "core",
   "feishu",
   "infra-runtime",

@@ -99,4 +99,49 @@ describe('tauriClient renderer correlation', () => {
             },
         });
     });
+
+    it('keeps explicit tab-scoped correlation headers from the caller', async () => {
+        mocks.invoke.mockResolvedValue({
+            status: 200,
+            body: '{}',
+            headers: { 'content-type': 'application/json' },
+            is_base64: false,
+        });
+        const {
+            proxyFetch,
+            setAppActiveCorrelation,
+        } = await loadClient();
+
+        setAppActiveCorrelation({
+            tabId: 'old-active-tab',
+            sessionId: 'old-active-session',
+            tabs: [
+                { id: 'old-active-tab', sessionId: 'old-active-session' },
+                { id: 'target-tab', sessionId: 'target-session' },
+            ],
+        });
+
+        await proxyFetch('http://127.0.0.1:31415/chat/send', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-MyAgents-Tab-Id': 'target-tab',
+                'X-MyAgents-Session-Id': 'target-session',
+            },
+            body: '{}',
+        });
+
+        expect(mocks.invoke).toHaveBeenCalledWith('proxy_http_request', {
+            request: {
+                url: 'http://127.0.0.1:31415/chat/send',
+                method: 'POST',
+                body: '{}',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-MyAgents-Tab-Id': 'target-tab',
+                    'X-MyAgents-Session-Id': 'target-session',
+                },
+            },
+        });
+    });
 });

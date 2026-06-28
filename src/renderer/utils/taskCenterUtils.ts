@@ -5,6 +5,8 @@
 
 import type { SessionMetadata } from '@/api/sessionClient';
 import { findPromotedPlugin } from '@/components/ImSettings/promotedPlugins';
+import { currentSupportedLocale, formatPastRelativeTime } from '@/i18n/format';
+import type { SupportedLocale } from '../../shared/i18n';
 export { getSessionDisplayText } from '@/utils/sessionDisplay';
 
 /**
@@ -21,20 +23,24 @@ export function getFolderName(path: string): string {
 /**
  * Format ISO timestamp as relative time (zh-CN)
  */
-export function formatTime(isoString: string, now: Date = new Date()): string {
+export function formatTime(
+    isoString: string,
+    now: Date = new Date(),
+    locale: SupportedLocale = currentSupportedLocale(),
+): string {
     const date = new Date(isoString);
     if (Number.isNaN(date.getTime())) return '';
 
     const diffDays = localCalendarDayIndex(now) - localCalendarDayIndex(date);
 
     if (diffDays === 0) {
-        return date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+        return date.toLocaleTimeString(locale, { hour: '2-digit', minute: '2-digit' });
     } else if (diffDays === 1) {
-        return '昨天';
+        return locale === 'zh-CN' ? '昨天' : 'Yesterday';
     } else if (diffDays > 1 && diffDays < 7) {
-        return `${diffDays}天前`;
+        return locale === 'zh-CN' ? `${diffDays}天前` : `${diffDays} days ago`;
     } else {
-        return date.toLocaleDateString('zh-CN', { month: 'short', day: 'numeric' });
+        return date.toLocaleDateString(locale, { month: 'short', day: 'numeric' });
     }
 }
 
@@ -115,9 +121,13 @@ const BUILTIN_PLATFORM_NAMES: Record<string, string> = {
 /**
  * Format message count suffix (e.g., "3 条消息")
  */
-export function formatMessageCount(session: SessionMetadata): string | null {
+export function formatMessageCount(
+    session: SessionMetadata,
+    locale: SupportedLocale = currentSupportedLocale(),
+): string | null {
     const count = session.stats?.messageCount;
     if (!count || count <= 0) return null;
+    if (locale === 'en-US') return `${count} message${count === 1 ? '' : 's'}`;
     return `${count} 条消息`;
 }
 
@@ -131,25 +141,25 @@ export function formatMessageCount(session: SessionMetadata): string | null {
  * (RecentThoughtsRow, TaskListRow) omitted the space; consolidating here
  * normalises them forward — the change is intentional, not a regression.
  */
-export function relativeTime(ts: number): string {
-    if (!ts) return '';
-    const diff = Date.now() - ts;
-    const mins = Math.floor(diff / 60_000);
-    if (mins < 1) return '刚刚';
-    if (mins < 60) return `${mins} 分钟前`;
-    const hrs = Math.floor(mins / 60);
-    if (hrs < 24) return `${hrs} 小时前`;
-    const days = Math.floor(hrs / 24);
-    if (days < 7) return `${days} 天前`;
-    return new Date(ts).toLocaleDateString();
+export function relativeTime(
+    ts: number,
+    locale: SupportedLocale = currentSupportedLocale(),
+): string {
+    return formatPastRelativeTime(ts, locale);
 }
 
 const WEEKDAY_LABEL_CN = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+const WEEKDAY_LABEL_EN = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
 /**
  * 时间段标签:0-4 凌晨 · 5-8 早上 · 9-11 上午 · 12 中午 · 13-17 下午 · 18-23 晚上.
  */
-export function periodOfHour(hour: number): string {
+export function periodOfHour(hour: number, locale: SupportedLocale = currentSupportedLocale()): string {
+    if (locale === 'en-US') {
+        if (hour < 12) return 'AM';
+        if (hour === 12) return 'noon';
+        return 'PM';
+    }
     if (hour < 5) return '凌晨';
     if (hour < 9) return '早上';
     if (hour < 12) return '上午';
@@ -161,8 +171,18 @@ export function periodOfHour(hour: number): string {
 /**
  * "上午 11 点" / "下午 2:30" — integer hour drops the colon.
  */
-export function formatClockCN(hour: number, minute: number): string {
-    const period = periodOfHour(hour);
+export function formatClockCN(
+    hour: number,
+    minute: number,
+    locale: SupportedLocale = currentSupportedLocale(),
+): string {
+    if (locale === 'en-US') {
+        const period = hour < 12 ? 'AM' : 'PM';
+        const display = hour === 0 ? 12 : hour > 12 ? hour - 12 : hour;
+        const mm = String(minute).padStart(2, '0');
+        return minute === 0 ? `${display} ${period}` : `${display}:${mm} ${period}`;
+    }
+    const period = periodOfHour(hour, locale);
     const display = hour === 0 ? 0 : hour > 12 ? hour - 12 : hour;
     if (minute === 0) return `${period} ${display} 点`;
     const mm = String(minute).padStart(2, '0');
@@ -179,7 +199,10 @@ export function formatClockCN(hour: number, minute: number): string {
  * the year. `0 8 15 1 *` is "January 15th yearly", not "monthly on the
  * 15th"; mistranslating would be worse than showing the raw cron.
  */
-export function humanizeCron(expr: string): string | null {
+export function humanizeCron(
+    expr: string,
+    locale: SupportedLocale = currentSupportedLocale(),
+): string | null {
     const parts = expr.trim().split(/\s+/);
     if (parts.length !== 5) return null;
     const [minStr, hourStr, dom, month, dow] = parts;
@@ -188,13 +211,15 @@ export function humanizeCron(expr: string): string | null {
     if (!Number.isInteger(minute) || !Number.isInteger(hour)) return null;
     if (minute < 0 || minute > 59 || hour < 0 || hour > 23) return null;
     if (month !== '*') return null;
-    const clock = formatClockCN(hour, minute);
+    const clock = formatClockCN(hour, minute, locale);
 
-    if (dom === '*' && dow === '*') return `每天${clock}`;
-    if (dom === '*' && dow === '1-5') return `工作日${clock}`;
+    if (dom === '*' && dow === '*') return locale === 'zh-CN' ? `每天${clock}` : `Daily at ${clock}`;
+    if (dom === '*' && dow === '1-5') return locale === 'zh-CN' ? `工作日${clock}` : `Weekdays at ${clock}`;
     if (dom === '*' && /^\d$/.test(dow)) {
         const n = Number(dow);
-        if (n >= 0 && n <= 6) return `${WEEKDAY_LABEL_CN[n]}${clock}`;
+        if (n >= 0 && n <= 6) {
+            return locale === 'zh-CN' ? `${WEEKDAY_LABEL_CN[n]}${clock}` : `${WEEKDAY_LABEL_EN[n]} at ${clock}`;
+        }
     }
     if (dom === '*' && /^\d(?:,\d)+$/.test(dow)) {
         // Strict: every value must be a valid weekday 0..6. Silent filtering
@@ -209,13 +234,15 @@ export function humanizeCron(expr: string): string | null {
         }
         const days = Array.from(new Set(nums))
             .sort((a, b) => a - b)
-            .map((n) => WEEKDAY_LABEL_CN[n])
-            .join('、');
-        return days ? `${days} ${clock}` : null;
+            .map((n) => locale === 'zh-CN' ? WEEKDAY_LABEL_CN[n] : WEEKDAY_LABEL_EN[n])
+            .join(locale === 'zh-CN' ? '、' : ', ');
+        return days ? (locale === 'zh-CN' ? `${days} ${clock}` : `${days} at ${clock}`) : null;
     }
     if (/^\d+$/.test(dom) && dow === '*') {
         const d = Number(dom);
-        if (d >= 1 && d <= 31) return `每月 ${d} 号${clock}`;
+        if (d >= 1 && d <= 31) {
+            return locale === 'zh-CN' ? `每月 ${d} 号${clock}` : `Monthly on day ${d} at ${clock}`;
+        }
     }
     return null;
 }

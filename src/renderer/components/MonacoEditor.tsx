@@ -27,6 +27,7 @@ import tsWorker from 'monaco-editor/esm/vs/language/typescript/ts.worker?worker'
 import 'monaco-editor/min/vs/editor/editor.main.css';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { useTranslation } from 'react-i18next';
 import type { FilePreviewFocusTarget } from '@/types/filePreview';
 
 // Configure Monaco Environment for bundled workers (required for Tauri CSP)
@@ -107,6 +108,7 @@ export default function MonacoEditor({
     onQuote,
     wordWrap = 'on',
 }: MonacoEditorProps) {
+    const { t } = useTranslation('app');
     const handleChange = useCallback((newValue: string | undefined) => {
         onChange(newValue ?? '');
     }, [onChange]);
@@ -657,18 +659,18 @@ export default function MonacoEditor({
         const hasSelection = !!sel && !sel.isEmpty();
         const items: ContextMenuItem[] = [];
         if (!readOnly) {
-            items.push({ label: '剪切', icon: <Scissors className="h-4 w-4" />, disabled: !hasSelection, onClick: cutSelection });
+            items.push({ label: t('monacoContext.cut'), icon: <Scissors className="h-4 w-4" />, disabled: !hasSelection, onClick: cutSelection });
         }
-        items.push({ label: '复制', icon: <Copy className="h-4 w-4" />, disabled: !hasSelection, onClick: copySelection });
+        items.push({ label: t('monacoContext.copy'), icon: <Copy className="h-4 w-4" />, disabled: !hasSelection, onClick: copySelection });
         if (!readOnly) {
-            items.push({ label: '粘贴', icon: <ClipboardPaste className="h-4 w-4" />, onClick: pasteClipboard });
+            items.push({ label: t('monacoContext.paste'), icon: <ClipboardPaste className="h-4 w-4" />, onClick: pasteClipboard });
         }
         items.push({ separator: true });
-        items.push({ label: '全选', icon: <TextSelect className="h-4 w-4" />, onClick: selectAllText });
+        items.push({ label: t('monacoContext.selectAll'), icon: <TextSelect className="h-4 w-4" />, onClick: selectAllText });
         items.push({ separator: true });
-        items.push({ label: '查找', icon: <Search className="h-4 w-4" />, onClick: openFind });
+        items.push({ label: t('monacoContext.find'), icon: <Search className="h-4 w-4" />, onClick: openFind });
         return items;
-    }, [readOnly, cutSelection, copySelection, pasteClipboard, selectAllText, openFind]);
+    }, [readOnly, cutSelection, copySelection, pasteClipboard, selectAllText, openFind, t]);
 
     // Monaco editor options optimized for performance
     const options = useMemo(() => ({
@@ -768,7 +770,7 @@ export default function MonacoEditor({
                 loading={
                     <div className="flex h-full items-center justify-center gap-2 text-[var(--ink-muted)]">
                         <Loader2 className="h-5 w-5 animate-spin" />
-                        <span className="text-sm">加载编辑器...</span>
+                        <span className="text-sm">{t('monacoEditor.loading')}</span>
                     </div>
                 }
             />
@@ -796,7 +798,7 @@ export default function MonacoEditor({
                         onMouseDown={retainFocusOnMouseDown}
                     >
                         <Quote className="h-3 w-3" />
-                        引用
+                        {t('monacoEditor.quote')}
                     </button>
                 </div>
             )}

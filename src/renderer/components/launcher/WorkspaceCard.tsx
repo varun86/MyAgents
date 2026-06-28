@@ -7,6 +7,7 @@
 
 import { memo, useCallback, useRef, useState } from 'react';
 import { FolderOpen, Loader2, Trash2, Settings2, HeartPulse, MoreHorizontal, Pin, PinOff } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 
 import { MenuItem } from '@/components/ui/MenuItem';
 import { Popover } from '@/components/ui/Popover';
@@ -59,6 +60,7 @@ export default memo(function WorkspaceCard({
     onTogglePin,
     isLoading,
 }: WorkspaceCardProps) {
+    const { t } = useTranslation('launcher');
     // Context menu state
     const [contextMenu, setContextMenu] = useState<{
         x: number;
@@ -174,7 +176,7 @@ export default memo(function WorkspaceCard({
                             className="group/btn pointer-events-auto relative z-20 rounded-lg p-2 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
                             role="button"
                             tabIndex={-1}
-                            aria-label="更多"
+                            aria-label={t('workspaceCard.more')}
                             onClick={handleMoreClick}
                         >
                             <MoreHorizontal className="h-4 w-4" strokeWidth={2.2} />
@@ -204,7 +206,7 @@ export default memo(function WorkspaceCard({
                             icon={isPinned
                                 ? <PinOff className="h-3.5 w-3.5" />
                                 : <Pin className="h-3.5 w-3.5" />}
-                            label={isPinned ? '取消置顶' : '置顶'}
+                            label={isPinned ? t('workspaceCard.unpin') : t('workspaceCard.pin')}
                             onClick={() => {
                                 closeContextMenu();
                                 onTogglePin(project);
@@ -212,7 +214,7 @@ export default memo(function WorkspaceCard({
                         />
                         <MenuItem
                             icon={<Settings2 className="h-3.5 w-3.5" />}
-                            label="Agent 设置"
+                            label={t('workspaceCard.agentSettings')}
                             onClick={() => {
                                 closeContextMenu();
                                 onAgentSettings(project);
@@ -220,7 +222,7 @@ export default memo(function WorkspaceCard({
                         />
                         <MenuItem
                             icon={<FolderOpen className="h-3.5 w-3.5" />}
-                            label="打开所在文件夹"
+                            label={t('workspaceCard.openFolder')}
                             onClick={() => {
                                 closeContextMenu();
                                 onOpenFolder(project);
@@ -228,7 +230,7 @@ export default memo(function WorkspaceCard({
                         />
                         <MenuItem
                             icon={<Trash2 className="h-3.5 w-3.5" />}
-                            label="移除"
+                            label={t('workspaceCard.remove')}
                             tone="danger"
                             onClick={() => {
                                 closeContextMenu();

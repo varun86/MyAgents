@@ -33,6 +33,7 @@ import {
     Star,
     Trash2,
 } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 
 import { deleteSession, updateSession, type SessionMetadata } from '@/api/sessionClient';
 import { handoverSessionToChannel } from '@/api/sessionHandoverClient';
@@ -45,8 +46,6 @@ import Tip from './Tip';
 import { useToast } from './Toast';
 import { MenuItem } from './ui/MenuItem';
 import { Popover } from './ui/Popover';
-
-const CRON_DELETE_TOOLTIP = '请先停止循环任务后再删除';
 
 export interface BotChannelCandidate {
     agentId: string;
@@ -116,6 +115,7 @@ export default function SessionMenuButton({
     onFavoriteChanged,
     prepareCurrentSessionForDelete,
 }: SessionMenuButtonProps) {
+    const { t } = useTranslation('chat');
     const toast = useToast();
     const triggerRef = useRef<HTMLButtonElement | null>(null);
     const botMenuItemRef = useRef<HTMLButtonElement | null>(null);
@@ -161,12 +161,12 @@ export default function SessionMenuButton({
             setSessionIdCopied(true);
             if (copyResetTimerRef.current) clearTimeout(copyResetTimerRef.current);
             copyResetTimerRef.current = setTimeout(() => setSessionIdCopied(false), 1600);
-            toast.success('已复制 SessionID');
+            toast.success(t('shell.sessionMenu.toasts.copySessionIdSuccess'));
         } catch (err) {
             console.error('[SessionMenuButton] copy session id failed:', err);
-            toast.error('复制失败');
+            toast.error(t('shell.sessionMenu.toasts.copyFailed'));
         }
-    }, [sessionId, toast]);
+    }, [sessionId, toast, t]);
 
     const handleToggleFavorite = useCallback(async () => {
         if (favoriteInFlight) return;
@@ -176,18 +176,20 @@ export default function SessionMenuButton({
             const updated = await updateSession(sessionId, { favorite: next });
             if (updated) {
                 onFavoriteChanged?.(next, updated);
-                toast.success(next ? '已收藏' : '已取消收藏');
+                toast.success(next
+                    ? t('shell.sessionMenu.toasts.favoriteAdded')
+                    : t('shell.sessionMenu.toasts.favoriteRemoved'));
             } else {
-                toast.error('收藏失败，请重试');
+                toast.error(t('shell.sessionMenu.toasts.favoriteFailed'));
             }
         } catch (err) {
             console.error('[SessionMenuButton] toggle favorite failed:', err);
-            toast.error('收藏失败，请重试');
+            toast.error(t('shell.sessionMenu.toasts.favoriteFailed'));
         } finally {
             setFavoriteInFlight(false);
             closeAll();
         }
-    }, [favoriteInFlight, favorite, sessionId, onFavoriteChanged, toast, closeAll]);
+    }, [favoriteInFlight, favorite, sessionId, onFavoriteChanged, toast, closeAll, t]);
 
     const handleExport = useCallback(async () => {
         if (exporting) return;
@@ -203,9 +205,9 @@ export default function SessionMenuButton({
     }, [exporting, sessionId, toast, closeAll]);
 
     const handleShowStats = useCallback(() => {
-        setStatsTarget({ id: sessionId, title: sessionTitle || '此对话' });
+        setStatsTarget({ id: sessionId, title: sessionTitle || t('shell.currentChatFallback') });
         closeAll();
-    }, [sessionId, sessionTitle, closeAll]);
+    }, [sessionId, sessionTitle, closeAll, t]);
 
     const handleShowContext = useCallback(() => {
         if (!onShowContext) return;
@@ -225,21 +227,21 @@ export default function SessionMenuButton({
             const sessionIdToDelete = sessionId;
             const prepared = await prepareCurrentSessionForDelete();
             if (!prepared) {
-                toast.error('删除失败，请重试');
+                toast.error(t('shell.sessionMenu.toasts.deleteFailed'));
                 return;
             }
 
             const ok = await deleteSession(sessionIdToDelete);
             if (ok) {
-                toast.success('已删除');
+                toast.success(t('shell.sessionMenu.toasts.deleted'));
             } else {
-                toast.error('删除失败，请重试');
+                toast.error(t('shell.sessionMenu.toasts.deleteFailed'));
             }
         } catch (err) {
             console.error('[SessionMenuButton] delete failed:', err);
-            toast.error('删除失败，请重试');
+            toast.error(t('shell.sessionMenu.toasts.deleteFailed'));
         }
-    }, [sessionId, prepareCurrentSessionForDelete, toast]);
+    }, [sessionId, prepareCurrentSessionForDelete, toast, t]);
 
     // ─── Bot submenu ──────────────────────────────────────────────────────
 
@@ -257,7 +259,9 @@ export default function SessionMenuButton({
             });
             if (res.ok) {
                 if (res.notified) {
-                    toast.success(`已交接到 ${candidate.platformLabel} · ${candidate.channelName}`);
+                    toast.success(t('shell.sessionMenu.toasts.handoverSuccess', {
+                        target: `${candidate.platformLabel} · ${candidate.channelName}`,
+                    }));
                 } else {
                     // Step 7 (adapter.send_message) failed but the binding
                     // is in place. Surface the partial failure instead of
@@ -265,19 +269,23 @@ export default function SessionMenuButton({
                     // to know the IM end didn't get notified so they can
                     // ping the channel manually if needed. v0.2.14 dogfood
                     // showed silent-fail leading to "did this work?" UX.
-                    toast.error(`已交接到 ${candidate.platformLabel} · ${candidate.channelName}，但通知未送达 IM`);
+                    toast.error(t('shell.sessionMenu.toasts.handoverNotifyFailed', {
+                        target: `${candidate.platformLabel} · ${candidate.channelName}`,
+                    }));
                 }
                 closeAll();
             } else {
-                toast.error('交接失败');
+                toast.error(t('shell.sessionMenu.toasts.handoverFailed'));
             }
         } catch (err) {
             console.error('[SessionMenuButton] handover failed:', err);
-            toast.error(`交接失败：${err instanceof Error ? err.message : String(err)}`);
+            toast.error(t('shell.sessionMenu.toasts.handoverFailedWithError', {
+                error: err instanceof Error ? err.message : String(err),
+            }));
         } finally {
             setHandoverPendingTargetKey(null);
         }
-    }, [handoverPendingTargetKey, sessionId, workspacePath, toast, closeAll]);
+    }, [handoverPendingTargetKey, sessionId, workspacePath, toast, closeAll, t]);
 
     // Show the bot menu item when we either have channels to bind to OR the
     // session is already bound — otherwise a session bound to a transiently
@@ -290,11 +298,11 @@ export default function SessionMenuButton({
 
     return (
         <>
-            <Tip label="对话操作" position="bottom">
+            <Tip label={t('shell.sessionMenu.trigger')} position="bottom">
                 <button
                     ref={triggerRef}
                     type="button"
-                    aria-label="对话操作"
+                    aria-label={t('shell.sessionMenu.trigger')}
                     aria-expanded={open}
                     aria-haspopup="menu"
                     onClick={() => setOpen((prev) => !prev)}
@@ -329,23 +337,23 @@ export default function SessionMenuButton({
                             type="button"
                             onClick={() => { void handleCopySessionId(); }}
                             className="inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-xs text-[var(--accent)] transition-colors hover:bg-[var(--accent-warm-subtle)]"
-                            aria-label="复制 SessionID"
+                            aria-label={t('shell.sessionMenu.copySessionIdAria')}
                         >
                             {sessionIdCopied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
-                            <span>{sessionIdCopied ? '已复制' : '复制'}</span>
+                            <span>{sessionIdCopied ? t('shell.sessionMenu.copied') : t('shell.sessionMenu.copy')}</span>
                         </button>
                     </div>
                 </div>
                 <MenuItem
                     icon={<Pencil className="h-3.5 w-3.5" />}
-                    label="重命名"
+                    label={t('shell.sessionMenu.rename')}
                     onClick={canRename ? handleRename : undefined}
                     disabled={!canRename}
-                    title={canRename ? undefined : '发送一条消息后再为对话命名'}
+                    title={canRename ? undefined : t('shell.sessionMenu.renameDisabledTitle')}
                 />
                 <MenuItem
                     icon={<Star className="h-3.5 w-3.5" fill={favorite ? 'currentColor' : 'none'} />}
-                    label={favorite ? '取消收藏' : '收藏对话'}
+                    label={favorite ? t('shell.sessionMenu.unfavorite') : t('shell.sessionMenu.favorite')}
                     onClick={() => { void handleToggleFavorite(); }}
                     disabled={favoriteInFlight}
                 />
@@ -353,19 +361,19 @@ export default function SessionMenuButton({
                     icon={exporting
                         ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
                         : <Download className="h-3.5 w-3.5" />}
-                    label="导出为 md 文件"
+                    label={t('shell.sessionMenu.exportMarkdown')}
                     onClick={() => { void handleExport(); }}
                     disabled={exporting}
                 />
                 <MenuItem
                     icon={<BarChart2 className="h-3.5 w-3.5" />}
-                    label="会话 Token 消耗统计"
+                    label={t('shell.sessionMenu.tokenStats')}
                     onClick={handleShowStats}
                 />
                 {onShowContext && (
                     <MenuItem
                         icon={<Gauge className="h-3.5 w-3.5" />}
-                        label="上下文 Token 使用详情"
+                        label={t('shell.sessionMenu.contextUsage')}
                         onClick={handleShowContext}
                     />
                 )}
@@ -373,7 +381,7 @@ export default function SessionMenuButton({
                     <MenuItem
                         ref={botMenuItemRef}
                         icon={<MessageSquare className="h-3.5 w-3.5" />}
-                        label="绑定聊天机器人"
+                        label={t('shell.sessionMenu.bindBot')}
                         trailing={<span className="text-[var(--ink-subtle)]">▸</span>}
                         onClick={() => setSubmenuOpen((prev) => !prev)}
                         active={submenuOpen}
@@ -385,10 +393,10 @@ export default function SessionMenuButton({
                  *  put the tooltip on a wrapping span (which still receives
                  *  hover) and keep the button purely disabled. */}
                 {cronProtected ? (
-                    <span className="block" title={CRON_DELETE_TOOLTIP}>
+                    <span className="block" title={t('shell.sessionMenu.cronDeleteTooltip')}>
                         <MenuItem
                             icon={<Trash2 className="h-3.5 w-3.5" />}
-                            label="删除对话"
+                            label={t('shell.sessionMenu.delete')}
                             disabled
                             tone="danger"
                         />
@@ -396,7 +404,7 @@ export default function SessionMenuButton({
                 ) : (
                     <MenuItem
                         icon={<Trash2 className="h-3.5 w-3.5" />}
-                        label="删除对话"
+                        label={t('shell.sessionMenu.delete')}
                         onClick={handleDeleteClick}
                         tone="danger"
                     />
@@ -431,18 +439,21 @@ export default function SessionMenuButton({
                                 <span className="min-w-0 flex-1 truncate text-[var(--ink-muted)]">
                                     {boundChannel.channelName}
                                     {boundChannel.sourceDisplayName
-                                        ? ` · ${formatSourceLabel(boundChannel.sourceType)} ${boundChannel.sourceDisplayName}`
+                                        ? ` · ${formatSourceLabel(boundChannel.sourceType, {
+                                            privateLabel: t('shell.sessionMenu.source.private'),
+                                            groupLabel: t('shell.sessionMenu.source.group'),
+                                        })} ${boundChannel.sourceDisplayName}`
                                         : ''}
                                 </span>
                                 <span className="shrink-0 rounded-sm bg-[var(--paper-inset)] px-1.5 py-0.5 text-xs text-[var(--ink-muted)]">
-                                    已绑定
+                                    {t('shell.sessionMenu.bound')}
                                 </span>
                             </div>
                             {otherChannels.length > 0 && (
                                 <>
                                     <div className="my-1 border-t border-[var(--line-subtle)]" />
                                     <div className="px-3 py-1 text-xs uppercase tracking-wide text-[var(--ink-subtle)]">
-                                        切换到其他
+                                        {t('shell.sessionMenu.switchToOther')}
                                     </div>
                                     {otherChannels.map((c) => (
                                         <ChannelMenuItem
@@ -450,6 +461,9 @@ export default function SessionMenuButton({
                                             candidate={c}
                                             pending={handoverPendingTargetKey === c.sessionKey}
                                             disabled={handoverPendingTargetKey !== null}
+                                            privateLabel={t('shell.sessionMenu.source.private')}
+                                            groupLabel={t('shell.sessionMenu.source.group')}
+                                            unknownChatLabel={t('shell.sessionMenu.source.unknownChat')}
                                             onClick={() => { void handleHandover(c); }}
                                         />
                                     ))}
@@ -463,6 +477,9 @@ export default function SessionMenuButton({
                                 candidate={c}
                                 pending={handoverPendingTargetKey === c.sessionKey}
                                 disabled={handoverPendingTargetKey !== null}
+                                privateLabel={t('shell.sessionMenu.source.private')}
+                                groupLabel={t('shell.sessionMenu.source.group')}
+                                unknownChatLabel={t('shell.sessionMenu.source.unknownChat')}
                                 onClick={() => { void handleHandover(c); }}
                             />
                         ))
@@ -487,9 +504,11 @@ export default function SessionMenuButton({
             {/* Delete confirm */}
             {pendingDelete && (
                 <ConfirmDialog
-                    title="删除对话"
-                    message={`确定要删除「${sessionTitle || '此对话'}」吗？此操作不可撤销。`}
-                    confirmText="删除"
+                    title={t('shell.sessionMenu.deleteDialog.title')}
+                    message={t('shell.sessionMenu.deleteDialog.message', {
+                        title: sessionTitle || t('shell.currentChatFallback'),
+                    })}
+                    confirmText={t('shell.sessionMenu.deleteDialog.confirm')}
                     confirmVariant="danger"
                     onConfirm={handleConfirmDelete}
                     onCancel={() => setPendingDelete(false)}
@@ -507,14 +526,25 @@ interface ChannelMenuItemProps {
     candidate: BotChannelCandidate;
     pending: boolean;
     disabled: boolean;
+    privateLabel: string;
+    groupLabel: string;
+    unknownChatLabel: string;
     onClick: () => void;
 }
 
-function ChannelMenuItem({ candidate, pending, disabled, onClick }: ChannelMenuItemProps) {
+function ChannelMenuItem({
+    candidate,
+    pending,
+    disabled,
+    privateLabel,
+    groupLabel,
+    unknownChatLabel,
+    onClick,
+}: ChannelMenuItemProps) {
     const effectivelyDisabled = disabled || !!candidate.disabledReason || !candidate.sessionKey;
     const sourceLabel = candidate.disabledReason
         ? candidate.disabledReason
-        : `${formatSourceLabel(candidate.sourceType)} · ${candidate.sourceDisplayName || candidate.sourceId || '未知聊天'}`;
+        : `${formatSourceLabel(candidate.sourceType, { privateLabel, groupLabel })} · ${candidate.sourceDisplayName || candidate.sourceId || unknownChatLabel}`;
 
     return (
         <button
@@ -541,6 +571,9 @@ function ChannelMenuItem({ candidate, pending, disabled, onClick }: ChannelMenuI
     );
 }
 
-function formatSourceLabel(sourceType: 'private' | 'group' | undefined): string {
-    return sourceType === 'group' ? '群聊' : '私聊';
+function formatSourceLabel(
+    sourceType: 'private' | 'group' | undefined,
+    labels: { privateLabel: string; groupLabel: string },
+): string {
+    return sourceType === 'group' ? labels.groupLabel : labels.privateLabel;
 }

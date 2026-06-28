@@ -9,11 +9,13 @@ import {
   resolveCurrentProviderForSession,
   resolveLegacyBuiltinSnapshotProviderId,
   resolveLauncherProvider,
+  shouldBlockSendForLabsDisabledExternalRuntime,
   shouldDegradedLoad,
   shouldResetModelOnProviderChange,
   shouldSkipSnapshotWrite,
 } from './optionResolve';
-import { SUBSCRIPTION_PROVIDER_ID } from '../../shared/config-types';
+import { MANAGED_CODEX_PROVIDER, SUBSCRIPTION_PROVIDER_ID } from '../../shared/config-types';
+import { toProviderExecutionIntent } from '../../shared/providerExecution';
 
 describe('resolveCurrentProviderForSession (#401)', () => {
   const pinned = { id: 'zhipu' };
@@ -53,6 +55,37 @@ describe('resolveCurrentProviderForSession (#401)', () => {
         fallbackProvider: fallback,
       }),
     ).toBe(pinned);
+  });
+});
+
+describe('shouldBlockSendForLabsDisabledExternalRuntime', () => {
+  it('blocks user-managed external CLI sessions when Labs runtime mode is off', () => {
+    expect(shouldBlockSendForLabsDisabledExternalRuntime({
+      sessionRuntime: 'codex',
+      sessionRuntimeSource: 'system-cli',
+      multiAgentRuntimeEnabled: false,
+    })).toBe(true);
+  });
+
+  it('does not block Managed Codex Provider sessions when Labs runtime mode is off', () => {
+    expect(shouldBlockSendForLabsDisabledExternalRuntime({
+      sessionRuntime: 'codex',
+      sessionRuntimeSource: 'managed-provider',
+      multiAgentRuntimeEnabled: false,
+    })).toBe(false);
+  });
+
+  it('does not block builtin sessions or Labs-enabled external sessions', () => {
+    expect(shouldBlockSendForLabsDisabledExternalRuntime({
+      sessionRuntime: 'builtin',
+      sessionRuntimeSource: undefined,
+      multiAgentRuntimeEnabled: false,
+    })).toBe(false);
+    expect(shouldBlockSendForLabsDisabledExternalRuntime({
+      sessionRuntime: 'codex',
+      sessionRuntimeSource: 'system-cli',
+      multiAgentRuntimeEnabled: true,
+    })).toBe(false);
   });
 });
 
@@ -160,7 +193,7 @@ describe('canResumeProviderHistoryForSwitch', () => {
     })).toBe(true);
   });
 
-  it('uses the normal provider-history whitelist once current provider identity is known', () => {
+  it('allows known portable third-party providers to cross transport protocols', () => {
     expect(canResumeProviderHistoryForSwitch({
       legacyCurrentProviderUnknown: false,
       currentProviderEnv: {
@@ -175,7 +208,26 @@ describe('canResumeProviderHistoryForSwitch', () => {
         apiProtocol: 'anthropic',
         model: 'deepseek-v4-pro',
       },
+    })).toBe(true);
+  });
+
+  it('treats Managed Codex as a runtime-backed provider boundary', () => {
+    const builtin = toProviderExecutionIntent({ id: 'deepseek' }, 'deepseek-v4-pro');
+    const codex = toProviderExecutionIntent(MANAGED_CODEX_PROVIDER, 'gpt-5.4-codex');
+
+    expect(canResumeProviderHistoryForSwitch({
+      currentIntent: builtin,
+      nextIntent: codex,
+      legacyCurrentProviderUnknown: false,
     })).toBe(false);
+  });
+
+  it('allows Managed Codex model changes inside the same runtime-backed provider family', () => {
+    expect(canResumeProviderHistoryForSwitch({
+      currentIntent: toProviderExecutionIntent(MANAGED_CODEX_PROVIDER, 'gpt-5.4-codex'),
+      nextIntent: toProviderExecutionIntent(MANAGED_CODEX_PROVIDER, 'gpt-5.5-codex'),
+      legacyCurrentProviderUnknown: false,
+    })).toBe(true);
   });
 });
 

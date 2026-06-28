@@ -1,3 +1,5 @@
+import { i18n } from '@/i18n';
+
 const VIEWPORT_MARGIN = 8;
 const TOOLTIP_MAX_WIDTH = 260;
 const TOOLTIP_ESTIMATED_HEIGHT = 32;
@@ -20,24 +22,25 @@ export interface MonacoFindTooltipPosition {
   top: number;
 }
 
-const FIND_TOOLTIP_LABELS: Array<[string, string]> = [
-  ['Close', '关闭'],
-  ['Previous Match', '上一个匹配'],
-  ['Next Match', '下一个匹配'],
-  ['Match Case', '区分大小写'],
-  ['Match Whole Word', '全词匹配'],
-  ['Use Regular Expression', '使用正则表达式'],
-  ['Find in Selection', '在选区中查找'],
-  ['Toggle Replace', '切换替换'],
-  ['Replace All', '全部替换'],
-  ['Replace', '替换'],
+const FIND_TOOLTIP_LABELS: Array<[source: string, key: string]> = [
+  ['Close', 'close'],
+  ['Previous Match', 'previousMatch'],
+  ['Next Match', 'nextMatch'],
+  ['Match Case', 'matchCase'],
+  ['Match Whole Word', 'matchWholeWord'],
+  ['Use Regular Expression', 'useRegularExpression'],
+  ['Find in Selection', 'findInSelection'],
+  ['Toggle Replace', 'toggleReplace'],
+  ['Replace All', 'replaceAll'],
+  ['Replace', 'replace'],
 ];
 
 export function normalizeMonacoFindTooltipLabel(label: string): string {
   const normalized = label.replace(/\s+/g, ' ').trim();
   if (!normalized) return '';
 
-  for (const [source, target] of FIND_TOOLTIP_LABELS) {
+  for (const [source, key] of FIND_TOOLTIP_LABELS) {
+    const target = i18n.t(`app:monacoFind.${key}`);
     if (normalized === source) return target;
     if (normalized.startsWith(`${source} `)) {
       return `${target} ${normalized.slice(source.length).trim()}`;

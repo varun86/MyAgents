@@ -6,6 +6,7 @@
  */
 import { Save, Edit2, X, Plus, FileText, AlertCircle, Loader2, Trash2, Sparkles, FolderArchive } from 'lucide-react';
 import { useCallback, useEffect, useState, useImperativeHandle, forwardRef, useMemo, useRef } from 'react';
+import { useTranslation } from 'react-i18next';
 
 import { apiGetJson as globalApiGet, apiPostJson as globalApiPost, apiPutJson as globalApiPut, apiDelete as globalApiDelete } from '@/api/apiFetch';
 import { useTabApiOptional } from '@/context/TabContext';
@@ -40,10 +41,13 @@ interface RuleContentResponse {
 
 const SystemPromptsPanel = forwardRef<SystemPromptsPanelRef, SystemPromptsPanelProps>(
     function SystemPromptsPanel({ agentDir, onRequestInit }, ref) {
+        const { t } = useTranslation('settings');
         const toast = useToast();
         // Stabilize toast reference to avoid unnecessary effect re-runs (project convention)
         const toastRef = useRef(toast);
         useEffect(() => { toastRef.current = toast; }, [toast]);
+        const tRef = useRef(t);
+        tRef.current = t;
 
         // Tab-scoped API
         const tabState = useTabApiOptional();
@@ -186,7 +190,7 @@ const SystemPromptsPanel = forwardRef<SystemPromptsPanelRef, SystemPromptsPanelP
         // Switch file
         const handleSwitchFile = useCallback((file: FileId) => {
             if (isEditing) {
-                toastRef.current.warning('请先保存或取消编辑');
+                toastRef.current.warning(tRef.current('agentSettings.panel.unsavedWarning'));
                 return;
             }
             setActiveFile(file);
@@ -218,10 +222,10 @@ const SystemPromptsPanel = forwardRef<SystemPromptsPanelRef, SystemPromptsPanelP
                         setContent(editContent);
                         setExists(true);
                         setIsEditing(false);
-                        toastRef.current.success('CLAUDE.md 保存成功');
+                        toastRef.current.success(tRef.current('agentSettings.systemPrompts.claudeSaveSuccess'));
                     } catch (err) {
                         if (!isMountedRef.current) return;
-                        toastRef.current.error(err instanceof Error ? err.message : '保存失败');
+                        toastRef.current.error(err instanceof Error ? err.message : tRef.current('agentSettings.common.saveFailed'));
                     }
                 } else {
                     const endpoint = buildEndpoint(`/api/rules/${encodeURIComponent(activeFile.filename)}`);
@@ -231,14 +235,14 @@ const SystemPromptsPanel = forwardRef<SystemPromptsPanelRef, SystemPromptsPanelP
                         setContent(editContent);
                         setExists(true);
                         setIsEditing(false);
-                        toastRef.current.success(`${activeFile.filename} 保存成功`);
+                        toastRef.current.success(tRef.current('agentSettings.systemPrompts.ruleSaveSuccess', { filename: activeFile.filename }));
                     } else {
-                        toastRef.current.error(res.error || '保存失败');
+                        toastRef.current.error(res.error || tRef.current('agentSettings.common.saveFailed'));
                     }
                 }
             } catch (err) {
                 if (!isMountedRef.current) return;
-                toastRef.current.error(err instanceof Error ? err.message : '保存失败');
+                toastRef.current.error(err instanceof Error ? err.message : tRef.current('agentSettings.common.saveFailed'));
             } finally {
                 if (isMountedRef.current) setSaving(false);
             }
@@ -268,10 +272,10 @@ const SystemPromptsPanel = forwardRef<SystemPromptsPanelRef, SystemPromptsPanelP
                     setActiveFile({ type: 'rule', filename: actualFilename });
                     loadFileContent({ type: 'rule', filename: actualFilename });
                 } else {
-                    toastRef.current.error(res.error || '创建失败');
+                    toastRef.current.error(res.error || tRef.current('agentSettings.common.createFailed'));
                 }
             } catch {
-                if (isMountedRef.current) toastRef.current.error('创建失败');
+                if (isMountedRef.current) toastRef.current.error(tRef.current('agentSettings.common.createFailed'));
             } finally {
                 submittingRef.current = false;
             }
@@ -305,10 +309,10 @@ const SystemPromptsPanel = forwardRef<SystemPromptsPanelRef, SystemPromptsPanelP
                         setActiveFile({ type: 'rule', filename: actualFilename });
                     }
                 } else {
-                    toastRef.current.error(res.error || '重命名失败');
+                    toastRef.current.error(res.error || tRef.current('agentSettings.common.renameFailed'));
                 }
             } catch {
-                if (isMountedRef.current) toastRef.current.error('重命名失败');
+                if (isMountedRef.current) toastRef.current.error(tRef.current('agentSettings.common.renameFailed'));
             } finally {
                 submittingRef.current = false;
             }
@@ -322,7 +326,7 @@ const SystemPromptsPanel = forwardRef<SystemPromptsPanelRef, SystemPromptsPanelP
                 const res = await api.delete<{ success: boolean; error?: string }>(endpoint);
                 if (!isMountedRef.current) return;
                 if (res.success) {
-                    toastRef.current.success('文件已删除');
+                    toastRef.current.success(tRef.current('agentSettings.systemPrompts.fileDeleted'));
                     setDeleteTarget(null);
                     setIsEditing(false);
                     await loadRuleFiles();
@@ -332,10 +336,10 @@ const SystemPromptsPanel = forwardRef<SystemPromptsPanelRef, SystemPromptsPanelP
                         loadFileContent({ type: 'claude-md' });
                     }
                 } else {
-                    toastRef.current.error(res.error || '删除失败');
+                    toastRef.current.error(res.error || tRef.current('agentSettings.common.deleteFailed'));
                 }
             } catch {
-                if (isMountedRef.current) toastRef.current.error('删除失败');
+                if (isMountedRef.current) toastRef.current.error(tRef.current('agentSettings.common.deleteFailed'));
             }
         }, [deleteTarget, api, buildEndpoint, loadRuleFiles, activeFile, loadFileContent]);
 
@@ -419,7 +423,7 @@ const SystemPromptsPanel = forwardRef<SystemPromptsPanelRef, SystemPromptsPanelP
                                 onDoubleClick={(e) => {
                                     e.stopPropagation();
                                     if (isEditing) {
-                                        toastRef.current.warning('请先保存或取消编辑');
+                                        toastRef.current.warning(tRef.current('agentSettings.panel.unsavedWarning'));
                                         return;
                                     }
                                     setRenamingFile(filename);
@@ -454,7 +458,7 @@ const SystemPromptsPanel = forwardRef<SystemPromptsPanelRef, SystemPromptsPanelP
                                         setNewFileName('');
                                     }
                                 }}
-                                placeholder="文件名"
+                                placeholder={t('agentSettings.systemPrompts.newRulePlaceholder')}
                                 className="w-20 bg-transparent text-xs text-[var(--ink)] placeholder:text-[var(--ink-muted)]/50 outline-none"
                             />
                             <span className="text-xs text-[var(--ink-muted)]">.md</span>
@@ -466,7 +470,7 @@ const SystemPromptsPanel = forwardRef<SystemPromptsPanelRef, SystemPromptsPanelP
                                 type="button"
                                 onClick={() => {
                                     if (isEditing) {
-                                        toastRef.current.warning('请先保存或取消编辑');
+                                        toastRef.current.warning(tRef.current('agentSettings.panel.unsavedWarning'));
                                         return;
                                     }
                                     setIsCreating(true);
@@ -494,7 +498,7 @@ const SystemPromptsPanel = forwardRef<SystemPromptsPanelRef, SystemPromptsPanelP
                                     style={{ left: addTipPos.x, top: addTipPos.y }}
                                 >
                                     <p className="text-xs leading-relaxed text-[var(--ink-muted)]">
-                                        添加的规则文件均会自动加载到系统提示词 System Prompt 里面
+                                        {t('agentSettings.systemPrompts.ruleTooltip')}
                                     </p>
                                 </div>
                             )}
@@ -520,7 +524,7 @@ const SystemPromptsPanel = forwardRef<SystemPromptsPanelRef, SystemPromptsPanelP
                                             className="flex items-center gap-1 rounded-lg px-2.5 py-1 text-xs font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--error)]/10 hover:text-[var(--error)]"
                                         >
                                             <Trash2 className="h-3.5 w-3.5" />
-                                            删除
+                                            {t('agentSettings.common.delete')}
                                         </button>
                                     )}
                                     <button
@@ -529,7 +533,7 @@ const SystemPromptsPanel = forwardRef<SystemPromptsPanelRef, SystemPromptsPanelP
                                         className="flex items-center gap-1 rounded-lg px-2.5 py-1 text-xs font-medium text-[var(--ink-muted)] hover:bg-[var(--paper-inset)]"
                                     >
                                         <X className="h-3.5 w-3.5" />
-                                        取消
+                                        {t('agentSettings.common.cancel')}
                                     </button>
                                     <button
                                         type="button"
@@ -538,7 +542,7 @@ const SystemPromptsPanel = forwardRef<SystemPromptsPanelRef, SystemPromptsPanelP
                                         className="flex items-center gap-1 rounded-lg bg-[var(--button-primary-bg)] px-2.5 py-1 text-xs font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:opacity-50"
                                     >
                                         {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
-                                        保存
+                                        {t('agentSettings.common.save')}
                                     </button>
                                 </>
                             ) : (
@@ -548,7 +552,7 @@ const SystemPromptsPanel = forwardRef<SystemPromptsPanelRef, SystemPromptsPanelP
                                     className="flex items-center gap-1 rounded-lg bg-[var(--button-dark-bg)] px-2.5 py-1 text-xs font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-dark-bg-hover)]"
                                 >
                                     <Edit2 className="h-3.5 w-3.5" />
-                                    编辑
+                                    {t('agentSettings.common.edit')}
                                 </button>
                             )}
                         </div>
@@ -570,10 +574,10 @@ const SystemPromptsPanel = forwardRef<SystemPromptsPanelRef, SystemPromptsPanelP
                             <div className="flex h-full flex-col items-center justify-center gap-6 p-6">
                                 <div className="text-center">
                                     <p className="text-lg font-semibold text-[var(--ink)]">
-                                        还没有 CLAUDE.md
+                                        {t('agentSettings.systemPrompts.emptyTitle')}
                                     </p>
                                     <p className="mt-1.5 text-sm text-[var(--ink-muted)]">
-                                        系统提示词决定 Agent 在工作区里的行为风格——选一种方式开始：
+                                        {t('agentSettings.systemPrompts.emptyDescription')}
                                     </p>
                                 </div>
                                 <div className="flex w-full max-w-xl flex-col gap-3">
@@ -585,11 +589,13 @@ const SystemPromptsPanel = forwardRef<SystemPromptsPanelRef, SystemPromptsPanelP
                                         >
                                             <div className="flex items-center gap-2">
                                                 <Sparkles className="h-4 w-4 shrink-0 text-amber-500" />
-                                                <h4 className="text-base font-semibold text-[var(--ink)]">智能生成</h4>
-                                                <span className="rounded-full bg-[var(--accent-warm-subtle)] px-2 py-0.5 text-xs font-medium text-[var(--accent)]">推荐</span>
+                                                <h4 className="text-base font-semibold text-[var(--ink)]">{t('agentSettings.systemPrompts.generateTitle')}</h4>
+                                                <span className="rounded-full bg-[var(--accent-warm-subtle)] px-2 py-0.5 text-xs font-medium text-[var(--accent)]">{t('agentSettings.systemPrompts.recommended')}</span>
                                             </div>
                                             <p className="text-sm leading-relaxed text-[var(--ink-muted)]">
-                                                AI 分析当前项目结构，自动生成贴合的 CLAUDE.md（运行 <code className="rounded bg-[var(--paper-inset)] px-1 text-xs">/init</code>）
+                                                {t('agentSettings.systemPrompts.generateDescriptionPrefix')}
+                                                <code className="rounded bg-[var(--paper-inset)] px-1 text-xs">/init</code>
+                                                {t('agentSettings.systemPrompts.generateDescriptionSuffix')}
                                             </p>
                                         </button>
                                     )}
@@ -600,10 +606,10 @@ const SystemPromptsPanel = forwardRef<SystemPromptsPanelRef, SystemPromptsPanelP
                                     >
                                         <div className="flex items-center gap-2">
                                             <FolderArchive className="h-4 w-4 shrink-0 text-amber-500" />
-                                            <h4 className="text-base font-semibold text-[var(--ink)]">从模板库添加</h4>
+                                            <h4 className="text-base font-semibold text-[var(--ink)]">{t('agentSettings.systemPrompts.templateTitle')}</h4>
                                         </div>
                                         <p className="text-sm leading-relaxed text-[var(--ink-muted)]">
-                                            挑一个内置或自定义的 Agent 模板，合并到当前工作区（同名文件覆盖）
+                                            {t('agentSettings.systemPrompts.templateDescription')}
                                         </p>
                                     </button>
                                     <button
@@ -613,10 +619,10 @@ const SystemPromptsPanel = forwardRef<SystemPromptsPanelRef, SystemPromptsPanelP
                                     >
                                         <div className="flex items-center gap-2">
                                             <Edit2 className="h-4 w-4 shrink-0 text-amber-500" />
-                                            <h4 className="text-base font-semibold text-[var(--ink)]">手动创建</h4>
+                                            <h4 className="text-base font-semibold text-[var(--ink)]">{t('agentSettings.systemPrompts.manualTitle')}</h4>
                                         </div>
                                         <p className="text-sm leading-relaxed text-[var(--ink-muted)]">
-                                            自己写一份 CLAUDE.md，进入编辑器从空白开始
+                                            {t('agentSettings.systemPrompts.manualDescription')}
                                         </p>
                                     </button>
                                 </div>
@@ -627,10 +633,10 @@ const SystemPromptsPanel = forwardRef<SystemPromptsPanelRef, SystemPromptsPanelP
                                 <FileText className="h-16 w-16 text-[var(--ink-muted)]/30" />
                                 <div className="text-center">
                                     <p className="text-sm font-medium text-[var(--ink-muted)]">
-                                        {activeFilename} 文件不存在
+                                        {t('agentSettings.systemPrompts.ruleMissingTitle', { filename: activeFilename })}
                                     </p>
                                     <p className="mt-1 text-xs text-[var(--ink-muted)]">
-                                        点击「编辑」按钮创建内容
+                                        {t('agentSettings.systemPrompts.ruleMissingDescription')}
                                     </p>
                                 </div>
                                 <button
@@ -639,7 +645,7 @@ const SystemPromptsPanel = forwardRef<SystemPromptsPanelRef, SystemPromptsPanelP
                                     className="mt-2 flex items-center gap-1.5 rounded-lg bg-[var(--button-primary-bg)] px-4 py-2 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)]"
                                 >
                                     <Edit2 className="h-4 w-4" />
-                                    创建 {activeFilename}
+                                    {t('agentSettings.systemPrompts.createFile', { filename: activeFilename })}
                                 </button>
                             </div>
                         )
@@ -662,7 +668,7 @@ const SystemPromptsPanel = forwardRef<SystemPromptsPanelRef, SystemPromptsPanelP
                                 </div>
                             ) : (
                                 <span className="text-sm text-[var(--ink-muted)]/60">
-                                    （无内容）
+                                    {t('agentSettings.common.emptyContent')}
                                 </span>
                             )}
                         </div>
@@ -672,9 +678,9 @@ const SystemPromptsPanel = forwardRef<SystemPromptsPanelRef, SystemPromptsPanelP
                 {/* Delete Confirmation */}
                 {deleteTarget && (
                     <ConfirmDialog
-                        title="删除规则文件"
-                        message={`确认删除 ${deleteTarget}？此操作不可恢复。`}
-                        confirmText="删除"
+                        title={t('agentSettings.systemPrompts.deleteTitle')}
+                        message={t('agentSettings.systemPrompts.deleteMessage', { filename: deleteTarget })}
+                        confirmText={t('agentSettings.common.delete')}
                         confirmVariant="danger"
                         onConfirm={handleDeleteConfirm}
                         onCancel={() => setDeleteTarget(null)}
@@ -697,7 +703,7 @@ const SystemPromptsPanel = forwardRef<SystemPromptsPanelRef, SystemPromptsPanelP
                             setActiveFile({ type: 'claude-md' });
                             void loadFileContent({ type: 'claude-md' });
                             void loadRuleFiles();
-                            toastRef.current.success('模板已应用到当前工作区');
+                            toastRef.current.success(tRef.current('agentSettings.systemPrompts.templateApplied'));
                         }}
                     />
                 )}

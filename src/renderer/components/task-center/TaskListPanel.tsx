@@ -12,6 +12,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { CheckSquare, Plus } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 
 import {
   taskCenterAvailable,
@@ -75,10 +76,10 @@ type Bucket = 'pending' | 'active' | 'finished';
 // 任务本身仍被认为该跑 —— 徽章的黄/灰配色已经区分了子状态，列表聚合
 // 不必再按这些小波动分桶。`规划中` 留给真正的新建未调度态（todo）——
 // 任务已被构思并创建，但尚未被调度器首次触发。
-const BUCKETS: Record<Bucket, { label: string; statuses: TaskStatus[] }> = {
-  active: { label: '进行中', statuses: ['running', 'verifying', 'stopped', 'blocked'] },
-  pending: { label: '规划中', statuses: ['todo'] },
-  finished: { label: '已完成', statuses: ['done', 'archived'] },
+const BUCKET_STATUSES: Record<Bucket, TaskStatus[]> = {
+  active: ['running', 'verifying', 'stopped', 'blocked'],
+  pending: ['todo'],
+  finished: ['done', 'archived'],
 };
 
 const VIEW_STORAGE_KEY = 'myagents:task-center:view';
@@ -91,6 +92,7 @@ function loadStoredView(): TaskView {
 
 export function TaskListPanel({ highlightTaskId, refreshKey, pendingIntent }: Props) {
   const toast = useToast();
+  const { t } = useTranslation('task');
   const toastRef = useRef(toast);
   useEffect(() => {
     toastRef.current = toast;
@@ -150,7 +152,7 @@ export function TaskListPanel({ highlightTaskId, refreshKey, pendingIntent }: Pr
     try {
       const [nativeList, legacyList] = await Promise.all([
         taskList({}),
-        fetchLegacyCronTasks(),
+        fetchLegacyCronTasks(t('tasks.unnamedLegacyTask')),
       ]);
       // Silent auto-upgrade (PRD §11.4 / §16.2). Any legacy row that has
       // the prerequisites (prompt + resolvable workspace) is upgraded in
@@ -170,7 +172,7 @@ export function TaskListPanel({ highlightTaskId, refreshKey, pendingIntent }: Pr
       setLegacy(remainingLegacy);
       if (upgradedTasks.length > 0) {
         toastRef.current.success(
-          `已自动升级 ${upgradedTasks.length} 个旧定时任务为新版任务`,
+          t('tasks.autoUpgradeSuccess', { count: upgradedTasks.length }),
         );
       }
       // Surface auto-upgrade failures so the user understands why the
@@ -178,7 +180,7 @@ export function TaskListPanel({ highlightTaskId, refreshKey, pendingIntent }: Pr
       // toast trims to the first error (at most one per reload).
       if (failedCount > 0) {
         toastRef.current.error(
-          `${failedCount} 个遗留任务自动升级失败：${firstError ?? '未知错误'}。可在详情面板点击「升级为新版任务」手动重试。`,
+          t('tasks.autoUpgradeFailed', { count: failedCount, message: firstError ?? t('common.unknownError') }),
           8000,
         );
       }
@@ -196,7 +198,7 @@ export function TaskListPanel({ highlightTaskId, refreshKey, pendingIntent }: Pr
         void reloadRef.current?.();
       }
     }
-  }, []);
+  }, [t]);
   // Self-reference so the trailing re-kick above can call the latest
   // closure without adding `reload` to its own dep array.
   const reloadRef = useRef<typeof reload>(reload);
@@ -266,7 +268,7 @@ export function TaskListPanel({ highlightTaskId, refreshKey, pendingIntent }: Pr
         await fn();
         // SSE will trigger a reload and refresh the list in-place.
       } catch (e) {
-        toastRef.current.error(`${label}失败：${String(e)}`);
+        toastRef.current.error(t('tasks.actionFailed', { action: label, message: String(e) }));
       } finally {
         setPendingIds((prev) => {
           const next = new Set(prev);
@@ -275,50 +277,50 @@ export function TaskListPanel({ highlightTaskId, refreshKey, pendingIntent }: Pr
         });
       }
     },
-    [],
+    [t],
   );
 
   const handleRun = useCallback(
     (task: Task) =>
-      runAction(task.id, '执行', async () => {
+      runAction(task.id, t('tasks.actions.run'), async () => {
         track('task_run', {
           source: 'desktop',
           run_count: task.sessionIds.length + 1,
         });
         await taskRun(task.id);
       }),
-    [runAction],
+    [runAction, t],
   );
   const handleStop = useCallback(
     (task: Task) =>
-      runAction(task.id, '中止', async () => {
+      runAction(task.id, t('tasks.actions.stop'), async () => {
         track('task_stop', { source: 'desktop' });
         await taskUpdateStatus({ id: task.id, status: 'stopped', message: '用户手动中止' });
       }),
-    [runAction],
+    [runAction, t],
   );
   const handleRerun = useCallback(
     (task: Task) =>
-      runAction(task.id, '重新派发', async () => {
+      runAction(task.id, t('tasks.actions.rerun'), async () => {
         track('task_run', {
           source: 'desktop',
           run_count: task.sessionIds.length + 1,
         });
         await taskRerun(task.id);
       }),
-    [runAction],
+    [runAction, t],
   );
   const handleDelete = useCallback(
     (task: Task) => {
-      if (!window.confirm(`确认删除任务「${task.name}」？此操作不可恢复。`)) return;
-      void runAction(task.id, '删除', async () => {
+      if (!window.confirm(t('tasks.deleteConfirm', { name: task.name }))) return;
+      void runAction(task.id, t('tasks.actions.delete'), async () => {
         track('task_delete', { source: 'desktop', status: task.status });
         await taskDelete(task.id);
         // Optimistic removal — SSE will not fire a status-changed for delete.
         setTasks((prev) => prev.filter((x) => x.id !== task.id));
       });
     },
-    [runAction],
+    [runAction, t],
   );
 
   const buckets = useMemo(() => {
@@ -382,10 +384,10 @@ export function TaskListPanel({ highlightTaskId, refreshKey, pendingIntent }: Pr
             : c.legacy.hasExited
               ? 'done'
               : 'stopped';
-      for (const [name, cfg] of Object.entries(BUCKETS) as Array<
-        [Bucket, typeof BUCKETS[Bucket]]
+      for (const [name, statuses] of Object.entries(BUCKET_STATUSES) as Array<
+        [Bucket, typeof BUCKET_STATUSES[Bucket]]
       >) {
-        if (cfg.statuses.includes(status)) {
+        if (statuses.includes(status)) {
           out[name].push(c);
           break;
         }
@@ -420,7 +422,7 @@ export function TaskListPanel({ highlightTaskId, refreshKey, pendingIntent }: Pr
     const taskPathIds = new Set<string>();
     for (const t of tasks) if (t.workspacePath) taskPathIds.add(normalizeWorkspacePathIdentity(t.workspacePath));
     for (const l of legacy) if (l.workspacePath) taskPathIds.add(normalizeWorkspacePathIdentity(l.workspacePath));
-    const opts: SelectOption[] = [{ value: '', label: '全部工作区' }];
+    const opts: SelectOption[] = [{ value: '', label: t('tasks.allWorkspaces') }];
     const coveredIds = new Set<string>();
     const knownProjectIds = new Set(projects.map((p) => normalizeWorkspacePathIdentity(p.path)));
     for (const p of projects) {
@@ -445,13 +447,13 @@ export function TaskListPanel({ highlightTaskId, refreshKey, pendingIntent }: Pr
       seenOrphan.add(id);
       opts.push({
         value: path,
-        label: `${path.split('/').pop() ?? path} (已失效)`,
+        label: t('tasks.missingWorkspaceLabel', { name: path.split('/').pop() ?? path }),
       });
     };
     for (const t of tasks) if (t.workspacePath) addOrphan(t.workspacePath);
     for (const l of legacy) if (l.workspacePath) addOrphan(l.workspacePath);
     return opts;
-  }, [tasks, legacy, projects]);
+  }, [tasks, legacy, projects, t]);
 
   // Guard against "zombie" filter state: if the user selected a
   // workspace, then every task in that workspace gets deleted, the
@@ -547,7 +549,7 @@ export function TaskListPanel({ highlightTaskId, refreshKey, pendingIntent }: Pr
               ThoughtPanel's Lightbulb — see the comment there. */}
           <CheckSquare className="relative top-[1px] h-4 w-4 text-[var(--ink-muted)]" strokeWidth={1.5} />
           <span className="text-base font-semibold text-[var(--ink)]">
-            任务
+            {t('tasks.title')}
           </span>
           {/* v0.1.69 — inline "+ 新建" entry point so users aren't forced
               to enter the Task Center flow via a thought first. Opens
@@ -563,14 +565,14 @@ export function TaskListPanel({ highlightTaskId, refreshKey, pendingIntent }: Pr
             <button
               type="button"
               onClick={() => setShowCreateModal(true)}
-              aria-label="新建任务"
+              aria-label={t('tasks.newTask')}
               className="inline-flex h-7 items-center gap-1 rounded-full px-2.5 text-xs text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
             >
               <Plus className="h-3.5 w-3.5" strokeWidth={1.75} />
-              新建
+              {t('tasks.new')}
             </button>
             <span className="pointer-events-none absolute left-1/2 top-full z-50 mt-1.5 -translate-x-1/2 whitespace-nowrap rounded-md bg-[var(--ink)] px-2 py-1 text-xs font-medium text-[var(--paper)] opacity-0 shadow-md transition-opacity duration-150 group-hover/newTask:opacity-100">
-              新建任务
+              {t('tasks.newTask')}
             </span>
           </div>
         </div>
@@ -585,7 +587,7 @@ export function TaskListPanel({ highlightTaskId, refreshKey, pendingIntent }: Pr
                 options={workspaceOptions}
                 onChange={setWorkspaceFilter}
                 compact
-                placeholder="全部工作区"
+                placeholder={t('tasks.allWorkspaces')}
               />
             </div>
           )}
@@ -594,7 +596,7 @@ export function TaskListPanel({ highlightTaskId, refreshKey, pendingIntent }: Pr
             value={query}
             onChange={setQuery}
             onClear={clearSearch}
-            placeholder="搜索任务…"
+            placeholder={t('tasks.searchPlaceholder')}
           />
           <ViewToggle value={view} onChange={updateView} />
         </div>
@@ -609,11 +611,11 @@ export function TaskListPanel({ highlightTaskId, refreshKey, pendingIntent }: Pr
       <div className="@container flex-1 overflow-y-auto px-4 py-3">
         {loading ? (
           <div className="py-8 text-center text-sm text-[var(--ink-muted)]">
-            加载中…
+            {t('common.loading')}
           </div>
         ) : totalCount === 0 ? (
           <div className="py-12 text-center text-sm text-[var(--ink-muted)]">
-            还没有任务。在左栏记下想法后点「派发」即可创建任务。
+            {t('tasks.empty')}
           </div>
         ) : (
           // Order: 进行中 → 已完成 → 规划中. Current work and recent results
@@ -623,14 +625,14 @@ export function TaskListPanel({ highlightTaskId, refreshKey, pendingIntent }: Pr
             if (rows.length === 0) return null;
             return view === 'card' ? (
               <section key={b} className="mb-6">
-                <BucketHeader label={BUCKETS[b].label} count={rows.length} />
+                <BucketHeader label={t(`tasks.groups.${b}`)} count={rows.length} />
                 <div className="grid grid-cols-2 gap-3 @[900px]:grid-cols-3">
                   {rows.map(renderCard)}
                 </div>
               </section>
             ) : (
               <section key={b} className="mb-4">
-                <BucketHeader label={BUCKETS[b].label} count={rows.length} />
+                <BucketHeader label={t(`tasks.groups.${b}`)} count={rows.length} />
                 <div>{rows.map(renderRow)}</div>
               </section>
             );
@@ -681,7 +683,7 @@ export function TaskListPanel({ highlightTaskId, refreshKey, pendingIntent }: Pr
               return prev.map((x) => (x.id === upgradedTask.id ? upgradedTask : x));
             });
             setSelectedTask(upgradedTask);
-            toastRef.current.success(`「${upgradedTask.name}」已升级为新版任务`);
+            toastRef.current.success(t('tasks.upgraded', { name: upgradedTask.name }));
             void reload();
           }}
         />
@@ -697,7 +699,7 @@ export function TaskListPanel({ highlightTaskId, refreshKey, pendingIntent }: Pr
               origin: 'manual',
               has_workspace: !!created.workspacePath,
             });
-            toastRef.current.success(`「${created.name}」已创建`);
+            toastRef.current.success(t('tasks.created', { name: created.name }));
             void reload();
           }}
         />
@@ -732,7 +734,7 @@ function BucketHeader({ label, count }: { label: string; count: number }) {
  * the Tauri environment isn't ready or the CLI round-trip fails — we don't
  * want a transient error to blank out the whole task list.
  */
-async function fetchLegacyCronTasks(): Promise<LegacyCronRow[]> {
+async function fetchLegacyCronTasks(unnamedLegacyTaskLabel: string): Promise<LegacyCronRow[]> {
   if (!taskCenterAvailable()) return [];
   try {
     const { invoke } = await import('@tauri-apps/api/core');
@@ -758,7 +760,7 @@ async function fetchLegacyCronTasks(): Promise<LegacyCronRow[]> {
           (t.exit_reason as string | null | undefined);
         return {
           id: String(t.id ?? ''),
-          name: String(t.name ?? t.prompt ?? '未命名定时任务').slice(0, 80),
+          name: String(t.name ?? t.prompt ?? unnamedLegacyTaskLabel).slice(0, 80),
           status,
           hasExited: status === 'stopped' && !!exitReason,
           raw: t,

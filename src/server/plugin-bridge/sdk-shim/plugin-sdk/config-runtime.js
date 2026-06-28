@@ -1,29 +1,68 @@
-// AUTO-GENERATED STUB — do not edit manually.
-// Regenerate: npm run generate:sdk-shims
-// Source: openclaw/src/plugin-sdk/config-runtime.ts
+// HAND-WRITTEN BRIDGE SHIM — listed in _handwritten.json.
+//
+// MyAgents Plugin Bridge does not own an openclaw.json file. The authoritative
+// OpenClaw config for a loaded channel is the in-process normalized snapshot
+// built by src/server/plugin-bridge/openclaw-config.ts. This shim exposes the
+// subset of config-runtime that channel plugins use for runtime reload paths
+// (notably openclaw-weixin QR login).
 
 const _warned = new Set();
 function _w(fn) {
   if (!_warned.has(fn)) { _warned.add(fn); console.warn('[sdk-shim] openclaw/plugin-sdk/config-runtime.' + fn + '() not implemented in Bridge mode'); }
 }
 
+const CONFIG_GLOBAL_KEY = '__MYAGENTS_OPENCLAW_CONFIG__';
+
+function _clone(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
+function _asConfig(value) {
+  const root = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  const rawChannels = root.channels && typeof root.channels === 'object' && !Array.isArray(root.channels)
+    ? root.channels
+    : {};
+  const channels = {};
+  for (const [key, channel] of Object.entries(rawChannels)) {
+    channels[key] = channel && typeof channel === 'object' && !Array.isArray(channel) ? channel : {};
+  }
+  return { ...root, channels };
+}
+
+function _getConfig() {
+  return _clone(globalThis[CONFIG_GLOBAL_KEY] ?? { channels: {} });
+}
+
+function _setConfig(cfg) {
+  const next = _asConfig(cfg);
+  globalThis[CONFIG_GLOBAL_KEY] = next;
+  return _clone(next);
+}
+
 export function resolveDefaultAgentId() { _w('resolveDefaultAgentId'); return undefined; }
-export function requireRuntimeConfig() { _w('requireRuntimeConfig'); return undefined; }
-export function resolveLivePluginConfigObject() { _w('resolveLivePluginConfigObject'); return undefined; }
-export function resolvePluginConfigObject() { _w('resolvePluginConfigObject'); return undefined; }
-export function clearConfigCache() { _w('clearConfigCache'); return undefined; }
-export function clearRuntimeConfigSnapshot() { _w('clearRuntimeConfigSnapshot'); return undefined; }
-export function getRuntimeConfigSourceSnapshot() { _w('getRuntimeConfigSourceSnapshot'); return undefined; }
-export function getRuntimeConfigSnapshot() { _w('getRuntimeConfigSnapshot'); return undefined; }
-export function getRuntimeConfig() { _w('getRuntimeConfig'); return undefined; }
-export function loadConfig() { _w('loadConfig'); return undefined; }
-export function readConfigFileSnapshotForWrite() { _w('readConfigFileSnapshotForWrite'); return undefined; }
-export function setRuntimeConfigSnapshot() { _w('setRuntimeConfigSnapshot'); return undefined; }
-export function writeConfigFile() { _w('writeConfigFile'); return undefined; }
-export function mutateConfigFile() { _w('mutateConfigFile'); return undefined; }
-export function replaceConfigFile() { _w('replaceConfigFile'); return undefined; }
-export function logConfigUpdated() { _w('logConfigUpdated'); return undefined; }
-export function updateConfig() { _w('updateConfig'); return undefined; }
+export function requireRuntimeConfig() { return _getConfig(); }
+export function resolveLivePluginConfigObject() { return _getConfig(); }
+export function resolvePluginConfigObject() { return _getConfig(); }
+export function clearConfigCache() { return undefined; }
+export function clearRuntimeConfigSnapshot() { globalThis[CONFIG_GLOBAL_KEY] = { channels: {} }; return undefined; }
+export function getRuntimeConfigSourceSnapshot() { return { source: 'myagents-plugin-bridge' }; }
+export function getRuntimeConfigSnapshot() { return _getConfig(); }
+export function getRuntimeConfig() { return _getConfig(); }
+export function loadConfig() { return _getConfig(); }
+export function readConfigFileSnapshotForWrite() { return _getConfig(); }
+export function setRuntimeConfigSnapshot(cfg) { return _setConfig(cfg); }
+export function writeConfigFile(cfg) { return _setConfig(cfg); }
+export function mutateConfigFile(mutator) {
+  const current = _getConfig();
+  const next = typeof mutator === 'function' ? (mutator(current) ?? current) : current;
+  return _setConfig(next);
+}
+export function replaceConfigFile(cfg) { return _setConfig(cfg); }
+export function logConfigUpdated() { return undefined; }
+export function updateConfig(patch) {
+  const current = _getConfig();
+  return _setConfig({ ...current, ...(patch && typeof patch === 'object' ? patch : {}) });
+}
 export function resolveChannelModelOverride() { _w('resolveChannelModelOverride'); return undefined; }
 export function evaluateSupplementalContextVisibility() { _w('evaluateSupplementalContextVisibility'); return undefined; }
 export function filterSupplementalContextItems() { _w('filterSupplementalContextItems'); return undefined; }

@@ -6,6 +6,7 @@
  */
 import { Plus, Sparkles, Terminal, Loader2, ExternalLink } from 'lucide-react';
 import { useCallback, useEffect, useState, useMemo, useRef } from 'react';
+import { useTranslation } from 'react-i18next';
 
 import { apiGetJson as globalApiGet, apiPostJson as globalApiPost, apiDelete as globalApiDelete } from '@/api/apiFetch';
 import { useTabApiOptional } from '@/context/TabContext';
@@ -33,10 +34,13 @@ export default function SkillsCommandsList({
     refreshKey = 0,
     onClose
 }: SkillsCommandsListProps) {
+    const { t } = useTranslation('settings');
     const toast = useToast();
     // Stabilize toast reference to avoid unnecessary effect re-runs
     const toastRef = useRef(toast);
     toastRef.current = toast;
+    const tRef = useRef(t);
+    tRef.current = t;
 
     // Use Tab-scoped API when available (in project workspace context)
     // Fall back to global API when not in Tab context (Settings page)
@@ -94,7 +98,7 @@ export default function SkillsCommandsList({
                 setCommands(commandsRes.commands);
             }
         } catch {
-            toastRef.current.error('加载失败');
+            toastRef.current.error(tRef.current('agentSettings.common.loadFailed'));
         } finally {
             setLoading(false);
         }
@@ -123,10 +127,10 @@ export default function SkillsCommandsList({
                 // Notify SimpleChatInput to refresh slash commands
                 window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.SKILL_COPIED_TO_PROJECT, { detail: { skillName: response.folderName || tempName } }));
             } else {
-                toastRef.current.error(response.error || '创建失败');
+                toastRef.current.error(response.error || tRef.current('agentSettings.common.createFailed'));
             }
         } catch {
-            toastRef.current.error('创建失败');
+            toastRef.current.error(tRef.current('agentSettings.common.createFailed'));
         }
     }, [scope, agentDir, loadData, onSelectSkill, api, isInTabContext]);
 
@@ -150,7 +154,9 @@ export default function SkillsCommandsList({
                     });
 
                     if (response.success) {
-                        toastRef.current.success(response.message || '技能导入成功');
+                        toastRef.current.success(response.folderName
+                            ? tRef.current('agentSettings.skillCommandList.skillImportSuccessNamed', { name: response.folderName })
+                            : tRef.current('agentSettings.skillCommandList.skillImportSuccess'));
                         setShowNewSkillDialog(false);
                         loadData();
                         // 进入新创建的技能详情页
@@ -160,18 +166,18 @@ export default function SkillsCommandsList({
                         // Notify SimpleChatInput to refresh slash commands
                         window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.SKILL_COPIED_TO_PROJECT, { detail: { skillName: response.folderName } }));
                     } else {
-                        toastRef.current.error(response.error || '导入失败');
+                        toastRef.current.error(response.error || tRef.current('agentSettings.common.importFailed'));
                     }
                 } catch (err) {
-                    toastRef.current.error(err instanceof Error ? err.message : '导入失败');
+                    toastRef.current.error(err instanceof Error ? err.message : tRef.current('agentSettings.common.importFailed'));
                 }
             };
             reader.onerror = () => {
-                toastRef.current.error('读取文件失败');
+                toastRef.current.error(tRef.current('agentSettings.common.readFileFailed'));
             };
             reader.readAsDataURL(file);
         } catch (err) {
-            toastRef.current.error(err instanceof Error ? err.message : '上传失败');
+            toastRef.current.error(err instanceof Error ? err.message : tRef.current('agentSettings.common.uploadFailed'));
         }
     }, [scope, loadData, onSelectSkill, api]);
 
@@ -205,7 +211,9 @@ export default function SkillsCommandsList({
             });
 
             if (response.success) {
-                toastRef.current.success(response.message || '技能导入成功');
+                toastRef.current.success(response.folderName
+                    ? tRef.current('agentSettings.skillCommandList.skillImportSuccessNamed', { name: response.folderName })
+                    : tRef.current('agentSettings.skillCommandList.skillImportSuccess'));
                 setShowNewSkillDialog(false);
                 loadData();
                 // 进入新创建的技能详情页
@@ -215,10 +223,10 @@ export default function SkillsCommandsList({
                 // Notify SimpleChatInput to refresh slash commands
                 window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.SKILL_COPIED_TO_PROJECT, { detail: { skillName: response.folderName } }));
             } else {
-                toastRef.current.error(response.error || '导入失败');
+                toastRef.current.error(response.error || tRef.current('agentSettings.common.importFailed'));
             }
         } catch (err) {
-            toastRef.current.error(err instanceof Error ? err.message : '导入失败');
+            toastRef.current.error(err instanceof Error ? err.message : tRef.current('agentSettings.common.importFailed'));
         }
     }, [scope, loadData, onSelectSkill, api]);
 
@@ -232,16 +240,16 @@ export default function SkillsCommandsList({
                 description: newItemDescription.trim() || undefined
             });
             if (response.success) {
-                toastRef.current.success('指令创建成功');
+                toastRef.current.success(tRef.current('agentSettings.skillCommandList.commandCreateSuccess'));
                 setShowNewCommandDialog(false);
                 setNewItemName('');
                 setNewItemDescription('');
                 loadData();
             } else {
-                toastRef.current.error(response.error || '创建失败');
+                toastRef.current.error(response.error || tRef.current('agentSettings.common.createFailed'));
             }
         } catch {
-            toastRef.current.error('创建失败');
+            toastRef.current.error(tRef.current('agentSettings.common.createFailed'));
         } finally {
             setCreating(false);
         }
@@ -259,14 +267,14 @@ export default function SkillsCommandsList({
 
             const response = await api.delete<{ success: boolean; error?: string }>(endpoint);
             if (response.success) {
-                toastRef.current.success('删除成功');
+                toastRef.current.success(tRef.current('agentSettings.common.deleteSuccess'));
                 setDeleteTarget(null);
                 loadData();
             } else {
-                toastRef.current.error(response.error || '删除失败');
+                toastRef.current.error(response.error || tRef.current('agentSettings.common.deleteFailed'));
             }
         } catch {
-            toastRef.current.error('删除失败');
+            toastRef.current.error(tRef.current('agentSettings.common.deleteFailed'));
         } finally {
             setDeleting(false);
         }
@@ -297,7 +305,7 @@ export default function SkillsCommandsList({
                     <div className="flex items-center gap-2">
                         <Sparkles className="h-5 w-5 text-[var(--ink-muted)]" />
                         <h3 className="text-base font-semibold text-[var(--ink)]">
-                            {scope === 'project' ? '项目技能' : '技能 Skills'}
+                            {scope === 'project' ? t('agentSettings.skillCommandList.projectSkillsTitle') : t('agentSettings.skillCommandList.skillsTitle')}
                         </h3>
                         <span className="rounded-full bg-[var(--paper-inset)] px-2 py-0.5 text-xs text-[var(--ink-muted)]">
                             {skills.length}
@@ -309,7 +317,7 @@ export default function SkillsCommandsList({
                         className="flex items-center gap-1 rounded-lg bg-[var(--button-primary-bg)] px-3 py-1.5 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)]"
                     >
                         <Plus className="h-4 w-4" />
-                        新建
+                        {t('agentSettings.common.new')}
                     </button>
                 </div>
 
@@ -327,8 +335,8 @@ export default function SkillsCommandsList({
                 ) : (
                     <EmptyState
                         icon={<Sparkles className="h-12 w-12" />}
-                        title={scope === 'project' ? '还没有项目技能' : '还没有技能'}
-                        description="创建你的第一个技能来扩展 Claude 的能力"
+                        title={scope === 'project' ? t('agentSettings.skillCommandList.emptyProjectSkills') : t('agentSettings.skillCommandList.emptySkills')}
+                        description={t('agentSettings.skillCommandList.emptySkillsDescription')}
                     />
                 )}
 
@@ -339,7 +347,7 @@ export default function SkillsCommandsList({
                         onClick={handleOpenUserSkills}
                         className="mt-4 flex w-full items-center justify-center gap-1.5 py-2 text-sm text-[var(--ink-muted)] transition-colors hover:text-[var(--accent)]"
                     >
-                        <span>查看用户技能</span>
+                        <span>{t('agentSettings.skillCommandList.viewUserSkills')}</span>
                         <ExternalLink className="h-3.5 w-3.5" />
                     </button>
                 )}
@@ -351,7 +359,7 @@ export default function SkillsCommandsList({
                     <div className="flex items-center gap-2">
                         <Terminal className="h-5 w-5 text-[var(--ink-muted)]" />
                         <h3 className="text-base font-semibold text-[var(--ink)]">
-                            {scope === 'project' ? '项目指令' : '指令 Commands'}
+                            {scope === 'project' ? t('agentSettings.skillCommandList.projectCommandsTitle') : t('agentSettings.skillCommandList.commandsTitle')}
                         </h3>
                         <span className="rounded-full bg-[var(--paper-inset)] px-2 py-0.5 text-xs text-[var(--ink-muted)]">
                             {commands.length}
@@ -363,7 +371,7 @@ export default function SkillsCommandsList({
                         className="flex items-center gap-1 rounded-lg bg-[var(--button-primary-bg)] px-3 py-1.5 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)]"
                     >
                         <Plus className="h-4 w-4" />
-                        新建
+                        {t('agentSettings.common.new')}
                     </button>
                 </div>
 
@@ -381,8 +389,8 @@ export default function SkillsCommandsList({
                 ) : (
                     <EmptyState
                         icon={<Terminal className="h-12 w-12" />}
-                        title={scope === 'project' ? '还没有项目指令' : '还没有指令'}
-                        description="创建你的第一个指令来定义工作流"
+                        title={scope === 'project' ? t('agentSettings.skillCommandList.emptyProjectCommands') : t('agentSettings.skillCommandList.emptyCommands')}
+                        description={t('agentSettings.skillCommandList.emptyCommandsDescription')}
                     />
                 )}
 
@@ -393,7 +401,7 @@ export default function SkillsCommandsList({
                         onClick={handleOpenUserSkills}
                         className="mt-4 flex w-full items-center justify-center gap-1.5 py-2 text-sm text-[var(--ink-muted)] transition-colors hover:text-[var(--accent)]"
                     >
-                        <span>查看用户指令</span>
+                        <span>{t('agentSettings.skillCommandList.viewUserCommands')}</span>
                         <ExternalLink className="h-3.5 w-3.5" />
                     </button>
                 )}
@@ -428,10 +436,10 @@ export default function SkillsCommandsList({
                         setShowInstallFromUrlDialog(false);
                         loadData();
                         if (folderNames.length === 1) {
-                            toastRef.current.success(`已安装技能 "${folderNames[0]}"`);
+                            toastRef.current.success(tRef.current('agentSettings.skillCommandList.installedSingle', { name: folderNames[0] }));
                             onSelectSkill(folderNames[0], scope, true);
                         } else {
-                            toastRef.current.success(`已安装 ${folderNames.length} 个技能`);
+                            toastRef.current.success(tRef.current('agentSettings.skillCommandList.installedMultiple', { count: folderNames.length }));
                         }
                         window.dispatchEvent(
                             new CustomEvent(CUSTOM_EVENTS.SKILL_COPIED_TO_PROJECT, {
@@ -445,7 +453,7 @@ export default function SkillsCommandsList({
             {/* New Command Dialog */}
             {showNewCommandDialog && (
                 <CreateDialog
-                    title="新建指令"
+                    title={t('agentSettings.skillCommandList.newCommandTitle')}
                     name={newItemName}
                     description={newItemDescription}
                     onNameChange={setNewItemName}
@@ -463,9 +471,9 @@ export default function SkillsCommandsList({
             {/* Delete Confirmation */}
             {deleteTarget && (
                 <ConfirmDialog
-                    title={`删除${deleteTarget.type === 'skill' ? '技能' : '指令'}`}
-                    message={`确定要删除「${deleteTarget.name}」吗？此操作无法撤销。`}
-                    confirmText="删除"
+                    title={deleteTarget.type === 'skill' ? t('agentSettings.skillCommandList.deleteSkillTitle') : t('agentSettings.skillCommandList.deleteCommandTitle')}
+                    message={t('agentSettings.skillCommandList.deleteMessage', { name: deleteTarget.name })}
+                    confirmText={t('agentSettings.common.delete')}
                     confirmVariant="danger"
                     onConfirm={handleDelete}
                     onCancel={() => setDeleteTarget(null)}
@@ -489,6 +497,7 @@ export function SkillCard({ skill, onClick, onToggleEnabled }: {
     onClick: () => void;
     onToggleEnabled?: (folderName: string, enabled: boolean) => void;
 }) {
+    const { t } = useTranslation('settings');
     const isDisabled = skill.enabled === false;
     return (
         <div
@@ -533,7 +542,7 @@ export function SkillCard({ skill, onClick, onToggleEnabled }: {
             {/* Description — `min-h-[2.6em]` reserves the 2-line height even
                 for short descriptions so cards in the same grid row align. */}
             <p className="line-clamp-2 min-h-[2.6em] text-sm leading-relaxed text-[var(--ink-muted)]">
-                {skill.description || '暂无描述'}
+                {skill.description || t('agentSettings.common.noDescription')}
             </p>
         </div>
     );
@@ -543,6 +552,7 @@ export function SkillCard({ skill, onClick, onToggleEnabled }: {
 // minus the toggle (commands have no enabled/disabled state).
 // Exported for reuse in GlobalSkillsPanel.
 export function CommandCard({ command, onClick }: { command: CommandItem; onClick: () => void }) {
+    const { t } = useTranslation('settings');
     return (
         <div
             className="group flex cursor-pointer flex-col gap-1.5 rounded-xl bg-[var(--paper-elevated)] px-3.5 py-3 transition-shadow hover:shadow-sm"
@@ -560,7 +570,7 @@ export function CommandCard({ command, onClick }: { command: CommandItem; onClic
                 )}
             </div>
             <p className="line-clamp-2 min-h-[2.6em] text-sm leading-relaxed text-[var(--ink-muted)]">
-                {command.description || '暂无描述'}
+                {command.description || t('agentSettings.common.noDescription')}
             </p>
         </div>
     );

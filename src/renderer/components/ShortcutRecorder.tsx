@@ -12,6 +12,7 @@
 // produces the same accelerator string, matching DEFAULT_SUMMON_ACCELERATOR.
 
 import { memo, useCallback, useEffect, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { formatAccelerator } from '@/utils/formatAccelerator';
 
 export interface ShortcutRecorderProps {
@@ -33,6 +34,12 @@ const MAIN_KEY_BLOCKLIST = new Set([
   'Dead', // dead keys
 ]);
 
+type ShortcutRejectReason =
+  | 'missingMainKey'
+  | 'blockedKey'
+  | 'missingModifier'
+  | 'shiftLetterConflict';
+
 function isMac(): boolean {
   if (typeof navigator === 'undefined') return false;
   return navigator.platform.toLowerCase().includes('mac');
@@ -40,7 +47,7 @@ function isMac(): boolean {
 
 /** Convert a KeyboardEvent into a Tauri accelerator string. Returns null
  *  if the combo isn't valid (no modifier, blocked main key, etc.). */
-function eventToAccelerator(e: KeyboardEvent): { ok: true; accel: string } | { ok: false; reason: string } {
+function eventToAccelerator(e: KeyboardEvent): { ok: true; accel: string } | { ok: false; reason: ShortcutRejectReason } {
   const mods: string[] = [];
   // Canonical: Cmd on mac, Ctrl elsewhere → "CmdOrCtrl"
   if (isMac()) {
@@ -79,15 +86,15 @@ function eventToAccelerator(e: KeyboardEvent): { ok: true; accel: string } | { o
     main = named[code] ?? '';
   }
 
-  if (!main) return { ok: false, reason: '请选择一个普通按键' };
-  if (MAIN_KEY_BLOCKLIST.has(main)) return { ok: false, reason: '该按键不能作为快捷键' };
-  if (mods.length === 0) return { ok: false, reason: '请至少加一个修饰键（Cmd/Ctrl/Alt/Shift）' };
+  if (!main) return { ok: false, reason: 'missingMainKey' };
+  if (MAIN_KEY_BLOCKLIST.has(main)) return { ok: false, reason: 'blockedKey' };
+  if (mods.length === 0) return { ok: false, reason: 'missingModifier' };
 
   // Reject Shift+letter only — Shift alone with a letter just types capital.
   const onlyShift = mods.length === 1 && mods[0] === 'Shift';
   const isLetter = /^[A-Z]$/.test(main);
   if (onlyShift && isLetter) {
-    return { ok: false, reason: '仅 Shift+字母 与文字输入冲突，请加 Cmd/Ctrl/Alt' };
+    return { ok: false, reason: 'shiftLetterConflict' };
   }
 
   return { ok: true, accel: [...mods, main].join('+') };
@@ -99,6 +106,7 @@ const ShortcutRecorder = memo(function ShortcutRecorder({
   disabled = false,
   className,
 }: ShortcutRecorderProps) {
+  const { t } = useTranslation('settings');
   const [recording, setRecording] = useState(false);
   const [hint, setHint] = useState<string | null>(null);
   const buttonRef = useRef<HTMLButtonElement>(null);
@@ -122,7 +130,7 @@ const ShortcutRecorder = memo(function ShortcutRecorder({
       e.stopPropagation();
 
       if (e.key === 'Escape') {
-        stopRecording('已取消');
+        stopRecording(t('shortcuts.recorder.cancelled'));
         return;
       }
 
@@ -133,7 +141,7 @@ const ShortcutRecorder = memo(function ShortcutRecorder({
 
       const result = eventToAccelerator(e);
       if (!result.ok) {
-        setHint(result.reason);
+        setHint(t(`shortcuts.recorder.errors.${result.reason}`));
         return;
       }
       stopRecording();
@@ -142,7 +150,7 @@ const ShortcutRecorder = memo(function ShortcutRecorder({
 
     window.addEventListener('keydown', onKeyDown, { capture: true });
     return () => window.removeEventListener('keydown', onKeyDown, { capture: true });
-  }, [recording, onChange, stopRecording]);
+  }, [recording, onChange, stopRecording, t]);
 
   // Auto-blur when entering recording state so the button doesn't trap focus
   useEffect(() => {
@@ -151,7 +159,7 @@ const ShortcutRecorder = memo(function ShortcutRecorder({
     }
   }, [recording]);
 
-  const display = recording ? '请按下快捷键…（Esc 取消）' : formatAccelerator(value);
+  const display = recording ? t('shortcuts.recorder.recordingDisplay') : formatAccelerator(value);
 
   return (
     <div className={`flex flex-col items-end gap-1 ${className ?? ''}`}>
@@ -165,7 +173,7 @@ const ShortcutRecorder = memo(function ShortcutRecorder({
             ? 'border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent)] animate-pulse'
             : 'border-[var(--line)] bg-[var(--paper)] text-[var(--ink)] hover:border-[var(--line-strong)]'
         } ${disabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
-        title={recording ? '正在录制：请按下快捷键，或按 Esc 取消' : '点击修改快捷键'}
+        title={recording ? t('shortcuts.recorder.recordingTitle') : t('shortcuts.recorder.idleTitle')}
       >
         {display}
       </button>

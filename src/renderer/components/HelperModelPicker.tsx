@@ -14,6 +14,7 @@
 
 import { useCallback, useMemo, useRef, useState } from 'react';
 import { ChevronUp } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 
 import type { Provider, ProviderVerifyStatus } from '@/config/types';
 import { isProviderAvailable } from '@/config/configService';
@@ -95,6 +96,7 @@ export function HelperModelPicker({
     onOpenChange,
     triggerClassName,
 }: HelperModelPickerProps) {
+    const { t } = useTranslation('app');
     const [open, setOpenState] = useState(false);
     const btnRef = useRef<HTMLButtonElement>(null);
 
@@ -105,10 +107,10 @@ export function HelperModelPicker({
 
     const selectedProvider = providers.find(p => p.id === value.providerId);
     const modelDisplayName = useMemo(() => {
-        if (!selectedProvider || !value.model) return '未选择模型';
+        if (!selectedProvider || !value.model) return t('helperModelPicker.noModelSelected');
         const m = selectedProvider.models.find(mod => mod.model === value.model);
         return m?.modelName || value.model;
-    }, [selectedProvider, value.model]);
+    }, [selectedProvider, value.model, t]);
 
     return (
         <>
@@ -142,7 +144,7 @@ export function HelperModelPicker({
                                 }}
                                 className="w-full px-3 py-2.5 text-left text-sm text-[var(--accent)] transition-colors hover:bg-[var(--paper-inset)]"
                             >
-                                请先配置模型 →
+                                {t('helperModelPicker.configureModel')}
                             </button>
                         );
                     }

@@ -2,6 +2,7 @@
 // Removes workspace step (Agent already has one), uses cmd_start_agent_channel.
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowLeft, ArrowRight, Check, Copy, ExternalLink, Loader2, Plus, Puzzle, Trash2 } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 import QRCode from 'qrcode';
 import { track } from '@/analytics';
 import { isTauriEnvironment } from '@/utils/browserMock';
@@ -156,6 +157,7 @@ export default function ChannelWizard({
     onComplete,
     onCancel,
 }: ChannelWizardProps) {
+    const { t } = useTranslation('settings');
     const toast = useToast();
     const toastRef = useRef(toast);
     toastRef.current = toast;
@@ -460,14 +462,14 @@ export default function ChannelWizard({
 
                 setAllowedUsers(prev => {
                     if (prev.includes(userId) || (username && prev.includes(username))) return prev;
-                    toastRef.current.success(`用户 ${displayName} 已绑定`);
+                    toastRef.current.success(t('agentSettings.channelWizard.toast.userBound', { name: displayName }));
                     return [...prev, userId];
                 });
             },
             ac.signal,
         );
         return () => ac.abort();
-    }, [step, bindingStep, channelId]);
+    }, [step, bindingStep, channelId, t]);
 
     // Check if credentials are filled
     const hasCredentials = isDualConfig
@@ -562,24 +564,24 @@ export default function ChannelWizard({
 
             if (isMountedRef.current) {
                 track('agent_channel_create', { source: 'desktop', platform });
-                toastRef.current.success('Channel 启动成功，请完成用户绑定');
+                toastRef.current.success(t('agentSettings.channelWizard.toast.channelStarted'));
                 setStep(bindingStep); // Advance to binding step
             }
         } catch (err) {
             if (isMountedRef.current) {
-                toastRef.current.error(`启动失败: ${err}`);
+                toastRef.current.error(t('agentSettings.channelWizard.toast.startFailed', { message: String(err) }));
             }
         } finally {
             if (isMountedRef.current) setStarting(false);
         }
-    }, [buildChannelConfig, agent, platform, startChannel, refreshConfig, bindingStep]);
+    }, [buildChannelConfig, agent, platform, startChannel, refreshConfig, bindingStep, t]);
 
     // QR Login: start channel then initiate QR login flow
     const startQrLogin = useCallback(async () => {
         if (!isTauriEnvironment()) return;
         qrAbortRef.current = false;
         setQrStatus('loading');
-        setQrMessage('正在启动插件...');
+        setQrMessage(t('agentSettings.channelWizard.qr.startingPlugin'));
 
         try {
             const { invoke } = await import('@tauri-apps/api/core');
@@ -599,20 +601,20 @@ export default function ChannelWizard({
             if (qrAbortRef.current || !isMountedRef.current) return;
 
             // 3. Request QR code from Bridge
-            setQrMessage('正在获取二维码...');
+            setQrMessage(t('agentSettings.channelWizard.qr.loading'));
             const startResult = await invoke<{ ok: boolean; qrDataUrl?: string; message?: string; sessionKey?: string }>(
                 'cmd_plugin_qr_login_start', { agentId: agent.id, channelId }
             );
 
             if (!startResult.ok || !startResult.qrDataUrl) {
-                throw new Error(startResult.message || '获取二维码失败');
+                throw new Error(startResult.message || t('agentSettings.channelWizard.qr.loadFailed'));
             }
 
             if (!isMountedRef.current || qrAbortRef.current) return;
             qrSessionKeyRef.current = startResult.sessionKey;
             setQrDataUrl(startResult.qrDataUrl);
             setQrStatus('waiting');
-            setQrMessage(`请使用${openclawPluginName}扫描二维码`);
+            setQrMessage(t('agentSettings.channelWizard.qr.scanWith', { name: openclawPluginName }));
 
             // 4. Poll for QR scan completion (pass sessionKey — WeChat requires it)
             // Auto-retry with QR refresh on timeout/error, up to MAX_QR_RETRIES
@@ -629,7 +631,7 @@ export default function ChannelWizard({
 
                     if (waitResult.connected) {
                         setQrStatus('connected');
-                        setQrMessage('登录成功！正在启动...');
+                        setQrMessage(t('agentSettings.channelWizard.qr.loginSuccessStarting'));
                         await invoke('cmd_plugin_restart_gateway', {
                             agentId: agent.id, channelId,
                             accountId: waitResult.accountId,
@@ -649,7 +651,7 @@ export default function ChannelWizard({
                         }
                         if (isMountedRef.current) {
                             track('agent_channel_create', { source: 'desktop', platform });
-                            toastRef.current.success('扫码登录成功');
+                            toastRef.current.success(t('agentSettings.channelWizard.toast.scanLoginSuccess'));
                             setStep(2);
                         }
                         return;
@@ -670,8 +672,8 @@ export default function ChannelWizard({
                     if (isTerminal || qrRetryCount >= MAX_QR_RETRIES) {
                         setQrStatus('error');
                         setQrMessage(qrRetryCount >= MAX_QR_RETRIES
-                            ? `超过最大重试次数 (${MAX_QR_RETRIES})，请手动重试`
-                            : `登录失败: ${errMsg}`);
+                            ? t('agentSettings.channelWizard.qr.maxRetries', { count: MAX_QR_RETRIES })
+                            : t('agentSettings.channelWizard.qr.loginFailed', { message: errMsg }));
                         return;
                     }
 
@@ -684,11 +686,11 @@ export default function ChannelWizard({
                         if (refreshResult.ok && refreshResult.qrDataUrl) {
                             qrSessionKeyRef.current = refreshResult.sessionKey;
                             setQrDataUrl(refreshResult.qrDataUrl);
-                            setQrMessage(`二维码已刷新 (${qrRetryCount}/${MAX_QR_RETRIES})，请扫描`);
+                            setQrMessage(t('agentSettings.channelWizard.qr.refreshed', { current: qrRetryCount, max: MAX_QR_RETRIES }));
                         }
                     } catch {
                         setQrStatus('error');
-                        setQrMessage('二维码获取失败，请手动重试');
+                        setQrMessage(t('agentSettings.channelWizard.qr.loadFailedRetry'));
                         return;
                     }
                 }
@@ -696,11 +698,11 @@ export default function ChannelWizard({
         } catch (err) {
             if (isMountedRef.current) {
                 setQrStatus('error');
-                setQrMessage(`启动失败: ${err}`);
+                setQrMessage(t('agentSettings.channelWizard.qr.startFailed', { message: String(err) }));
             }
         }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [buildChannelConfig, agent, channelId, platform, refreshConfig]);
+    }, [buildChannelConfig, agent, channelId, platform, refreshConfig, t]);
 
     // Auto-start QR login when entering step 1 for QR plugins.
     // CRITICAL: startQrLogin must NOT be in deps — it depends on `agent` which changes
@@ -731,9 +733,9 @@ export default function ChannelWizard({
         // Step 1 -> Step 2: validate credentials and start channel
         if (!hasCredentials) {
             toastRef.current.error(
-                isFeishu ? '请输入 App ID 和 App Secret'
-                    : isDingtalk ? '请输入 Client ID 和 Client Secret'
-                        : '请输入 Bot Token'
+                isFeishu ? t('agentSettings.channelWizard.validation.feishuCredentials')
+                    : isDingtalk ? t('agentSettings.channelWizard.validation.dingtalkCredentials')
+                        : t('agentSettings.channelWizard.validation.botToken')
             );
             return;
         }
@@ -747,17 +749,17 @@ export default function ChannelWizard({
         ];
         if (isFeishu) {
             if (allChannels.some(ch => ch.feishuAppId === feishuAppId.trim())) {
-                toastRef.current.error('该飞书应用凭证已被其他 Channel 使用');
+                toastRef.current.error(t('agentSettings.channelWizard.validation.duplicateFeishu'));
                 return;
             }
         } else if (isDingtalk) {
             if (allChannels.some(ch => ch.dingtalkClientId === dingtalkClientId.trim())) {
-                toastRef.current.error('该钉钉应用凭证已被其他 Channel 使用');
+                toastRef.current.error(t('agentSettings.channelWizard.validation.duplicateDingtalk'));
                 return;
             }
         } else {
             if (allChannels.some(ch => ch.botToken === botToken.trim())) {
-                toastRef.current.error('该 Bot Token 已被其他 Channel 使用');
+                toastRef.current.error(t('agentSettings.channelWizard.validation.duplicateBotToken'));
                 return;
             }
         }
@@ -802,14 +804,14 @@ export default function ChannelWizard({
         } catch (err) {
             if (isMountedRef.current) {
                 setVerifyStatus('invalid');
-                toastRef.current.error(`验证失败: ${err}`);
+                toastRef.current.error(t('agentSettings.channelWizard.toast.verificationFailed', { message: String(err) }));
             }
         } finally {
             if (isMountedRef.current) {
                 setStarting(false);
             }
         }
-    }, [hasCredentials, isFeishu, isDingtalk, isOpenClaw, step, botToken, feishuAppId, dingtalkClientId, channelId, platform, agent, config.agents, buildChannelConfig, startChannel, refreshConfig]);
+    }, [hasCredentials, isFeishu, isDingtalk, isOpenClaw, step, botToken, feishuAppId, dingtalkClientId, channelId, platform, agent, config.agents, buildChannelConfig, startChannel, refreshConfig, t]);
 
     // Complete wizard — merge local users with any Rust-persisted users
     const handleComplete = useCallback(async () => {
@@ -872,7 +874,13 @@ export default function ChannelWizard({
         openclawNpmSpec: installedPlugin?.npmSpec,
     }) ? installedPlugin.manifest.name : null;
     const openclawPluginName = promoted?.name || openclawWizardManifestName || openclawPluginId || 'Plugin';
-    const platformLabel = isOpenClaw ? openclawPluginName : isDingtalk ? '钉钉' : isFeishu ? '飞书' : 'Telegram';
+    const platformLabel = isOpenClaw
+        ? openclawPluginName
+        : isDingtalk
+            ? t('agentSettings.channelWizard.platform.dingtalk')
+            : isFeishu
+                ? t('agentSettings.channelWizard.platform.feishu')
+                : t('agentSettings.channelWizard.platform.telegram');
 
     // Platform icon for header
     const platformIcon = (() => {
@@ -885,26 +893,26 @@ export default function ChannelWizard({
 
     const stepLabel = (() => {
         if (isQrLogin) {
-            if (step === 1) return '扫码登录';
-            return '绑定用户';
+            if (step === 1) return t('agentSettings.channelWizard.steps.qrLogin');
+            return t('agentSettings.channelWizard.steps.bindUser');
         }
         if (isOpenClaw) {
-            if (step === 1) return '配置插件';
-            if (step === 2) return '确认并启动';
-            return '绑定用户';
+            if (step === 1) return t('agentSettings.channelWizard.steps.configurePlugin');
+            if (step === 2) return t('agentSettings.channelWizard.steps.confirmAndStart');
+            return t('agentSettings.channelWizard.steps.bindUser');
         }
         if (isDingtalk) {
-            if (step === 1) return '配置应用凭证';
-            if (step === 2) return '配置权限与能力';
-            return '绑定你的钉钉账号';
+            if (step === 1) return t('agentSettings.channelWizard.steps.configureCredentials');
+            if (step === 2) return t('agentSettings.channelWizard.steps.configurePermissionsCapabilities');
+            return t('agentSettings.channelWizard.steps.bindDingtalk');
         }
         if (isFeishu) {
-            if (step === 1) return '配置应用凭证';
-            if (step === 2) return '配置权限与事件';
-            return '绑定你的飞书账号';
+            if (step === 1) return t('agentSettings.channelWizard.steps.configureCredentials');
+            if (step === 2) return t('agentSettings.channelWizard.steps.configurePermissionsEvents');
+            return t('agentSettings.channelWizard.steps.bindFeishu');
         }
-        if (step === 1) return '配置 Bot Token';
-        return '绑定你的 Telegram 账号';
+        if (step === 1) return t('agentSettings.channelWizard.steps.configureBotToken');
+        return t('agentSettings.channelWizard.steps.bindTelegram');
     })();
 
     // Reusable action bar for each step
@@ -924,14 +932,14 @@ export default function ChannelWizard({
                     className="flex items-center gap-1.5 rounded-lg border border-[var(--line)] px-4 py-2 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)]"
                 >
                     <ArrowLeft className="h-4 w-4" />
-                    {props.backLabel || '上一步'}
+                    {props.backLabel || t('agentSettings.channelWizard.nav.back')}
                 </button>
             ) : (
                 <button
                     onClick={handleCancel}
                     className="rounded-lg border border-[var(--line)] px-4 py-2 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)]"
                 >
-                    取消
+                    {t('agentSettings.channelWizard.nav.cancel')}
                 </button>
             )}
             <button
@@ -959,10 +967,10 @@ export default function ChannelWizard({
                     )}
                     <div>
                         <h2 className="text-lg font-semibold text-[var(--ink)]">
-                            添加 {platformLabel} Channel
+                            {t('agentSettings.channelWizard.header.title', { platform: platformLabel })}
                         </h2>
                         <p className="text-xs text-[var(--ink-muted)]">
-                            步骤 {step}/{totalSteps}: {stepLabel}
+                            {t('agentSettings.channelWizard.header.stepIndicator', { step, total: totalSteps, label: stepLabel })}
                         </p>
                     </div>
                 </div>
@@ -982,7 +990,7 @@ export default function ChannelWizard({
                     {/* Action bar — must use handleCancel to stop Bridge + remove config */}
                     {renderActionBar({
                         onNext: () => { qrAbortRef.current = true; handleCancel(); },
-                        nextLabel: '取消',
+                        nextLabel: t('agentSettings.channelWizard.nav.cancel'),
                         nextIcon: undefined,
                     })}
 
@@ -1014,7 +1022,7 @@ export default function ChannelWizard({
                                 </div>
                             )}
                             {(qrStatus === 'waiting' || qrStatus === 'scanned') && qrImageUrl && (
-                                <img src={qrImageUrl} alt="扫码登录" className="h-48 w-48 rounded-xl" />
+                                <img src={qrImageUrl} alt={t('agentSettings.channelWizard.qr.scanAlt')} className="h-48 w-48 rounded-xl" />
                             )}
                             {qrStatus === 'connected' && (
                                 <div className="flex h-48 w-48 items-center justify-center rounded-xl bg-[var(--accent-success-subtle)]">
@@ -1023,12 +1031,12 @@ export default function ChannelWizard({
                             )}
                             {qrStatus === 'error' && (
                                 <div className="flex h-48 w-48 flex-col items-center justify-center gap-2 rounded-xl bg-[var(--paper-inset)]">
-                                    <p className="text-sm text-[var(--accent-danger)]">获取失败</p>
+                                    <p className="text-sm text-[var(--accent-danger)]">{t('agentSettings.channelWizard.qr.failed')}</p>
                                     <button
                                         onClick={() => { setQrStatus('idle'); }}
                                         className="rounded-lg bg-[var(--button-primary-bg)] px-3 py-1.5 text-xs font-medium text-[var(--button-primary-text)] hover:bg-[var(--button-primary-bg-hover)]"
                                     >
-                                        重试
+                                        {t('agentSettings.channelWizard.qr.retry')}
                                     </button>
                                 </div>
                             )}
@@ -1044,7 +1052,7 @@ export default function ChannelWizard({
                     {/* Action bar at top */}
                     {renderActionBar({
                         onNext: handleNext,
-                        nextLabel: '下一步',
+                        nextLabel: t('agentSettings.channelWizard.nav.next'),
                         nextDisabled: !hasCredentials,
                         nextIcon: <ArrowRight className="h-4 w-4" />,
                     })}
@@ -1081,7 +1089,7 @@ export default function ChannelWizard({
                             }`}
                             onClick={() => handleDualModeSwitch('qr')}
                         >
-                            扫码添加
+                            {t('agentSettings.channelWizard.dual.scanMode')}
                         </button>
                         <button
                             className={`flex-1 rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
@@ -1091,16 +1099,18 @@ export default function ChannelWizard({
                             }`}
                             onClick={() => handleDualModeSwitch('config')}
                         >
-                            手动配置
+                            {t('agentSettings.channelWizard.dual.manualMode')}
                         </button>
                     </div>
 
                     {/* QR mode */}
                     {dualConfigMode === 'qr' && (
                         <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
-                            <p className="text-sm font-medium text-[var(--ink)]">扫码创建机器人</p>
+                            <p className="text-sm font-medium text-[var(--ink)]">{t('agentSettings.channelWizard.dual.scanCreateBot')}</p>
                             <p className="mt-1.5 text-xs text-[var(--ink-muted)]">
-                                使用 {promoted?.name?.replace(/（.*）/, '') || '企业微信'} App 扫描下方二维码，一键创建机器人并自动获取凭证
+                                {t('agentSettings.channelWizard.dual.scanDescription', {
+                                    app: promoted?.name?.replace(/（.*）/, '') || t('agentSettings.channelWizard.platform.wecom'),
+                                })}
                             </p>
 
                             <div className="mt-5 flex flex-col items-center py-4">
@@ -1111,20 +1121,22 @@ export default function ChannelWizard({
                                 )}
                                 {wecomQrStatus === 'waiting' && wecomQrImageUrl && (
                                     <div className="rounded-xl border border-[var(--line)] bg-white p-1.5">
-                                        <img src={wecomQrImageUrl} alt="企业微信扫码" className="h-[200px] w-[200px] rounded-lg" />
+                                        <img src={wecomQrImageUrl} alt={t('agentSettings.channelWizard.dual.wecomScanAlt')} className="h-[200px] w-[200px] rounded-lg" />
                                     </div>
                                 )}
                                 {wecomQrStatus === 'success' && (
                                     <div className="flex h-[200px] w-[200px] flex-col items-center justify-center rounded-xl border border-[var(--success)] bg-[var(--success-bg)]">
                                         <Check className="h-8 w-8 text-[var(--success)]" />
-                                        <p className="mt-2 text-sm font-medium text-[var(--success)]">扫码成功</p>
-                                        <p className="mt-1 text-xs text-[var(--success)]">Bot ID 和 Secret 已自动获取</p>
+                                        <p className="mt-2 text-sm font-medium text-[var(--success)]">{t('agentSettings.channelWizard.dual.scanSuccess')}</p>
+                                        <p className="mt-1 text-xs text-[var(--success)]">{t('agentSettings.channelWizard.dual.credentialsReceived')}</p>
                                     </div>
                                 )}
                                 {wecomQrStatus === 'error' && (
                                     <div className="flex h-[200px] w-[200px] flex-col items-center justify-center gap-2 rounded-xl border border-[var(--line)] bg-[var(--paper-inset)]">
                                         <p className="text-sm text-[var(--ink-muted)]">
-                                            {wecomQrRefreshCount > 0 ? '二维码多次过期' : '获取二维码失败'}
+                                            {wecomQrRefreshCount > 0
+                                                ? t('agentSettings.channelWizard.dual.qrExpiredMultiple')
+                                                : t('agentSettings.channelWizard.qr.loadFailed')}
                                         </p>
                                         <button
                                             onClick={() => {
@@ -1136,7 +1148,7 @@ export default function ChannelWizard({
                                             }}
                                             className="text-xs text-[var(--accent-warm)] hover:underline"
                                         >
-                                            重试
+                                            {t('agentSettings.channelWizard.qr.retry')}
                                         </button>
                                     </div>
                                 )}
@@ -1148,18 +1160,18 @@ export default function ChannelWizard({
 
                                 <p className="mt-3 text-xs text-[var(--ink-muted)]">
                                     {wecomQrStatus === 'loading' && (wecomQrRefreshCount > 0
-                                        ? `二维码已过期，正在刷新 (${wecomQrRefreshCount}/${WECOM_MAX_QR_REFRESHES})...`
-                                        : '正在获取二维码...')}
-                                    {wecomQrStatus === 'waiting' && '请使用企业微信 App 扫描二维码'}
-                                    {wecomQrStatus === 'success' && '凭证已就绪，点击「下一步」继续'}
+                                        ? t('agentSettings.channelWizard.dual.qrExpiredRefreshing', { current: wecomQrRefreshCount, max: WECOM_MAX_QR_REFRESHES })
+                                        : t('agentSettings.channelWizard.qr.loading'))}
+                                    {wecomQrStatus === 'waiting' && t('agentSettings.channelWizard.dual.scanWithWecom')}
+                                    {wecomQrStatus === 'success' && t('agentSettings.channelWizard.dual.credentialsReady')}
                                     {wecomQrStatus === 'error' && (wecomQrRefreshCount > 0
-                                        ? '二维码多次过期，请检查网络后重试'
-                                        : '请检查网络后重试')}
+                                        ? t('agentSettings.channelWizard.dual.qrExpiredRetry')
+                                        : t('agentSettings.channelWizard.dual.networkRetry'))}
                                 </p>
                             </div>
 
                             <p className="mt-2 text-xs text-[var(--ink-subtle)]">
-                                扫码后将创建新的智能机器人。如需关联已有机器人，请切换到「手动配置」
+                                {t('agentSettings.channelWizard.dual.scanNote')}
                             </p>
                         </div>
                     )}
@@ -1168,12 +1180,12 @@ export default function ChannelWizard({
                     {dualConfigMode === 'config' && (
                         <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
                             <h3 className="text-sm font-medium text-[var(--ink)]">
-                                {promoted?.setupGuide?.credentialTitle || '插件配置'}
+                                {promoted?.setupGuide?.credentialTitle || t('agentSettings.channelWizard.config.pluginConfig')}
                             </h3>
                             <p className="mt-1.5 text-xs text-[var(--ink-muted)]">
                                 {promoted?.setupGuide?.credentialHintLink ? (
                                     <>
-                                        {'前往 '}
+                                        {t('agentSettings.channelWizard.config.goToPrefix')}
                                         <a
                                             href={promoted.setupGuide.credentialHintLink}
                                             target="_blank"
@@ -1186,13 +1198,13 @@ export default function ChannelWizard({
                                                 }
                                             }}
                                         >
-                                            企业微信管理后台
+                                            {t('agentSettings.channelWizard.dual.wecomAdmin')}
                                             <ExternalLink className="inline h-3 w-3" />
                                         </a>
-                                        {' '}创建智能机器人，获取凭证
+                                        {t('agentSettings.channelWizard.dual.wecomCredentialSuffix')}
                                     </>
                                 ) : (
-                                    promoted?.setupGuide?.credentialHint || '输入插件需要的配置参数'
+                                    promoted?.setupGuide?.credentialHint || t('agentSettings.channelWizard.config.inputPluginParams')
                                 )}
                             </p>
 
@@ -1207,7 +1219,7 @@ export default function ChannelWizard({
                                             type={/secret|token|password|key/i.test(key) ? 'password' : 'text'}
                                             value={openclawSchemaValues[key] || ''}
                                             onChange={(e) => setOpenclawSchemaValues(prev => ({ ...prev, [key]: e.target.value }))}
-                                            placeholder={`输入 ${key}`}
+                                            placeholder={t('agentSettings.channelWizard.config.fieldPlaceholder', { field: key })}
                                             className="w-full rounded-[var(--radius-sm)] border border-[var(--line)] bg-transparent px-3 py-2.5 text-sm text-[var(--ink)] placeholder:text-[var(--ink-muted)] focus:border-[var(--button-primary-bg)] focus:outline-none transition-colors"
                                         />
                                     </div>
@@ -1215,7 +1227,7 @@ export default function ChannelWizard({
                             </div>
 
                             <p className="mt-4 text-xs text-[var(--ink-subtle)]">
-                                创建方法：企微客户端 → 工作台 → 智能机器人 → 创建机器人 → 手动创建 → API 模式创建 → 使用长连接
+                                {t('agentSettings.channelWizard.dual.manualMethod')}
                             </p>
                         </div>
                     )}
@@ -1228,7 +1240,7 @@ export default function ChannelWizard({
                     {/* Action bar at top */}
                     {renderActionBar({
                         onNext: handleNext,
-                        nextLabel: '下一步',
+                        nextLabel: t('agentSettings.channelWizard.nav.next'),
                         nextDisabled: openclawHasIncompleteFields || openclawHasIncompleteSchema,
                         nextIcon: <ArrowRight className="h-4 w-4" />,
                     })}
@@ -1267,7 +1279,7 @@ export default function ChannelWizard({
                                         }}
                                     >
                                         <ExternalLink className="h-3 w-3" />
-                                        项目主页
+                                        {t('agentSettings.channelWizard.config.projectHomepage')}
                                     </button>
                                 )}
                             </div>
@@ -1277,12 +1289,12 @@ export default function ChannelWizard({
                     {/* Config section */}
                     <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
                         <h3 className="text-sm font-medium text-[var(--ink)]">
-                            {promoted?.setupGuide?.credentialTitle || '插件配置'}
+                            {promoted?.setupGuide?.credentialTitle || t('agentSettings.channelWizard.config.pluginConfig')}
                         </h3>
                         <p className="mt-1.5 text-xs text-[var(--ink-muted)]">
                             {promoted?.setupGuide?.credentialHintLink ? (
                                 <>
-                                    {promoted.setupGuide.credentialHint.split(promoted.setupGuide.credentialHintLink)[0] || '前往 '}
+                                    {promoted.setupGuide.credentialHint.split(promoted.setupGuide.credentialHintLink)[0] || t('agentSettings.channelWizard.config.goToPrefix')}
                                     <a
                                         href={promoted.setupGuide.credentialHintLink}
                                         target="_blank"
@@ -1295,13 +1307,13 @@ export default function ChannelWizard({
                                             }
                                         }}
                                     >
-                                        {openclawPluginName} 开放平台
+                                        {t('agentSettings.channelWizard.config.openPlatform', { name: openclawPluginName })}
                                         <ExternalLink className="inline h-3 w-3" />
                                     </a>
-                                    {' '}创建应用，获取凭证
+                                    {t('agentSettings.channelWizard.config.createAppSuffix')}
                                 </>
                             ) : (
-                                promoted?.setupGuide?.credentialHint || '输入插件需要的配置参数（如 appId、clientSecret 等）'
+                                promoted?.setupGuide?.credentialHint || t('agentSettings.channelWizard.config.inputPluginParamsExample')
                             )}
                         </p>
 
@@ -1324,7 +1336,7 @@ export default function ChannelWizard({
                                                         type={/secret|token|password|key/i.test(key) ? 'password' : 'text'}
                                                         value={openclawSchemaValues[key] || ''}
                                                         onChange={(e) => setOpenclawSchemaValues(prev => ({ ...prev, [key]: e.target.value }))}
-                                                        placeholder={`输入 ${key}`}
+                                                        placeholder={t('agentSettings.channelWizard.config.fieldPlaceholder', { field: key })}
                                                         className="w-full rounded-[var(--radius-sm)] border border-[var(--line)] bg-transparent px-3 py-2.5 text-sm text-[var(--ink)] placeholder:text-[var(--ink-muted)] focus:border-[var(--button-primary-bg)] focus:outline-none transition-colors"
                                                     />
                                                 </div>
@@ -1333,18 +1345,18 @@ export default function ChannelWizard({
                                     </div>
                                     {/* Extra custom fields */}
                                     <div className="border-t border-[var(--line-subtle)] pt-3">
-                                        <p className="mb-2 text-xs text-[var(--ink-muted)]">自定义配置</p>
+                                        <p className="mb-2 text-xs text-[var(--ink-muted)]">{t('agentSettings.channelWizard.config.customConfig')}</p>
                                         <div className="space-y-2">
                                             {openclawCustomFields.map((field, i) => (
                                                 <div key={i} className="flex items-center gap-2">
-                                                    <input type="text" value={field.key} onChange={(e) => { const next = [...openclawCustomFields]; next[i] = { ...next[i], key: e.target.value }; setOpenclawCustomFields(next); }} placeholder="配置名" className="w-[140px] shrink-0 rounded-[var(--radius-sm)] border border-[var(--line)] bg-transparent px-3 py-2 text-sm text-[var(--ink)] placeholder:text-[var(--ink-muted)] focus:border-[var(--button-primary-bg)] focus:outline-none transition-colors" />
-                                                    <input type="text" value={field.value} onChange={(e) => { const next = [...openclawCustomFields]; next[i] = { ...next[i], value: e.target.value }; setOpenclawCustomFields(next); }} placeholder="值" className="min-w-0 flex-1 rounded-[var(--radius-sm)] border border-[var(--line)] bg-transparent px-3 py-2 text-sm text-[var(--ink)] placeholder:text-[var(--ink-muted)] focus:border-[var(--button-primary-bg)] focus:outline-none transition-colors" />
+                                                    <input type="text" value={field.key} onChange={(e) => { const next = [...openclawCustomFields]; next[i] = { ...next[i], key: e.target.value }; setOpenclawCustomFields(next); }} placeholder={t('agentSettings.channelWizard.config.keyPlaceholder')} className="w-[140px] shrink-0 rounded-[var(--radius-sm)] border border-[var(--line)] bg-transparent px-3 py-2 text-sm text-[var(--ink)] placeholder:text-[var(--ink-muted)] focus:border-[var(--button-primary-bg)] focus:outline-none transition-colors" />
+                                                    <input type="text" value={field.value} onChange={(e) => { const next = [...openclawCustomFields]; next[i] = { ...next[i], value: e.target.value }; setOpenclawCustomFields(next); }} placeholder={t('agentSettings.channelWizard.config.valuePlaceholder')} className="min-w-0 flex-1 rounded-[var(--radius-sm)] border border-[var(--line)] bg-transparent px-3 py-2 text-sm text-[var(--ink)] placeholder:text-[var(--ink-muted)] focus:border-[var(--button-primary-bg)] focus:outline-none transition-colors" />
                                                     <button onClick={() => setOpenclawCustomFields(openclawCustomFields.filter((_, idx) => idx !== i))} className="shrink-0 rounded-lg p-1.5 text-[var(--ink-subtle)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--error)]"><Trash2 className="h-3.5 w-3.5" /></button>
                                                 </div>
                                             ))}
                                             <button onClick={() => setOpenclawCustomFields([...openclawCustomFields, { key: '', value: '' }])} className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]">
                                                 <Plus className="h-3.5 w-3.5" />
-                                                添加配置项
+                                                {t('agentSettings.channelWizard.config.addConfigItem')}
                                             </button>
                                         </div>
                                     </div>
@@ -1353,14 +1365,14 @@ export default function ChannelWizard({
                                 <div className="space-y-2">
                                     {openclawCustomFields.map((field, i) => (
                                         <div key={i} className="flex items-center gap-2">
-                                            <input type="text" value={field.key} onChange={(e) => { const next = [...openclawCustomFields]; next[i] = { ...next[i], key: e.target.value }; setOpenclawCustomFields(next); }} placeholder="配置名" className="w-[140px] shrink-0 rounded-[var(--radius-sm)] border border-[var(--line)] bg-transparent px-3 py-2 text-sm text-[var(--ink)] placeholder:text-[var(--ink-muted)] focus:border-[var(--button-primary-bg)] focus:outline-none transition-colors" />
-                                            <input type="text" value={field.value} onChange={(e) => { const next = [...openclawCustomFields]; next[i] = { ...next[i], value: e.target.value }; setOpenclawCustomFields(next); }} placeholder="值" className="min-w-0 flex-1 rounded-[var(--radius-sm)] border border-[var(--line)] bg-transparent px-3 py-2 text-sm text-[var(--ink)] placeholder:text-[var(--ink-muted)] focus:border-[var(--button-primary-bg)] focus:outline-none transition-colors" />
+                                            <input type="text" value={field.key} onChange={(e) => { const next = [...openclawCustomFields]; next[i] = { ...next[i], key: e.target.value }; setOpenclawCustomFields(next); }} placeholder={t('agentSettings.channelWizard.config.keyPlaceholder')} className="w-[140px] shrink-0 rounded-[var(--radius-sm)] border border-[var(--line)] bg-transparent px-3 py-2 text-sm text-[var(--ink)] placeholder:text-[var(--ink-muted)] focus:border-[var(--button-primary-bg)] focus:outline-none transition-colors" />
+                                            <input type="text" value={field.value} onChange={(e) => { const next = [...openclawCustomFields]; next[i] = { ...next[i], value: e.target.value }; setOpenclawCustomFields(next); }} placeholder={t('agentSettings.channelWizard.config.valuePlaceholder')} className="min-w-0 flex-1 rounded-[var(--radius-sm)] border border-[var(--line)] bg-transparent px-3 py-2 text-sm text-[var(--ink)] placeholder:text-[var(--ink-muted)] focus:border-[var(--button-primary-bg)] focus:outline-none transition-colors" />
                                             <button onClick={() => setOpenclawCustomFields(openclawCustomFields.filter((_, idx) => idx !== i))} className="shrink-0 rounded-lg p-1.5 text-[var(--ink-subtle)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--error)]"><Trash2 className="h-3.5 w-3.5" /></button>
                                         </div>
                                     ))}
                                     <button onClick={() => setOpenclawCustomFields([...openclawCustomFields, { key: '', value: '' }])} className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]">
                                         <Plus className="h-3.5 w-3.5" />
-                                        添加配置项
+                                        {t('agentSettings.channelWizard.config.addConfigItem')}
                                     </button>
                                 </div>
                             )}
@@ -1370,7 +1382,7 @@ export default function ChannelWizard({
                     {/* Step-by-step image guide (promoted plugins only) */}
                     {promoted?.setupGuide?.steps && promoted.setupGuide.steps.length > 0 && (
                         <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
-                            <p className="text-sm font-medium text-[var(--ink)]">配置指引</p>
+                            <p className="text-sm font-medium text-[var(--ink)]">{t('agentSettings.channelWizard.config.setupGuide')}</p>
                             {promoted.setupGuide.steps.map((guideStep, i) => {
                                 const linkText = guideStep.captionLinkText;
                                 const linkUrl = guideStep.captionLinkUrl;
@@ -1419,7 +1431,7 @@ export default function ChannelWizard({
                     {/* Action bar at top */}
                     {renderActionBar({
                         onNext: handleNext,
-                        nextLabel: '下一步',
+                        nextLabel: t('agentSettings.channelWizard.nav.next'),
                         nextDisabled: !hasCredentials || starting,
                         nextLoading: starting,
                         nextIcon: !starting ? <ArrowRight className="h-4 w-4" /> : undefined,
@@ -1439,21 +1451,23 @@ export default function ChannelWizard({
                                 />
                             </div>
                             <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
-                                <p className="text-sm font-medium text-[var(--ink)]">如何获取钉钉应用凭证？</p>
+                                <p className="text-sm font-medium text-[var(--ink)]">
+                                    {t('agentSettings.channelWizard.guides.dingtalk.credentialsTitle')}
+                                </p>
                                 <ol className="mt-3 space-y-1.5 text-sm text-[var(--ink-muted)]">
-                                    <li>1. 登录<a
+                                    <li>{t('agentSettings.channelWizard.guides.dingtalk.credentialsStep1Prefix')}<a
                                         href="https://open-dev.dingtalk.com"
                                         target="_blank"
                                         rel="noopener noreferrer"
                                         className="mx-0.5 inline-flex items-center gap-0.5 text-[var(--button-primary-bg)] hover:underline"
                                     >
-                                        钉钉开放平台
-                                    </a>，进入 <span className="font-medium text-[var(--ink)]">应用开发</span> &gt; <span className="font-medium text-[var(--ink)]">钉钉应用</span></li>
-                                    <li>2. 点击右上角 <span className="font-medium text-[var(--ink)]">创建应用</span>，填写应用名称和描述</li>
-                                    <li>3. 创建后进入应用详情，在左侧菜单 <span className="font-medium text-[var(--ink)]">凭证与基础信息</span> 页获取 Client ID 和 Client Secret</li>
+                                        {t('agentSettings.channelWizard.guides.dingtalk.openPlatform')}
+                                    </a>{t('agentSettings.channelWizard.guides.dingtalk.credentialsStep1Middle')}<span className="font-medium text-[var(--ink)]">{t('agentSettings.channelWizard.guides.dingtalk.appDevelopment')}</span> &gt; <span className="font-medium text-[var(--ink)]">{t('agentSettings.channelWizard.guides.dingtalk.dingtalkApps')}</span></li>
+                                    <li>{t('agentSettings.channelWizard.guides.dingtalk.credentialsStep2Prefix')}<span className="font-medium text-[var(--ink)]">{t('agentSettings.channelWizard.guides.dingtalk.createApp')}</span>{t('agentSettings.channelWizard.guides.dingtalk.credentialsStep2Suffix')}</li>
+                                    <li>{t('agentSettings.channelWizard.guides.dingtalk.credentialsStep3Prefix')}<span className="font-medium text-[var(--ink)]">{t('agentSettings.channelWizard.guides.dingtalk.credentialsBasicInfo')}</span>{t('agentSettings.channelWizard.guides.dingtalk.credentialsStep3Suffix')}</li>
                                 </ol>
-                                <img src={dingtalkStep1CreateAppImg} alt="钉钉开放平台 - 创建应用" className="mt-4 w-full rounded-lg border border-[var(--line)]" />
-                                <img src={dingtalkStep1CredentialsImg} alt="钉钉凭证与基础信息" className="mt-4 w-full rounded-lg border border-[var(--line)]" />
+                                <img src={dingtalkStep1CreateAppImg} alt={t('agentSettings.channelWizard.guides.dingtalk.altCreateApp')} className="mt-4 w-full rounded-lg border border-[var(--line)]" />
+                                <img src={dingtalkStep1CredentialsImg} alt={t('agentSettings.channelWizard.guides.dingtalk.altCredentials')} className="mt-4 w-full rounded-lg border border-[var(--line)]" />
                             </div>
                         </div>
                     ) : isFeishu ? (
@@ -1470,20 +1484,22 @@ export default function ChannelWizard({
                                 />
                             </div>
                             <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
-                                <p className="text-sm font-medium text-[var(--ink)]">如何获取飞书应用凭证？</p>
+                                <p className="text-sm font-medium text-[var(--ink)]">
+                                    {t('agentSettings.channelWizard.guides.feishu.credentialsTitle')}
+                                </p>
                                 <ol className="mt-3 space-y-1.5 text-sm text-[var(--ink-muted)]">
-                                    <li>1. 登录<a
+                                    <li>{t('agentSettings.channelWizard.guides.feishu.credentialsStep1Prefix')}<a
                                         href="https://open.feishu.cn/app"
                                         target="_blank"
                                         rel="noopener noreferrer"
                                         className="mx-0.5 inline-flex items-center gap-0.5 text-[var(--button-primary-bg)] hover:underline"
                                     >
-                                        飞书开放平台
-                                    </a>并创建自建应用</li>
-                                    <li>2. 在「凭证与基础信息」页获取 App ID 和 App Secret 填入上方</li>
-                                    <li>3. 填入凭证后点击「下一步」，会引导你完成权限、事件订阅、添加机器人能力等设置</li>
+                                        {t('agentSettings.channelWizard.guides.feishu.openPlatform')}
+                                    </a>{t('agentSettings.channelWizard.guides.feishu.credentialsStep1Suffix')}</li>
+                                    <li>{t('agentSettings.channelWizard.guides.feishu.credentialsStep2')}</li>
+                                    <li>{t('agentSettings.channelWizard.guides.feishu.credentialsStep3')}</li>
                                 </ol>
-                                <img src={feishuStep1Img} alt="飞书开放平台 - 凭证与基础信息" className="mt-4 w-full rounded-lg border border-[var(--line)]" />
+                                <img src={feishuStep1Img} alt={t('agentSettings.channelWizard.guides.feishu.altCredentials')} className="mt-4 w-full rounded-lg border border-[var(--line)]" />
                             </div>
                         </div>
                     ) : (
@@ -1498,20 +1514,20 @@ export default function ChannelWizard({
                             </div>
                             <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
                                 <h3 className="text-sm font-medium text-[var(--ink)]">
-                                    如何获取 Bot Token？
+                                    {t('agentSettings.channelWizard.guides.telegram.tokenTitle')}
                                 </h3>
                                 <div className="mt-3 flex gap-5">
                                     <img
                                         src={telegramBotAddImg}
-                                        alt="Telegram BotFather tutorial"
+                                        alt={t('agentSettings.channelWizard.guides.telegram.altBotFather')}
                                         className="h-[270px] flex-shrink-0 rounded-lg border border-[var(--line)] object-cover"
                                     />
                                     <ol className="flex-1 space-y-2 text-sm text-[var(--ink-muted)]">
-                                        <li>1. 扫左侧二维码，或在 Telegram 中搜索 <span className="font-medium text-[var(--ink)]">@BotFather</span></li>
-                                        <li>2. 发送 <code className="rounded bg-[var(--paper-inset)] px-1.5 py-0.5 text-xs">/newbot</code> 创建新 Bot</li>
-                                        <li>3. 按提示设置 Bot 名称和用户名</li>
-                                        <li>4. 复制返回的 <span className="font-medium text-[var(--ink)]">HTTP API Token</span></li>
-                                        <li>5. 粘贴到上方的 Bot Token 输入框</li>
+                                        <li>{t('agentSettings.channelWizard.guides.telegram.step1Prefix')}<span className="font-medium text-[var(--ink)]">@BotFather</span>{t('agentSettings.channelWizard.guides.telegram.step1Suffix')}</li>
+                                        <li>{t('agentSettings.channelWizard.guides.telegram.step2Prefix')}<code className="rounded bg-[var(--paper-inset)] px-1.5 py-0.5 text-xs">/newbot</code>{t('agentSettings.channelWizard.guides.telegram.step2Suffix')}</li>
+                                        <li>{t('agentSettings.channelWizard.guides.telegram.step3')}</li>
+                                        <li>{t('agentSettings.channelWizard.guides.telegram.step4Prefix')}<span className="font-medium text-[var(--ink)]">HTTP API Token</span></li>
+                                        <li>{t('agentSettings.channelWizard.guides.telegram.step5')}</li>
                                     </ol>
                                 </div>
                             </div>
@@ -1527,39 +1543,45 @@ export default function ChannelWizard({
                     {renderActionBar({
                         onBack: () => setStep(1),
                         onNext: handleNext,
-                        nextLabel: '下一步',
+                        nextLabel: t('agentSettings.channelWizard.nav.next'),
                         nextIcon: <ArrowRight className="h-4 w-4" />,
                     })}
 
                     <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
-                        <h3 className="text-sm font-medium text-[var(--ink)]">4. 添加机器人能力</h3>
+                        <h3 className="text-sm font-medium text-[var(--ink)]">
+                            {t('agentSettings.channelWizard.guides.dingtalk.addBotTitle')}
+                        </h3>
                         <ol className="mt-3 space-y-1.5 text-sm text-[var(--ink-muted)]">
-                            <li>在应用详情页，左侧菜单进入 <span className="font-medium text-[var(--ink)]">添加应用能力</span></li>
-                            <li>找到 <span className="font-medium text-[var(--ink)]">机器人</span> 卡片，点击 <span className="font-medium text-[var(--ink)]">+ 添加</span></li>
+                            <li>{t('agentSettings.channelWizard.guides.dingtalk.addBotStep1Prefix')}<span className="font-medium text-[var(--ink)]">{t('agentSettings.channelWizard.guides.dingtalk.addCapability')}</span></li>
+                            <li>{t('agentSettings.channelWizard.guides.dingtalk.addBotStep2Prefix')}<span className="font-medium text-[var(--ink)]">{t('agentSettings.channelWizard.guides.dingtalk.bot')}</span>{t('agentSettings.channelWizard.guides.dingtalk.addBotStep2Middle')}<span className="font-medium text-[var(--ink)]">+ {t('agentSettings.channelWizard.guides.dingtalk.add')}</span></li>
                         </ol>
-                        <img src={dingtalkStep2AddRobotImg} alt="钉钉添加应用能力 - 机器人" className="mt-4 w-full rounded-lg border border-[var(--line)]" />
+                        <img src={dingtalkStep2AddRobotImg} alt={t('agentSettings.channelWizard.guides.dingtalk.altAddBot')} className="mt-4 w-full rounded-lg border border-[var(--line)]" />
                     </div>
 
                     <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
-                        <h3 className="text-sm font-medium text-[var(--ink)]">5. 配置机器人</h3>
+                        <h3 className="text-sm font-medium text-[var(--ink)]">
+                            {t('agentSettings.channelWizard.guides.dingtalk.configureBotTitle')}
+                        </h3>
                         <ol className="mt-3 space-y-1.5 text-sm text-[var(--ink-muted)]">
-                            <li>左侧菜单进入 <span className="font-medium text-[var(--ink)]">机器人</span>，开启 <span className="font-medium text-[var(--ink)]">机器人配置</span> 开关</li>
-                            <li>填写机器人名称和简介</li>
-                            <li>消息接收模式选择 <span className="font-medium text-[var(--ink)]">Stream 模式</span>（无需公网服务器，推荐）</li>
-                            <li>点击 <span className="font-medium text-[var(--ink)]">发布</span> 保存机器人配置</li>
+                            <li>{t('agentSettings.channelWizard.guides.dingtalk.configureBotStep1Prefix')}<span className="font-medium text-[var(--ink)]">{t('agentSettings.channelWizard.guides.dingtalk.bot')}</span>{t('agentSettings.channelWizard.guides.dingtalk.configureBotStep1Middle')}<span className="font-medium text-[var(--ink)]">{t('agentSettings.channelWizard.guides.dingtalk.botConfig')}</span>{t('agentSettings.channelWizard.guides.dingtalk.configureBotStep1Suffix')}</li>
+                            <li>{t('agentSettings.channelWizard.guides.dingtalk.configureBotStep2')}</li>
+                            <li>{t('agentSettings.channelWizard.guides.dingtalk.configureBotStep3Prefix')}<span className="font-medium text-[var(--ink)]">{t('agentSettings.channelWizard.guides.dingtalk.streamMode')}</span>{t('agentSettings.channelWizard.guides.dingtalk.configureBotStep3Suffix')}</li>
+                            <li>{t('agentSettings.channelWizard.guides.dingtalk.configureBotStep4Prefix')}<span className="font-medium text-[var(--ink)]">{t('agentSettings.channelWizard.guides.dingtalk.publish')}</span>{t('agentSettings.channelWizard.guides.dingtalk.configureBotStep4Suffix')}</li>
                         </ol>
-                        <img src={dingtalkStep2StreamModeImg} alt="钉钉机器人配置 - Stream 模式" className="mt-4 w-full rounded-lg border border-[var(--line)]" />
+                        <img src={dingtalkStep2StreamModeImg} alt={t('agentSettings.channelWizard.guides.dingtalk.altStreamMode')} className="mt-4 w-full rounded-lg border border-[var(--line)]" />
                     </div>
 
                     <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
-                        <h3 className="text-sm font-medium text-[var(--ink)]">6. 创建版本并发布</h3>
+                        <h3 className="text-sm font-medium text-[var(--ink)]">
+                            {t('agentSettings.channelWizard.guides.dingtalk.publishTitle')}
+                        </h3>
                         <ol className="mt-3 space-y-1.5 text-sm text-[var(--ink-muted)]">
-                            <li>左侧菜单进入 <span className="font-medium text-[var(--ink)]">版本管理与发布</span></li>
-                            <li>点击右上角 <span className="font-medium text-[var(--ink)]">创建新版本</span>，填写版本号和描述</li>
-                            <li>设置 <span className="font-medium text-[var(--ink)]">应用可用范围</span>（建议选择<span className="font-medium text-[var(--ink)]">全部员工</span>或目标范围）</li>
-                            <li>保存后提交发布，管理员审批通过后即可使用</li>
+                            <li>{t('agentSettings.channelWizard.guides.dingtalk.publishStep1Prefix')}<span className="font-medium text-[var(--ink)]">{t('agentSettings.channelWizard.guides.dingtalk.versionRelease')}</span></li>
+                            <li>{t('agentSettings.channelWizard.guides.dingtalk.publishStep2Prefix')}<span className="font-medium text-[var(--ink)]">{t('agentSettings.channelWizard.guides.dingtalk.createVersion')}</span>{t('agentSettings.channelWizard.guides.dingtalk.publishStep2Suffix')}</li>
+                            <li>{t('agentSettings.channelWizard.guides.dingtalk.publishStep3Prefix')}<span className="font-medium text-[var(--ink)]">{t('agentSettings.channelWizard.guides.dingtalk.appAvailableScope')}</span>{t('agentSettings.channelWizard.guides.dingtalk.publishStep3Middle')}<span className="font-medium text-[var(--ink)]">{t('agentSettings.channelWizard.guides.dingtalk.allEmployees')}</span>{t('agentSettings.channelWizard.guides.dingtalk.publishStep3Suffix')}</li>
+                            <li>{t('agentSettings.channelWizard.guides.dingtalk.publishStep4')}</li>
                         </ol>
-                        <img src={dingtalkStep2PublishImg} alt="钉钉版本管理与发布" className="mt-4 w-full rounded-lg border border-[var(--line)]" />
+                        <img src={dingtalkStep2PublishImg} alt={t('agentSettings.channelWizard.guides.dingtalk.altPublish')} className="mt-4 w-full rounded-lg border border-[var(--line)]" />
                     </div>
                 </div>
             )}
@@ -1571,7 +1593,7 @@ export default function ChannelWizard({
                     {renderActionBar({
                         onBack: () => setStep(1),
                         onNext: handleNext,
-                        nextLabel: '下一步',
+                        nextLabel: t('agentSettings.channelWizard.nav.next'),
                         nextIcon: <ArrowRight className="h-4 w-4" />,
                     })}
 
@@ -1579,25 +1601,31 @@ export default function ChannelWizard({
                     <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-inset)] px-4 py-3">
                         <div className="flex items-center gap-2 text-sm text-[var(--ink)]">
                             <Check className="h-4 w-4 text-[var(--success)]" />
-                            <span>凭证已验证{botUsername ? `：${botUsername}` : ''}</span>
+                            <span>
+                                {botUsername
+                                    ? t('agentSettings.channelWizard.guides.feishu.credentialVerifiedWithName', { name: botUsername })
+                                    : t('agentSettings.channelWizard.guides.feishu.credentialVerified')}
+                            </span>
                         </div>
                         <p className="mt-1.5 pl-6 text-xs text-[var(--ink-muted)]">
-                            按照下面 3 步在飞书开放平台完成权限、事件订阅、版本发布，然后点上方「下一步」继续绑定。
+                            {t('agentSettings.channelWizard.guides.feishu.nextHint')}
                         </p>
                     </div>
 
                     <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
-                        <h3 className="text-sm font-medium text-[var(--ink)]">4. 配置权限</h3>
+                        <h3 className="text-sm font-medium text-[var(--ink)]">
+                            {t('agentSettings.channelWizard.guides.feishu.permissionsTitle', { step: 4 })}
+                        </h3>
                         <ol className="mt-3 space-y-1.5 text-sm text-[var(--ink-muted)]">
-                            <li>左侧菜单进入 <span className="font-medium text-[var(--ink)]">权限管理</span></li>
-                            <li>点击 <span className="font-medium text-[var(--ink)]">批量导入</span></li>
-                            <li>粘贴以下 JSON（一键导入所有需要的权限）：</li>
+                            <li>{t('agentSettings.channelWizard.guides.feishu.permissionsStep1Prefix')}<span className="font-medium text-[var(--ink)]">{t('agentSettings.channelWizard.guides.feishu.permissionManagement')}</span></li>
+                            <li>{t('agentSettings.channelWizard.guides.feishu.permissionsStep2Prefix')}<span className="font-medium text-[var(--ink)]">{t('agentSettings.channelWizard.guides.feishu.batchImport')}</span></li>
+                            <li>{t('agentSettings.channelWizard.guides.feishu.permissionsStep3')}</li>
                         </ol>
                         <div className="mt-3 relative">
                             <button
                                 onClick={handleCopyPermJson}
                                 className="absolute right-2 top-2 rounded-md border border-[var(--line)] bg-[var(--paper-elevated)] p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
-                                title="复制 JSON"
+                                title={t('agentSettings.channelWizard.guides.feishu.copyJson')}
                             >
                                 {permJsonCopied ? <Check className="h-3.5 w-3.5 text-[var(--success)]" /> : <Copy className="h-3.5 w-3.5" />}
                             </button>
@@ -1605,26 +1633,30 @@ export default function ChannelWizard({
                                 {FEISHU_PERMISSIONS_JSON}
                             </pre>
                         </div>
-                        <img src={feishuStep2PermImg} alt="飞书权限管理 - 批量导入" className="mt-4 w-full rounded-lg border border-[var(--line)]" />
+                        <img src={feishuStep2PermImg} alt={t('agentSettings.channelWizard.guides.feishu.altPermissions')} className="mt-4 w-full rounded-lg border border-[var(--line)]" />
                     </div>
 
                     <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
-                        <h3 className="text-sm font-medium text-[var(--ink)]">5. 配置事件订阅</h3>
+                        <h3 className="text-sm font-medium text-[var(--ink)]">
+                            {t('agentSettings.channelWizard.guides.feishu.eventsTitle', { step: 5 })}
+                        </h3>
                         <ol className="mt-3 space-y-1.5 text-sm text-[var(--ink-muted)]">
-                            <li>左侧菜单进入 <span className="font-medium text-[var(--ink)]">事件与回调</span> &gt; <span className="font-medium text-[var(--ink)]">事件配置</span></li>
-                            <li>请求方式选择：<span className="font-medium text-[var(--ink)]">使用长连接接收事件</span>（不需要公网服务器）</li>
-                            <li>添加事件：搜索 <code className="rounded bg-[var(--paper-inset)] px-1.5 py-0.5 text-xs">im.message.receive_v1</code>（接收消息），勾选添加</li>
+                            <li>{t('agentSettings.channelWizard.guides.feishu.eventsStep1Prefix')}<span className="font-medium text-[var(--ink)]">{t('agentSettings.channelWizard.guides.feishu.eventsCallbacks')}</span> &gt; <span className="font-medium text-[var(--ink)]">{t('agentSettings.channelWizard.guides.feishu.eventConfig')}</span></li>
+                            <li>{t('agentSettings.channelWizard.guides.feishu.eventsStep2Prefix')}<span className="font-medium text-[var(--ink)]">{t('agentSettings.channelWizard.guides.feishu.longConnection')}</span>{t('agentSettings.channelWizard.guides.feishu.eventsStep2Suffix')}</li>
+                            <li>{t('agentSettings.channelWizard.guides.feishu.eventsStep3Prefix')}<code className="rounded bg-[var(--paper-inset)] px-1.5 py-0.5 text-xs">im.message.receive_v1</code>{t('agentSettings.channelWizard.guides.feishu.eventsStep3Suffix')}</li>
                         </ol>
-                        <img src={feishuStep2EventImg} alt="飞书事件与回调 - 事件配置" className="mt-4 w-full rounded-lg border border-[var(--line)]" />
+                        <img src={feishuStep2EventImg} alt={t('agentSettings.channelWizard.guides.feishu.altEvents')} className="mt-4 w-full rounded-lg border border-[var(--line)]" />
                     </div>
 
                     <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
-                        <h3 className="text-sm font-medium text-[var(--ink)]">6. 创建版本并发布</h3>
+                        <h3 className="text-sm font-medium text-[var(--ink)]">
+                            {t('agentSettings.channelWizard.guides.feishu.publishTitle', { step: 6 })}
+                        </h3>
                         <ol className="mt-3 space-y-1.5 text-sm text-[var(--ink-muted)]">
-                            <li>左侧菜单进入 <span className="font-medium text-[var(--ink)]">版本管理与发布</span></li>
-                            <li>点击右上角 <span className="font-medium text-[var(--ink)]">创建版本</span>，填写版本信息后提交发布</li>
+                            <li>{t('agentSettings.channelWizard.guides.feishu.publishStep1Prefix')}<span className="font-medium text-[var(--ink)]">{t('agentSettings.channelWizard.guides.feishu.versionRelease')}</span></li>
+                            <li>{t('agentSettings.channelWizard.guides.feishu.publishStep2Prefix')}<span className="font-medium text-[var(--ink)]">{t('agentSettings.channelWizard.guides.feishu.createVersion')}</span>{t('agentSettings.channelWizard.guides.feishu.publishStep2Suffix')}</li>
                         </ol>
-                        <img src={feishuStep2PublishImg} alt="飞书版本管理与发布" className="mt-4 w-full rounded-lg border border-[var(--line)]" />
+                        <img src={feishuStep2PublishImg} alt={t('agentSettings.channelWizard.guides.feishu.altPublish')} className="mt-4 w-full rounded-lg border border-[var(--line)]" />
                     </div>
                 </div>
             )}
@@ -1637,7 +1669,9 @@ export default function ChannelWizard({
                     {renderActionBar({
                         onBack: () => setStep(1),
                         onNext: handleOpenClawStart,
-                        nextLabel: starting ? '启动中…' : '启动 Channel',
+                        nextLabel: starting
+                            ? t('agentSettings.channelWizard.nav.starting')
+                            : t('agentSettings.channelWizard.nav.startChannel'),
                         nextDisabled: starting,
                         nextLoading: starting,
                         nextIcon: !starting ? <Check className="h-4 w-4" /> : undefined,
@@ -1648,10 +1682,10 @@ export default function ChannelWizard({
                         <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-inset)] px-4 py-3">
                             <div className="flex items-center gap-2 text-sm text-[var(--ink)]">
                                 <Check className="h-4 w-4 text-[var(--success)]" />
-                                <span>已填入 {openclawPluginName} 凭证</span>
+                                <span>{t('agentSettings.channelWizard.openclaw.credentialsEntered', { name: openclawPluginName })}</span>
                             </div>
                             <p className="mt-1.5 pl-6 text-xs text-[var(--ink-muted)]">
-                                按照下面 3 步在飞书开放平台完成权限、事件订阅、添加机器人能力，全部完成后点上方「启动 Channel」验证并启动。
+                                {t('agentSettings.channelWizard.openclaw.larkNextHint')}
                             </p>
                         </div>
                     )}
@@ -1660,17 +1694,19 @@ export default function ChannelWizard({
                     {promoted?.pluginId === 'openclaw-lark' && (
                         <>
                             <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
-                                <h3 className="text-sm font-medium text-[var(--ink)]">2. 配置权限</h3>
+                                <h3 className="text-sm font-medium text-[var(--ink)]">
+                                    {t('agentSettings.channelWizard.guides.feishu.permissionsTitle', { step: 2 })}
+                                </h3>
                                 <ol className="mt-3 space-y-1.5 text-sm text-[var(--ink-muted)]">
-                                    <li>左侧菜单进入 <span className="font-medium text-[var(--ink)]">权限管理</span></li>
-                                    <li>点击 <span className="font-medium text-[var(--ink)]">批量导入</span></li>
-                                    <li>粘贴以下 JSON（一键导入所有需要的权限）：</li>
+                                    <li>{t('agentSettings.channelWizard.guides.feishu.permissionsStep1Prefix')}<span className="font-medium text-[var(--ink)]">{t('agentSettings.channelWizard.guides.feishu.permissionManagement')}</span></li>
+                                    <li>{t('agentSettings.channelWizard.guides.feishu.permissionsStep2Prefix')}<span className="font-medium text-[var(--ink)]">{t('agentSettings.channelWizard.guides.feishu.batchImport')}</span></li>
+                                    <li>{t('agentSettings.channelWizard.guides.feishu.permissionsStep3')}</li>
                                 </ol>
                                 <div className="mt-3 relative">
                                     <button
                                         onClick={handleCopyPermJson}
                                         className="absolute right-2 top-2 rounded-md border border-[var(--line)] bg-[var(--paper-elevated)] p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
-                                        title="复制 JSON"
+                                        title={t('agentSettings.channelWizard.guides.feishu.copyJson')}
                                     >
                                         {permJsonCopied ? <Check className="h-3.5 w-3.5 text-[var(--success)]" /> : <Copy className="h-3.5 w-3.5" />}
                                     </button>
@@ -1678,26 +1714,30 @@ export default function ChannelWizard({
                                         {FEISHU_PERMISSIONS_JSON}
                                     </pre>
                                 </div>
-                                <img src={feishuStep2PermImg} alt="飞书权限管理 - 批量导入" className="mt-4 w-full rounded-lg border border-[var(--line)]" />
+                                <img src={feishuStep2PermImg} alt={t('agentSettings.channelWizard.guides.feishu.altPermissions')} className="mt-4 w-full rounded-lg border border-[var(--line)]" />
                             </div>
 
                             <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
-                                <h3 className="text-sm font-medium text-[var(--ink)]">3. 配置事件订阅</h3>
+                                <h3 className="text-sm font-medium text-[var(--ink)]">
+                                    {t('agentSettings.channelWizard.guides.feishu.eventsTitle', { step: 3 })}
+                                </h3>
                                 <ol className="mt-3 space-y-1.5 text-sm text-[var(--ink-muted)]">
-                                    <li>左侧菜单进入 <span className="font-medium text-[var(--ink)]">事件与回调</span> &gt; <span className="font-medium text-[var(--ink)]">事件配置</span></li>
-                                    <li>请求方式选择：<span className="font-medium text-[var(--ink)]">使用长连接接收事件</span>（不需要公网服务器）</li>
-                                    <li>添加事件：搜索 <code className="rounded bg-[var(--paper-inset)] px-1.5 py-0.5 text-xs">im.message.receive_v1</code>（接收消息），勾选添加</li>
+                                    <li>{t('agentSettings.channelWizard.guides.feishu.eventsStep1Prefix')}<span className="font-medium text-[var(--ink)]">{t('agentSettings.channelWizard.guides.feishu.eventsCallbacks')}</span> &gt; <span className="font-medium text-[var(--ink)]">{t('agentSettings.channelWizard.guides.feishu.eventConfig')}</span></li>
+                                    <li>{t('agentSettings.channelWizard.guides.feishu.eventsStep2Prefix')}<span className="font-medium text-[var(--ink)]">{t('agentSettings.channelWizard.guides.feishu.longConnection')}</span>{t('agentSettings.channelWizard.guides.feishu.eventsStep2Suffix')}</li>
+                                    <li>{t('agentSettings.channelWizard.guides.feishu.eventsStep3Prefix')}<code className="rounded bg-[var(--paper-inset)] px-1.5 py-0.5 text-xs">im.message.receive_v1</code>{t('agentSettings.channelWizard.guides.feishu.eventsStep3Suffix')}</li>
                                 </ol>
-                                <img src={feishuStep2EventImg} alt="飞书事件与回调 - 事件配置" className="mt-4 w-full rounded-lg border border-[var(--line)]" />
+                                <img src={feishuStep2EventImg} alt={t('agentSettings.channelWizard.guides.feishu.altEvents')} className="mt-4 w-full rounded-lg border border-[var(--line)]" />
                             </div>
 
                             <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
-                                <h3 className="text-sm font-medium text-[var(--ink)]">4. 添加机器人能力并发布</h3>
+                                <h3 className="text-sm font-medium text-[var(--ink)]">
+                                    {t('agentSettings.channelWizard.guides.feishu.botPublishTitle', { step: 4 })}
+                                </h3>
                                 <ol className="mt-3 space-y-1.5 text-sm text-[var(--ink-muted)]">
-                                    <li>左侧菜单进入 <span className="font-medium text-[var(--ink)]">添加应用能力</span>，找到 <span className="font-medium text-[var(--ink)]">机器人</span> 卡片，点击添加</li>
-                                    <li>左侧菜单进入 <span className="font-medium text-[var(--ink)]">版本管理与发布</span>，点击 <span className="font-medium text-[var(--ink)]">创建版本</span>，提交发布</li>
+                                    <li>{t('agentSettings.channelWizard.guides.feishu.botPublishStep1Prefix')}<span className="font-medium text-[var(--ink)]">{t('agentSettings.channelWizard.guides.feishu.addCapability')}</span>{t('agentSettings.channelWizard.guides.feishu.botPublishStep1Middle')}<span className="font-medium text-[var(--ink)]">{t('agentSettings.channelWizard.guides.feishu.bot')}</span>{t('agentSettings.channelWizard.guides.feishu.botPublishStep1Suffix')}</li>
+                                    <li>{t('agentSettings.channelWizard.guides.feishu.botPublishStep2Prefix')}<span className="font-medium text-[var(--ink)]">{t('agentSettings.channelWizard.guides.feishu.versionRelease')}</span>{t('agentSettings.channelWizard.guides.feishu.botPublishStep2Middle')}<span className="font-medium text-[var(--ink)]">{t('agentSettings.channelWizard.guides.feishu.createVersion')}</span>{t('agentSettings.channelWizard.guides.feishu.botPublishStep2Suffix')}</li>
                                 </ol>
-                                <img src={feishuStep2AddBotImg} alt="飞书添加机器人能力" className="mt-4 w-full rounded-lg border border-[var(--line)]" />
+                                <img src={feishuStep2AddBotImg} alt={t('agentSettings.channelWizard.guides.feishu.altAddBot')} className="mt-4 w-full rounded-lg border border-[var(--line)]" />
                             </div>
                         </>
                     )}
@@ -1717,9 +1757,9 @@ export default function ChannelWizard({
                     {/* Confirm panel (non-lark): lark uses the top status strip instead */}
                     {promoted?.pluginId !== 'openclaw-lark' && (
                         <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
-                            <h3 className="text-sm font-medium text-[var(--ink)]">确认配置</h3>
+                            <h3 className="text-sm font-medium text-[var(--ink)]">{t('agentSettings.channelWizard.openclaw.confirmTitle')}</h3>
                             <p className="mt-1.5 text-xs text-[var(--ink-muted)]">
-                                确认以上设置完成后，点击「启动 Channel」
+                                {t('agentSettings.channelWizard.openclaw.confirmDescription')}
                             </p>
 
                             <div className="mt-4 space-y-3">
@@ -1744,8 +1784,10 @@ export default function ChannelWizard({
                                     const count = Object.keys(cfg).length;
                                     return count > 0 ? (
                                         <div className="flex items-center justify-between rounded-lg border border-[var(--line)] p-3">
-                                            <span className="text-xs text-[var(--ink-muted)]">配置项</span>
-                                            <span className="text-sm text-[var(--ink)]">{count} 个</span>
+                                            <span className="text-xs text-[var(--ink-muted)]">{t('agentSettings.channelWizard.openclaw.configItems')}</span>
+                                            <span className="text-sm text-[var(--ink)]">
+                                                {t('agentSettings.channelWizard.openclaw.configItemsCount', { count })}
+                                            </span>
                                         </div>
                                     ) : null;
                                 })()}
@@ -1762,7 +1804,7 @@ export default function ChannelWizard({
                     {renderActionBar({
                         onBack: isQrLogin ? undefined : () => setStep((isFeishu || isDingtalk || isOpenClaw) ? 2 : 1),
                         onNext: handleComplete,
-                        nextLabel: '完成',
+                        nextLabel: t('agentSettings.channelWizard.nav.finish'),
                         nextIcon: <Check className="h-4 w-4" />,
                     })}
 
@@ -1771,15 +1813,17 @@ export default function ChannelWizard({
                             <BindCodePanel
                                 bindCode={botStatus.bindCode}
                                 hasWhitelistUsers={allowedUsers.length > 0}
-                                platformName={isOpenClaw ? platformLabel : isDingtalk ? '钉钉' : '飞书'}
+                                platformName={isOpenClaw ? platformLabel : isDingtalk
+                                    ? t('agentSettings.channelWizard.platform.dingtalk')
+                                    : t('agentSettings.channelWizard.platform.feishu')}
                             />
                         )
                     ) : isQrLogin ? (
                         <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
                             <div className="space-y-3">
-                                <label className="text-sm font-medium text-[var(--ink)]">用户绑定</label>
+                                <label className="text-sm font-medium text-[var(--ink)]">{t('agentSettings.channelWizard.binding.title')}</label>
                                 <p className="text-xs text-[var(--ink-muted)]">
-                                    扫码即可使用，无需手动绑定用户。
+                                    {t('agentSettings.channelWizard.binding.qrOnly')}
                                 </p>
                             </div>
                         </div>

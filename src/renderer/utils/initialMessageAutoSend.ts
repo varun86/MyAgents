@@ -4,6 +4,7 @@ export interface InitialMessageAutoSendGate {
   hasSessionId: boolean;
   isConnected: boolean;
   isActive: boolean;
+  runtimeReady?: boolean;
 }
 
 /**
@@ -16,5 +17,6 @@ export function shouldAutoSendInitialMessage(args: InitialMessageAutoSendGate): 
   if (args.alreadyConsumed) return false;
   if (!args.hasSessionId) return false;
   if (!args.isConnected) return false;
+  if (args.runtimeReady === false) return false;
   return true;
 }

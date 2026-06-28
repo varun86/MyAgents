@@ -4,6 +4,7 @@
  */
 import React, { useEffect, useRef, useState } from 'react';
 import { Loader2, FolderOpen, Link2 } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 import { isTauriEnvironment } from '@/utils/browserMock';
 import { useCloseLayer } from '@/hooks/useCloseLayer';
 import OverlayBackdrop from '@/components/OverlayBackdrop';
@@ -29,6 +30,7 @@ export function CreateDialog({
     onCancel,
     loading
 }: CreateDialogProps) {
+    const { t } = useTranslation('settings');
     useCloseLayer(() => { onCancel(); return true; }, 300);
 
     return (
@@ -37,23 +39,23 @@ export function CreateDialog({
                 <h3 className="text-lg font-semibold text-[var(--ink)]">{title}</h3>
                 <div className="mt-4 space-y-4">
                     <div>
-                        <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">名称</label>
+                        <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">{t('agentSettings.common.name')}</label>
                         <input
                             type="text"
                             value={name}
                             onChange={(e) => onNameChange(e.target.value)}
-                            placeholder="例如：my-skill"
+                            placeholder={t('agentSettings.skillDialogs.namePlaceholder')}
                             className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 text-sm text-[var(--ink)] placeholder-[var(--ink-muted)] focus:border-[var(--accent)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)]/20"
                             autoFocus
                         />
                     </div>
                     <div>
-                        <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">描述 (可选)</label>
+                        <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">{t('agentSettings.skillDialogs.descriptionLabel')}</label>
                         <input
                             type="text"
                             value={description}
                             onChange={(e) => onDescriptionChange(e.target.value)}
-                            placeholder="简短描述这个技能/指令的用途"
+                            placeholder={t('agentSettings.skillDialogs.descriptionPlaceholder')}
                             className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 text-sm text-[var(--ink)] placeholder-[var(--ink-muted)] focus:border-[var(--accent)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)]/20"
                         />
                     </div>
@@ -64,7 +66,7 @@ export function CreateDialog({
                         onClick={onCancel}
                         className="rounded-lg px-4 py-2 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)]"
                     >
-                        取消
+                        {t('agentSettings.common.cancel')}
                     </button>
                     <button
                         type="button"
@@ -73,7 +75,7 @@ export function CreateDialog({
                         className="flex items-center gap-2 rounded-lg bg-[var(--button-primary-bg)] px-4 py-2 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:opacity-50"
                     >
                         {loading && <Loader2 className="h-4 w-4 animate-spin" />}
-                        创建
+                        {t('agentSettings.common.create')}
                     </button>
                 </div>
             </div>
@@ -105,6 +107,7 @@ export function NewSkillChooser({
     onCancel,
     syncConfig
 }: NewSkillChooserProps) {
+    const { t } = useTranslation('settings');
     useCloseLayer(() => { onCancel(); return true; }, 300);
 
     const fileInputRef = useRef<HTMLInputElement>(null);
@@ -132,7 +135,7 @@ export function NewSkillChooser({
             const selected = await open({
                 directory: true,
                 multiple: false,
-                title: '选择技能文件夹（需包含 SKILL.md）',
+                title: t('agentSettings.skillDialogs.folderPickerTitle'),
             });
 
             if (selected && typeof selected === 'string') {
@@ -160,7 +163,7 @@ export function NewSkillChooser({
         <OverlayBackdrop className="z-[300]">
             <div className="w-full max-w-md rounded-2xl bg-[var(--paper-elevated)] p-6 shadow-2xl">
                 <div className="flex items-center justify-between">
-                    <h3 className="text-lg font-semibold text-[var(--ink)]">新建技能</h3>
+                    <h3 className="text-lg font-semibold text-[var(--ink)]">{t('agentSettings.skillDialogs.newSkillTitle')}</h3>
                     <button
                         type="button"
                         onClick={onCancel}
@@ -185,8 +188,8 @@ export function NewSkillChooser({
                             </svg>
                         </div>
                         <div>
-                            <div className="font-medium text-[var(--ink)]">直接编写技能</div>
-                            <p className="mt-0.5 text-sm text-[var(--ink-muted)]">适合简单易描述的技能</p>
+                            <div className="font-medium text-[var(--ink)]">{t('agentSettings.skillDialogs.writeSkillTitle')}</div>
+                            <p className="mt-0.5 text-sm text-[var(--ink-muted)]">{t('agentSettings.skillDialogs.writeSkillDescription')}</p>
                         </div>
                     </button>
 
@@ -204,8 +207,8 @@ export function NewSkillChooser({
                             </svg>
                         </div>
                         <div>
-                            <div className="font-medium text-[var(--ink)]">上传技能</div>
-                            <p className="mt-0.5 text-sm text-[var(--ink-muted)]">导入 .zip、.skill 或 .md 文件</p>
+                            <div className="font-medium text-[var(--ink)]">{t('agentSettings.skillDialogs.uploadSkillTitle')}</div>
+                            <p className="mt-0.5 text-sm text-[var(--ink-muted)]">{t('agentSettings.skillDialogs.uploadSkillDescription')}</p>
                         </div>
                     </button>
 
@@ -220,8 +223,8 @@ export function NewSkillChooser({
                                 <Link2 className="h-6 w-6 text-[var(--ink-muted)]" />
                             </div>
                             <div>
-                                <div className="font-medium text-[var(--ink)]">从链接导入</div>
-                                <p className="mt-0.5 text-sm text-[var(--ink-muted)]">粘贴 GitHub 链接或 npx skills 命令</p>
+                                <div className="font-medium text-[var(--ink)]">{t('agentSettings.skillDialogs.importFromUrlTitle')}</div>
+                                <p className="mt-0.5 text-sm text-[var(--ink-muted)]">{t('agentSettings.skillDialogs.importFromUrlDescription')}</p>
                             </div>
                         </button>
                     )}
@@ -237,8 +240,8 @@ export function NewSkillChooser({
                                 <FolderOpen className="h-6 w-6 text-[var(--ink-muted)]" />
                             </div>
                             <div>
-                                <div className="font-medium text-[var(--ink)]">导入文件夹</div>
-                                <p className="mt-0.5 text-sm text-[var(--ink-muted)]">选择包含 SKILL.md 的技能文件夹</p>
+                                <div className="font-medium text-[var(--ink)]">{t('agentSettings.skillDialogs.importFolderTitle')}</div>
+                                <p className="mt-0.5 text-sm text-[var(--ink-muted)]">{t('agentSettings.skillDialogs.importFolderDescription')}</p>
                             </div>
                         </button>
                     )}
@@ -262,10 +265,12 @@ export function NewSkillChooser({
                             </div>
                             <div>
                                 <div className="font-medium text-[var(--ink)]">
-                                    从 Claude Code 同步
-                                    <span className="ml-2 text-xs text-[var(--ink-muted)]">({syncConfig.syncableCount} 个可同步)</span>
+                                    {t('agentSettings.skillDialogs.syncFromClaudeTitle')}
+                                    <span className="ml-2 text-xs text-[var(--ink-muted)]">
+                                        ({t('agentSettings.skillDialogs.syncableCount', { count: syncConfig.syncableCount })})
+                                    </span>
                                 </div>
-                                <p className="mt-0.5 text-sm text-[var(--ink-muted)]">导入 ~/.claude/skills 中的技能</p>
+                                <p className="mt-0.5 text-sm text-[var(--ink-muted)]">{t('agentSettings.skillDialogs.syncFromClaudeDescription')}</p>
                             </div>
                         </button>
                     )}
@@ -352,6 +357,7 @@ interface InstallFromUrlDialogProps {
 }
 
 export function InstallFromUrlDialog({ onInstall, onCancel, onInstalled }: InstallFromUrlDialogProps) {
+    const { t } = useTranslation('settings');
     useCloseLayer(() => { onCancel(); return true; }, 300);
 
     const [url, setUrl] = useState('');
@@ -375,16 +381,16 @@ export function InstallFromUrlDialog({ onInstall, onCancel, onInstalled }: Insta
     useEffect(() => {
         if (!loading) return;
         const phases = [
-            { at: 0, text: '正在解析链接...' },
-            { at: 600, text: '正在下载仓库...' },
-            { at: 3000, text: '正在解包...' },
-            { at: 8000, text: '正在验证 SKILL.md...' },
+            { at: 0, text: t('agentSettings.skillDialogs.phaseParsing') },
+            { at: 600, text: t('agentSettings.skillDialogs.phaseDownloading') },
+            { at: 3000, text: t('agentSettings.skillDialogs.phaseUnpacking') },
+            { at: 8000, text: t('agentSettings.skillDialogs.phaseValidating') },
         ];
         const timers = phases.map(p => setTimeout(() => {
             if (isMountedRef.current) setPhase(p.text);
         }, p.at));
         return () => timers.forEach(clearTimeout);
-    }, [loading]);
+    }, [loading, t]);
 
     const handleProbe = async () => {
         if (!url.trim() || loading) return;
@@ -394,12 +400,12 @@ export function InstallFromUrlDialog({ onInstall, onCancel, onInstalled }: Insta
         setSelectedFolders(new Set());
         setOverwriteFolders(new Set());
         setLoading(true);
-        setPhase('正在解析链接...');
+        setPhase(t('agentSettings.skillDialogs.phaseParsing'));
         try {
             const result = await onInstall(url.trim());
             if (!isMountedRef.current) return;
             if (!result.success) {
-                setError(result.error || '安装失败');
+                setError(result.error || t('agentSettings.skillDialogs.installFailed'));
                 return;
             }
             if (result.mode === 'installed') {
@@ -427,7 +433,7 @@ export function InstallFromUrlDialog({ onInstall, onCancel, onInstalled }: Insta
                 }
             }
         } catch (err) {
-            if (isMountedRef.current) setError(err instanceof Error ? err.message : '安装失败');
+            if (isMountedRef.current) setError(err instanceof Error ? err.message : t('agentSettings.skillDialogs.installFailed'));
         } finally {
             if (isMountedRef.current) {
                 setLoading(false);
@@ -440,19 +446,19 @@ export function InstallFromUrlDialog({ onInstall, onCancel, onInstalled }: Insta
         if (!preview || loading) return;
         setError(null);
         setLoading(true);
-        setPhase('正在下载并安装...');
+        setPhase(t('agentSettings.skillDialogs.phaseInstalling'));
         try {
             let body: { pluginName?: string; folderNames?: string[]; overwrite?: string[] };
             if (preview.mode === 'marketplace') {
                 if (!selectedPlugin) {
-                    setError('请选择一个 Claude Plugins 插件');
+                    setError(t('agentSettings.skillDialogs.selectPluginRequired'));
                     return;
                 }
                 const plugin = preview.plugins.find(p => p.name === selectedPlugin);
                 if (!plugin) return;
                 const chosen = plugin.skills.filter(s => selectedFolders.has(s.suggestedFolderName));
                 if (chosen.length === 0) {
-                    setError('请至少选择一个 skill');
+                    setError(t('agentSettings.skillDialogs.selectSkillRequired'));
                     return;
                 }
                 body = {
@@ -463,7 +469,7 @@ export function InstallFromUrlDialog({ onInstall, onCancel, onInstalled }: Insta
             } else if (preview.mode === 'multi') {
                 const chosen = preview.candidates.filter(c => selectedFolders.has(c.suggestedFolderName));
                 if (chosen.length === 0) {
-                    setError('请至少选择一个 skill');
+                    setError(t('agentSettings.skillDialogs.selectSkillRequired'));
                     return;
                 }
                 body = {
@@ -473,7 +479,7 @@ export function InstallFromUrlDialog({ onInstall, onCancel, onInstalled }: Insta
             } else {
                 // single-conflict
                 if (!overwriteFolders.has(preview.skill.suggestedFolderName)) {
-                    setError('请勾选"覆盖已存在"');
+                    setError(t('agentSettings.skillDialogs.overwriteRequired'));
                     return;
                 }
                 body = {
@@ -485,7 +491,7 @@ export function InstallFromUrlDialog({ onInstall, onCancel, onInstalled }: Insta
             const result = await onInstall(url.trim(), body);
             if (!isMountedRef.current) return;
             if (!result.success) {
-                setError(result.error || '安装失败');
+                setError(result.error || t('agentSettings.skillDialogs.installFailed'));
                 return;
             }
             if (result.mode === 'installed') {
@@ -493,7 +499,7 @@ export function InstallFromUrlDialog({ onInstall, onCancel, onInstalled }: Insta
                 onInstalled?.(folders);
             }
         } catch (err) {
-            if (isMountedRef.current) setError(err instanceof Error ? err.message : '安装失败');
+            if (isMountedRef.current) setError(err instanceof Error ? err.message : t('agentSettings.skillDialogs.installFailed'));
         } finally {
             if (isMountedRef.current) {
                 setLoading(false);
@@ -522,24 +528,22 @@ export function InstallFromUrlDialog({ onInstall, onCancel, onInstalled }: Insta
     return (
         <OverlayBackdrop className="z-[300]">
             <div className="w-full max-w-2xl rounded-2xl bg-[var(--paper-elevated)] p-6 shadow-2xl">
-                <h3 className="text-lg font-semibold text-[var(--ink)]">从链接导入 Skill</h3>
+                <h3 className="text-lg font-semibold text-[var(--ink)]">{t('agentSettings.skillDialogs.installFromUrlTitle')}</h3>
 
                 {!preview && (
                     <div className="mt-4">
-                        <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">GitHub 链接或 npx skills 命令</label>
+                        <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">{t('agentSettings.skillDialogs.urlLabel')}</label>
                         <textarea
                             value={url}
                             onChange={e => setUrl(e.target.value)}
                             rows={5}
-                            placeholder={
-                                '示例：\n  anthropics/skills\n  https://github.com/vercel-labs/skills/tree/main/skills/react-best-practices\n  npx skills add foo/bar --skill baz'
-                            }
+                            placeholder={t('agentSettings.skillDialogs.urlPlaceholder')}
                             className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 font-mono text-sm text-[var(--ink)] placeholder-[var(--ink-muted)] focus:border-[var(--accent)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)]/20"
                             disabled={loading}
                             autoFocus
                         />
                         <p className="mt-2 text-xs text-[var(--ink-muted)]">
-                            支持 GitHub 仓库、tree 子路径、npx skills 完整命令、直连 .zip 链接。暂不支持 GitLab、私有仓库。
+                            {t('agentSettings.skillDialogs.urlHint')}
                         </p>
                     </div>
                 )}
@@ -547,7 +551,7 @@ export function InstallFromUrlDialog({ onInstall, onCancel, onInstalled }: Insta
                 {loading && (
                     <div className="mt-4 flex items-center gap-3 rounded-lg border border-[var(--line)] bg-[var(--paper)] px-4 py-3 text-sm text-[var(--ink-muted)]">
                         <Loader2 className="h-4 w-4 animate-spin" />
-                        {phase || '处理中...'}
+                        {phase || t('agentSettings.skillDialogs.processing')}
                     </div>
                 )}
 
@@ -560,10 +564,11 @@ export function InstallFromUrlDialog({ onInstall, onCancel, onInstalled }: Insta
                 {preview && preview.mode === 'marketplace' && (
                     <div className="mt-4 max-h-[50vh] space-y-3 overflow-y-auto">
                         <p className="text-sm text-[var(--ink-muted)]">
-                            发现 Claude Plugins 市场：<span className="font-medium text-[var(--ink)]">{preview.marketplaceName}</span>
-                            {preview.marketplaceDescription && ` — ${preview.marketplaceDescription}`}
+                            {t('agentSettings.skillDialogs.marketplaceFoundPrefix')}
+                            <span className="font-medium text-[var(--ink)]">{preview.marketplaceName}</span>
+                            {preview.marketplaceDescription && ` ${t('agentSettings.skillDialogs.marketplaceDescriptionSeparator')} ${preview.marketplaceDescription}`}
                         </p>
-                        <p className="text-sm font-medium text-[var(--ink)]">请选择要安装的 Claude Plugins 插件：</p>
+                        <p className="text-sm font-medium text-[var(--ink)]">{t('agentSettings.skillDialogs.selectPluginLabel')}</p>
                         {preview.plugins.map(plugin => (
                             <label
                                 key={plugin.name}
@@ -588,7 +593,7 @@ export function InstallFromUrlDialog({ onInstall, onCancel, onInstalled }: Insta
                                     <div className="flex-1">
                                         <div className="font-medium text-[var(--ink)]">
                                             {plugin.name}
-                                            <span className="ml-2 text-xs text-[var(--ink-muted)]">({plugin.skills.length} skills)</span>
+                                            <span className="ml-2 text-xs text-[var(--ink-muted)]">({t('agentSettings.skillDialogs.skillCount', { count: plugin.skills.length })})</span>
                                         </div>
                                         {plugin.description && (
                                             <p className="mt-1 text-xs text-[var(--ink-muted)]">{plugin.description}</p>
@@ -605,10 +610,10 @@ export function InstallFromUrlDialog({ onInstall, onCancel, onInstalled }: Insta
                                                         />
                                                         <span className="font-mono text-[var(--ink)]">{skill.suggestedFolderName}</span>
                                                         {skill.conflict && (
-                                                            <span className="rounded bg-[var(--warning-bg)] px-1.5 py-0.5 text-[var(--warning)]">已存在</span>
+                                                            <span className="rounded bg-[var(--warning-bg)] px-1.5 py-0.5 text-[var(--warning)]">{t('agentSettings.skillDialogs.existsBadge')}</span>
                                                         )}
                                                         {skill.hasDangerousTools && (
-                                                            <span className="rounded bg-[var(--error-bg)] px-1.5 py-0.5 text-[var(--error)]">含 Bash 权限</span>
+                                                            <span className="rounded bg-[var(--error-bg)] px-1.5 py-0.5 text-[var(--error)]">{t('agentSettings.skillDialogs.bashPermissionBadge')}</span>
                                                         )}
                                                         {skill.conflict && (
                                                             <label className="ml-auto flex items-center gap-1 text-[var(--ink-muted)]">
@@ -618,7 +623,7 @@ export function InstallFromUrlDialog({ onInstall, onCancel, onInstalled }: Insta
                                                                     onChange={() => toggleOverwrite(skill.suggestedFolderName)}
                                                                     onClick={e => e.stopPropagation()}
                                                                 />
-                                                                覆盖
+                                                                {t('agentSettings.skillDialogs.overwrite')}
                                                             </label>
                                                         )}
                                                     </div>
@@ -634,7 +639,7 @@ export function InstallFromUrlDialog({ onInstall, onCancel, onInstalled }: Insta
 
                 {preview && preview.mode === 'multi' && (
                     <div className="mt-4 max-h-[50vh] space-y-2 overflow-y-auto">
-                        <p className="text-sm text-[var(--ink-muted)]">仓库包含多个 skill，请选择要安装的：</p>
+                        <p className="text-sm text-[var(--ink-muted)]">{t('agentSettings.skillDialogs.multiSkillPrompt')}</p>
                         {preview.candidates.map(c => (
                             <div
                                 key={c.suggestedFolderName}
@@ -650,10 +655,10 @@ export function InstallFromUrlDialog({ onInstall, onCancel, onInstalled }: Insta
                                     <div className="flex items-center gap-2">
                                         <span className="font-mono text-sm text-[var(--ink)]">{c.suggestedFolderName}</span>
                                         {c.conflict && (
-                                            <span className="rounded bg-[var(--warning-bg)] px-1.5 py-0.5 text-xs text-[var(--warning)]">已存在</span>
+                                            <span className="rounded bg-[var(--warning-bg)] px-1.5 py-0.5 text-xs text-[var(--warning)]">{t('agentSettings.skillDialogs.existsBadge')}</span>
                                         )}
                                         {c.hasDangerousTools && (
-                                            <span className="rounded bg-[var(--error-bg)] px-1.5 py-0.5 text-xs text-[var(--error)]">含 Bash 权限</span>
+                                            <span className="rounded bg-[var(--error-bg)] px-1.5 py-0.5 text-xs text-[var(--error)]">{t('agentSettings.skillDialogs.bashPermissionBadge')}</span>
                                         )}
                                     </div>
                                     {c.description && <p className="mt-0.5 text-xs text-[var(--ink-muted)]">{c.description}</p>}
@@ -665,7 +670,7 @@ export function InstallFromUrlDialog({ onInstall, onCancel, onInstalled }: Insta
                                                 checked={overwriteFolders.has(c.suggestedFolderName)}
                                                 onChange={() => toggleOverwrite(c.suggestedFolderName)}
                                             />
-                                            覆盖已存在的同名技能
+                                            {t('agentSettings.skillDialogs.overwriteExistingSkill')}
                                         </label>
                                     )}
                                 </div>
@@ -677,7 +682,9 @@ export function InstallFromUrlDialog({ onInstall, onCancel, onInstalled }: Insta
                 {preview && preview.mode === 'single-conflict' && (
                     <div className="mt-4 rounded-xl border border-[var(--warning)]/30 bg-[var(--warning-bg)] p-4">
                         <p className="text-sm font-medium text-[var(--ink)]">
-                            技能 <span className="font-mono">{preview.skill.suggestedFolderName}</span> 已存在
+                            {t('agentSettings.skillDialogs.skillExistsPrefix')}
+                            <span className="font-mono">{preview.skill.suggestedFolderName}</span>
+                            {t('agentSettings.skillDialogs.skillExistsSuffix')}
                         </p>
                         {preview.skill.description && (
                             <p className="mt-1 text-xs text-[var(--ink-muted)]">{preview.skill.description}</p>
@@ -688,7 +695,7 @@ export function InstallFromUrlDialog({ onInstall, onCancel, onInstalled }: Insta
                                 checked={overwriteFolders.has(preview.skill.suggestedFolderName)}
                                 onChange={() => toggleOverwrite(preview.skill.suggestedFolderName)}
                             />
-                            覆盖现有版本
+                            {t('agentSettings.skillDialogs.overwriteCurrentVersion')}
                         </label>
                     </div>
                 )}
@@ -700,7 +707,7 @@ export function InstallFromUrlDialog({ onInstall, onCancel, onInstalled }: Insta
                         disabled={loading}
                         className="rounded-lg px-4 py-2 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] disabled:opacity-50"
                     >
-                        取消
+                        {t('agentSettings.common.cancel')}
                     </button>
                     {!preview ? (
                         <button
@@ -710,7 +717,7 @@ export function InstallFromUrlDialog({ onInstall, onCancel, onInstalled }: Insta
                             className="flex items-center gap-2 rounded-lg bg-[var(--button-primary-bg)] px-4 py-2 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:opacity-50"
                         >
                             {loading && <Loader2 className="h-4 w-4 animate-spin" />}
-                            解析并预览
+                            {t('agentSettings.skillDialogs.probe')}
                         </button>
                     ) : (
                         <button
@@ -720,7 +727,7 @@ export function InstallFromUrlDialog({ onInstall, onCancel, onInstalled }: Insta
                             className="flex items-center gap-2 rounded-lg bg-[var(--button-primary-bg)] px-4 py-2 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:opacity-50"
                         >
                             {loading && <Loader2 className="h-4 w-4 animate-spin" />}
-                            安装
+                            {t('agentSettings.skillDialogs.install')}
                         </button>
                     )}
                 </div>

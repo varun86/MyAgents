@@ -17,6 +17,7 @@ import { AtSign, Check, Copy, Edit2, Expand, Eye, FileText, FolderOpen, Loader2,
 import Tip from './Tip';
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useState, useRef } from 'react';
 import { createPortal } from 'react-dom';
+import { useTranslation } from 'react-i18next';
 
 import { useCloseLayer } from '@/hooks/useCloseLayer';
 import { useWorkspaceChangeSignal } from '@/hooks/useWorkspaceChangeSignal';
@@ -132,6 +133,7 @@ interface FilePreviewModalProps {
 /** Auto-save status indicator — same treatment as the existing code-file editor.
  *  Silent on idle; surfaces saving/saved/error only when relevant. */
 function AutoSaveIndicator({ status }: { status: 'idle' | 'saving' | 'saved' | 'error' }) {
+    const { t } = useTranslation('chat');
     if (status === 'idle') {
         return null;
     }
@@ -139,7 +141,7 @@ function AutoSaveIndicator({ status }: { status: 'idle' | 'saving' | 'saved' | '
         return (
             <span className="flex items-center gap-1 text-xs text-[var(--ink-muted)]">
                 <Loader2 className="h-3 w-3 animate-spin" />
-                保存中
+                {t('workspaceFiles.filePreview.saving')}
             </span>
         );
     }
@@ -147,14 +149,14 @@ function AutoSaveIndicator({ status }: { status: 'idle' | 'saving' | 'saved' | '
         return (
             <span className="flex items-center gap-1 text-xs text-[var(--success)]">
                 <Check className="h-3 w-3" />
-                已保存
+                {t('workspaceFiles.filePreview.saved')}
             </span>
         );
     }
     return (
         <span className="flex items-center gap-1 text-xs text-[var(--error)]">
             <X className="h-3 w-3" />
-            保存失败
+            {t('workspaceFiles.filePreview.saveFailed')}
         </span>
     );
 }
@@ -198,12 +200,13 @@ function LiveUpdateIndicator({
     updatedAt: Date | null;
     pending: boolean;
 }) {
+    const { t } = useTranslation('chat');
     if (!updatedAt) return null;
-    const label = pending ? '外部更新' : '已更新';
+    const label = pending ? t('workspaceFiles.filePreview.externalUpdate') : t('workspaceFiles.filePreview.updated');
     return (
         <span
             className="flex-shrink-0 whitespace-nowrap text-xs font-normal text-[var(--ink-subtle)]/80"
-            title={pending ? '文件已在外部更新，本地编辑尚未覆盖' : '文件内容已自动更新'}
+            title={pending ? t('workspaceFiles.filePreview.externalUpdateTitle') : t('workspaceFiles.filePreview.updatedTitle')}
         >
             {label} {formatFilePreviewUpdateTime(updatedAt)}
         </span>
@@ -239,6 +242,7 @@ function FilenameSlot({
     busy: boolean;
     className: string;
 }) {
+    const { t } = useTranslation('chat');
     const inputRef = useRef<HTMLInputElement>(null);
     useEffect(() => {
         if (isEditing && inputRef.current) {
@@ -259,7 +263,7 @@ function FilenameSlot({
             <span
                 className={`truncate ${className} ${canRename ? 'cursor-text' : ''}`}
                 onDoubleClick={canRename ? onStartEdit : undefined}
-                title={canRename ? '双击重命名' : undefined}
+                title={canRename ? t('workspaceFiles.filePreview.doubleClickRename') : undefined}
             >
                 {name}
             </span>
@@ -314,6 +318,7 @@ function MdViewSegment({
     onChange: (mode: 'preview' | 'edit') => void;
     compact?: boolean;
 }) {
+    const { t } = useTranslation('chat');
     const baseBtn = compact
         ? 'inline-flex items-center gap-1 rounded-[var(--radius-sm)] px-2 py-0.5 text-xs font-medium transition-all duration-150'
         : 'inline-flex items-center gap-1.5 rounded-[var(--radius-sm)] px-3 py-1 text-sm font-medium transition-all duration-150';
@@ -330,7 +335,7 @@ function MdViewSegment({
                 className={`${baseBtn} ${value === 'preview' ? activeBtn : inactiveBtn}`}
             >
                 <Eye className={iconCls} strokeWidth={1.75} />
-                预览
+                {t('workspaceFiles.filePreview.previewMode')}
             </button>
             <button
                 type="button"
@@ -340,7 +345,7 @@ function MdViewSegment({
                 className={`${baseBtn} ${value === 'edit' ? activeBtn : inactiveBtn}`}
             >
                 <Edit2 className={iconCls} strokeWidth={1.75} />
-                编辑
+                {t('workspaceFiles.filePreview.editMode')}
             </button>
         </div>
     );
@@ -373,6 +378,7 @@ export default function FilePreviewModal({
     onRevealInTree,
     onQuoteSelection,
 }: FilePreviewModalProps) {
+    const { t } = useTranslation('chat');
     // Cmd+W dismissal: only register for fullscreen mode (z-[210]).
     // Embedded mode (split-panel) has no z-index overlay and is handled separately.
     // Routes through `handleCloseRef` (latest-ref pattern) so Cmd+W respects the same
@@ -395,6 +401,8 @@ export default function FilePreviewModal({
     // Stabilize toast reference to avoid unnecessary effect re-runs
     const toastRef = useRef(toast);
     toastRef.current = toast;
+    const tRef = useRef(t);
+    tRef.current = t;
 
     const fileService = useWorkspaceFileService(workspacePath);
 
@@ -770,7 +778,7 @@ export default function FilePreviewModal({
             isDirectEdit &&
             editContentRef.current !== savedContentRef.current
         ) {
-            toastRef.current.warning('文件已在外部更新，未自动覆盖');
+            toastRef.current.warning(tRef.current('workspaceFiles.filePreview.toasts.externalUpdateConflict'));
             return;
         }
         // If there are STILL unsaved direct-edit changes after in-flight completed, save now
@@ -785,7 +793,7 @@ export default function FilePreviewModal({
                 onSavedRef.current?.();
             } catch {
                 // Save failed on close — don't block the close
-                toastRef.current.error('关闭时自动保存失败');
+                toastRef.current.error(tRef.current('workspaceFiles.filePreview.toasts.closeAutosaveFailed'));
             }
         }
         onClose();
@@ -801,7 +809,7 @@ export default function FilePreviewModal({
             externalUpdatePendingRef.current &&
             editContentRef.current !== savedContentRef.current
         ) {
-            toastRef.current.warning('文件已在外部更新，未自动覆盖');
+            toastRef.current.warning(tRef.current('workspaceFiles.filePreview.toasts.externalUpdateConflict'));
             return;
         }
         if (editContentRef.current === savedContentRef.current) return; // nothing to save
@@ -854,7 +862,7 @@ export default function FilePreviewModal({
                     externalUpdatePendingRef.current &&
                     editContentRef.current !== savedContentRef.current
                 ) {
-                    toastRef.current.warning('文件已在外部更新，未自动覆盖');
+                    toastRef.current.warning(tRef.current('workspaceFiles.filePreview.toasts.externalUpdateConflict'));
                     return;
                 }
                 const { newPath } = await fileServiceRef.current.rename({
@@ -874,7 +882,7 @@ export default function FilePreviewModal({
                 // characters" / etc. Keep the editor open so the user can
                 // correct without losing the draft.
                 if (isMountedRef.current) {
-                    toastRef.current.error(err instanceof Error ? err.message : '重命名失败');
+                    toastRef.current.error(err instanceof Error ? err.message : tRef.current('workspaceFiles.filePreview.toasts.renameFailed'));
                 }
             } finally {
                 renameInFlightRef.current = false;
@@ -930,7 +938,7 @@ export default function FilePreviewModal({
             externalUpdatePendingRef.current &&
             editContentRef.current !== savedContentRef.current
         ) {
-            toastRef.current.warning('文件已在外部更新，未自动覆盖');
+            toastRef.current.warning(tRef.current('workspaceFiles.filePreview.toasts.externalUpdateConflict'));
             return;
         }
         if (isDirectEdit && editContentRef.current !== savedContentRef.current) {
@@ -957,38 +965,40 @@ export default function FilePreviewModal({
     const handleCopyFilePath = useCallback(() => {
         navigator.clipboard
             .writeText(absolutePathForDisplay)
-            .then(() => toastRef.current.success('已复制文件路径'))
-            .catch(() => toastRef.current.error('复制失败'));
+            .then(() => toastRef.current.success(tRef.current('workspaceFiles.filePreview.toasts.copiedFilePath')))
+            .catch(() => toastRef.current.error(tRef.current('workspaceFiles.common.copyFailed')));
     }, [absolutePathForDisplay]);
 
     const handleCopyFullText = useCallback(() => {
         void (async () => {
             if (richDocKind) return;
             if (isLoading) {
-                toastRef.current.warning('文件加载中，暂时无法复制');
+                toastRef.current.warning(tRef.current('workspaceFiles.filePreview.toasts.copyWhileLoading'));
                 return;
             }
             if (error) {
-                toastRef.current.warning('文件预览失败，暂时无法复制');
+                toastRef.current.warning(tRef.current('workspaceFiles.filePreview.toasts.copyAfterPreviewFailed'));
                 return;
             }
 
             const text = editContentRef.current;
             if (text.length === 0) {
-                toastRef.current.warning('文档内容为空');
+                toastRef.current.warning(tRef.current('workspaceFiles.filePreview.emptyDocument'));
                 return;
             }
 
             try {
                 if (isMarkdown && !isMdEditView) {
                     const result = await copyMarkdownAsRichText(text);
-                    toastRef.current.success(result === 'rich' ? '已复制全文' : '已复制纯文本');
+                    toastRef.current.success(result === 'rich'
+                        ? tRef.current('workspaceFiles.filePreview.toasts.copiedFullText')
+                        : tRef.current('workspaceFiles.filePreview.toasts.copiedPlainText'));
                 } else {
                     await copyPlainText(text);
-                    toastRef.current.success('已复制全文');
+                    toastRef.current.success(tRef.current('workspaceFiles.filePreview.toasts.copiedFullText'));
                 }
             } catch {
-                toastRef.current.error('复制失败');
+                toastRef.current.error(tRef.current('workspaceFiles.common.copyFailed'));
             }
         })();
     }, [error, isLoading, isMarkdown, isMdEditView, richDocKind]);
@@ -1018,7 +1028,7 @@ export default function FilePreviewModal({
     const handleSwitchToBrowserClick = useCallback(() => {
         if (!onSwitchToBrowser) return;
         if (isDirectEdit && hasExternalUpdateConflict()) {
-            toastRef.current.warning('文件已在外部更新，未自动覆盖');
+            toastRef.current.warning(tRef.current('workspaceFiles.filePreview.toasts.externalUpdateConflict'));
             return;
         }
         if (isDirectEdit) handleManualFlush();
@@ -1028,7 +1038,7 @@ export default function FilePreviewModal({
     const handleFullscreenClick = useCallback(() => {
         if (!onFullscreen) return;
         if (isDirectEdit && hasExternalUpdateConflict()) {
-            toastRef.current.warning('文件已在外部更新，未自动覆盖');
+            toastRef.current.warning(tRef.current('workspaceFiles.filePreview.toasts.externalUpdateConflict'));
             return;
         }
         if (isDirectEdit) {
@@ -1053,7 +1063,7 @@ export default function FilePreviewModal({
                 await fileServiceRef.current.openPathExternal({ fullPath: localPath, workspace: null });
             }
         } catch {
-            toastRef.current.error('无法打开目录');
+            toastRef.current.error(tRef.current('workspaceFiles.common.openFolderFailed'));
         }
     }, [canReveal, localPath, onRevealFile, workspacePath]);
 
@@ -1069,14 +1079,14 @@ export default function FilePreviewModal({
 
         return (
             <>
-                <Tip label="更多" position="bottom">
+                <Tip label={t('workspaceFiles.common.more')} position="bottom">
                     <button
                         ref={moreButtonRef}
                         type="button"
                         onClick={() => setMoreMenuOpen(open => !open)}
                         onMouseDown={retainFocusOnMouseDown}
                         className={buttonClass}
-                        aria-label="更多"
+                        aria-label={t('workspaceFiles.common.more')}
                     >
                         <MoreHorizontal className={iconClass} />
                     </button>
@@ -1091,42 +1101,46 @@ export default function FilePreviewModal({
                     {onQuoteFile && (
                         <MenuItem
                             icon={<AtSign className="h-3.5 w-3.5" />}
-                            label="引用"
+                            label={t('workspaceFiles.common.quote')}
                             onClick={() => runMenuAction(handleQuoteFileClick)}
                         />
                     )}
                     {onRevealInTree && !localPath && (
                         <MenuItem
                             icon={<LocateFixed className="h-3.5 w-3.5" />}
-                            label="在文件目录中展示"
+                            label={t('workspaceFiles.common.revealInTree')}
                             onClick={() => runMenuAction(handleRevealInTree)}
                         />
                     )}
                     <MenuItem
                         icon={<Copy className="h-3.5 w-3.5" />}
-                        label="复制文件路径"
+                        label={t('workspaceFiles.common.copyFilePath')}
                         onClick={() => runMenuAction(handleCopyFilePath)}
                     />
                     {canReveal && (
                         <MenuItem
                             icon={<FolderOpen className="h-3.5 w-3.5" />}
-                            label="打开所在文件夹"
+                            label={t('workspaceFiles.common.openContainingFolder')}
                             onClick={() => runMenuAction(handleOpenInFinder)}
                         />
                     )}
                     {canRename && (
                         <MenuItem
                             icon={<Edit2 className="h-3.5 w-3.5" />}
-                            label="重命名"
+                            label={t('workspaceFiles.common.rename')}
                             onClick={() => runMenuAction(handleStartRename)}
                         />
                     )}
                     {!richDocKind && (
                         <MenuItem
                             icon={<Copy className="h-3.5 w-3.5" />}
-                            label="复制全文"
+                            label={t('workspaceFiles.filePreview.copyFullText')}
                             disabled={isLoading || !!error}
-                            title={isLoading ? '文件加载后可复制' : error ? '文件预览失败，无法复制全文' : undefined}
+                            title={isLoading
+                                ? t('workspaceFiles.filePreview.copyFullTextAfterLoad')
+                                : error
+                                  ? t('workspaceFiles.filePreview.copyFullTextPreviewFailed')
+                                  : undefined}
                             onClick={() => runMenuAction(handleCopyFullText)}
                         />
                     )}
@@ -1193,11 +1207,11 @@ export default function FilePreviewModal({
                 return (
                     <div className="flex h-full flex-col items-center justify-center gap-3 bg-[var(--paper-elevated)] text-[var(--ink-muted)]">
                         <FileText className="h-10 w-10 opacity-20" />
-                        <p className="text-sm">文档内容为空</p>
+                        <p className="text-sm">{t('workspaceFiles.filePreview.emptyDocument')}</p>
                         {canEdit && (
                             <button type="button" onClick={() => setMdViewMode('edit')}
                                 className="text-sm text-[var(--accent)] hover:underline">
-                                切换到编辑
+                                {t('workspaceFiles.filePreview.switchToEdit')}
                             </button>
                         )}
                     </div>
@@ -1241,7 +1255,7 @@ export default function FilePreviewModal({
         // (non-md or read-only md), the middle column collapses to 0.
         return (
             <div className="flex h-full flex-col overflow-hidden">
-                <div className="relative z-10 grid flex-shrink-0 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-2 px-4 py-2 after:pointer-events-none after:absolute after:inset-x-0 after:top-full after:h-6 after:bg-gradient-to-b after:from-[var(--paper-elevated)] after:to-[var(--paper-elevated-a0)]">
+                <div className="relative z-10 grid flex-shrink-0 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-2 px-4 py-2 after:pointer-events-none after:absolute after:inset-x-0 after:top-full after:h-3 after:bg-gradient-to-b after:from-[var(--paper-elevated)] after:to-[var(--paper-elevated-a0)]">
                     {/* Left: file info */}
                     <div className="flex min-w-0 items-center gap-2">
                         <div className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-md bg-[var(--accent-warm-muted)]">
@@ -1276,9 +1290,9 @@ export default function FilePreviewModal({
 
                         {/* Switch to browser preview — only for HTML files with an active browser */}
                         {onSwitchToBrowser && (
-                            <Tip label="网页预览" position="bottom">
+                            <Tip label={t('workspaceFiles.filePreview.browserPreview')} position="bottom">
                                 <button type="button" onClick={handleSwitchToBrowserClick}
-                                    aria-label="网页预览"
+                                    aria-label={t('workspaceFiles.filePreview.browserPreview')}
                                     className="rounded-md p-1 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]">
                                     <Eye className="h-3.5 w-3.5" />
                                 </button>
@@ -1286,18 +1300,18 @@ export default function FilePreviewModal({
                         )}
 
                         {onFullscreen && (
-                            <Tip label="全屏预览" position="bottom">
+                            <Tip label={t('workspaceFiles.filePreview.fullscreenPreview')} position="bottom">
                                 <button type="button" onClick={handleFullscreenClick}
-                                    aria-label="全屏预览"
+                                    aria-label={t('workspaceFiles.filePreview.fullscreenPreview')}
                                     className="rounded-md p-1 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]">
                                     <Expand className="h-3.5 w-3.5" />
                                 </button>
                             </Tip>
                         )}
 
-                        <Tip label="关闭" position="bottom">
+                        <Tip label={t('workspaceFiles.common.close')} position="bottom">
                             <button type="button" onClick={handleClose}
-                                aria-label="关闭"
+                                aria-label={t('workspaceFiles.common.close')}
                                 className="rounded-md p-1 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]">
                                 <X className="h-3.5 w-3.5" />
                             </button>
@@ -1362,7 +1376,7 @@ export default function FilePreviewModal({
                                         type="button"
                                         onClick={handleOpenInFinder}
                                         className="flex-shrink-0 rounded p-0.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
-                                        title="打开所在文件夹"
+                                        title={t('workspaceFiles.common.openContainingFolder')}
                                     >
                                         <FolderOpen className="h-3.5 w-3.5" />
                                     </button>
@@ -1386,7 +1400,7 @@ export default function FilePreviewModal({
                             onClick={handleClose}
                             className="inline-flex items-center justify-center rounded-md border border-[var(--line-strong)] bg-[var(--button-secondary-bg)] px-3 py-1.5 text-xs font-semibold text-[var(--ink)] shadow-sm transition-all duration-150 hover:bg-[var(--button-secondary-bg-hover)] hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:ring-offset-1 active:scale-[0.98]"
                         >
-                            关闭
+                            {t('workspaceFiles.common.close')}
                         </button>
                     </div>
                 </div>

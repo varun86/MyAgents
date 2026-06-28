@@ -5,6 +5,7 @@
 
 import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import { Plus, Loader2, Trash2, ChevronRight, AlertCircle } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 import { open } from '@tauri-apps/plugin-dialog';
 import { invoke } from '@tauri-apps/api/core';
 import { homeDir, join, basename } from '@tauri-apps/api/path';
@@ -31,6 +32,7 @@ export default memo(function TemplateLibraryDialog({
     onCreateWorkspace,
     onClose,
 }: TemplateLibraryDialogProps) {
+    const { t } = useTranslation('launcher');
     useCloseLayer(() => { onClose(); return true; }, 200);
 
     // State
@@ -90,6 +92,7 @@ export default memo(function TemplateLibraryDialog({
     }, [selectedId]);
 
     const selectedTemplate = templates.find(t => t.id === selectedId);
+    const getTemplateDescription = useCallback((tpl: WorkspaceTemplate): string => tpl.description ?? '', []);
 
     // Debounced check: does targetDir/projectName already exist?
     useEffect(() => {
@@ -119,7 +122,7 @@ export default memo(function TemplateLibraryDialog({
             const selected = await open({
                 directory: true,
                 multiple: false,
-                title: '选择工作区地址',
+                title: t('templateLibrary.pickTargetDirTitle'),
             });
             if (selected && typeof selected === 'string') {
                 setTargetDir(selected);
@@ -127,7 +130,7 @@ export default memo(function TemplateLibraryDialog({
         } catch (err) {
             console.warn('[TemplateLibrary] Failed to pick directory:', err);
         }
-    }, []);
+    }, [t]);
 
     // Add user template from local folder
     const handleAddTemplate = useCallback(async () => {
@@ -137,7 +140,7 @@ export default memo(function TemplateLibraryDialog({
             const selected = await open({
                 directory: true,
                 multiple: false,
-                title: '选择文件夹作为模板（将复制到模板库）',
+                title: t('templateLibrary.pickTemplateDirTitle'),
             });
             if (!selected || typeof selected !== 'string') {
                 setAddingTemplate(false);
@@ -167,11 +170,11 @@ export default memo(function TemplateLibraryDialog({
             setSelectedId(newTemplate.id);
         } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
-            setError(`添加模板失败: ${msg}`);
+            setError(t('templateLibrary.addTemplateFailed', { message: msg }));
         } finally {
             setAddingTemplate(false);
         }
-    }, []);
+    }, [t]);
 
     // Remove user template — delete folder first, then metadata
     const handleRemoveTemplate = useCallback(async () => {
@@ -191,11 +194,11 @@ export default memo(function TemplateLibraryDialog({
             }
         } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
-            setError(`删除模板失败: ${msg}`);
+            setError(t('templateLibrary.deleteTemplateFailed', { message: msg }));
         } finally {
             setTemplateToRemove(null);
         }
-    }, [templateToRemove, selectedId]);
+    }, [selectedId, t, templateToRemove]);
 
     // Find an available path, appending numeric suffix on collision
     const findAvailablePath = useCallback(async (dir: string, name: string): Promise<string> => {
@@ -236,11 +239,11 @@ export default memo(function TemplateLibraryDialog({
             onClose();
         } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
-            setError(`创建失败: ${msg}`);
+            setError(t('templateLibrary.createFailed', { message: msg }));
         } finally {
             setCreating(false);
         }
-    }, [selectedTemplate, targetDir, projectName, findAvailablePath, onCreateWorkspace, onClose]);
+    }, [selectedTemplate, targetDir, projectName, findAvailablePath, onCreateWorkspace, onClose, t]);
 
     const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
         if (e.key === 'Escape') {
@@ -272,7 +275,7 @@ export default memo(function TemplateLibraryDialog({
             <div className="flex w-[640px] max-h-[80vh] flex-col rounded-2xl bg-[var(--paper-elevated)] shadow-lg" onKeyDown={handleKeyDown}>
                 {/* Header */}
                 <div className="flex items-center justify-between border-b border-[var(--line)] px-6 py-4">
-                    <h2 className="text-lg font-semibold text-[var(--ink)]">从模板创建 Agent</h2>
+                    <h2 className="text-lg font-semibold text-[var(--ink)]">{t('templateLibrary.title')}</h2>
                     <button
                         onClick={onClose}
                         className="rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
@@ -290,7 +293,7 @@ export default memo(function TemplateLibraryDialog({
                         <div className="flex-1 overflow-y-auto overscroll-contain p-3">
                             <div className="mb-2 px-1">
                                 <span className="text-sm font-semibold tracking-[0.04em] text-[var(--ink-muted)]">
-                                    模板库
+                                    {t('templateLibrary.library')}
                                 </span>
                             </div>
                             {templates.map((tpl) => (
@@ -312,10 +315,10 @@ export default memo(function TemplateLibraryDialog({
                                     </span>
                                     <div className="min-w-0 flex-1">
                                         <p className="truncate text-sm font-medium leading-tight">{tpl.name}</p>
-                                        {tpl.description ? (
-                                            <p className="mt-0.5 truncate text-xs leading-tight text-[var(--ink-muted)]">{tpl.description}</p>
+                                        {getTemplateDescription(tpl) ? (
+                                            <p className="mt-0.5 truncate text-xs leading-tight text-[var(--ink-muted)]">{getTemplateDescription(tpl)}</p>
                                         ) : tpl.isBuiltin ? (
-                                            <p className="mt-0.5 text-xs leading-tight text-[var(--ink-muted)]">内置</p>
+                                            <p className="mt-0.5 text-xs leading-tight text-[var(--ink-muted)]">{t('templateLibrary.builtin')}</p>
                                         ) : null}
                                     </div>
                                     {/* Remove button for user templates */}
@@ -324,7 +327,7 @@ export default memo(function TemplateLibraryDialog({
                                             type="button"
                                             onClick={(e) => { e.stopPropagation(); setTemplateToRemove(tpl); }}
                                             className="rounded p-1 text-[var(--ink-muted)] opacity-0 transition-all hover:text-[var(--error)] group-hover:opacity-100"
-                                            title="删除模板"
+                                            title={t('templateLibrary.deleteTemplate')}
                                         >
                                             <Trash2 className="h-3 w-3" />
                                         </button>
@@ -346,7 +349,7 @@ export default memo(function TemplateLibraryDialog({
                                 ) : (
                                     <Plus className="h-3.5 w-3.5" />
                                 )}
-                                添加模板
+                                {t('templateLibrary.addTemplate')}
                             </button>
                         </div>
                     </div>
@@ -369,7 +372,7 @@ export default memo(function TemplateLibraryDialog({
                                                         ? ''
                                                         : 'cursor-pointer hover:bg-[var(--hover-bg)] hover:ring-1 hover:ring-[var(--line)]'
                                                 }`}
-                                                title={selectedTemplate.isBuiltin ? undefined : '点击更换图标'}
+                                                title={selectedTemplate.isBuiltin ? undefined : t('templateLibrary.changeIcon')}
                                             >
                                                 <WorkspaceIcon icon={selectedTemplate.icon} size={28} />
                                             </button>
@@ -436,7 +439,7 @@ export default memo(function TemplateLibraryDialog({
                                                             setEditingName(true);
                                                         }
                                                     }}
-                                                    title={selectedTemplate.isBuiltin ? undefined : '点击编辑名称'}
+                                                    title={selectedTemplate.isBuiltin ? undefined : t('templateLibrary.editName')}
                                                 >
                                                     {selectedTemplate.name}
                                                 </h3>
@@ -444,7 +447,7 @@ export default memo(function TemplateLibraryDialog({
                                             {/* Description — inline editable for user templates */}
                                             {selectedTemplate.isBuiltin ? (
                                                 <p className="mt-1 min-h-[20px] text-sm leading-snug text-[var(--ink-muted)]">
-                                                    {selectedTemplate.description}
+                                                    {getTemplateDescription(selectedTemplate)}
                                                 </p>
                                             ) : editingDesc ? (
                                                 <input
@@ -462,7 +465,7 @@ export default memo(function TemplateLibraryDialog({
                                                         if (e.key === 'Escape') { setEditingDesc(false); }
                                                     }}
                                                     className="mt-1 w-full rounded border border-[var(--line)] bg-transparent px-1.5 py-0.5 text-sm text-[var(--ink-muted)] placeholder:text-[var(--ink-subtle)] focus:border-[var(--ink-muted)] focus:outline-none"
-                                                    placeholder="添加模板描述..."
+                                                    placeholder={t('templateLibrary.descriptionPlaceholder')}
                                                     autoFocus
                                                 />
                                             ) : (
@@ -472,9 +475,9 @@ export default memo(function TemplateLibraryDialog({
                                                         setDescDraft(selectedTemplate.description || '');
                                                         setEditingDesc(true);
                                                     }}
-                                                    title="点击编辑描述"
+                                                    title={t('templateLibrary.editDescription')}
                                                 >
-                                                    {selectedTemplate.description || '点击添加描述...'}
+                                                    {selectedTemplate.description || t('templateLibrary.addDescription')}
                                                 </p>
                                             )}
                                         </div>
@@ -483,19 +486,19 @@ export default memo(function TemplateLibraryDialog({
 
                                 {/* Project name */}
                                 <div className="mb-4">
-                                    <label className="mb-2 block text-sm font-medium text-[var(--ink)]">Agent 名称</label>
+                                    <label className="mb-2 block text-sm font-medium text-[var(--ink)]">{t('templateLibrary.agentName')}</label>
                                     <input
                                         type="text"
                                         value={projectName}
                                         onChange={(e) => setProjectName(e.target.value.replace(/[/\\]/g, ''))}
                                         className="w-full rounded-[6px] border border-[var(--line)] bg-transparent px-3 py-2.5 text-sm text-[var(--ink)] placeholder:text-[var(--ink-muted)] focus:border-[var(--focus-border)] focus:outline-none transition-colors"
-                                        placeholder="输入 Agent 名称"
+                                        placeholder={t('templateLibrary.agentNamePlaceholder')}
                                     />
                                 </div>
 
                                 {/* Target directory */}
                                 <div className="mb-6">
-                                    <label className="mb-2 block text-sm font-medium text-[var(--ink)]">工作区地址</label>
+                                    <label className="mb-2 block text-sm font-medium text-[var(--ink)]">{t('templateLibrary.targetDir')}</label>
                                     <div className="flex items-center gap-2">
                                         <div className="flex min-w-0 flex-1 items-center rounded-[6px] border border-[var(--line)] bg-[var(--paper)] px-3 py-2.5">
                                             <span className="truncate text-sm text-[var(--ink-muted)]">
@@ -515,7 +518,7 @@ export default memo(function TemplateLibraryDialog({
                                             onClick={handleChangeDir}
                                             className="shrink-0 rounded-lg bg-[var(--button-secondary-bg)] px-3 py-2.5 text-sm font-medium text-[var(--button-secondary-text)] transition-colors hover:bg-[var(--button-secondary-bg-hover)]"
                                         >
-                                            更换
+                                            {t('templateLibrary.changeDir')}
                                         </button>
                                     </div>
                                 </div>
@@ -524,7 +527,7 @@ export default memo(function TemplateLibraryDialog({
                                 {pathExists && !error && (
                                     <div className="mb-4 flex items-center gap-1.5 text-xs text-[var(--warning)]">
                                         <AlertCircle className="h-3.5 w-3.5 shrink-0" />
-                                        <span>该目录已存在，创建时将自动添加数字后缀</span>
+                                        <span>{t('templateLibrary.pathExistsWarning')}</span>
                                     </div>
                                 )}
 
@@ -546,13 +549,13 @@ export default memo(function TemplateLibraryDialog({
                                         ) : (
                                             <Plus className="h-3.5 w-3.5" />
                                         )}
-                                        创建 Agent
+                                        {t('templateLibrary.createAgent')}
                                     </button>
                                 </div>
                             </>
                         ) : (
                             <div className="flex flex-1 items-center justify-center text-[var(--ink-muted)]">
-                                选择一个模板
+                                {t('templateLibrary.selectTemplate')}
                             </div>
                         )}
                     </div>
@@ -562,10 +565,10 @@ export default memo(function TemplateLibraryDialog({
             {/* Remove template confirmation */}
             {templateToRemove && (
                 <ConfirmDialog
-                    title="删除模板"
-                    message={`确定要从模板库中删除「${templateToRemove.name}」吗？模板文件将被永久删除。`}
-                    confirmText="删除"
-                    cancelText="取消"
+                    title={t('templateLibrary.deleteDialogTitle')}
+                    message={t('templateLibrary.deleteDialogMessage', { name: templateToRemove.name })}
+                    confirmText={t('rightRail.delete')}
+                    cancelText={t('workspaceEdit.cancel')}
                     confirmVariant="danger"
                     onConfirm={handleRemoveTemplate}
                     onCancel={() => setTemplateToRemove(null)}

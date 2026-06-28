@@ -204,12 +204,13 @@ export function resetExternalUserRequestedStop(): void {
 export function buildExternalSystemInitPayload(input: {
   info: SystemInitInfo;
   runtime: RuntimeType;
+  runtimeSource?: import('../../../shared/types/runtime').RuntimeSource;
 }): ExternalSystemInitPayload {
   return {
     info: { ...input.info },
     sessionId: lastSessionId,
     prewarm: isPrewarmingSession || undefined,
     runtime: input.runtime,
+    runtimeSource: input.runtimeSource,
   };
 }
-

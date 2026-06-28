@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 
 export default function DingtalkCardConfig({
     useAiCard,
@@ -9,8 +10,9 @@ export default function DingtalkCardConfig({
     useAiCard: boolean;
     cardTemplateId: string;
     onUseAiCardChange: (value: boolean) => void;
-    onCardTemplateIdChange: (value: string) => void;
+	onCardTemplateIdChange: (value: string) => void;
 }) {
+    const { t } = useTranslation('settings');
     const [localTemplateId, setLocalTemplateId] = useState(cardTemplateId);
     const debounceRef = useRef<NodeJS.Timeout>(undefined);
 
@@ -31,9 +33,11 @@ export default function DingtalkCardConfig({
             {/* AI Card toggle */}
             <div className="flex items-center justify-between">
                 <div>
-                    <p className="text-sm font-medium text-[var(--ink)]">AI Card 流式回复</p>
+                    <p className="text-sm font-medium text-[var(--ink)]">
+                        {t('agentSettings.imComponents.dingtalkCardTitle')}
+                    </p>
                     <p className="text-xs text-[var(--ink-muted)]">
-                        使用钉钉 AI 卡片实现流式更新效果，需额外配置卡片模板
+                        {t('agentSettings.imComponents.dingtalkCardDescription')}
                     </p>
                 </div>
                 <button
@@ -55,17 +59,17 @@ export default function DingtalkCardConfig({
             {useAiCard && (
                 <div>
                     <label className="mb-1.5 block text-xs font-medium text-[var(--ink-muted)]">
-                        卡片模板 ID
+                        {t('agentSettings.imComponents.cardTemplateId')}
                     </label>
                     <input
                         type="text"
                         value={localTemplateId}
                         onChange={(e) => handleTemplateIdChange(e.target.value)}
-                        placeholder="请填入卡片模板 ID"
+                        placeholder={t('agentSettings.imComponents.cardTemplatePlaceholder')}
                         className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 text-sm text-[var(--ink)] placeholder-[var(--ink-subtle)] outline-none transition-colors focus:border-[var(--button-primary-bg)]"
                     />
                     <p className="mt-1.5 text-xs text-[var(--ink-muted)]">
-                        需在钉钉开放平台创建 AI 卡片模板后填入模板 ID。未填写时将自动降级为普通 Markdown 消息。
+                        {t('agentSettings.imComponents.cardTemplateHint')}
                     </p>
                 </div>
             )}

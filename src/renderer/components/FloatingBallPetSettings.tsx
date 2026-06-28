@@ -1,6 +1,8 @@
 import { Check, Download, ExternalLink as ExternalLinkIcon, FolderOpen, Link2, Loader2, RefreshCw, Trash2, UploadCloud, X } from 'lucide-react';
+import type { TFunction } from 'i18next';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { useTranslation } from 'react-i18next';
 
 import ConfirmDialog from '@/components/ConfirmDialog';
 import CustomSelect from '@/components/CustomSelect';
@@ -48,10 +50,15 @@ function notifyBallConfigChanged() {
     });
 }
 
-function formatImportToast(summary: PetImportSummary): string {
-    if (summary.imported === 0 && summary.skipped === 0) return '没有发现可导入的 Codex Pets';
-    if (summary.skipped > 0) return `已导入 ${summary.imported} 组，跳过 ${summary.skipped} 组`;
-    return `已导入 ${summary.imported} 组桌宠素材`;
+function formatImportToast(summary: PetImportSummary, t: TFunction<'settings'>): string {
+    if (summary.imported === 0 && summary.skipped === 0) return t('floatingBallPet.importToast.empty');
+    if (summary.skipped > 0) {
+        return t('floatingBallPet.importToast.withSkipped', {
+            imported: summary.imported,
+            skipped: summary.skipped,
+        });
+    }
+    return t('floatingBallPet.importToast.imported', { imported: summary.imported });
 }
 
 function PetStyleCard({
@@ -69,6 +76,7 @@ function PetStyleCard({
     onSelect: () => void;
     onDelete?: () => void;
 }) {
+    const { t } = useTranslation('settings');
     const description = pack.description?.trim();
 
     return (
@@ -115,8 +123,8 @@ function PetStyleCard({
                     className={`absolute right-3 top-3 inline-flex h-8 w-8 items-center justify-center rounded-full border border-[var(--line)] bg-[var(--paper-elevated)] text-[var(--ink-muted)] shadow-sm transition-all hover:border-[var(--error)] hover:bg-[var(--error-bg)] hover:text-[var(--error)] focus:opacity-100 focus:outline-none focus:ring-2 focus:ring-[var(--error-subtle)] disabled:cursor-wait ${
                         deleting ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
                     }`}
-                    aria-label={`删除 ${pack.displayName}`}
-                    title="删除"
+                    aria-label={t('floatingBallPet.deletePackAria', { name: pack.displayName })}
+                    title={t('floatingBallPet.delete')}
                 >
                     {deleting ? (
                         <Loader2 className="h-4 w-4 animate-spin" />
@@ -140,14 +148,15 @@ function DeletePetConfirmDialog({
     onConfirm: (pack: PetPack) => void;
     onCancel: () => void;
 }) {
+    const { t } = useTranslation('settings');
     if (!target) return null;
 
     return (
         <ConfirmDialog
-            title="删除桌宠素材"
-            message={`确定要删除「${target.displayName}」吗？\n删除后这个素材会从本机导入列表移除。`}
-            confirmText="删除"
-            cancelText="取消"
+            title={t('floatingBallPet.deleteDialogTitle')}
+            message={t('floatingBallPet.deleteDialogMessage', { name: target.displayName })}
+            confirmText={t('floatingBallPet.delete')}
+            cancelText={t('floatingBallPet.cancel')}
             confirmVariant="danger"
             loading={deleting}
             onConfirm={() => onConfirm(target)}
@@ -171,6 +180,7 @@ function PetdexImportDialog({
     onSubmit: () => void;
     onClose: () => void;
 }) {
+    const { t } = useTranslation('settings');
     const inputRef = useRef<HTMLInputElement | null>(null);
     useCloseLayer(() => {
         if (!open) return false;
@@ -201,9 +211,9 @@ function PetdexImportDialog({
             >
                 <div className="flex items-start justify-between gap-4">
                     <div>
-                        <h3 className="text-lg font-semibold text-[var(--ink)]">Petdex 链接导入</h3>
+                        <h3 className="text-lg font-semibold text-[var(--ink)]">{t('floatingBallPet.petdexDialog.title')}</h3>
                         <p className="mt-1 text-sm leading-6 text-[var(--ink-muted)]">
-                            粘贴 Petdex 宠物页面链接，MyAgents 会下载 zip 包并按 Codex Pets 协议校验后导入。
+                            {t('floatingBallPet.petdexDialog.description')}
                         </p>
                     </div>
                     <button
@@ -211,14 +221,14 @@ function PetdexImportDialog({
                         onClick={onClose}
                         disabled={importing}
                         className="rounded-lg p-1 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] disabled:cursor-wait disabled:opacity-60"
-                        aria-label="关闭"
+                        aria-label={t('floatingBallPet.close')}
                     >
                         <X className="h-5 w-5" />
                     </button>
                 </div>
 
                 <label className="mt-5 block text-sm font-medium text-[var(--ink)]" htmlFor="petdex-import-url">
-                    Petdex 链接
+                    {t('floatingBallPet.petdexDialog.urlLabel')}
                 </label>
                 <input
                     ref={inputRef}
@@ -227,7 +237,7 @@ function PetdexImportDialog({
                     value={value}
                     onChange={(event) => onValueChange(event.target.value)}
                     disabled={importing}
-                    placeholder="例如 https://petdex.dev/pets/bluebow"
+                    placeholder={t('floatingBallPet.petdexDialog.placeholder')}
                     className="mt-2 w-full rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 text-base text-[var(--ink)] placeholder-[var(--ink-muted)] outline-none transition-colors focus:border-[var(--accent)] focus:ring-2 focus:ring-[var(--accent)]/20 disabled:cursor-wait disabled:opacity-70"
                 />
 
@@ -238,7 +248,7 @@ function PetdexImportDialog({
                         disabled={importing}
                         className="rounded-lg border border-[var(--line)] bg-[var(--paper)] px-4 py-2 text-sm font-semibold text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)] disabled:cursor-wait disabled:opacity-70"
                     >
-                        取消
+                        {t('floatingBallPet.cancel')}
                     </button>
                     <button
                         type="submit"
@@ -246,7 +256,7 @@ function PetdexImportDialog({
                         className="inline-flex items-center justify-center gap-2 rounded-lg bg-[var(--button-primary-bg)] px-4 py-2 text-sm font-semibold text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:cursor-wait disabled:opacity-70"
                     >
                         {importing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Link2 className="h-4 w-4" />}
-                        导入
+                        {t('floatingBallPet.import')}
                     </button>
                 </div>
             </form>
@@ -255,6 +265,8 @@ function PetdexImportDialog({
 }
 
 export default function FloatingBallPetSettings() {
+    const { t } = useTranslation('settings');
+    const tRef = useRef(t);
     const { config, updateConfig, projects, addProject } = useConfig();
     const toast = useToast();
     const [installedPacks, setInstalledPacks] = useState<PetPack[]>([]);
@@ -268,6 +280,10 @@ export default function FloatingBallPetSettings() {
     const refreshSeqRef = useRef(0);
     const mountedRef = useRef(true);
 
+    useEffect(() => {
+        tRef.current = t;
+    }, [t]);
+
     const selectedPetId = normalizeBuiltinPetPackId(config.floatingBallPetId) ?? DEFAULT_PET_PACK_ID;
     const hoverPeekEnabled = config.floatingBallHoverPeekEnabled !== false;
     const stylePacks = useMemo<PetPack[]>(() => {
@@ -279,14 +295,14 @@ export default function FloatingBallPetSettings() {
     }, [installedPacks]);
     const workspaceOptions = useMemo(
         () => [
-            { value: '', label: '跟随默认工作区' },
+            { value: '', label: t('floatingBallPet.followDefaultWorkspace') },
             ...projects.map((project) => ({
                 value: project.path,
                 label: shortenPathForDisplay(project.path),
                 icon: <FolderOpen className="h-3.5 w-3.5" />,
             })),
         ],
-        [projects],
+        [projects, t],
     );
 
     const refreshInstalled = useCallback(async () => {
@@ -301,7 +317,9 @@ export default function FloatingBallPetSettings() {
         } catch (err) {
             console.warn('[FloatingBallPetSettings] list installed pets failed:', err);
             if (mountedRef.current && refreshSeqRef.current === seq) {
-                toast.error(`读取已导入素材失败：${err instanceof Error ? err.message : String(err)}`);
+                toast.error(tRef.current('floatingBallPet.toasts.loadInstalledFailed', {
+                    message: err instanceof Error ? err.message : String(err),
+                }));
             }
         } finally {
             if (mountedRef.current && refreshSeqRef.current === seq) {
@@ -344,9 +362,11 @@ export default function FloatingBallPetSettings() {
                 }
                 await refreshInstalled();
                 setDeleteTarget(null);
-                toast.success('已删除桌宠素材');
+                toast.success(tRef.current('floatingBallPet.toasts.deleted'));
             } catch (err) {
-                toast.error(`删除桌宠素材失败：${err instanceof Error ? err.message : String(err)}`);
+                toast.error(tRef.current('floatingBallPet.toasts.deleteFailed', {
+                    message: err instanceof Error ? err.message : String(err),
+                }));
             } finally {
                 if (mountedRef.current) {
                     setDeletingPetId(null);
@@ -359,15 +379,24 @@ export default function FloatingBallPetSettings() {
     const setEnabled = useCallback(
         async (enabled: boolean) => {
             try {
-                await setNativeFloatingBallEnabled(enabled);
+                await setNativeFloatingBallEnabled(enabled, {
+                    unsupported: tRef.current('floatingBallPet.toasts.unsupportedSystem'),
+                });
             } catch (err) {
-                toast.error(`${enabled ? '启用' : '关闭'}桌面宠物失败：${describeNativeFloatingBallError(err)}`);
+                toast.error(tRef.current('floatingBallPet.toasts.toggleFailed', {
+                    action: enabled
+                        ? tRef.current('floatingBallPet.enableAction')
+                        : tRef.current('floatingBallPet.disableAction'),
+                    message: describeNativeFloatingBallError(err),
+                }));
                 return;
             }
 
             await updateConfig({ floatingBallEnabled: enabled });
             track('floating_ball_toggle', { gate: false, enabled });
-            toast.success(enabled ? '已启用桌面宠物' : '已关闭桌面宠物');
+            toast.success(enabled
+                ? tRef.current('floatingBallPet.toasts.enabled')
+                : tRef.current('floatingBallPet.toasts.disabled'));
         },
         [toast, updateConfig],
     );
@@ -395,7 +424,7 @@ export default function FloatingBallPetSettings() {
                 if (importedPacks.length > 0) {
                     await selectPetPack(importedPacks[0]);
                 }
-                toast.success(formatImportToast({ imported, skipped, pets: [] }));
+                toast.success(formatImportToast({ imported, skipped, pets: [] }, tRef.current));
             } finally {
                 setImporting(false);
             }
@@ -412,9 +441,11 @@ export default function FloatingBallPetSettings() {
             if (packs.length > 0) {
                 await selectPetPack(packs[0]);
             }
-            toast.success(formatImportToast(summary));
+            toast.success(formatImportToast(summary, tRef.current));
         } catch (err) {
-            toast.error(`从 Codex 导入失败：${err instanceof Error ? err.message : String(err)}`);
+            toast.error(tRef.current('floatingBallPet.toasts.importCodexFailed', {
+                message: err instanceof Error ? err.message : String(err),
+            }));
         } finally {
             setImporting(false);
         }
@@ -423,7 +454,7 @@ export default function FloatingBallPetSettings() {
     const importFromPetdex = useCallback(async () => {
         const url = petdexUrl.trim();
         if (!url) {
-            toast.error('请输入 Petdex 链接');
+            toast.error(tRef.current('floatingBallPet.toasts.petdexUrlRequired'));
             return;
         }
         setImporting(true);
@@ -436,9 +467,11 @@ export default function FloatingBallPetSettings() {
             }
             setPetdexDialogOpen(false);
             setPetdexUrl('');
-            toast.success(formatImportToast(summary));
+            toast.success(formatImportToast(summary, tRef.current));
         } catch (err) {
-            toast.error(`Petdex 链接导入失败：${err instanceof Error ? err.message : String(err)}`);
+            toast.error(tRef.current('floatingBallPet.toasts.importPetdexFailed', {
+                message: err instanceof Error ? err.message : String(err),
+            }));
         } finally {
             setImporting(false);
         }
@@ -449,7 +482,7 @@ export default function FloatingBallPetSettings() {
             const { open } = await import('@tauri-apps/plugin-dialog');
             const selected = await open({
                 multiple: true,
-                title: '选择 Codex Pets .zip 文件',
+                title: tRef.current('floatingBallPet.fileDialogTitle'),
                 filters: [
                     { name: 'Codex Pets ZIP', extensions: ['zip'] },
                 ],
@@ -457,7 +490,9 @@ export default function FloatingBallPetSettings() {
             if (!selected) return;
             await importPaths(Array.isArray(selected) ? selected : [selected]);
         } catch (err) {
-            toast.error(`选择文件失败：${err instanceof Error ? err.message : String(err)}`);
+            toast.error(tRef.current('floatingBallPet.toasts.chooseFileFailed', {
+                message: err instanceof Error ? err.message : String(err),
+            }));
         }
     }, [importPaths, toast]);
 
@@ -490,9 +525,9 @@ export default function FloatingBallPetSettings() {
                 }}
             />
             <div className="mb-8">
-                <h2 className="text-xl font-semibold text-[var(--ink)]">桌面宠物</h2>
+                <h2 className="text-xl font-semibold text-[var(--ink)]">{t('floatingBallPet.title')}</h2>
                 <p className="mt-2 max-w-2xl text-sm leading-6 text-[var(--ink-muted)]">
-                    悬浮桌面宠物伴你在任何时刻唤起 MyAgents，与 AI 对话或发起任务。
+                    {t('floatingBallPet.description')}
                 </p>
             </div>
 
@@ -500,9 +535,9 @@ export default function FloatingBallPetSettings() {
                 <section className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-4 sm:p-5">
                     <div className="flex flex-col items-start gap-4 sm:flex-row sm:items-center sm:justify-between sm:gap-6">
                         <div>
-                            <h3 className="text-base font-medium text-[var(--ink)]">启用</h3>
+                            <h3 className="text-base font-medium text-[var(--ink)]">{t('floatingBallPet.enableTitle')}</h3>
                             <p className="mt-1 text-sm text-[var(--ink-muted)]">
-                                显示桌面悬浮入口和伴侣窗口。
+                                {t('floatingBallPet.enableDescription')}
                             </p>
                         </div>
                         <button
@@ -523,12 +558,12 @@ export default function FloatingBallPetSettings() {
                 </section>
 
                 <section className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-4 sm:p-5">
-                    <h3 className="text-base font-medium text-[var(--ink)]">通用设置</h3>
+                    <h3 className="text-base font-medium text-[var(--ink)]">{t('floatingBallPet.generalTitle')}</h3>
                     <div className="mt-4 flex flex-col items-stretch gap-4 sm:flex-row sm:items-center sm:justify-between sm:gap-6">
                         <div className="min-w-0 flex-1">
-                            <p className="text-sm font-medium text-[var(--ink)]">绑定工作区</p>
+                            <p className="text-sm font-medium text-[var(--ink)]">{t('floatingBallPet.workspaceBindingTitle')}</p>
                             <p className="mt-1 text-sm text-[var(--ink-muted)]">
-                                默认跟随启动页工作区，也可以固定到某个项目。
+                                {t('floatingBallPet.workspaceBindingDescription')}
                             </p>
                         </div>
                         <CustomSelect
@@ -541,16 +576,16 @@ export default function FloatingBallPetSettings() {
                                     await addProject(next);
                                 }
                                 await updateConfig({ floatingBallWorkspaceOverride: next });
-                                toast.success('工作区绑定已更新');
+                                toast.success(t('floatingBallPet.toasts.workspaceBindingUpdated'));
                             }}
                             className="w-full shrink-0 sm:w-72"
                         />
                     </div>
                     <div className="mt-4 flex flex-col items-start gap-4 border-t border-[var(--line)] pt-4 sm:flex-row sm:items-center sm:justify-between sm:gap-6">
                         <div className="min-w-0 flex-1">
-                            <p className="text-sm font-medium text-[var(--ink)]">悬停预览浮窗</p>
+                            <p className="text-sm font-medium text-[var(--ink)]">{t('floatingBallPet.hoverPeekTitle')}</p>
                             <p className="mt-1 text-sm text-[var(--ink-muted)]">
-                                鼠标移到悬浮球上时自动展开半透明浮窗；关闭后点击悬浮球仍可打开。
+                                {t('floatingBallPet.hoverPeekDescription')}
                             </p>
                         </div>
                         <button
@@ -559,7 +594,9 @@ export default function FloatingBallPetSettings() {
                                 const next = !hoverPeekEnabled;
                                 await updateConfig({ floatingBallHoverPeekEnabled: next });
                                 notifyBallConfigChanged();
-                                toast.success(next ? '已开启悬停预览浮窗' : '已关闭悬停预览浮窗');
+                                toast.success(next
+                                    ? t('floatingBallPet.toasts.hoverPeekEnabled')
+                                    : t('floatingBallPet.toasts.hoverPeekDisabled'));
                             }}
                             className={`relative h-6 w-11 shrink-0 cursor-pointer rounded-full transition-colors ${
                                 hoverPeekEnabled ? 'bg-[var(--accent)]' : 'bg-[var(--line-strong)]'
@@ -578,16 +615,16 @@ export default function FloatingBallPetSettings() {
                 <section className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-4 sm:p-5">
                     <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
                         <div>
-                            <h3 className="text-base font-medium text-[var(--ink)]">宠物样式</h3>
+                            <h3 className="text-base font-medium text-[var(--ink)]">{t('floatingBallPet.petStyleTitle')}</h3>
                             <p className="mt-1 max-w-2xl text-sm leading-6 text-[var(--ink-muted)]">
-                                内置样式和导入素材都使用 Codex Pets 的 9 状态 spritesheet 协议，运行时会按当前 Agent 状态切换动作。
+                                {t('floatingBallPet.petStyleDescription')}
                             </p>
                         </div>
                         <button
                             type="button"
                             onClick={() => void refreshInstalled()}
                             className="self-end rounded-lg p-2 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] sm:self-auto"
-                            title="刷新导入素材"
+                            title={t('floatingBallPet.refreshImported')}
                         >
                             {loadingInstalled ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
                         </button>
@@ -617,9 +654,9 @@ export default function FloatingBallPetSettings() {
                     >
                         <div className="flex min-h-44 w-full flex-col items-center justify-center text-center">
                             <UploadCloud className="h-8 w-8 text-[var(--ink-muted)]" />
-                            <h4 className="mt-4 text-base font-semibold text-[var(--ink)]">拖拽导入 Codex Pets 素材</h4>
+                            <h4 className="mt-4 text-base font-semibold text-[var(--ink)]">{t('floatingBallPet.dropImportTitle')}</h4>
                             <p className="mt-2 max-w-xl whitespace-normal break-words text-sm leading-6 text-[var(--ink-muted)]">
-                                拖入包含 pet.json 和 spritesheet.webp/png 的文件夹或 Codex Pets .zip 文件，导入时会校验 9 状态素材尺寸与 manifest 引用。
+                                {t('floatingBallPet.dropImportDescription')}
                             </p>
                             <div className="mt-5 flex w-full flex-col items-stretch gap-2 rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-2 shadow-sm lg:w-auto lg:flex-row lg:items-center lg:gap-3">
                                 <button
@@ -629,7 +666,7 @@ export default function FloatingBallPetSettings() {
                                     className="inline-flex w-full min-w-0 flex-wrap items-center justify-center gap-2 whitespace-normal rounded-lg bg-[var(--button-primary-bg)] px-4 py-2 text-sm font-semibold text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:cursor-wait disabled:opacity-70 lg:w-auto"
                                 >
                                     {importing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
-                                    从 Codex 导入
+                                    {t('floatingBallPet.importFromCodex')}
                                 </button>
                                 <button
                                     type="button"
@@ -638,7 +675,7 @@ export default function FloatingBallPetSettings() {
                                     className="inline-flex w-full min-w-0 flex-wrap items-center justify-center gap-2 whitespace-normal rounded-lg border border-[var(--line)] bg-[var(--paper)] px-4 py-2 text-sm font-semibold text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)] disabled:cursor-wait disabled:opacity-70 lg:w-auto"
                                 >
                                     <FolderOpen className="h-4 w-4" />
-                                    选择 .zip 文件
+                                    {t('floatingBallPet.chooseZip')}
                                 </button>
                                 <button
                                     type="button"
@@ -647,7 +684,7 @@ export default function FloatingBallPetSettings() {
                                     className="inline-flex w-full min-w-0 flex-wrap items-center justify-center gap-2 whitespace-normal rounded-lg border border-[var(--line)] bg-[var(--paper)] px-4 py-2 text-sm font-semibold text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)] disabled:cursor-wait disabled:opacity-70 lg:w-auto"
                                 >
                                     <Link2 className="h-4 w-4" />
-                                    Petdex 链接导入
+                                    {t('floatingBallPet.importFromPetdex')}
                                 </button>
                             </div>
                         </div>
@@ -655,7 +692,7 @@ export default function FloatingBallPetSettings() {
                 </section>
 
                 <section className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-4 sm:p-5">
-                    <h3 className="text-base font-medium text-[var(--ink)]">下载网站推荐</h3>
+                    <h3 className="text-base font-medium text-[var(--ink)]">{t('floatingBallPet.downloadSitesTitle')}</h3>
                     <div className="mt-4 grid gap-3 md:grid-cols-2">
                         <ExternalLink
                             href="https://petdex.dev"
@@ -663,7 +700,7 @@ export default function FloatingBallPetSettings() {
                         >
                             <span>
                                 <span className="block font-semibold">Petdex</span>
-                                <span className="mt-1 block text-[var(--ink-muted)]">Codex Pets 公共素材库</span>
+                                <span className="mt-1 block text-[var(--ink-muted)]">{t('floatingBallPet.petdexSiteDescription')}</span>
                             </span>
                             <ExternalLinkIcon className="h-4 w-4 text-[var(--ink-muted)]" />
                         </ExternalLink>
@@ -673,7 +710,7 @@ export default function FloatingBallPetSettings() {
                         >
                             <span>
                                 <span className="block font-semibold">GitHub Topic</span>
-                                <span className="mt-1 block text-[var(--ink-muted)]">社区开源 Codex Pet 项目</span>
+                                <span className="mt-1 block text-[var(--ink-muted)]">{t('floatingBallPet.githubSiteDescription')}</span>
                             </span>
                             <ExternalLinkIcon className="h-4 w-4 text-[var(--ink-muted)]" />
                         </ExternalLink>

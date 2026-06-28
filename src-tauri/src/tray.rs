@@ -6,7 +6,7 @@ use std::fs;
 #[cfg(target_os = "macos")]
 use tauri::image::Image;
 use tauri::{
-    menu::{CheckMenuItem, CheckMenuItemBuilder, MenuBuilder, MenuItemBuilder},
+    menu::{CheckMenuItem, CheckMenuItemBuilder, MenuBuilder, MenuItem, MenuItemBuilder},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Emitter, Manager, Runtime, Wry,
 };
@@ -32,7 +32,10 @@ const MENU_EXIT: &str = "exit";
 /// Non-generic over Runtime: production uses `Wry` everywhere; pinning the
 /// type here avoids dragging an `R: Runtime` parameter through every consumer.
 pub struct TrayMenuHandles {
+    pub open: MenuItem<Wry>,
+    pub settings: MenuItem<Wry>,
     pub force_wake_lock: CheckMenuItem<Wry>,
+    pub exit: MenuItem<Wry>,
 }
 
 /// Initialize the system tray with icon and menu.
@@ -40,19 +43,26 @@ pub struct TrayMenuHandles {
 /// Pinned to `Wry` because production runs on Wry and `TrayMenuHandles` stores
 /// `CheckMenuItem<Wry>` non-generically. All callers pass `&mut App<Wry>`.
 pub fn setup_tray(app: &tauri::App<Wry>) -> Result<(), Box<dyn std::error::Error>> {
+    let locale = crate::i18n::current_locale();
     // Build the tray menu
-    let open_item = MenuItemBuilder::with_id(MENU_OPEN, "打开 MyAgents").build(app)?;
-    let settings_item = MenuItemBuilder::with_id(MENU_SETTINGS, "设置").build(app)?;
+    let open_item =
+        MenuItemBuilder::with_id(MENU_OPEN, crate::i18n::t("tray.open", locale)).build(app)?;
+    let settings_item =
+        MenuItemBuilder::with_id(MENU_SETTINGS, crate::i18n::t("tray.settings", locale))
+            .build(app)?;
     // PRD 0.2.35 — global force wake-lock toggle. Initial check state mirrors
     // disk truth (`config.json::forceWakeLock`). The CheckMenuItem handle is
     // managed (below) so `apply_force_wake_lock` can call `set_checked()` when
     // the value changes from the Settings page.
     let initial_force_wl = crate::wake_lock::should_force_wake_lock();
-    let force_wake_lock_item: CheckMenuItem<Wry> =
-        CheckMenuItemBuilder::with_id(MENU_FORCE_WAKE_LOCK, "阻止电脑睡眠")
-            .checked(initial_force_wl)
-            .build(app)?;
-    let exit_item = MenuItemBuilder::with_id(MENU_EXIT, "退出").build(app)?;
+    let force_wake_lock_item: CheckMenuItem<Wry> = CheckMenuItemBuilder::with_id(
+        MENU_FORCE_WAKE_LOCK,
+        crate::i18n::t("tray.forceWakeLock", locale),
+    )
+    .checked(initial_force_wl)
+    .build(app)?;
+    let exit_item =
+        MenuItemBuilder::with_id(MENU_EXIT, crate::i18n::t("tray.exit", locale)).build(app)?;
 
     let menu = MenuBuilder::new(app)
         .item(&open_item)
@@ -66,7 +76,10 @@ pub fn setup_tray(app: &tauri::App<Wry>) -> Result<(), Box<dyn std::error::Error
     // Store the CheckMenuItem in app state so `wake_lock::apply_force_wake_lock`
     // can mutate its check state from any thread.
     app.manage(TrayMenuHandles {
+        open: open_item,
+        settings: settings_item,
         force_wake_lock: force_wake_lock_item,
+        exit: exit_item,
     });
 
     // Load tray icon - use template icon on macOS for proper menu bar appearance
@@ -174,6 +187,34 @@ pub fn setup_tray(app: &tauri::App<Wry>) -> Result<(), Box<dyn std::error::Error
 
     ulog_info!("[Tray] System tray initialized successfully");
     Ok(())
+}
+
+pub fn apply_tray_locale<R: Runtime>(
+    app: &tauri::AppHandle<R>,
+    locale: crate::i18n::SupportedLocale,
+) {
+    let Some(handles) = app.try_state::<TrayMenuHandles>() else {
+        ulog_debug!("[Tray] apply locale skipped; tray handles not registered");
+        return;
+    };
+    if let Err(e) = handles.open.set_text(crate::i18n::t("tray.open", locale)) {
+        ulog_error!("[Tray] Failed to update open label: {}", e);
+    }
+    if let Err(e) = handles
+        .settings
+        .set_text(crate::i18n::t("tray.settings", locale))
+    {
+        ulog_error!("[Tray] Failed to update settings label: {}", e);
+    }
+    if let Err(e) = handles
+        .force_wake_lock
+        .set_text(crate::i18n::t("tray.forceWakeLock", locale))
+    {
+        ulog_error!("[Tray] Failed to update force wake-lock label: {}", e);
+    }
+    if let Err(e) = handles.exit.set_text(crate::i18n::t("tray.exit", locale)) {
+        ulog_error!("[Tray] Failed to update exit label: {}", e);
+    }
 }
 
 /// Show the main window (and focus it).

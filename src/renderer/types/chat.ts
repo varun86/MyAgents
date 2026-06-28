@@ -177,6 +177,23 @@ export interface MessageMetadata {
   senderName?: string;
 }
 
+export interface ModelUsageEntry {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens?: number;
+  cacheCreationTokens?: number;
+}
+
+export interface MessageUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens?: number;
+  cacheCreationTokens?: number;
+  providerId?: string;
+  model?: string;
+  modelUsage?: Record<string, ModelUsageEntry>;
+}
+
 export interface Message {
   id: string;
   role: 'user' | 'assistant';
@@ -193,4 +210,10 @@ export interface Message {
    * the text even if the turn keeps running. Not persisted; meaningless for history.
    */
   streamingTextActive?: boolean;
+  /** Usage info for a completed assistant turn. */
+  usage?: MessageUsage;
+  /** Tool call count in this assistant response. */
+  toolCount?: number;
+  /** Completed assistant turn duration in milliseconds. */
+  durationMs?: number;
 }

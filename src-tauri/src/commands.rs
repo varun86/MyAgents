@@ -1081,7 +1081,7 @@ pub fn cmd_sync_admin_agent<R: Runtime>(app_handle: AppHandle<R>) -> Result<bool
 
 // ============= CLI Sync =============
 
-const CLI_VERSION: &str = "26";
+const CLI_VERSION: &str = "28";
 
 /// Sync the CLI script from bundled resources to ~/.myagents/bin/.
 /// Version-gated: only runs when CLI_VERSION changes.
@@ -1243,7 +1243,7 @@ pub fn cmd_sync_cli<R: Runtime>(app_handle: AppHandle<R>) -> Result<bool, String
 // matching exclusion list in src/server/index.ts::seedBundledSkills
 // MUST be kept in sync (comment there points back here).
 
-const SYSTEM_SKILLS_VERSION: &str = "23";
+const SYSTEM_SKILLS_VERSION: &str = "25";
 
 /// Skills that ship with the app and MUST stay at the bundled version —
 /// the app's flows depend on them, users are not meant to customise.
@@ -1672,7 +1672,15 @@ const FORBIDDEN_SYSTEM_DIRS: &[&str] = &[
     "/private/etc",
     "/private/var",
 ];
-const CREDENTIAL_SUBDIRS: &[&str] = &[".ssh", ".gnupg", ".aws", ".kube", ".docker", ".config/op"];
+const CREDENTIAL_SUBDIRS: &[&str] = &[
+    ".ssh",
+    ".gnupg",
+    ".aws",
+    ".kube",
+    ".docker",
+    ".config/op",
+    ".myagents/codex",
+];
 #[cfg(target_os = "macos")]
 const MAC_SENSITIVE_SUBDIRS: &[&str] = &[
     "Library/Keychains",

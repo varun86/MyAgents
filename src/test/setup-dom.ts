@@ -4,7 +4,9 @@
 //   tests sharing the same jsdom document.
 import '@testing-library/jest-dom/vitest';
 import { cleanup } from '@testing-library/react';
-import { afterEach } from 'vitest';
+import { afterEach, beforeEach } from 'vitest';
+
+import { i18n } from '@/i18n';
 
 // jsdom lacks ResizeObserver, which several components (CollapsibleContent,
 // MessageList, editors) construct in effects. Provide a no-op stub so rendering
@@ -17,6 +19,10 @@ if (typeof globalThis.ResizeObserver === 'undefined') {
     disconnect(): void { /* no-op */ }
   } as unknown as typeof ResizeObserver;
 }
+
+beforeEach(async () => {
+  await i18n.changeLanguage('zh-CN');
+});
 
 afterEach(() => {
   cleanup();

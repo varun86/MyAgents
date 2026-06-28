@@ -30,6 +30,8 @@ export interface LogContext {
     turnId?: string;
     /** Runtime label e.g. 'claude-code' | 'codex' | 'gemini' | 'builtin'. */
     runtime?: string;
+    /** Runtime source e.g. 'system-cli' | 'managed-provider'. */
+    runtimeSource?: string;
 }
 
 /**

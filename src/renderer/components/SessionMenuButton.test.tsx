@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { ComponentProps } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { i18n } from '@/i18n';
 import { ToastProvider } from './Toast';
 
 const mocks = vi.hoisted(() => ({
@@ -121,6 +122,32 @@ describe('SessionMenuButton', () => {
         workspacePath: '/Users/zhihu/Documents/project/MyAgents',
       });
     });
+  });
+
+  it('renders English chrome without translating channel/platform data', async () => {
+    await i18n.changeLanguage('en-US');
+    const groupTarget: BotChannelCandidate = {
+      agentId: 'agent-1',
+      agentName: 'Mino',
+      channelId: 'channel-1',
+      channelType: 'openclaw:feishu',
+      channelName: 'mino-bot',
+      platformLabel: '飞书',
+      sessionKey: 'agent:agent-1:openclaw:feishu:group:oc_target',
+      sessionId: 'old-im-session',
+      sourceType: 'group',
+      sourceId: 'oc_target',
+      sourceDisplayName: 'Product Crew',
+    };
+
+    renderMenu({ availableChannels: [groupTarget] });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Chat actions' }));
+    fireEvent.click(screen.getByRole('button', { name: /Bind chat bot/ }));
+
+    expect(screen.getByText('Group · Product Crew')).toBeInTheDocument();
+    expect(screen.getByText('飞书')).toBeInTheDocument();
+    expect(screen.getByText('mino-bot')).toBeInTheDocument();
   });
 
   it('moves the current tab off the session before deleting storage', async () => {

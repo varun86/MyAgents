@@ -9,7 +9,7 @@ import { join } from 'path';
 import { existsSync, readFileSync } from 'fs';
 import { execFileSync, execSync } from 'child_process';
 import { query } from '@anthropic-ai/claude-agent-sdk';
-import { resolveClaudeCodeCli, buildClaudeSessionEnv, startOneShotBridge, getSidecarPort } from './agent-session';
+import { resolveClaudeCodeCli, buildClaudeSessionEnv, startOneShotBridge, getSidecarPort, type ProviderEnv } from './agent-session';
 import { applyContextWindowSuffix } from './utils/model-capabilities';
 import { ensureDirSync } from './utils/fs-utils';
 import { getLastBridgeError, getProxyForUrl } from './openai-bridge';
@@ -45,9 +45,9 @@ function parseSubscriptionError(errorText: string, originalText?: string): Verif
   const raw = (originalText ?? errorText).slice(0, 300) || undefined;
   const lower = errorText.toLowerCase();
   if (lower.includes('authentication') || lower.includes('login') || lower.includes('/login')) {
-    return { error: '登录已过期，请重新登录 (claude --login)', detail: raw };
+    return { error: '登录已过期，请重新登录 (claude auth login)', detail: raw };
   } else if (lower.includes('forbidden') || lower.includes('403')) {
-    return { error: '登录已过期，请重新登录 (claude --login)', detail: raw };
+    return { error: '登录已过期，请重新登录 (claude auth login)', detail: raw };
   } else if (lower.includes('rate limit') || lower.includes('429')) {
     return { error: '请求频率限制，请稍后再试', detail: raw };
   } else if (lower.includes('network') || lower.includes('connect')) {
@@ -588,7 +588,8 @@ export async function verifySubscription(): Promise<{ success: boolean; error?: 
   // never `'user'`). The earlier-claimed need for `'user' to read OAuth
   // credentials` was incorrect — settingSources only governs settings.json
   // and managed-settings, not credentials files.
-  const env = buildClaudeSessionEnv(); // No provider override = default Anthropic auth
+  const officialSubscriptionProvider: ProviderEnv = {};
+  const env = buildClaudeSessionEnv(officialSubscriptionProvider);
   return verifyViaSdk(env, {
     sessionId: randomUUID(),
     logPrefix: 'subscription/verify',

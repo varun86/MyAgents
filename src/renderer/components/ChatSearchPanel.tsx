@@ -12,6 +12,7 @@
 
 import { ChevronDown, ChevronUp, Search, X } from 'lucide-react';
 import { useEffect, useRef, type KeyboardEvent } from 'react';
+import { useTranslation } from 'react-i18next';
 
 import type { ChatSearchController } from '@/hooks/useChatSearch';
 
@@ -23,6 +24,7 @@ interface ChatSearchPanelProps {
 }
 
 export default function ChatSearchPanel({ controller, onClose }: ChatSearchPanelProps) {
+  const { t } = useTranslation('chat');
   const { query, setQuery, matchCount, currentIndex, next, prev, hasQuery } = controller;
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -69,8 +71,8 @@ export default function ChatSearchPanel({ controller, onClose }: ChatSearchPanel
         value={query}
         onChange={e => setQuery(e.target.value)}
         onKeyDown={handleKeyDown}
-        placeholder="在当前页面中查找"
-        aria-label="在当前页面中查找"
+        placeholder={t('shell.search.placeholder')}
+        aria-label={t('shell.search.placeholder')}
         className="min-w-0 flex-1 bg-transparent text-sm text-[var(--ink)] outline-none placeholder:text-[var(--ink-muted)]"
       />
       <span className="shrink-0 text-xs tabular-nums text-[var(--ink-muted)]">
@@ -81,8 +83,8 @@ export default function ChatSearchPanel({ controller, onClose }: ChatSearchPanel
         type="button"
         onClick={prev}
         disabled={matchCount === 0}
-        title="上一个 (Shift+Enter)"
-        aria-label="上一个匹配"
+        title={t('shell.search.previousTitle')}
+        aria-label={t('shell.search.previousAria')}
         className="flex h-6 w-6 items-center justify-center rounded-md text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
       >
         <ChevronUp className="h-3.5 w-3.5" />
@@ -91,8 +93,8 @@ export default function ChatSearchPanel({ controller, onClose }: ChatSearchPanel
         type="button"
         onClick={next}
         disabled={matchCount === 0}
-        title="下一个 (Enter)"
-        aria-label="下一个匹配"
+        title={t('shell.search.nextTitle')}
+        aria-label={t('shell.search.nextAria')}
         className="flex h-6 w-6 items-center justify-center rounded-md text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
       >
         <ChevronDown className="h-3.5 w-3.5" />
@@ -100,8 +102,8 @@ export default function ChatSearchPanel({ controller, onClose }: ChatSearchPanel
       <button
         type="button"
         onClick={onClose}
-        title="关闭 (Esc)"
-        aria-label="关闭搜索"
+        title={t('shell.search.closeTitle')}
+        aria-label={t('shell.search.closeAria')}
         className="flex h-6 w-6 items-center justify-center rounded-md text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
       >
         <X className="h-3.5 w-3.5" />

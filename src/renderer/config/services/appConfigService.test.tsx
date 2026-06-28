@@ -1,5 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { atomicModifyConfig, CONFIG_CHANGED_EVENT } from './appConfigService';
+import {
+  atomicModifyConfig,
+  CONFIG_CHANGED_EVENT,
+  ensureManagedCodexProviderDevGateDefault,
+} from './appConfigService';
 
 // Issue #303: env-only edits (e.g. user saves MINERU_API_KEY via Settings) used
 // to land on disk silently. ConfigProvider's React state never refreshed, so
@@ -76,5 +80,39 @@ describe('atomicModifyConfig — CONFIG_CHANGED_EVENT dispatch (issue #303)', ()
 
     expect(received.length).toBe(3);
     expect(received.every(d => d?.reason === 'atomicModifyConfig')).toBe(true);
+  });
+});
+
+describe('ensureManagedCodexProviderDevGateDefault', () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  afterEach(() => {
+    localStorage.clear();
+    vi.restoreAllMocks();
+  });
+
+  it('persists the release default as an explicit true when the raw config omits it', async () => {
+    localStorage.setItem('myagents:config', JSON.stringify({ theme: 'dark' }));
+
+    await ensureManagedCodexProviderDevGateDefault();
+
+    const stored = JSON.parse(localStorage.getItem('myagents:config') ?? '{}') as Record<string, unknown>;
+    expect(stored.theme).toBe('dark');
+    expect(stored.managedCodexProviderDevGate).toBe(true);
+    expect(stored.defaultPermissionMode).toBeUndefined();
+  });
+
+  it('preserves an explicit false so users can keep the provider hidden', async () => {
+    localStorage.setItem('myagents:config', JSON.stringify({
+      theme: 'dark',
+      managedCodexProviderDevGate: false,
+    }));
+
+    await ensureManagedCodexProviderDevGateDefault();
+
+    const stored = JSON.parse(localStorage.getItem('myagents:config') ?? '{}') as Record<string, unknown>;
+    expect(stored.managedCodexProviderDevGate).toBe(false);
   });
 });

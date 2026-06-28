@@ -20,11 +20,11 @@ export const MARKDOWN_SANITIZE_SCHEMA = {
   ],
   attributes: {
     ...defaultSchema.attributes,
-    // Allow class on code/span for syntax highlighting
-    code: [...(defaultSchema.attributes?.code ?? []), 'className'],
-    span: [...(defaultSchema.attributes?.span ?? []), 'className', 'style'],
-    // Allow KaTeX-generated markup
-    div: [...(defaultSchema.attributes?.div ?? []), 'className', 'style'],
+    // Keep the default language-* class support for fenced code blocks.
+    // Do not allow arbitrary class/style on raw HTML: AI/user Markdown can
+    // otherwise render Tailwind or fixed-position overlay markup as live DOM.
+    // KaTeX runs after this sanitizer, so its generated classes are unaffected.
+    code: defaultSchema.attributes?.code ?? [],
   },
 };
 

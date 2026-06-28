@@ -7,22 +7,14 @@
 // Once expanded, the usual pagination (`PAGE_SIZE` at a time) takes over.
 
 import { useMemo, useState } from 'react';
+import type { TFunction } from 'i18next';
+import { useTranslation } from 'react-i18next';
 import { ChevronRight, Download } from 'lucide-react';
 import type { StatusTransition, Task, TaskStatus } from '@/../shared/types/task';
+import { isSupportedLocale } from '@/../shared/i18n';
 
 const PAGE_SIZE = 50;
 const COLLAPSED_PREVIEW = 3;
-
-const STATUS_LABEL: Record<TaskStatus, string> = {
-  todo: '待启动',
-  running: '进行中',
-  verifying: '验证中',
-  done: '已完成',
-  blocked: '已阻塞',
-  stopped: '已暂停',
-  archived: '已归档',
-  deleted: '已删除',
-};
 
 interface Props {
   task: Task;
@@ -32,6 +24,7 @@ interface Props {
 }
 
 export function StatusHistoryList({ task, defaultCollapsed = false }: Props) {
+  const { t } = useTranslation('task');
   const history = task.statusHistory;
   const [expanded, setExpanded] = useState(!defaultCollapsed);
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
@@ -46,7 +39,7 @@ export function StatusHistoryList({ task, defaultCollapsed = false }: Props) {
   if (history.length === 0) {
     return (
       <div className="py-6 text-center text-xs text-[var(--ink-muted)]">
-        暂无状态变更记录
+        {t('history.empty')}
       </div>
     );
   }
@@ -55,7 +48,7 @@ export function StatusHistoryList({ task, defaultCollapsed = false }: Props) {
     <div className="flex flex-col gap-2">
       <div className="flex items-center justify-between">
         <div className="text-sm font-semibold text-[var(--ink)]">
-          状态变更记录 ({history.length})
+          {t('history.title', { count: history.length })}
         </div>
         {/* Export button is only useful in the fully expanded view;
             hiding it in collapsed mode keeps the row tidy. */}
@@ -64,10 +57,10 @@ export function StatusHistoryList({ task, defaultCollapsed = false }: Props) {
             type="button"
             onClick={() => downloadAsJson(task)}
             className="flex items-center gap-1 rounded-[var(--radius-md)] px-2 py-1 text-xs text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
-            title="下载完整 JSON"
+            title={t('history.downloadTitle')}
           >
             <Download className="h-3 w-3" />
-            导出为 JSON
+            {t('history.exportJson')}
           </button>
         )}
       </div>
@@ -83,7 +76,7 @@ export function StatusHistoryList({ task, defaultCollapsed = false }: Props) {
           className="flex items-center gap-1 self-center rounded-[var(--radius-md)] px-3 py-1 text-xs text-[var(--accent-warm)] transition-colors hover:bg-[var(--accent-warm-subtle)]"
         >
           <ChevronRight className="h-3 w-3" />
-          查看全部 {ordered.length} 条
+          {t('history.viewAll', { count: ordered.length })}
         </button>
       )}
       {hasMore && (
@@ -92,7 +85,7 @@ export function StatusHistoryList({ task, defaultCollapsed = false }: Props) {
           onClick={() => setVisibleCount((c) => c + PAGE_SIZE)}
           className="self-center rounded-[var(--radius-md)] px-3 py-1 text-xs text-[var(--accent-warm)] transition-colors hover:bg-[var(--accent-warm-subtle)]"
         >
-          加载更多(剩余 {ordered.length - visibleCount})
+          {t('history.loadMore', { count: ordered.length - visibleCount })}
         </button>
       )}
     </div>
@@ -100,8 +93,10 @@ export function StatusHistoryList({ task, defaultCollapsed = false }: Props) {
 }
 
 function TransitionRow({ t }: { t: StatusTransition }) {
-  const from = t.from ? STATUS_LABEL[t.from] : '—';
-  const to = STATUS_LABEL[t.to];
+  const { t: translate, i18n } = useTranslation('task');
+  const locale = isSupportedLocale(i18n.language) ? i18n.language : 'zh-CN';
+  const from = t.from ? statusLabel(t.from, translate) : '—';
+  const to = statusLabel(t.to, translate);
   // Self-loop transitions (from === to) are audit-only entries — e.g.
   // crash recovery of a recurring task where the status didn't actually
   // change but we wanted to record the event. Render them as a single
@@ -137,10 +132,14 @@ function TransitionRow({ t }: { t: StatusTransition }) {
         )}
       </div>
       <span className="shrink-0 text-xs tabular-nums text-[var(--ink-muted)]/60">
-        {new Date(t.at).toLocaleString()}
+        {new Date(t.at).toLocaleString(locale)}
       </span>
     </li>
   );
+}
+
+function statusLabel(status: TaskStatus, t: TFunction<'task'>): string {
+  return t(`badges.status.${status}`, { defaultValue: t('history.unknownStatus') });
 }
 
 function actorLabel(a: StatusTransition['actor']): string {

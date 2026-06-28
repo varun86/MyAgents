@@ -1,6 +1,7 @@
 import { X, ZoomIn, ZoomOut, RotateCcw } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { useTranslation } from 'react-i18next';
 
 import { useCloseLayer } from '@/hooks/useCloseLayer';
 import OverlayBackdrop from '@/components/OverlayBackdrop';
@@ -12,6 +13,7 @@ interface ImagePreviewProps {
 }
 
 export default function ImagePreview({ src, name, onClose }: ImagePreviewProps) {
+    const { t } = useTranslation('app');
     const [scale, setScale] = useState(1);
     const [rotation, setRotation] = useState(0);
 
@@ -66,7 +68,7 @@ export default function ImagePreview({ src, name, onClose }: ImagePreviewProps) 
                         type="button"
                         onClick={handleZoomOut}
                         className="rounded-lg p-2 text-white/80 hover:bg-white/10 hover:text-white transition-colors"
-                        title="缩小"
+                        title={t('imagePreview.zoomOut')}
                     >
                         <ZoomOut className="h-5 w-5" />
                     </button>
@@ -75,7 +77,7 @@ export default function ImagePreview({ src, name, onClose }: ImagePreviewProps) 
                         type="button"
                         onClick={handleZoomIn}
                         className="rounded-lg p-2 text-white/80 hover:bg-white/10 hover:text-white transition-colors"
-                        title="放大"
+                        title={t('imagePreview.zoomIn')}
                     >
                         <ZoomIn className="h-5 w-5" />
                     </button>
@@ -83,7 +85,7 @@ export default function ImagePreview({ src, name, onClose }: ImagePreviewProps) 
                         type="button"
                         onClick={handleRotate}
                         className="rounded-lg p-2 text-white/80 hover:bg-white/10 hover:text-white transition-colors"
-                        title="旋转"
+                        title={t('imagePreview.rotate')}
                     >
                         <RotateCcw className="h-5 w-5" style={{ transform: 'scaleX(-1)' }} />
                     </button>
@@ -91,15 +93,15 @@ export default function ImagePreview({ src, name, onClose }: ImagePreviewProps) 
                         type="button"
                         onClick={handleReset}
                         className="rounded-lg px-3 py-2 text-xs text-white/80 hover:bg-white/10 hover:text-white transition-colors"
-                        title="重置"
+                        title={t('imagePreview.reset')}
                     >
-                        重置
+                        {t('imagePreview.reset')}
                     </button>
                     <button
                         type="button"
                         onClick={onClose}
                         className="ml-4 rounded-lg p-2 text-white/80 hover:bg-white/10 hover:text-white transition-colors"
-                        title="关闭 (Esc)"
+                        title={t('imagePreview.closeEsc')}
                     >
                         <X className="h-5 w-5" />
                     </button>
@@ -123,7 +125,7 @@ export default function ImagePreview({ src, name, onClose }: ImagePreviewProps) 
 
             {/* Hint text */}
             <div className="absolute bottom-4 left-1/2 -translate-x-1/2 text-xs text-white/50">
-                双击图片放大 · 按 Esc 关闭
+                {t('imagePreview.hint')}
             </div>
         </OverlayBackdrop>,
         document.body

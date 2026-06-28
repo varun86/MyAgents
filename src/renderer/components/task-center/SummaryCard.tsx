@@ -11,6 +11,7 @@
 // own local state (async cronstrue load) that's cleanest kept local.
 
 import { useCallback, useEffect, useMemo, useState, type ComponentType, type ReactNode } from 'react';
+import { useTranslation } from 'react-i18next';
 import {
   Calendar,
   ChevronDown,
@@ -29,6 +30,7 @@ import {
 import { relativeTime } from '@/utils/taskCenterUtils';
 import { workspacePathsEqual } from '@/../shared/workspacePath';
 import type { Task, TaskExecutionMode, TaskRunStats } from '@/../shared/types/task';
+import { isSupportedLocale } from '@/../shared/i18n';
 
 interface Props {
   task: Task;
@@ -36,14 +38,16 @@ interface Props {
 }
 
 type IconComp = ComponentType<{ className?: string }>;
-const MODE_META: Record<TaskExecutionMode, { icon: IconComp; label: string }> = {
-  once: { icon: Play, label: '一次性' },
-  scheduled: { icon: Calendar, label: '定时一次' },
-  recurring: { icon: Timer, label: '周期触发' },
-  loop: { icon: Heart, label: '心跳循环' },
+const MODE_META: Record<TaskExecutionMode, { icon: IconComp; labelKey: string }> = {
+  once: { icon: Play, labelKey: 'badges.category.once' },
+  scheduled: { icon: Calendar, labelKey: 'badges.category.scheduled' },
+  recurring: { icon: Timer, labelKey: 'badges.category.recurring' },
+  loop: { icon: Heart, labelKey: 'badges.category.loop' },
 };
 
 export function SummaryCard({ task, stats }: Props) {
+  const { t, i18n } = useTranslation('task');
+  const locale = isSupportedLocale(i18n.language) ? i18n.language : 'zh-CN';
   const { projects } = useConfig();
   const { statuses } = useAgentStatuses();
   const workspace = useMemo(
@@ -66,13 +70,13 @@ export function SummaryCard({ task, stats }: Props) {
   const nextExecutionAt = stats?.nextExecutionAt;
   useEffect(() => {
     let cancelled = false;
-    void summarizeSchedule(task, nextExecutionAt).then((s) => {
+    void summarizeSchedule(task, nextExecutionAt, locale).then((s) => {
       if (!cancelled) setSchedule(s);
     });
     return () => {
       cancelled = true;
     };
-  }, [task, nextExecutionAt]);
+  }, [task, nextExecutionAt, locale]);
 
   const modeMeta = MODE_META[task.executionMode];
   const ScheduleIcon = modeMeta.icon;
@@ -92,16 +96,17 @@ export function SummaryCard({ task, stats }: Props) {
     if (!task.lastExecutedAt) return null;
     return (
       <span className="flex flex-wrap items-center gap-x-2">
-        <span>{relativeTime(task.lastExecutedAt)}</span>
+        <span>{relativeTime(task.lastExecutedAt, locale)}</span>
         {stats?.lastSuccess === true && (
-          <span className="text-[var(--success)]">成功</span>
+          <span className="text-[var(--success)]">{t('summary.succeeded')}</span>
         )}
         {stats?.lastSuccess === false && (
-          <span className="text-[var(--error)]">失败</span>
+          <span className="text-[var(--error)]">{t('summary.failed')}</span>
         )}
         {stats?.lastDurationMs != null && (
           <span className="text-[var(--ink-muted)]">
-            · 耗时 {(stats.lastDurationMs / 1000).toFixed(1)}s
+            {t('summary.duration')}
+            {(stats.lastDurationMs / 1000).toFixed(1)}s
           </span>
         )}
       </span>
@@ -113,14 +118,16 @@ export function SummaryCard({ task, stats }: Props) {
         const bits: string[] = [];
         if (task.endConditions?.deadline) {
           bits.push(
-            `截止 ${new Date(task.endConditions.deadline).toLocaleString()}`,
+            t('summary.deadline', {
+              time: new Date(task.endConditions.deadline).toLocaleString(locale),
+            }),
           );
         }
         if (task.endConditions?.maxExecutions) {
-          bits.push(`最多 ${task.endConditions.maxExecutions} 次`);
+          bits.push(t('summary.maxExecutions', { count: task.endConditions.maxExecutions }));
         }
         if (task.endConditions?.aiCanExit === false) {
-          bits.push('禁止 AI 自主退出');
+          bits.push(t('summary.aiCannotExit'));
         }
         return bits.join(' · ');
       })()
@@ -138,7 +145,7 @@ export function SummaryCard({ task, stats }: Props) {
         <ScheduleIcon className="mt-0.5 h-4 w-4 shrink-0 text-[var(--accent-warm)]" />
         <div className="min-w-0 flex-1">
           <div className="text-sm font-medium leading-snug text-[var(--ink)]">
-            {schedule?.title ?? `${modeMeta.label} · 计算中…`}
+            {schedule?.title ?? `${t(modeMeta.labelKey)} · ${t('summary.computing')}`}
           </div>
           {schedule?.next && (
             <div className="mt-0.5 text-xs text-[var(--ink-muted)]">
@@ -164,13 +171,16 @@ export function SummaryCard({ task, stats }: Props) {
       <dl className="mt-3 grid grid-cols-[auto_1fr] gap-x-5 gap-y-1.5 border-t border-[var(--line-subtle)] pt-3 text-xs">
         {agentLabel && <MetaRow k="Agent" v={agentLabel} />}
         {(stats?.executionCount ?? 0) > 0 && (
-          <MetaRow k="累计执行" v={`${stats!.executionCount} 次`} />
+          <MetaRow
+            k={t('summary.executionCount')}
+            v={t('summary.executionCountValue', { count: stats!.executionCount })}
+          />
         )}
-        {lastRunCell && <MetaRow k="最近执行" v={lastRunCell} />}
-        {endConditionCell && <MetaRow k="终止条件" v={endConditionCell} />}
+        {lastRunCell && <MetaRow k={t('summary.lastRun')} v={lastRunCell} />}
+        {endConditionCell && <MetaRow k={t('summary.endConditions')} v={endConditionCell} />}
         {task.tags.length > 0 && (
           <MetaRow
-            k="标签"
+            k={t('summary.tags')}
             v={
               <span className="flex flex-wrap gap-1">
                 {task.tags.map((t) => (
@@ -201,36 +211,36 @@ export function SummaryCard({ task, stats }: Props) {
         ) : (
           <ChevronRight className="h-3 w-3" />
         )}
-        {detailsOpen ? '收起详情' : '展开更多详情'}
+        {detailsOpen ? t('summary.collapseDetails') : t('summary.expandDetails')}
       </button>
 
       {detailsOpen && (
         <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-5 gap-y-1.5 border-t border-[var(--line-subtle)] pt-2 text-xs">
-          <MetaRow k="创建于" v={new Date(task.createdAt).toLocaleString()} />
-          <MetaRow k="最近更新" v={new Date(task.updatedAt).toLocaleString()} />
+          <MetaRow k={t('summary.createdAt')} v={new Date(task.createdAt).toLocaleString(locale)} />
+          <MetaRow k={t('summary.updatedAt')} v={new Date(task.updatedAt).toLocaleString(locale)} />
           <MetaRow
-            k="工作区"
-            v={workspace?.displayName ?? workspace?.name ?? '未知工作区'}
+            k={t('summary.workspace')}
+            v={workspace?.displayName ?? workspace?.name ?? t('summary.unknownWorkspace')}
           />
-          {workspace?.path && <MetaRow k="工作区路径" v={workspace.path} mono />}
+          {workspace?.path && <MetaRow k={t('summary.workspacePath')} v={workspace.path} mono />}
           {task.runMode && (
             <MetaRow
-              k="会话策略"
-              v={task.runMode === 'single-session' ? '连续对话' : '新开对话'}
+              k={t('summary.runMode')}
+              v={task.runMode === 'single-session' ? t('summary.runModeSingle') : t('summary.runModeNew')}
             />
           )}
-          {task.model && <MetaRow k="模型覆盖" v={task.model} mono />}
+          {task.model && <MetaRow k={t('summary.modelOverride')} v={task.model} mono />}
           {task.permissionMode && task.permissionMode !== 'auto' && (
-            <MetaRow k="权限覆盖" v={task.permissionMode} mono />
+            <MetaRow k={t('summary.permissionOverride')} v={task.permissionMode} mono />
           )}
           {task.runtime && task.runtime !== 'builtin' && (
             <MetaRow k="Runtime" v={task.runtime} mono />
           )}
           {stats?.cronStatus && (
-            <MetaRow k="调度器" v={stats.cronStatus} mono />
+            <MetaRow k={t('summary.scheduler')} v={stats.cronStatus} mono />
           )}
           {stats?.sessionCount != null && stats.sessionCount > 0 && (
-            <MetaRow k="关联会话" v={String(stats.sessionCount)} />
+            <MetaRow k={t('summary.sessionCount')} v={String(stats.sessionCount)} />
           )}
           {workspace?.agentId && (
             <MetaRow k="Agent ID" v={workspace.agentId} mono />

@@ -17,6 +17,7 @@ import { promisify } from 'node:util';
 import { splitProviderModelInput, type McpServerDefinition } from '../shared/config-types';
 import { deriveCliToolKind, type CliToolRegistryEntry } from '../shared/types/cliTools';
 import { workspacePathsEqual } from '../shared/workspacePath';
+import { IMAGE_UNDERSTANDING_TOOL_ID } from '../shared/official-tools';
 import { removeCustomMcpServerCascade, McpRemovalError } from './services/mcp-removal';
 import { SDK_RESERVED_MCP_NAMES } from './agent-session';
 import {
@@ -56,6 +57,7 @@ import { buildCronScope } from './utils/cron-scope';
 import { readLoopbackJson } from './utils/loopback-response';
 import { ADMIN_LOOPBACK_TIMEOUT_MS, managementApi } from './utils/management-api-client';
 import { getCuseDiagnostics } from './utils/cuse-diagnostics';
+import { getSessionEngine } from './session-engine';
 
 // Long-running sidecar operations need their own budget. Anchored to the
 // sidecar's internal `FETCH_TIMEOUT_MS` (300s for tarball download) plus a
@@ -792,6 +794,50 @@ export async function handleMcpOAuthRevoke(payload: { id: string }): Promise<Adm
 }
 
 // ---------------------------------------------------------------------------
+// Official Vision CLI Tool Handlers
+// ---------------------------------------------------------------------------
+
+export async function handleVisionReadme(): Promise<AdminResponse> {
+  const { getVisionToolReadme } = await import('./official-tools/vision');
+  return { success: true, data: { text: getVisionToolReadme() } };
+}
+
+export async function handleVisionAnalyze(payload: {
+  images?: unknown;
+  image?: unknown;
+  prompt?: unknown;
+  promptFile?: unknown;
+}): Promise<AdminResponse> {
+  const rawImages = Array.isArray(payload.images)
+    ? payload.images
+    : (payload.image !== undefined ? [payload.image] : []);
+  const images = rawImages.filter((value): value is string => typeof value === 'string' && value.trim().length > 0);
+  const prompt = typeof payload.prompt === 'string' ? payload.prompt : undefined;
+  const promptFile = typeof payload.promptFile === 'string' ? payload.promptFile : undefined;
+  const { analyzeImages, visionErrorResponse } = await import('./official-tools/vision');
+  try {
+    const sessionContext = getSessionEngine().getCurrentSessionContext();
+    const result = await analyzeImages({
+      workspacePath: sessionContext.workspacePath ?? getCurrentWorkspacePath(),
+      sessionMeta: sessionContext.sessionMeta ?? null,
+      images,
+      prompt,
+      promptFile,
+    });
+    trackServer('official_tool_vision_analyze', {
+      tool_id: IMAGE_UNDERSTANDING_TOOL_ID,
+      image_count: result.images.length,
+      provider_id: result.providerId,
+      model: result.model,
+    });
+    return { success: true, data: result };
+  } catch (error) {
+    const { status, error: message, recoveryHint } = visionErrorResponse(error);
+    return { success: false, error: message, data: { status }, recoveryHint };
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Model Provider Handlers
 // ---------------------------------------------------------------------------
 
@@ -1397,6 +1443,25 @@ Options for 'oauth start' (manual mode):
   --client-secret  OAuth client secret
   --scopes         Scopes (comma or space separated)
   --callback-port  Local callback port`,
+
+  vision: `myagents vision — Official image-understanding helper
+
+Commands:
+  readme                   Show the full image-understanding tool guide
+  analyze                  Analyze one or more local workspace image paths
+
+Options for 'analyze':
+  --image <path>           Image path inside the current MyAgents workspace (repeatable)
+  --prompt-file <path>     Workspace-relative text file with the inspection request
+  --prompt '<text>'        Short literal request authored by the agent
+  --json                   Output machine-readable JSON
+
+Examples:
+  myagents vision readme
+  myagents vision analyze --image @myagents_files/screenshot.png --prompt-file inspect.txt
+
+Use --prompt-file for user-provided, multiline, quoted, or shell-sensitive text.
+The configured image-understanding model is selected in Settings -> Toolbox.`,
 
   model: `myagents model — Manage model providers
 

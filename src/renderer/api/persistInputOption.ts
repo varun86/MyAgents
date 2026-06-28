@@ -21,10 +21,16 @@
 //    out keeps this function pure across both Chat (with a session) and
 //    Launcher (without).
 
-import type { PermissionMode, Project, McpServerDefinition } from '@/config/types';
+import { CODEX_SUBSCRIPTION_PROVIDER_ID, type PermissionMode, type Project, type McpServerDefinition } from '@/config/types';
 import type { AgentConfig } from '@/../shared/types/agent';
-import type { RuntimeConfig } from '@/../shared/types/runtime';
+import { buildRuntimeChangePatch, type RuntimeConfig } from '@/../shared/types/runtime';
 import { createConcreteProviderRoute, type ProviderRoute } from '@/../shared/providerRoute';
+import {
+  agentDefaultsForRuntimeBackedProvider,
+  runtimeBackedProviderPermissionMode,
+  type RuntimeBackedProviderIdentity,
+} from '@/../shared/providerExecution';
+import type { OfficialToolId } from '@/../shared/official-tools';
 
 export interface BuiltinModelSelection {
   providerId: string;
@@ -50,6 +56,11 @@ export interface InputOptionFields {
   builtinModel?: string | null;
   /** Selected model when on an external runtime (Codex/CC/Gemini). */
   runtimeModel?: string | null;
+  /** Provider-shaped selection whose execution is owned by an external runtime
+   *  (currently Codex 订阅). This is intentionally separate from
+   *  `builtinSelection`: the user picked a Provider, but the running session
+   *  must carry runtime/source identity. */
+  runtimeBackedProviderSelection?: RuntimeBackedProviderIdentity;
   /** Permission mode — split between `agent.permissionMode` (builtin) and
    *  `agent.runtimeConfig.permissionMode` (external) at the storage layer. */
   permissionMode?: PermissionMode | string;
@@ -62,6 +73,8 @@ export interface InputOptionFields {
   /** PRD 0.2.17 — Claude plugin ids enabled at the workspace level. Mirrors
    *  mcpEnabledServers exactly (project + agent + snapshot dual-write). */
   enabledPluginIds?: string[];
+  /** MyAgents official CLI tool ids enabled at the workspace level. */
+  enabledOfficialToolIds?: OfficialToolId[];
 }
 
 export interface PersistInputOptionParams {
@@ -76,6 +89,8 @@ export interface PersistInputOptionParams {
   /** Existing runtimeConfig to merge into when writing
    *  `runtimeConfig.permissionMode` / `.model`. Avoids stomping unrelated keys. */
   currentRuntimeConfig?: RuntimeConfig;
+  /** Current Agent/Project provider. Used only to clean old managed-provider runtime projection. */
+  currentProviderId?: string | null;
 
   fields: InputOptionFields;
 
@@ -112,6 +127,9 @@ export interface PersistInputOptionParams {
    *  session restart picks up the new plugin selection immediately. */
   pushPluginsToSidecar?: (enabledIds: string[]) => Promise<unknown>;
 
+  /** Live sidecar push for MyAgents official CLI tool enabled set. */
+  pushOfficialToolsToSidecar?: (enabledIds: OfficialToolId[]) => Promise<unknown>;
+
   /** Live sidecar push for external runtime model / permission-mode changes.
    *  Chat-tab only. Launcher has no active Sidecar; the next session reads disk. */
   pushRuntimeConfigToSidecar?: (
@@ -124,6 +142,7 @@ export interface PersistInputOptionParams {
 export interface SessionSnapshotPatch {
   providerId?: string | null;
   providerRoute?: ProviderRoute | null;
+  providerExecutionIdentity?: RuntimeBackedProviderIdentity | null;
   model?: string | null;
   /** #324 — persisted literally (incl. 'default', which meaningfully pins the
    *  session back to default over a non-default agent value). */
@@ -131,6 +150,7 @@ export interface SessionSnapshotPatch {
   permissionMode?: string | null;
   mcpEnabledServers?: string[] | null;
   enabledPluginIds?: string[] | null;
+  enabledOfficialToolIds?: OfficialToolId[] | null;
   /** #300/#401 — credential snapshot. `null` clears it so the sidecar re-resolves
    *  the env live from `providerId`. Same-provider builtin model edits must not
    *  clear it because owned sessions treat frozen env as part of exact identity. */
@@ -231,18 +251,37 @@ export async function persistInputOptionChange(
     }
   }
 
+  if (params.pushOfficialToolsToSidecar && params.fields.enabledOfficialToolIds !== undefined) {
+    try {
+      await params.pushOfficialToolsToSidecar(params.fields.enabledOfficialToolIds);
+    } catch (e) {
+      errors.push(`sidecar official tools push: ${describe(e)}`);
+    }
+  }
+
   if (
     params.isExternalRuntime &&
     params.pushRuntimeConfigToSidecar &&
-    (params.fields.runtimeModel !== undefined || params.fields.permissionMode !== undefined)
+    (
+      params.fields.runtimeModel !== undefined
+      || params.fields.permissionMode !== undefined
+      || params.fields.runtimeBackedProviderSelection !== undefined
+    )
   ) {
     try {
       const runtimeConfig: Pick<RuntimeConfig, 'model' | 'permissionMode'> = {};
-      if (params.fields.runtimeModel !== undefined) {
+      if (params.fields.runtimeBackedProviderSelection) {
+        runtimeConfig.model = params.fields.runtimeBackedProviderSelection.model;
+      } else if (params.fields.runtimeModel !== undefined) {
         runtimeConfig.model = params.fields.runtimeModel ?? undefined;
       }
       if (params.fields.permissionMode !== undefined) {
-        runtimeConfig.permissionMode = params.fields.permissionMode;
+        runtimeConfig.permissionMode = params.fields.runtimeBackedProviderSelection
+          ? runtimeBackedProviderPermissionMode(
+            params.fields.runtimeBackedProviderSelection,
+            params.fields.permissionMode,
+          )
+          : params.fields.permissionMode;
       }
       await params.pushRuntimeConfigToSidecar(runtimeConfig);
     } catch (e) {
@@ -261,7 +300,10 @@ function buildProjectPatch(
   const patch: Partial<Omit<Project, 'id'>> = {};
   const { fields, isExternalRuntime } = params;
 
-  if (!isExternalRuntime && fields.builtinSelection !== undefined) {
+  if (fields.runtimeBackedProviderSelection !== undefined) {
+    patch.providerId = fields.runtimeBackedProviderSelection.providerId;
+    patch.model = fields.runtimeBackedProviderSelection.model;
+  } else if (!isExternalRuntime && fields.builtinSelection !== undefined) {
     patch.providerId = fields.builtinSelection.providerId;
     patch.model = fields.builtinSelection.model;
   } else if (fields.providerId !== undefined) {
@@ -283,6 +325,9 @@ function buildProjectPatch(
   if (fields.enabledPluginIds !== undefined) {
     patch.enabledPluginIds = fields.enabledPluginIds;
   }
+  if (fields.enabledOfficialToolIds !== undefined) {
+    patch.enabledOfficialToolIds = fields.enabledOfficialToolIds;
+  }
   return patch;
 }
 
@@ -290,14 +335,22 @@ function buildSnapshotPatch(params: PersistInputOptionParams): SessionSnapshotPa
   const patch: SessionSnapshotPatch = {};
   const { fields, isExternalRuntime } = params;
 
-  if (!isExternalRuntime && fields.builtinSelection !== undefined) {
+  if (fields.runtimeBackedProviderSelection !== undefined) {
+    patch.providerId = fields.runtimeBackedProviderSelection.providerId;
+    patch.providerRoute = null;
+    patch.providerExecutionIdentity = fields.runtimeBackedProviderSelection;
+    patch.model = fields.runtimeBackedProviderSelection.model;
+    patch.providerEnvJson = null;
+  } else if (!isExternalRuntime && fields.builtinSelection !== undefined) {
     patch.providerId = fields.builtinSelection.providerId;
     patch.providerRoute = routeFromBuiltinSelection(fields.builtinSelection);
+    patch.providerExecutionIdentity = null;
     patch.model = fields.builtinSelection.model;
     patch.providerEnvJson = null;
   } else if (fields.providerId !== undefined) {
     patch.providerId = fields.providerId;
     patch.providerRoute = null;
+    patch.providerExecutionIdentity = null;
     // #300: the session's frozen `providerEnvJson` was captured for the OLD
     // provider. Once providerId changes it is stale credentials (e.g. a deepseek
     // baseUrl/apiKey/modelAliases blob living under a skywork-ai providerId).
@@ -314,7 +367,9 @@ function buildSnapshotPatch(params: PersistInputOptionParams): SessionSnapshotPa
   // `handleRuntimeModelChange`) silently bypass the snapshot and consumers
   // reading `snapshot.model` (sidecar restore, IM bot bridge) see stale
   // builtin values.
-  if (isExternalRuntime) {
+  if (fields.runtimeBackedProviderSelection !== undefined) {
+    patch.model = fields.runtimeBackedProviderSelection.model;
+  } else if (isExternalRuntime) {
     if (fields.runtimeModel !== undefined) patch.model = fields.runtimeModel;
   } else if (fields.builtinSelection !== undefined) {
     patch.model = fields.builtinSelection.model;
@@ -322,7 +377,12 @@ function buildSnapshotPatch(params: PersistInputOptionParams): SessionSnapshotPa
     patch.model = fields.builtinModel;
   }
   if (fields.permissionMode !== undefined) {
-    patch.permissionMode = fields.permissionMode;
+    patch.permissionMode = fields.runtimeBackedProviderSelection
+      ? runtimeBackedProviderPermissionMode(
+        fields.runtimeBackedProviderSelection,
+        fields.permissionMode,
+      )
+      : fields.permissionMode;
   }
   // Effort is one snapshot field regardless of runtime (like snapshot.model).
   if (fields.reasoningEffort !== undefined) {
@@ -334,6 +394,9 @@ function buildSnapshotPatch(params: PersistInputOptionParams): SessionSnapshotPa
   if (fields.enabledPluginIds !== undefined) {
     patch.enabledPluginIds = fields.enabledPluginIds;
   }
+  if (fields.enabledOfficialToolIds !== undefined) {
+    patch.enabledOfficialToolIds = fields.enabledOfficialToolIds;
+  }
   return patch;
 }
 
@@ -343,10 +406,38 @@ function buildAgentPatch(
   const patch: Partial<Omit<AgentConfig, 'id'>> = {};
   const { fields, isExternalRuntime, currentRuntimeConfig } = params;
 
-  if (!isExternalRuntime && fields.builtinSelection !== undefined) {
+  if (fields.runtimeBackedProviderSelection !== undefined) {
+    Object.assign(patch, agentDefaultsForRuntimeBackedProvider(
+      fields.runtimeBackedProviderSelection,
+      currentRuntimeConfig,
+      {
+        ...(fields.permissionMode !== undefined ? { permissionMode: fields.permissionMode } : {}),
+        ...(fields.reasoningEffort !== undefined ? { reasoningEffort: fields.reasoningEffort } : {}),
+      },
+    ));
+  } else if (fields.builtinSelection !== undefined) {
     patch.providerId = fields.builtinSelection.providerId;
   } else if (fields.providerId !== undefined) {
     patch.providerId = fields.providerId ?? undefined;
+  }
+  const currentLooksLikeManagedCodexProvider =
+    params.currentProviderId === CODEX_SUBSCRIPTION_PROVIDER_ID
+    || currentRuntimeConfig?.source === 'managed-provider';
+  const managedCodexCleanupPatch = currentLooksLikeManagedCodexProvider
+    ? buildRuntimeChangePatch(currentRuntimeConfig, 'builtin')
+    : undefined;
+  const runtimeConfigBase = managedCodexCleanupPatch
+    ? managedCodexCleanupPatch.runtimeConfig
+    : currentRuntimeConfig;
+  const writesOrdinaryProviderDefault =
+    fields.runtimeBackedProviderSelection === undefined
+    && (
+      fields.builtinSelection !== undefined
+      || fields.providerId !== undefined
+      || fields.builtinModel !== undefined
+    );
+  if (managedCodexCleanupPatch && writesOrdinaryProviderDefault) {
+    Object.assign(patch, managedCodexCleanupPatch);
   }
   if (fields.mcpEnabledServers !== undefined) {
     patch.mcpEnabledServers = fields.mcpEnabledServers;
@@ -354,14 +445,19 @@ function buildAgentPatch(
   if (fields.enabledPluginIds !== undefined) {
     patch.enabledPluginIds = fields.enabledPluginIds;
   }
+  if (fields.enabledOfficialToolIds !== undefined) {
+    patch.enabledOfficialToolIds = fields.enabledOfficialToolIds;
+  }
 
   // Permission mode + model split by runtime. The historical Chat.tsx bug
   // was writing every permission mode change to `agent.permissionMode` even
   // when the runtime was external (Codex/CC/Gemini), where the canonical
   // location is `agent.runtimeConfig.permissionMode`. Launcher already had
   // the correct branch — this helper is the unified version.
-  if (isExternalRuntime) {
-    const next: Partial<RuntimeConfig> = { ...(currentRuntimeConfig ?? {}) };
+  if (fields.runtimeBackedProviderSelection !== undefined) {
+    // Runtime-backed providers already wrote their runtime-owned fields above.
+  } else if (isExternalRuntime && !writesOrdinaryProviderDefault) {
+    const next: Partial<RuntimeConfig> = { ...(runtimeConfigBase ?? {}) };
     let runtimeConfigDirty = false;
     if (fields.permissionMode !== undefined) {
       next.permissionMode = fields.permissionMode;

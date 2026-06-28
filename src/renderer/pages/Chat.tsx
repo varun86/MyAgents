@@ -1,5 +1,7 @@
 import { AlertTriangle, ArrowLeft, Globe, History, Loader2, Plus, PanelRightOpen, RotateCcw, TerminalSquare, X } from 'lucide-react';
 import { forwardRef, lazy, Suspense, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
+import type { TFunction } from 'i18next';
+import { useTranslation } from 'react-i18next';
 
 import { track } from '@/analytics';
 import type { HistoryEntrySource } from '@/analytics';
@@ -47,14 +49,16 @@ import { updateSession as patchSessionMetadata } from '@/api/sessionClient';
 import { persistInputOptionChange, type BuiltinModelSelection, type BuiltinProviderEnvPolicy } from '@/api/persistInputOption';
 import { materializePendingSessionConfig } from '@/api/sessionMaterialize';
 import type { CronTask } from '@/types/cronTask';
-import { formatScheduleDescription } from '@/types/cronTask';
+import { formatCronScheduleDescription } from '@/utils/cronTaskI18n';
 import CronTaskCard from '@/components/scheduled-tasks/CronTaskCard';
 import CronTaskDetailPanel from '@/components/CronTaskDetailPanel';
+import { projectCronExecutionOverrides } from '@/utils/cronExecutionProjection';
 import type { CronSettingsResult, CronInitialConfig } from '@/components/cron/CronTaskSettingsModal';
 import { isTauriEnvironment } from '@/utils/browserMock';
 import { isDebugMode } from '@/utils/debug';
-import { isImSource, getChannelTypeLabel } from '@/utils/taskCenterUtils';
-import { type PermissionMode, type McpServerDefinition, type Provider, getEffectiveModelAliases } from '@/config/types';
+import { getChannelTypeLabel } from '@/utils/taskCenterUtils';
+import { appendCronPromptToDraft } from '@/utils/cronComposerRecovery';
+import { CODEX_SUBSCRIPTION_PROVIDER_ID, type PermissionMode, type McpServerDefinition, type Provider, getEffectiveModelAliases } from '@/config/types';
 import { syncMcpServerNames } from '@/components/tools/toolBadgeConfig';
 import {
   getAllMcpServers,
@@ -66,11 +70,28 @@ import { patchAgentConfig, getAgentById } from '@/config/services/agentConfigSer
 import { BrowserPanelContext } from '@/context/BrowserPanelContext';
 import { BROWSER_BLANK_URL } from '@/components/browserConstants';
 import { CUSTOM_EVENTS, isPendingSessionId } from '../../shared/constants';
+import {
+  IMAGE_UNDERSTANDING_TOOL_ID,
+  OFFICIAL_TOOLS,
+  isImageUnderstandingToolConfigured,
+  normalizeOfficialToolIds,
+  type OfficialToolId,
+} from '../../shared/official-tools';
+import { isSupportedLocale } from '../../shared/i18n';
 import { workspacePathsEqual } from '../../shared/workspacePath';
 import { coerceReasoningEffortForRuntime, reasoningEffortChoices } from '../../shared/reasoningEffort';
 import type { ProviderHistoryEnv } from '../../shared/providerHistory';
 import { createConcreteProviderRoute, hasProviderRouteCredential, isConcreteProviderRoute } from '../../shared/providerRoute';
 import type { ProviderRoute } from '../../shared/providerRoute';
+import {
+  isRuntimeBackedProvider,
+  managedCodexProviderPermissionToRuntimePermission,
+  managedCodexRuntimePermissionToProviderPermission,
+  runtimeBackedProviderPermissionMode,
+  toProviderExecutionIntent,
+  type RuntimeBackedProviderIdentity,
+  type ProviderExecutionIntent,
+} from '../../shared/providerExecution';
 import type { CapabilityInitialSelect } from '../../shared/skillsTypes';
 import {
   buildRuntimeChangePatch,
@@ -92,9 +113,22 @@ import {
   resolveCurrentProviderForSession,
   resolveLegacyBuiltinSnapshotProviderId,
   isPinnedProviderUnavailable,
+  shouldBlockSendForLabsDisabledExternalRuntime,
   shouldResetModelOnProviderChange,
   shouldSkipSnapshotWrite,
 } from '@/utils/optionResolve';
+import { buildProviderSwitchSessionBirth } from '@/utils/providerSwitchSessionBirth';
+import {
+  projectInputChromeRuntime,
+  shouldUseExternalRuntimeInputControls,
+} from '@/utils/runtimeUiProjection';
+import {
+  isManagedProviderSessionSnapshot,
+  managedProviderSnapshotModel,
+  managedProviderSnapshotProviderId,
+  shouldSessionSnapshotUseProviderPicker,
+} from '@/utils/sessionSnapshotProviderProjection';
+import { coerceRuntimeBirthPermissionMode } from '../../shared/runtimeBirthFields';
 // CronTaskConfig type is used via useCronTask hook
 
 import { getRichDocKind, isPreviewable, type RichDocKind } from '../../shared/fileTypes';
@@ -110,6 +144,12 @@ type SplitPreviewFile = {
   initialEditMode?: boolean;
   initialLineNumber?: number;
   focusTarget?: FilePreviewFocusTarget;
+};
+
+type SwitchDialogCopy = {
+  title: string;
+  message: string;
+  confirmText: string;
 };
 
 // Lazy load FilePreviewModal for split view panel
@@ -137,7 +177,91 @@ function getRuntimeDisplayLabel(runtime: RuntimeType | undefined): string {
 
 function buildBuiltinProviderRoute(provider: Provider | undefined, model: string | undefined): ProviderRoute | undefined {
   if (!provider || !model) return undefined;
+  if (isRuntimeBackedProvider(provider)) return undefined;
   return createConcreteProviderRoute(provider.id, model);
+}
+
+function buildProviderExecutionIntent(
+  provider: Pick<Provider, 'id' | 'execution'> | undefined,
+  model: string | undefined,
+): ProviderExecutionIntent | undefined {
+  if (!provider || !model) return undefined;
+  return toProviderExecutionIntent(provider, model);
+}
+
+function isRuntimeBackedIntent(intent: ProviderExecutionIntent | undefined): boolean {
+  return intent?.kind === 'runtime-backed-provider';
+}
+
+function isCodexSubscriptionIntent(intent: ProviderExecutionIntent | undefined): boolean {
+  return intent?.kind === 'runtime-backed-provider'
+    && intent.providerId === CODEX_SUBSCRIPTION_PROVIDER_ID;
+}
+
+function providerDisplayName(
+  provider: Pick<Provider, 'id' | 'name'> | undefined,
+  fallback: string,
+): string {
+  return provider?.name?.trim() || provider?.id || fallback;
+}
+
+function buildProviderSwitchDialogCopy(t: TFunction<'chat'>, args: {
+  currentProvider?: Pick<Provider, 'id' | 'name'>;
+  targetProvider?: Pick<Provider, 'id' | 'name'>;
+  currentIntent?: ProviderExecutionIntent;
+  targetIntent?: ProviderExecutionIntent;
+  targetModel?: string;
+  targetProviderId?: string;
+}): SwitchDialogCopy {
+  const currentIsCodex = isCodexSubscriptionIntent(args.currentIntent);
+  const targetIsCodex = isCodexSubscriptionIntent(args.targetIntent);
+  const currentProviderName = currentIsCodex
+    ? t('shell.providerSwitch.codexSubscription')
+    : providerDisplayName(args.currentProvider, t('shell.providerSwitch.currentProviderFallback'));
+  const targetProviderName = targetIsCodex
+    ? t('shell.providerSwitch.codexSubscription')
+    : providerDisplayName(args.targetProvider, args.targetProviderId ?? t('shell.providerSwitch.targetProviderFallback'));
+
+  if (targetIsCodex && !currentIsCodex) {
+    return {
+      title: t('shell.providerSwitch.codexTarget.title'),
+      message: t('shell.providerSwitch.codexTarget.message'),
+      confirmText: t('shell.providerSwitch.codexTarget.confirm'),
+    };
+  }
+
+  if (currentIsCodex && !targetIsCodex) {
+    return {
+      title: t('shell.providerSwitch.newSessionTitle'),
+      message: t('shell.providerSwitch.codexCurrent.message'),
+      confirmText: t('shell.providerSwitch.createNewSession'),
+    };
+  }
+
+  if (isRuntimeBackedIntent(args.currentIntent) || isRuntimeBackedIntent(args.targetIntent)) {
+    return {
+      title: t('shell.providerSwitch.newSessionTitle'),
+      message: t('shell.providerSwitch.runtimeBacked.message'),
+      confirmText: t('shell.providerSwitch.createNewSession'),
+    };
+  }
+
+  const sameProvider = !!args.currentProvider?.id
+    && args.currentProvider.id === (args.targetProvider?.id ?? args.targetProviderId);
+  if (sameProvider) {
+    const targetModel = args.targetModel ?? t('shell.providerSwitch.targetModelFallback');
+    return {
+      title: t('shell.providerSwitch.newSessionTitle'),
+      message: t('shell.providerSwitch.sameProvider.message', { targetModel }),
+      confirmText: t('shell.providerSwitch.createNewSession'),
+    };
+  }
+
+  return {
+    title: t('shell.providerSwitch.newSessionTitle'),
+    message: t('shell.providerSwitch.crossProvider.message', { currentProviderName, targetProviderName }),
+    confirmText: t('shell.providerSwitch.createNewSession'),
+  };
 }
 
 function coerceExternalRuntimeModelForUi(model: string | undefined, runtime: RuntimeType): string | undefined {
@@ -146,6 +270,17 @@ function coerceExternalRuntimeModelForUi(model: string | undefined, runtime: Run
 
 function coerceExternalRuntimePermissionForUi(mode: string | undefined, runtime: RuntimeType): string | undefined {
   return runtime === 'builtin' ? mode : coercePermissionModeForRuntime(mode, runtime);
+}
+
+function coerceInitialMessageRuntimePermission(
+  initialMessage: InitialMessage,
+  runtime: RuntimeType,
+): string | undefined {
+  const identity = initialMessage.providerExecutionIdentity;
+  if (identity) {
+    return runtimeBackedProviderPermissionMode(identity, initialMessage.permissionMode);
+  }
+  return coerceExternalRuntimePermissionForUi(initialMessage.permissionMode, runtime);
 }
 
 function coerceReasoningEffortForUi(effort: string | undefined, runtime: RuntimeType): string | undefined {
@@ -182,6 +317,7 @@ const SessionTitleEditor = forwardRef<
   SessionTitleEditorHandle,
   { title: string; onRename: (newTitle: string) => void }
 >(function SessionTitleEditor({ title, onRename }, ref) {
+  const { t } = useTranslation('chat');
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(title);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -220,7 +356,7 @@ const SessionTitleEditor = forwardRef<
         <span
           className="block truncate cursor-pointer px-1.5 py-0.5 text-sm font-medium text-[var(--ink-subtle)] hover:text-[var(--ink)] transition-colors"
           onClick={() => setEditing(true)}
-          title="点击重命名"
+          title={t('shell.sessionTitle.renameTitle')}
         >
           {title}
         </span>
@@ -288,6 +424,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     isSessionLoading,
     sessionState,
     sessionRuntime,
+    sessionRuntimeSource,
     sessionMeta,
     setSessionMeta,
     unifiedLogs,
@@ -328,6 +465,11 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   } = useTabState();
   const isActive = useTabActive();
   const toast = useToast();
+  const { t } = useTranslation('chat');
+  const { t: tTask, i18n } = useTranslation('task');
+  const taskLocale = isSupportedLocale(i18n.language) ? i18n.language : 'zh-CN';
+  const tRef = useRef(t);
+  tRef.current = t;
 
   // Workspace file service — Phase D coherence fix: SimpleChatInput already
   // sources its slash menu from `cmd_list_slash_commands`; the chat sidebar
@@ -350,34 +492,47 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   const sessionSnapshotOwnsConfig = !!sessionMeta?.configSnapshotAt;
   const waitingForExistingSessionMeta = !!sessionId && !isPendingSessionId(sessionId) && !sessionMeta;
   const sessionSnapshotRuntime = (sessionMeta?.runtime as RuntimeType | undefined) ?? 'builtin';
+  const sessionSnapshotIsManagedProvider = sessionSnapshotOwnsConfig
+    && isManagedProviderSessionSnapshot(sessionMeta);
+  const sessionSnapshotUsesProviderPicker = sessionSnapshotOwnsConfig
+    && shouldSessionSnapshotUseProviderPicker({
+      session: sessionMeta,
+      runtime: sessionSnapshotRuntime,
+    });
   const concreteSessionProviderRoute = isConcreteProviderRoute(sessionMeta?.providerRoute)
     ? sessionMeta.providerRoute
     : undefined;
-  const legacyBuiltinSnapshotProviderId = sessionSnapshotOwnsConfig && sessionSnapshotRuntime === 'builtin'
-    ? (concreteSessionProviderRoute?.providerId ?? resolveLegacyBuiltinSnapshotProviderId({
-      snapshotProviderId: sessionMeta?.providerId,
-      snapshotModel: sessionMeta?.model,
-      selectedProviderId,
-      providers,
-      apiKeys,
-      providerVerifyStatus,
-    }))
+  const sessionSnapshotProviderId = sessionSnapshotUsesProviderPicker
+    ? (sessionSnapshotIsManagedProvider
+      ? (sessionMeta ? managedProviderSnapshotProviderId(sessionMeta) : undefined)
+      : (concreteSessionProviderRoute?.providerId ?? resolveLegacyBuiltinSnapshotProviderId({
+        snapshotProviderId: sessionMeta?.providerId,
+        snapshotModel: sessionMeta?.model,
+        selectedProviderId,
+        providers,
+        apiKeys,
+        providerVerifyStatus,
+      })))
     : undefined;
-  const effectiveSelectedProviderId = sessionSnapshotOwnsConfig && sessionSnapshotRuntime === 'builtin'
-    ? legacyBuiltinSnapshotProviderId
+  const effectiveSelectedProviderId = sessionSnapshotUsesProviderPicker
+    ? sessionSnapshotProviderId
     : selectedProviderId;
   const selectedProviderExact = effectiveSelectedProviderId ? providers.find(p => p.id === effectiveSelectedProviderId) : undefined;
   const selectedProviderAvailable = selectedProviderExact
     ? (
-      sessionSnapshotOwnsConfig && selectedProviderExact.type === 'subscription'
+      isRuntimeBackedProvider(selectedProviderExact)
+        ? isProviderAvailable(selectedProviderExact, apiKeys, providerVerifyStatus)
+        : sessionSnapshotOwnsConfig && selectedProviderExact.type === 'subscription'
         ? hasProviderRouteCredential(selectedProviderExact, { apiKeys, verifyStatus: providerVerifyStatus })
         : isProviderAvailable(selectedProviderExact, apiKeys, providerVerifyStatus)
     )
     : false;
   const availableProviderIdsForInput = useMemo(() => providers
-    .filter(provider => provider.type === 'subscription'
-      ? provider.enabled !== false && hasProviderRouteCredential(provider, { apiKeys, verifyStatus: providerVerifyStatus })
-      : isProviderAvailable(provider, apiKeys, providerVerifyStatus))
+    .filter(provider => isRuntimeBackedProvider(provider)
+      ? isProviderAvailable(provider, apiKeys, providerVerifyStatus)
+      : provider.type === 'subscription'
+        ? provider.enabled !== false && hasProviderRouteCredential(provider, { apiKeys, verifyStatus: providerVerifyStatus })
+        : isProviderAvailable(provider, apiKeys, providerVerifyStatus))
     .map(provider => provider.id), [providers, apiKeys, providerVerifyStatus]);
   const fallbackProvider = resolveProvider(effectiveSelectedProviderId, providers, apiKeys, providerVerifyStatus);
   const currentProvider = resolveCurrentProviderForSession({
@@ -623,7 +778,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     const openIntentPreview = async () => {
       try {
         if (!fileService.isAvailable) {
-          toastRef.current.error('无法打开预览：工作区文件服务不可用');
+          toastRef.current.error(t('shell.toasts.previewWorkspaceUnavailable'));
           return;
         }
         const fileName = intent.path.split(/[/\\]/).pop() ?? intent.path;
@@ -649,7 +804,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
             initialLineNumber: intent.initialLineNumber,
           };
         } else {
-          toastRef.current.info('这个文件类型暂不支持 MyAgents 预览');
+          toastRef.current.info(t('shell.toasts.previewUnsupportedType'));
           return;
         }
 
@@ -662,7 +817,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       } catch (err) {
         if (!cancelled) {
           console.error('[Chat] Failed to open pending file preview:', err);
-          toastRef.current.error('打开文件预览失败');
+          toastRef.current.error(t('shell.toasts.previewOpenFailed'));
         }
       } finally {
         if (!cancelled) consume();
@@ -680,6 +835,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     isSplitViewEnabled,
     isNarrowLayout,
     onFilePreviewIntentConsumed,
+    t,
   ]);
 
   // Open terminal in split panel (called from DirectoryPanel header button)
@@ -855,6 +1011,21 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   const [selectedModel, setSelectedModel] = useState<string | undefined>(
     currentAgent?.model ?? currentProject?.model ?? currentProvider?.primaryModel
   );
+  const currentProviderExecutionIntent = useMemo(
+    () => sessionMeta?.providerExecutionIdentity
+      ?? buildProviderExecutionIntent(currentProviderForHistory, selectedModel),
+    [
+      sessionMeta?.providerExecutionIdentity,
+      currentProviderForHistory,
+      selectedModel,
+    ],
+  );
+  const currentRuntimeSource = sessionMeta?.runtimeSource
+    ?? sessionRuntimeSource
+    ?? (currentProviderExecutionIntent?.kind === 'runtime-backed-provider'
+      ? currentProviderExecutionIntent.runtimeSource
+      : undefined);
+  const managedProviderRuntimeActive = currentRuntimeSource === 'managed-provider';
   // #324 — 推理强度 setting ('default' | level). ONE state for both runtimes
   // (the storage location splits on isExternalRuntime at persist time, like
   // model). Lifecycle mirrors selectedModel: seeded from agent, restored from
@@ -875,6 +1046,11 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   const [cronOpenPreset, setCronOpenPreset] = useState<CronInitialConfig | null>(null);
   const [cronCardTask, setCronCardTask] = useState<CronTask | null>(null);
   const [cronDetailTask, setCronDetailTask] = useState<CronTask | null>(null);
+  const [stoppedCronRecovery, setStoppedCronRecovery] = useState<{
+    prompt: string;
+    task: CronTask | null;
+    sessionId: string;
+  } | null>(null);
 
   // Track permission mode before AI-triggered plan mode (for restore on ExitPlanMode)
   const prePlanPermissionModeRef = useRef<PermissionMode | null>(null);
@@ -915,6 +1091,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   // choice; autoSend clears it after its MCP block, handing later config-change
   // re-pushes back to the mount effect. (codex review: dual MCP-push race.)
   const launcherOwnsInitialMcpRef = useRef(hadInitialMessage.current);
+  const launcherOwnsInitialOfficialToolsRef = useRef(hadInitialMessage.current);
   const [launcherMcpFallbackRevision, setLauncherMcpFallbackRevision] = useState(0);
   const projectSyncedRef = useRef(false);
 
@@ -1021,7 +1198,15 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   // derivations (runtimePermissionModes, runtimeModels, etc.) are automatically safe.
   const multiAgentRuntimeEnabled = !!config.multiAgentRuntime;
   // Agent's currently-configured runtime — used as the default for NEW sessions.
-  const agentRuntime: RuntimeType = multiAgentRuntimeEnabled
+  // Managed Codex is a provider default, not the legacy user-managed Codex CLI
+  // runtime, so stale `agent.runtime=codex` must not leak into Chat chrome.
+  const currentAgentRuntimeConfig = currentAgent?.runtimeConfig as RuntimeConfig | undefined;
+  const agentUsesManagedCodexProvider =
+    currentAgent?.providerId === CODEX_SUBSCRIPTION_PROVIDER_ID
+    || currentAgentRuntimeConfig?.source === 'managed-provider';
+  const agentRuntime: RuntimeType = agentUsesManagedCodexProvider
+    ? 'builtin'
+    : multiAgentRuntimeEnabled
     ? ((currentAgent?.runtime as RuntimeType) || 'builtin')
     : 'builtin';
   // v0.1.69: session is self-contained — its frozen runtime is authoritative for
@@ -1032,9 +1217,18 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   // spawned with its frozen runtime and the backend routes by sessionId.
   const currentRuntime: RuntimeType = (sessionRuntime as RuntimeType | null) ?? agentRuntime;
   const isExternalRuntime = currentRuntime !== 'builtin';
+  const inputChromeRuntime = projectInputChromeRuntime({
+    currentRuntime,
+    managedProviderRuntimeActive,
+  });
+  const inputUsesExternalRuntimeControls = shouldUseExternalRuntimeInputControls({
+    currentRuntime,
+    managedProviderRuntimeActive,
+  });
+  const showLegacyRuntimeSelector = multiAgentRuntimeEnabled;
   const visibleSdkSlashCommands = useMemo(
-    () => isExternalRuntime ? [] : sdkSlashCommands,
-    [isExternalRuntime, sdkSlashCommands],
+    () => inputUsesExternalRuntimeControls ? [] : sdkSlashCommands,
+    [inputUsesExternalRuntimeControls, sdkSlashCommands],
   );
 
   // Detect installed runtimes once on mount
@@ -1098,7 +1292,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   const [codexModels, setCodexModels] = useState<typeof CC_MODELS>([]);
   const [geminiModels, setGeminiModels] = useState<typeof CC_MODELS>([]);
   useEffect(() => {
-    if (!multiAgentRuntimeEnabled || currentRuntime !== 'codex') return;
+    if ((!multiAgentRuntimeEnabled && !managedProviderRuntimeActive) || currentRuntime !== 'codex') return;
     let cancelled = false;
     // AbortController so a tab-close (effect cleanup) silences the
     // proxyFetch "Sidecar gone" warning that would otherwise fire when
@@ -1112,7 +1306,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       if (!cancelled && data?.models?.length) setCodexModels(data.models);
     }).catch(() => {});
     return () => { cancelled = true; controller.abort(); };
-  }, [multiAgentRuntimeEnabled, currentRuntime, apiGet]);
+  }, [multiAgentRuntimeEnabled, managedProviderRuntimeActive, currentRuntime, apiGet]);
   useEffect(() => {
     if (!multiAgentRuntimeEnabled || currentRuntime !== 'gemini') return;
     let cancelled = false;
@@ -1142,7 +1336,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   // serializes the two calls.
   const prewarmedKeyRef = useRef<string | null>(null);
   useEffect(() => {
-    if (!multiAgentRuntimeEnabled) return;
+    if (!multiAgentRuntimeEnabled && !managedProviderRuntimeActive) return;
     if (currentRuntime !== 'gemini' && currentRuntime !== 'codex') return;
     if (!isActive || !isConnected || !sessionId) return;
     // Only a 'push' tab prewarms the sidecar with ITS config (model/permission).
@@ -1208,7 +1402,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     // the new settings. Re-firing pre-warm on every keystroke-driven option
     // change would thrash the subprocess.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [multiAgentRuntimeEnabled, currentRuntime, isActive, isConnected, sessionId, sessionRuntime, apiPost, configPending]);
+  }, [multiAgentRuntimeEnabled, managedProviderRuntimeActive, currentRuntime, isActive, isConnected, sessionId, sessionRuntime, apiPost, configPending]);
 
   const runtimeModels = currentRuntime === 'claude-code' ? CC_MODELS
     : currentRuntime === 'codex' ? codexModels
@@ -1256,6 +1450,10 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   const buildCronRuntimeConfig = useCallback((): RuntimeConfig | undefined => {
     if (!isExternalRuntime) return undefined;
     const base = { ...((currentAgent?.runtimeConfig as RuntimeConfig | undefined) ?? {}) };
+    if (currentProviderExecutionIntent?.kind === 'runtime-backed-provider') {
+      base.source = currentProviderExecutionIntent.runtimeSource;
+      base.model = currentProviderExecutionIntent.model;
+    }
     const persistedModel = coerceExternalRuntimeModelForUi(base.model, currentRuntime);
     if (persistedModel) {
       base.model = persistedModel;
@@ -1277,7 +1475,18 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       base.permissionMode = selectedPermission;
     }
     return Object.keys(base).length > 0 ? base : undefined;
-  }, [isExternalRuntime, currentAgent?.runtimeConfig, runtimeModel, effectiveRuntimePermissionMode, currentRuntime]);
+  }, [isExternalRuntime, currentAgent?.runtimeConfig, currentProviderExecutionIntent, runtimeModel, effectiveRuntimePermissionMode, currentRuntime]);
+
+  const buildCronExecutionOverrides = useCallback((args: {
+    providerId?: string;
+    model?: string;
+  }) => projectCronExecutionOverrides({
+    providers,
+    runtime: currentRuntime,
+    providerId: args.providerId,
+    model: args.model,
+    runtimeConfig: buildCronRuntimeConfig(),
+  }), [providers, currentRuntime, buildCronRuntimeConfig]);
 
   // Callback to refresh workspace (exposed to SimpleChatInput)
   const triggerWorkspaceRefresh = useCallback(() => {
@@ -1306,6 +1515,12 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   const initialMessageConsumedRef = useRef(false);
   const onInitialMessageConsumedRef = useRef(onInitialMessageConsumed);
   onInitialMessageConsumedRef.current = onInitialMessageConsumed;
+  const initialMessageRuntimeReady = useMemo(() => {
+    const identity = initialMessage?.providerExecutionIdentity;
+    if (!identity) return true;
+    if (currentRuntime !== identity.runtime) return false;
+    return currentRuntimeSource === identity.runtimeSource;
+  }, [initialMessage?.providerExecutionIdentity, currentRuntime, currentRuntimeSource]);
 
   useEffect(() => {
     if (!initialMessage) return;
@@ -1318,6 +1533,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       hasSessionId: !!sessionId,
       isConnected,
       isActive,
+      runtimeReady: initialMessageRuntimeReady,
     })) return;
 
     const launchMessage = initialMessage;
@@ -1333,8 +1549,11 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     // 'auto' default if useConfig() hasn't resolved yet. projectSynced:false
     // forces the agent→project→global fallback (there's no explicit choice to
     // honor on this auto-send).
+    const initialRuntimePermission = isExternalRuntime
+      ? coerceInitialMessageRuntimePermission(launchMessage, currentRuntime)
+      : undefined;
     const effectivePermission = (isExternalRuntime
-      ? (coerceExternalRuntimePermissionForUi(launchMessage.permissionMode, currentRuntime)
+      ? (initialRuntimePermission
         ?? effectiveRuntimePermissionMode
         ?? getDefaultRuntimePermissionMode(currentRuntime)
         ?? 'default')
@@ -1390,16 +1609,30 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
           });
         }
 
+        if (launchMessage.enabledOfficialToolIds !== undefined) {
+          setWorkspaceOfficialToolEnabled(normalizeOfficialToolIds(launchMessage.enabledOfficialToolIds));
+          await apiPost('/api/official-tools/session-enable', {
+            enabledIds: launchMessage.enabledOfficialToolIds,
+          });
+        }
+        launcherOwnsInitialOfficialToolsRef.current = false;
+
         // 3. Update local UI state to reflect Launcher choices
         if (launchMessage.permissionMode) {
           // External runtime has its own permission mode state (runtimePermissionMode),
           // while builtin uses permissionMode. Set the correct one based on runtime.
           if (isExternalRuntime) {
             setRuntimePermissionMode(
-              coerceExternalRuntimePermissionForUi(launchMessage.permissionMode, currentRuntime)
+              initialRuntimePermission
               ?? getDefaultRuntimePermissionMode(currentRuntime)
               ?? 'default',
             );
+            const providerPermission = launchMessage.providerExecutionIdentity
+              ? managedCodexRuntimePermissionToProviderPermission(launchMessage.permissionMode)
+              : undefined;
+            if (providerPermission) {
+              setPermissionMode(providerPermission);
+            }
           } else {
             setPermissionMode(launchMessage.permissionMode);
             // #244: the launcher choice is now the authoritative builtin mode —
@@ -1444,6 +1677,14 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
         //     CronTask via Rust and triggers the first execution — same as if the
         //     user had typed in the chat input and clicked send with cron enabled.
         if (launchMessage.cron) {
+          const cronExecution = buildCronExecutionOverrides({
+            providerId: !isExternalRuntime && provider ? provider.id : undefined,
+            model: effectiveModel,
+          });
+          const cronPermissionMode = coerceRuntimeBirthPermissionMode(
+            effectivePermission,
+            cronExecution.runtime ?? currentRuntime,
+          );
           enableCronMode({
             prompt: launchMessage.text,
             intervalMinutes: launchMessage.cron.intervalMinutes,
@@ -1452,13 +1693,12 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
             notifyEnabled: launchMessage.cron.notifyEnabled,
             schedule: launchMessage.cron.schedule,
             delivery: launchMessage.cron.delivery,
-            model: effectiveModel,
-            permissionMode: effectivePermission,
-            // PRD 0.2.9 — Pass providerId (live-resolve) instead of building
-            // a frozen providerEnv. External runtimes carry no providerId.
-            providerId: !isExternalRuntime && provider ? provider.id : undefined,
-            runtime: currentRuntime,
-            runtimeConfig: buildCronRuntimeConfig(),
+            model: cronExecution.model,
+            permissionMode: cronPermissionMode,
+            providerId: cronExecution.providerId,
+            providerIntent: cronExecution.providerIntent,
+            runtime: cronExecution.runtime,
+            runtimeConfig: cronExecution.runtimeConfig,
             // Without this, the editor reopens defaulting to 'current_session'
             // because cronState.config.executionTarget is undefined → modal's
             // computed runMode lies about the user's choice. (Bug 2A.)
@@ -1513,6 +1753,14 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
             chatInputRef.current?.setImages(launchMessage.images);
           }
           if (launchMessage.cron) {
+            const cronExecution = buildCronExecutionOverrides({
+              providerId: !isExternalRuntime && provider ? provider.id : undefined,
+              model: effectiveModel,
+            });
+            const cronPermissionMode = coerceRuntimeBirthPermissionMode(
+              effectivePermission,
+              cronExecution.runtime ?? currentRuntime,
+            );
             enableCronMode({
               prompt: launchMessage.text,
               intervalMinutes: launchMessage.cron.intervalMinutes,
@@ -1521,12 +1769,12 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
               notifyEnabled: launchMessage.cron.notifyEnabled,
               schedule: launchMessage.cron.schedule,
               delivery: launchMessage.cron.delivery,
-              model: effectiveModel,
-              permissionMode: effectivePermission,
-              // PRD 0.2.9 — see above for the providerId rationale.
-              providerId: !isExternalRuntime && provider ? provider.id : undefined,
-              runtime: currentRuntime,
-              runtimeConfig: buildCronRuntimeConfig(),
+              model: cronExecution.model,
+              permissionMode: cronPermissionMode,
+              providerId: cronExecution.providerId,
+              providerIntent: cronExecution.providerIntent,
+              runtime: cronExecution.runtime,
+              runtimeConfig: cronExecution.runtimeConfig,
               executionTarget: launchMessage.cron.executionTarget,
               mcpEnabledServers: launchMessage.mcpEnabledServers,
             });
@@ -1536,12 +1784,12 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
           console.warn('[Chat] failed to restore launcher draft:', restoreErr);
         }
         onInitialMessageConsumedRef.current?.();
-        toast.error('发送失败，已恢复草稿，请重试');
+        toast.error(tRef.current('shell.toasts.autoSendRestoredDraft'));
       }
     };
     void autoSend();
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [initialMessage, isActive, sessionId, isConnected]);
+  }, [initialMessage, isActive, sessionId, isConnected, initialMessageRuntimeReady]);
 
   // Close startup overlay as soon as the backend has acknowledged the request
   // — either by transitioning to 'starting' (subprocess launched, system_init
@@ -1588,6 +1836,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     disableCronMode,
     updateConfig: _updateCronConfig,
     updateRunningConfig,
+    setExecutionState: setCronExecutionState,
     startTask: startCronTask,
     stop: stopCronTask,
     restoreFromTask: restoreCronTask,
@@ -1632,6 +1881,33 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   // PERFORMANCE: Ref-stabilize cronState for handleSendMessage
   const cronStateRef = useRef(cronState);
   cronStateRef.current = cronState;
+  const activeCurrentSessionCronTask = cronState.task?.status === 'running' && cronState.task.runMode !== 'new_session'
+    ? cronState.task
+    : null;
+  const composerConfigLockedReason = activeCurrentSessionCronTask
+    ? t('shell.toasts.composerLockedByCron')
+    : undefined;
+  const showPinnedProviderUnavailableToast = useCallback(() => {
+    toastRef.current.error(t('shell.toasts.providerUnavailable', { providerId: effectiveSelectedProviderId }));
+  }, [effectiveSelectedProviderId, t]);
+  const showSnapshotProviderIncompleteToast = useCallback(() => {
+    toastRef.current.warning(t('shell.toasts.snapshotProviderIncomplete'));
+  }, [t]);
+  const guardCronConfigMutation = useCallback(() => {
+    if (!composerConfigLockedReason) return false;
+    toastRef.current.warning(composerConfigLockedReason, 3500);
+    return true;
+  }, [composerConfigLockedReason]);
+  const stoppedCronTaskForInput = useMemo(
+    () => stoppedCronRecovery?.task && stoppedCronRecovery.sessionId === sessionId
+      ? { ...stoppedCronRecovery.task, status: 'stopped' as const }
+      : null,
+    [stoppedCronRecovery, sessionId],
+  );
+
+  useEffect(() => {
+    setStoppedCronRecovery(null);
+  }, [sessionId]);
 
   // Sync cron task's sessionId when session is created after task creation
   // This handles two cases:
@@ -1748,6 +2024,26 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   const [workspaceEnabledPlugins, setWorkspaceEnabledPlugins] = useState<string[]>(
     currentAgent?.enabledPluginIds ?? currentProject?.enabledPluginIds ?? []
   );
+  const [workspaceOfficialToolEnabled, setWorkspaceOfficialToolEnabled] = useState<OfficialToolId[]>(
+    normalizeOfficialToolIds(currentAgent?.enabledOfficialToolIds ?? currentProject?.enabledOfficialToolIds ?? [])
+  );
+  const globalOfficialToolEnabled = useMemo(
+    () => normalizeOfficialToolIds(config.enabledOfficialToolIds ?? []),
+    [config.enabledOfficialToolIds],
+  );
+  const imageUnderstandingConfiguredForInput = useMemo(() => {
+    if (!isImageUnderstandingToolConfigured(config.officialToolSettings)) return false;
+    const selection = config.officialToolSettings?.imageUnderstanding;
+    const provider = providers.find(item => item.id === selection?.providerId);
+    if (!provider || isRuntimeBackedProvider(provider)) return false;
+    if (!isProviderAvailable(provider, apiKeys, providerVerifyStatus)) return false;
+    const model = provider.models.find(item => item.model === selection?.model);
+    return Array.isArray(model?.inputModalities) && model.inputModalities.includes('image');
+  }, [apiKeys, config.officialToolSettings, providerVerifyStatus, providers]);
+  const officialToolNeedsConfig = useMemo(
+    () => ({ [IMAGE_UNDERSTANDING_TOOL_ID]: !imageUnderstandingConfiguredForInput }),
+    [imageUnderstandingConfiguredForInput],
+  );
 
   // Track which session's cron task state has been loaded
   const cronLoadedSessionRef = useRef<string | null>(null);
@@ -1789,6 +2085,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
           // Restore UI state only - Scheduler is managed by Rust layer (方案 A)
           // Do NOT call startCronScheduler here to avoid duplicate scheduler starts
           restoreCronTask(task);
+          setStoppedCronRecovery(null);
 
           // Check if task is currently executing (e.g., execution started before app restart)
           // If executing, mark it so we can set loading state after TabProvider's loadSession completes
@@ -1796,8 +2093,10 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
           // Calling it here causes infinite loop with TabProvider's session loading effect
           const executing = await isTaskExecuting(task.id);
           if (executing) {
+            if (sessionIdRef.current !== sessionId) return;
             console.log('[Chat] Cron task is currently executing, marking for loading state');
             pendingCronLoadingRef.current = true;
+            setCronExecutionState(task.id, true, (task.executionCount ?? 0) + 1);
           }
         } else if (cronState.task && cronState.task.sessionId && cronState.task.sessionId !== sessionId) {
           // Current cron state is for a different session - clear FRONTEND state only
@@ -1828,7 +2127,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     };
 
     void loadCronTaskState();
-  }, [sessionId, tabId, restoreCronTask, disableCronMode, cronState.task, setIsLoading]);
+  }, [sessionId, tabId, restoreCronTask, disableCronMode, cronState.task, setIsLoading, setCronExecutionState]);
 
   // Set loading state after TabProvider's loadSession completes (for cron task executing scenario)
   // This effect watches for messages reference changes, which indicates loadSession has completed
@@ -1929,6 +2228,30 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     launcherMcpFallbackRevision,
   ]);
 
+  useEffect(() => {
+    const syncOfficialTools = async () => {
+      if (configDispositionRef.current !== 'push') return;
+      if (!isConnected || isSessionLoading) return;
+      if (launcherOwnsInitialOfficialToolsRef.current) return;
+      try {
+        await apiPost('/api/official-tools/session-enable', {
+          enabledIds: workspaceOfficialToolEnabled,
+        });
+      } catch (err) {
+        console.error('[Chat] Failed to sync official tools:', err);
+      }
+    };
+    void syncOfficialTools();
+  }, [
+    apiPost,
+    configPending,
+    isConnected,
+    isSessionLoading,
+    workspaceOfficialToolEnabled,
+    config?.enabledOfficialToolIds,
+    config?.officialToolSettings,
+  ]);
+
   // Load enabled agents and sync to backend
   const loadAndSyncAgents = useCallback(async () => {
     try {
@@ -1983,16 +2306,16 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     try {
       const res = await apiPost<{ success: boolean; error?: string }>('/api/skill/copy-to-global', { folderName });
       if (res.success) {
-        toastRef.current.success('已同步至全局技能');
+        toastRef.current.success(t('shell.toasts.skillSyncedToGlobal'));
         loadSkillsAndCommandsRef.current();
       } else {
-        toastRef.current.error(res.error || '同步失败');
+        toastRef.current.error(res.error || t('shell.toasts.syncFailed'));
       }
     } catch (err) {
       console.error('[Chat] Sync skill to global failed:', err);
-      toastRef.current.error('同步失败，请重试');
+      toastRef.current.error(t('shell.toasts.syncFailedRetry'));
     }
-  }, [apiPost]);
+  }, [apiPost, t]);
 
   // Load capabilities on mount and when workspace config changes (e.g. skill copied, settings saved)
   useEffect(() => {
@@ -2007,6 +2330,12 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       setWorkspaceMcpEnabled(currentProject.mcpEnabledServers);
     }
   }, [currentProject?.mcpEnabledServers, sessionMeta?.configSnapshotAt]);
+
+  useEffect(() => {
+    if (sessionMeta?.configSnapshotAt) return;
+    const next = currentAgent?.enabledOfficialToolIds ?? currentProject?.enabledOfficialToolIds;
+    if (next) setWorkspaceOfficialToolEnabled(normalizeOfficialToolIds(next));
+  }, [currentAgent?.enabledOfficialToolIds, currentProject?.enabledOfficialToolIds, sessionMeta?.configSnapshotAt]);
 
   // v0.1.69 — owned (Desktop/Cron) sessions lock config via SessionMetadata snapshot
   // (configSnapshotAt stamped at creation per `snapshotForOwnedSession`). Tab-level UI
@@ -2025,16 +2354,6 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     sessionMetaConfigSnapshotAt: sessionMeta?.configSnapshotAt ?? null,
     sessionMetaLoaded: !!sessionMeta,
   });
-
-  // v0.1.69 T17: legacy pre-snapshot session — session exists but has no snapshot,
-  // and not IM-sourced (IM is live-follow by design, not a legacy artifact). These
-  // sessions live-follow the agent, so edits to the agent mutate this session's
-  // effective config. Show an "unlocked" indicator so the user understands why.
-  // (Note: after #305 these sessions auto-migrate to owned on first UI config
-  // change; the indicator only shows until the user touches a config knob.)
-  const isSessionUnlocked = !!sessionMeta
-    && !sessionMeta.configSnapshotAt
-    && !isImSource(sessionMeta.source);
 
   // #300 — the session pinned a provider (selectedProviderId) but resolveProvider
   // silently fell back to a different one because the pinned provider is
@@ -2099,18 +2418,20 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   const persistTabConfigChange = useCallback(async (patch: {
     builtinSelection?: BuiltinModelSelection;
     builtinProviderEnvPolicy?: BuiltinProviderEnvPolicy;
+    runtimeBackedProviderSelection?: RuntimeBackedProviderIdentity;
     providerId?: string;
     /** Builtin model. Use `runtimeModel` instead for external runtimes. */
     model?: string | null;
     /** External runtime model. Routed to `agent.runtimeConfig.model`. */
     runtimeModel?: string | null;
-    permissionMode?: PermissionMode;
+    permissionMode?: PermissionMode | string;
     /** #324 — 推理强度 setting ('default' | level). The helper routes it to
      *  `agent.reasoningEffort` (builtin) / `agent.runtimeConfig.reasoningEffort`
      *  (external) + the session snapshot. */
     reasoningEffort?: string;
     mcpEnabledServers?: string[];
     enabledPluginIds?: string[];
+    enabledOfficialToolIds?: OfficialToolId[];
   }) => {
     if (!currentProject) return false;
     const result = await persistInputOptionChange({
@@ -2118,9 +2439,11 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       agentId: currentProject.agentId ?? null,
       isExternalRuntime,
       currentRuntimeConfig: currentAgent?.runtimeConfig,
+      currentProviderId: currentAgent?.providerId ?? currentProject.providerId,
       fields: {
         builtinSelection: patch.builtinSelection,
         builtinProviderEnvPolicy: patch.builtinProviderEnvPolicy,
+        runtimeBackedProviderSelection: patch.runtimeBackedProviderSelection,
         providerId: patch.providerId,
         builtinModel: patch.model,
         runtimeModel: patch.runtimeModel,
@@ -2128,6 +2451,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
         reasoningEffort: patch.reasoningEffort,
         mcpEnabledServers: patch.mcpEnabledServers,
         enabledPluginIds: patch.enabledPluginIds,
+        enabledOfficialToolIds: patch.enabledOfficialToolIds,
       },
       patchProject,
       patchAgentConfig,
@@ -2158,6 +2482,10 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
         if (configDispositionRef.current === 'pending') return; // defer while unresolved; disk write still happens
         await apiPost('/api/cc-plugin/session-enable', { enabledIds });
       },
+      pushOfficialToolsToSidecar: async (enabledIds) => {
+        if (configDispositionRef.current === 'pending') return;
+        await apiPost('/api/official-tools/session-enable', { enabledIds });
+      },
       pushRuntimeConfigToSidecar: async (runtimeConfig) => {
         if (configDispositionRef.current === 'pending') return; // defer while unresolved; disk write still happens
         await apiPost('/api/runtime/config', {
@@ -2168,11 +2496,11 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     });
     if (!result.ok) {
       console.error('[chat] tab config dual-write failed:', result.errors);
-      toastRef.current.warning('配置未能完全保存，重启后可能恢复旧值');
+      toastRef.current.warning(t('shell.toasts.configPartiallySaved'));
     }
     return !result.snapshotWriteFailed;
   // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed deps; persistInputOptionChange is a pure import, runtimeConfig accessed via currentAgent ref, apiPost is stable from TabContext
-  }, [skipSnapshotWrite, currentProject?.id, currentProject?.agentId, isExternalRuntime, currentRuntime, currentAgent?.runtimeConfig, patchSnapshot, patchProject]);
+  }, [skipSnapshotWrite, currentProject?.id, currentProject?.agentId, isExternalRuntime, currentRuntime, currentAgent?.runtimeConfig, patchSnapshot, patchProject, t]);
 
   // Handle workspace MCP toggle — Tab UI edits dual-write:
   // (1) session snapshot so THIS session uses the new tool set immediately (owned sessions only
@@ -2181,6 +2509,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   //     v0.1.69 §4.3 rule 2: "写 Session + 向上写 Agent"). For unlocked/IM this is also
   //     the live-follow source, so the single write covers both roles.
   const handleWorkspaceMcpToggle = useCallback(async (serverId: string, enabled: boolean) => {
+    if (guardCronConfigMutation()) return;
     const newEnabled = enabled
       ? [...workspaceMcpEnabled, serverId]
       : workspaceMcpEnabled.filter(id => id !== serverId);
@@ -2196,13 +2525,14 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     if (!persisted) {
       setWorkspaceMcpEnabled(workspaceMcpEnabled);
     }
-  }, [workspaceMcpEnabled, persistTabConfigChange]);
+  }, [workspaceMcpEnabled, persistTabConfigChange, guardCronConfigMutation]);
 
   // PRD 0.2.17 — Claude plugin per-workspace toggle. Mirrors MCP exactly:
   // optimistic local update + dual-write via persistTabConfigChange (which
   // also pushes /api/cc-plugin/session-enable to the running sidecar so
   // the SDK options pick up the new plugin set on next pre-warm).
   const handleWorkspacePluginToggle = useCallback(async (pluginId: string, enabled: boolean) => {
+    if (guardCronConfigMutation()) return;
     const newEnabled = enabled
       ? [...workspaceEnabledPlugins, pluginId]
       : workspaceEnabledPlugins.filter(id => id !== pluginId);
@@ -2211,7 +2541,21 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     if (!persisted) {
       setWorkspaceEnabledPlugins(workspaceEnabledPlugins);
     }
-  }, [workspaceEnabledPlugins, persistTabConfigChange]);
+  }, [workspaceEnabledPlugins, persistTabConfigChange, guardCronConfigMutation]);
+
+  const handleWorkspaceOfficialToolToggle = useCallback(async (toolId: OfficialToolId, enabled: boolean) => {
+    if (guardCronConfigMutation()) return;
+    const newEnabled = normalizeOfficialToolIds(
+      enabled
+        ? [...workspaceOfficialToolEnabled, toolId]
+        : workspaceOfficialToolEnabled.filter(id => id !== toolId),
+    );
+    setWorkspaceOfficialToolEnabled(newEnabled);
+    const persisted = await persistTabConfigChange({ enabledOfficialToolIds: newEnabled });
+    if (!persisted) {
+      setWorkspaceOfficialToolEnabled(workspaceOfficialToolEnabled);
+    }
+  }, [workspaceOfficialToolEnabled, persistTabConfigChange, guardCronConfigMutation]);
 
   // Sync selectedModel when provider changes (skip initial mount to preserve project-stored model)
   const providerInitRef = useRef(true);
@@ -2304,37 +2648,58 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     // stomp (#395/#396).
     const snapshotRuntime = (sessionMeta.runtime as RuntimeType | undefined) ?? agentRuntime;
     const snapshotIsExternal = snapshotRuntime !== 'builtin';
+    const snapshotIsManagedProvider = snapshotIsExternal
+      && isManagedProviderSessionSnapshot(sessionMeta);
+    const snapshotUsesProviderPicker = shouldSessionSnapshotUseProviderPicker({
+      session: sessionMeta,
+      runtime: snapshotRuntime,
+    });
     const snapshotOwnsConfig = Boolean(sessionMeta.configSnapshotAt);
-    const fallbackModel = snapshotIsExternal
+    const fallbackModel = snapshotIsExternal && !snapshotIsManagedProvider
       ? (currentAgent?.runtimeConfig as RuntimeConfig | undefined)?.model
       : currentAgent?.model;
     const rawModel = snapshotOwnsConfig ? sessionMeta.model : (sessionMeta.model ?? fallbackModel);
-    const model = snapshotIsExternal
+    const runtimeModelValue = snapshotIsExternal
       ? coerceExternalRuntimeModelForUi(rawModel, snapshotRuntime)
+      : rawModel;
+    const providerModelValue = snapshotIsManagedProvider
+      ? managedProviderSnapshotModel(sessionMeta, rawModel)
       : rawModel;
     const fallbackMode = snapshotIsExternal
       ? (currentAgent?.runtimeConfig as RuntimeConfig | undefined)?.permissionMode
       : (currentAgent?.permissionMode as string | undefined);
     const rawMode = snapshotOwnsConfig ? sessionMeta.permissionMode : (sessionMeta.permissionMode ?? fallbackMode);
-    const mode = snapshotIsExternal
+    const runtimePermissionValue = snapshotIsExternal
       ? coerceExternalRuntimePermissionForUi(rawMode, snapshotRuntime)
       : rawMode;
+    const providerPermissionValue = snapshotIsManagedProvider
+      ? managedCodexRuntimePermissionToProviderPermission(
+        runtimePermissionValue ?? getDefaultRuntimePermissionMode(snapshotRuntime),
+      )
+      : rawMode;
     const providerId = snapshotOwnsConfig
-      ? (isConcreteProviderRoute(sessionMeta.providerRoute)
-        ? sessionMeta.providerRoute.providerId
-        : resolveLegacyBuiltinSnapshotProviderId({
-        snapshotProviderId: sessionMeta.providerId,
-        snapshotModel: sessionMeta.model,
-        selectedProviderId,
-        providers,
-        apiKeys,
-        providerVerifyStatus,
-      }))
+      ? (snapshotIsManagedProvider
+        ? managedProviderSnapshotProviderId(sessionMeta)
+        : (
+          isConcreteProviderRoute(sessionMeta.providerRoute)
+            ? sessionMeta.providerRoute.providerId
+            : resolveLegacyBuiltinSnapshotProviderId({
+              snapshotProviderId: sessionMeta.providerId,
+              snapshotModel: sessionMeta.model,
+              selectedProviderId,
+              providers,
+              apiKeys,
+              providerVerifyStatus,
+            })
+        ))
       : (sessionMeta.providerId ?? currentAgent?.providerId);
     const mcp = snapshotOwnsConfig ? sessionMeta.mcpEnabledServers : (sessionMeta.mcpEnabledServers ?? currentAgent?.mcpEnabledServers);
     const plugins = snapshotOwnsConfig
       ? (sessionMeta.enabledPluginIds ?? [])
       : (sessionMeta.enabledPluginIds ?? currentAgent?.enabledPluginIds ?? currentProject?.enabledPluginIds ?? []);
+    const officialTools = snapshotOwnsConfig
+      ? (sessionMeta.enabledOfficialToolIds ?? [])
+      : normalizeOfficialToolIds(sessionMeta.enabledOfficialToolIds ?? currentAgent?.enabledOfficialToolIds ?? currentProject?.enabledOfficialToolIds ?? []);
     // #324 — snapshot effort wins over agent default; a persisted 'default'
     // is meaningful (session explicitly reverted) and flows through as-is.
     // UNCONDITIONAL set (`?? 'default'`, unlike model's `if (model)`): effort's
@@ -2349,9 +2714,10 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       projectSyncedRef.current = true;
     }
     if (snapshotIsExternal) {
-      setRuntimeModel(model);
-    } else if (snapshotOwnsConfig || model) {
-      setSelectedModel(model);
+      setRuntimeModel(runtimeModelValue);
+    }
+    if (snapshotUsesProviderPicker && (snapshotOwnsConfig || providerModelValue)) {
+      setSelectedModel(providerModelValue);
     }
     setReasoningEffort(
       (snapshotIsExternal
@@ -2360,17 +2726,19 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       ?? 'default',
     );
     if (snapshotIsExternal) {
-      setRuntimePermissionMode(mode ?? getDefaultRuntimePermissionMode(snapshotRuntime) ?? 'default');
-    } else if (snapshotOwnsConfig || mode) {
-      setPermissionMode((mode as PermissionMode | undefined) ?? 'auto');
+      setRuntimePermissionMode(runtimePermissionValue ?? getDefaultRuntimePermissionMode(snapshotRuntime) ?? 'default');
     }
-    if (!snapshotIsExternal && providerId) {
+    if (snapshotUsesProviderPicker && (snapshotOwnsConfig || providerPermissionValue)) {
+      setPermissionMode((providerPermissionValue as PermissionMode | undefined) ?? 'auto');
+    }
+    if (snapshotUsesProviderPicker && providerId) {
       setSelectedProviderId(providerId);
     } else if (!snapshotIsExternal && snapshotOwnsConfig && providers.length > 0) {
       setSelectedProviderId(undefined);
     }
     if (mcp) setWorkspaceMcpEnabled(mcp);
     setWorkspaceEnabledPlugins(plugins);
+    setWorkspaceOfficialToolEnabled(normalizeOfficialToolIds(officialTools));
   // eslint-disable-next-line react-hooks/exhaustive-deps -- currentAgent derived from config, listening to its identity would re-fire on unrelated agent changes
   }, [sessionMeta, configPending, selectedProviderId, providers]);
 
@@ -2385,7 +2753,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     // primaryModel AND persist it to project/agent, permanently corrupting the
     // user's choice. Leave it; the send guard surfaces the unavailability instead.
     if (pinnedProviderUnavailable) return;
-    if (currentProvider.type === 'subscription' || !Array.isArray(currentProvider.models) || currentProvider.models.length === 0) return;
+    if (currentProvider.type === 'subscription' && !isRuntimeBackedProvider(currentProvider)) return;
+    if (!Array.isArray(currentProvider.models) || currentProvider.models.length === 0) return;
     if (!selectedModel) return;
     const modelIds = currentProvider.models.map((m) => m.model);
     if (modelIds.includes(selectedModel)) return;
@@ -2523,6 +2892,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
           runtime?: RuntimeType;
           model?: string | null;
           mcpServerIds?: string[] | null;
+          enabledOfficialToolIds?: OfficialToolId[] | null;
           permissionMode?: string | null;
           providerId?: string | null;
           reasoningEffort?: string | null;
@@ -2556,6 +2926,9 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
           if (Array.isArray(config.mcpServerIds)) {
             setWorkspaceMcpEnabled(config.mcpServerIds);
           }
+          if (Array.isArray(config.enabledOfficialToolIds)) {
+            setWorkspaceOfficialToolEnabled(normalizeOfficialToolIds(config.enabledOfficialToolIds));
+          }
           // #324 — server returns 'default' when unset, so truthiness works.
           if (config.reasoningEffort) {
             setReasoningEffort(config.reasoningEffort);
@@ -2569,6 +2942,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
             providerId: config.providerId,
             permissionMode: config.permissionMode,
             mcpServerIds: config.mcpServerIds,
+            enabledOfficialToolIds: config.enabledOfficialToolIds,
           });
         }
       } catch (err) {
@@ -2626,14 +3000,14 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       if (event.key.toLowerCase() !== 'f') return;
       event.preventDefault();
       if (!isHighlightApiSupported()) {
-        toast.error('当前环境不支持页内搜索（缺少 CSS Highlight API）');
+        toast.error(t('shell.toasts.searchUnsupported'));
         return;
       }
       setChatSearchOpen(true);
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [isActive, toast]);
+  }, [isActive, toast, t]);
   // When the tab becomes inactive, close the panel so a) the global
   // CSS.highlights registry doesn't retain stale Range objects from this tab,
   // and b) switching back shows a fresh state rather than a rotting counter.
@@ -2740,6 +3114,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   // targetModel: when provided, use this model instead of the provider's primaryModel
   // (avoids useEffect race when user picks a specific model from a different provider).
   const handleProviderChange = useCallback(async (providerId: string, targetModel?: string) => {
+    if (guardCronConfigMutation()) return;
     // Skip if selecting the same provider (compare against local state, not shared project)
     if (effectiveSelectedProviderId === providerId) {
       // Provider unchanged but caller passed a specific model — treat as model change.
@@ -2749,24 +3124,34 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
         const currentProviderHistoryEnv = currentProviderForHistory
           ? toProviderHistoryEnv(currentProviderForHistory, selectedModel)
           : undefined;
+        const nextIntent = buildProviderExecutionIntent(currentProviderForHistory, targetModel);
         const canResumeProviderHistory = canResumeProviderHistoryForSwitch({
+          currentIntent: currentProviderExecutionIntent,
+          nextIntent,
           currentProviderEnv: currentProviderHistoryEnv,
           nextProviderEnv: currentProviderForHistory
             ? toProviderHistoryEnv(currentProviderForHistory, targetModel)
             : undefined,
           legacyCurrentProviderUnknown: builtinSnapshotProviderHistoryUnknown,
         });
-        if (!canResumeProviderHistory && messagesRef.current.length > 0) {
+        if (!canResumeProviderHistory && (messagesRef.current.length > 0 || isRuntimeBackedIntent(currentProviderExecutionIntent) || isRuntimeBackedIntent(nextIntent))) {
           setPendingProviderSwitch({ providerId, model: targetModel });
           return;
         }
         const persisted = await persistTabConfigChange({
-          builtinSelection: { providerId, model: targetModel },
-          builtinProviderEnvPolicy: 'preserve-provider-env',
+          ...(nextIntent?.kind === 'runtime-backed-provider'
+            ? { runtimeBackedProviderSelection: nextIntent }
+            : {
+                builtinSelection: { providerId, model: targetModel },
+                builtinProviderEnvPolicy: 'preserve-provider-env' as const,
+              }),
           permissionMode: effectivePermissionMode,
         });
         if (!persisted) return;
         setSelectedModel(targetModel);
+        if (nextIntent?.kind === 'runtime-backed-provider') {
+          setRuntimeModel(nextIntent.model);
+        }
       }
       return;
     }
@@ -2776,7 +3161,10 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
 
     const newProvider = providers.find(p => p.id === providerId);
     const model = targetModel ?? newProvider?.primaryModel;
+    const nextIntent = buildProviderExecutionIntent(newProvider, model);
     const canResumeProviderHistory = canResumeProviderHistoryForSwitch({
+      currentIntent: currentProviderExecutionIntent,
+      nextIntent,
       currentProviderEnv: currentProviderForHistory
         ? toProviderHistoryEnv(currentProviderForHistory, selectedModel)
         : undefined,
@@ -2787,7 +3175,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     // Existing SDK transcripts only need a new tab when crossing provider-history
     // families. Ordinary third-party providers share a portable protocol family;
     // entries in providerHistory's isolated set intentionally do not.
-    if (!canResumeProviderHistory && messagesRef.current.length > 0) {
+    if (!canResumeProviderHistory && (messagesRef.current.length > 0 || isRuntimeBackedIntent(currentProviderExecutionIntent) || isRuntimeBackedIntent(nextIntent))) {
       setPendingProviderSwitch({ providerId, model });
       return;  // Don't update state — dialog will handle it
     }
@@ -2797,8 +3185,12 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     // the user's latest preference (PRD v0.1.69 §4.3 rule 2 dual-write).
     if (!model) return;
     const persisted = await persistTabConfigChange({
-      builtinSelection: { providerId, model },
-      builtinProviderEnvPolicy: 'clear-stale-provider-env',
+      ...(nextIntent?.kind === 'runtime-backed-provider'
+        ? { runtimeBackedProviderSelection: nextIntent }
+        : {
+            builtinSelection: { providerId, model },
+            builtinProviderEnvPolicy: 'clear-stale-provider-env' as const,
+          }),
       permissionMode: effectivePermissionMode,
     });
     if (!persisted) return;
@@ -2809,6 +3201,9 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     setSelectedProviderId(providerId);
     if (model) {
       setSelectedModel(model);
+      if (nextIntent?.kind === 'runtime-backed-provider') {
+        setRuntimeModel(nextIntent.model);
+      }
     }
 
     // Suppress the deferred provider-change useEffect — we've already set the correct model
@@ -2822,9 +3217,11 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     currentProviderForHistory?.type,
     currentProviderForHistory?.config.baseUrl,
     currentProviderForHistory?.apiProtocol,
+    currentProviderExecutionIntent,
     builtinSnapshotProviderHistoryUnknown,
     effectivePermissionMode,
     persistTabConfigChange,
+    guardCronConfigMutation,
   ]);
 
   const handleBuiltinModelSelect = useCallback(async (selection: BuiltinModelSelection) => {
@@ -2836,6 +3233,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   // snapshot the new model locally so this session persists the choice; project + agent
   // also get written so FUTURE new sessions / Bots / Crons inherit the latest preference.
   const handleModelChange = useCallback(async (model: string) => {
+    if (guardCronConfigMutation()) return;
     // Skip if selecting the same model
     if (selectedModel === model) {
       return;
@@ -2844,7 +3242,10 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     // Track model_switch event
     track('model_switch', { model });
 
+    const nextIntent = buildProviderExecutionIntent(currentProviderForHistory, model);
     const canResumeProviderHistory = canResumeProviderHistoryForSwitch({
+      currentIntent: currentProviderExecutionIntent,
+      nextIntent,
       currentProviderEnv: currentProviderForHistory
         ? toProviderHistoryEnv(currentProviderForHistory, selectedModel)
         : undefined,
@@ -2854,19 +3255,26 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       legacyCurrentProviderUnknown: builtinSnapshotProviderHistoryUnknown,
     });
     const currentProviderId = effectiveSelectedProviderId ?? currentProvider?.id;
-    if (!canResumeProviderHistory && messagesRef.current.length > 0 && currentProviderId) {
+    if (!canResumeProviderHistory && (messagesRef.current.length > 0 || isRuntimeBackedIntent(currentProviderExecutionIntent) || isRuntimeBackedIntent(nextIntent)) && currentProviderId) {
       setPendingProviderSwitch({ providerId: currentProviderId, model });
       return;
     }
 
     if (!currentProviderId) return;
     const persisted = await persistTabConfigChange({
-      builtinSelection: { providerId: currentProviderId, model },
-      builtinProviderEnvPolicy: 'preserve-provider-env',
+      ...(nextIntent?.kind === 'runtime-backed-provider'
+        ? { runtimeBackedProviderSelection: nextIntent }
+        : {
+            builtinSelection: { providerId: currentProviderId, model },
+            builtinProviderEnvPolicy: 'preserve-provider-env' as const,
+          }),
       permissionMode: effectivePermissionMode,
     });
     if (!persisted) return;
     setSelectedModel(model);
+    if (nextIntent?.kind === 'runtime-backed-provider') {
+      setRuntimeModel(nextIntent.model);
+    }
   // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed deps; currentProvider fields cover toProviderHistoryEnv inputs
   }, [
     selectedModel,
@@ -2874,11 +3282,13 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     currentProviderForHistory?.type,
     currentProviderForHistory?.config.baseUrl,
     currentProviderForHistory?.apiProtocol,
+    currentProviderExecutionIntent,
     effectiveSelectedProviderId,
     currentProvider?.id,
     builtinSnapshotProviderHistoryUnknown,
     effectivePermissionMode,
     persistTabConfigChange,
+    guardCronConfigMutation,
   ]);
 
   // External-runtime model change. Same dual-write policy as builtin
@@ -2888,11 +3298,12 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   // was lost on next session — matching launcher's persist behavior closes
   // that gap.
   const handleRuntimeModelChange = useCallback(async (model: string) => {
+    if (guardCronConfigMutation()) return;
     if (runtimeModel === model) return;
     const persisted = await persistTabConfigChange({ runtimeModel: model });
     if (!persisted) return;
     setRuntimeModel(model);
-  }, [runtimeModel, persistTabConfigChange]);
+  }, [runtimeModel, persistTabConfigChange, guardCronConfigMutation]);
 
   // #324 — reasoning effort change. Same dual-write policy as handleModelChange
   // (snapshot + agent; live sidecar apply rides the effort-push effect, and the
@@ -2918,6 +3329,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   }, [configPending, pushReasoningEffort]);
 
   const handleReasoningEffortChange = useCallback(async (effort: string) => {
+    if (guardCronConfigMutation()) return;
     if (reasoningEffort === effort) return;
     track('reasoning_effort_switch', { effort });
     const persisted = await persistTabConfigChange({ reasoningEffort: effort });
@@ -2932,7 +3344,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     } else {
       pushReasoningEffort(effort);
     }
-  }, [reasoningEffort, persistTabConfigChange, pushReasoningEffort]);
+  }, [reasoningEffort, persistTabConfigChange, pushReasoningEffort, guardCronConfigMutation]);
 
   // #324 — clamp effort on provider-protocol change. An OpenAI-only level
   // (e.g. 'minimal') left selected after switching to an Anthropic-protocol
@@ -2966,6 +3378,33 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     }
   }, [isExternalRuntime, persistTabConfigChange]);
 
+  const handleInputPermissionModeChange = useCallback(async (mode: PermissionMode) => {
+    if (guardCronConfigMutation()) return;
+    if (!managedProviderRuntimeActive) {
+      await handlePermissionModeChange(mode);
+      return;
+    }
+
+    const runtimeMode = managedCodexProviderPermissionToRuntimePermission(mode)
+      ?? coerceRuntimeBirthPermissionMode(mode, currentRuntime)
+      ?? getDefaultRuntimePermissionMode(currentRuntime);
+    const persisted = await persistTabConfigChange({ permissionMode: runtimeMode });
+    if (!persisted) return;
+    projectSyncedRef.current = true;
+    setPermissionMode(mode);
+    setRuntimePermissionMode(runtimeMode);
+  }, [
+    managedProviderRuntimeActive,
+    handlePermissionModeChange,
+    currentRuntime,
+    persistTabConfigChange,
+    guardCronConfigMutation,
+  ]);
+
+  const inputChromePermissionMode = managedProviderRuntimeActive
+    ? permissionMode
+    : effectivePermissionMode;
+
   // Cross-runtime SDK protection: only fires when the multiAgentRuntime feature
   // gate is OFF but the session was created by an external runtime (Codex/CC/
   // Gemini). In that case the backend would try to run the built-in SDK against
@@ -2978,9 +3417,11 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   // needed. The previous formula `sessionRuntime !== currentRuntime` was wrong
   // because it compared session-actual against agent-preference, which forced an
   // unnecessary fork every time the user changed agent.runtime in another tab.
-  const isCrossRuntimeSession = sessionRuntime !== null
-    && sessionRuntime !== 'builtin'
-    && !multiAgentRuntimeEnabled;
+  const isCrossRuntimeSession = shouldBlockSendForLabsDisabledExternalRuntime({
+    sessionRuntime,
+    sessionRuntimeSource: currentRuntimeSource,
+    multiAgentRuntimeEnabled,
+  });
   const [pendingCrossRuntimeMessage, setPendingCrossRuntimeMessage] = useState<{
     text: string;
     images: ImageAttachment[];
@@ -3008,13 +3449,15 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     // user switched away from). Refuse to send and tell the user how to fix it,
     // instead of routing to the wrong provider and resetting their model.
     if (pinnedProviderUnavailable) {
-      toastRef.current.error(
-        `当前会话指定的 Provider「${effectiveSelectedProviderId}」不可用（缺少 API Key 或已被禁用）。请在设置中补充密钥，或在模型选择器中切换 Provider 后再发送。`,
-      );
+      showPinnedProviderUnavailableToast();
       return false;
     }
     if (builtinSnapshotProviderSelectionIncomplete) {
-      toastRef.current.warning('这个历史会话缺少 Provider 信息，请先在模型选择器里重新选择一次模型。');
+      showSnapshotProviderIncompleteToast();
+      return false;
+    }
+    if (!isExternalRuntime && isRuntimeBackedProvider(currentProviderRef.current)) {
+      toastRef.current.warning(t('shell.toasts.codexSubscriptionNeedsSession'));
       return false;
     }
 
@@ -3024,7 +3467,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     // being bypassed while the user keeps typing during the startup window.
     const isAiBusy = isLoading || sessionState === 'running' || sessionState === 'starting';
     if (isAiBusy && queuedMessages.length >= 5) {
-      toastRef.current.warning('最多排队 5 条消息');
+      toastRef.current.warning(t('shell.toasts.queueLimit'));
       return false;
     }
 
@@ -3049,10 +3492,24 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       // If cron mode is enabled and task hasn't started yet, start the task
       const cron = cronStateRef.current;
       if (cron.isEnabled && !cron.task && cron.config) {
+        setStoppedCronRecovery(null);
         if (cron.config.executionTarget === 'new_task') {
           // ── New standalone task: create independently, show card in chat ──
           try {
             const sessionId = `cron-standalone-${crypto.randomUUID()}`;
+            const cronExecution = projectCronExecutionOverrides({
+              providers,
+              runtime: cron.config.runtime,
+              providerId: cron.config.providerId,
+              model: cron.config.model,
+              runtimeConfig: cron.config.runtimeConfig,
+              providerEnv: cron.config.providerEnv,
+              providerIntent: cron.config.providerIntent,
+            });
+            const cronPermissionMode = coerceRuntimeBirthPermissionMode(
+              cron.config.permissionMode,
+              cronExecution.runtime ?? currentRuntime,
+            );
             const task = await createCronTask({
               workspacePath: agentDir,
               sessionId,
@@ -3061,25 +3518,19 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
               endConditions: cron.config.endConditions,
               runMode: 'new_session',
               notifyEnabled: cron.config.notifyEnabled,
-              model: cron.config.model,
-              permissionMode: cron.config.permissionMode,
+              model: cronExecution.model,
+              permissionMode: cronPermissionMode,
               // PRD 0.2.9 — Forward the live-resolve providerId; sidecar
               // re-reads provider config on every tick so credential
               // rotation propagates without re-saving the cron. R2
               // invariant: when providerId is set, drop providerEnv so
               // no apiKey snapshot lands in cron_tasks.json. Legacy
               // callers (no providerId) keep the explicit-snapshot path.
-              providerId: cron.config.providerId,
-              providerEnv: cron.config.providerId ? undefined : cron.config.providerEnv,
-              providerIntent:
-                cron.config.providerIntent
-                ?? (cron.config.providerId
-                  ? undefined
-                  : cron.config.providerEnv
-                    ? 'explicit'
-                    : 'subscription'),
-              runtime: cron.config.runtime,
-              runtimeConfig: cron.config.runtimeConfig,
+              providerId: cronExecution.providerId,
+              providerEnv: cronExecution.providerEnv as typeof cron.config.providerEnv,
+              providerIntent: cronExecution.providerIntent,
+              runtime: cronExecution.runtime,
+              runtimeConfig: cronExecution.runtimeConfig,
               schedule: cron.config.schedule,
               delivery: cron.config.delivery,
             });
@@ -3088,11 +3539,11 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
             setCronCardTask(task);
             disableCronMode();
             setIsLoading(false);
-            toastRef.current?.success('定时任务已创建');
+            toastRef.current?.success(t('shell.toasts.cronTaskCreated'));
           } catch (err) {
             disableCronMode();
             setIsLoading(false);
-            toastRef.current?.error(`创建失败: ${err instanceof Error ? err.message : String(err)}`);
+            toastRef.current?.error(t('shell.toasts.createFailedWithError', { error: err instanceof Error ? err.message : String(err) }));
           }
           return;
         }
@@ -3123,7 +3574,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps -- toastRef/currentProviderRef/apiKeysRef/cronStateRef are refs (stable); scrollToBottom/setMessages/setIsLoading/setSessionState are stable
-  }, [sessionState, isLoading, queuedMessages.length, startCronTask, sendMessage, effectivePermissionMode, effectiveModel, reasoningEffort, isExternalRuntime, isCrossRuntimeSession, scrollToBottom, pinnedProviderUnavailable, effectiveSelectedProviderId, builtinSnapshotProviderSelectionIncomplete]);
+  }, [sessionState, isLoading, queuedMessages.length, startCronTask, sendMessage, effectivePermissionMode, effectiveModel, reasoningEffort, isExternalRuntime, isCrossRuntimeSession, scrollToBottom, pinnedProviderUnavailable, builtinSnapshotProviderSelectionIncomplete, showPinnedProviderUnavailableToast, showSnapshotProviderIncompleteToast, t]);
 
   // Ref-stabilize handleSendMessage for handleRetry (avoids frequent re-creation)
   const handleSendMessageRef = useRef(handleSendMessage);
@@ -3190,10 +3641,33 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   // Runtime change — show confirm dialog, then open new Tab (v0.1.59)
   const [pendingRuntimeChange, setPendingRuntimeChange] = useState<RuntimeType | null>(null);
 
+  const providerSwitchDialogCopy = useMemo(() => {
+    if (!pendingProviderSwitch) return null;
+    const targetProvider = providers.find(p => p.id === pendingProviderSwitch.providerId);
+    const targetModel = pendingProviderSwitch.model ?? targetProvider?.primaryModel;
+    const targetIntent = buildProviderExecutionIntent(targetProvider, targetModel);
+    return buildProviderSwitchDialogCopy(t, {
+      currentProvider: currentProviderForHistory ?? currentProvider,
+      targetProvider,
+      currentIntent: currentProviderExecutionIntent,
+      targetIntent,
+      targetModel,
+      targetProviderId: pendingProviderSwitch.providerId,
+    });
+  }, [
+    pendingProviderSwitch,
+    providers,
+    currentProviderForHistory,
+    currentProvider,
+    currentProviderExecutionIntent,
+    t,
+  ]);
+
   const handleRuntimeChange = useCallback((runtime: RuntimeType) => {
+    if (guardCronConfigMutation()) return;
     if (!currentAgent || runtime === currentRuntime) return;
     setPendingRuntimeChange(runtime);
-  }, [currentAgent, currentRuntime]);
+  }, [currentAgent, currentRuntime, guardCronConfigMutation]);
 
   const transferBindingToForkedSession = useCallback(async (channel: ChannelSurface, targetSessionId: string) => {
     if (!agentDir) {
@@ -3211,9 +3685,9 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       throw new Error('Channel binding transfer failed');
     }
     if (!result.notified) {
-      toastRef.current.warning('新会话已接管 Channel，但 IM 通知发送失败');
+      toastRef.current.warning(t('shell.toasts.channelNotificationFailed'));
     }
-  }, [agentDir]);
+  }, [agentDir, t]);
 
   const deleteUnopenedForkSession = useCallback(async (targetSessionId: string) => {
     try {
@@ -3225,6 +3699,10 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   }, []);
 
   const confirmRuntimeChange = useCallback(async () => {
+    if (guardCronConfigMutation()) {
+      setPendingRuntimeChange(null);
+      return;
+    }
     const runtime = pendingRuntimeChange;
     setPendingRuntimeChange(null);
     if (!runtime || !currentAgent) return;
@@ -3258,7 +3736,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       session = await createSession(agentDir, runtime);
     } catch (err) {
       console.error('[chat] Failed to create session for runtime fork:', err);
-      toastRef.current.error('切换 Runtime 失败：无法创建新会话');
+      toastRef.current.error(t('shell.toasts.runtimeSwitchCreateFailed'));
       return;
     }
     // Fork metadata succeeded — now persist workspace default before opening
@@ -3281,10 +3759,10 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
         console.warn('[chat] Runtime fork succeeded but agent template update failed:', err);
         if (boundChannel) {
           await deleteUnopenedForkSession(session.id);
-          toastRef.current.error('切换 Runtime 失败：工作区默认 Runtime 未能更新');
+          toastRef.current.error(t('shell.toasts.runtimeSwitchDefaultUpdateFailed'));
           return;
         }
-        toastRef.current.warning('新会话将继续打开，但工作区默认 Runtime 未能更新');
+        toastRef.current.warning(t('shell.toasts.runtimeSwitchDefaultUpdateWarning'));
       }
     }
     const runtimeLabel = getRuntimeDisplayLabel(runtime);
@@ -3301,7 +3779,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
           console.warn('[chat] Runtime rollback after fork tab open failure also failed:', rollbackErr);
         }
       }
-      toastRef.current.error('切换 Runtime 失败：新 Tab 未能打开');
+      toastRef.current.error(t('shell.toasts.runtimeSwitchTabOpenFailed'));
       return;
     }
     if (boundChannel && session) {
@@ -3317,84 +3795,105 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
         } catch (rollbackErr) {
           console.warn('[chat] Runtime rollback after failed channel transfer also failed:', rollbackErr);
         }
-        toastRef.current.error('新会话已打开，但 Channel 绑定未迁移，工作区 Runtime 已恢复');
+        toastRef.current.error(t('shell.toasts.runtimeSwitchChannelTransferFailed'));
         return;
       }
     }
-  }, [pendingRuntimeChange, currentAgent, onForkSession, agentDir, transferBindingToForkedSession, deleteUnopenedForkSession]);
+  }, [pendingRuntimeChange, currentAgent, onForkSession, agentDir, transferBindingToForkedSession, deleteUnopenedForkSession, guardCronConfigMutation, t]);
 
-  // Provider/model history-boundary confirm: save the requested selection to
-  // project, create a new session in a new tab, and leave the current tab on
-  // its original SDK transcript.
+  // Provider/model history-boundary confirm: create a fresh session in a new
+  // tab so the old transcript is not reused across incompatible provider
+  // families. The new session gets an owned snapshot, and the user's latest
+  // provider/model choice is still written upward to Project/Agent defaults
+  // without mutating the old session snapshot.
   const confirmProviderSwitch = useCallback(async () => {
+    if (guardCronConfigMutation()) {
+      setPendingProviderSwitch(null);
+      return;
+    }
     const pending = pendingProviderSwitch;
     setPendingProviderSwitch(null);
     if (!pending || !agentDir || !onForkSession) return;
     const boundChannel = channelSurfaceRef.current;
 
-    // Ordering constraint (cross-review Codex Warning): session snapshot
-    // captures `providerId` at creation time via `snapshotForOwnedSession`
-    // reading the current agent. If we created the session before patching
-    // the agent, the snapshot would freeze the OLD provider — so the new Tab
-    // would still be bound to the old one. Hence: patch first, then create.
-    //
-    // To prevent the "agent default silently drifted even though fork
-    // failed" leak, we snapshot the prior provider/model and roll back if
-    // `createSession` throws.
-    const priorProviderId = currentProject?.providerId;
-    const priorModel = currentProject?.model;
-    const priorAgentProviderId = currentAgent?.providerId;
-    const priorAgentModel = currentAgent?.model;
     let forkTabOpened = false;
+    const newProvider = providers.find(p => p.id === pending.providerId);
+    const targetModel = pending.model ?? newProvider?.primaryModel;
+    const targetIntent = buildProviderExecutionIntent(newProvider, targetModel);
+
+    if (!newProvider || !targetModel || !targetIntent) {
+      toastRef.current.error(t('shell.toasts.providerSwitchTargetUnavailable'));
+      return;
+    }
 
     try {
-      // 1. Save provider + model to project config so the new tab picks it up
-      if (currentProject) {
-        await patchProject(currentProject.id, { providerId: pending.providerId, model: pending.model ?? null });
-        if (currentProject?.agentId) {
-          await patchAgentConfig(currentProject.agentId, { providerId: pending.providerId, model: pending.model ?? undefined });
-        }
-      }
-      await refreshConfig();  // Sync React state so new tab sees updated provider
-      // 2. Create a new session and open in new Tab (pass runtime to avoid cross-runtime mismatch)
       const { createSession } = await import('@/api/sessionClient');
-      const session = await createSession(agentDir, currentRuntime);
-      const newProvider = providers.find(p => p.id === pending.providerId);
-      const opened = await onForkSession(session.id, agentDir, `${newProvider?.name ?? 'Claude'} 会话`);
+      const birth = buildProviderSwitchSessionBirth({
+        targetIntent,
+        providerId: pending.providerId,
+        model: targetModel,
+        permissionMode: inputChromePermissionMode,
+        reasoningEffort,
+        mcpEnabledServers: workspaceMcpEnabled,
+        enabledPluginIds: workspaceEnabledPlugins,
+        enabledOfficialToolIds: workspaceOfficialToolEnabled,
+      });
+      const session = await createSession(
+        agentDir,
+        birth.runtime,
+        birth.opts,
+      );
+      const opened = await onForkSession(
+        session.id,
+        agentDir,
+        `${newProvider?.name ?? 'Claude'} 会话`,
+      );
       if (!opened) {
         await deleteUnopenedForkSession(session.id);
         throw new Error('Fork tab failed to open');
       }
       forkTabOpened = true;
+      if (currentProject) {
+        const defaultWriteResult = await persistInputOptionChange({
+          workspaceId: currentProject.id,
+          agentId: currentProject.agentId,
+          isExternalRuntime: false,
+          currentRuntimeConfig: currentAgent?.runtimeConfig as RuntimeConfig | undefined,
+          currentProviderId: currentAgent?.providerId ?? currentProject.providerId,
+          fields: {
+            ...(targetIntent.kind === 'runtime-backed-provider'
+              ? { runtimeBackedProviderSelection: targetIntent }
+              : { builtinSelection: { providerId: pending.providerId, model: targetModel } }),
+            permissionMode: targetIntent.kind === 'runtime-backed-provider'
+              ? runtimeBackedProviderPermissionMode(targetIntent, inputChromePermissionMode)
+              : inputChromePermissionMode,
+          },
+          snapshotWriteMode: 'disabled',
+          patchProject,
+          patchAgentConfig,
+        });
+        if (!defaultWriteResult.ok) {
+          console.error('[chat] Provider switch default write failed:', defaultWriteResult.errors);
+          toastRef.current.warning(t('shell.toasts.providerSwitchDefaultSaveFailed'));
+        }
+        try {
+          await refreshConfig();
+        } catch (refreshErr) {
+          console.warn('[chat] Provider switch config refresh failed:', refreshErr);
+        }
+      }
       if (boundChannel) {
         await transferBindingToForkedSession(boundChannel, session.id);
       }
     } catch (err) {
       console.error('[chat] Failed to create cross-provider session:', err);
-      // Roll back the agent / project config so workspace default stays on
-      // the provider the user actually got to keep using.
-      try {
-        if (currentProject && priorProviderId !== undefined) {
-          await patchProject(currentProject.id, { providerId: priorProviderId, model: priorModel ?? null });
-          if (currentProject?.agentId) {
-            await patchAgentConfig(currentProject.agentId, {
-              providerId: priorAgentProviderId,
-              model: priorAgentModel,
-            });
-          }
-          await refreshConfig();
-        }
-      } catch (rollbackErr) {
-        console.warn('[chat] Provider rollback after failed fork also failed:', rollbackErr);
-      }
       toastRef.current.error(
         forkTabOpened
-          ? '新会话已打开，但 Channel 绑定未迁移，工作区 Provider 已恢复'
-          : '创建新会话失败，工作区 Provider 已恢复',
+          ? t('shell.toasts.providerSwitchChannelTransferFailed')
+          : t('shell.toasts.createNewSessionFailed'),
       );
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed to .id/.agentId
-  }, [pendingProviderSwitch, agentDir, onForkSession, currentProject?.id, currentProject?.agentId, patchProject, refreshConfig, providers, currentRuntime, currentProject?.providerId, currentProject?.model, currentAgent?.providerId, currentAgent?.model, transferBindingToForkedSession, deleteUnopenedForkSession]);
+  }, [pendingProviderSwitch, agentDir, onForkSession, providers, transferBindingToForkedSession, deleteUnopenedForkSession, inputChromePermissionMode, reasoningEffort, workspaceMcpEnabled, workspaceEnabledPlugins, workspaceOfficialToolEnabled, currentProject, currentAgent, patchProject, refreshConfig, guardCronConfigMutation, t]);
 
   // Cross-runtime confirm: create new session in new tab and send the pending message
   const confirmCrossRuntimeSend = useCallback(async () => {
@@ -3408,18 +3907,18 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       setPendingCrossRuntimeMessage(null);  // Clear only after success
       // Open new tab with the pending message as initialMessage
       if (pending.images.length > 0) {
-        toastRef.current.warning('图片附件无法带入新会话，请重新添加');
+        toastRef.current.warning(t('shell.toasts.imagesNotTransferred'));
       }
-      const opened = await onForkSession(session.id, agentDir, pending.text.slice(0, 40) || '新会话', pending.text);
+      const opened = await onForkSession(session.id, agentDir, pending.text.slice(0, 40) || t('shell.toasts.newSession'), pending.text);
       if (!opened) {
         await deleteUnopenedForkSession(session.id);
       }
     } catch (err) {
       setPendingCrossRuntimeMessage(null);  // Clear on error too (dialog dismissed)
       console.error('[chat] Failed to create cross-runtime session:', err);
-      toastRef.current.error('创建新会话失败');
+      toastRef.current.error(t('shell.toasts.createNewSessionFailed'));
     }
-  }, [pendingCrossRuntimeMessage, agentDir, onForkSession, currentRuntime, deleteUnopenedForkSession]);
+  }, [pendingCrossRuntimeMessage, agentDir, onForkSession, currentRuntime, deleteUnopenedForkSession, t]);
 
   const handleCollapseWorkspace = useCallback(() => setShowWorkspace(false), []);
   // Issue #231: snapshot the current input value at the moment the user opens
@@ -3428,28 +3927,49 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   // re-rendered the entire Chat tree on every paste — see SimpleChatInput #231
   // comment).
   const handleOpenCronSettings = useCallback(() => {
+    if (guardCronConfigMutation()) return;
+    setStoppedCronRecovery(null);
     setCronPrompt(chatInputRef.current?.getCurrentValue() ?? '');
     setCronOpenPreset(null); // 定时 button = no slash preset
     setShowCronSettings(true);
-  }, []);
+  }, [guardCronConfigMutation]);
 
   // Dispatch a client-action slash command from the chat input. `/loop` opens
   // the cron modal preset to infinite-loop mode; the task content is entered in
   // the input after confirming (which arms cron mode — see handleSendMessage).
   const handleSlashAction = useCallback((name: string) => {
     if (name === 'loop') {
+      if (guardCronConfigMutation()) return;
+      setStoppedCronRecovery(null);
       setCronPrompt(''); // task is entered after confirm, not snapshotted here
       setCronOpenPreset(LOOP_SLASH_PRESET);
       setShowCronSettings(true);
     }
-  }, []);
+  }, [guardCronConfigMutation]);
 
   const handleCronStop = useCallback(async () => {
-    const originalPrompt = await stopCronTask();
-    if (originalPrompt) {
-      chatInputRef.current?.setValue(originalPrompt);
+    const stopSessionId = sessionIdRef.current;
+    const result = await stopCronTask();
+    if (!result || sessionIdRef.current !== stopSessionId) return;
+    const promptToRecover = result.prompt;
+    if (promptToRecover) {
+      setStoppedCronRecovery({
+        prompt: promptToRecover,
+        task: result.task,
+        sessionId: stopSessionId ?? '',
+      });
     }
   }, [stopCronTask]);
+
+  const handleCronDismissStopped = useCallback(() => {
+    if (stoppedCronRecovery?.prompt) {
+      const currentValue = chatInputRef.current?.getCurrentValue() ?? '';
+      const nextValue = appendCronPromptToDraft(currentValue, stoppedCronRecovery.prompt);
+      chatInputRef.current?.setValue(nextValue);
+      chatInputRef.current?.focus();
+    }
+    setStoppedCronRecovery(null);
+  }, [stoppedCronRecovery]);
 
   const handleCancelQueuedVoid = useCallback(
     (queueId: string) => { void handleCancelQueued(queueId); },
@@ -3471,7 +3991,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     const currentValue = inputRef.current?.value ?? '';
     // Only prepend \n when there's existing content (so the quote starts on a new line)
     const prefix = currentValue ? '\n' : '';
-    const quote = `${prefix}${formatQuote(selectedText)}\n针对引用的内容：`;
+    const quote = `${prefix}${formatQuote(selectedText)}\n${t('shell.selection.quotePrompt')}`;
     const appended = currentValue + quote;
     chatInputRef.current?.setValue(appended);
     // Move cursor to end + scroll textarea to bottom so user sees the appended quote
@@ -3483,13 +4003,13 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
         textarea.focus();
       }
     }, 0);
-  }, [inputRef, formatQuote]);
+  }, [inputRef, formatQuote, t]);
 
   // Elaborate = quote + placeholder + "深入讲讲" then auto-send
   const handleElaborateSelection = useCallback((selectedText: string) => {
-    const prompt = `${formatQuote(selectedText)}\n针对引用的内容：深入讲讲`;
+    const prompt = `${formatQuote(selectedText)}\n${t('shell.selection.elaboratePrompt')}`;
     void handleSendMessageRef.current(prompt);
-  }, [formatQuote]);
+  }, [formatQuote, t]);
 
   // File preview「引用文件」: append `@<path> ` to chat input. Token-format matches existing
   // `@file` mention (server's fallback-path collector treats literal `@path` as a file
@@ -3575,13 +4095,11 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   // model/permission/providerEnv 发送 `/compact`（实测可触发内置压缩），避免误切 provider。
   const handleCompactContext = useCallback(() => {
     if (pinnedProviderUnavailable) {
-      toastRef.current.error(
-        `当前会话指定的 Provider「${effectiveSelectedProviderId}」不可用（缺少 API Key 或已被禁用）。请在设置中补充密钥，或在模型选择器中切换 Provider 后再发送。`,
-      );
+      showPinnedProviderUnavailableToast();
       return;
     }
     if (builtinSnapshotProviderSelectionIncomplete) {
-      toastRef.current.warning('这个历史会话缺少 Provider 信息，请先在模型选择器里重新选择一次模型。');
+      showSnapshotProviderIncompleteToast();
       return;
     }
     const providerRoute = buildBuiltinProviderRoute(currentProviderRef.current, effectiveModel);
@@ -3589,7 +4107,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     void sendMessage('/compact', undefined, effectivePermissionMode, effectiveModel, isExternalRuntime ? undefined : providerEnv, undefined,
       isExternalRuntime ? undefined : reasoningEffort,
       isExternalRuntime ? undefined : providerRoute);
-  }, [sendMessage, effectivePermissionMode, effectiveModel, reasoningEffort, isExternalRuntime, buildProviderEnv, builtinSnapshotProviderSelectionIncomplete, pinnedProviderUnavailable, effectiveSelectedProviderId]);
+  }, [sendMessage, effectivePermissionMode, effectiveModel, reasoningEffort, isExternalRuntime, buildProviderEnv, builtinSnapshotProviderSelectionIncomplete, pinnedProviderUnavailable, showPinnedProviderUnavailableToast, showSnapshotProviderIncompleteToast]);
 
   // PRD 0.2.32 — context 用量指示器 slot。自取数（内部 useTabState 订阅 contextUsage），
   // 数据不经 SimpleChatInput props；useMemo 让 slot identity 在流式期间稳定，不打穿
@@ -3630,14 +4148,14 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
 
   const handleExitPlanModeApprove = useCallback(async () => {
     const ok = await respondExitPlanMode(true);
-    if (!ok) toastRef.current.error('提交失败，请重试');
+    if (!ok) toastRef.current.error(t('shell.toasts.submitFailedRetry'));
     // Mode restore is handled by the useEffect below reacting to resolved='approved'
-  }, [respondExitPlanMode]);
+  }, [respondExitPlanMode, t]);
 
   const handleExitPlanModeReject = useCallback(async (feedback?: string) => {
     const ok = await respondExitPlanMode(false, feedback);
-    if (!ok) toastRef.current.error('提交失败，请重试');
-  }, [respondExitPlanMode]);
+    if (!ok) toastRef.current.error(t('shell.toasts.submitFailedRetry'));
+  }, [respondExitPlanMode, t]);
 
   const handleDismissSystemNotice = useCallback(() => {
     setSystemNotice(null);
@@ -3742,7 +4260,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
           setMessages(snapshot);
           chatInputRef.current?.setValue('');
           chatInputRef.current?.setImages([]);
-          toastRef.current.error('时间回溯失败：' + (r.error || '未知错误'));
+          toastRef.current.error(t('shell.toasts.rewindFailedWithError', { error: r.error || t('shell.toasts.unknownError') }));
         }
       })
       .catch(err => {
@@ -3751,13 +4269,13 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
         setMessages(snapshot);
         chatInputRef.current?.setValue('');
         chatInputRef.current?.setImages([]);
-        toastRef.current.error('时间回溯失败，请重试');
+        toastRef.current.error(t('shell.toasts.rewindFailedRetry'));
       })
       .finally(() => {
         setRewindStatus(null);
         setIsLoading(false);
       });
-  }, [rewindTarget, apiPost, setMessages, setIsLoading, pauseAutoScroll]);
+  }, [rewindTarget, apiPost, setMessages, setIsLoading, pauseAutoScroll, t]);
 
   // Retry = rewind to before user message + auto-resend
   // Rewind to before the given user message and re-send its content.
@@ -3796,7 +4314,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
         const r = res as { success?: boolean; error?: string } | undefined;
         if (r && !r.success) {
           setMessages(snapshot);
-          toastRef.current.error('重试失败：' + (r.error || '未知错误'));
+          toastRef.current.error(t('shell.toasts.retryFailedWithError', { error: r.error || t('shell.toasts.unknownError') }));
           return;
         }
         // Rewind succeeded → auto-resend the original message
@@ -3819,7 +4337,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       .catch(err => {
         console.error('[Chat] Retry failed:', err);
         setMessages(snapshot);
-        toastRef.current.error('重试失败');
+        toastRef.current.error(t('shell.toasts.retryFailed'));
       })
       .finally(() => {
         setRewindStatus(null);
@@ -3828,7 +4346,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
           setIsLoading(false);
         }
       });
-  }, [apiPost, setMessages, setIsLoading, pauseAutoScroll, isExternalRuntime]); // all stable — refs handle the rest
+  }, [apiPost, setMessages, setIsLoading, pauseAutoScroll, isExternalRuntime, t]); // all stable — refs handle the rest
 
   // Uses refs for messagesRef/toastRef/handleSendMessageRef — deps are all stable → reference stable
   const handleRetry = useCallback((assistantMessageId: string) => {
@@ -3876,23 +4394,23 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
         if (r?.success && r.newSessionId && r.agentDir) {
           if (!onForkSession) {
             await deleteUnopenedForkSession(r.newSessionId);
-            toastRef.current.error('创建分支失败：无法打开新会话');
+            toastRef.current.error(t('shell.toasts.forkOpenFailed'));
             return;
           }
           const opened = await onForkSession(r.newSessionId, r.agentDir, r.title || 'Fork');
           if (!opened) {
             await deleteUnopenedForkSession(r.newSessionId);
-            toastRef.current.error('创建分支失败：无法打开新会话');
+            toastRef.current.error(t('shell.toasts.forkOpenFailed'));
           }
         } else {
-          toastRef.current.error('创建分支失败：' + (r?.error || '未知错误'));
+          toastRef.current.error(t('shell.toasts.forkFailedWithError', { error: r?.error || t('shell.toasts.unknownError') }));
         }
       })
       .catch(err => {
         console.error('[Chat] Fork failed:', err);
-        toastRef.current.error('创建分支失败');
+        toastRef.current.error(t('shell.toasts.forkFailed'));
       });
-  }, [forkTarget, apiPost, onForkSession, deleteUnopenedForkSession]);
+  }, [forkTarget, apiPost, onForkSession, deleteUnopenedForkSession, t]);
 
   // Handler for selecting a session from history dropdown
   const handleSelectSession = useCallback((id: string, historyEntrySource: HistoryEntrySource = 'chat_dropdown') => {
@@ -3945,7 +4463,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       if (ch.activeSessions.length === 0) {
         out.push({
           ...base,
-          disabledReason: '暂无聊天记录',
+          disabledReason: t('shell.handover.noActiveSessions'),
         });
         continue;
       }
@@ -3961,7 +4479,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       }
     }
     return out;
-  }, [currentAgent, agentStatuses]);
+  }, [currentAgent, agentStatuses, t]);
 
 /**
    * Migrate the current channel binding to a new session id, then reset the
@@ -4043,14 +4561,14 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       >
       <div className={`flex min-w-0 flex-1 flex-col overflow-hidden ${showWorkspace && !shouldUseWorkspaceOverlay ? 'border-r border-[var(--line-subtle)]' : ''}`}>
         {/* Compact header - single row */}
-        <div className="relative z-10 flex h-12 flex-shrink-0 items-center justify-between bg-[var(--paper-elevated)] px-4 after:pointer-events-none after:absolute after:inset-x-0 after:top-full after:h-6 after:bg-gradient-to-b after:from-[var(--paper-elevated)] after:to-[var(--paper-elevated-a0)]">
+        <div className="relative z-10 flex h-12 flex-shrink-0 items-center justify-between bg-[var(--paper-elevated)] px-4 after:pointer-events-none after:absolute after:inset-x-0 after:top-full after:h-3 after:bg-gradient-to-b after:from-[var(--paper-elevated)] after:to-[var(--paper-elevated-a0)]">
           <div className="flex min-w-0 items-center gap-2">
             {onBack && (
               <button
                 type="button"
                 onClick={onBack}
                 className="flex-shrink-0 rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
-                title="Back to projects"
+                title={t('shell.header.backToProjects')}
               >
                 <ArrowLeft className="h-4 w-4" />
               </button>
@@ -4083,7 +4601,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
             {sessionId && agentDir && (
               <SessionMenuButton
                 sessionId={sessionId}
-                sessionTitle={sessionTitle ?? '此对话'}
+                sessionTitle={sessionTitle ?? t('shell.currentChatFallback')}
                 workspacePath={agentDir}
                 boundChannel={surfaces.channel}
                 availableChannels={availableHandoverChannels}
@@ -4110,10 +4628,10 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
               type="button"
               onClick={handleNewSession}
               className="flex items-center gap-1.5 whitespace-nowrap rounded-lg px-2 py-1.5 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
-              title="新建对话"
+              title={t('shell.header.newChat')}
             >
               <Plus className="h-3.5 w-3.5 flex-shrink-0" />
-              {!splitFile && <span>新对话</span>}
+              {!splitFile && <span>{t('shell.header.newChatShort')}</span>}
             </button>
             {/* History button */}
             <button
@@ -4127,7 +4645,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
                 }`}
             >
               <History className="h-3.5 w-3.5 flex-shrink-0" />
-              {!splitFile && <span>历史</span>}
+              {!splitFile && <span>{t('shell.header.history')}</span>}
             </button>
             <SessionHistoryDropdown
               agentDir={agentDir}
@@ -4160,7 +4678,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
                 type="button"
                 onClick={() => setShowWorkspace(true)}
                 className="flex items-center gap-1 rounded-lg px-2 py-1 text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
-                title="展开工作区"
+                title={t('shell.header.expandWorkspace')}
               >
                 <PanelRightOpen className="h-4 w-4" />
               </button>
@@ -4181,8 +4699,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
           {/* Drop zone overlay for file drag */}
           <DropZoneOverlay
             isVisible={isAnyDragActive && (!isTauriDragging || activeZoneId === 'chat-content' || activeZoneId === null)}
-            message="松手将文件加入工作区"
-            subtitle="非图片文件将复制到 myagents_files 并自动引用"
+            message={t('shell.dropZone.message')}
+            subtitle={t('shell.dropZone.subtitle')}
           />
 
           {/* Unified boot overlay — same component App renders as the lazy-Chat
@@ -4224,20 +4742,20 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
               <div className="mx-auto flex max-w-3xl items-start gap-2">
                 <AlertTriangle className="mt-0.5 h-4 w-4 flex-shrink-0 text-[var(--accent)]" />
                 <div className="flex-1">
-                  <span className="font-semibold text-[var(--ink)]">AI 调用失败：</span>
+                  <span className="font-semibold text-[var(--ink)]">{t('shell.agentError.title')}</span>
                   <span className="text-[var(--ink-muted)]">{agentError}</span>
                   {/* Oversized image hint: detect API 400 about image dimensions and offer rewind.
                       Pattern synced with backend (agent-session.ts shouldResetSessionAfterError).
                       Known API error: "...image dimensions exceed max allowed size: 8000 pixels" */}
                   {lastUserMsg && /image.*exceed.*max allowed size/i.test(agentError) && (
                     <div className="mt-1">
-                      <span className="text-[var(--ink-muted)]">工具截图超过模型处理限制，</span>
+                      <span className="text-[var(--ink-muted)]">{t('shell.agentError.imageTooLargePrefix')}</span>
                       <button
                         type="button"
                         onClick={() => { setAgentError(null); handleRewind(lastUserMsg!.id); }}
                         className="text-[var(--accent)] underline underline-offset-2 hover:text-[var(--accent-hover)]"
                       >
-                        点击时间回溯到之前
+                        {t('shell.agentError.rewindAction')}
                       </button>
                     </div>
                   )}
@@ -4250,14 +4768,14 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
                       className="flex items-center gap-1 rounded-md px-2 py-0.5 text-sm font-medium text-[var(--accent)] transition-colors hover:bg-[var(--accent-warm-subtle)]"
                     >
                       <RotateCcw className="h-3 w-3" />
-                      重新发送
+                      {t('shell.agentError.resend')}
                     </button>
                   )}
                   <button
                     type="button"
                     onClick={() => setAgentError(null)}
                     className="flex-shrink-0 rounded p-0.5 text-[var(--ink-subtle)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink-muted)]"
-                    title="关闭"
+                    title={t('shell.common.close')}
                   >
                     <X className="h-3.5 w-3.5" />
                   </button>
@@ -4355,7 +4873,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
                 <CronTaskCard
                   taskId={cronCardTask.id}
                   name={cronCardTask.name || cronCardTask.prompt.slice(0, 20)}
-                  scheduleDesc={formatScheduleDescription(cronCardTask)}
+                  scheduleDesc={formatCronScheduleDescription(cronCardTask, tTask, taskLocale)}
                   onOpenDetail={task => { setCronDetailTask(task); setCronCardTask(null); }}
                 />
               </div>
@@ -4396,18 +4914,17 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
             providerAvailable={currentProviderAvailableForInput}
             availableProviderIds={availableProviderIdsForInput}
             providerUnavailableMessage={builtinSnapshotProviderSelectionIncomplete
-              ? '请先在模型选择器里重新选择一次模型'
+              ? t('shell.toasts.reselectModelFirst')
               : undefined}
             onProviderChange={handleProviderChange}
-            selectedModel={isExternalRuntime ? runtimeModel : selectedModel}
-            onBuiltinModelSelect={isExternalRuntime ? undefined : handleBuiltinModelSelect}
-            onModelChange={isExternalRuntime ? handleRuntimeModelChange : handleModelChange}
+            selectedModel={inputUsesExternalRuntimeControls ? runtimeModel : selectedModel}
+            onBuiltinModelSelect={inputUsesExternalRuntimeControls ? undefined : handleBuiltinModelSelect}
+            onModelChange={inputUsesExternalRuntimeControls ? handleRuntimeModelChange : handleModelChange}
             reasoningEffort={reasoningEffort}
             onReasoningEffortChange={handleReasoningEffortChange}
-            sessionUnlocked={isSessionUnlocked}
             contextIndicator={contextIndicatorSlot}
-            permissionMode={effectivePermissionMode}
-            onPermissionModeChange={handlePermissionModeChange}
+            permissionMode={inputChromePermissionMode}
+            onPermissionModeChange={handleInputPermissionModeChange}
             apiKeys={apiKeys}
             providerVerifyStatus={providerVerifyStatus}
             inputRef={inputRef}
@@ -4415,6 +4932,11 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
             globalMcpEnabled={globalMcpEnabled}
             mcpServers={mcpServers}
             onWorkspaceMcpToggle={handleWorkspaceMcpToggle}
+            officialTools={OFFICIAL_TOOLS}
+            workspaceOfficialToolEnabled={workspaceOfficialToolEnabled}
+            globalOfficialToolEnabled={globalOfficialToolEnabled}
+            officialToolNeedsConfig={officialToolNeedsConfig}
+            onWorkspaceOfficialToolToggle={handleWorkspaceOfficialToolToggle}
             // PRD 0.2.17 — Claude plugins. globallyVisiblePlugins is the
             // Layer 1 (Settings 开关 ON) candidate list; workspaceEnabledPlugins
             // is the Layer 2 actually-enabled subset for this workspace.
@@ -4424,20 +4946,25 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
             onRefreshProviders={refreshProviderData}
             onOpenAgentSettings={handleOpenAgentSettings}
             onWorkspaceRefresh={triggerWorkspaceRefresh}
-            // Cron task props - StatusBar and Overlay are rendered inside SimpleChatInput
+            // Cron task props - the non-blocking status bar is rendered inside SimpleChatInput.
             cronModeEnabled={cronState.isEnabled}
             cronConfig={cronState.config}
             cronTask={cronState.task}
+            stoppedCronTask={stoppedCronTaskForInput}
+            cronIsExecuting={cronState.isExecuting}
+            cronExecutionNumber={cronState.executionNumber}
+            composerConfigLockedReason={composerConfigLockedReason}
             onCronButtonClick={handleOpenCronSettings}
             onCronSettings={handleOpenCronSettings}
             onCronCancel={disableCronMode}
             onCronStop={handleCronStop}
+            onCronDismissStopped={handleCronDismissStopped}
             onSlashAction={handleSlashAction}
-            runtime={currentRuntime}
-            runtimeDetections={multiAgentRuntimeEnabled ? runtimeDetections : undefined}
-            onRuntimeChange={multiAgentRuntimeEnabled ? handleRuntimeChange : undefined}
-            runtimeModels={isExternalRuntime ? runtimeModels : undefined}
-            runtimePermissionModes={isExternalRuntime ? runtimePermissionModes : undefined}
+            runtime={inputChromeRuntime}
+            runtimeDetections={showLegacyRuntimeSelector ? runtimeDetections : undefined}
+            onRuntimeChange={showLegacyRuntimeSelector ? handleRuntimeChange : undefined}
+            runtimeModels={inputUsesExternalRuntimeControls ? runtimeModels : undefined}
+            runtimePermissionModes={inputUsesExternalRuntimeControls ? runtimePermissionModes : undefined}
             queuedMessages={queuedMessages}
             onCancelQueued={handleCancelQueuedVoid}
             onForceExecuteQueued={handleForceExecuteQueuedVoid}
@@ -4543,7 +5070,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
                         else if (terminalPinned && terminalAlive) setSplitActiveView('terminal');
                       }}
                       className="ml-0.5 flex h-5 w-5 items-center justify-center rounded opacity-0 transition-opacity hover:bg-[var(--paper-inset)] group-hover:opacity-100"
-                      title="关闭文件"
+                      title={t('shell.split.closeFile')}
                     >
                       <span className="text-sm leading-none text-[var(--ink-muted)]">×</span>
                     </span>
@@ -4564,7 +5091,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
                     }`}
                   >
                     <TerminalSquare className="h-3 w-3" />
-                    终端
+                    {t('shell.split.terminal')}
                     <span
                       role="button"
                       onClick={(e) => {
@@ -4574,7 +5101,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
                         else if (splitFile) setSplitActiveView('file');
                       }}
                       className="ml-0.5 flex h-5 w-5 items-center justify-center rounded opacity-0 transition-opacity hover:bg-[var(--paper-inset)] group-hover:opacity-100"
-                      title="隐藏终端"
+                      title={t('shell.split.hideTerminal')}
                     >
                       <span className="text-sm leading-none text-[var(--ink-muted)]">×</span>
                     </span>
@@ -4604,9 +5131,9 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
                             // BROWSER_BLANK_URL even after the user navigates.
                             const liveUrl = browserCurrentUrl || browserUrl;
                             try {
-                              return new URL(liveUrl).hostname || '新标签页';
+                              return new URL(liveUrl).hostname || t('shell.split.newTab');
                             } catch {
-                              return '浏览器';
+                              return t('shell.split.browser');
                             }
                           })()}
                     </span>
@@ -4622,7 +5149,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
                         else if (splitFile) setSplitActiveView('file');
                       }}
                       className="ml-0.5 flex h-5 w-5 items-center justify-center rounded opacity-0 transition-opacity hover:bg-[var(--paper-inset)] group-hover:opacity-100"
-                      title="关闭浏览器"
+                      title={t('shell.split.closeBrowser')}
                     >
                       <span className="text-sm leading-none text-[var(--ink-muted)]">×</span>
                     </span>
@@ -4689,12 +5216,12 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
                   <div className="flex h-9 flex-shrink-0 items-center justify-between bg-[var(--paper)] px-3">
                     <div className="flex items-center gap-1.5">
                       <TerminalSquare className="h-3.5 w-3.5 text-[var(--ink)]" />
-                      <span className="text-sm font-medium text-[var(--ink)]">终端</span>
+                      <span className="text-sm font-medium text-[var(--ink)]">{t('shell.split.terminal')}</span>
                       <span className="text-xs text-[var(--ink-muted)]">
                         {agentDir ? `~/${agentDir.split(/[/\\]/).pop()}` : ''}
                       </span>
                     </div>
-                    <Tip label="隐藏终端" position="bottom">
+                    <Tip label={t('shell.split.hideTerminal')} position="bottom">
                       <button
                         type="button"
                         onClick={() => {
@@ -4816,10 +5343,13 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       {/* Cross-Runtime Session Confirm Dialog */}
       {pendingCrossRuntimeMessage && (
         <ConfirmDialog
-          title="跨 Runtime 会话"
-          message={`此会话由 ${getRuntimeDisplayLabel(sessionRuntime as RuntimeType | undefined)} 创建,当前 Runtime 为 ${getRuntimeDisplayLabel(currentRuntime)},新消息将使用当前 Runtime 新开会话。`}
-          confirmText="新开会话并发送"
-          cancelText="取消"
+          title={t('shell.dialogs.crossRuntime.title')}
+          message={t('shell.dialogs.crossRuntime.message', {
+            sessionRuntime: getRuntimeDisplayLabel(sessionRuntime as RuntimeType | undefined),
+            currentRuntime: getRuntimeDisplayLabel(currentRuntime),
+          })}
+          confirmText={t('shell.dialogs.crossRuntime.confirm')}
+          cancelText={t('shell.common.cancel')}
           onConfirm={confirmCrossRuntimeSend}
           onCancel={() => setPendingCrossRuntimeMessage(null)}
         />
@@ -4830,15 +5360,15 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
         const label = getRuntimeDisplayLabel(pendingRuntimeChange);
         return (
           <ConfirmDialog
-            title="切换 Runtime"
+            title={t('shell.dialogs.runtimeSwitch.title')}
             message={
-              `切换到 ${label} 后：\n` +
-              `• 当前会话保持不变\n` +
-              `• 将在新 Tab 打开一个使用 ${label} 的新会话\n` +
-              `• 工作区默认 Runtime 同步更新为 ${label}（后续新开的 Tab / Bot / Cron 都将使用 ${label}）`
+              t('shell.dialogs.runtimeSwitch.message', {
+                currentRuntime: getRuntimeDisplayLabel(currentRuntime),
+                targetRuntime: label,
+              })
             }
-            confirmText="确认切换"
-            cancelText="取消"
+            confirmText={t('shell.dialogs.runtimeSwitch.confirm')}
+            cancelText={t('shell.common.cancel')}
             onConfirm={confirmRuntimeChange}
             onCancel={() => setPendingRuntimeChange(null)}
           />
@@ -4848,10 +5378,10 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       {/* Provider / Model History-Boundary Confirm Dialog */}
       {pendingProviderSwitch && (
         <ConfirmDialog
-          title="切换模型/Provider"
-          message="当前会话的历史记录不能安全切换到目标模型/Provider。切换后将保留当前会话，并在新 Tab 打开一个使用新模型/Provider 的会话。"
-          confirmText="创建新会话"
-          cancelText="取消"
+          title={providerSwitchDialogCopy?.title ?? t('shell.providerSwitch.newSessionTitle')}
+          message={providerSwitchDialogCopy?.message ?? t('shell.providerSwitch.defaultMessage')}
+          confirmText={providerSwitchDialogCopy?.confirmText ?? t('shell.providerSwitch.createNewSession')}
+          cancelText={t('shell.common.cancel')}
           onConfirm={confirmProviderSwitch}
           onCancel={() => setPendingProviderSwitch(null)}
         />
@@ -4860,10 +5390,10 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       {/* Time Rewind Confirm Dialog */}
       {rewindTarget && (
         <ConfirmDialog
-          title="时间回溯"
-          message="您的「对话记录」与「文件修改状态」都将回溯到本次对话发生之前。"
-          confirmText="确认回溯"
-          cancelText="取消"
+          title={t('shell.dialogs.rewind.title')}
+          message={t('shell.dialogs.rewind.message')}
+          confirmText={t('shell.dialogs.rewind.confirm')}
+          cancelText={t('shell.common.cancel')}
           confirmVariant="danger"
           onConfirm={handleRewindConfirm}
           onCancel={() => setRewindTarget(null)}
@@ -4873,10 +5403,10 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       {/* Fork Session Confirm Dialog */}
       {forkTarget && (
         <ConfirmDialog
-          title="创建分支"
-          message="将从此处创建一个新的会话分支，在新标签页中打开。原会话不受影响。"
-          confirmText="创建分支"
-          cancelText="取消"
+          title={t('shell.dialogs.fork.title')}
+          message={t('shell.dialogs.fork.message')}
+          confirmText={t('shell.dialogs.fork.confirm')}
+          cancelText={t('shell.common.cancel')}
           confirmVariant="primary"
           onConfirm={handleForkConfirm}
           onCancel={() => setForkTarget(null)}
@@ -4895,19 +5425,24 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
         initialConfig={cronState.task ? cronState.config : (cronOpenPreset ?? cronState.config)}
         workspacePath={agentDir}
         onConfirm={async (config: CronSettingsResult) => {
-          // PRD 0.2.9 — Forward `providerId` (live-resolve at sidecar)
-          // instead of building a frozen `providerEnv` snapshot. The
-          // sidecar reads provider config from disk on every tick, so
-          // credential rotation propagates without re-saving the cron.
-          // External runtimes manage their own provider — no providerId.
+          if (composerConfigLockedReason) {
+            toastRef.current.warning(composerConfigLockedReason, 3500);
+            setShowCronSettings(false);
+            setCronOpenPreset(null);
+            return;
+          }
+          const cronExecution = buildCronExecutionOverrides({
+            providerId: !isExternalRuntime && currentProvider ? currentProvider.id : undefined,
+            model: isExternalRuntime ? undefined : selectedModel,
+          });
           const enrichedConfig = {
             ...config,
-            model: isExternalRuntime ? undefined : selectedModel,
+            model: cronExecution.model,
             permissionMode: isExternalRuntime ? undefined : permissionMode,
-            providerId:
-              !isExternalRuntime && currentProvider ? currentProvider.id : undefined,
-            runtime: currentRuntime,
-            runtimeConfig: buildCronRuntimeConfig(),
+            providerId: cronExecution.providerId,
+            providerIntent: cronExecution.providerIntent,
+            runtime: cronExecution.runtime,
+            runtimeConfig: cronExecution.runtimeConfig,
             executionTarget: config.executionTarget,
           };
 
@@ -4939,7 +5474,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
             const { deleteCronTask } = await import('@/api/cronTaskClient');
             await deleteCronTask(taskId);
             setCronDetailTask(null);
-            toastRef.current?.success('任务已删除');
+            toastRef.current?.success(t('shell.toasts.taskDeleted'));
           }}
           onResume={async (taskId) => {
             await startCronTaskIpc(taskId);
@@ -4947,7 +5482,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
             const { getCronTask } = await import('@/api/cronTaskClient');
             const updated = await getCronTask(taskId);
             setCronDetailTask(updated);
-            toastRef.current?.success('任务已恢复');
+            toastRef.current?.success(t('shell.toasts.taskResumed'));
           }}
           onStop={async (taskId) => {
             const { stopCronTask } = await import('@/api/cronTaskClient');
@@ -4955,7 +5490,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
             const { getCronTask } = await import('@/api/cronTaskClient');
             const updated = await getCronTask(taskId);
             setCronDetailTask(updated);
-            toastRef.current?.success('任务已停止');
+            toastRef.current?.success(t('shell.toasts.taskStopped'));
           }}
           onOpenSession={(id) => handleSelectSession(id, 'task_run_history')}
         />

@@ -1,4 +1,5 @@
 import React from 'react';
+import { useTranslation } from 'react-i18next';
 import { PERMISSION_MODES } from '@/config/types';
 
 export default function PermissionModeSelect({
@@ -6,8 +7,9 @@ export default function PermissionModeSelect({
     onChange,
 }: {
     value: string;
-    onChange: (mode: string) => void;
+	onChange: (mode: string) => void;
 }) {
+    const { t } = useTranslation('settings');
     return (
         <div className="space-y-2">
             <div className="space-y-2">
@@ -41,9 +43,11 @@ export default function PermissionModeSelect({
                         </div>
                         <div>
                             <div className="text-sm font-medium text-[var(--ink)]">
-                                {mode.icon} {mode.label}
+                                {mode.icon} {t(`agentSettings.permission.${mode.value}`, { defaultValue: mode.label })}
                             </div>
-                            <p className="text-xs text-[var(--ink-muted)]">{mode.description}</p>
+                            <p className="text-xs text-[var(--ink-muted)]">
+                                {t(`agentSettings.permission.${mode.value}Description`, { defaultValue: mode.description })}
+                            </p>
                         </div>
                     </label>
                 ))}

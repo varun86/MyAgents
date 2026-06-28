@@ -1,13 +1,25 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 import {
   DEFAULT_CLAUDE_TRANSCRIPT_CLEANUP_PERIOD_DAYS,
   DEFAULT_CONFIG,
+  CODEX_SUBSCRIPTION_PROVIDER_ID,
+  MANAGED_CODEX_PROVIDER,
+  MANAGED_CODEX_REQUIRED_RUNTIME,
   PRESET_PROVIDERS,
+  SUBSCRIPTION_PROVIDER_ID,
+  applyManagedCodexProviderReadiness,
+  getManagedCodexProviderReadiness,
+  isManagedCodexRequiredRuntimeInstalled,
+  isManagedCodexProviderGateEnabled,
+  isManagedCodexSubscriptionAuthValid,
   normalizeChatQueueResponseMode,
   normalizeClaudeTranscriptCleanupPeriodDays,
   normalizeProviderOrder,
   splitProviderModelInput,
+  withManagedCodexRuntimeModels,
+  withManagedCodexProviderCatalog,
 } from './config-types';
 
 // normalizeProviderOrder reconciles a persisted provider order against the set
@@ -17,6 +29,30 @@ import {
 describe('normalizeProviderOrder', () => {
   it('honors the saved order, then appends known providers missing from it', () => {
     expect(normalizeProviderOrder(['a', 'b', 'c'], ['c', 'a'])).toEqual(['c', 'a', 'b']);
+  });
+
+  it('places newly introduced Codex subscription after Anthropic subscription when the saved order is missing it', () => {
+    expect(normalizeProviderOrder(
+      [SUBSCRIPTION_PROVIDER_ID, CODEX_SUBSCRIPTION_PROVIDER_ID, 'anthropic-api', 'deepseek'],
+      [SUBSCRIPTION_PROVIDER_ID, 'anthropic-api', 'deepseek'],
+    )).toEqual([
+      SUBSCRIPTION_PROVIDER_ID,
+      CODEX_SUBSCRIPTION_PROVIDER_ID,
+      'anthropic-api',
+      'deepseek',
+    ]);
+  });
+
+  it('honors an explicit saved Codex subscription position', () => {
+    expect(normalizeProviderOrder(
+      [SUBSCRIPTION_PROVIDER_ID, CODEX_SUBSCRIPTION_PROVIDER_ID, 'anthropic-api', 'deepseek'],
+      ['deepseek', CODEX_SUBSCRIPTION_PROVIDER_ID, SUBSCRIPTION_PROVIDER_ID],
+    )).toEqual([
+      'deepseek',
+      CODEX_SUBSCRIPTION_PROVIDER_ID,
+      SUBSCRIPTION_PROVIDER_ID,
+      'anthropic-api',
+    ]);
   });
 
   it('drops ids in the order that are no longer known', () => {
@@ -110,5 +146,124 @@ describe('desktop pet defaults', () => {
 describe('CLI tool registry defaults', () => {
   it('keeps the experimental registry off by default', () => {
     expect(DEFAULT_CONFIG.cliToolRegistryEnabled).toBe(false);
+  });
+});
+
+describe('Managed Codex provider readiness', () => {
+  function readManagedCodexRustConst(name: string): string {
+    const source = readFileSync('src-tauri/src/managed_codex.rs', 'utf8');
+    const match = source.match(new RegExp(`^const ${name}:.*= "([^"]+)";`, 'm'));
+    if (!match) throw new Error(`Missing Rust Managed Codex constant: ${name}`);
+    return match[1];
+  }
+
+  it('keeps the shared runtime lock aligned with the Rust downloader lock', () => {
+    expect(MANAGED_CODEX_REQUIRED_RUNTIME.version).toBe(readManagedCodexRustConst('REQUIRED_VERSION'));
+    expect(MANAGED_CODEX_REQUIRED_RUNTIME.runtimeSet).toBe(readManagedCodexRustConst('REQUIRED_RUNTIME_SET'));
+    expect(MANAGED_CODEX_REQUIRED_RUNTIME.manifestBaseUrl).toBe(
+      `${readManagedCodexRustConst('RUNTIME_SETS_BASE_URL')}/${readManagedCodexRustConst('REQUIRED_RUNTIME_SET')}`,
+    );
+  });
+
+  it('defaults the developer gate on but still honors explicit disablement', () => {
+    expect(DEFAULT_CONFIG.managedCodexProviderDevGate).toBe(true);
+    expect(isManagedCodexProviderGateEnabled({})).toBe(false);
+    expect(isManagedCodexProviderGateEnabled({ managedCodexProviderDevGate: true })).toBe(true);
+    expect(isManagedCodexProviderGateEnabled({ managedCodexProviderDevGate: false })).toBe(false);
+  });
+
+  it('keeps the provider out of the catalogue while the developer gate is explicitly off', () => {
+    expect(withManagedCodexProviderCatalog([MANAGED_CODEX_PROVIDER], {
+      managedCodexProviderDevGate: false,
+    }).some(provider => provider.id === CODEX_SUBSCRIPTION_PROVIDER_ID)).toBe(false);
+  });
+
+  it('inserts the provider after Anthropic subscription in the default catalogue', () => {
+    const catalog = withManagedCodexProviderCatalog(PRESET_PROVIDERS, DEFAULT_CONFIG);
+
+    expect(catalog.slice(0, 3).map(provider => provider.id)).toEqual([
+      SUBSCRIPTION_PROVIDER_ID,
+      CODEX_SUBSCRIPTION_PROVIDER_ID,
+      'anthropic-api',
+    ]);
+  });
+
+  it('shows the provider card by default but keeps it unselectable until ready', () => {
+    const catalog = withManagedCodexProviderCatalog([], DEFAULT_CONFIG);
+    const providers = applyManagedCodexProviderReadiness(catalog, DEFAULT_CONFIG);
+
+    expect(catalog.map(provider => provider.id)).toEqual([CODEX_SUBSCRIPTION_PROVIDER_ID]);
+    expect(providers[0].enabled).toBeUndefined();
+    expect(providers[0].runtimeReady).toBe(false);
+    expect(getManagedCodexProviderReadiness(DEFAULT_CONFIG).reason).toBe('runtime-not-installed');
+  });
+
+  it('derives Codex subscription models from the managed runtime model list', () => {
+    const provider = withManagedCodexRuntimeModels(MANAGED_CODEX_PROVIDER, [
+      { value: 'gpt-5.1', displayName: 'GPT-5.1' },
+      { value: 'gpt-5', displayName: 'GPT-5', isDefault: true },
+      { value: '', displayName: '默认', isDefault: true },
+      { value: 'gpt-5', displayName: 'duplicate' },
+    ]);
+
+    expect(MANAGED_CODEX_PROVIDER.models).toEqual([]);
+    expect(provider.primaryModel).toBe('gpt-5');
+    expect(provider.models.map(model => model.model)).toEqual(['gpt-5.1', 'gpt-5']);
+    expect(provider.models[0]).toMatchObject({
+      modelName: 'GPT-5.1',
+      modelSeries: 'codex',
+      source: 'discovered',
+    });
+  });
+
+  it('requires exact runtime version, subscription auth, and no explicit disablement', () => {
+    const runtime = {
+      status: 'installed' as const,
+      installedVersion: MANAGED_CODEX_REQUIRED_RUNTIME.version,
+      requiredVersion: MANAGED_CODEX_REQUIRED_RUNTIME.version,
+    };
+    const auth = {
+      status: 'valid' as const,
+      authMethod: 'chatgpt' as const,
+    };
+
+    expect(isManagedCodexRequiredRuntimeInstalled(runtime)).toBe(true);
+    expect(isManagedCodexSubscriptionAuthValid(auth)).toBe(true);
+    expect(getManagedCodexProviderReadiness({
+      managedCodexProviderDevGate: true,
+      managedCodexRuntimeInstall: runtime,
+      managedCodexAuth: auth,
+    })).toMatchObject({
+      visible: true,
+      selectable: true,
+      reason: 'ready',
+    });
+  });
+
+  it('does not treat Codex API-key auth as subscription readiness', () => {
+    expect(isManagedCodexSubscriptionAuthValid({
+      status: 'valid',
+      authMethod: 'api-key',
+    })).toBe(false);
+  });
+
+  it('preserves explicit provider disablement even after readiness succeeds', () => {
+    const providers = applyManagedCodexProviderReadiness([
+      { ...MANAGED_CODEX_PROVIDER, enabled: false },
+    ], {
+      managedCodexProviderDevGate: true,
+      disabledProviderIds: [CODEX_SUBSCRIPTION_PROVIDER_ID],
+      managedCodexRuntimeInstall: {
+        status: 'installed',
+        installedVersion: MANAGED_CODEX_REQUIRED_RUNTIME.version,
+      },
+      managedCodexAuth: {
+        status: 'valid',
+        authMethod: 'chatgpt',
+      },
+    });
+
+    expect(providers[0].enabled).toBe(false);
+    expect(providers[0].runtimeReady).toBe(true);
   });
 });

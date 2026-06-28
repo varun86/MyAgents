@@ -1,0 +1,587 @@
+{
+  "tabs": {
+    "allTabs": "All tabs",
+    "openTabs": "Open tabs",
+    "genericTab": "Tab",
+    "settings": "Settings",
+    "taskCenter": "Task Center",
+    "team": "Team",
+    "launcher": "Launcher",
+    "newTab": "New tab",
+    "closeTab": "Close tab",
+    "generating": "AI is responding",
+    "unread": "Unread messages",
+    "switchTo": "Switch to {{title}}"
+  },
+  "titlebar": {
+    "helper": "AI Helper",
+    "feedbackTitle": "Help & feedback",
+    "helperDescription": "Ask the helper for product help, issue reports, or suggestions.",
+    "communityTitle": "Join the user community",
+    "communityDescription": "Scan to join and discuss usage with other users.",
+    "communityQrAlt": "User community QR code",
+    "team": "Team",
+    "task": "Tasks",
+    "taskCenterTitle": "Task Center ({{shortcut}})",
+    "settings": "Settings",
+    "settingsTitle": "Settings ({{shortcut}})",
+    "restorePrevious": "Restore previous chats",
+    "restoreTitle": "{{count}} previous chat(s) were not closed. Click to restore.",
+    "dismiss": "Dismiss",
+    "installingUpdate": "Installing update...",
+    "updateToVersion": "Update to v{{version}}",
+    "restartAndUpdate": "Restart and update",
+    "installing": "Installing...",
+    "restartUpdate": "Restart update",
+    "minimize": "Minimize",
+    "maximize": "Maximize",
+    "restoreWindow": "Restore",
+    "close": "Close",
+    "teamLoading": "Checking Team feature status",
+    "teamBuildUnavailable": "Team is not enabled in this build",
+    "teamUnavailable": "Team is not available yet"
+  },
+  "appChrome": {
+    "updateVerifyFailed": "Could not verify the update because of a network issue. Try again later.",
+    "updateExpiredRedownloading": "The downloaded update expired. Downloading the latest version...",
+    "updateInstallFailed": "Update installation failed. Try again or check manually in Settings.",
+    "backgroundCompletion": "AI will continue in the background",
+    "maxTabsReached": "Maximum tab count reached. Close another tab and try again.",
+    "maxTabsReachedWithCount": "Maximum tab count reached ({{count}}). Close one tab before starting an AI discussion.",
+    "codexSessionCreateFailed": "Failed to create Codex session",
+    "launchFailed": "Launch failed: {{message}}",
+    "tabLimitReached": "Tab limit reached. Close one tab and try again.",
+    "noWorkspaceForDiscussion": "No workspaces yet. Cannot start AI discussion.",
+    "noModelProviderForDiscussion": "No available model provider configured. Cannot start AI discussion.",
+    "discussionTabTitle": "Task discussion",
+    "diagnosticsTabTitle": "Issue diagnosis",
+    "exitAppTitle": "Exit app",
+    "exitRunningTasksMessage": "{{count}} recurring task(s) are running. They will stop after exit. Exit now?",
+    "exit": "Exit",
+    "cancel": "Cancel",
+    "newVersionTitle": "New version available",
+    "newVersionMessage": "Version v{{version}} has been downloaded. Install now?",
+    "install": "Install",
+    "later": "Later"
+  },
+  "tabProvider": {
+    "compactSuccess": "Context compressed",
+    "compactFailed": "Context compression failed",
+    "sendFailed": "Send failed",
+    "networkError": "Network error",
+    "networkDisconnected": "Network connection interrupted. Try again."
+  },
+  "floatingSession": {
+    "sidecarUnavailable": "Sidecar is unavailable",
+    "backendNotConfirmed": "Backend did not confirm this request. It may have expired.",
+    "replyFailed": "Reply failed",
+    "agentErrorOpenMainWindow": "Agent error. Click ↗ to view it in the main window.",
+    "sessionExpiredNewChat": "The previous session expired. A new chat has been started.",
+    "noWorkspace": "No available workspace. Finish MyAgents setup first.",
+    "switchWorkspaceFailed": "Failed to switch workspace. Try again.",
+    "newConversationFailed": "Failed to start a new chat. Try again.",
+    "engineNotReady": "AI engine is not ready yet. Try again shortly.",
+    "confirmSendFailed": "Failed to send confirmation. Try again.",
+    "answerSendFailed": "Failed to send answer. Try again.",
+    "submitFailed": "Submit failed. Try again."
+  },
+  "updater": {
+    "remoteVersionParseFailed": "Could not parse remote version information"
+  },
+  "common": {
+    "loading": "Loading...",
+    "selectPlaceholder": "Select"
+  },
+  "workspaceNameValidation": {
+    "empty": "Name cannot be empty",
+    "trim": "Name cannot start or end with a space",
+    "pathSeparators": "Name cannot include path separators or '..'",
+    "illegalChars": "Name contains invalid characters < > : \" | ? *",
+    "controlChars": "Name contains control characters",
+    "dotsOnly": "Name cannot contain only dots",
+    "windowsReserved": "'{{name}}' is a reserved Windows file name",
+    "duplicate": "A file or folder with this name already exists"
+  },
+  "pathInput": {
+    "title": "Confirm project path",
+    "selectedFolder": "Selected folder:",
+    "fullPath": "Full path",
+    "browserPathHint": "The browser cannot read the real path. Confirm it or edit the path above.",
+    "confirm": "Add"
+  },
+  "monacoEditor": {
+    "loading": "Loading editor...",
+    "quote": "Quote"
+  },
+  "blockGroup": {
+    "expandAll": "Expand all"
+  },
+  "agentStatus": {
+    "expand": "Expand Agent status panel",
+    "collapse": "Collapse Agent status panel",
+    "background": "Background",
+    "backgroundTooltip": "[Background]"
+  },
+  "workspaceTree": {
+    "collapseFolder": "Collapse folder",
+    "emptyFolderHint": "Empty folder - drop files here or right-click to create"
+  },
+  "sessionTags": {
+    "cron": "Scheduled",
+    "background": "Background",
+    "floatingBall": "Desktop pet"
+  },
+  "modalities": {
+    "image": "image",
+    "video": "video",
+    "audio": "audio"
+  },
+  "modalityBadges": {
+    "supportsInput": "Supports {{modality}} input"
+  },
+  "helperModelPicker": {
+    "noModelSelected": "No model selected",
+    "configureModel": "Configure a model first →"
+  },
+  "markdown": {
+    "imageLoadFailed": "Image failed to load: {{src}}",
+    "emptyImagePath": "Image path is empty"
+  },
+  "export": {
+    "downloadedPath": "Exported: {{path}}",
+    "downloadedDownloads": "Exported to Downloads: {{fileName}}"
+  },
+  "sessionExport": {
+    "empty": "This chat has no exportable content",
+    "failed": "Export failed. Try again."
+  },
+  "workspaceFile": {
+    "desktopOnly": "Workspace file operations are only available in the desktop app. Current mode: browser development.",
+    "selectWorkspaceFirst": "Select a workspace first"
+  },
+  "browserPanel": {
+    "urlPlaceholder": "Enter a URL or search...",
+    "openFailed": "Failed to open embedded browser: {{message}}",
+    "back": "Back",
+    "forward": "Forward",
+    "stop": "Stop",
+    "reload": "Reload",
+    "editSource": "Edit source",
+    "openExternal": "Open in browser",
+    "close": "Close browser",
+    "newTab": "New tab",
+    "blankHint": "Enter a URL or paste a link in the address bar above"
+  },
+  "imagePreview": {
+    "zoomOut": "Zoom out",
+    "zoomIn": "Zoom in",
+    "rotate": "Rotate",
+    "reset": "Reset",
+    "closeEsc": "Close (Esc)",
+    "hint": "Double-click image to zoom · Press Esc to close"
+  },
+  "errorBoundary": {
+    "title": "Interface render error",
+    "unknown": "An unknown error occurred",
+    "reload": "Reload"
+  },
+  "dropZone": {
+    "defaultMessage": "Release to add files to the workspace"
+  },
+  "richDoc": {
+    "tooLarge": "This file is over 50 MB and cannot be previewed inline.",
+    "renderFailed": "Cannot render this file.",
+    "readFailed": "Cannot read this file.",
+    "openDefault": "Open with default app",
+    "empty": "This document has no content",
+    "sheetParseFailed": "Failed to parse spreadsheet",
+    "sheetTruncated": "Large spreadsheet truncated to the first {{rows}} rows x {{cols}} columns. Open with the default app to view the full content.",
+    "resetZoom": "Reset to 100%",
+    "wordRenderFailed": "Failed to render Word document",
+    "pdfRenderFailed": "Failed to render PDF",
+    "pptRenderFailed": "Failed to render presentation"
+  },
+  "message": {
+    "turnDuration": "This turn took {{duration}}",
+    "replyFileName": "{{date}}_reply.md",
+    "actions": {
+      "copy": "Copy",
+      "copied": "Copied",
+      "exportMarkdown": "Export markdown",
+      "retry": "Retry",
+      "fork": "Fork",
+      "rewind": "Rewind"
+    },
+    "systemTags": {
+      "heartbeat": "Heartbeat",
+      "cronTask": "Scheduled task",
+      "floatingContext": "Floating context"
+    },
+    "taskStatus": {
+      "completed": "completed",
+      "error": "errored",
+      "failed": "failed",
+      "stopped": "stopped"
+    },
+    "backgroundTask": "Background task",
+    "systemInfo": "System info",
+    "expand": "Expand"
+  },
+  "fileActions": {
+    "copy": "Copy",
+    "copied": "Copied",
+    "copyFailed": "Copy failed",
+    "reference": "Reference",
+    "openContainingFolder": "Open containing folder",
+    "openMyAgentsPreview": "Open MyAgents preview",
+    "preview": "Preview",
+    "open": "Open",
+    "revealInTree": "Reveal in file tree"
+  },
+  "markdown": {
+    "copyCode": "Copy code",
+    "copy": "Copy",
+    "copied": "Copied",
+    "preview": "Preview",
+    "code": "Code",
+    "updating": "Updating...",
+    "diagramRendering": "Rendering diagram...",
+    "renderDiagram": "Rendering diagram..."
+  },
+  "inlineCode": {
+    "pause": "Pause",
+    "playAudio": "Play audio",
+    "folderTitle": "Folder: {{path}}",
+    "fileTitle": "File: {{path}}"
+  },
+  "linkContext": {
+    "previewInternal": "Preview (embedded browser)",
+    "copyLink": "Copy link",
+    "copied": "Link copied",
+    "copyFailed": "Copy failed",
+    "openSystem": "Open in system browser"
+  },
+  "monacoFind": {
+    "close": "Close",
+    "previousMatch": "Previous match",
+    "nextMatch": "Next match",
+    "matchCase": "Match case",
+    "matchWholeWord": "Match whole word",
+    "useRegularExpression": "Use regular expression",
+    "findInSelection": "Find in selection",
+    "toggleReplace": "Toggle replace",
+    "replaceAll": "Replace all",
+    "replace": "Replace"
+  },
+  "monacoContext": {
+    "cut": "Cut",
+    "copy": "Copy",
+    "paste": "Paste",
+    "selectAll": "Select all",
+    "find": "Find"
+  },
+  "dropdown": {
+    "moreActions": "More actions"
+  },
+  "notifications": {
+    "messageCompleteTitle": "MyAgents - Task complete",
+    "messageCompleteBody": "Please review the result",
+    "permissionTitle": "MyAgents - Permission request",
+    "permissionBody": "AI requested tool access - {{toolName}}",
+    "askUserTitle": "MyAgents - Confirmation needed",
+    "askUserBody": "AI is waiting for your confirmation",
+    "planModeTitle": "MyAgents - Plan review",
+    "planModeBody": "AI is waiting for you to review the plan"
+  },
+  "contextUsage": {
+    "windowDefault": "No limit configured. Estimated with default {{window}}",
+    "windowRuntime": "Window {{window}} · runtime live value",
+    "windowModelConfig": "Window {{window}} from model configuration",
+    "autoCompactFootnote": "{{windowDesc}} · auto-compacts at about {{threshold}}",
+    "aria": "Context usage {{percent}}%",
+    "title": "Context usage",
+    "compactTip": "Compact context to free up more usable space",
+    "compact": "Compact",
+    "usedLabel": "Used context window"
+  },
+  "space": {
+    "errors": {
+      "operations": {
+        "comment": "Comment",
+        "createIssue": "Issue creation",
+        "updateIssueStatus": "Issue status update",
+        "closeIssue": "Issue close",
+        "dispatchAgent": "Agent assignment",
+        "createTag": "Tag creation",
+        "attachment": "Attachment operation",
+        "skill": "Skill operation",
+        "request": "Space request"
+      },
+      "templates": {
+        "relogin": "{{operation}} failed: sign in to MyAgents Community again",
+        "permissionDenied": "{{operation}} failed: insufficient permission",
+        "serviceUnavailable": "{{operation}} failed: service is temporarily unavailable. Try again later.",
+        "withDetail": "{{operation}} failed: {{detail}}",
+        "network": "{{operation}} failed. Check the network or try again later.",
+        "invalidResponse": "{{operation}} failed: service returned unrecognized data",
+        "failed": "{{operation}} failed"
+      }
+    },
+    "login": {
+      "eyebrow": "Official Space",
+      "title": "MyAgents Community",
+      "description": "Sign in to the official Space with Google",
+      "waiting": "Waiting for browser authorization",
+      "continueWithGoogle": "Continue with Google",
+      "returnHint": "MyAgents will reopen automatically after authorization."
+    },
+    "sidebar": {
+      "openJoin": "Open join",
+      "signedInWithGoogle": "Signed in with Google",
+      "logout": "Sign out"
+    },
+    "common": {
+      "refresh": "Refresh",
+      "create": "Create",
+      "cancel": "Cancel",
+      "save": "Save",
+      "upload": "Upload",
+      "loadingTeam": "Loading team",
+      "teamLoadFailed": "Failed to load team data",
+      "retry": "Retry",
+      "noDescription": "No description",
+      "selectFile": "Select a file",
+      "notSynced": "Not synced"
+    },
+    "filters": {
+      "allTags": "All tags",
+      "allStatuses": "All statuses",
+      "noTag": "No tag",
+      "newTag": "New tag"
+    },
+    "toasts": {
+      "loginSuccess": "Signed in to MyAgents Community",
+      "loginFailed": "Login failed",
+      "loginSlow": "Login status sync is slow. Retrying...",
+      "loginTimeout": "Login timed out. Start Google login again.",
+      "browserLoginOpened": "Opened browser login",
+      "dispatchProcessed": "Processed {{count}} Space dispatch task(s)",
+      "refreshed": "Refreshed",
+      "logoutSuccess": "Signed out of Space",
+      "skillUploaded": "Uploaded {{name}}",
+      "selectWorkspace": "Select a target workspace",
+      "skillInstalled": "Installed to {{target}}",
+      "skillRevisionUploaded": "Updated to rev {{revision}}",
+      "skillDeleted": "Skill unpublished",
+      "agentEnabled": "Agent enabled",
+      "agentDisabled": "Agent disabled",
+      "agentRevoked": "Agent revoked",
+      "agentUpdated": "Registered Agent updated",
+      "agentCreated": "Registered Agent created",
+      "issueStatusUpdated": "Issue status updated",
+      "attachmentsUploaded": "Uploaded {{count}} attachment(s)",
+      "attachmentDownloaded": "Downloaded to {{path}}",
+      "noAgentWorkspaces": "No Agent workspaces available",
+      "attachmentCommandCopied": "Attachment download command copied",
+      "attachmentPathCopied": "Local attachment path copied",
+      "assignedToAgent": "Assigned to {{name}}",
+      "assignmentRecorded": "Assignment recorded: {{name}}",
+      "issueCommandCopied": "Issue command copied",
+      "tagCreated": "Created tag: {{name}}",
+      "issueCreated": "Issue created",
+      "issueCreatedWithAttachments": "Issue created and {{count}} attachment(s) uploaded"
+    },
+    "issues": {
+      "searchPlaceholder": "Search title",
+      "closeSearch": "Close search",
+      "searchIssue": "Search issue",
+      "createIssue": "New Issue",
+      "empty": "No matching issues",
+      "comments": "{{count}} comments"
+    },
+    "createIssue": {
+      "community": "MyAgents Community",
+      "title": "New issue",
+      "close": "Close",
+      "titlePlaceholder": "Issue title",
+      "bodyPlaceholder": "Add description...",
+      "removeFile": "Remove {{name}}",
+      "addAttachment": "Add attachment",
+      "attachment": "Attachment",
+      "tagPlaceholder": "Tag name",
+      "createTag": "Create tag",
+      "cancelCreateTag": "Cancel tag creation",
+      "continuous": "Keep creating",
+      "pickAttachmentsTitle": "Choose issue attachments"
+    },
+    "detail": {
+      "close": "Close detail",
+      "loadingIssue": "Loading issue",
+      "notFound": "Issue not found",
+      "attachments": "Attachments",
+      "uploadAttachment": "Upload attachment",
+      "emptyAttachments": "No attachments",
+      "downloadAttachment": "Download attachment {{name}}",
+      "chooseDownloadWorkspace": "Choose download workspace",
+      "downloadToAgentWorkspace": "Download to Agent workspace",
+      "copyAttachmentCommand": "Copy attachment download command {{name}}",
+      "copyCliDownloadCommand": "Copy CLI download command",
+      "copyAttachmentPath": "Copy local attachment path {{name}}",
+      "copyLocalPath": "Copy local path",
+      "dispatchToAgent": "Dispatch to Agent",
+      "issueCommand": "Issue command",
+      "assignAgent": "Assign Agent",
+      "emptyRegisteredAgents": "No Registered Agents",
+      "copyIssueCommand": "Copy issue command",
+      "comments": "Comments",
+      "commentCount": "{{count}} comments",
+      "emptyComments": "No comments yet. Add more context at the bottom.",
+      "commentPlaceholder": "Share your thoughts",
+      "uploadAttachmentAria": "Upload attachment",
+      "sendComment": "Send comment"
+    },
+    "skills": {
+      "hint": "Default list. Click a row to view install details.",
+      "upload": "Upload",
+      "uploadSkill": "Upload Skill",
+      "empty": "No Skills",
+      "viewDetails": "Click to view details",
+      "overview": "Overview",
+      "files": "Files",
+      "updateRevision": "Update revision",
+      "delete": "Unpublish",
+      "installGlobal": "Install globally",
+      "noProjects": "No project workspaces",
+      "installProjectTitle": "Install to the selected project",
+      "noInstallProjectsTitle": "No installable project workspaces",
+      "installProject": "Install to project",
+      "loadingSkill": "Loading Skill",
+      "notFound": "Skill not found",
+      "installImpact": "Install impact",
+      "loadingFile": "Loading file",
+      "deleteTitle": "Unpublish Skill",
+      "deleteMessage": "Unpublish \"{{name}}\"? It will no longer appear in lists, while historical revisions and audit records are kept.",
+      "pickZipTitle": "Choose Skill ZIP",
+      "pickRevisionZipTitle": "Choose Skill Revision ZIP"
+    },
+    "agents": {
+      "hint": "Register local workspaces to subscribe and respond to cloud dispatches.",
+      "sync": "Sync",
+      "register": "Register",
+      "empty": "No Registered Agents",
+      "registerAgent": "Register Agent",
+      "editAgent": "Edit Agent {{name}}",
+      "edit": "Edit",
+      "enableAgent": "Enable Agent {{name}}",
+      "disableAgent": "Disable Agent {{name}}",
+      "enable": "Enable",
+      "disable": "Disable",
+      "revokeAgent": "Revoke Agent {{name}}",
+      "revoke": "Revoke",
+      "viewSettings": "View registration settings",
+      "status": "Status",
+      "lastSync": "Last sync",
+      "workspace": "Workspace",
+      "goal": "Goal",
+      "revokeTitle": "Revoke Registered Agent",
+      "revokeMessage": "Revoke \"{{name}}\"? The token for this local node will be invalidated and it will no longer receive new dispatches.",
+      "editTitle": "Edit Agent",
+      "registerTitle": "Register Agent",
+      "officialSpace": "Official Space",
+      "name": "Name",
+      "workspaceLabel": "Workspace label",
+      "displayNamePlaceholder": "Agent display name",
+      "goalPlaceholder": "Describe what this registered agent should handle."
+    }
+  },
+  "usageStats": {
+    "ranges": {
+      "7d": "7d",
+      "30d": "30d",
+      "60d": "60d"
+    },
+    "loadDataFailed": "Unable to load stats",
+    "loadFailed": "Load failed",
+    "title": "Usage",
+    "description": "Global token usage",
+    "loading": "Loading...",
+    "summary": {
+      "totalTokens": "Total tokens",
+      "inputTokens": "Input tokens",
+      "outputTokens": "Output tokens",
+      "cacheInput": "Input cache",
+      "messageCount": "Turns"
+    },
+    "dailyTrend": "Daily usage trend",
+    "empty": "No data",
+    "totalConsumption": "Total: {{tokens}} tokens",
+    "tooltip": {
+      "input": "Input: {{tokens}}",
+      "output": "Output: {{tokens}}",
+      "messages": "Turns: {{count}}"
+    },
+    "legend": {
+      "input": "Input",
+      "output": "Output"
+    },
+    "vendors": {
+      "all": "All",
+      "other": "Other"
+    },
+    "modelDistribution": "Model usage distribution",
+    "table": {
+      "model": "Model",
+      "totalTokens": "Total tokens",
+      "input": "Input",
+      "output": "Output",
+      "cacheInput": "Input cache",
+      "count": "Count"
+    }
+  },
+  "logsPanel": {
+    "hideAnalytics": "Analytics logs",
+    "searchPlaceholder": "Search logs... (⌘F)",
+    "previous": "Previous (Shift+Enter)",
+    "next": "Next (Enter)",
+    "clearSearch": "Clear",
+    "export": "Export logs",
+    "clear": "Clear logs",
+    "close": "Close",
+    "scope": "Scope",
+    "type": "Type",
+    "hide": "Hide",
+    "empty": "No logs yet.",
+    "total": "Total: {{count}}",
+    "escToClose": "Press <key>ESC</key> to close"
+  },
+  "historyOverlay": {
+    "filters": {
+      "all": "All",
+      "favorite": "Favorites",
+      "active": "Active",
+      "desktop": "Desktop",
+      "bot": "Chat bots"
+    },
+    "allWorkspaces": "All workspaces",
+    "deleted": "Deleted",
+    "deleteFailedRetry": "Delete failed. Please try again.",
+    "deleteFailed": "Delete failed",
+    "favoriteFailed": "Failed to update favorite. Please try again.",
+    "title": "Chat history",
+    "searchPlaceholder": "Search history content or titles...",
+    "exitSearch": "Exit search",
+    "directMatch": "Matched session. Press Enter or click to open.",
+    "sessionNotFound": "No session found for this SessionID",
+    "empty": "No matching chat history",
+    "noResults": "No results",
+    "unfavorite": "Remove favorite",
+    "favorite": "Favorite",
+    "messageCount": "{{count}} msg",
+    "viewStats": "View stats",
+    "deleteBlocked": "Stop the scheduled task before deleting",
+    "deleteBlockedAria": "Delete (stop the scheduled task first)",
+    "delete": "Delete",
+    "deleteTitle": "Delete conversation",
+    "deleteMessage": "Delete \"{{title}}\"? This cannot be undone."
+  }
+}

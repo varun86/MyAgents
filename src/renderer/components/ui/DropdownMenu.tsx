@@ -15,6 +15,7 @@
 
 import { useRef, useState, type ReactNode } from 'react';
 import { MoreHorizontal } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 
 import { Popover } from './Popover';
 
@@ -66,10 +67,12 @@ export function DropdownMenu({
   disabled,
   zIndex,
   minWidth = 140,
-  title = '更多操作',
+  title,
 }: DropdownMenuProps) {
+  const { t } = useTranslation('app');
   const [open, setOpen] = useState(false);
   const btnRef = useRef<HTMLButtonElement>(null);
+  const triggerTitle = title ?? t('dropdown.moreActions');
 
   // Drop empty sections so "0 visible groups" renders nothing, and a
   // single populated group doesn't leave a stray top separator.
@@ -99,7 +102,7 @@ export function DropdownMenu({
           e.stopPropagation();
           setOpen((v) => !v);
         }}
-        title={title}
+        title={triggerTitle}
         className={`flex items-center justify-center text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] disabled:opacity-50 ${triggerCls}`}
       >
         <MoreHorizontal className={iconCls} />

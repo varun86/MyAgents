@@ -16,6 +16,7 @@
 // row, one mental model.
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Calendar, Clock, Play, Repeat, Timer } from 'lucide-react';
 
 import type { TaskExecutionMode, TaskRunMode } from '@/../shared/types/task';
@@ -44,33 +45,33 @@ export interface ExecutionModeEditorProps extends ExecutionModeState {
 
 const EXECUTION_TABS: Array<{
   value: TaskExecutionMode;
-  label: string;
+  labelKey: string;
   icon: typeof Clock;
-  description: string;
+  descriptionKey: string;
 }> = [
   {
     value: 'once',
-    label: '立即执行',
+    labelKey: 'execution.modes.once.label',
     icon: Play,
-    description: '创建后立刻开始执行；任务会出现在右侧任务列表。',
+    descriptionKey: 'execution.modes.once.description',
   },
   {
     value: 'scheduled',
-    label: '定时一次',
+    labelKey: 'execution.modes.scheduled.label',
     icon: Calendar,
-    description: '在指定时间触发一次，然后停止',
+    descriptionKey: 'execution.modes.scheduled.description',
   },
   {
     value: 'recurring',
-    label: '周期触发',
+    labelKey: 'execution.modes.recurring.label',
     icon: Timer,
-    description: '每隔固定时间触发一次，可设置结束条件',
+    descriptionKey: 'execution.modes.recurring.description',
   },
   {
     value: 'loop',
-    label: 'Ralph Loop',
+    labelKey: 'execution.modes.loop.label',
     icon: Repeat,
-    description: '完成后立即下一轮（同会话持续打磨），必须设置退出条件',
+    descriptionKey: 'execution.modes.loop.description',
   },
 ];
 
@@ -89,6 +90,7 @@ export function ExecutionModeEditor({
   setCronTimezone,
   disabled,
 }: ExecutionModeEditorProps) {
+  const { t } = useTranslation('task');
   const isScheduled = executionMode === 'scheduled';
   const isRecurring = executionMode === 'recurring';
   const isLoop = executionMode === 'loop';
@@ -117,8 +119,11 @@ export function ExecutionModeEditor({
   );
 
   const currentDescription = useMemo(
-    () => EXECUTION_TABS.find((t) => t.value === executionMode)?.description,
-    [executionMode],
+    () => {
+      const tab = EXECUTION_TABS.find((item) => item.value === executionMode);
+      return tab ? t(tab.descriptionKey) : '';
+    },
+    [executionMode, t],
   );
 
   // Pinned "now + 60s" — lazy-init so the `<input type=datetime-local>`
@@ -132,15 +137,15 @@ export function ExecutionModeEditor({
   return (
     <div>
       <div className="flex gap-1.5 rounded-[var(--radius-md)] bg-[var(--paper-inset)] p-1">
-        {EXECUTION_TABS.map((t) => {
-          const Icon = t.icon;
-          const active = executionMode === t.value;
+        {EXECUTION_TABS.map((tab) => {
+          const Icon = tab.icon;
+          const active = executionMode === tab.value;
           return (
             <button
-              key={t.value}
+              key={tab.value}
               type="button"
               disabled={disabled}
-              onClick={() => setExecutionMode(t.value)}
+              onClick={() => setExecutionMode(tab.value)}
               className={`flex flex-1 items-center justify-center gap-1.5 rounded-[var(--radius-sm)] px-3 py-2 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
                 active
                   ? 'bg-[var(--paper-elevated)] text-[var(--ink)] shadow-xs'
@@ -148,7 +153,7 @@ export function ExecutionModeEditor({
               }`}
             >
               <Icon className="h-3.5 w-3.5" />
-              {t.label}
+              {t(tab.labelKey)}
             </button>
           );
         })}
@@ -158,7 +163,7 @@ export function ExecutionModeEditor({
       {isScheduled && (
         <div className="mt-5">
           <label className="mb-2 block text-sm font-medium text-[var(--ink-secondary)]">
-            执行时间
+            {t('execution.scheduledTime')}
           </label>
           <input
             type="datetime-local"
@@ -194,11 +199,11 @@ export function ExecutionModeEditor({
       {showSessionStrategy && (
         <div className="mt-5">
           <label className="mb-2 block text-sm font-medium text-[var(--ink-secondary)]">
-            会话策略
+            {t('execution.sessionStrategy')}
           </label>
           {isLoop ? (
             <p className="text-sm text-[var(--ink-muted)]">
-              连续对话（保持上下文）— Ralph Loop 固定使用此模式
+              {t('execution.loopSessionStrategy')}
             </p>
           ) : (
             <>
@@ -208,20 +213,20 @@ export function ExecutionModeEditor({
                   onClick={() => setRunMode('new-session')}
                   disabled={disabled}
                 >
-                  新开对话
+                  {t('execution.newSession')}
                 </PillButton>
                 <PillButton
                   selected={runMode === 'single-session'}
                   onClick={() => setRunMode('single-session')}
                   disabled={disabled}
                 >
-                  连续对话
+                  {t('execution.singleSession')}
                 </PillButton>
               </div>
               <p className="mt-2 text-sm text-[var(--ink-muted)]">
                 {runMode === 'new-session'
-                  ? '每次执行创建新会话，无历史记忆，上下文干净'
-                  : '所有轮次复用同一会话，AI 能记住之前内容'}
+                  ? t('execution.newSessionDescription')
+                  : t('execution.singleSessionDescription')}
               </p>
             </>
           )}

@@ -1,4 +1,5 @@
 import type { CSSProperties } from 'react';
+import { currentSupportedLocale } from '@/i18n/format';
 import { isClosedIssue } from './spaceHelpers';
 
 export const PAPER_GRID_STYLE: CSSProperties = {
@@ -17,14 +18,14 @@ export function formatTime(value?: string | null): string {
   if (!value) return '';
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
-  return date.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+  return date.toLocaleString(currentSupportedLocale(), { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 }
 
 export function formatDate(value?: string | null): string {
   if (!value) return '';
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
-  return date.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+  return date.toLocaleDateString(currentSupportedLocale(), { year: 'numeric', month: 'short', day: 'numeric' });
 }
 
 export function formatBytes(value?: number | null): string {

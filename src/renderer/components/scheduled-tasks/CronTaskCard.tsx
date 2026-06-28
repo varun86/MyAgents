@@ -5,9 +5,11 @@
 
 import { useState, useCallback } from 'react';
 import { Clock, ArrowRight } from 'lucide-react';
-import { formatNextExecution } from '@/types/cronTask';
+import { useTranslation } from 'react-i18next';
 import type { CronTask } from '@/types/cronTask';
 import * as cronClient from '@/api/cronTaskClient';
+import { isSupportedLocale } from '@/../shared/i18n';
+import { formatCronNextExecution } from '@/utils/cronTaskI18n';
 
 interface CronTaskCardProps {
   /** Parsed result from the cron tool add action */
@@ -20,6 +22,8 @@ interface CronTaskCardProps {
 }
 
 export default function CronTaskCard({ taskId, name, scheduleDesc, nextExecutionAt, onOpenDetail }: CronTaskCardProps) {
+  const { t, i18n } = useTranslation('task');
+  const locale = isSupportedLocale(i18n.language) ? i18n.language : 'zh-CN';
   const [loading, setLoading] = useState(false);
 
   const handleClick = useCallback(async () => {
@@ -42,15 +46,15 @@ export default function CronTaskCard({ taskId, name, scheduleDesc, nextExecution
         <div className="flex h-6 w-6 items-center justify-center rounded-[var(--radius-sm)] bg-[var(--accent-warm-subtle)]">
           <Clock className="h-3.5 w-3.5 text-[var(--accent)]" />
         </div>
-        <span className="text-xs font-medium text-[var(--accent)]">定时任务已创建</span>
+        <span className="text-xs font-medium text-[var(--accent)]">{t('cron.created')}</span>
       </div>
 
       {/* Body */}
-      <p className="text-sm font-medium text-[var(--ink)]">{name || '未命名任务'}</p>
+      <p className="text-sm font-medium text-[var(--ink)]">{name || t('cron.untitledTask')}</p>
       <p className="mt-0.5 text-xs text-[var(--ink-muted)]">
         {scheduleDesc}
         {nextExecutionAt && (
-          <span className="ml-1.5">· 下次: {formatNextExecution(nextExecutionAt, 'running')}</span>
+          <span className="ml-1.5">{t('cron.nextInline', { time: formatCronNextExecution(nextExecutionAt, 'running', t, locale) })}</span>
         )}
       </p>
 
@@ -61,7 +65,7 @@ export default function CronTaskCard({ taskId, name, scheduleDesc, nextExecution
           disabled={loading}
           className="mt-2.5 flex items-center gap-1 text-xs font-medium text-[var(--accent)] hover:text-[var(--accent-warm-hover)] transition-colors disabled:opacity-50"
         >
-          查看详情
+          {t('cron.viewDetails')}
           <ArrowRight className="h-3 w-3" />
         </button>
       )}

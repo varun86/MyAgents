@@ -13,6 +13,7 @@
 
 import { AlertCircle, AlertTriangle, Info, X } from 'lucide-react';
 import { useState } from 'react';
+import { useTranslation } from 'react-i18next';
 
 import { describeTerminalReason, type TerminalReasonSeverity } from '../../shared/terminalReason';
 
@@ -50,6 +51,7 @@ export default function TerminalReasonBanner({
   onDismiss,
   onNewSession,
 }: TerminalReasonBannerProps) {
+  const { t } = useTranslation('chat');
   // Guard rapid double-clicks on the "新开会话" button — handleNewSession is async
   // and involves Rust IPC + session handover; re-entering it mid-flight can
   // create duplicate session resets. Uses React's official "resetting state on
@@ -67,6 +69,11 @@ export default function TerminalReasonBanner({
 
   const style = SEVERITY_STYLES[info.severity];
   const Icon = style.icon;
+  const reasonKey = typeof reason === 'string' && reason.length > 0 ? reason : 'unknown';
+  const unknownLabel = t('shell.terminalReason.unknown.label', { reason: reasonKey });
+  const unknownDetail = t('shell.terminalReason.unknown.detail', { reason: reasonKey });
+  const label = t(`shell.terminalReason.reasons.${reasonKey}.label`, { defaultValue: unknownLabel });
+  const detail = t(`shell.terminalReason.reasons.${reasonKey}.detail`, { defaultValue: unknownDetail });
 
   // Per-reason shortcut button. Drives the PRD §5.1.2 action:
   // - max_turns → 新开会话继续
@@ -77,8 +84,8 @@ export default function TerminalReasonBanner({
       <div className="mx-auto flex max-w-3xl items-start gap-2">
         <Icon className={`mt-0.5 h-4 w-4 flex-shrink-0 ${style.iconColor}`} />
         <div className="flex-1">
-          <span className="font-semibold text-[var(--ink)]">{info.label}</span>
-          <span className="ml-2 text-[var(--ink-muted)]">{info.detail}</span>
+          <span className="font-semibold text-[var(--ink)]">{label}</span>
+          <span className="ml-2 text-[var(--ink-muted)]">{detail}</span>
         </div>
         <div className="flex flex-shrink-0 items-center gap-1.5">
           {showNewSession && (
@@ -96,14 +103,14 @@ export default function TerminalReasonBanner({
               }}
               className="rounded-md px-2 py-0.5 text-xs font-medium text-[var(--accent-warm)] transition-colors hover:bg-[var(--accent-warm-subtle)] disabled:cursor-wait disabled:opacity-60"
             >
-              新开会话
+              {t('shell.terminalReason.newSession')}
             </button>
           )}
           <button
             type="button"
             onClick={onDismiss}
             className="rounded p-0.5 text-[var(--ink-subtle)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink-muted)]"
-            title="关闭"
+            title={t('shell.common.close')}
           >
             <X className="h-3.5 w-3.5" />
           </button>

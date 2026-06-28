@@ -547,10 +547,21 @@ impl SidecarManager {
         session_id: &str,
         desired_runtime: &str,
     ) -> RuntimeDriftResult {
+        self.kill_sidecar_if_runtime_identity_differs(session_id, desired_runtime, None)
+    }
+
+    pub fn kill_sidecar_if_runtime_identity_differs(
+        &mut self,
+        session_id: &str,
+        desired_runtime: &str,
+        desired_runtime_source: Option<&str>,
+    ) -> RuntimeDriftResult {
         let decision = match self.sidecars.get(session_id) {
-            Some(sidecar) => decide_runtime_drift_result(
+            Some(sidecar) => decide_runtime_identity_drift_result(
                 sidecar.runtime.as_deref(),
+                sidecar.runtime_source.as_deref(),
                 desired_runtime,
+                desired_runtime_source,
                 &sidecar.owners,
             ),
             None => RuntimeDriftResult::NoDrift,
