@@ -12,5 +12,28 @@
     "generating": "AI is responding",
     "unread": "Unread messages",
     "switchTo": "Switch to {{title}}"
+  },
+  "titlebar": {
+    "helper": "AI Helper",
+    "team": "Team",
+    "task": "Tasks",
+    "taskCenterTitle": "Task Center ({{shortcut}})",
+    "settings": "Settings",
+    "settingsTitle": "Settings ({{shortcut}})",
+    "restorePrevious": "Restore previous chats",
+    "restoreTitle": "{{count}} previous chat(s) were not closed. Click to restore.",
+    "dismiss": "Dismiss",
+    "installingUpdate": "Installing update...",
+    "updateToVersion": "Update to v{{version}}",
+    "restartAndUpdate": "Restart and update",
+    "installing": "Installing...",
+    "restartUpdate": "Restart update",
+    "minimize": "Minimize",
+    "maximize": "Maximize",
+    "restoreWindow": "Restore",
+    "close": "Close",
+    "teamLoading": "Checking Team feature status",
+    "teamBuildUnavailable": "Team is not enabled in this build",
+    "teamUnavailable": "Team is not available yet"
   }
 }

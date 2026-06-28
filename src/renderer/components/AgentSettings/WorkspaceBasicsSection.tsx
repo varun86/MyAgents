@@ -3,6 +3,8 @@
 // Metadata (name/icon) writes to both Project and AgentConfig.
 
 import { useState, useCallback, useEffect, useRef, useMemo } from 'react';
+import type { TFunction } from 'i18next';
+import { useTranslation } from 'react-i18next';
 import { ChevronRight } from 'lucide-react';
 import { useConfig } from '@/hooks/useConfig';
 import { useAvailableProviders } from '@/hooks/useAvailableProviders';
@@ -28,7 +30,18 @@ interface WorkspaceBasicsSectionProps {
   agentDir: string;
 }
 
+function permissionText(mode: string | null | undefined, t: TFunction<'settings'>): { label: string; description: string; icon: string } {
+  const value = mode === 'fullAgency' || mode === 'auto' || mode === 'plan' ? mode : 'plan';
+  const icon = value === 'fullAgency' ? '🚀' : value === 'auto' ? '⚡' : '📋';
+  return {
+    icon,
+    label: t(`agentSettings.permission.${value}`),
+    description: t(`agentSettings.permission.${value}Description`),
+  };
+}
+
 export default function WorkspaceBasicsSection({ project, agent, agentDir }: WorkspaceBasicsSectionProps) {
+  const { t } = useTranslation('settings');
   const { config, providers, apiKeys, providerVerifyStatus, patchProject, refreshConfig } = useConfig();
   // Only credentialed providers — the picker must not expose a provider
   // the user can't actually use, and must match the Chat model switcher's
@@ -101,11 +114,11 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
         : runtime === 'codex' ? 'Codex'
         : runtime === 'gemini' ? 'Gemini CLI'
         : 'MyAgents';
-      toast.success(`已切换为 ${label}，新开 Tab 后生效`);
+      toast.success(t('agentSettings.basics.runtimeChanged', { label }));
     } catch (err) {
       console.error('[runtime] Failed to save runtime:', err);
     }
-  }, [agent, refreshConfig, toast]);
+  }, [agent, refreshConfig, t, toast]);
 
   // Load globally available MCP servers
   useEffect(() => {
@@ -226,7 +239,7 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
     .filter(p => effectiveEnabledPlugins?.includes(p.id))
     .map(p => p.name);
   const pluginSummary = enabledPluginNames.length === 0
-    ? '未启用插件'
+    ? t('agentSettings.basics.noPluginsSummary')
     : enabledPluginNames.length <= 2
       ? enabledPluginNames.join(' / ')
       : `${enabledPluginNames.slice(0, 2).join(' / ')} +${enabledPluginNames.length - 2}`;
@@ -258,8 +271,8 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
     : true;
   const modelName = effectiveModel
     ? (selectedProvider?.models?.find(m => m.model === effectiveModel)?.modelName || effectiveModel)
-    : (selectedProvider?.primaryModel || '未设置');
-  const providerName = selectedProvider?.name || '默认';
+    : (selectedProvider?.primaryModel || t('agentSettings.basics.notSet'));
+  const providerName = selectedProvider?.name || t('agentSettings.basics.defaultProvider');
 
   const openProviderSettings = useCallback(() => {
     window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.OPEN_SETTINGS, {
@@ -269,7 +282,7 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
   }, []);
 
   const effectivePermissionMode = agent?.permissionMode ?? project?.permissionMode;
-  const permissionMode = PERMISSION_MODES.find(m => m.value === effectivePermissionMode) || PERMISSION_MODES[0];
+  const permissionMode = permissionText(effectivePermissionMode, t);
 
   // #324 — agent-level 推理强度 default (builtin; no project fallback — the
   // agent is the only storage for this field).
@@ -280,20 +293,20 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
     .filter(s => effectiveMcpServers?.includes(s.id))
     .map(s => s.name);
   const mcpSummary = enabledMcpNames.length === 0
-    ? '未启用工具'
+    ? t('agentSettings.basics.noToolsSummary')
     : enabledMcpNames.length <= 2
       ? enabledMcpNames.join(' / ')
       : `${enabledMcpNames.slice(0, 2).join(' / ')} +${enabledMcpNames.length - 2}`;
 
   if (!project) {
-    return <p className="text-sm text-[var(--ink-subtle)]">未找到工作区配置</p>;
+    return <p className="text-sm text-[var(--ink-subtle)]">{t('agentSettings.general.missingWorkspace')}</p>;
   }
 
   return (
     <div className="space-y-3">
       {/* Name + Icon — single row: [label] [icon] [input] */}
       <div className="relative flex items-center gap-3">
-        <label className="w-16 shrink-0 text-sm text-[var(--ink-muted)]">名称</label>
+        <label className="w-16 shrink-0 text-sm text-[var(--ink-muted)]">{t('agentSettings.basics.name')}</label>
         <button
           className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border transition-colors ${
             openPopup === 'icon'
@@ -301,7 +314,7 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
               : 'border-[var(--line)] hover:border-[var(--line-strong)]'
           }`}
           onClick={() => setOpenPopup(openPopup === 'icon' ? null : 'icon')}
-          title="选择图标"
+          title={t('agentSettings.basics.chooseIcon')}
         >
           <WorkspaceIcon icon={project.icon || DEFAULT_WORKSPACE_ICON} size={22} />
         </button>
@@ -311,7 +324,7 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
           onChange={e => setName(e.target.value)}
           onBlur={handleNameBlur}
           onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur(); }}
-          placeholder="工作区名称"
+          placeholder={t('agentSettings.basics.workspaceNamePlaceholder')}
         />
 
         {openPopup === 'icon' && (
@@ -325,7 +338,7 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
                   className={`flex h-9 w-9 items-center justify-center rounded-lg transition-all ${
                     !project.icon ? 'bg-[var(--accent-warm-muted)] ring-1 ring-[var(--accent-warm)]' : 'hover:bg-[var(--hover-bg)]'
                   }`}
-                  title="默认"
+                  title={t('agentSettings.basics.defaultIcon')}
                 >
                   <WorkspaceIcon icon={DEFAULT_WORKSPACE_ICON} size={20} />
                 </button>
@@ -354,7 +367,7 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
 
       {/* Workspace path — read-only */}
       <div className="flex items-center gap-3">
-        <label className="w-16 shrink-0 text-sm text-[var(--ink-muted)]">工作区</label>
+        <label className="w-16 shrink-0 text-sm text-[var(--ink-muted)]">{t('agentSettings.basics.workspace')}</label>
         <span className="flex-1 truncate rounded-lg px-3 py-1.5 text-sm text-[var(--ink-subtle)]" title={agentDir}>
           {agentDir}
         </span>
@@ -364,7 +377,7 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
       {config.multiAgentRuntime && (
         <>
           <div className="flex items-center gap-3">
-            <label className="w-16 shrink-0 text-sm text-[var(--ink-muted)]">运行环境</label>
+            <label className="w-16 shrink-0 text-sm text-[var(--ink-muted)]">{t('agentSettings.basics.runtime')}</label>
             <div className="flex-1">
               <RuntimeSelector
                 value={currentRuntime}
@@ -383,9 +396,7 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
               : currentRuntime;
             return (
               <p className="rounded-lg bg-[var(--accent-warm-subtle)] px-3.5 py-2.5 text-xs leading-relaxed text-[var(--ink-muted)]">
-                当前 Agent 工作区的运行环境已设置为 <span className="font-medium text-[var(--ink-secondary)]">{runtimeLabel}</span>。
-                无论您在 MyAgents 客户端或通过绑定的聊天机器人与 AI 对话,均将直接调用本机已安装的 {runtimeLabel} 来执行,效果等同于在终端中使用。
-                因此供应商配置、支持的模型、MCP 工具、权限规则等均由 {runtimeLabel} 自身管理,如需调整请在其设置中修改。
+                {t('agentSettings.basics.externalRuntimeNotice', { runtime: runtimeLabel })}
               </p>
             );
           })()}
@@ -444,10 +455,10 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
 
             return (
               <div className="flex items-start gap-3">
-                <label className="w-16 shrink-0 pt-2 text-sm text-[var(--ink-muted)]">网络代理</label>
+                <label className="w-16 shrink-0 pt-2 text-sm text-[var(--ink-muted)]">{t('agentSettings.basics.networkProxy')}</label>
                 <div className="flex-1 grid grid-cols-1 gap-2 sm:grid-cols-2">
-                  {radio('myagents', 'MyAgents 代理', '使用 MyAgents 设置里的代理（默认）')}
-                  {radio('terminal', '跟随终端', '等同于在你电脑的终端里手动启动——继承 shell 里 export 的代理变量')}
+                  {radio('myagents', t('agentSettings.basics.proxyMyAgents'), t('agentSettings.basics.proxyMyAgentsHint'))}
+                  {radio('terminal', t('agentSettings.basics.proxyTerminal'), t('agentSettings.basics.proxyTerminalHint'))}
                 </div>
               </div>
             );
@@ -458,7 +469,7 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
       {/* Model — hidden when external runtime (they manage their own models) */}
       {currentRuntime === 'builtin' && (
       <div className="relative flex items-center gap-3">
-        <label className="w-16 shrink-0 text-sm text-[var(--ink-muted)]">模型</label>
+        <label className="w-16 shrink-0 text-sm text-[var(--ink-muted)]">{t('agentSettings.basics.model')}</label>
         <button
           className="flex flex-1 items-center justify-between rounded-lg border border-[var(--line)] px-3 py-1.5 text-left text-sm text-[var(--ink)] transition-colors hover:border-[var(--line-strong)]"
           onClick={() => setOpenPopup(openPopup === 'model' ? null : 'model')}
@@ -470,9 +481,9 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
               // they don't hit a runtime error when a message fires.
               <span
                 className="shrink-0 rounded px-1.5 py-0.5 text-xs font-medium text-[var(--warning)]"
-                title="该供应商未配置 API Key / 订阅登录，请点击重新选择"
+                title={t('agentSettings.basics.providerUnavailableTitle')}
               >
-                ⚠ 暂不可用
+                ⚠ {t('agentSettings.basics.unavailable')}
               </span>
             )}
           </span>
@@ -486,14 +497,14 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
               {availableProviders.length === 0 ? (
                 <div className="px-3 py-3">
                   <p className="mb-2 text-xs leading-relaxed text-[var(--ink-muted)]">
-                    还没有可用的供应商 —— 请先到「设置 → 模型供应商」添加 API Key 或完成订阅登录。
+                    {t('agentSettings.basics.noProviders')}
                   </p>
                   <button
                     type="button"
                     onClick={openProviderSettings}
                     className="text-xs font-medium text-[var(--accent-warm)] hover:underline"
                   >
-                    打开模型供应商设置 →
+                    {t('agentSettings.basics.openProviderSettings')}
                   </button>
                 </div>
               ) : (
@@ -525,7 +536,7 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
       {/* Permission — hidden when external runtime */}
       {currentRuntime === 'builtin' && (
       <div className="relative flex items-center gap-3">
-        <label className="w-16 shrink-0 text-sm text-[var(--ink-muted)]">权限</label>
+        <label className="w-16 shrink-0 text-sm text-[var(--ink-muted)]">{t('agentSettings.basics.permission')}</label>
         <button
           className="flex flex-1 items-center justify-between rounded-lg border border-[var(--line)] px-3 py-1.5 text-left text-sm text-[var(--ink)] transition-colors hover:border-[var(--line-strong)]"
           onClick={() => setOpenPopup(openPopup === 'permission' ? null : 'permission')}
@@ -538,7 +549,9 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
           <>
             <div className="fixed inset-0 z-40" onMouseDown={(e) => { if (e.target === e.currentTarget) setOpenPopup(null); }} />
             <div className="absolute left-20 top-0 z-50 w-[280px] rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-2 shadow-lg">
-              {PERMISSION_MODES.map(mode => (
+              {PERMISSION_MODES.map(mode => {
+                const displayMode = permissionText(mode.value, t);
+                return (
                 <button
                   key={mode.value}
                   className={`flex w-full items-start gap-2 rounded-lg px-3 py-2 text-left transition-colors ${
@@ -548,13 +561,14 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
                   }`}
                   onClick={() => handlePermissionSelect(mode.value)}
                 >
-                  <span className="shrink-0">{mode.icon}</span>
+                  <span className="shrink-0">{displayMode.icon}</span>
                   <div>
-                    <div className="text-sm font-medium">{mode.label}</div>
-                    <div className="text-xs text-[var(--ink-muted)]">{mode.description}</div>
+                    <div className="text-sm font-medium">{displayMode.label}</div>
+                    <div className="text-xs text-[var(--ink-muted)]">{displayMode.description}</div>
                   </div>
                 </button>
-              ))}
+                );
+              })}
             </div>
           </>
         )}
@@ -564,12 +578,12 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
       {/* #324 推理强度 — hidden when external runtime (configured via chat toolbar there) */}
       {currentRuntime === 'builtin' && (
       <div className="relative flex items-center gap-3">
-        <label className="w-16 shrink-0 text-sm text-[var(--ink-muted)]">推理强度</label>
+        <label className="w-16 shrink-0 text-sm text-[var(--ink-muted)]">{t('agentSettings.basics.reasoningEffort')}</label>
         <button
           className="flex flex-1 items-center justify-between rounded-lg border border-[var(--line)] px-3 py-1.5 text-left text-sm text-[var(--ink)] transition-colors hover:border-[var(--line-strong)]"
           onClick={() => setOpenPopup(openPopup === 'effort' ? null : 'effort')}
         >
-          <span>{effectiveReasoningEffort === 'default' ? '默认' : effectiveReasoningEffort}</span>
+          <span>{effectiveReasoningEffort === 'default' ? t('agentSettings.basics.defaultValue') : effectiveReasoningEffort}</span>
           <ChevronRight className="h-3.5 w-3.5 shrink-0 text-[var(--ink-subtle)]" />
         </button>
 
@@ -587,12 +601,16 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
                   }`}
                   onClick={() => handleEffortSelect(level)}
                 >
-                  <span className="text-sm font-medium">{level === 'default' ? '默认' : level}</span>
-                  <span className="text-xs text-[var(--ink-muted)]">{REASONING_EFFORT_DESCRIPTIONS[level] ?? ''}</span>
+                  <span className="text-sm font-medium">{level === 'default' ? t('agentSettings.basics.defaultValue') : level}</span>
+                  <span className="text-xs text-[var(--ink-muted)]">
+                    {t(`agentSettings.reasoning.descriptions.${level}`, {
+                      defaultValue: REASONING_EFFORT_DESCRIPTIONS[level] ?? '',
+                    })}
+                  </span>
                 </button>
               ))}
               <div className="mt-1 whitespace-nowrap border-t border-[var(--line)] px-3 pb-1 pt-2 text-xs text-[var(--ink-muted)]/60">
-                需服务商支持该参数，以实际生效为准
+                {t('agentSettings.basics.reasoningSupportHint')}
               </div>
             </div>
           </>
@@ -603,7 +621,7 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
       {/* MCP Tools — hidden when external runtime */}
       {currentRuntime === 'builtin' && (
       <div className="relative flex items-center gap-3">
-        <label className="w-16 shrink-0 text-sm text-[var(--ink-muted)]">工具</label>
+        <label className="w-16 shrink-0 text-sm text-[var(--ink-muted)]">{t('agentSettings.basics.tools')}</label>
         <button
           className="flex flex-1 items-center justify-between rounded-lg border border-[var(--line)] px-3 py-1.5 text-left text-sm text-[var(--ink)] transition-colors hover:border-[var(--line-strong)]"
           onClick={() => setOpenPopup(openPopup === 'mcp' ? null : 'mcp')}
@@ -618,7 +636,7 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
             <div className="absolute left-20 top-0 z-50 max-h-[300px] w-[320px] overflow-y-auto overscroll-contain rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-2 shadow-lg">
               {availableMcpServers.length === 0 ? (
                 <p className="px-3 py-2 text-xs text-[var(--ink-subtle)]">
-                  尚未启用全局 MCP 工具。请先在系统设置中启用。
+                  {t('agentSettings.basics.noGlobalTools')}
                 </p>
               ) : (
                 availableMcpServers.map(server => {
@@ -656,7 +674,7 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
        *  empty "未启用插件" row for users who haven't installed any. */}
       {currentRuntime === 'builtin' && visiblePlugins.length > 0 && (
       <div className="relative flex items-center gap-3">
-        <label className="w-16 shrink-0 text-sm text-[var(--ink-muted)]">插件</label>
+        <label className="w-16 shrink-0 text-sm text-[var(--ink-muted)]">{t('agentSettings.basics.plugins')}</label>
         <button
           className="flex flex-1 items-center justify-between rounded-lg border border-[var(--line)] px-3 py-1.5 text-left text-sm text-[var(--ink)] transition-colors hover:border-[var(--line-strong)]"
           onClick={() => setOpenPopup(openPopup === 'plugins' ? null : 'plugins')}

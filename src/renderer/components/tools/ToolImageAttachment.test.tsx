@@ -1,6 +1,7 @@
 import { fireEvent, render, screen } from '@testing-library/react';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { i18n } from '@/i18n';
 import type { ToolAttachment } from '@/types/chat';
 import ToolImageAttachment from './ToolImageAttachment';
 
@@ -11,6 +12,10 @@ vi.mock('@/context/TabContext', () => ({
 vi.mock('@/utils/toolAttachment', () => ({
   useAttachmentUrl: () => ({ state: 'ready', url: 'data:image/png;base64,abc' }),
 }));
+
+afterEach(async () => {
+  await i18n.changeLanguage('zh-CN');
+});
 
 const attachment: ToolAttachment = {
   kind: 'image',
@@ -48,5 +53,17 @@ describe('ToolImageAttachment', () => {
     expect(screen.getByRole('button', { name: '复制图片' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '另存为…' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '复制本地路径' })).toBeInTheDocument();
+  });
+
+  it('localizes image action chrome while preserving attachment caption data', async () => {
+    await i18n.changeLanguage('en-US');
+
+    render(<ToolImageAttachment attachment={attachment} />);
+    fireEvent.contextMenu(screen.getByRole('button'));
+
+    expect(screen.getByRole('button', { name: 'Copy image' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Save as…' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Copy local path' })).toBeInTheDocument();
+    expect(screen.getByText('Generated reference image')).toBeInTheDocument();
   });
 });

@@ -2,6 +2,7 @@
 import { useMemo } from 'react';
 import { X } from 'lucide-react';
 import { createPortal } from 'react-dom';
+import { useTranslation } from 'react-i18next';
 import { isProjectVisibleToUser, type Project } from '@/config/types';
 import { getFolderName } from '@/types/tab';
 import { shortenPathForDisplay } from '@/utils/pathDetection';
@@ -15,6 +16,7 @@ interface WorkspaceSelectDialogProps {
 }
 
 export default function WorkspaceSelectDialog({ projects, onSelect, onClose }: WorkspaceSelectDialogProps) {
+  const { t } = useTranslation('settings');
   useCloseLayer(() => { onClose(); return true; }, 50);
 
   const eligibleProjects = useMemo(
@@ -27,7 +29,7 @@ export default function WorkspaceSelectDialog({ projects, onSelect, onClose }: W
       <div className="w-full max-w-md rounded-2xl border border-[var(--line)] bg-[var(--paper-elevated)] p-6 shadow-xl">
         <div className="mb-4 flex items-center justify-between">
           <h2 className="text-lg font-semibold text-[var(--ink)]">
-            选择工作区
+            {t('agentSettings.workspaceSelect.title')}
           </h2>
           <button onClick={onClose} className="rounded p-1 text-[var(--ink-subtle)] hover:text-[var(--ink-muted)] transition-colors">
             <X className="h-4 w-4" />
@@ -35,12 +37,12 @@ export default function WorkspaceSelectDialog({ projects, onSelect, onClose }: W
         </div>
 
         <p className="mb-4 text-xs text-[var(--ink-muted)]">
-          选择一个尚未升级的工作区，将其转化为 Agent。
+          {t('agentSettings.workspaceSelect.description')}
         </p>
 
         {eligibleProjects.length === 0 ? (
           <p className="py-8 text-center text-sm text-[var(--ink-subtle)]">
-            所有工作区已升级为 Agent。
+            {t('agentSettings.workspaceSelect.empty')}
           </p>
         ) : (
           <div className="max-h-[300px] space-y-2 overflow-y-auto">

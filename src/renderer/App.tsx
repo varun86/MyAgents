@@ -3025,15 +3025,15 @@ export default function App() {
 
   const handleOpenSpace = useCallback(() => {
     if (spaceBuildCapability.isLoading) {
-      toastRef.current.info('正在读取团队功能状态');
+      toastRef.current.info(t('titlebar.teamLoading'));
       return;
     }
     if (!spaceBuildCapability.available) {
-      toastRef.current.info(spaceBuildCapability.reason ?? '当前构建未启用团队功能');
+      toastRef.current.info(spaceBuildCapability.reason ?? t('titlebar.teamBuildUnavailable'));
       return;
     }
     if (!teamSpaceAvailable) {
-      toastRef.current.info('团队功能尚未开放');
+      toastRef.current.info(t('titlebar.teamUnavailable'));
       return;
     }
     const currentTabs = tabsRef.current;

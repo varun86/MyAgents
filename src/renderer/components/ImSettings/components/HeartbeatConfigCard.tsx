@@ -1,5 +1,6 @@
 import { lazy, Suspense, useCallback, useMemo, useState } from 'react';
 import type { ChangeEvent, KeyboardEvent } from 'react';
+import { useTranslation } from 'react-i18next';
 import { ChevronDown } from 'lucide-react';
 import type { HeartbeatConfig, ActiveHoursConfig } from '../../../../shared/types/im';
 import { DEFAULT_HEARTBEAT_CONFIG } from '../../../../shared/types/im';
@@ -15,11 +16,11 @@ import {
 const FilePreviewModal = lazy(() => import('../../FilePreviewModal'));
 
 const INTERVAL_PRESETS = [
-    { label: '5 分钟', value: 5 },
-    { label: '15 分钟', value: 15 },
-    { label: '30 分钟', value: 30 },
-    { label: '1 小时', value: 60 },
-    { label: '4 小时', value: 240 },
+    { value: 5 },
+    { value: 15 },
+    { value: 30 },
+    { value: 60 },
+    { value: 240 },
 ];
 
 const INTERVAL_PRESET_VALUES = INTERVAL_PRESETS.map(p => p.value);
@@ -47,6 +48,7 @@ export default function HeartbeatConfigCard({
     /** Workspace path — used to open HEARTBEAT.md in built-in preview/editor */
     workspacePath?: string;
 }) {
+    const { t } = useTranslation('settings');
     const config = useMemo(
         () => heartbeat ?? DEFAULT_HEARTBEAT_CONFIG,
         [heartbeat],
@@ -180,6 +182,12 @@ export default function HeartbeatConfigCard({
     );
 
     const selectedTz = COMMON_TIMEZONES.find(tz => tz.value === config.activeHours?.timezone);
+    const formatPreset = useCallback((minutes: number) => {
+        if (minutes >= 60 && minutes % 60 === 0) {
+            return t('agentSettings.heartbeat.intervalHours', { count: minutes / 60 });
+        }
+        return t('agentSettings.heartbeat.intervalMinutes', { count: minutes });
+    }, [t]);
 
     return (
         <>
@@ -187,9 +195,9 @@ export default function HeartbeatConfigCard({
             {/* Header with toggle */}
             <div className={`flex items-center justify-between${config.enabled ? ' mb-4' : ''}`}>
                 <div>
-                    <h3 className="text-base font-medium text-[var(--ink)]">心跳感知 Heartbeat</h3>
+                    <h3 className="text-base font-medium text-[var(--ink)]">{t('agentSettings.heartbeat.title')}</h3>
                     <p className="mt-0.5 text-xs text-[var(--ink-muted)]">
-                        心跳感知赋予 Agent 按心跳间隔时间苏醒，检查一下心跳清单{' '}
+                        {t('agentSettings.heartbeat.descriptionPrefix')}{' '}
                         {workspacePath ? (
                             <button
                                 type="button"
@@ -201,7 +209,7 @@ export default function HeartbeatConfigCard({
                         ) : (
                             <code className="rounded bg-[var(--paper-inset)] px-1 py-0.5 text-[var(--accent)]">HEARTBEAT.md</code>
                         )}
-                        {' '}里面的任务，如果为空则会跳过。你可以直接编辑心跳清单{' '}
+                        {' '}{t('agentSettings.heartbeat.descriptionMiddle')}{' '}
                         {workspacePath ? (
                             <button
                                 type="button"
@@ -213,7 +221,7 @@ export default function HeartbeatConfigCard({
                         ) : (
                             <code className="rounded bg-[var(--paper-inset)] px-1 py-0.5 text-[var(--accent)]">HEARTBEAT.md</code>
                         )}
-                        {' '}的内容。
+                        {' '}{t('agentSettings.heartbeat.descriptionSuffix')}
                     </p>
                 </div>
                 <button
@@ -235,7 +243,7 @@ export default function HeartbeatConfigCard({
                 <div className="space-y-4">
                     {/* Interval */}
                     <div>
-                        <p className="mb-2 text-sm font-medium text-[var(--ink)]">心跳间隔</p>
+                        <p className="mb-2 text-sm font-medium text-[var(--ink)]">{t('agentSettings.heartbeat.interval')}</p>
                         <div className="flex flex-wrap gap-2">
                             {INTERVAL_PRESETS.map(preset => (
                                 <button
@@ -263,7 +271,7 @@ export default function HeartbeatConfigCard({
                                             : 'bg-[var(--paper-inset)] text-[var(--ink-secondary)] hover:bg-[var(--ink-faint)]'
                                     }`}
                                 >
-                                    {preset.label}
+                                    {formatPreset(preset.value)}
                                 </button>
                             ))}
                             {/* Custom interval input */}
@@ -273,7 +281,7 @@ export default function HeartbeatConfigCard({
                                     min={HEARTBEAT_INTERVAL_MIN}
                                     max={HEARTBEAT_INTERVAL_MAX}
                                     value={customInputValue}
-                                    placeholder="自定义"
+                                    placeholder={t('agentSettings.heartbeat.custom')}
                                     onFocus={handleCustomFocus}
                                     onChange={handleCustomChange}
                                     onBlur={handleCustomBlur}
@@ -284,7 +292,7 @@ export default function HeartbeatConfigCard({
                                             : 'border-[var(--line)] bg-[var(--paper)]'
                                     } text-[var(--ink)] placeholder:text-[var(--ink-faint)] focus:outline-none focus:ring-1 focus:ring-[var(--accent)]`}
                                 />
-                                <span className="text-xs text-[var(--ink-muted)]">分钟</span>
+                                <span className="text-xs text-[var(--ink-muted)]">{t('agentSettings.heartbeat.minutes')}</span>
                             </div>
                         </div>
                     </div>
@@ -293,9 +301,9 @@ export default function HeartbeatConfigCard({
                     <div>
                         <div className="mb-2 flex items-center justify-between">
                             <div>
-                                <p className="text-sm font-medium text-[var(--ink)]">活跃时段</p>
+                                <p className="text-sm font-medium text-[var(--ink)]">{t('agentSettings.heartbeat.activeHours')}</p>
                                 <p className="text-xs text-[var(--ink-muted)]">
-                                    仅在指定时间范围内执行心跳
+                                    {t('agentSettings.heartbeat.activeHoursDescription')}
                                 </p>
                             </div>
                             <button
@@ -321,7 +329,7 @@ export default function HeartbeatConfigCard({
                                     onChange={e => updateActiveHours({ start: e.target.value })}
                                     className="rounded-lg border border-[var(--line)] bg-[var(--paper)] px-2 py-1.5 text-xs text-[var(--ink)] focus:border-[var(--accent)] focus:outline-none focus:ring-1 focus:ring-[var(--accent)]"
                                 />
-                                <span className="text-xs text-[var(--ink-muted)]">至</span>
+                                <span className="text-xs text-[var(--ink-muted)]">{t('agentSettings.heartbeat.to')}</span>
                                 <input
                                     type="time"
                                     value={config.activeHours.end}

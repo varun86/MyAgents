@@ -1,4 +1,5 @@
 import type React from 'react';
+import { useTranslation } from 'react-i18next';
 import type { ToolUseSimple } from '@/types/chat';
 
 import BashOutputTool from './tools/BashOutputTool';
@@ -42,15 +43,19 @@ function parseCronResult(result: string): { taskId: string; name?: string; sched
 const TEXT_DISPLAY_LIMIT = 50_000;
 const JSON_DISPLAY_LIMIT = 200_000;
 
-function clampResult(tool: ToolUseSimple): ToolUseSimple {
+type ChatTranslator = (key: string, options?: Record<string, unknown>) => string;
+
+function clampResult(tool: ToolUseSimple, t: ChatTranslator): ToolUseSimple {
   if (!tool.result) return tool;
   const trimmed = tool.result.trimStart();
   const isJson = trimmed.startsWith('{') || trimmed.startsWith('[');
   const limit = isJson ? JSON_DISPLAY_LIMIT : TEXT_DISPLAY_LIMIT;
   if (tool.result.length <= limit) return tool;
+  const shown = limit.toLocaleString();
+  const total = tool.result.length.toLocaleString();
   return {
     ...tool,
-    result: tool.result.slice(0, limit) + `\n\n... [结果过长，已截断显示前 ${limit.toLocaleString()} 字符，共 ${tool.result.length.toLocaleString()} 字符]`,
+    result: `${tool.result.slice(0, limit)}\n\n${t('shell.toolChrome.truncate.result', { shown, total })}`,
   };
 }
 
@@ -59,10 +64,11 @@ interface ToolUseProps {
 }
 
 export default function ToolUse({ tool: rawTool }: ToolUseProps) {
+  const { t } = useTranslation('chat');
   // Clamp large results for display — but only for general text rendering.
   // Specialized components (cron card, WebSearch, TaskTool, etc.) parse structured
   // JSON from result — clamping would corrupt the JSON and break rich UI.
-  const tool = clampResult(rawTool);
+  const tool = clampResult(rawTool, t);
   // NOTE: tool.attachments are NOT rendered here. ToolUse lives inside
   // ProcessRow's collapsible body (BlockGroup), so rendering rich-media here
   // buried the player inside the folded tool window (PRD 0.2.30 bug). The

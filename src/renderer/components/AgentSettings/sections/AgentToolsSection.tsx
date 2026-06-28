@@ -1,5 +1,6 @@
 // Agent tools section — MCP server toggles + Claude plugin toggles (PRD 0.2.17)
 import { useState, useCallback, useEffect } from 'react';
+import { useTranslation } from 'react-i18next';
 import type { AgentConfig } from '../../../../shared/types/agent';
 import type { PluginEntry } from '../../../../shared/types/plugin';
 import { patchAgentConfig } from '@/config/services/agentConfigService';
@@ -13,6 +14,7 @@ interface AgentToolsSectionProps {
 }
 
 export default function AgentToolsSection({ agent, onAgentChanged }: AgentToolsSectionProps) {
+  const { t } = useTranslation('settings');
   const [allServers, setAllServers] = useState<McpServerDefinition[]>([]);
   const [globalEnabled, setGlobalEnabled] = useState<string[]>([]);
 
@@ -71,8 +73,8 @@ export default function AgentToolsSection({ agent, onAgentChanged }: AgentToolsS
        *  installed plugins. */}
       {visiblePlugins.length > 0 && (
         <McpToolsCard
-          title="插件 Plugins"
-          subtitle="选择此 Agent 启动会话时自动启用的 Claude 插件（来自 Settings → 插件 中已显示的候选）"
+          title={t('agentSettings.toolsCard.pluginTitle')}
+          subtitle={t('agentSettings.toolsCard.pluginSubtitle')}
           availableMcpServers={visiblePlugins.map(p => ({
             id: p.id,
             name: p.name,

@@ -11,6 +11,7 @@ import { useBackgroundTaskPolling } from '@/hooks/useBackgroundTaskPolling';
 import { getBackgroundTaskStatus, isTerminalStatus, BACKGROUND_TASK_STATUS_EVENT, type BackgroundTaskTerminalStatus } from '@/utils/backgroundTaskStatus';
 import { CheckCircle, ChevronDown, ChevronRight, Clock, Coins, Loader2, Terminal, Wrench, XCircle } from 'lucide-react';
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Virtuoso } from 'react-virtuoso';
 
 // Pattern 3 §3.2.3 — virtualize the expanded trace list when subagent calls are
@@ -57,6 +58,7 @@ function formatTokens(tokens: number): string {
 
 // 可折叠内容组件 - 默认最多显示 5 行
 function CollapsibleContent({ children, maxLines = DEFAULT_MAX_LINES }: { children: React.ReactNode; maxLines?: number }) {
+  const { t } = useTranslation('chat');
   const [isExpanded, setIsExpanded] = useState(false);
   const [needsExpansion, setNeedsExpansion] = useState(false);
   const [computedMaxHeight, setComputedMaxHeight] = useState(maxLines * DEFAULT_LINE_HEIGHT);
@@ -102,7 +104,7 @@ function CollapsibleContent({ children, maxLines = DEFAULT_MAX_LINES }: { childr
           className="mt-2 flex items-center gap-1 text-xs text-[var(--ink-muted)] hover:text-[var(--ink)] transition-colors"
         >
           <ChevronDown className={`size-3 transition-transform ${isExpanded ? 'rotate-180' : ''}`} />
-          <span>{isExpanded ? '收起' : '展开更多'}</span>
+          <span>{isExpanded ? t('shell.toolChrome.task.collapse') : t('shell.toolChrome.task.expandMore')}</span>
         </button>
       )}
     </div>
@@ -123,6 +125,7 @@ function TaskRunningStats({
   traceExpanded: boolean;
   onToggleTrace: () => void;
 }) {
+  const { t } = useTranslation('chat');
   const [elapsed, setElapsed] = useState(0);
   const intervalRef = useRef<ReturnType<typeof setInterval> | undefined>(undefined);
 
@@ -160,20 +163,20 @@ function TaskRunningStats({
         {/* 运行中状态 */}
         <div className="flex items-center gap-1.5 text-[var(--accent)]">
           <Loader2 className="size-3.5 animate-spin" />
-          <span className="font-medium">运行中</span>
+          <span className="font-medium">{t('shell.toolChrome.task.statusRunning')}</span>
         </div>
 
         {/* 已运行时间 */}
         <div className="flex items-center gap-1">
           <Clock className="size-3.5" />
-          <span>已运行 {formatDuration(elapsed)}</span>
+          <span>{t('shell.toolChrome.task.ranFor', { duration: formatDuration(elapsed) })}</span>
         </div>
 
         {/* 工具调用次数 */}
         {stats.toolCount > 0 && (
           <div className="flex items-center gap-1">
             <Wrench className="size-3.5" />
-            <span>调用工具 {stats.toolCount} 次</span>
+            <span>{t('shell.toolChrome.task.toolCalls', { count: stats.toolCount })}</span>
           </div>
         )}
 
@@ -181,7 +184,7 @@ function TaskRunningStats({
         {totalTokens > 0 && (
           <div className="flex items-center gap-1">
             <Coins className="size-3.5" />
-            <span>消耗 {formatTokens(totalTokens)} token</span>
+            <span>{t('shell.toolChrome.task.tokenUsage', { tokens: formatTokens(totalTokens) })}</span>
           </div>
         )}
       </div>
@@ -211,6 +214,7 @@ function TaskCompletedStats({
   traceExpanded: boolean;
   onToggleTrace: () => void;
 }) {
+  const { t } = useTranslation('chat');
   const isSuccess = result.status === 'completed';
   const isError = result.status === 'error';
 
@@ -222,7 +226,10 @@ function TaskCompletedStats({
     <Loader2 className="size-3.5 animate-spin" />
   );
 
-  const statusLabel = isSuccess ? '完成' : isError ? '错误' : '进行中';
+  const statusLabel =
+    isSuccess ? t('shell.toolChrome.task.statusCompleted')
+    : isError ? t('shell.toolChrome.task.statusError')
+    : t('shell.toolChrome.task.statusRunning');
 
   const totalTokens = stats
     ? stats.inputTokens + stats.outputTokens
@@ -272,7 +279,7 @@ function TaskCompletedStats({
         {toolCount > 0 && (
           <div className="flex items-center gap-1">
             <Wrench className="size-3.5" />
-            <span>{toolCount} 次工具调用</span>
+            <span>{t('shell.toolChrome.task.toolCallsShort', { count: toolCount })}</span>
           </div>
         )}
 
@@ -280,7 +287,7 @@ function TaskCompletedStats({
         {totalTokens > 0 && (
           <div className="flex items-center gap-1">
             <Coins className="size-3.5" />
-            <span>消耗 {formatTokens(totalTokens)} token</span>
+            <span>{t('shell.toolChrome.task.tokenUsage', { tokens: formatTokens(totalTokens) })}</span>
           </div>
         )}
       </div>
@@ -306,6 +313,7 @@ function TaskBackgroundStats({
   terminalStatus: BackgroundTaskTerminalStatus | null;
   startTime: number;
 }) {
+  const { t } = useTranslation('chat');
   const [frontendElapsed, setFrontendElapsed] = useState(0);
   const intervalRef = useRef<ReturnType<typeof setInterval> | undefined>(undefined);
 
@@ -340,7 +348,7 @@ function TaskBackgroundStats({
       <div className="flex flex-wrap items-center gap-3 text-[var(--ink-muted)]">
         {/* "后台" 标签 */}
         <span className="rounded-full bg-[var(--ink-muted)]/10 px-1.5 py-0.5 text-xs font-medium">
-          后台
+          {t('shell.toolChrome.common.background')}
         </span>
 
         {/* 状态 */}
@@ -348,18 +356,18 @@ function TaskBackgroundStats({
           isSuccess ? (
             <div className="flex items-center gap-1.5 text-[var(--success)]">
               <CheckCircle className="size-3.5" />
-              <span className="font-medium">后台完成</span>
+              <span className="font-medium">{t('shell.toolChrome.task.backgroundCompleted')}</span>
             </div>
           ) : (
             <div className="flex items-center gap-1.5 text-[var(--error)]">
               <XCircle className="size-3.5" />
-              <span className="font-medium">后台失败</span>
+              <span className="font-medium">{t('shell.toolChrome.task.backgroundFailed')}</span>
             </div>
           )
         ) : (
           <div className="flex items-center gap-1.5 text-[var(--accent)]">
             <Loader2 className="size-3.5 animate-spin" />
-            <span className="font-medium">后台运行中</span>
+            <span className="font-medium">{t('shell.toolChrome.task.backgroundRunning')}</span>
           </div>
         )}
 
@@ -375,7 +383,7 @@ function TaskBackgroundStats({
         {stats && stats.toolCount > 0 && (
           <div className="flex items-center gap-1">
             <Wrench className="size-3.5" />
-            <span>调用工具 {stats.toolCount} 次</span>
+            <span>{t('shell.toolChrome.task.toolCalls', { count: stats.toolCount })}</span>
           </div>
         )}
       </div>
@@ -385,6 +393,7 @@ function TaskBackgroundStats({
 
 // 渲染单个子工具调用 - memo 化避免不必要的重渲染
 const SubagentCallItem = memo(function SubagentCallItem({ call }: { call: SubagentToolCall }) {
+  const { t } = useTranslation('chat');
   const description = useMemo(() => {
     if (call.parsedInput && typeof call.parsedInput === 'object' && 'description' in call.parsedInput) {
       return String(call.parsedInput.description ?? '');
@@ -413,7 +422,7 @@ const SubagentCallItem = memo(function SubagentCallItem({ call }: { call: Subage
         {isCallRunning && (
           <div className="flex items-center gap-1.5 rounded-full bg-[var(--accent)]/10 px-2 py-0.5 text-xs font-medium text-[var(--accent)]">
             <Loader2 className="size-3 animate-spin" />
-            <span>执行中</span>
+            <span>{t('shell.toolChrome.common.executing')}</span>
           </div>
         )}
       </div>
@@ -430,7 +439,7 @@ const SubagentCallItem = memo(function SubagentCallItem({ call }: { call: Subage
 
       {call.result && (
         <div className="mt-1">
-          <div className="mb-1 text-xs font-semibold uppercase tracking-wider text-[var(--ink-muted)]">结果</div>
+          <div className="mb-1 text-xs font-semibold uppercase tracking-wider text-[var(--ink-muted)]">{t('shell.toolChrome.common.result')}</div>
           <ExpandableResult
             content={call.result}
             className="rounded-md bg-[var(--paper-inset)]/50 p-2 text-xs text-[var(--ink-secondary)]"
@@ -454,6 +463,7 @@ const SubagentCallItem = memo(function SubagentCallItem({ call }: { call: Subage
 // virtualise via react-virtuoso so a Task with 500 subagent calls only
 // mounts the rows currently in view (~10) instead of all 500 at once.
 const TaskTraceList = memo(function TaskTraceList({ calls }: { calls: SubagentToolCall[] }) {
+  const { t } = useTranslation('chat');
   const itemContent = useCallback((index: number) => {
     const call = calls[index];
     return <SubagentCallItem key={call.id} call={call} />;
@@ -462,7 +472,7 @@ const TaskTraceList = memo(function TaskTraceList({ calls }: { calls: SubagentTo
   return (
     <div id="task-trace-content" className="pl-2 border-l-2 border-[var(--line)]">
       <div className="px-1 pb-2 text-xs font-semibold uppercase tracking-wider text-[var(--ink-muted)]">
-        调用记录 ({calls.length})
+        {t('shell.toolChrome.task.traceTitle', { count: calls.length })}
       </div>
       {calls.length < TRACE_VIRTUALIZE_THRESHOLD ? (
         <div className="space-y-2 max-h-96 overflow-y-auto pr-1">
@@ -484,6 +494,7 @@ const TaskTraceList = memo(function TaskTraceList({ calls }: { calls: SubagentTo
 });
 
 export default function TaskTool({ tool }: TaskToolProps) {
+  const { t } = useTranslation('chat');
   const input = tool.parsedInput as AgentInput;
   const isRunning = isSubagentContainerRunning(tool);
   const [traceExpanded, setTraceExpanded] = useState(false);
@@ -583,7 +594,7 @@ export default function TaskTool({ tool }: TaskToolProps) {
   }, [parsedResult]);
 
   if (!input) {
-    return <div className="text-sm text-[var(--ink-muted)]">Initializing task...</div>;
+    return <div className="text-sm text-[var(--ink-muted)]">{t('shell.toolChrome.task.initializing')}</div>;
   }
 
   const hasTrace = (tool.subagentCalls?.length ?? 0) > 0;
@@ -659,7 +670,7 @@ export default function TaskTool({ tool }: TaskToolProps) {
       {/* 非标准结果 (无法解析时显示原始内容) */}
       {tool.result && !parsedResult && (
         <div className="space-y-1.5">
-          <div className="text-xs font-semibold uppercase tracking-wider text-[var(--ink-muted)]">输出</div>
+          <div className="text-xs font-semibold uppercase tracking-wider text-[var(--ink-muted)]">{t('shell.toolChrome.task.output')}</div>
           <div className="rounded-lg border border-[var(--line-subtle)] bg-[var(--paper-inset)] p-3">
             <CollapsibleContent maxLines={DEFAULT_MAX_LINES}>
               <pre className="font-mono text-sm text-[var(--ink)] whitespace-pre-wrap">

@@ -18,6 +18,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { MoreHorizontal, FolderOpen, ExternalLink, Play, Pause, RotateCcw, RotateCw } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 
 import { useWorkspaceFileService } from '@/hooks/useWorkspaceFileService';
 import { useFileAction } from '@/context/FileActionContext';
@@ -36,6 +37,7 @@ const CARD_SHELL =
   'flex w-full max-w-[440px] items-center gap-3 rounded-[14px] border border-[var(--line)] bg-[var(--paper-elevated)] px-3.5 py-3 shadow-[var(--shadow-xs)]';
 
 export default function ToolAudioAttachment({ attachment }: Props) {
+  const { t } = useTranslation('chat');
   const fileService = useWorkspaceFileService(null);
   // The chat's workspace root. `openPath` (sourcePath) may live under the
   // workspace (e.g. `<workspace>/myagents_files/...`) on a non-home drive
@@ -94,7 +96,7 @@ export default function ToolAudioAttachment({ attachment }: Props) {
   if (attachment.pendingId && !attachment.refPath) {
     return (
       <div className={`${CARD_SHELL} text-sm text-[var(--ink-muted)]`}>
-        <span className="animate-pulse">音频生成中…</span>
+        <span className="animate-pulse">{t('shell.toolChrome.audio.generating')}</span>
       </div>
     );
   }
@@ -103,7 +105,7 @@ export default function ToolAudioAttachment({ attachment }: Props) {
   if (attachment.refPath?.startsWith('error://')) {
     return (
       <div className="flex w-full max-w-[440px] items-center rounded-[14px] border border-rose-300/50 bg-rose-50/30 px-3.5 py-3 text-xs text-rose-600 dark:bg-rose-900/10 dark:text-rose-300">
-        <span>⚠️ 音频渲染失败：{attachment.refPath.slice('error://'.length)}</span>
+        <span>{t('shell.toolChrome.audio.renderFailed', { reason: attachment.refPath.slice('error://'.length) })}</span>
       </div>
     );
   }
@@ -112,7 +114,7 @@ export default function ToolAudioAttachment({ attachment }: Props) {
     <div className="relative shrink-0" ref={menuRef}>
       <button
         type="button"
-        aria-label="更多"
+        aria-label={t('shell.toolChrome.audio.more')}
         onClick={() => setMenuOpen(o => !o)}
         className="flex size-7 items-center justify-center rounded-full text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink-secondary)]"
       >
@@ -127,7 +129,7 @@ export default function ToolAudioAttachment({ attachment }: Props) {
             disabled={!seekable}
             className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-[var(--ink-secondary)] transition-colors hover:bg-[var(--paper-inset)] disabled:cursor-default disabled:opacity-40 disabled:hover:bg-transparent"
           >
-            <RotateCcw className="size-3.5" /> 后退 5 秒
+            <RotateCcw className="size-3.5" /> {t('shell.toolChrome.audio.rewindSeconds', { seconds: SKIP_SECONDS })}
           </button>
           <button
             type="button"
@@ -135,7 +137,7 @@ export default function ToolAudioAttachment({ attachment }: Props) {
             disabled={!seekable}
             className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-[var(--ink-secondary)] transition-colors hover:bg-[var(--paper-inset)] disabled:cursor-default disabled:opacity-40 disabled:hover:bg-transparent"
           >
-            <RotateCw className="size-3.5" /> 前进 5 秒
+            <RotateCw className="size-3.5" /> {t('shell.toolChrome.audio.forwardSeconds', { seconds: SKIP_SECONDS })}
           </button>
           <div className="my-1 h-px bg-[var(--line-subtle)]" />
           <button
@@ -143,14 +145,14 @@ export default function ToolAudioAttachment({ attachment }: Props) {
             onClick={reveal}
             className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-[var(--ink-secondary)] transition-colors hover:bg-[var(--paper-inset)]"
           >
-            <FolderOpen className="size-3.5" /> 在文件管理器中显示
+            <FolderOpen className="size-3.5" /> {t('shell.toolChrome.audio.reveal')}
           </button>
           <button
             type="button"
             onClick={openDefault}
             className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-[var(--ink-secondary)] transition-colors hover:bg-[var(--paper-inset)]"
           >
-            <ExternalLink className="size-3.5" /> 用默认应用打开
+            <ExternalLink className="size-3.5" /> {t('shell.toolChrome.audio.openDefault')}
           </button>
         </div>
       )}
@@ -161,7 +163,7 @@ export default function ToolAudioAttachment({ attachment }: Props) {
   if (!savedPath) {
     return (
       <div className={`${CARD_SHELL} justify-between text-xs text-[var(--ink-muted)]`}>
-        <span>音频</span>
+        <span>{t('shell.toolChrome.audio.audio')}</span>
         {moreMenu}
       </div>
     );
@@ -172,7 +174,7 @@ export default function ToolAudioAttachment({ attachment }: Props) {
       {/* play / pause */}
       <button
         type="button"
-        aria-label={isPlaying ? '暂停' : '播放'}
+        aria-label={isPlaying ? t('shell.toolChrome.audio.pause') : t('shell.toolChrome.audio.play')}
         onClick={toggle}
         className="flex size-10 shrink-0 items-center justify-center rounded-full bg-[var(--accent)] text-white transition-colors hover:bg-[var(--accent-warm-hover)] active:scale-95"
       >

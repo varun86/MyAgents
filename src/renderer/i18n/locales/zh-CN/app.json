@@ -12,5 +12,28 @@
     "generating": "AI 正在输出",
     "unread": "有未读消息",
     "switchTo": "切换到 {{title}}"
+  },
+  "titlebar": {
+    "helper": "小助理",
+    "team": "团队",
+    "task": "任务",
+    "taskCenterTitle": "任务中心 ({{shortcut}})",
+    "settings": "设置",
+    "settingsTitle": "设置 ({{shortcut}})",
+    "restorePrevious": "恢复上次对话",
+    "restoreTitle": "上次有 {{count}} 个对话未关闭，点击恢复",
+    "dismiss": "忽略",
+    "installingUpdate": "正在安装更新…",
+    "updateToVersion": "更新到 v{{version}}",
+    "restartAndUpdate": "重启并更新",
+    "installing": "安装中…",
+    "restartUpdate": "重启更新",
+    "minimize": "最小化",
+    "maximize": "最大化",
+    "restoreWindow": "还原",
+    "close": "关闭",
+    "teamLoading": "正在读取团队功能状态",
+    "teamBuildUnavailable": "当前构建未启用团队功能",
+    "teamUnavailable": "团队功能尚未开放"
   }
 }

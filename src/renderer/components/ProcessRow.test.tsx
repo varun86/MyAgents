@@ -80,8 +80,8 @@ describe('ProcessRow Codex CollabAgent activity', () => {
 
     const { container } = render(<ProcessRow block={block} index={0} totalBlocks={1} isStreaming />);
 
-    expect(screen.getByText('Sub-agent')).toBeInTheDocument();
-    expect(screen.getByText('Agent message')).toBeInTheDocument();
+    expect(screen.getByText('子 Agent')).toBeInTheDocument();
+    expect(screen.getByText('Agent 消息')).toBeInTheDocument();
     expect(container.querySelector('.animate-spin')).not.toBeNull();
     expect(container.querySelector('.animate-pulse')).not.toBeNull();
   });

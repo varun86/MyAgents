@@ -12,7 +12,13 @@
  * - Intercepts link clicks and forwards them to the parent via widget:link
  */
 
-export function buildSandboxHtml(cssVarsBlock: string): string {
+export function buildSandboxHtml(
+  cssVarsBlock: string,
+  options: { scriptErrorPrefix?: string } = {},
+): string {
+  const scriptErrorPrefix = JSON.stringify(
+    options.scriptErrorPrefix ?? '这个组件的脚本没能运行（通常是模型生成的代码有语法错误）：',
+  );
   // The receiver template. All dynamic content arrives via postMessage.
   return `<!DOCTYPE html>
 <html>
@@ -157,6 +163,7 @@ p { margin: 0 0 8px; }
   // the main console / logs.
   var widgetErrored = false;
   var errorReports = 0;
+  var widgetScriptErrorPrefix = ${scriptErrorPrefix};
   function showWidgetError(msg) {
     var text = String(msg || 'script error');
     // Bound parent-log spam: a widget whose error repeats (e.g. throws every
@@ -174,7 +181,7 @@ p { margin: 0 0 8px; }
     // Engines often mask the detail to a generic "Script error." for sandboxed
     // scripts, so lead with a self-explanatory line and append whatever detail
     // the engine did give.
-    note.textContent = '⚠️ 这个组件的脚本没能运行（通常是模型生成的代码有语法错误）：' + text;
+    note.textContent = '⚠️ ' + widgetScriptErrorPrefix + text;
     root.appendChild(note);
     reportHeight();
   }
@@ -258,6 +265,10 @@ p { margin: 0 0 8px; }
   // Message handler
   window.addEventListener('message', function(e) {
     if (!e.data || !e.data.type) return;
+
+    if (e.data.type === 'widget:i18n' && typeof e.data.scriptErrorPrefix === 'string') {
+      widgetScriptErrorPrefix = e.data.scriptErrorPrefix;
+    }
 
     if (e.data.type === 'widget:update' && !finalized) {
       // Streaming preview — update HTML without executing scripts

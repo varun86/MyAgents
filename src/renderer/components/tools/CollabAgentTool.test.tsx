@@ -5,13 +5,17 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { cleanup, render, screen, fireEvent } from '@testing-library/react';
 
+import { i18n } from '@/i18n';
 import type { ToolUseSimple } from '@/types/chat';
 
 import TaskTool from './TaskTool';
 import { getToolLabel, getToolMainLabel, isSubagentContainerTool } from './toolBadgeConfig';
 import { isSubagentContainerRunning } from './subagentActivity';
 
-afterEach(() => cleanup());
+afterEach(async () => {
+  cleanup();
+  await i18n.changeLanguage('zh-CN');
+});
 
 function collabTool(overrides: Partial<ToolUseSimple>): ToolUseSimple {
   return {
@@ -38,10 +42,15 @@ describe('isSubagentContainerTool', () => {
 
 describe('CollabAgent labels', () => {
   it('main label is a stable "Sub-agent"', () => {
-    expect(getToolMainLabel(collabTool({}))).toBe('Sub-agent');
+    expect(getToolMainLabel(collabTool({}))).toBe('子 Agent');
   });
   it('compact label reflects the collab action + model', () => {
     expect(getToolLabel(collabTool({}))).toBe('派生子 Agent · gpt-5-codex');
+  });
+  it('localizes the collab action while preserving the model id', async () => {
+    await i18n.changeLanguage('en-US');
+
+    expect(getToolLabel(collabTool({}))).toBe('Spawn sub-agent · gpt-5-codex');
   });
   it('compact label shows the latest sub-agent call while running', () => {
     const label = getToolLabel(collabTool({
@@ -63,7 +72,7 @@ describe('CollabAgent labels', () => {
       isLoading: true,
       subagentCalls: [{ id: 'msg-1', name: 'AgentMessage', input: {}, result: 'hello', isLoading: true }],
     }));
-    expect(label).toBe('Agent message');
+    expect(label).toBe('Agent 消息');
   });
   it('compact label still follows the nested trace after spawnAgent itself completed', () => {
     const tool = collabTool({
@@ -83,7 +92,7 @@ describe('CollabAgent labels', () => {
         { id: 'msg-1', name: 'AgentMessage', input: {}, result: 'newer output', isLoading: true },
       ],
     }));
-    expect(label).toBe('Agent message');
+    expect(label).toBe('Agent 消息');
   });
 });
 

@@ -13,6 +13,7 @@
 
 import { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { useTranslation } from 'react-i18next';
 import { Copy, Download, FileText } from 'lucide-react';
 
 import ContextMenu, { type ContextMenuItem } from '@/components/ContextMenu';
@@ -27,6 +28,7 @@ interface Props {
 }
 
 export default function ToolImageAttachment({ attachment }: Props) {
+  const { t } = useTranslation('chat');
   const tab = useTabStateOptional();
   const toast = useToastOptional();
   const sessionId = tab?.sessionId ?? null;
@@ -74,14 +76,14 @@ export default function ToolImageAttachment({ attachment }: Props) {
 
   const copyLocalPath = useCallback(() => {
     if (!localPath) {
-      toast?.error('没有可复制的本地路径');
+      toast?.error(t('shell.toolChrome.image.noLocalPath'));
       return;
     }
     void writeClipboardText(localPath).then(
-      () => toast?.success('已复制图片路径'),
-      () => toast?.error('复制路径失败'),
+      () => toast?.success(t('shell.toolChrome.image.copyPathSuccess')),
+      () => toast?.error(t('shell.toolChrome.image.copyPathFailed')),
     );
-  }, [localPath, toast]);
+  }, [localPath, t, toast]);
 
   const readImageBlob = useCallback(async (): Promise<Blob> => {
     const mimeType = attachment.mimeType || 'image/png';
@@ -111,25 +113,25 @@ export default function ToolImageAttachment({ attachment }: Props) {
         const blob = await readImageBlob();
         const mimeType = blob.type || attachment.mimeType || 'image/png';
         await navigator.clipboard.write([new ClipboardItem({ [mimeType]: blob })]);
-        toast?.success('已复制图片');
+        toast?.success(t('shell.toolChrome.image.copySuccess'));
       } catch (err) {
         console.warn('[ToolImageAttachment] copy image failed:', err);
         if (localPath) {
           await writeClipboardText(localPath).then(
-            () => toast?.warning('无法复制图片，已复制本地路径'),
-            () => toast?.error('复制图片失败'),
+            () => toast?.warning(t('shell.toolChrome.image.copyFallbackPath')),
+            () => toast?.error(t('shell.toolChrome.image.copyFailed')),
           );
         } else {
-          toast?.error('复制图片失败');
+          toast?.error(t('shell.toolChrome.image.copyFailed'));
         }
       }
     })();
-  }, [attachment.mimeType, localPath, readImageBlob, toast]);
+  }, [attachment.mimeType, localPath, readImageBlob, t, toast]);
 
   const saveImageAs = useCallback(() => {
     void (async () => {
       if (urlState.state !== 'ready') {
-        toast?.error('图片尚未加载完成');
+        toast?.error(t('shell.toolChrome.image.notReady'));
         return;
       }
       try {
@@ -145,54 +147,54 @@ export default function ToolImageAttachment({ attachment }: Props) {
           refPath: attachment.refPath,
           destinationPath,
         });
-        toast?.success('图片已另存');
+        toast?.success(t('shell.toolChrome.image.saveSuccess'));
       } catch (err) {
         console.error('[ToolImageAttachment] save image failed:', err);
-        toast?.error('另存图片失败');
+        toast?.error(t('shell.toolChrome.image.saveFailed'));
       }
     })();
-  }, [attachment, toast, urlState.state]);
+  }, [attachment, t, toast, urlState.state]);
 
   const contextMenuItems = useMemo((): ContextMenuItem[] => [
     {
-      label: '复制图片',
+      label: t('shell.toolChrome.image.copyImage'),
       icon: <Copy className="h-4 w-4" />,
       disabled: urlState.state !== 'ready',
       onClick: copyImage,
     },
     {
-      label: '另存为…',
+      label: t('shell.toolChrome.image.saveAs'),
       icon: <Download className="h-4 w-4" />,
       disabled: urlState.state !== 'ready',
       onClick: saveImageAs,
     },
     { separator: true },
     {
-      label: '复制本地路径',
+      label: t('shell.toolChrome.image.copyLocalPath'),
       icon: <FileText className="h-4 w-4" />,
       disabled: !localPath,
       onClick: copyLocalPath,
     },
-  ], [copyImage, copyLocalPath, localPath, saveImageAs, urlState.state]);
+  ], [copyImage, copyLocalPath, localPath, saveImageAs, t, urlState.state]);
 
   if (urlState.state === 'pending') {
     return (
       <div className="flex h-32 w-full items-center justify-center rounded border border-dashed border-[var(--line)] bg-[var(--paper-inset)]/40 text-sm text-[var(--ink-muted)]">
-        <span className="animate-pulse">生成中…</span>
+        <span className="animate-pulse">{t('shell.toolChrome.image.generating')}</span>
       </div>
     );
   }
   if (urlState.state === 'loading') {
     return (
       <div className="flex h-32 w-full items-center justify-center rounded border border-dashed border-[var(--line)] bg-[var(--paper-inset)]/40 text-sm text-[var(--ink-muted)]">
-        <span className="animate-pulse">加载中…</span>
+        <span className="animate-pulse">{t('shell.toolChrome.image.loading')}</span>
       </div>
     );
   }
   if (urlState.state === 'error') {
     return (
       <div className="flex h-20 w-full items-center justify-center rounded border border-rose-300/50 bg-rose-50/30 px-3 text-xs text-rose-600 dark:bg-rose-900/10 dark:text-rose-300">
-        <span>⚠️ Image failed to render: {urlState.reason}</span>
+        <span>{t('shell.toolChrome.image.renderFailed', { reason: urlState.reason })}</span>
       </div>
     );
   }
@@ -210,7 +212,7 @@ export default function ToolImageAttachment({ attachment }: Props) {
         >
           <img
             src={urlState.url}
-            alt={attachment.caption || 'Generated image'}
+            alt={attachment.caption || t('shell.toolChrome.common.generatedImageAlt')}
             loading="lazy"
             onLoad={updateCaptionWidth}
             className="block h-auto max-h-80 max-w-full object-contain"
@@ -233,7 +235,7 @@ export default function ToolImageAttachment({ attachment }: Props) {
             >
               <img
                 src={urlState.url}
-                alt={attachment.caption || 'Generated image'}
+                alt={attachment.caption || t('shell.toolChrome.common.generatedImageAlt')}
                 onContextMenu={handleContextMenu}
                 className="max-h-full max-w-full"
               />

@@ -2,6 +2,7 @@
 // Flat layout: section titles + dividers, no outer card borders
 
 import { useState, useCallback, useEffect, useRef } from 'react';
+import { useTranslation } from 'react-i18next';
 import { useConfig } from '@/hooks/useConfig';
 import { useToast } from '@/components/Toast';
 import { useAgentStatuses } from '@/hooks/useAgentStatuses';
@@ -22,6 +23,7 @@ interface WorkspaceGeneralTabProps {
 }
 
 export default function WorkspaceGeneralTab({ agentDir }: WorkspaceGeneralTabProps) {
+  const { t } = useTranslation('settings');
   const { config, projects, patchProject, refreshConfig } = useConfig();
   const project = projects.find(p => workspacePathsEqual(p.path, agentDir));
   const agent = project?.agentId ? getAgentById(config, project.agentId) : undefined;
@@ -61,7 +63,7 @@ export default function WorkspaceGeneralTab({ agentDir }: WorkspaceGeneralTabPro
         if (!project.isAgent) {
           await patchProject(project.id, { isAgent: true });
         }
-        toastRef.current.success('主动 Agent 模式已开启');
+        toastRef.current.success(t('agentSettings.general.enabled'));
       } else if (!agent) {
         // Fallback: create AgentConfig if somehow missing (shouldn't happen after migration)
         const newAgent: AgentConfig = {
@@ -83,7 +85,7 @@ export default function WorkspaceGeneralTab({ agentDir }: WorkspaceGeneralTabPro
         };
         await addAgentConfig(newAgent);
         await patchProject(project.id, { isAgent: true, agentId: newAgent.id });
-        toastRef.current.success('主动 Agent 模式已开启');
+        toastRef.current.success(t('agentSettings.general.enabled'));
       } else if (agent.enabled) {
         // Disable — stop all running channels first
         let stoppedCount = 0;
@@ -99,8 +101,8 @@ export default function WorkspaceGeneralTab({ agentDir }: WorkspaceGeneralTabPro
         await patchAgentConfig(agent.id, { enabled: false });
         toastRef.current.success(
           stoppedCount > 0
-            ? `主动 Agent 模式已关闭，${stoppedCount} 个渠道已停止`
-            : '主动 Agent 模式已关闭',
+            ? t('agentSettings.general.disabledWithChannels', { count: stoppedCount })
+            : t('agentSettings.general.disabled'),
         );
       } else {
         // Re-enable — auto-restart channels that have credentials (setupCompleted)
@@ -124,11 +126,11 @@ export default function WorkspaceGeneralTab({ agentDir }: WorkspaceGeneralTabPro
           }
           toastRef.current.success(
             startedCount > 0
-              ? `主动 Agent 模式已开启，${startedCount} 个渠道已启动`
-              : '主动 Agent 模式已开启',
+              ? t('agentSettings.general.enabledWithChannels', { count: startedCount })
+              : t('agentSettings.general.enabled'),
           );
         } else {
-          toastRef.current.success('主动 Agent 模式已开启');
+          toastRef.current.success(t('agentSettings.general.enabled'));
         }
         if (isMountedRef.current) await refreshStatuses();
         if (isMountedRef.current) setToggling(false);
@@ -138,18 +140,18 @@ export default function WorkspaceGeneralTab({ agentDir }: WorkspaceGeneralTabPro
       if (isMountedRef.current) await refreshStatuses();
     } catch (e) {
       console.error('[WorkspaceGeneralTab] Toggle proactive failed:', e);
-      toastRef.current.error('操作失败');
+      toastRef.current.error(t('agentSettings.general.operationFailed'));
     } finally {
       if (isMountedRef.current) setToggling(false);
     }
-  }, [project, agent, agentDir, config.defaultPermissionMode, toggling, patchProject, refreshConfig, refreshStatuses]);
+  }, [project, agent, agentDir, config.defaultPermissionMode, toggling, patchProject, refreshConfig, refreshStatuses, t]);
 
   const status = agent ? statuses[agent.id] : undefined;
 
   if (!project) {
     return (
       <div className="flex items-center justify-center py-12">
-        <span className="text-sm text-[var(--ink-subtle)]">未找到工作区配置</span>
+        <span className="text-sm text-[var(--ink-subtle)]">{t('agentSettings.general.missingWorkspace')}</span>
       </div>
     );
   }
@@ -157,27 +159,27 @@ export default function WorkspaceGeneralTab({ agentDir }: WorkspaceGeneralTabPro
   return (
     <div className="h-full overflow-auto px-8 py-6">
       <div className="mx-auto max-w-2xl space-y-6 pb-8">
-        {/* Card 1: 基础设置 */}
+        {/* Card 1: Basic settings */}
         <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
           <h3 className="flex items-center gap-2 text-base font-medium text-[var(--ink)]">
             <Settings2 className="h-[18px] w-[18px] text-[var(--ink-muted)]" />
-            基础设置
+            {t('agentSettings.general.basicsTitle')}
           </h3>
           <div className="mt-4">
             <WorkspaceBasicsSection project={project} agent={agent} agentDir={agentDir} />
           </div>
         </div>
 
-        {/* Card 2: 主动 Agent 模式 */}
+        {/* Card 2: Proactive Agent mode */}
         <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
           <div className="flex items-center justify-between">
             <div className="flex-1 pr-4">
               <h3 className="flex items-center gap-2 text-base font-medium text-[var(--ink)]">
                 <HeartPulse className="h-[18px] w-[18px] text-[var(--heartbeat)]" />
-                主动 Agent 模式
+                {t('agentSettings.general.proactiveTitle')}
               </h3>
               <p className="mt-0.5 text-xs text-[var(--ink-muted)]">
-                启用后让 AI 具备 24 小时感知与行动能力、可添加聊天机器人（如飞书、钉钉）主动与你互动
+                {t('agentSettings.general.proactiveDescription')}
               </p>
             </div>
             <button

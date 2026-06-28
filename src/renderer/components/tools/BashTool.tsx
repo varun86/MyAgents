@@ -2,6 +2,7 @@
 import type { BashInput, ToolUseSimple } from '@/types/chat';
 
 import { Loader2 } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 import { ExpandableResult } from './utils';
 
 /** Try to parse SDK bash result JSON: {"stdout":"...","stderr":"...","interrupted":false} */
@@ -68,6 +69,7 @@ interface BashToolProps {
 }
 
 export default function BashTool({ tool }: BashToolProps) {
+  const { t } = useTranslation('chat');
   const input = parseBashInput(tool);
   const durationLabel = formatDuration(tool.resultMeta?.durationMs);
   const hasDisplayableInput = !!input?.command;
@@ -83,7 +85,7 @@ export default function BashTool({ tool }: BashToolProps) {
     return (
       <div className="flex items-center gap-2 text-sm text-[var(--ink-muted)]">
         <Loader2 className="size-3 animate-spin" />
-        <span>Initializing terminal...</span>
+        <span>{t('shell.toolChrome.bash.initializing')}</span>
       </div>
     );
   }
@@ -92,7 +94,7 @@ export default function BashTool({ tool }: BashToolProps) {
     <div className="flex flex-col gap-3 font-sans select-none">
       {hasDisplayableInput && (
         <div className="flex flex-col gap-2">
-          <div className="px-1 text-xs font-semibold uppercase tracking-wider text-[var(--ink-muted)]">Input</div>
+          <div className="px-1 text-xs font-semibold uppercase tracking-wider text-[var(--ink-muted)]">{t('shell.toolChrome.bash.input')}</div>
           <div className="relative overflow-hidden rounded-xl border border-[var(--line)] bg-[var(--code-bg)] px-4 py-3 text-[var(--code-text)] shadow-sm">
             <pre className="overflow-x-auto font-mono text-sm whitespace-pre-wrap break-all select-text">
               <span className="font-semibold text-[var(--success)]">$ </span>
@@ -100,7 +102,7 @@ export default function BashTool({ tool }: BashToolProps) {
             </pre>
             {input.run_in_background && (
               <div className="absolute right-3 top-3 rounded-md border border-[var(--line)] bg-[var(--code-header-bg)] px-1.5 py-0.5 text-xs font-medium uppercase tracking-wider text-[var(--code-line-number)]">
-                Background
+                {t('shell.toolChrome.bash.background')}
               </div>
             )}
           </div>
@@ -117,7 +119,7 @@ export default function BashTool({ tool }: BashToolProps) {
 
       {output && (
         <div className="flex flex-col gap-2">
-          <div className="px-1 text-xs font-semibold uppercase tracking-wider text-[var(--ink-muted)]">Output</div>
+          <div className="px-1 text-xs font-semibold uppercase tracking-wider text-[var(--ink-muted)]">{t('shell.toolChrome.bash.output')}</div>
           <ExpandableResult
             content={output}
             wrapperClassName="rounded-xl border border-[var(--line)] bg-[var(--code-bg)] shadow-sm"
@@ -129,10 +131,10 @@ export default function BashTool({ tool }: BashToolProps) {
 
       {!output && tool.isLoading && (
         <div className="flex flex-col gap-1.5">
-          <div className="px-1 text-xs font-semibold uppercase tracking-wider text-[var(--ink-muted)]">Output</div>
+          <div className="px-1 text-xs font-semibold uppercase tracking-wider text-[var(--ink-muted)]">{t('shell.toolChrome.bash.output')}</div>
           <div className="flex items-center gap-2 rounded-xl border border-[var(--line)] bg-[var(--code-bg)] px-4 py-3 font-mono text-sm text-[var(--code-text)]">
             <Loader2 className="size-3.5 animate-spin text-[var(--code-line-number)]" />
-            <span>Running...</span>
+            <span>{t('shell.toolChrome.bash.running')}</span>
           </div>
         </div>
       )}

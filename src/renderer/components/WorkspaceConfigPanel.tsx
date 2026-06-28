@@ -5,6 +5,7 @@
 import { X, SlidersHorizontal, ChevronLeft } from 'lucide-react';
 import { useCallback, useEffect, useState, useRef } from 'react';
 import { createPortal } from 'react-dom';
+import { useTranslation } from 'react-i18next';
 
 import { useCloseLayer } from '@/hooks/useCloseLayer';
 import OverlayBackdrop from '@/components/OverlayBackdrop';
@@ -65,14 +66,15 @@ function detailViewForSelect(select: CapabilityInitialSelect | undefined): Detai
     }
 }
 
-const TAB_ITEMS: { key: Tab; label: string }[] = [
-    { key: 'general', label: '通用' },
-    { key: 'system-prompts', label: '系统提示词' },
-    { key: 'introduction', label: '使用指南' },
-    { key: 'skills', label: '技能 Skills' },
+const TAB_ITEMS: { key: Tab; labelKey: string }[] = [
+    { key: 'general', labelKey: 'agentSettings.panel.tabs.general' },
+    { key: 'system-prompts', labelKey: 'agentSettings.panel.tabs.systemPrompts' },
+    { key: 'introduction', labelKey: 'agentSettings.panel.tabs.introduction' },
+    { key: 'skills', labelKey: 'agentSettings.panel.tabs.skills' },
 ];
 
 export default function WorkspaceConfigPanel({ agentDir, onClose, refreshKey: externalRefreshKey = 0, initialTab, initialSelect, onRequestInit }: WorkspaceConfigPanelProps) {
+    const { t } = useTranslation('settings');
     useCloseLayer(() => { onClose(); return true; }, 200);
     const toast = useToast();
     // Stabilize toast reference to avoid unnecessary effect re-runs
@@ -125,20 +127,20 @@ export default function WorkspaceConfigPanel({ agentDir, onClose, refreshKey: ex
     // Handle close with editing check
     const handleClose = useCallback(() => {
         if (isAnyEditing()) {
-            toastRef.current.warning('请先保存或取消编辑');
+            toastRef.current.warning(t('agentSettings.panel.unsavedWarning'));
             return;
         }
         onClose();
-    }, [isAnyEditing, onClose]);
+    }, [isAnyEditing, onClose, t]);
 
     // Handle back with editing check
     const handleBackFromDetail = useCallback(() => {
         if (isAnyEditing()) {
-            toastRef.current.warning('请先保存或取消编辑');
+            toastRef.current.warning(t('agentSettings.panel.unsavedWarning'));
             return;
         }
         setDetailView({ type: 'none' });
-    }, [isAnyEditing]);
+    }, [isAnyEditing, t]);
 
     // Close on Escape key
     useEffect(() => {
@@ -199,11 +201,11 @@ export default function WorkspaceConfigPanel({ agentDir, onClose, refreshKey: ex
     // Handle tab switch with editing check
     const handleTabSwitch = useCallback((tab: Tab) => {
         if (isAnyEditing()) {
-            toastRef.current.warning('请先保存或取消编辑');
+            toastRef.current.warning(t('agentSettings.panel.unsavedWarning'));
             return;
         }
         setActiveTab(tab);
-    }, [isAnyEditing]);
+    }, [isAnyEditing, t]);
 
     return createPortal(
         <OverlayBackdrop onClose={handleClose} className="z-[200]">
@@ -220,7 +222,7 @@ export default function WorkspaceConfigPanel({ agentDir, onClose, refreshKey: ex
                                 type="button"
                                 onClick={handleBackFromDetail}
                                 className="mr-1 rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
-                                title="返回列表"
+                                title={t('agentSettings.panel.backToList')}
                             >
                                 <ChevronLeft className="h-5 w-5" />
                             </button>
@@ -228,7 +230,7 @@ export default function WorkspaceConfigPanel({ agentDir, onClose, refreshKey: ex
                         <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-[var(--button-dark-bg)] shadow">
                             <SlidersHorizontal className="h-4 w-4 text-[var(--button-primary-text)]" />
                         </div>
-                        <h2 className="text-lg font-semibold text-[var(--ink)]">Agent 设置</h2>
+                        <h2 className="text-lg font-semibold text-[var(--ink)]">{t('agentSettings.panel.title')}</h2>
                     </div>
 
                     {/* Tab switcher — left-aligned after title (only in list view) */}
@@ -245,7 +247,7 @@ export default function WorkspaceConfigPanel({ agentDir, onClose, refreshKey: ex
                                             : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
                                     } ${item.key !== TAB_ITEMS[0].key ? 'ml-4' : ''}`}
                                 >
-                                    {item.label}
+                                    {t(item.labelKey)}
                                     {activeTab === item.key && (
                                         <span className="absolute inset-x-0 -bottom-px h-0.5 rounded-full bg-[var(--accent-warm)]" />
                                     )}
@@ -262,7 +264,7 @@ export default function WorkspaceConfigPanel({ agentDir, onClose, refreshKey: ex
                         type="button"
                         onClick={handleClose}
                         className="shrink-0 rounded-lg p-2 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
-                        title="关闭 (Esc)"
+                        title={t('agentSettings.panel.closeEsc')}
                     >
                         <X className="h-5 w-5" />
                     </button>
@@ -339,7 +341,7 @@ export default function WorkspaceConfigPanel({ agentDir, onClose, refreshKey: ex
                 {/* Footer hint */}
                 <div className="flex-shrink-0 border-t border-[var(--line)] bg-[var(--paper-inset)] px-6 py-2">
                     <p className="text-center text-xs text-[var(--ink-muted)]">
-                        按 Esc 关闭 · 配置修改会立即生效
+                        {t('agentSettings.panel.footer')}
                     </p>
                 </div>
             </div>

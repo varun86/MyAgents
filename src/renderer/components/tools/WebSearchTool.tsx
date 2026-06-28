@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { Globe, ExternalLink, ChevronDown } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 import type { ToolUseSimple, WebSearchInput } from '@/types/chat';
 import { openExternal } from '@/utils/openExternal';
 import { ExpandableResult } from './utils';
@@ -79,13 +80,14 @@ function parseSearchResults(resultStr: string): SearchResult[] {
 }
 
 export default function WebSearchTool({ tool }: WebSearchToolProps) {
+  const { t } = useTranslation('chat');
   const [expanded, setExpanded] = useState(false);
   const input = tool.parsedInput as WebSearchInput;
   const results = tool.result ? parseSearchResults(tool.result) : [];
   const showRawResult = tool.result && results.length === 0;
 
   if (!input && !tool.inputJson) {
-    return <div className="text-sm text-[var(--ink-muted)]">Initializing search...</div>;
+    return <div className="text-sm text-[var(--ink-muted)]">{t('shell.toolChrome.webSearch.initializing')}</div>;
   }
 
   let query = input?.query || '';
@@ -137,7 +139,7 @@ export default function WebSearchTool({ tool }: WebSearchToolProps) {
               className="flex items-center gap-1 px-2 py-1 text-xs text-[var(--ink-muted)] hover:text-[var(--ink)] transition-colors"
             >
               <ChevronDown className="size-3" />
-              <span>展开剩余 {hiddenCount} 条结果</span>
+              <span>{t('shell.toolChrome.webSearch.expandRemaining', { count: hiddenCount })}</span>
             </button>
           )}
         </div>
@@ -146,7 +148,7 @@ export default function WebSearchTool({ tool }: WebSearchToolProps) {
       {/* Raw Output fallback — height-clamped for consistency with other tools */}
       {showRawResult && tool.result && (
         <div className="space-y-2">
-          <div className="text-xs font-semibold uppercase tracking-wider text-[var(--ink-muted)]">Tool Output</div>
+          <div className="text-xs font-semibold uppercase tracking-wider text-[var(--ink-muted)]">{t('shell.toolChrome.webSearch.toolOutput')}</div>
           <ExpandableResult
             content={tool.result}
             className="rounded-lg border border-[var(--line-subtle)] bg-[var(--paper-inset)] p-3 text-xs text-[var(--ink-secondary)]"
@@ -158,7 +160,7 @@ export default function WebSearchTool({ tool }: WebSearchToolProps) {
       {!tool.result && tool.isLoading && (
         <div className="flex items-center gap-2 text-xs text-[var(--ink-muted)] animate-pulse">
           <Globe className="size-3" />
-          <span>Searching for &ldquo;{query}&rdquo;...</span>
+          <span>{t('shell.toolChrome.webSearch.searchingFor', { query })}</span>
         </div>
       )}
     </div>

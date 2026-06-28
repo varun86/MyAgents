@@ -1,4 +1,5 @@
 import { Check, Loader2 } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 
 export interface ChecklistItem {
   content: string;
@@ -18,6 +19,7 @@ interface TodoChecklistProps {
  * `TaskTodoTool` (TaskList snapshot) so the two render identically.
  */
 export default function TodoChecklist({ items }: TodoChecklistProps) {
+  const { t } = useTranslation('chat');
   const completedCount = items.filter((t) => t.status === 'completed').length;
   const totalCount = items.length;
 
@@ -26,7 +28,7 @@ export default function TodoChecklist({ items }: TodoChecklistProps) {
       {/* Summary Header */}
       <div className="flex items-center gap-2 text-sm text-[var(--ink-muted)]">
         <span className="font-medium tabular-nums">
-          {completedCount}/{totalCount} 已完成
+          {t('shell.toolChrome.common.completedCount', { completed: completedCount, total: totalCount })}
         </span>
       </div>
 
