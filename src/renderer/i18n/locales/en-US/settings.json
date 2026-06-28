@@ -1186,6 +1186,116 @@
       }
     }
   },
+  "plugins": {
+    "title": "Plugins",
+    "installButton": "Install Plugin",
+    "descriptionIntro": "MyAgents supports the Claude Plugins protocol. A plugin can include skills, sub-agents, hooks, and MCP.",
+    "descriptionInstall": "Use Install Plugin to add one from a GitHub link or local folder.",
+    "descriptionVisibilityPrefix": "The plugin switch controls whether the plugin is ",
+    "descriptionVisibilityEmphasis": "visible in workspaces",
+    "descriptionVisibilitySuffix": ". To actually enable it, select it in Agent Settings or the Chat input tool menu.",
+    "loading": "Loading...",
+    "emptyTitle": "No plugins yet",
+    "emptyDescription": "Use Install Plugin in the upper right to add one from GitHub or a local path.",
+    "errors": {
+      "loadList": "Failed to load plugin list",
+      "loadDetail": "Failed to load plugin details",
+      "toggle": "Toggle failed",
+      "uninstall": "Uninstall failed"
+    },
+    "toasts": {
+      "hidden": "Hidden {{name}}. It is no longer selectable in workspaces.",
+      "shown": "Shown {{name}}. Enable it from Agent Settings or the Chat tool menu.",
+      "uninstalled": "Uninstalled {{name}}",
+      "uninstalledWithWarning": "Uninstalled {{name}} (⚠ {{warning}})"
+    },
+    "uninstall": {
+      "title": "Uninstall {{name}}?",
+      "message": "This will delete the plugin directory and remove it from the enabled list. The data directory ({{dataDir}}) is kept by default.",
+      "confirm": "Uninstall"
+    },
+    "card": {
+      "hideTitle": "Hide from workspaces",
+      "showTitle": "Show so workspaces can select it",
+      "noDescription": "No description"
+    },
+    "detail": {
+      "back": "Back to list",
+      "hide": "Hide from workspaces",
+      "show": "Show so workspaces can select it",
+      "openDirectory": "Open Directory",
+      "uninstall": "Uninstall",
+      "metadata": "Metadata",
+      "author": "Author",
+      "homepage": "Homepage",
+      "repository": "Repository",
+      "source": "Source",
+      "installPath": "Install Path",
+      "installedAt": "Installed At",
+      "components": "Components",
+      "none": "— None",
+      "componentCount": "{{count}} item(s)",
+      "hookCount": "{{count}} event handler(s)",
+      "hasExecutable": "✓ Has executables"
+    },
+    "install": {
+      "errors": {
+        "sourceRequired": "Enter a source address",
+        "inspectFailed": "Inspection failed",
+        "marketplaceUnsupported": "Marketplace repositories (.claude-plugin/marketplace.json) are not supported yet; planned for v0.2.18.",
+        "noPluginFound": "No Claude plugin was found at this source",
+        "installFailed": "Install failed",
+        "selectAtLeastOne": "Select at least one plugin"
+      },
+      "toasts": {
+        "installedOne": "Installed {{name}}",
+        "installedBatch": "Installed {{count}} plugin(s)",
+        "batchPartial": "Install finished: {{ok}} succeeded, {{failed}} failed"
+      },
+      "input": {
+        "title": "Install Plugin",
+        "supportsGithub": "Supports GitHub repositories (",
+        "githubSeparator": ", ",
+        "orFullUrl": " or full URL), direct ",
+        "localPathPrefix": " links, and local folder absolute paths such as ",
+        "or": " or ",
+        "localPathSuffix": ".",
+        "sourceLabel": "Source address",
+        "sourcePlaceholder": "anthropics/example-plugin · github.com/... · /Users/me/plugin · C:\\dev\\plugin",
+        "trustWarning": "Plugins run arbitrary code, start MCP processes, and trigger hook scripts with your user permissions. Install only trusted sources.",
+        "cancel": "Cancel",
+        "start": "Start Install"
+      },
+      "select": {
+        "title": "Select Plugins to Install",
+        "source": "Source",
+        "detectedPrefix": "Detected",
+        "detectedSuffix": "plugin(s)",
+        "invalidSkipped": " ({{count}} invalid manifest(s) skipped)",
+        "defaultAll": "; all valid plugins are selected by default.",
+        "selectAll": "Select All",
+        "selectNone": "Select None",
+        "back": "Back",
+        "installSelected": "Install {{count}} plugin(s)"
+      },
+      "progress": {
+        "doneTitle": "Install Complete",
+        "runningTitle": "Installing Plugins",
+        "summary": "{{total}} total: {{ok}} succeeded, {{failed}} failed",
+        "current": "Item {{current}} / {{total}} · {{name}}",
+        "close": "Done",
+        "installing": "Installing..."
+      },
+      "phases": {
+        "fetching": "Fetching...",
+        "extracting": "Extracting...",
+        "validating": "Validating...",
+        "writing": "Writing to disk...",
+        "done": "✓ Install complete",
+        "failed": "✗ Install failed"
+      }
+    }
+  },
   "helper": {
     "title": "AI Helper",
     "history": "History",

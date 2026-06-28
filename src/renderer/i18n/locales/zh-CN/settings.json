@@ -1186,6 +1186,116 @@
       }
     }
   },
+  "plugins": {
+    "title": "插件 Plugins",
+    "installButton": "安装插件",
+    "descriptionIntro": "MyAgents 支持 Claude Plugins 插件协议，每个插件内可能包含 skills、sub agents、hooks 和 MCP。",
+    "descriptionInstall": "右侧「安装插件」按钮支持通过 GitHub 链接或本地文件夹来安装插件。",
+    "descriptionVisibilityPrefix": "插件开关决定插件「",
+    "descriptionVisibilityEmphasis": "在各工作区是否可见",
+    "descriptionVisibilitySuffix": "」；如果要实际启用，请去 Agent 设置或 Chat 输入框的工具菜单里勾选启用。",
+    "loading": "加载中…",
+    "emptyTitle": "还没有插件",
+    "emptyDescription": "点右上角「安装插件」从 GitHub 或本地路径添加。",
+    "errors": {
+      "loadList": "加载插件列表失败",
+      "loadDetail": "加载插件详情失败",
+      "toggle": "切换失败",
+      "uninstall": "卸载失败"
+    },
+    "toasts": {
+      "hidden": "已隐藏 {{name}}（各工作区不再可选）",
+      "shown": "已显示 {{name}}（可在 Agent / Chat 工具菜单里勾选启用）",
+      "uninstalled": "已卸载 {{name}}",
+      "uninstalledWithWarning": "已卸载 {{name}}（⚠ {{warning}}）"
+    },
+    "uninstall": {
+      "title": "卸载 {{name}}?",
+      "message": "将删除插件目录并从启用列表移除。数据目录（{{dataDir}}）默认保留。",
+      "confirm": "卸载"
+    },
+    "card": {
+      "hideTitle": "隐藏（不在工作区里出现）",
+      "showTitle": "显示（可被工作区选择）",
+      "noDescription": "暂无描述"
+    },
+    "detail": {
+      "back": "返回列表",
+      "hide": "隐藏（不再各工作区可见）",
+      "show": "显示（可被工作区选择）",
+      "openDirectory": "打开目录",
+      "uninstall": "卸载",
+      "metadata": "元数据",
+      "author": "作者",
+      "homepage": "主页",
+      "repository": "仓库",
+      "source": "来源",
+      "installPath": "安装路径",
+      "installedAt": "安装时间",
+      "components": "组件清单",
+      "none": "— 无",
+      "componentCount": "{{count}} 个",
+      "hookCount": "{{count}} 个事件处理器",
+      "hasExecutable": "✓ 有可执行文件"
+    },
+    "install": {
+      "errors": {
+        "sourceRequired": "请填写来源地址",
+        "inspectFailed": "探测失败",
+        "marketplaceUnsupported": "Marketplace 仓库（.claude-plugin/marketplace.json）暂未支持，v0.2.18 加。",
+        "noPluginFound": "未在该来源找到任何 Claude 插件",
+        "installFailed": "安装失败",
+        "selectAtLeastOne": "请至少选择一个插件"
+      },
+      "toasts": {
+        "installedOne": "已安装 {{name}}",
+        "installedBatch": "已安装 {{count}} 个插件",
+        "batchPartial": "安装完成：{{ok}} 个成功，{{failed}} 个失败"
+      },
+      "input": {
+        "title": "安装插件",
+        "supportsGithub": "支持 GitHub 仓库（",
+        "githubSeparator": "、",
+        "orFullUrl": " 或完整 URL）、直链 ",
+        "localPathPrefix": "、本地文件夹绝对路径（如 ",
+        "or": " 或 ",
+        "localPathSuffix": "）",
+        "sourceLabel": "来源地址",
+        "sourcePlaceholder": "anthropics/example-plugin · github.com/... · /Users/me/plugin · C:\\dev\\plugin",
+        "trustWarning": "插件以你的用户权限运行任意代码、启动 MCP 进程、触发 hook 脚本。仅安装可信来源。",
+        "cancel": "取消",
+        "start": "开始安装"
+      },
+      "select": {
+        "title": "选择要安装的插件",
+        "source": "来源",
+        "detectedPrefix": "检测到",
+        "detectedSuffix": "个插件",
+        "invalidSkipped": "（其中 {{count}} 个 manifest 无效，已跳过）",
+        "defaultAll": "，默认全选。",
+        "selectAll": "全选",
+        "selectNone": "全不选",
+        "back": "返回",
+        "installSelected": "安装 {{count}} 个插件"
+      },
+      "progress": {
+        "doneTitle": "安装完成",
+        "runningTitle": "正在批量安装",
+        "summary": "共 {{total}} 个：成功 {{ok}}，失败 {{failed}}",
+        "current": "第 {{current}} / {{total}} 个 · {{name}}",
+        "close": "完成",
+        "installing": "安装中…"
+      },
+      "phases": {
+        "fetching": "抓取中…",
+        "extracting": "解压中…",
+        "validating": "校验中…",
+        "writing": "写入磁盘…",
+        "done": "✓ 安装完成",
+        "failed": "✗ 安装失败"
+      }
+    }
+  },
   "helper": {
     "title": "AI 小助理",
     "history": "历史",
