@@ -49,7 +49,7 @@ import { updateSession as patchSessionMetadata } from '@/api/sessionClient';
 import { persistInputOptionChange, type BuiltinModelSelection, type BuiltinProviderEnvPolicy } from '@/api/persistInputOption';
 import { materializePendingSessionConfig } from '@/api/sessionMaterialize';
 import type { CronTask } from '@/types/cronTask';
-import { formatScheduleDescription } from '@/types/cronTask';
+import { formatCronScheduleDescription } from '@/utils/cronTaskI18n';
 import CronTaskCard from '@/components/scheduled-tasks/CronTaskCard';
 import CronTaskDetailPanel from '@/components/CronTaskDetailPanel';
 import { projectCronExecutionOverrides } from '@/utils/cronExecutionProjection';
@@ -77,6 +77,7 @@ import {
   normalizeOfficialToolIds,
   type OfficialToolId,
 } from '../../shared/official-tools';
+import { isSupportedLocale } from '../../shared/i18n';
 import { workspacePathsEqual } from '../../shared/workspacePath';
 import { coerceReasoningEffortForRuntime, reasoningEffortChoices } from '../../shared/reasoningEffort';
 import type { ProviderHistoryEnv } from '../../shared/providerHistory';
@@ -465,6 +466,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   const isActive = useTabActive();
   const toast = useToast();
   const { t } = useTranslation('chat');
+  const { t: tTask, i18n } = useTranslation('task');
+  const taskLocale = isSupportedLocale(i18n.language) ? i18n.language : 'zh-CN';
   const tRef = useRef(t);
   tRef.current = t;
 
@@ -4880,7 +4883,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
                 <CronTaskCard
                   taskId={cronCardTask.id}
                   name={cronCardTask.name || cronCardTask.prompt.slice(0, 20)}
-                  scheduleDesc={formatScheduleDescription(cronCardTask)}
+                  scheduleDesc={formatCronScheduleDescription(cronCardTask, tTask, taskLocale)}
                   onOpenDetail={task => { setCronDetailTask(task); setCronCardTask(null); }}
                 />
               </div>

@@ -1,8 +1,15 @@
 // Cron Task Status Bar - non-blocking composer status for armed/running/stopped cron tasks.
 import { useEffect, useMemo, useState } from 'react';
 import { Settings2, Square, Timer, X } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 
-import { formatCronInterval, type CronSchedule } from '@/types/cronTask';
+import type { CronSchedule } from '@/types/cronTask';
+import { isSupportedLocale } from '@/../shared/i18n';
+import {
+  formatCronCountdown,
+  formatCronExecutionCount,
+  formatCronScheduleForStatusBar,
+} from '@/utils/cronTaskI18n';
 
 type CronTaskStatusBarMode = 'draft' | 'running' | 'executing' | 'stopped';
 
@@ -20,46 +27,6 @@ interface CronTaskStatusBarProps {
   onDismissStopped?: () => void;
 }
 
-function formatStatusBarSchedule(schedule: CronSchedule | null | undefined, intervalMinutes: number): string {
-  if (schedule) {
-    switch (schedule.kind) {
-      case 'at':
-        return `${new Date(schedule.at).toLocaleString('zh-CN')} 执行一次`;
-      case 'every':
-        return `每 ${formatCronInterval(schedule.minutes)} 执行一次`;
-      case 'cron':
-        return `Cron: ${schedule.expr}`;
-      case 'loop':
-        return 'Ralph Loop 无限循环';
-    }
-  }
-  return `每 ${formatCronInterval(intervalMinutes)} 执行一次`;
-}
-
-function formatExecutionCount(executionCount = 0, maxExecutions?: number): string {
-  if (maxExecutions && maxExecutions > 0) {
-    return `已执行 ${executionCount}/${maxExecutions} 次`;
-  }
-  return `已执行 ${executionCount} 次`;
-}
-
-function formatCountdown(nextExecutionAt: string | null | undefined, now: number): string | null {
-  if (!nextExecutionAt) return null;
-  const target = new Date(nextExecutionAt).getTime();
-  if (!Number.isFinite(target)) return null;
-  const remainingMs = target - now;
-  if (remainingMs <= 0) return '等待触发';
-
-  const totalSeconds = Math.floor(remainingMs / 1000);
-  const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const seconds = totalSeconds % 60;
-  if (hours > 0) {
-    return `下次 ${hours}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
-  }
-  return `下次 ${minutes}:${seconds.toString().padStart(2, '0')}`;
-}
-
 export default function CronTaskStatusBar({
   mode = 'draft',
   intervalMinutes,
@@ -73,6 +40,8 @@ export default function CronTaskStatusBar({
   onStop,
   onDismissStopped,
 }: CronTaskStatusBarProps) {
+  const { t, i18n } = useTranslation('task');
+  const locale = isSupportedLocale(i18n.language) ? i18n.language : 'zh-CN';
   const [now, setNow] = useState(() => Date.now());
   const isActive = mode === 'running' || mode === 'executing';
 
@@ -83,26 +52,26 @@ export default function CronTaskStatusBar({
   }, [isActive, nextExecutionAt]);
 
   const countdown = useMemo(
-    () => mode === 'running' ? formatCountdown(nextExecutionAt, now) : null,
-    [mode, nextExecutionAt, now],
+    () => mode === 'running' ? formatCronCountdown(nextExecutionAt, now, t) : null,
+    [mode, nextExecutionAt, now, t],
   );
 
   const title = mode === 'draft'
-    ? '定时模式'
+    ? t('cron.statusBar.draftTitle')
     : mode === 'stopped'
-      ? '定时任务已停止'
+      ? t('cron.statusBar.stoppedTitle')
       : schedule?.kind === 'loop'
-        ? (mode === 'executing' ? '心跳循环执行中' : '心跳循环进行中')
-        : (mode === 'executing' ? '定时任务执行中' : '定时任务运行中');
+        ? (mode === 'executing' ? t('cron.statusBar.loopExecutingTitle') : t('cron.statusBar.loopRunningTitle'))
+        : (mode === 'executing' ? t('cron.statusBar.executingTitle') : t('cron.statusBar.runningTitle'));
 
   const detail = mode === 'stopped'
-    ? '点击关闭可恢复任务内容到输入框'
+    ? t('cron.statusBar.stoppedDetail')
     : [
-        formatStatusBarSchedule(schedule, intervalMinutes),
+        formatCronScheduleForStatusBar(schedule, intervalMinutes, t, locale),
         mode === 'executing'
-          ? `第 ${executionNumber ?? executionCount + 1} 轮执行中`
+          ? t('cron.statusBar.roundExecuting', { count: executionNumber ?? executionCount + 1 })
           : countdown,
-        isActive ? formatExecutionCount(executionCount, maxExecutions) : null,
+        isActive ? formatCronExecutionCount(executionCount, t, maxExecutions) : null,
       ].filter(Boolean).join(' · ');
 
   return (
@@ -134,7 +103,7 @@ export default function CronTaskStatusBar({
             type="button"
             onClick={onSettings}
             className="rounded-md p-1.5 text-[var(--ink-muted)] transition hover:bg-[var(--heartbeat-bg)] hover:text-[var(--heartbeat)]"
-            title="修改设置"
+            title={t('cron.statusBar.settingsTitle')}
           >
             <Settings2 className="h-4 w-4" />
           </button>
@@ -144,7 +113,7 @@ export default function CronTaskStatusBar({
             type="button"
             onClick={onCancel}
             className="rounded-md p-1.5 text-[var(--ink-muted)] transition hover:bg-[var(--heartbeat-bg)] hover:text-[var(--heartbeat)]"
-            title="取消定时"
+            title={t('cron.statusBar.cancelTitle')}
           >
             <X className="h-4 w-4" />
           </button>
@@ -154,10 +123,10 @@ export default function CronTaskStatusBar({
             type="button"
             onClick={onStop}
             className="flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium text-[var(--heartbeat)] transition hover:bg-[var(--heartbeat-bg)]"
-            title="停止定时任务"
+            title={t('cron.statusBar.stopTitle')}
           >
             <Square className="h-3.5 w-3.5" />
-            停止
+            {t('cron.statusBar.stopButton')}
           </button>
         )}
         {mode === 'stopped' && onDismissStopped && (
@@ -165,7 +134,7 @@ export default function CronTaskStatusBar({
             type="button"
             onClick={onDismissStopped}
             className="rounded-md p-1.5 text-[var(--ink-muted)] transition hover:bg-[var(--heartbeat-bg)] hover:text-[var(--heartbeat)]"
-            title="关闭并恢复任务内容到输入框"
+            title={t('cron.statusBar.dismissStoppedTitle')}
           >
             <X className="h-4 w-4" />
           </button>

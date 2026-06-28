@@ -2,6 +2,7 @@
 // Redesigned for v0.1.42: adds execution mode (当前对话/新开对话) + ScheduleTypeTabs (3 schedule types)
 import { X, Clock, Bell, Flag, MessageSquare, AlertCircle } from 'lucide-react';
 import { useState, useCallback, useMemo } from 'react';
+import { useTranslation } from 'react-i18next';
 
 import { useCloseLayer } from '@/hooks/useCloseLayer';
 import type { CronEndConditions, CronRunMode, CronTaskConfig, CronSchedule } from '@/types/cronTask';
@@ -103,6 +104,7 @@ function CronTaskSettingsForm({
   onConfirm,
   workspacePath,
 }: Omit<CronTaskSettingsModalProps, 'isOpen'>) {
+  const { t } = useTranslation('task');
   // Execution target: current session (legacy behavior) or new standalone task
   const [executionTarget, setExecutionTarget] = useState<ExecutionTarget>(initialConfig?.executionTarget ?? 'current_session');
 
@@ -161,30 +163,30 @@ function CronTaskSettingsForm({
   // Validation
   const validationErrors = useMemo(() => {
     const errors: string[] = [];
-    if (!schedule && intervalMinutes < MIN_CRON_INTERVAL) errors.push(`间隔不能小于 ${MIN_CRON_INTERVAL} 分钟`);
+    if (!schedule && intervalMinutes < MIN_CRON_INTERVAL) errors.push(t('cron.settingsModal.validation.intervalTooShort', { min: MIN_CRON_INTERVAL }));
     if (schedule?.kind === 'cron') {
       const parts = schedule.expr.trim().split(/\s+/);
       if (parts.length !== 5) {
-        errors.push('无效的 Cron 表达式');
+        errors.push(t('cron.settingsModal.validation.invalidCron'));
       } else {
         const cronFieldRegex = /^[\d,\-*/]+$/;
         if (!parts.every(p => cronFieldRegex.test(p))) {
-          errors.push('无效的 Cron 表达式');
+          errors.push(t('cron.settingsModal.validation.invalidCron'));
         }
       }
     }
     if (schedule?.kind === 'at') {
       const atTime = new Date(schedule.at).getTime();
       // Validate at confirm time, not render time — just check if parseable here
-      if (isNaN(atTime)) errors.push('请输入有效的执行时间');
+      if (isNaN(atTime)) errors.push(t('cron.settingsModal.validation.invalidExecutionTime'));
     }
     if (endMode === 'conditional' && !isAtSchedule) {
       if (!useDeadline && !useMaxExecutions && !aiCanExit) {
-        errors.push('请至少选择一个结束条件');
+        errors.push(t('cron.settingsModal.validation.endConditionRequired'));
       }
     }
     return errors;
-  }, [schedule, intervalMinutes, endMode, useDeadline, useMaxExecutions, aiCanExit, isAtSchedule]);
+  }, [schedule, intervalMinutes, endMode, useDeadline, useMaxExecutions, aiCanExit, isAtSchedule, t]);
 
   const isValid = validationErrors.length === 0;
 
@@ -223,7 +225,7 @@ function CronTaskSettingsForm({
         <div className="flex shrink-0 items-center justify-between px-6 py-4">
           <div className="flex items-center gap-2.5">
             <Clock className="h-4 w-4 text-[var(--accent)]" />
-            <h2 className="text-lg font-semibold text-[var(--ink)]">定时任务</h2>
+            <h2 className="text-lg font-semibold text-[var(--ink)]">{t('cron.settingsModal.title')}</h2>
           </div>
           <button onClick={onClose} className="rounded-lg p-1.5 text-[var(--ink-muted)] transition hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]">
             <X className="h-4 w-4" />
@@ -235,21 +237,21 @@ function CronTaskSettingsForm({
 
           {/* ── 执行模式 ── */}
           <div>
-            <SectionHeader icon={MessageSquare}>执行模式</SectionHeader>
+            <SectionHeader icon={MessageSquare}>{t('cron.settingsModal.executionMode')}</SectionHeader>
             <div className="mt-3">
               {isLoopSchedule ? (
-                <p className="text-sm text-[var(--ink-muted)]">连续对话（保持上下文）— Ralph Loop 固定使用此模式</p>
+                <p className="text-sm text-[var(--ink-muted)]">{t('cron.settingsModal.loopModeDescription')}</p>
               ) : (
               <div className="flex gap-2">
-                <PillButton selected={executionTarget === 'current_session'} onClick={() => setExecutionTarget('current_session')}>当前对话</PillButton>
-                <PillButton selected={executionTarget === 'new_task'} onClick={() => setExecutionTarget('new_task')}>新开对话</PillButton>
+                <PillButton selected={executionTarget === 'current_session'} onClick={() => setExecutionTarget('current_session')}>{t('cron.settingsModal.currentSession')}</PillButton>
+                <PillButton selected={executionTarget === 'new_task'} onClick={() => setExecutionTarget('new_task')}>{t('cron.settingsModal.newTask')}</PillButton>
               </div>
               )}
               {!isLoopSchedule && (
               <p className="mt-1.5 text-sm text-[var(--ink-muted)]">
                 {executionTarget === 'current_session'
-                  ? '在当前对话中定时执行，保持上下文'
-                  : '创建独立定时任务，不占用当前对话'}
+                  ? t('cron.settingsModal.currentSessionDescription')
+                  : t('cron.settingsModal.newTaskDescription')}
               </p>
               )}
             </div>
@@ -259,7 +261,7 @@ function CronTaskSettingsForm({
 
           {/* ── 执行计划 ── */}
           <div>
-            <SectionHeader icon={Clock}>执行计划</SectionHeader>
+            <SectionHeader icon={Clock}>{t('cron.settingsModal.schedule')}</SectionHeader>
             <div className="mt-3">
               <ScheduleTypeTabs value={schedule} intervalMinutes={intervalMinutes} onChange={handleScheduleChange} />
             </div>
@@ -270,17 +272,17 @@ function CronTaskSettingsForm({
           {/* ── 结束条件 ── */}
           {!isAtSchedule && (
             <div>
-              <SectionHeader icon={Flag}>结束条件</SectionHeader>
+              <SectionHeader icon={Flag}>{t('cron.settingsModal.endConditions')}</SectionHeader>
               <div className="mt-3 space-y-3">
                 <div className="flex gap-1.5 rounded-[var(--radius-md)] bg-[var(--paper-inset)] p-1">
                   <button type="button" onClick={() => setEndMode('forever')}
                     className={`flex flex-1 items-center justify-center rounded-[var(--radius-sm)] px-3 py-1.5 text-sm font-medium transition-colors ${
                       endMode === 'forever' ? 'bg-[var(--paper-elevated)] text-[var(--ink)] shadow-xs' : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
-                    }`}>永久运行</button>
+                    }`}>{t('cron.settingsModal.forever')}</button>
                   <button type="button" onClick={() => setEndMode('conditional')}
                     className={`flex flex-1 items-center justify-center rounded-[var(--radius-sm)] px-3 py-1.5 text-sm font-medium transition-colors ${
                       endMode === 'conditional' ? 'bg-[var(--paper-elevated)] text-[var(--ink)] shadow-xs' : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
-                    }`}>条件停止</button>
+                    }`}>{t('cron.settingsModal.conditional')}</button>
                 </div>
 
                 {endMode === 'conditional' && (
@@ -289,8 +291,8 @@ function CronTaskSettingsForm({
                       <div className="flex cursor-pointer items-center justify-between border-b border-[var(--line)] px-3 py-2.5"
                         onClick={() => setUseDeadline(!useDeadline)}>
                         <div className="flex items-center gap-2.5">
-                          <Checkbox checked={useDeadline} onChange={setUseDeadline} label="截止时间" />
-                          <span className="text-sm text-[var(--ink)]">截止时间</span>
+                          <Checkbox checked={useDeadline} onChange={setUseDeadline} label={t('cron.settingsModal.deadline')} />
+                          <span className="text-sm text-[var(--ink)]">{t('cron.settingsModal.deadline')}</span>
                         </div>
                         <input type="datetime-local" value={deadline} onChange={e => setDeadline(e.target.value)}
                           onClick={e => e.stopPropagation()}
@@ -299,18 +301,18 @@ function CronTaskSettingsForm({
                       <div className="flex cursor-pointer items-center justify-between border-b border-[var(--line)] px-3 py-2.5"
                         onClick={() => setUseMaxExecutions(!useMaxExecutions)}>
                         <div className="flex items-center gap-2.5">
-                          <Checkbox checked={useMaxExecutions} onChange={setUseMaxExecutions} label="执行次数" />
-                          <span className="text-sm text-[var(--ink)]">执行次数</span>
+                          <Checkbox checked={useMaxExecutions} onChange={setUseMaxExecutions} label={t('cron.settingsModal.maxExecutions')} />
+                          <span className="text-sm text-[var(--ink)]">{t('cron.settingsModal.maxExecutions')}</span>
                         </div>
                         <div className="flex items-center gap-1.5" onClick={e => e.stopPropagation()}>
                           <input type="number" value={maxExecutions} onChange={e => setMaxExecutions(parseInt(e.target.value, 10) || 1)}
                             min={1} max={999}
                             className={`w-16 rounded-md border border-[var(--line)] bg-[var(--paper)] px-2 py-1 text-center text-sm text-[var(--ink)] focus:border-[var(--accent)] focus:outline-none ${!useMaxExecutions ? 'opacity-50' : ''}`} />
-                          <span className={`text-sm text-[var(--ink-secondary)] ${!useMaxExecutions ? 'opacity-50' : ''}`}>次</span>
+                          <span className={`text-sm text-[var(--ink-secondary)] ${!useMaxExecutions ? 'opacity-50' : ''}`}>{t('cron.settingsModal.timesSuffix')}</span>
                         </div>
                       </div>
                     </div>
-                    <p className="text-sm text-[var(--ink-muted)]">可多选，满足任一条件时任务将自动停止</p>
+                    <p className="text-sm text-[var(--ink-muted)]">{t('cron.settingsModal.conditionalHint')}</p>
                   </>
                 )}
 
@@ -319,8 +321,8 @@ function CronTaskSettingsForm({
                   <div className="flex cursor-pointer items-center justify-between rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2.5"
                     onClick={() => setAiCanExit(!aiCanExit)}>
                     <div className="flex items-center gap-2.5">
-                      <Checkbox checked={aiCanExit} onChange={setAiCanExit} label="允许 AI 自主结束任务" />
-                      <span className="text-sm text-[var(--ink)]">允许 AI 自主结束任务</span>
+                      <Checkbox checked={aiCanExit} onChange={setAiCanExit} label={t('cron.settingsModal.aiCanExit')} />
+                      <span className="text-sm text-[var(--ink)]">{t('cron.settingsModal.aiCanExit')}</span>
                     </div>
                   </div>
                 )}
@@ -330,16 +332,16 @@ function CronTaskSettingsForm({
 
           {/* ── 任务通知 ── */}
           <div>
-            <SectionHeader icon={Bell}>任务通知</SectionHeader>
+            <SectionHeader icon={Bell}>{t('cron.settingsModal.notifications')}</SectionHeader>
             <div className="mt-3 space-y-3">
               <div className="flex items-center justify-between rounded-lg border border-[var(--line)] bg-[var(--paper)] px-4 py-3">
-                <span className="text-sm text-[var(--ink)]">每次执行完即发送通知</span>
+                <span className="text-sm text-[var(--ink)]">{t('cron.settingsModal.notifyOnCompletion')}</span>
                 <ToggleSwitch enabled={notifyEnabled} onChange={setNotifyEnabled} />
               </div>
               {notifyEnabled && hasChannels && (
                 <div className="space-y-2">
-                  <label className="text-sm font-medium text-[var(--ink)]">投递渠道</label>
-                  <CustomSelect value={deliveryBotId} options={deliveryOptions} onChange={setDeliveryBotId} placeholder="桌面通知（默认）" />
+                  <label className="text-sm font-medium text-[var(--ink)]">{t('cron.settingsModal.deliveryChannel')}</label>
+                  <CustomSelect value={deliveryBotId} options={deliveryOptions} onChange={setDeliveryBotId} placeholder={t('cron.settingsModal.desktopDefault')} />
                 </div>
               )}
             </div>
@@ -358,10 +360,10 @@ function CronTaskSettingsForm({
 
         {/* Footer */}
         <div className="flex shrink-0 items-center justify-end gap-2.5 border-t border-[var(--line)] px-6 py-3.5">
-          <button onClick={onClose} className="rounded-lg px-4 py-2 text-sm font-medium text-[var(--ink-muted)] transition hover:bg-[var(--paper-inset)]">取消</button>
+          <button onClick={onClose} className="rounded-lg px-4 py-2 text-sm font-medium text-[var(--ink-muted)] transition hover:bg-[var(--paper-inset)]">{t('cron.settingsModal.cancel')}</button>
           <button onClick={handleConfirm} disabled={!isValid}
             className="rounded-lg bg-[var(--accent)] px-5 py-2 text-sm font-medium text-white transition hover:bg-[var(--accent-warm-hover)] disabled:cursor-not-allowed disabled:opacity-50">
-            确认
+            {t('cron.settingsModal.confirm')}
           </button>
         </div>
       </div>
