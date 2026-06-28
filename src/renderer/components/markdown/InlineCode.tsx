@@ -11,6 +11,7 @@ import { useAudioPlayer } from '@/hooks/useAudioPlayer';
 import { looksLikeFilePath } from '@/utils/pathDetection';
 import { resolveAgainstWorkspace, resolveFileActionTarget } from '@/utils/workspaceFileLinks';
 import { Play, Pause } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 
 interface InlineCodeProps {
     children: React.ReactNode;
@@ -32,6 +33,7 @@ function extractText(node: React.ReactNode): string {
 
 /** Inline play/pause button for audio file paths */
 function AudioPlayButton({ filePath }: { filePath: string }) {
+    const { t } = useTranslation('app');
     const { isPlaying, toggle } = useAudioPlayer(filePath);
 
     return (
@@ -39,7 +41,7 @@ function AudioPlayButton({ filePath }: { filePath: string }) {
             type="button"
             onClick={(e) => { e.preventDefault(); e.stopPropagation(); toggle(); }}
             className="ml-1 inline-flex size-[18px] shrink-0 items-center justify-center rounded-full bg-[var(--accent)] text-white transition-colors hover:bg-[var(--accent-warm-hover)] align-middle"
-            title={isPlaying ? '暂停' : '播放音频'}
+            title={isPlaying ? t('inlineCode.pause') : t('inlineCode.playAudio')}
         >
             {isPlaying
                 ? <Pause className="size-2.5 fill-current" />
@@ -50,6 +52,7 @@ function AudioPlayButton({ filePath }: { filePath: string }) {
 }
 
 export default function InlineCode({ children }: InlineCodeProps) {
+    const { t } = useTranslation('app');
     const fileAction = useFileAction(); // null outside Chat
     const text = extractText(children);
 
@@ -103,7 +106,9 @@ export default function InlineCode({ children }: InlineCodeProps) {
             className={INTERACTIVE_CLASS}
             onClick={handleClick}
             onContextMenu={handleContextMenu}
-            title={pathInfo.type === 'dir' ? `文件夹: ${text}` : `文件: ${text}`}
+            title={pathInfo.type === 'dir'
+                ? t('inlineCode.folderTitle', { path: text })
+                : t('inlineCode.fileTitle', { path: text })}
         >
             {children}
         </code>

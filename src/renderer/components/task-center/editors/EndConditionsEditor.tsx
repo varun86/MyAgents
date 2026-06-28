@@ -2,6 +2,7 @@
 // conditional + deadline / maxExecutions / aiCanExit). Used by the dispatch
 // dialog and the task detail overlay edit mode.
 
+import { useTranslation } from 'react-i18next';
 import { Checkbox, toLocalDateTimeString } from './controls';
 
 export type EndConditionMode = 'forever' | 'conditional';
@@ -32,6 +33,7 @@ export function EndConditionsEditor({
   setAiCanExit,
   disabled,
 }: EndConditionsEditorProps) {
+  const { t } = useTranslation('task');
   return (
     <div className="space-y-3.5">
       <div className="flex gap-1.5 rounded-[var(--radius-md)] bg-[var(--paper-inset)] p-1">
@@ -45,7 +47,7 @@ export function EndConditionsEditor({
               : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
           }`}
         >
-          永久运行
+          {t('endConditions.forever')}
         </button>
         <button
           type="button"
@@ -57,7 +59,7 @@ export function EndConditionsEditor({
               : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
           }`}
         >
-          条件停止
+          {t('endConditions.conditional')}
         </button>
       </div>
 
@@ -81,7 +83,7 @@ export function EndConditionsEditor({
                     v ? toLocalDateTimeString(new Date(Date.now() + 86400_000)) : '',
                   )
                 }
-                label="截止时间"
+                label={t('endConditions.deadline')}
               />
               <input
                 type="datetime-local"
@@ -105,7 +107,7 @@ export function EndConditionsEditor({
                 checked={!!maxExecutions}
                 disabled={disabled}
                 onChange={(v) => setMaxExecutions(v ? '10' : '')}
-                label="执行次数"
+                label={t('endConditions.maxExecutions')}
               />
               <div
                 className="flex items-center gap-1.5"
@@ -127,13 +129,13 @@ export function EndConditionsEditor({
                     !maxExecutions ? 'opacity-50' : ''
                   }`}
                 >
-                  次
+                  {t('endConditions.timesSuffix')}
                 </span>
               </div>
             </div>
           </div>
           <p className="text-sm text-[var(--ink-muted)]">
-            可多选，满足任一条件时任务将自动停止
+            {t('endConditions.conditionalHint')}
           </p>
         </>
       )}
@@ -149,7 +151,7 @@ export function EndConditionsEditor({
           checked={aiCanExit}
           onChange={setAiCanExit}
           disabled={disabled}
-          label="允许 AI 自主结束任务"
+          label={t('endConditions.aiCanExit')}
         />
       </div>
     </div>

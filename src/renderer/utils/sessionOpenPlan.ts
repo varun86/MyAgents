@@ -1,4 +1,4 @@
-import { type RuntimeType } from '../../shared/types/runtime';
+import { type RuntimeSource, type RuntimeType } from '../../shared/types/runtime';
 
 // Single source of truth lives in shared/ (consumed by sidecar too). Re-exported
 // here so existing renderer callers (`@/utils/sessionOpenPlan`) keep working.
@@ -14,6 +14,15 @@ export interface SessionOpenActivationState {
   task_id: string | null;
 }
 
+export interface SessionRuntimeIdentity {
+  runtime: RuntimeType;
+  /**
+   * Missing source is legacy-compatible. For non-builtin runtimes it means the
+   * user-managed/system CLI source; Managed Codex writes `managed-provider`.
+   */
+  runtimeSource?: RuntimeSource;
+}
+
 export type SessionOpenPlan =
   | { type: 'jump-to-tab'; tabId: string }
   | {
@@ -21,6 +30,8 @@ export type SessionOpenPlan =
     reason: 'runtime-mismatch' | 'current-cron-running';
     targetRuntime?: RuntimeType;
     currentRuntime?: RuntimeType;
+    targetRuntimeSource?: RuntimeSource;
+    currentRuntimeSource?: RuntimeSource;
   }
   | { type: 'attach-existing-sidecar'; taskId: string }
   | { type: 'switch-current-tab' };
@@ -31,8 +42,36 @@ export interface SessionOpenPlanInput {
   multiAgentRuntime: boolean;
   currentRuntime?: RuntimeType;
   targetRuntime?: RuntimeType;
+  currentRuntimeIdentity?: SessionRuntimeIdentity;
+  targetRuntimeIdentity?: SessionRuntimeIdentity;
   targetActivation?: SessionOpenActivationState | null;
   currentTabCronRunning: boolean;
+}
+
+function normalizeIdentity(
+  runtime: RuntimeType | undefined,
+  runtimeSource: RuntimeSource | undefined,
+): SessionRuntimeIdentity | undefined {
+  if (!runtime) return undefined;
+  if (runtime === 'builtin') return { runtime };
+  return { runtime, runtimeSource: runtimeSource ?? 'system-cli' };
+}
+
+function resolveIdentity(
+  identity: SessionRuntimeIdentity | undefined,
+  runtime: RuntimeType | undefined,
+): SessionRuntimeIdentity | undefined {
+  return identity ?? normalizeIdentity(runtime, undefined);
+}
+
+function sameIdentity(a: SessionRuntimeIdentity, b: SessionRuntimeIdentity): boolean {
+  return a.runtime === b.runtime
+    && (a.runtimeSource ?? (a.runtime === 'builtin' ? undefined : 'system-cli'))
+      === (b.runtimeSource ?? (b.runtime === 'builtin' ? undefined : 'system-cli'));
+}
+
+function hasManagedProviderSource(identity: SessionRuntimeIdentity | undefined): boolean {
+  return identity?.runtimeSource === 'managed-provider';
 }
 
 export function planSessionOpen(input: SessionOpenPlanInput): SessionOpenPlan {
@@ -52,17 +91,25 @@ export function planSessionOpen(input: SessionOpenPlanInput): SessionOpenPlan {
     return { type: 'attach-existing-sidecar', taskId: input.targetActivation.task_id };
   }
 
+  const currentIdentity = resolveIdentity(input.currentRuntimeIdentity, input.currentRuntime);
+  const targetIdentity = resolveIdentity(input.targetRuntimeIdentity, input.targetRuntime);
+  const crossesRuntimeIdentity = !!currentIdentity
+    && !!targetIdentity
+    && !sameIdentity(currentIdentity, targetIdentity);
+  const managedProviderBoundary = hasManagedProviderSource(currentIdentity)
+    || hasManagedProviderSource(targetIdentity);
+
   if (
-    input.multiAgentRuntime
-    && input.currentRuntime
-    && input.targetRuntime
-    && input.currentRuntime !== input.targetRuntime
+    crossesRuntimeIdentity
+    && (input.multiAgentRuntime || managedProviderBoundary)
   ) {
     return {
       type: 'open-new-tab',
       reason: 'runtime-mismatch',
-      currentRuntime: input.currentRuntime,
-      targetRuntime: input.targetRuntime,
+      currentRuntime: currentIdentity.runtime,
+      targetRuntime: targetIdentity.runtime,
+      ...(currentIdentity.runtimeSource ? { currentRuntimeSource: currentIdentity.runtimeSource } : {}),
+      ...(targetIdentity.runtimeSource ? { targetRuntimeSource: targetIdentity.runtimeSource } : {}),
     };
   }
 

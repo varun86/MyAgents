@@ -5,6 +5,7 @@
 
 import { ChevronDown, ChevronUp } from 'lucide-react';
 import { memo, useCallback, useEffect, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 
 import type { Message } from '@/types/chat';
 
@@ -159,6 +160,7 @@ interface AgentStatusBarProps {
 // 不显示 icon prefix、不显示 elapsed 时间数字、不区分 sync/bg 计数——
 // 信息密度刚好够「瞥一眼知有几件事」，详情留给展开态。
 const AgentStatusBar = memo(function AgentStatusBar({ summary, expanded, onToggle }: AgentStatusBarProps) {
+  const { t } = useTranslation('app');
   const hasTodos = summary.todoTotal > 0;
   const hasSubagents = summary.subagentRunning > 0;
 
@@ -167,7 +169,7 @@ const AgentStatusBar = memo(function AgentStatusBar({ summary, expanded, onToggl
       type="button"
       onClick={onToggle}
       aria-expanded={expanded}
-      aria-label={expanded ? '收起 Agent 状态面板' : '展开 Agent 状态面板'}
+      aria-label={expanded ? t('agentStatus.collapse') : t('agentStatus.expand')}
       className={`flex items-center gap-4 px-3 py-2 text-xs text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)]/40 ${
         expanded ? 'border-t border-[var(--line-subtle)]' : ''
       }`}

@@ -15,6 +15,7 @@ use crate::sidecar::ManagedSidecarManager;
 use crate::{ulog_debug, ulog_info, ulog_warn};
 
 use super::adapter::push_text_preferring_stream;
+use super::health::{self, HealthManager};
 use super::router::{EnsureSidecarPrep, SessionRouter};
 use super::types::{ActiveHours, HeartbeatConfig, PendingCronEvent, WakeReason};
 use super::{AnyAdapter, PeerLocks};
@@ -136,6 +137,7 @@ impl HeartbeatRunner {
         adapter: Arc<AnyAdapter>,
         app_handle: AppHandle<R>,
         peer_locks: PeerLocks,
+        health: Arc<HealthManager>,
         agent_id: String,
         workspace_path: String,
     ) {
@@ -252,6 +254,7 @@ impl HeartbeatRunner {
                         &adapter,
                         &app_handle,
                         &peer_locks,
+                        &health,
                         &agent_id,
                         &workspace_path,
                     ).await;
@@ -277,6 +280,7 @@ impl HeartbeatRunner {
                         &adapter,
                         &app_handle,
                         &peer_locks,
+                        &health,
                         &agent_id,
                         &workspace_path,
                     ).await;
@@ -308,6 +312,7 @@ impl HeartbeatRunner {
         adapter: &Arc<AnyAdapter>,
         app_handle: &AppHandle<R>,
         peer_locks: &PeerLocks,
+        health: &Arc<HealthManager>,
         agent_id: &str,
         workspace_path: &str,
     ) -> bool {
@@ -397,11 +402,14 @@ impl HeartbeatRunner {
         let current_runtime = self.runtime.read().await.clone();
 
         {
-            let drift_result = router.lock().await.check_and_reset_on_runtime_drift(
-                &session_key,
-                &current_runtime,
-                sidecar_manager,
-            );
+            let drift_result = {
+                let mut router_guard = router.lock().await;
+                router_guard.check_and_reset_on_runtime_drift(
+                    &session_key,
+                    &current_runtime,
+                    sidecar_manager,
+                )
+            };
             if let Some((old_id, new_id)) = drift_result {
                 ulog_info!(
                     "[heartbeat] Runtime drift reset peer {} before heartbeat: {} -> {} ({})",
@@ -410,6 +418,12 @@ impl HeartbeatRunner {
                     &new_id[..8.min(new_id.len())],
                     current_runtime,
                 );
+                let _ = health::persist_router_active_sessions(
+                    health,
+                    router,
+                    "heartbeat-runtime-drift",
+                )
+                .await;
             }
         }
 
@@ -441,6 +455,12 @@ impl HeartbeatRunner {
                             let mut router_guard = router.lock().await;
                             router_guard.commit_ensure_sidecar(&session_key, &info, port);
                         }
+                        let _ = health::persist_router_active_sessions(
+                            health,
+                            router,
+                            "heartbeat-ensure-sidecar",
+                        )
+                        .await;
                         (port, is_new)
                     }
                     Err(e) => {
@@ -492,6 +512,7 @@ impl HeartbeatRunner {
             let mut router_guard = router.lock().await;
             router_guard.touch_session_activity(&session_key);
         }
+        let _ = health::persist_router_active_sessions(health, router, "heartbeat-touch").await;
 
         // Build heartbeat prompt — a FIXED template.
         // The actual checklist lives in HEARTBEAT.md in the workspace root.

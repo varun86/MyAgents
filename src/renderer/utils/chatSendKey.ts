@@ -10,6 +10,8 @@
  * 'enter', preserving the historical default).
  */
 
+import { i18n } from '@/i18n';
+
 /** How a plain/modified Enter is interpreted in a chat composer. */
 export type ChatSendShortcut = 'enter' | 'modEnter';
 
@@ -65,7 +67,7 @@ export function sendKeyHint(
 ): { label: string; shortcut: string } {
   const mod = isMac ? '⌘' : 'Ctrl';
   return {
-    label: '发送',
+    label: String(i18n.t('chat:input.send')),
     shortcut: pref === 'modEnter' ? `${mod} Enter` : 'Enter',
   };
 }

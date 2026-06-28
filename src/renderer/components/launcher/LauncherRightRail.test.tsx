@@ -5,6 +5,7 @@ import { ToastProvider } from '@/components/Toast';
 import type { SessionMetadata } from '@/api/sessionClient';
 import type { Project } from '@/config/types';
 import type { TaskCenterData } from '@/hooks/useTaskCenterData';
+import { i18n } from '@/i18n';
 
 import LauncherRightRail from './LauncherRightRail';
 
@@ -129,6 +130,28 @@ describe('LauncherRightRail', () => {
         expect(screen.getByRole('button', { name: /展开更多 2 个/ })).toBeInTheDocument();
         expect(screen.queryByText('Project 8')).not.toBeInTheDocument();
         expect(scrollRoot.scrollTo).toHaveBeenCalledWith({ top: 0, behavior: 'auto' });
+    });
+
+    it('renders right rail chrome in English when the UI language is English', async () => {
+        await i18n.changeLanguage('en-US');
+        const projects = [
+            project(1),
+            project(2),
+            project(3),
+            project(4),
+            project(5),
+            project(6),
+            project(7),
+            project(8),
+        ];
+
+        renderRail({ projects, sessions: [] });
+
+        expect(screen.getByRole('heading', { name: 'Agent Workspaces' })).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: /Show 2 more/ })).toBeInTheDocument();
+        expect(screen.getByRole('heading', { name: 'Chat History' })).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: /Filter chat history: All/ })).toBeInTheDocument();
+        expect(screen.getByText('No chat history')).toBeInTheDocument();
     });
 
     it('shows six collapsed workspaces before revealing the expand button', () => {

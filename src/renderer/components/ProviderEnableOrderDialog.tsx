@@ -1,5 +1,6 @@
 import React, { useCallback, useMemo } from 'react';
 import { ArrowDown, ArrowUp, GripVertical, X } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 import {
     closestCenter,
     DndContext,
@@ -41,6 +42,7 @@ interface ProviderOrderRowProps {
 }
 
 function ProviderOrderRow({ provider, index, isLast, enabled, onMove, onToggle }: ProviderOrderRowProps) {
+    const { t } = useTranslation('settings');
     const {
         attributes,
         listeners,
@@ -66,8 +68,8 @@ function ProviderOrderRow({ provider, index, isLast, enabled, onMove, onToggle }
                 {...attributes}
                 {...listeners}
                 className="rounded-md p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] active:cursor-grabbing"
-                title="拖拽排序"
-                aria-label={`拖拽排序 ${provider.name}`}
+                title={t('providers.order.drag')}
+                aria-label={t('providers.order.dragProvider', { name: provider.name })}
             >
                 <GripVertical className="h-4 w-4" />
             </button>
@@ -77,7 +79,7 @@ function ProviderOrderRow({ provider, index, isLast, enabled, onMove, onToggle }
                     onClick={() => onMove(provider.id, -1)}
                     disabled={index === 0}
                     className="rounded-md p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] disabled:opacity-35"
-                    title="上移"
+                    title={t('providers.order.moveUp')}
                 >
                     <ArrowUp className="h-3.5 w-3.5" />
                 </button>
@@ -86,7 +88,7 @@ function ProviderOrderRow({ provider, index, isLast, enabled, onMove, onToggle }
                     onClick={() => onMove(provider.id, 1)}
                     disabled={isLast}
                     className="rounded-md p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] disabled:opacity-35"
-                    title="下移"
+                    title={t('providers.order.moveDown')}
                 >
                     <ArrowDown className="h-3.5 w-3.5" />
                 </button>
@@ -98,13 +100,13 @@ function ProviderOrderRow({ provider, index, isLast, enabled, onMove, onToggle }
                         {provider.cloudProvider}
                     </span>
                     <span className="shrink-0 rounded bg-[var(--paper-inset)] px-1.5 py-0.5 text-xs font-medium text-[var(--ink-muted)]">
-                        {provider.type === 'subscription' ? '订阅' : 'API'}
+                        {provider.type === 'subscription' ? t('providers.order.subscription') : t('providers.order.api')}
                     </span>
                 </div>
                 <p className="mt-0.5 truncate text-xs text-[var(--ink-muted)]">
                     {provider.models.length > 0
                         ? provider.models.map(model => model.modelName || model.model).join(', ')
-                        : '暂无模型'}
+                        : t('providers.noModels')}
                 </p>
             </div>
             <button
@@ -113,7 +115,7 @@ function ProviderOrderRow({ provider, index, isLast, enabled, onMove, onToggle }
                 aria-checked={enabled}
                 onClick={() => onToggle(provider.id, !enabled)}
                 className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full border-2 border-transparent transition-colors ${enabled ? 'bg-[var(--accent)]' : 'bg-[var(--line-strong)]'}`}
-                title={enabled ? '已启用' : '已禁用'}
+                title={enabled ? t('providers.order.enabled') : t('providers.order.disabled')}
             >
                 <span className={`pointer-events-none inline-block h-4 w-4 rounded-full bg-[var(--toggle-thumb)] shadow-sm transition-transform ${enabled ? 'translate-x-5' : 'translate-x-0.5'}`} />
             </button>
@@ -130,6 +132,7 @@ export default function ProviderEnableOrderDialog({
     onClose,
     onSave,
 }: ProviderEnableOrderDialogProps) {
+    const { t } = useTranslation('settings');
     const providerRows = useMemo(() => {
         const byId = new Map(providers.map(provider => [provider.id, provider] as const));
         return normalizeProviderOrder(providers.map(provider => provider.id), providerOrderDraft)
@@ -197,15 +200,15 @@ export default function ProviderEnableOrderDialog({
                 <div className="flex-shrink-0 px-6 pb-4 pt-6">
                     <div className="flex items-center justify-between">
                         <div>
-                            <h3 className="text-lg font-semibold text-[var(--ink)]">启用和排序</h3>
+                            <h3 className="text-lg font-semibold text-[var(--ink)]">{t('providers.order.title')}</h3>
                             <p className="mt-1 text-xs text-[var(--ink-muted)]">
-                                控制可被对话、任务和聊天机器人使用的供应商，以及它们在模型选择器中的顺序。
+                                {t('providers.order.description')}
                             </p>
                         </div>
                         <button
                             onClick={onClose}
                             className="rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)]"
-                            aria-label="关闭"
+                            aria-label={t('providers.order.close')}
                         >
                             <X className="h-5 w-5" />
                         </button>
@@ -216,10 +219,10 @@ export default function ProviderEnableOrderDialog({
                     <div className="mb-3 flex items-center justify-between rounded-xl border border-[var(--line)] bg-[var(--paper)] px-3 py-2">
                         <div>
                             <p className="text-sm font-medium text-[var(--ink)]">
-                                已启用 {Math.max(0, enabledCount)} / {providerRows.length}
+                                {t('providers.order.enabledCount', { enabled: Math.max(0, enabledCount), total: providerRows.length })}
                             </p>
                             <p className="text-xs text-[var(--ink-muted)]">
-                                禁用的供应商会从设置列表和模型选择器隐藏；重新启用会保留已有配置。
+                                {t('providers.order.description2')}
                             </p>
                         </div>
                         <button
@@ -227,7 +230,7 @@ export default function ProviderEnableOrderDialog({
                             onClick={toggleAllProvidersEnabled}
                             className="rounded-lg border border-[var(--line)] px-3 py-1.5 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)]"
                         >
-                            {allEnabled ? '取消全选' : '全选'}
+                            {allEnabled ? t('providers.order.clearAll') : t('providers.order.selectAll')}
                         </button>
                     </div>
                     <DndContext
@@ -261,13 +264,13 @@ export default function ProviderEnableOrderDialog({
                         onClick={onClose}
                         className="rounded-lg border border-[var(--line)] px-4 py-2.5 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)]"
                     >
-                        取消
+                        {t('providers.order.cancel')}
                     </button>
                     <button
                         onClick={onSave}
                         className="rounded-lg bg-[var(--button-primary-bg)] px-4 py-2.5 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)]"
                     >
-                        保存
+                        {t('providers.order.save')}
                     </button>
                 </div>
             </div>

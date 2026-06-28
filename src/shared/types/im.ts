@@ -104,6 +104,7 @@ export interface ImBotConfig {
   groupToolsDeny?: string[];
 
   // ===== OpenClaw Channel Plugin =====
+  /** Install plugin ID used to locate ~/.myagents/openclaw-plugins/<pluginId>. */
   openclawPluginId?: string;
   openclawNpmSpec?: string;
   openclawPluginConfig?: Record<string, string>;
@@ -215,6 +216,7 @@ export interface ImActiveSession {
   sourceType: ImSourceType;
   workspacePath: string;
   messageCount: number;
+  metadataBirthPending?: boolean;
   lastActive: string;         // ISO timestamp
 }
 

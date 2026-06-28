@@ -4,6 +4,7 @@
  */
 import { Plus, Bot, Loader2, ChevronLeft } from 'lucide-react';
 import { useCallback, useEffect, useState, useRef } from 'react';
+import { useTranslation } from 'react-i18next';
 
 import { track } from '@/analytics';
 import { apiGetJson, apiPostJson } from '@/api/apiFetch';
@@ -44,6 +45,7 @@ export default function GlobalAgentsPanel({
     /** When set on first mount, open the matching agent's detail view directly. */
     initialSelect?: CapabilityInitialSelect;
 }) {
+    const { t } = useTranslation('settings');
     const toast = useToast();
     const toastRef = useRef(toast);
     toastRef.current = toast;
@@ -96,11 +98,11 @@ export default function GlobalAgentsPanel({
         const next = viewStateForSelect(initialSelect);
         if (!next) return;
         if (isAnyEditingRef.current()) {
-            toastRef.current.warning('请先保存或取消编辑');
+            toastRef.current.warning(t('agentSettings.globalAgents.unsavedWarning'));
             return;
         }
         setViewState(next);
-    }, [initialSelect]);
+    }, [initialSelect, t]);
 
     const loadData = useCallback(async () => {
         setLoading(true);
@@ -118,11 +120,11 @@ export default function GlobalAgentsPanel({
             setSyncConflicts(syncCheckRes?.conflictFolders ?? []);
         } catch {
             if (!isMountedRef.current) return;
-            toastRef.current.error('加载失败');
+            toastRef.current.error(t('agentSettings.common.loadFailed'));
         } finally {
             if (isMountedRef.current) setLoading(false);
         }
-    }, []);
+    }, [t]);
 
     useEffect(() => {
         loadData();
@@ -130,11 +132,11 @@ export default function GlobalAgentsPanel({
 
     const handleBackToList = useCallback(() => {
         if (isAnyEditing()) {
-            toastRef.current.warning('请先保存或取消编辑');
+            toastRef.current.warning(t('agentSettings.globalAgents.unsavedWarning'));
             return;
         }
         setViewState({ type: 'list' });
-    }, [isAnyEditing]);
+    }, [isAnyEditing, t]);
 
     const handleQuickCreateAgent = useCallback(async (tempName: string) => {
         try {
@@ -148,12 +150,12 @@ export default function GlobalAgentsPanel({
                 setViewState({ type: 'agent-detail', name: response.folderName || tempName, isNewAgent: true });
                 setRefreshKey(k => k + 1);
             } else {
-                toastRef.current.error(response.error || '创建失败');
+                toastRef.current.error(response.error || t('agentSettings.common.createFailed'));
             }
         } catch {
-            toastRef.current.error('创建失败');
+            toastRef.current.error(t('agentSettings.common.createFailed'));
         }
-    }, []);
+    }, [t]);
 
     const doSync = useCallback(async (mode: 'skip' | 'overwrite') => {
         try {
@@ -168,27 +170,27 @@ export default function GlobalAgentsPanel({
 
             if (response.success) {
                 const parts: string[] = [];
-                if (response.synced > 0) parts.push(`新增 ${response.synced}`);
-                if (response.overwritten > 0) parts.push(`覆盖 ${response.overwritten}`);
-                if (response.skipped > 0) parts.push(`跳过 ${response.skipped}`);
-                if (response.failed > 0) parts.push(`失败 ${response.failed}`);
+                if (response.synced > 0) parts.push(t('agentSettings.globalAgents.syncAdded', { count: response.synced }));
+                if (response.overwritten > 0) parts.push(t('agentSettings.globalAgents.syncOverwritten', { count: response.overwritten }));
+                if (response.skipped > 0) parts.push(t('agentSettings.globalAgents.syncSkipped', { count: response.skipped }));
+                if (response.failed > 0) parts.push(t('agentSettings.globalAgents.syncFailedCount', { count: response.failed }));
 
                 if (response.failed > 0) {
-                    toastRef.current.warning(parts.join('，'));
+                    toastRef.current.warning(parts.join(t('agentSettings.globalAgents.syncSeparator')));
                 } else if (parts.length > 0) {
-                    toastRef.current.success(parts.join('，'));
+                    toastRef.current.success(parts.join(t('agentSettings.globalAgents.syncSeparator')));
                 } else {
-                    toastRef.current.info('没有可同步的 Agent');
+                    toastRef.current.info(t('agentSettings.globalAgents.noSyncableAgents'));
                 }
                 setRefreshKey(k => k + 1);
             } else {
-                toastRef.current.error('同步失败');
+                toastRef.current.error(t('agentSettings.globalAgents.syncFailed'));
             }
         } catch {
-            toastRef.current.error('同步失败');
+            toastRef.current.error(t('agentSettings.globalAgents.syncFailed'));
         }
         setShowSyncConflictDialog(false);
-    }, []);
+    }, [t]);
 
     const handleSyncFromClaude = useCallback(async () => {
         if (syncConflicts.length > 0) {
@@ -219,14 +221,14 @@ export default function GlobalAgentsPanel({
                 }
                 setRefreshKey(k => k + 1);
             } else {
-                toastRef.current.error(response.error || '创建失败');
+                toastRef.current.error(response.error || t('agentSettings.common.createFailed'));
             }
         } catch {
-            toastRef.current.error('创建失败');
+            toastRef.current.error(t('agentSettings.common.createFailed'));
         } finally {
             setCreating(false);
         }
-    }, [newItemName, newItemDescription]);
+    }, [newItemName, newItemDescription, t]);
 
     const handleItemSaved = useCallback((autoClose?: boolean) => {
         setRefreshKey(k => k + 1);
@@ -257,7 +259,7 @@ export default function GlobalAgentsPanel({
                     className="flex items-center gap-1 text-sm text-[var(--ink-muted)] hover:text-[var(--ink)]"
                 >
                     <ChevronLeft className="h-4 w-4" />
-                    返回列表
+                    {t('agentSettings.globalAgents.backToList')}
                 </button>
                 <div className="rounded-xl border border-[var(--line)] bg-[var(--paper)] overflow-hidden" style={{ minHeight: '500px' }}>
                     <AgentDetailPanel
@@ -282,7 +284,7 @@ export default function GlobalAgentsPanel({
                 <div className="mb-4 flex items-center justify-between">
                     <div className="flex items-center gap-2">
                         <Bot className="h-5 w-5 text-[var(--ink-muted)]" />
-                        <h3 className="text-base font-semibold text-[var(--ink)]">用户 Agent</h3>
+                        <h3 className="text-base font-semibold text-[var(--ink)]">{t('agentSettings.globalAgents.title')}</h3>
                         <span className="text-xs text-[var(--ink-muted)]">({agents.length})</span>
                     </div>
                     <div className="flex items-center gap-2">
@@ -291,7 +293,7 @@ export default function GlobalAgentsPanel({
                                 onClick={handleSyncFromClaude}
                                 className="flex items-center gap-1 rounded-lg border border-[var(--line)] px-3 py-1.5 text-sm text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
                             >
-                                从 Claude Code 同步 ({syncableCount})
+                                {t('agentSettings.globalAgents.syncFromClaude', { count: syncableCount })}
                             </button>
                         )}
                         <button
@@ -302,7 +304,7 @@ export default function GlobalAgentsPanel({
                             className="flex items-center gap-1 rounded-lg bg-[var(--button-primary-bg)] px-3 py-1.5 text-sm font-medium text-[var(--button-primary-text)] hover:bg-[var(--button-primary-bg-hover)]"
                         >
                             <Plus className="h-4 w-4" />
-                            新建
+                            {t('agentSettings.common.new')}
                         </button>
                     </div>
                 </div>
@@ -319,9 +321,9 @@ export default function GlobalAgentsPanel({
                 ) : (
                     <div className="rounded-xl border border-dashed border-[var(--line)] bg-[var(--paper-inset)]/30 py-8 text-center">
                         <Bot className="mx-auto h-10 w-10 text-[var(--ink-muted)]/30" />
-                        <p className="mt-2 text-sm text-[var(--ink-muted)]">还没有用户 Agent</p>
+                        <p className="mt-2 text-sm text-[var(--ink-muted)]">{t('agentSettings.globalAgents.emptyTitle')}</p>
                         <p className="mt-1 text-xs text-[var(--ink-muted)]">
-                            Sub-Agent 可以被 AI 自主委派来处理特定任务
+                            {t('agentSettings.globalAgents.emptyDescription')}
                         </p>
                     </div>
                 )}
@@ -330,7 +332,7 @@ export default function GlobalAgentsPanel({
             {/* Dialogs */}
             {showNewDialog && (
                 <CreateDialog
-                    title="新建 Agent"
+                    title={t('agentSettings.globalAgents.newAgentTitle')}
                     name={newItemName}
                     description={newItemDescription}
                     onNameChange={setNewItemName}
@@ -345,9 +347,9 @@ export default function GlobalAgentsPanel({
             {showSyncConflictDialog && (
                 <OverlayBackdrop className="z-50">
                     <div className="w-[420px] rounded-xl border border-[var(--line)] bg-[var(--paper)] p-6 shadow-xl">
-                        <h3 className="text-base font-semibold text-[var(--ink)]">同步冲突</h3>
+                        <h3 className="text-base font-semibold text-[var(--ink)]">{t('agentSettings.globalAgents.conflictTitle')}</h3>
                         <p className="mt-2 text-sm text-[var(--ink-muted)]">
-                            以下 {syncConflicts.length} 个 Agent 已存在，请选择处理方式：
+                            {t('agentSettings.globalAgents.conflictMessage', { count: syncConflicts.length })}
                         </p>
                         <div className="mt-3 max-h-32 overflow-y-auto rounded-lg bg-[var(--paper-inset)] p-2">
                             {syncConflicts.map(name => (
@@ -359,19 +361,19 @@ export default function GlobalAgentsPanel({
                                 onClick={() => setShowSyncConflictDialog(false)}
                                 className="rounded-lg border border-[var(--line)] px-3 py-1.5 text-sm text-[var(--ink-muted)] hover:bg-[var(--paper-inset)]"
                             >
-                                取消
+                                {t('agentSettings.common.cancel')}
                             </button>
                             <button
                                 onClick={() => doSync('skip')}
                                 className="rounded-lg border border-[var(--line)] px-3 py-1.5 text-sm text-[var(--ink)] hover:bg-[var(--paper-inset)]"
                             >
-                                跳过已存在
+                                {t('agentSettings.globalAgents.skipExisting')}
                             </button>
                             <button
                                 onClick={() => doSync('overwrite')}
                                 className="rounded-lg bg-[var(--button-primary-bg)] px-3 py-1.5 text-sm font-medium text-[var(--button-primary-text)] hover:bg-[var(--button-primary-bg-hover)]"
                             >
-                                全部覆盖
+                                {t('agentSettings.globalAgents.overwriteAll')}
                             </button>
                         </div>
                     </div>
@@ -379,7 +381,7 @@ export default function GlobalAgentsPanel({
             )}
 
             <p className="text-center text-xs text-[var(--ink-muted)]">
-                用户 Agent 存储在 ~/.myagents/agents/ 目录下，对所有项目生效
+                {t('agentSettings.globalAgents.storageHint')}
             </p>
         </div>
     );

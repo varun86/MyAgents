@@ -1,6 +1,8 @@
 // Channel platform selector — matches original PlatformSelect 2-column grid style
 // Includes promoted plugins and "install new plugin" dashed card
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import type { TFunction } from 'i18next';
+import { useTranslation } from 'react-i18next';
 import { Download, Loader2, Puzzle, Trash2 } from 'lucide-react';
 import { isTauriEnvironment } from '@/utils/browserMock';
 import { useToast } from '@/components/Toast';
@@ -20,11 +22,13 @@ interface PlatformEntry {
   plugin?: InstalledPlugin;
 }
 
-const STATIC_PLATFORMS: PlatformEntry[] = [
-  { id: 'telegram', name: 'Telegram', description: '通过 Telegram Bot 远程使用 AI Agent', icon: telegramIcon },
+function staticPlatforms(t: TFunction<'settings'>): PlatformEntry[] {
+  return [
+  { id: 'telegram', name: 'Telegram', description: t('agentSettings.channels.telegramDescription'), icon: telegramIcon },
   // 内置飞书已被官方 OpenClaw 插件替代（在 PROMOTED_PLUGINS 中），新用户不再显示
-  { id: 'dingtalk', name: '钉钉', description: '通过钉钉自建应用 Bot 远程使用 AI Agent', icon: dingtalkIcon },
-];
+  { id: 'dingtalk', name: '钉钉', description: t('agentSettings.channels.dingtalkDescription'), icon: dingtalkIcon },
+  ];
+}
 
 interface ChannelPlatformSelectProps {
   onSelect: (platform: ChannelType) => void;
@@ -32,6 +36,7 @@ interface ChannelPlatformSelectProps {
 }
 
 export default function ChannelPlatformSelect({ onSelect }: ChannelPlatformSelectProps) {
+  const { t } = useTranslation('settings');
   const [installedPlugins, setInstalledPlugins] = useState<InstalledPlugin[]>([]);
   const [loading, setLoading] = useState(true);
   const [pendingUninstall, setPendingUninstall] = useState<InstalledPlugin | null>(null);
@@ -66,14 +71,14 @@ export default function ChannelPlatformSelect({ onSelect }: ChannelPlatformSelec
       await invoke('cmd_uninstall_openclaw_plugin', { pluginId: pendingUninstall.pluginId });
       if (!isMountedRef.current) return;
       setInstalledPlugins(prev => prev.filter(p => p.pluginId !== pendingUninstall.pluginId));
-      toastRef.current.success(`已卸载 ${pendingUninstall.manifest?.name || pendingUninstall.pluginId}`);
+      toastRef.current.success(t('agentSettings.channels.uninstalled', { name: pendingUninstall.manifest?.name || pendingUninstall.pluginId }));
     } catch (err) {
       if (!isMountedRef.current) return;
       toastRef.current.error(String(err));
     } finally {
       if (isMountedRef.current) setPendingUninstall(null);
     }
-  }, [pendingUninstall]);
+  }, [pendingUninstall, t]);
 
   const handlePromotedClick = useCallback(async (promoted: typeof PROMOTED_PLUGINS[number]) => {
     const existing = installedPlugins.find(p => p.pluginId === promoted.pluginId);
@@ -83,7 +88,7 @@ export default function ChannelPlatformSelect({ onSelect }: ChannelPlatformSelec
     }
     if (!isTauriEnvironment()) return;
     setAutoInstalling(promoted.pluginId);
-    toastRef.current.info('首次启动正在安装插件，请稍等…');
+    toastRef.current.info(t('agentSettings.channels.firstInstall'));
     try {
       const { invoke } = await import('@tauri-apps/api/core');
       const result = await invoke<InstalledPlugin>('cmd_install_openclaw_plugin', { npmSpec: promoted.npmSpec });
@@ -92,11 +97,11 @@ export default function ChannelPlatformSelect({ onSelect }: ChannelPlatformSelec
       onSelect(`openclaw:${result.pluginId}` as ChannelType);
     } catch (err) {
       if (!isMountedRef.current) return;
-      toastRef.current.error(`安装失败: ${err}`);
+      toastRef.current.error(t('agentSettings.channels.installFailed', { message: String(err) }));
     } finally {
       if (isMountedRef.current) setAutoInstalling(null);
     }
-  }, [installedPlugins, onSelect]);
+  }, [installedPlugins, onSelect, t]);
 
   const handleInstallPlugin = useCallback(async () => {
     if (!installNpmSpec.trim() || !isTauriEnvironment()) return;
@@ -105,15 +110,15 @@ export default function ChannelPlatformSelect({ onSelect }: ChannelPlatformSelec
       const { invoke } = await import('@tauri-apps/api/core');
       const result = await invoke<InstalledPlugin>('cmd_install_openclaw_plugin', { npmSpec: installNpmSpec.trim() });
       setInstalledPlugins(prev => [...prev, result]);
-      toastRef.current.success(`已安装 ${result.manifest?.name || result.pluginId}`);
+      toastRef.current.success(t('agentSettings.channels.installed', { name: result.manifest?.name || result.pluginId }));
       setShowInstallInput(false);
       setInstallNpmSpec('');
     } catch (err) {
-      toastRef.current.error(`安装失败: ${err}`);
+      toastRef.current.error(t('agentSettings.channels.installFailed', { message: String(err) }));
     } finally {
       setInstalling(false);
     }
-  }, [installNpmSpec]);
+  }, [installNpmSpec, t]);
 
   const promotedIds = new Set(PROMOTED_PLUGINS.map(p => p.pluginId));
 
@@ -122,7 +127,7 @@ export default function ChannelPlatformSelect({ onSelect }: ChannelPlatformSelec
     .map(p => ({
       id: `openclaw:${p.pluginId}` as ChannelType,
       name: p.manifest?.name || p.pluginId,
-      description: p.manifest?.description || `社区插件 — ${p.npmSpec}`,
+      description: p.manifest?.description || t('agentSettings.channels.communityPluginDescription', { npmSpec: p.npmSpec }),
       iconElement: (
         <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-[var(--accent-warm-subtle)]">
           <Puzzle className="h-6 w-6 text-[var(--accent-warm)]" />
@@ -131,14 +136,14 @@ export default function ChannelPlatformSelect({ onSelect }: ChannelPlatformSelec
       plugin: p,
     }));
 
-  const allPlatforms = [...STATIC_PLATFORMS, ...pluginPlatforms];
+  const allPlatforms = [...staticPlatforms(t), ...pluginPlatforms];
 
   return (
     <div className="space-y-6">
       {/* Header */}
       <div>
-        <h2 className="text-lg font-semibold text-[var(--ink)]">选择平台</h2>
-        <p className="mt-0.5 text-xs text-[var(--ink-muted)]">选择要接入的聊天平台</p>
+        <h2 className="text-lg font-semibold text-[var(--ink)]">{t('agentSettings.channels.platformSelectTitle')}</h2>
+        <p className="mt-0.5 text-xs text-[var(--ink-muted)]">{t('agentSettings.channels.platformSelectDescription')}</p>
       </div>
 
       {/* Platform cards — 2-column grid matching original PlatformSelect */}
@@ -162,7 +167,7 @@ export default function ChannelPlatformSelect({ onSelect }: ChannelPlatformSelec
             {p.plugin && (
               <button
                 onClick={e => { e.stopPropagation(); setPendingUninstall(p.plugin!); }}
-                title="卸载插件"
+                title={t('agentSettings.channels.uninstallPlugin')}
                 className="absolute right-2 top-2 rounded-md p-1.5 text-[var(--ink-muted)] opacity-0 transition-all hover:bg-[var(--error-bg)] hover:text-[var(--error)] group-hover:opacity-100"
               >
                 <Trash2 className="h-3.5 w-3.5" />
@@ -209,8 +214,8 @@ export default function ChannelPlatformSelect({ onSelect }: ChannelPlatformSelec
             </div>
           )}
           <div className="text-center">
-            <p className="text-sm font-medium text-[var(--ink-muted)]">安装新插件</p>
-            <p className="mt-1 text-xs text-[var(--ink-subtle)]">从 npm 安装 OpenClaw 社区插件</p>
+            <p className="text-sm font-medium text-[var(--ink-muted)]">{t('agentSettings.channels.installNewPlugin')}</p>
+            <p className="mt-1 text-xs text-[var(--ink-subtle)]">{t('agentSettings.channels.installFromNpm')}</p>
           </div>
         </button>
       </div>
@@ -223,7 +228,7 @@ export default function ChannelPlatformSelect({ onSelect }: ChannelPlatformSelec
             value={installNpmSpec}
             onChange={e => setInstallNpmSpec(e.target.value)}
             onKeyDown={e => { if (e.key === 'Enter') handleInstallPlugin(); }}
-            placeholder="npm 包名，例如 @openclaw/plugin-xxx"
+            placeholder={t('agentSettings.channels.installPlaceholder')}
             className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 text-sm text-[var(--ink)] placeholder:text-[var(--ink-subtle)] focus:border-[var(--accent)] focus:outline-none"
             autoFocus
           />
@@ -232,13 +237,13 @@ export default function ChannelPlatformSelect({ onSelect }: ChannelPlatformSelec
             disabled={!installNpmSpec.trim() || installing}
             className="rounded-lg bg-[var(--button-primary-bg)] px-4 py-2 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:opacity-50"
           >
-            {installing ? <Loader2 className="h-4 w-4 animate-spin" /> : '安装'}
+            {installing ? <Loader2 className="h-4 w-4 animate-spin" /> : t('agentSettings.channels.install')}
           </button>
           <button
             onClick={() => { setShowInstallInput(false); setInstallNpmSpec(''); }}
             className="rounded-lg border border-[var(--line)] px-3 py-2 text-sm text-[var(--ink-muted)] hover:bg-[var(--paper-inset)]"
           >
-            取消
+            {t('agentSettings.channels.cancel')}
           </button>
         </div>
       )}
@@ -246,9 +251,9 @@ export default function ChannelPlatformSelect({ onSelect }: ChannelPlatformSelec
       {/* Uninstall confirmation */}
       {pendingUninstall && (
         <ConfirmDialog
-          title="卸载插件"
-          message={`确定要卸载「${pendingUninstall.manifest?.name || pendingUninstall.pluginId}」吗？`}
-          confirmText="卸载"
+          title={t('agentSettings.channels.uninstallConfirmTitle')}
+          message={t('agentSettings.channels.uninstallConfirmMessage', { name: pendingUninstall.manifest?.name || pendingUninstall.pluginId })}
+          confirmText={t('agentSettings.channels.uninstallConfirm')}
           confirmVariant="danger"
           onConfirm={handleUninstall}
           onCancel={() => setPendingUninstall(null)}

@@ -37,6 +37,7 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use super::adapter::ImAdapter;
+use super::health;
 use super::types::ImSourceType;
 use super::AgentInstance;
 use crate::sidecar::{release_session_sidecar, ManagedSidecarManager, SidecarOwner};
@@ -59,11 +60,13 @@ const SUBSCRIPTION_PROVIDER_ID: &str = "anthropic-sub";
 /// helper below.
 pub struct OwnedSessionSnapshot {
     runtime: String,
+    runtime_source: Option<String>,
     model: Option<String>,
     permission_mode: Option<String>,
     mcp_enabled_servers: Option<Vec<String>>,
     provider_id: Option<String>,
     provider_route: Option<Value>,
+    provider_execution_identity: Option<Value>,
     provider_env_json: Option<String>,
 }
 
@@ -75,6 +78,9 @@ impl OwnedSessionSnapshot {
         // committed (not when Rust composed the payload).
         let mut obj = serde_json::Map::new();
         obj.insert("runtime".into(), json!(self.runtime));
+        if let Some(ref source) = self.runtime_source {
+            obj.insert("runtimeSource".into(), json!(source));
+        }
         if let Some(ref m) = self.model {
             obj.insert("model".into(), json!(m));
         }
@@ -89,6 +95,9 @@ impl OwnedSessionSnapshot {
         }
         if let Some(ref route) = self.provider_route {
             obj.insert("providerRoute".into(), route.clone());
+        }
+        if let Some(ref identity) = self.provider_execution_identity {
+            obj.insert("providerExecutionIdentity".into(), identity.clone());
         }
         if self.provider_route.is_none() {
             if let Some(ref penv) = self.provider_env_json {
@@ -108,6 +117,31 @@ fn provider_route_json(provider_id: Option<&str>, model: Option<&str>) -> Option
     Some(json!({
         "kind": if provider_id == SUBSCRIPTION_PROVIDER_ID { "subscription" } else { "provider" },
         "providerId": provider_id,
+        "model": model,
+    }))
+}
+
+fn runtime_source_from_config(runtime_config: Option<&serde_json::Value>) -> Option<String> {
+    match runtime_config
+        .and_then(|v| v.get("source"))
+        .and_then(|v| v.as_str())
+    {
+        Some("managed-provider") => Some("managed-provider".to_string()),
+        Some("system-cli") => Some("system-cli".to_string()),
+        _ => None,
+    }
+}
+
+fn managed_codex_identity_json(model: Option<&str>) -> Option<Value> {
+    let model = model?;
+    if model.is_empty() {
+        return None;
+    }
+    Some(json!({
+        "kind": "runtime-backed-provider",
+        "providerId": "codex-sub",
+        "runtime": "codex",
+        "runtimeSource": "managed-provider",
         "model": model,
     }))
 }
@@ -139,6 +173,7 @@ fn enabled_mcp_ids_from_servers_json(raw: Option<&str>) -> Option<Vec<String>> {
 /// RwLocks) and pass it to `freeze_and_rotate_for_runtime_change`.
 pub async fn build_snapshot_from_agent_state(agent: &AgentInstance) -> OwnedSessionSnapshot {
     let runtime_value = agent.runtime.read().await.clone();
+    let runtime_config_value = agent.runtime_config.read().await.clone();
     let mcp_servers_json = agent.mcp_servers_json.read().await.clone();
     let model_value = agent.current_model.read().await.clone();
     let provider_env_value = agent.current_provider_env.read().await.clone();
@@ -159,8 +194,15 @@ pub async fn build_snapshot_from_agent_state(agent: &AgentInstance) -> OwnedSess
             }
         })
     };
+    let runtime_source = runtime_source_from_config(runtime_config_value.as_ref());
+    let provider_execution_identity = if runtime_source.as_deref() == Some("managed-provider") {
+        managed_codex_identity_json(model_value.as_deref())
+    } else {
+        None
+    };
     OwnedSessionSnapshot {
         runtime: runtime_value,
+        runtime_source,
         model: model_value.clone(),
         permission_mode: Some(agent.permission_mode.read().await.clone()),
         // mcp_servers_json is the runtime payload: the selected server
@@ -174,6 +216,7 @@ pub async fn build_snapshot_from_agent_state(agent: &AgentInstance) -> OwnedSess
             provider_id_for_snapshot.as_deref(),
             model_value.as_deref(),
         ),
+        provider_execution_identity,
         provider_env_json: if is_external {
             None
         } else {
@@ -193,10 +236,12 @@ pub async fn build_snapshot_from_channel_state(
     current_model: &tokio::sync::RwLock<Option<String>>,
     permission_mode: &tokio::sync::RwLock<String>,
     mcp_servers_json: &tokio::sync::RwLock<Option<String>>,
+    runtime_config: &tokio::sync::RwLock<Option<serde_json::Value>>,
     _provider_id: Option<String>,
     current_provider_env: &tokio::sync::RwLock<Option<Value>>,
 ) -> OwnedSessionSnapshot {
     let runtime_value = runtime.read().await.clone();
+    let runtime_config_value = runtime_config.read().await.clone();
     let model_value = current_model.read().await.clone();
     let mcp_servers_json_value = mcp_servers_json.read().await.clone();
     let provider_env_value = current_provider_env.read().await.clone();
@@ -222,13 +267,21 @@ pub async fn build_snapshot_from_channel_state(
     } else {
         provider_route_json(provider_id_for_snapshot.as_deref(), model_value.as_deref())
     };
+    let runtime_source = runtime_source_from_config(runtime_config_value.as_ref());
+    let provider_execution_identity = if runtime_source.as_deref() == Some("managed-provider") {
+        managed_codex_identity_json(model_value.as_deref())
+    } else {
+        None
+    };
     OwnedSessionSnapshot {
         runtime: runtime_value,
-        model: model_value,
+        runtime_source,
+        model: model_value.clone(),
         permission_mode: Some(permission_mode.read().await.clone()),
         mcp_enabled_servers: enabled_mcp_ids_from_servers_json(mcp_servers_json_value.as_deref()),
         provider_id: provider_id_for_snapshot,
         provider_route: route,
+        provider_execution_identity,
         provider_env_json: if is_external {
             None
         } else {
@@ -264,6 +317,34 @@ async fn freeze_via_sidecar(
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FileLockFreezeOutcome {
+    Frozen,
+    Missing,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PeerFileLockFreezeDisposition {
+    Frozen,
+    MissingBirthPending,
+}
+
+pub(crate) fn resolve_peer_file_lock_freeze_outcome(
+    outcome: FileLockFreezeOutcome,
+    metadata_birth_pending: bool,
+    session_id: &str,
+) -> Result<PeerFileLockFreezeDisposition, String> {
+    match outcome {
+        FileLockFreezeOutcome::Frozen => Ok(PeerFileLockFreezeDisposition::Frozen),
+        FileLockFreezeOutcome::Missing if metadata_birth_pending => {
+            Ok(PeerFileLockFreezeDisposition::MissingBirthPending)
+        }
+        FileLockFreezeOutcome::Missing => {
+            Err(format!("session {} not found in sessions.json", session_id))
+        }
+    }
+}
+
 /// Rust fallback writer — used when the session's sidecar is dead at freeze
 /// time (port==0 from a prior `release_all_sidecars_preserve_bindings` or a
 /// natural exit). We still need the session to carry its OLD config so that
@@ -274,10 +355,10 @@ async fn freeze_via_sidecar(
 /// Uses the SAME on-disk `~/.myagents/sessions.lock` that the Node sidecar's
 /// `withSessionsLock` uses (`SessionStore.ts:32`). This is a cross-process
 /// writer pair, so the lock convention MUST match exactly.
-pub async fn freeze_via_file_lock(
+pub(crate) async fn freeze_via_file_lock_status(
     session_id: &str,
     snapshot: &OwnedSessionSnapshot,
-) -> Result<(), String> {
+) -> Result<FileLockFreezeOutcome, String> {
     let myagents_dir = dirs::home_dir()
         .ok_or_else(|| "home_dir unavailable".to_string())?
         .join(".myagents");
@@ -293,9 +374,12 @@ pub async fn freeze_via_file_lock(
     let result = with_file_lock(
         &lock_path,
         FileLockOptions::default(),
-        move || -> Result<bool, crate::utils::file_lock::FileLockError> {
+        move || -> Result<FileLockFreezeOutcome, crate::utils::file_lock::FileLockError> {
             let content = match std::fs::read_to_string(&sessions_path) {
                 Ok(s) => s,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    return Ok(FileLockFreezeOutcome::Missing);
+                }
                 Err(e) => {
                     return Err(crate::utils::file_lock::FileLockError::Io(e));
                 }
@@ -308,7 +392,14 @@ pub async fn freeze_via_file_lock(
             })?;
             let arr = match sessions.as_array_mut() {
                 Some(a) => a,
-                None => return Ok(false),
+                None => {
+                    return Err(crate::utils::file_lock::FileLockError::Io(
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "sessions.json must contain a SessionMetadata array",
+                        ),
+                    ));
+                }
             };
             let mut found = false;
             for entry in arr.iter_mut() {
@@ -332,7 +423,7 @@ pub async fn freeze_via_file_lock(
                 }
             }
             if !found {
-                return Ok(false);
+                return Ok(FileLockFreezeOutcome::Missing);
             }
 
             let new_content = serde_json::to_string_pretty(&sessions).map_err(|e| {
@@ -345,15 +436,26 @@ pub async fn freeze_via_file_lock(
                 .map_err(crate::utils::file_lock::FileLockError::Io)?;
             std::fs::rename(&tmp_path, &sessions_path)
                 .map_err(crate::utils::file_lock::FileLockError::Io)?;
-            Ok(true)
+            Ok(FileLockFreezeOutcome::Frozen)
         },
     )
     .await;
 
     match result {
-        Ok(true) => Ok(()),
-        Ok(false) => Err(format!("session {} not found in sessions.json", session_id)),
+        Ok(outcome) => Ok(outcome),
         Err(e) => Err(e.to_string()),
+    }
+}
+
+pub async fn freeze_via_file_lock(
+    session_id: &str,
+    snapshot: &OwnedSessionSnapshot,
+) -> Result<(), String> {
+    match freeze_via_file_lock_status(session_id, snapshot).await? {
+        FileLockFreezeOutcome::Frozen => Ok(()),
+        FileLockFreezeOutcome::Missing => {
+            Err(format!("session {} not found in sessions.json", session_id))
+        }
     }
 }
 
@@ -440,6 +542,7 @@ pub async fn freeze_and_rotate_for_runtime_change(
     let mut total_bindings = 0usize;
     let mut frozen_via_sidecar = 0usize;
     let mut frozen_via_fallback = 0usize;
+    let mut skipped_missing_pending = 0usize;
     let mut rotated = 0usize;
     let mut notified = 0usize;
     let mut notification_targets = 0usize;
@@ -451,7 +554,7 @@ pub async fn freeze_and_rotate_for_runtime_change(
         let mut pending_notifications: HashMap<String, RuntimeChangeNotification> = HashMap::new();
         let mut channel_rotated = 0usize;
 
-        let active_sessions_after_rotation = {
+        {
             let mut router = ch_inst.bot_instance.router.lock().await;
             let keys: Vec<String> = router.peer_session_keys();
             if keys.is_empty() {
@@ -493,30 +596,60 @@ pub async fn freeze_and_rotate_for_runtime_change(
                                 short_id(&old_session_id),
                                 e
                             );
-                            match freeze_via_file_lock(&old_session_id, &snapshot).await {
-                                Ok(()) => {
-                                    frozen_via_fallback += 1;
-                                    ulog_info!(
-                                        "[runtime-change] froze session {} via file lock (sidecar fallback)",
-                                        short_id(&old_session_id)
-                                    );
+                            match freeze_via_file_lock_status(&old_session_id, &snapshot)
+                                .await
+                                .and_then(|outcome| {
+                                    resolve_peer_file_lock_freeze_outcome(
+                                        outcome,
+                                        prior.metadata_birth_pending,
+                                        &old_session_id,
+                                    )
+                                }) {
+                                    Ok(PeerFileLockFreezeDisposition::Frozen) => {
+                                        frozen_via_fallback += 1;
+                                        ulog_info!(
+                                            "[runtime-change] froze session {} via file lock (sidecar fallback)",
+                                            short_id(&old_session_id)
+                                        );
+                                    }
+                                    Ok(PeerFileLockFreezeDisposition::MissingBirthPending) => {
+                                        skipped_missing_pending += 1;
+                                        ulog_info!(
+                                            "[runtime-change] skipped freeze for birth-pending session {} missing from SessionStore (sidecar fallback)",
+                                            short_id(&old_session_id)
+                                        );
+                                    }
+                                    Err(e2) => ulog_warn!(
+                                        "[runtime-change] file-lock freeze ALSO failed for session {}: {}",
+                                        short_id(&old_session_id),
+                                        e2
+                                    ),
                                 }
-                                Err(e2) => ulog_warn!(
-                                    "[runtime-change] file-lock freeze ALSO failed for session {}: {}",
-                                    short_id(&old_session_id),
-                                    e2
-                                ),
-                            }
                         }
                     }
                 } else {
                     // Sidecar dead (port==0 from previous preserve_bindings) OR
                     // HTTP client failed to build. Go straight to file-lock.
-                    match freeze_via_file_lock(&old_session_id, &snapshot).await {
-                        Ok(()) => {
+                    match freeze_via_file_lock_status(&old_session_id, &snapshot)
+                        .await
+                        .and_then(|outcome| {
+                            resolve_peer_file_lock_freeze_outcome(
+                                outcome,
+                                prior.metadata_birth_pending,
+                                &old_session_id,
+                            )
+                        }) {
+                        Ok(PeerFileLockFreezeDisposition::Frozen) => {
                             frozen_via_fallback += 1;
                             ulog_info!(
                                 "[runtime-change] froze session {} via file lock (no HTTP path available)",
+                                short_id(&old_session_id)
+                            );
+                        }
+                        Ok(PeerFileLockFreezeDisposition::MissingBirthPending) => {
+                            skipped_missing_pending += 1;
+                            ulog_info!(
+                                "[runtime-change] skipped freeze for birth-pending session {} missing from SessionStore (no HTTP path available)",
                                 short_id(&old_session_id)
                             );
                         }
@@ -608,21 +741,15 @@ pub async fn freeze_and_rotate_for_runtime_change(
                     pending_notifications.insert(chat_id, candidate);
                 }
             }
-
-            router.active_sessions()
-        };
+        }
 
         if channel_rotated > 0 {
-            health
-                .set_active_sessions(active_sessions_after_rotation)
-                .await;
-            if let Err(e) = health.persist().await {
-                ulog_warn!(
-                    "[runtime-change] failed to persist rotated active sessions (channel={}): {}",
-                    channel_id,
-                    e
-                );
-            }
+            let _ = health::persist_router_active_sessions(
+                &health,
+                &ch_inst.bot_instance.router,
+                "runtime-change-rotation",
+            )
+            .await;
         }
 
         notification_targets += pending_notifications.len();
@@ -654,13 +781,14 @@ pub async fn freeze_and_rotate_for_runtime_change(
 
     if total_bindings > 0 {
         ulog_info!(
-            "[runtime-change] agent={} {} → {}: bindings={} frozen(sidecar={}, fallback={}) rotated={} notification_targets={} notified={} deduped_notifications={}",
+            "[runtime-change] agent={} {} → {}: bindings={} frozen(sidecar={}, fallback={}) skipped_missing_pending={} rotated={} notification_targets={} notified={} deduped_notifications={}",
             agent.agent_id,
             old_runtime,
             new_runtime,
             total_bindings,
             frozen_via_sidecar,
             frozen_via_fallback,
+            skipped_missing_pending,
             rotated,
             notification_targets,
             notified,
@@ -745,5 +873,35 @@ mod tests {
             enabled_mcp_ids_from_servers_json(Some(&raw)),
             Some(vec!["remote-http".to_string()])
         );
+    }
+
+    #[test]
+    fn missing_file_lock_freeze_is_skipped_only_for_birth_pending_peer_sessions() {
+        assert_eq!(
+            resolve_peer_file_lock_freeze_outcome(
+                FileLockFreezeOutcome::Frozen,
+                false,
+                "persisted-session",
+            )
+            .unwrap(),
+            PeerFileLockFreezeDisposition::Frozen
+        );
+        assert_eq!(
+            resolve_peer_file_lock_freeze_outcome(
+                FileLockFreezeOutcome::Missing,
+                true,
+                "birth-pending-session",
+            )
+            .unwrap(),
+            PeerFileLockFreezeDisposition::MissingBirthPending
+        );
+
+        let err = resolve_peer_file_lock_freeze_outcome(
+            FileLockFreezeOutcome::Missing,
+            false,
+            "persisted-session",
+        )
+        .unwrap_err();
+        assert_eq!(err, "session persisted-session not found in sessions.json");
     }
 }

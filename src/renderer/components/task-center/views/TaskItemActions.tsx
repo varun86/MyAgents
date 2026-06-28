@@ -13,6 +13,7 @@
 // LegacyCronOverlay.
 
 import { Pencil, Play, RotateCcw, Square, Trash2 } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 
 import { DropdownMenu, type DropdownMenuItem, type DropdownMenuSection } from '@/components/ui/DropdownMenu';
 import type { Task, TaskStatus } from '@/../shared/types/task';
@@ -49,10 +50,11 @@ export function TaskItemActions({
   onEdit,
   onDelete,
 }: TaskItemActionsProps) {
+  const { t } = useTranslation('task');
   const primary =
     variant === 'legacy'
       ? null
-      : primaryActionFor(status, { onRun, onStop, onRerun });
+      : primaryActionFor(status, { onRun, onStop, onRerun }, t);
 
   // Menu ordering (v0.1.69):
   //   1. 编辑 (task variant) — clicking the card already opens the detail
@@ -67,13 +69,13 @@ export function TaskItemActions({
   if (variant === 'task' && onEdit) {
     primaryGroup.push({
       icon: <Pencil className="h-3.5 w-3.5" />,
-      label: '编辑',
+      label: t('tasks.actions.edit'),
       onClick: onEdit,
     });
   }
   if (variant === 'legacy') {
     primaryGroup.push({
-      label: '打开详情',
+      label: t('tasks.actions.openDetail'),
       onClick: onOpenDetail,
     });
   }
@@ -90,7 +92,7 @@ export function TaskItemActions({
     ? [
         {
           icon: <Trash2 className="h-3.5 w-3.5" />,
-          label: '删除',
+          label: t('tasks.actions.delete'),
           onClick: onDelete,
           danger: true,
         },
@@ -116,12 +118,13 @@ interface PrimaryAction {
 function primaryActionFor(
   status: TaskStatus,
   handlers: Pick<TaskItemActionsProps, 'onRun' | 'onStop' | 'onRerun'>,
+  t: (key: string) => string,
 ): PrimaryAction | null {
   switch (status) {
     case 'todo':
       return {
         icon: <Play className="h-3.5 w-3.5" />,
-        title: '立即执行',
+        title: t('tasks.actions.runNow'),
         menuClassName:
           'text-[var(--accent-warm)] hover:bg-[var(--accent-warm-subtle)]',
         handler: handlers.onRun,
@@ -130,7 +133,7 @@ function primaryActionFor(
     case 'verifying':
       return {
         icon: <Square className="h-3.5 w-3.5" />,
-        title: '中止',
+        title: t('tasks.actions.stop'),
         menuClassName:
           'text-[var(--ink-secondary)] hover:bg-[var(--error-bg)] hover:text-[var(--error)]',
         handler: handlers.onStop,
@@ -140,7 +143,7 @@ function primaryActionFor(
     case 'done':
       return {
         icon: <RotateCcw className="h-3.5 w-3.5" />,
-        title: '重新派发',
+        title: t('tasks.actions.rerun'),
         menuClassName:
           'text-[var(--ink-secondary)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]',
         handler: handlers.onRerun,

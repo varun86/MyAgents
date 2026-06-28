@@ -3,6 +3,7 @@
  * Unified style: colored dot + label, matching WorkspaceCard channel tags
  */
 
+import { useTranslation } from 'react-i18next';
 import type { SessionTag } from '@/hooks/useTaskCenterData';
 
 /** Tag color scheme: dot color + text color + bg color */
@@ -33,16 +34,10 @@ const TAG_STYLES = {
     },
 } as const;
 
-/** Labels */
-const TAG_LABELS: Record<string, string> = {
-    cron: '定时',
-    background: '后台',
-    floatingBall: '桌面宠物',
-};
-
 export default function SessionTagBadge({ tag }: { tag: SessionTag }) {
+    const { t } = useTranslation('app');
     const style = TAG_STYLES[tag.type] ?? TAG_STYLES.im;
-    const label = tag.type === 'im' ? tag.platform : (TAG_LABELS[tag.type] ?? tag.type);
+    const label = tag.type === 'im' ? tag.platform : t(`sessionTags.${tag.type}`, { defaultValue: tag.type });
 
     // `leading-none` collapses the badge's line-box to its glyph height so
     // `items-center` in the parent (Chat header / history row) centers the

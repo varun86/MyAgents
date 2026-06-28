@@ -35,7 +35,7 @@ const mocks = vi.hoisted(() => {
     }>>(async () => ({ queued: true, queueId: 'q1', isInFlight: false, deliveryMode: 'queue' as const })),
     forceExecuteQueueItem: vi.fn(async () => true),
     getAndClearLastAgentError: vi.fn<() => string | null>(() => null),
-    getAgentState: vi.fn<() => Record<string, unknown>>(() => ({ sessionState: 'idle' })),
+    getAgentState: vi.fn<() => Record<string, unknown>>(() => ({ sessionState: 'idle', agentDir: '/workspace' })),
     getAgents: vi.fn(() => ({ helper: { name: 'helper' } })),
     getLastBuiltinAssistantText: vi.fn(() => 'builtin latest'),
     getMcpServers: vi.fn(() => [{ id: 'fs' }]),
@@ -45,6 +45,7 @@ const mocks = vi.hoisted(() => {
     getSessionId: vi.fn(() => 'builtin-session'),
     getSessionModel: vi.fn(() => 'claude-sonnet'),
     getSessionPermissionMode: vi.fn(() => 'auto'),
+    getSessionEnabledOfficialToolIds: vi.fn(() => ['image-understanding']),
     getSessionProviderEnv: vi.fn(() => undefined),
     getSessionProviderId: vi.fn(() => 'sensenova'),
     getSessionReasoningEffort: vi.fn(() => 'default'),
@@ -65,6 +66,7 @@ const mocks = vi.hoisted(() => {
     setMcpServers: vi.fn(),
     setSessionModel: vi.fn(),
     setSessionPermissionMode: vi.fn(),
+    setSessionEnabledOfficialToolIds: vi.fn(),
     setSessionProviderEnv: vi.fn(),
     setSessionReasoningEffort: vi.fn(),
     stripPlaywrightResults: vi.fn((message: string) => message),
@@ -80,6 +82,7 @@ const mocks = vi.hoisted(() => {
       dispatch: Promise.resolve({ queued: true }),
     })),
     forceExecuteExternalQueueItem: vi.fn(async () => true),
+    getActiveRuntimeSource: vi.fn(() => 'system-cli' as const),
     getActiveRuntimeType: vi.fn(() => 'codex'),
     getCurrentBoundSessionId: vi.fn<() => string | null>(() => null),
     getExternalLiveAssistantMessage: vi.fn<() => { id: string; role: 'user' | 'assistant'; content: string; timestamp: string } | null>(() => null),
@@ -90,6 +93,7 @@ const mocks = vi.hoisted(() => {
     getExternalSessionPermissionMode: vi.fn(() => 'no-restrictions'),
     getExternalSessionReasoningEffort: vi.fn(() => 'medium'),
     getExternalSessionState: vi.fn(() => 'idle'),
+    getExternalSessionWorkspacePath: vi.fn(() => '/workspace'),
     getExternalSystemInitPayload: vi.fn(() => null),
     getLastExternalAssistantText: vi.fn(() => 'external answer'),
     hasPendingExternalAskUserQuestion: vi.fn((requestId: string) => Boolean(requestId) && state.pendingExternalAsk),
@@ -107,6 +111,30 @@ const mocks = vi.hoisted(() => {
     stopExternalSession: vi.fn(async () => true),
     updateExternalRuntimeConfig: vi.fn(async () => ({ success: true })),
     waitForExternalSessionIdle: vi.fn(async () => true),
+    getSessionData: vi.fn((sessionId: string) => ({
+      id: sessionId,
+      agentDir: '/workspace',
+      title: 'Test',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      lastActiveAt: '2026-01-01T00:00:00.000Z',
+      enabledOfficialToolIds: ['image-understanding'],
+      messages: [],
+    })),
+    updateSessionMetadata: vi.fn(async (sessionId: string, updates: Record<string, unknown>) => ({
+      id: sessionId,
+      agentDir: '/workspace',
+      title: 'Test',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      lastActiveAt: '2026-01-01T00:00:00.000Z',
+      ...updates,
+      messages: [],
+    })),
+    getEffectiveOfficialToolIdsForSession: vi.fn((_workspacePath: string, sessionMeta?: { enabledOfficialToolIds?: string[] } | null, overrideIds?: readonly string[] | null) => (
+      overrideIds !== null && overrideIds !== undefined
+        ? [...overrideIds]
+        : (sessionMeta?.enabledOfficialToolIds ? [...sessionMeta.enabledOfficialToolIds] : [])
+    )),
+    materializeProviderRouteEnv: vi.fn(() => undefined),
   };
 });
 
@@ -128,6 +156,7 @@ vi.mock('../agent-session', () => ({
   getSessionId: mocks.getSessionId,
   getSessionModel: mocks.getSessionModel,
   getSessionPermissionMode: mocks.getSessionPermissionMode,
+  getSessionEnabledOfficialToolIds: mocks.getSessionEnabledOfficialToolIds,
   getSessionProviderEnv: mocks.getSessionProviderEnv,
   getSessionProviderId: mocks.getSessionProviderId,
   getSessionReasoningEffort: mocks.getSessionReasoningEffort,
@@ -148,6 +177,7 @@ vi.mock('../agent-session', () => ({
   setMcpServers: mocks.setMcpServers,
   setSessionModel: mocks.setSessionModel,
   setSessionPermissionMode: mocks.setSessionPermissionMode,
+  setSessionEnabledOfficialToolIds: mocks.setSessionEnabledOfficialToolIds,
   setSessionProviderEnv: mocks.setSessionProviderEnv,
   setSessionReasoningEffort: mocks.setSessionReasoningEffort,
   stripPlaywrightResults: mocks.stripPlaywrightResults,
@@ -162,6 +192,7 @@ vi.mock('../runtimes/external-session', () => ({
   didLastTurnSucceed: mocks.didLastTurnSucceed,
   enqueueExternalSendForDesktop: mocks.enqueueExternalSendForDesktop,
   forceExecuteExternalQueueItem: mocks.forceExecuteExternalQueueItem,
+  getActiveRuntimeSource: mocks.getActiveRuntimeSource,
   getActiveRuntimeType: mocks.getActiveRuntimeType,
   getCurrentBoundSessionId: mocks.getCurrentBoundSessionId,
   getExternalLiveAssistantMessage: mocks.getExternalLiveAssistantMessage,
@@ -172,6 +203,7 @@ vi.mock('../runtimes/external-session', () => ({
   getExternalSessionPermissionMode: mocks.getExternalSessionPermissionMode,
   getExternalSessionReasoningEffort: mocks.getExternalSessionReasoningEffort,
   getExternalSessionState: mocks.getExternalSessionState,
+  getExternalSessionWorkspacePath: mocks.getExternalSessionWorkspacePath,
   getExternalSystemInitPayload: mocks.getExternalSystemInitPayload,
   getLastExternalAssistantText: mocks.getLastExternalAssistantText,
   hasPendingExternalAskUserQuestion: mocks.hasPendingExternalAskUserQuestion,
@@ -189,6 +221,16 @@ vi.mock('../runtimes/external-session', () => ({
   stopExternalSession: mocks.stopExternalSession,
   updateExternalRuntimeConfig: mocks.updateExternalRuntimeConfig,
   waitForExternalSessionIdle: mocks.waitForExternalSessionIdle,
+}));
+
+vi.mock('../utils/admin-config', () => ({
+  getEffectiveOfficialToolIdsForSession: mocks.getEffectiveOfficialToolIdsForSession,
+  materializeProviderRouteEnv: mocks.materializeProviderRouteEnv,
+}));
+
+vi.mock('../SessionStore', () => ({
+  getSessionData: mocks.getSessionData,
+  updateSessionMetadata: mocks.updateSessionMetadata,
 }));
 
 vi.mock('../sse', () => ({
@@ -286,6 +328,7 @@ describe('session-engine selector and adapters', () => {
       model: 'claude-sonnet',
       mcpServerIds: ['fs'],
       agentNames: ['helper'],
+      enabledOfficialToolIds: ['image-understanding'],
       permissionMode: 'auto',
       providerId: 'sensenova',
       providerRoute: { kind: 'provider', providerId: 'sensenova', model: 'claude-sonnet' },
@@ -314,18 +357,22 @@ describe('session-engine selector and adapters', () => {
     expect(engine.getRuntimeIdentity()).toEqual({
       kind: 'external',
       runtime: 'codex',
+      runtimeSource: 'system-cli',
       sessionId: 'external-session',
       boundSessionId: 'bound-session',
     });
     expect(engine.getSessionConfigSnapshot()).toEqual({
       success: true,
       runtime: 'codex',
+      runtimeSource: 'system-cli',
       model: 'gpt-5',
       mcpServerIds: null,
       agentNames: null,
+      enabledOfficialToolIds: ['image-understanding'],
       permissionMode: 'no-restrictions',
       providerId: null,
       providerRoute: null,
+      providerExecutionIdentity: null,
       reasoningEffort: 'medium',
     });
     expect(engine.getHeldImConfigSnapshot()).toEqual({
@@ -584,6 +631,26 @@ describe('session-engine selector and adapters', () => {
     );
   });
 
+  it('updates official tool ids through the builtin engine owner', async () => {
+    const result = await getSessionEngine().updateOfficialToolIds(['image-understanding']);
+
+    expect(result).toEqual({ success: true });
+    expect(mocks.setSessionEnabledOfficialToolIds).toHaveBeenCalledWith(['image-understanding']);
+    expect(mocks.updateSessionMetadata).not.toHaveBeenCalled();
+  });
+
+  it('updates official tool ids through the external engine owner', async () => {
+    mocks.state.useExternal = true;
+    mocks.state.externalActive = true;
+    mocks.getExternalSessionState.mockReturnValueOnce('idle');
+
+    const result = await getSessionEngine().updateOfficialToolIds([]);
+
+    expect(result).toEqual({ success: true });
+    expect(mocks.updateSessionMetadata).not.toHaveBeenCalled();
+    expect(mocks.stopExternalSession).toHaveBeenCalledTimes(1);
+  });
+
   it('stops the external runtime when an injected turn times out', async () => {
     mocks.state.useExternal = true;
     mocks.sendExternalMessage.mockResolvedValueOnce({ queued: true });
@@ -631,6 +698,9 @@ describe('session-engine selector and adapters', () => {
 
     expect(result).toEqual({ success: true, sessionId: 'builtin-session' });
     expect(mocks.freezeCurrentSessionMetadataForImDetach).toHaveBeenCalledTimes(1);
+    expect(mocks.freezeCurrentSessionMetadataForImDetach).toHaveBeenCalledWith(undefined, {
+      allowMissingMetadata: false,
+    });
     expect(mocks.resetSession).toHaveBeenCalledTimes(1);
     expect(mocks.materializeCurrentSessionMetadataForPublishedReset).toHaveBeenCalledTimes(1);
     expect(mocks.freezeCurrentSessionMetadataForImDetach.mock.invocationCallOrder[0])
@@ -651,12 +721,17 @@ describe('session-engine selector and adapters', () => {
 
     expect(result).toEqual({ success: true, sessionId: 'builtin-session' });
     expect(mocks.awaitExternalSessionStarting).toHaveBeenCalledTimes(1);
-    expect(mocks.freezeCurrentSessionMetadataForImDetach).toHaveBeenCalledWith({
-      runtime: 'codex',
-      model: 'gpt-5',
-      permissionMode: 'no-restrictions',
-      reasoningEffort: 'medium',
-    });
+    expect(mocks.freezeCurrentSessionMetadataForImDetach).toHaveBeenCalledWith(
+      {
+        runtime: 'codex',
+        model: 'gpt-5',
+        permissionMode: 'no-restrictions',
+        reasoningEffort: 'medium',
+      },
+      {
+        allowMissingMetadata: false,
+      },
+    );
     expect(mocks.freezeCurrentSessionMetadataForImDetach.mock.invocationCallOrder[0])
       .toBeLessThan(mocks.stopExternalSession.mock.invocationCallOrder[0]);
     expect(mocks.stopExternalSession.mock.invocationCallOrder[0])
@@ -667,15 +742,22 @@ describe('session-engine selector and adapters', () => {
   it('freezes the current external IM session through the engine facade', async () => {
     mocks.state.useExternal = true;
 
-    const result = await getSessionEngine().freezeCurrentSessionForImDetach();
+    const result = await getSessionEngine().freezeCurrentSessionForImDetach({
+      metadataBirthPending: true,
+    });
 
     expect(result).toEqual({ success: true, sessionId: 'old-im-session' });
-    expect(mocks.freezeCurrentSessionMetadataForImDetach).toHaveBeenCalledWith({
-      runtime: 'codex',
-      model: 'gpt-5',
-      permissionMode: 'no-restrictions',
-      reasoningEffort: 'medium',
-    });
+    expect(mocks.freezeCurrentSessionMetadataForImDetach).toHaveBeenCalledWith(
+      {
+        runtime: 'codex',
+        model: 'gpt-5',
+        permissionMode: 'no-restrictions',
+        reasoningEffort: 'medium',
+      },
+      {
+        allowMissingMetadata: true,
+      },
+    );
   });
 
   it('routes permission responses by external liveness compatibility', () => {

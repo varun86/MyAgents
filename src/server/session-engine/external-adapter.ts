@@ -14,6 +14,7 @@ import {
   awaitExternalSessionStarting,
   enqueueExternalSendForDesktop,
   forceExecuteExternalQueueItem,
+  getActiveRuntimeSource,
   getActiveRuntimeType,
   getCurrentBoundSessionId,
   getExternalLiveAssistantMessage,
@@ -24,6 +25,7 @@ import {
   getExternalSessionPermissionMode,
   getExternalSessionReasoningEffort,
   getExternalSessionState,
+  getExternalSessionWorkspacePath,
   getExternalSystemInitPayload,
   getLastExternalAssistantText,
   isExternalSessionActive,
@@ -50,12 +52,17 @@ import type {
   SessionEngine,
 } from './types';
 import { decideExternalInjectedTurnResult } from '../session-core/turn-result-policy';
+import { getEffectiveOfficialToolIdsForSession } from '../utils/admin-config';
 import { getSessionData, updateSessionMetadata } from '../SessionStore';
 import { getLatestAssistantResultFromMessages, NO_TEXT_RESPONSE } from '../inbox/latest-result';
 import type { SessionMessage } from '../types/session';
 
 function getRuntimeSessionId(): string {
   return getExternalSessionId() || getCurrentBoundSessionId() || getSessionId();
+}
+
+function getRuntimeWorkspacePath(): string {
+  return getExternalSessionWorkspacePath() || getAgentState().agentDir || '';
 }
 
 function getLatestExternalResult(): string {
@@ -98,6 +105,7 @@ export function createExternalSessionEngine(): SessionEngine {
       return {
         kind: 'external',
         runtime: getActiveRuntimeType(),
+        runtimeSource: getActiveRuntimeSource(),
         sessionId: getRuntimeSessionId(),
         ...(boundSessionId ? { boundSessionId } : {}),
       };
@@ -128,16 +136,34 @@ export function createExternalSessionEngine(): SessionEngine {
     },
 
     getSessionConfigSnapshot() {
+      const runtimeSessionId = getRuntimeSessionId();
+      const session = runtimeSessionId ? getSessionData(runtimeSessionId) : null;
+      const workspacePath = getRuntimeWorkspacePath();
       return {
         success: true,
         runtime: getActiveRuntimeType(),
+        runtimeSource: getActiveRuntimeSource(),
         model: getExternalSessionModel(),
         mcpServerIds: null,
         agentNames: null,
+        enabledOfficialToolIds: workspacePath
+          ? getEffectiveOfficialToolIdsForSession(workspacePath, session)
+          : [],
         permissionMode: getExternalSessionPermissionMode(),
-        providerId: null,
+        providerId: session?.providerExecutionIdentity?.providerId ?? null,
         providerRoute: null,
+        providerExecutionIdentity: session?.providerExecutionIdentity ?? null,
         reasoningEffort: getExternalSessionReasoningEffort() ?? 'default',
+      };
+    },
+
+    getCurrentSessionContext() {
+      const sessionId = getRuntimeSessionId();
+      return {
+        runtime: getActiveRuntimeType(),
+        sessionId: sessionId || null,
+        workspacePath: getRuntimeWorkspacePath() || null,
+        sessionMeta: sessionId ? getSessionData(sessionId) : null,
       };
     },
 
@@ -344,6 +370,13 @@ export function createExternalSessionEngine(): SessionEngine {
       return setExternalReasoningEffort(effort);
     },
 
+    async updateOfficialToolIds(_ids) {
+      if (isExternalSessionActive() && getExternalSessionState() !== 'running') {
+        await stopExternalSession();
+      }
+      return { success: true };
+    },
+
     async materializePendingDesktopSession(request) {
       const runtimeSessionIdBefore = getExternalSessionId() || undefined;
       if (request.phase === 'commit' || request.phase === undefined) {
@@ -369,16 +402,21 @@ export function createExternalSessionEngine(): SessionEngine {
       return result;
     },
 
-    freezeCurrentSessionForImDetach() {
+    freezeCurrentSessionForImDetach(options) {
       const model = getExternalSessionModel() ?? undefined;
       const permissionMode = getExternalSessionPermissionMode() ?? undefined;
       const reasoningEffort = getExternalSessionReasoningEffort() ?? undefined;
-      return freezeCurrentSessionMetadataForImDetach({
-        runtime: getActiveRuntimeType(),
-        ...(model ? { model } : {}),
-        ...(permissionMode ? { permissionMode } : {}),
-        ...(reasoningEffort ? { reasoningEffort } : {}),
-      });
+      return freezeCurrentSessionMetadataForImDetach(
+        {
+          runtime: getActiveRuntimeType(),
+          ...(model ? { model } : {}),
+          ...(permissionMode ? { permissionMode } : {}),
+          ...(reasoningEffort ? { reasoningEffort } : {}),
+        },
+        {
+          allowMissingMetadata: options?.metadataBirthPending === true,
+        },
+      );
     },
 
     updateRuntimeConfig(patch, options) {
@@ -485,17 +523,22 @@ export function createExternalSessionEngine(): SessionEngine {
       return { success: true, sessionId: newSessionId };
     },
 
-    async resetForNewImSession(workspacePath) {
+    async resetForNewImSession(workspacePath, options) {
       await awaitExternalSessionStarting();
       const model = getExternalSessionModel() ?? undefined;
       const permissionMode = getExternalSessionPermissionMode() ?? undefined;
       const reasoningEffort = getExternalSessionReasoningEffort() ?? undefined;
-      const freeze = await freezeCurrentSessionMetadataForImDetach({
-        runtime: getActiveRuntimeType(),
-        ...(model ? { model } : {}),
-        ...(permissionMode ? { permissionMode } : {}),
-        ...(reasoningEffort ? { reasoningEffort } : {}),
-      });
+      const freeze = await freezeCurrentSessionMetadataForImDetach(
+        {
+          runtime: getActiveRuntimeType(),
+          ...(model ? { model } : {}),
+          ...(permissionMode ? { permissionMode } : {}),
+          ...(reasoningEffort ? { reasoningEffort } : {}),
+        },
+        {
+          allowMissingMetadata: options?.metadataBirthPending === true,
+        },
+      );
       if (!freeze.success) {
         return { success: false, error: freeze.error ?? 'Failed to freeze current IM session before reset' };
       }

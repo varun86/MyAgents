@@ -1,4 +1,5 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
+import { useTranslation } from 'react-i18next';
 import type { ToolUseSimple } from '@/types/chat';
 import { CollapsibleTool } from './CollapsibleTool';
 import { ToolHeader } from './utils';
@@ -11,6 +12,7 @@ interface GeminiImageToolProps {
 }
 
 export default function GeminiImageTool({ tool }: GeminiImageToolProps) {
+  const { t } = useTranslation('chat');
   // PRD 0.2.31 — shared single-source parser (server + this card use the same one).
   const parsed = parseGeminiImageResult(tool.result);
   const { openPreview } = useImagePreview();
@@ -65,7 +67,7 @@ export default function GeminiImageTool({ tool }: GeminiImageToolProps) {
     };
   }, [parsed.filePath, resultKey, hasAttachments]);
 
-  const toolLabel = tool.name.includes('edit_image') ? '编辑图片' : '生成图片';
+  const toolLabel = tool.name.includes('edit_image') ? t('shell.toolChrome.labels.editImage') : t('shell.toolChrome.labels.generateImage');
   const isGenerating = !tool.result;
 
   const handleImageClick = useCallback(() => {
@@ -78,7 +80,7 @@ export default function GeminiImageTool({ tool }: GeminiImageToolProps) {
     <div className="flex items-center gap-1.5">
       <ToolHeader tool={tool} toolName={tool.name} label={toolLabel} />
       {isGenerating && (
-        <span className="text-xs text-[var(--ink-muted)] animate-pulse">生成中...</span>
+        <span className="text-xs text-[var(--ink-muted)] animate-pulse">{t('shell.toolChrome.geminiImage.generating')}</span>
       )}
       {parsed.isEdit && parsed.editCount && (
         <span className="rounded bg-[var(--paper-inset)] px-1.5 py-0.5 text-xs text-[var(--ink-muted)]">
@@ -127,12 +129,12 @@ export default function GeminiImageTool({ tool }: GeminiImageToolProps) {
           >
             {!imageLoaded && !imageError && (
               <div className="w-[300px] h-[200px] bg-[var(--paper-inset)] animate-pulse rounded-lg flex items-center justify-center">
-                <span className="text-xs text-[var(--ink-muted)]">加载中...</span>
+                <span className="text-xs text-[var(--ink-muted)]">{t('shell.toolChrome.geminiImage.loading')}</span>
               </div>
             )}
             {imageError && (
               <div className="w-[300px] h-[200px] bg-[var(--paper-inset)] rounded-lg flex items-center justify-center">
-                <span className="text-xs text-[var(--error)]">图片加载失败</span>
+                <span className="text-xs text-[var(--error)]">{t('shell.toolChrome.geminiImage.loadFailed')}</span>
               </div>
             )}
             {imageUrl && (
@@ -147,7 +149,7 @@ export default function GeminiImageTool({ tool }: GeminiImageToolProps) {
             {imageLoaded && (
               <div className="absolute inset-0 bg-black/0 group-hover:bg-black/10 transition-colors rounded-lg flex items-center justify-center">
                 <span className="opacity-0 group-hover:opacity-100 text-white text-xs bg-black/50 px-2 py-1 rounded transition-opacity">
-                  点击放大
+                  {t('shell.toolChrome.geminiImage.zoom')}
                 </span>
               </div>
             )}
@@ -158,9 +160,9 @@ export default function GeminiImageTool({ tool }: GeminiImageToolProps) {
       {/* Metadata */}
       {parsed.contextId && (
         <div className="text-xs text-[var(--ink-muted)] space-y-0.5 mt-1">
-          {parsed.resolution && <div>分辨率: {parsed.resolution} {parsed.aspectRatio && `| 宽高比: ${parsed.aspectRatio}`}</div>}
-          {parsed.model && <div>模型: {parsed.model}</div>}
-          {parsed.filePath && <div className="font-mono opacity-60 break-all">文件: {parsed.filePath}</div>}
+          {parsed.resolution && <div>{t('shell.toolChrome.geminiImage.resolution')}: {parsed.resolution} {parsed.aspectRatio && `| ${t('shell.toolChrome.geminiImage.aspectRatio')}: ${parsed.aspectRatio}`}</div>}
+          {parsed.model && <div>{t('shell.toolChrome.geminiImage.model')}: {parsed.model}</div>}
+          {parsed.filePath && <div className="font-mono opacity-60 break-all">{t('shell.toolChrome.geminiImage.file')}: {parsed.filePath}</div>}
           <div className="font-mono opacity-60">contextId: {parsed.contextId}</div>
         </div>
       )}

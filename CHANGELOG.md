@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.2.42] - 2026-06-28
+
+> 本版把产品界面国际化推进到可用状态，并补齐订阅型 Provider 与官方图片理解工具：界面可跟随系统或切换中英文，Codex 订阅可作为受管 Provider 使用，内置 CLI 也能读取工作区图片。另有任务创建、定时任务、IM 渠道和 Chat 稳定性修复。
+
+### Added
+
+- **界面语言支持更完整**：Settings 可选择跟随系统、中文或 English；Launcher、Chat、Settings、Task Center、Agent 设置、工具卡片、IM 渠道、悬浮球和托盘等界面文案会随语言切换。
+- **Codex 订阅 Provider**：新增 Codex（订阅）入口，MyAgents 可管理 Codex runtime 的安装、更新与 ChatGPT 订阅登录，并把它和普通 Provider 一样用于 Chat、任务、定时任务和 Agent 默认配置。
+- **订阅登录能力补齐**：Provider 设置中补充 Anthropic 订阅登录验证，并把 Codex 订阅入口放到 Anthropic 附近，减少订阅账户和 API Key 配置混用时的误选。
+- **官方图片理解 CLI 工具**：新增 `myagents vision`，可在已启用工具箱和读图模型配置后分析工作区内图片，支持短 prompt 与 workspace 内 prompt 文件。
+
+### Changed
+
+- **定时任务编辑不中断输入**：Chat 输入区里的定时任务 composer 保持可交互，任务创建、停止和恢复反馈更稳定。
+- **任务中心创建流程更清晰**：任务卡片、派发弹窗和提示文案重新整理，任务 prompt 引导移入输入占位，减少表单噪音。
+- **Chat 回合信息更容易检查**：assistant 消息可在 hover 时查看本轮用量 / 时长等指标；启动遮罩、文件预览渐隐和设置导航也做了细节调整。
+
+### Fixed
+
+- **OpenClaw / 微信 IM 渠道更稳**：修复 OpenClaw 渠道配置 key 归一化、微信路由、handover 和健康检查问题，减少扫码登录后串线或收不到消息的情况。
+- **Provider / Runtime 身份更稳**：Codex 订阅、第三方 Provider 与可 portable 切换的协议边界更清楚，避免任务、定时任务或 Agent 默认配置把订阅 Provider 误写成普通外部 Runtime。
+- **Plugin Bridge 日志更安全**：插件桥接日志会脱敏嵌套账号字段，减少账号凭据进入日志的风险。
+- **恢复历史会话不再吞新气泡**：修复 restored chat replay 与 live echo 的边界，恢复会话后新发用户消息仍能正常显示。
+- **Markdown raw HTML 不再逃出内容区**：收紧 Markdown HTML 处理，避免 raw HTML 生成覆盖层逃逸到消息容器外。
+- **macOS 标题栏拖拽恢复稳定**：恢复原生标题栏拖拽路径，避免自定义拖拽实现引发崩溃或拖动失效。
+
+---
+
 ## [0.2.41] - 2026-06-26
 
 > 本版继续收敛会话的 Provider / 模型身份，并让 custom MCP 删除变成真正的身份删除：历史会话、任务、定时任务和 Agent 里的旧引用不会再把已删除的 Provider / MCP 悄悄带回来；同时用量统计和 Codex 输入处理更可靠。

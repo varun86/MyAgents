@@ -1,22 +1,42 @@
 // Agent tasks section — display cron tasks associated with this agent, clickable to open detail
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import { useTranslation } from 'react-i18next';
 import type { AgentConfig } from '../../../../shared/types/agent';
 import { getWorkspaceCronTasks, deleteCronTask, startCronTask, stopCronTask, startCronScheduler } from '@/api/cronTaskClient';
 import type { CronTask } from '@/types/cronTask';
-import { getCronStatusText, formatScheduleDescription } from '@/types/cronTask';
 import { useToast } from '@/components/Toast';
 import CronTaskDetailPanel from '@/components/CronTaskDetailPanel';
+import { currentSupportedLocale, formatPastRelativeTime } from '@/i18n/format';
+import { formatCronIntervalLabel, formatCronStatusText } from '@/utils/cronTaskI18n';
+import { humanizeCron } from '@/utils/taskCenterUtils';
+import type { SupportedLocale } from '../../../../shared/i18n';
+import type { TFunction } from 'i18next';
 
 function formatRelativeTime(isoStr: string): string {
-  const diff = Date.now() - new Date(isoStr).getTime();
-  if (diff < 0) return '刚刚';
-  const mins = Math.floor(diff / 60000);
-  if (mins < 1) return '刚刚';
-  if (mins < 60) return `${mins} 分钟前`;
-  const hours = Math.floor(mins / 60);
-  if (hours < 24) return `${hours} 小时前`;
-  const days = Math.floor(hours / 24);
-  return `${days} 天前`;
+  return formatPastRelativeTime(new Date(isoStr).getTime(), currentSupportedLocale());
+}
+
+type TaskT = TFunction<'task'>;
+
+function formatTaskSchedule(task: CronTask, tTask: TaskT, locale: SupportedLocale): string {
+  if (task.schedule) {
+    switch (task.schedule.kind) {
+      case 'at':
+        return tTask('cron.schedule.onceAt', { time: new Date(task.schedule.at).toLocaleString(locale) });
+      case 'every':
+        return tTask('cron.schedule.every', { interval: formatCronIntervalLabel(task.schedule.minutes, tTask) });
+      case 'cron':
+        return humanizeCron(task.schedule.expr, locale) ?? tTask('cron.schedule.cron', { expr: task.schedule.expr });
+      case 'loop':
+        return tTask('cron.schedule.loop');
+    }
+  }
+  return tTask('cron.schedule.every', { interval: formatCronIntervalLabel(task.intervalMinutes, tTask) });
+}
+
+function cronStatusText(status: string, tTask: TaskT): string {
+  if (status === 'running' || status === 'stopped') return formatCronStatusText(status, tTask);
+  return status;
 }
 
 function cronStatusDotColor(status: string): string {
@@ -29,6 +49,8 @@ interface AgentTasksSectionProps {
 }
 
 export default function AgentTasksSection({ agent }: AgentTasksSectionProps) {
+  const { t } = useTranslation('settings');
+  const { t: tTask } = useTranslation('task');
   const [tasks, setTasks] = useState<CronTask[]>([]);
   const [selectedTask, setSelectedTask] = useState<CronTask | null>(null);
   const toast = useToast();
@@ -61,13 +83,13 @@ export default function AgentTasksSection({ agent }: AgentTasksSectionProps) {
       await deleteCronTask(taskId);
       if (!isMountedRef.current) return;
       setSelectedTask(null);
-      toastRef.current.success('定时任务已删除');
+      toastRef.current.success(t('agentSettings.tasks.deleted'));
       void loadTasks();
     } catch (err) {
       if (!isMountedRef.current) return;
-      toastRef.current.error(`删除失败: ${err instanceof Error ? err.message : String(err)}`);
+      toastRef.current.error(t('agentSettings.tasks.deleteFailed', { message: err instanceof Error ? err.message : String(err) }));
     }
-  }, [loadTasks]);
+  }, [loadTasks, t]);
 
   const handleResume = useCallback(async (taskId: string) => {
     try {
@@ -75,7 +97,7 @@ export default function AgentTasksSection({ agent }: AgentTasksSectionProps) {
       await startCronScheduler(taskId);
       if (!isMountedRef.current) return;
       setSelectedTask(null);
-      toastRef.current.success('任务已恢复运行');
+      toastRef.current.success(t('agentSettings.tasks.resumed'));
       void loadTasks();
     } catch (err) {
       if (!isMountedRef.current) return;
@@ -85,16 +107,16 @@ export default function AgentTasksSection({ agent }: AgentTasksSectionProps) {
         void loadTasks();
         return;
       }
-      toastRef.current.error(`恢复失败: ${msg}`);
+      toastRef.current.error(t('agentSettings.tasks.resumeFailed', { message: msg }));
     }
-  }, [loadTasks]);
+  }, [loadTasks, t]);
 
   const handleStop = useCallback(async (taskId: string) => {
     try {
       await stopCronTask(taskId, '手动停止');
       if (!isMountedRef.current) return;
       setSelectedTask(null);
-      toastRef.current.success('任务已停止');
+      toastRef.current.success(t('agentSettings.tasks.stopped'));
       void loadTasks();
     } catch (err) {
       if (!isMountedRef.current) return;
@@ -104,9 +126,9 @@ export default function AgentTasksSection({ agent }: AgentTasksSectionProps) {
         void loadTasks();
         return;
       }
-      toastRef.current.error(`停止失败: ${msg}`);
+      toastRef.current.error(t('agentSettings.tasks.stopFailed', { message: msg }));
     }
-  }, [loadTasks]);
+  }, [loadTasks, t]);
 
   // Only show active (running) tasks, sorted by date descending (newest first)
   const activeTasks = useMemo(() =>
@@ -119,16 +141,17 @@ export default function AgentTasksSection({ agent }: AgentTasksSectionProps) {
       }),
     [tasks],
   );
+  const locale = currentSupportedLocale();
 
   return (
     <div className="space-y-3">
       <h3 className="text-base font-medium text-[var(--ink)]">
-        定时任务
+        {t('agentSettings.tasks.title')}
       </h3>
 
       {activeTasks.length === 0 ? (
         <p className="text-xs text-[var(--ink-subtle)]">
-          暂无运行中的定时任务。
+          {t('agentSettings.tasks.empty')}
         </p>
       ) : (
         <div className="space-y-2">
@@ -145,10 +168,10 @@ export default function AgentTasksSection({ agent }: AgentTasksSectionProps) {
               />
               <div className="min-w-0 flex-1">
                 <span className="text-sm font-medium truncate text-[var(--ink)]">
-                  {task.name || '未命名任务'}
+                  {task.name || t('agentSettings.tasks.unnamed')}
                 </span>
                 <div className="text-xs text-[var(--ink-subtle)]">
-                  {formatScheduleDescription(task)} · {getCronStatusText(task.status)}
+                  {formatTaskSchedule(task, tTask, locale)} · {cronStatusText(task.status, tTask)}
                 </div>
               </div>
               {task.lastExecutedAt && (

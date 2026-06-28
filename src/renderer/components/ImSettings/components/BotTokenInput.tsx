@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { AlertCircle, Check, Eye, EyeOff, Loader2 } from 'lucide-react';
 
 export default function BotTokenInput({
@@ -11,7 +12,8 @@ export default function BotTokenInput({
     onChange: (token: string) => void;
     verifyStatus: 'idle' | 'verifying' | 'valid' | 'invalid';
     botUsername?: string;
-}) {
+	}) {
+    const { t } = useTranslation('settings');
     const [visible, setVisible] = useState(false);
     const [localValue, setLocalValue] = useState(value);
 
@@ -38,7 +40,7 @@ export default function BotTokenInput({
                         onChange={(e) => setLocalValue(e.target.value)}
                         onBlur={handleBlur}
                         onKeyDown={(e) => e.key === 'Enter' && handleBlur()}
-                        placeholder="从 @BotFather 获取 Bot Token"
+                        placeholder={t('agentSettings.imComponents.tokenPlaceholder')}
                         className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 pr-10 text-sm text-[var(--ink)] placeholder-[var(--ink-muted)] focus:border-[var(--focus-border)] focus:outline-none"
                     />
                     <button
@@ -62,12 +64,12 @@ export default function BotTokenInput({
             </div>
             {verifyStatus === 'valid' && botUsername && (
                 <p className="text-xs text-[var(--success)]">
-                    已验证: @{botUsername}
+                    {t('agentSettings.imComponents.verified', { name: `@${botUsername}` })}
                 </p>
             )}
             {verifyStatus === 'invalid' && (
                 <p className="text-xs text-[var(--error)]">
-                    Token 无效，请检查后重试
+                    {t('agentSettings.imComponents.tokenInvalid')}
                 </p>
             )}
         </div>

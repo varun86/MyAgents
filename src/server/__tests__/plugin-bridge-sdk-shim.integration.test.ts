@@ -20,6 +20,8 @@
 
 import { describe, expect, it } from 'vitest';
 
+import { setOpenClawConfigSnapshot } from '../plugin-bridge/openclaw-config';
+
 const SHIM_BASE = '../plugin-bridge/sdk-shim/plugin-sdk';
 
 describe('plugin-bridge SDK shim — drift-stub augmentation', () => {
@@ -73,5 +75,39 @@ describe('plugin-bridge SDK shim — drift-stub augmentation', () => {
     const mod = await import(`${SHIM_BASE}/command-auth.js`);
     expect(typeof mod.listNativeCommandSpecsForConfig).toBe('function');
     expect(mod.listNativeCommandSpecsForConfig({})).toEqual([]);
+  });
+
+  it('config-runtime exposes the Bridge OpenClaw config snapshot for plugin reload paths', async () => {
+    const mod = await import(`${SHIM_BASE}/config-runtime.js`);
+
+    setOpenClawConfigSnapshot({
+      channels: {
+        'openclaw-weixin': {
+          enabled: true,
+          appId: 'wx-app',
+          dmPolicy: 'open',
+        },
+      },
+    });
+
+    const loaded = mod.loadConfig();
+    expect(loaded.channels['openclaw-weixin']).toMatchObject({
+      enabled: true,
+      appId: 'wx-app',
+      dmPolicy: 'open',
+    });
+
+    loaded.channels['openclaw-weixin'].appId = 'mutated-copy';
+    expect(mod.loadConfig().channels['openclaw-weixin'].appId).toBe('wx-app');
+
+    await mod.writeConfigFile({
+      channels: {
+        'openclaw-weixin': {
+          enabled: true,
+          appId: 'wx-app-2',
+        },
+      },
+    });
+    expect(mod.getRuntimeConfig().channels['openclaw-weixin'].appId).toBe('wx-app-2');
   });
 });

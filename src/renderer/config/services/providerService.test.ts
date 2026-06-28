@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+    CODEX_SUBSCRIPTION_PROVIDER_ID,
     DEFAULT_CONFIG,
+    MANAGED_CODEX_PROVIDER,
     applyProviderEnablementAndOrder,
     type Provider,
 } from '../types';
@@ -9,6 +11,7 @@ import {
     getFirstAvailableProvider,
     isProviderAvailable,
     resolveBuiltinSelection,
+    resolveProvider,
 } from './providerService';
 
 const makeProvider = (id: string, primaryModel = `${id}-model`): Provider => ({
@@ -73,5 +76,56 @@ describe('provider availability with enablement', () => {
 
         expect(selection?.provider.id).toBe('beta');
         expect(selection?.model).toBe('beta-primary');
+    });
+
+    it('requires runtime-backed providers to be ready and have discovered models', () => {
+        expect(isProviderAvailable(
+            MANAGED_CODEX_PROVIDER,
+            {},
+            { [CODEX_SUBSCRIPTION_PROVIDER_ID]: { status: 'valid', verifiedAt: '2026-06-26T00:00:00.000Z' } },
+        )).toBe(false);
+
+        expect(isProviderAvailable(
+            { ...MANAGED_CODEX_PROVIDER, runtimeReady: true },
+            {},
+            {},
+        )).toBe(false);
+
+        expect(isProviderAvailable(
+            {
+                ...MANAGED_CODEX_PROVIDER,
+                runtimeReady: true,
+                primaryModel: 'gpt-5',
+                models: [{ model: 'gpt-5', modelName: 'GPT-5', modelSeries: 'codex' }],
+            },
+            {},
+            {},
+        )).toBe(true);
+
+        expect(isProviderAvailable(
+            {
+                ...MANAGED_CODEX_PROVIDER,
+                enabled: false,
+                runtimeReady: true,
+                primaryModel: 'gpt-5',
+                models: [{ model: 'gpt-5', modelName: 'GPT-5', modelSeries: 'codex' }],
+            },
+            {},
+            {},
+        )).toBe(false);
+    });
+
+    it('does not fallback from an unavailable runtime-backed provider to an API provider', () => {
+        const providers = [
+            { ...MANAGED_CODEX_PROVIDER, enabled: false },
+            makeProvider('deepseek'),
+        ];
+
+        expect(resolveProvider(
+            CODEX_SUBSCRIPTION_PROVIDER_ID,
+            providers,
+            { deepseek: 'deepseek-key' },
+            {},
+        )).toBeUndefined();
     });
 });

@@ -25,7 +25,7 @@ use serde::Serialize;
 use serde_json::json;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 
-use super::health::HealthManager;
+use super::health::{self, HealthManager};
 use super::router::{parse_session_key, SessionRouter};
 use super::runtime_change;
 use super::types::{LastActiveChannel, PeerSession};
@@ -101,12 +101,14 @@ fn short_id(s: &str) -> String {
     s.chars().take(8).collect()
 }
 
-async fn freeze_current_via_sidecar(port: u16) -> Result<(), String> {
+async fn freeze_current_via_sidecar(port: u16, metadata_birth_pending: bool) -> Result<(), String> {
     let client = crate::local_http::json_client(Duration::from_secs(30));
     let url = format!("http://127.0.0.1:{}/api/session/freeze-current", port);
     let resp = client
         .post(&url)
-        .json(&json!({}))
+        .json(&json!({
+            "metadataBirthPending": metadata_birth_pending,
+        }))
         .send()
         .await
         .map_err(|e| format!("freeze-current HTTP send failed: {}", e))?;
@@ -190,6 +192,7 @@ pub async fn cmd_session_new_with_surface_migration<R: Runtime>(
                     &ch.bot_instance.current_model,
                     &ch.bot_instance.permission_mode,
                     &ch.bot_instance.mcp_servers_json,
+                    &ch.bot_instance.runtime_config,
                     ch.bot_instance.config.provider_id.clone(),
                     &ch.bot_instance.current_provider_env,
                 )
@@ -234,6 +237,9 @@ pub struct HandoverResult {
     pub ok: bool,
     pub session_key: String,
     pub notified: bool,
+    pub state_persisted: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
 }
 
 /// Bind `session_id` (the desktop session) to `(agent_id, channel_id)`.
@@ -329,6 +335,7 @@ pub async fn cmd_handover_session_to_channel<R: Runtime>(
             &channel.bot_instance.current_model,
             &channel.bot_instance.permission_mode,
             &channel.bot_instance.mcp_servers_json,
+            &channel.bot_instance.runtime_config,
             channel.bot_instance.config.provider_id.clone(),
             &channel.bot_instance.current_provider_env,
         )
@@ -489,21 +496,38 @@ pub async fn cmd_handover_session_to_channel<R: Runtime>(
     if let Some(prior) = prior_before_handover.as_ref() {
         if prior.session_id != sessionId {
             let freeze_result = if prior.sidecar_port != 0 {
-                freeze_current_via_sidecar(prior.sidecar_port).await.map(|_| {
-                    ulog_info!(
-                        "[handover] step4b froze prior session {} via sidecar port {}",
-                        short_id(&prior.session_id),
-                        prior.sidecar_port
-                    );
-                })
-            } else {
-                runtime_change::freeze_via_file_lock(&prior.session_id, &fallback_snapshot)
+                freeze_current_via_sidecar(prior.sidecar_port, prior.metadata_birth_pending)
                     .await
                     .map(|_| {
                         ulog_info!(
-                            "[handover] step4b froze idle prior session {} via file lock",
-                            short_id(&prior.session_id)
+                            "[handover] step4b froze prior session {} via sidecar port {}",
+                            short_id(&prior.session_id),
+                            prior.sidecar_port
                         );
+                    })
+            } else {
+                runtime_change::freeze_via_file_lock_status(&prior.session_id, &fallback_snapshot)
+                    .await
+                    .and_then(|outcome| {
+                        runtime_change::resolve_peer_file_lock_freeze_outcome(
+                            outcome,
+                            prior.metadata_birth_pending,
+                            &prior.session_id,
+                        )
+                    })
+                    .map(|disposition| match disposition {
+                        runtime_change::PeerFileLockFreezeDisposition::Frozen => {
+                            ulog_info!(
+                                "[handover] step4b froze idle prior session {} via file lock",
+                                short_id(&prior.session_id)
+                            );
+                        }
+                        runtime_change::PeerFileLockFreezeDisposition::MissingBirthPending => {
+                            ulog_info!(
+                                "[handover] step4b skipped freeze for birth-pending prior session {} missing from SessionStore",
+                                short_id(&prior.session_id)
+                            );
+                        }
                     })
             };
             if let Err(e) = freeze_result {
@@ -525,7 +549,8 @@ pub async fn cmd_handover_session_to_channel<R: Runtime>(
     // `is_new=true` means the old sidecar was dead and a fresh one was minted
     // on a different port; binding the IM channel to the stale port would
     // route subsequent messages into a closed socket.
-    let (chat_id, prior_session_id, prior_sidecar_port, active_sessions_after_upsert) = {
+    let mut persist_warning: Option<String> = None;
+    let (chat_id, prior_session_id, prior_sidecar_port) = {
         let mut router = router_arc.lock().await;
         let current_prior = router.peer_session_snapshot(&target_session_key);
         let before_identity = prior_before_handover
@@ -566,12 +591,7 @@ pub async fn cmd_handover_session_to_channel<R: Runtime>(
             last_active: Instant::now(),
         });
 
-        (
-            source_id,
-            prior_session_id,
-            prior_sidecar_port,
-            router.active_sessions(),
-        )
+        (source_id, prior_session_id, prior_sidecar_port)
     };
     ulog_info!(
         "[handover] step5 peer_session upserted: chat_id={} prior_session={}",
@@ -581,14 +601,10 @@ pub async fn cmd_handover_session_to_channel<R: Runtime>(
             .map(short_id)
             .unwrap_or_else(|| "none".into()),
     );
-    target_health
-        .set_active_sessions(active_sessions_after_upsert)
-        .await;
-    if let Err(e) = target_health.persist().await {
-        ulog_warn!(
-            "[handover] step5 persist target channel health after upsert failed: {}",
-            e
-        );
+    if let Err(e) =
+        health::persist_router_active_sessions(&target_health, &router_arc, "handover-upsert").await
+    {
+        persist_warning = Some(format!("Active session state failed to persist: {}", e));
     }
 
     if target_consumer_needs_cancel(
@@ -628,7 +644,7 @@ pub async fn cmd_handover_session_to_channel<R: Runtime>(
     // the agent's channels before notifying the target.
     let mut removed_count = 0usize;
     for runtime in &channel_runtimes {
-        let (removed_bindings, active_sessions_after_removal) = {
+        let (removed_bindings, should_persist_removal) = {
             let mut router_guard = runtime.router.lock().await;
             let keep_session_key = if runtime.channel_id == channelId {
                 Some(target_session_key.as_str())
@@ -637,17 +653,20 @@ pub async fn cmd_handover_session_to_channel<R: Runtime>(
             };
             let removed =
                 router_guard.remove_peer_sessions_for_session_except(&sessionId, keep_session_key);
-            let active_sessions = if removed.is_empty() {
-                None
-            } else {
-                Some(router_guard.active_sessions())
-            };
-            (removed, active_sessions)
+            let should_persist = !removed.is_empty();
+            (removed, should_persist)
         };
-        if let Some(active_sessions) = active_sessions_after_removal {
-            runtime.health.set_active_sessions(active_sessions).await;
-            if let Err(e) = runtime.health.persist().await {
-                ulog_warn!("[handover] step5b persist channel health after stale binding removal failed: {}", e);
+        if should_persist_removal {
+            if let Err(e) = health::persist_router_active_sessions(
+                &runtime.health,
+                &runtime.router,
+                "handover-remove-stale-binding",
+            )
+            .await
+            {
+                persist_warning.get_or_insert_with(|| {
+                    format!("Active session state failed to persist: {}", e)
+                });
             }
         }
 
@@ -760,6 +779,8 @@ pub async fn cmd_handover_session_to_channel<R: Runtime>(
         ok: true,
         session_key: target_session_key,
         notified,
+        state_persisted: persist_warning.is_none(),
+        warning: persist_warning,
     })
 }
 

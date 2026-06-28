@@ -1,5 +1,6 @@
 import type { AgentDefinition } from '@anthropic-ai/claude-agent-sdk';
 import type { BackgroundAgentPermissionMode, McpServerDefinition } from '../../shared/config-types';
+import type { OfficialToolId } from '../../shared/official-tools';
 import {
   canResumeAcrossProviderBoundary,
   type ProviderHistoryEnv,
@@ -18,6 +19,7 @@ const pendingConfigRestart = new Set<BuiltinRestartReason>();
 let currentMcpServers: McpServerDefinition[] | null = null;
 let frozenSdkMcpFingerprint = '';
 let currentEnabledPluginIds: string[] | null = null;
+let currentEnabledOfficialToolIds: OfficialToolId[] | null = null;
 let currentAgentDefinitions: Record<string, AgentDefinition> | null = null;
 let currentPermissionMode: PermissionMode = 'auto';
 let prePlanPermissionMode: PermissionMode | null = null;
@@ -45,6 +47,12 @@ export const configState = {
   },
   set currentEnabledPluginIds(ids: string[] | null) {
     currentEnabledPluginIds = ids;
+  },
+  get currentEnabledOfficialToolIds(): OfficialToolId[] | null {
+    return currentEnabledOfficialToolIds;
+  },
+  set currentEnabledOfficialToolIds(ids: OfficialToolId[] | null) {
+    currentEnabledOfficialToolIds = ids;
   },
   get currentAgentDefinitions(): Record<string, AgentDefinition> | null {
     return currentAgentDefinitions;
@@ -165,6 +173,14 @@ export function getSessionEnabledPluginIds(): readonly string[] | null {
 
 export function setSessionEnabledPluginIds(ids: string[] | null): void {
   currentEnabledPluginIds = ids === null ? null : [...ids];
+}
+
+export function getSessionEnabledOfficialToolIds(): readonly OfficialToolId[] | null {
+  return currentEnabledOfficialToolIds;
+}
+
+export function setSessionEnabledOfficialToolIds(ids: readonly OfficialToolId[] | null): void {
+  currentEnabledOfficialToolIds = ids === null ? null : [...ids];
 }
 
 export function getCurrentAgentDefinitions(): Record<string, AgentDefinition> | null {
@@ -459,6 +475,7 @@ export function snapshotConfig(): BuiltinConfigSnapshot {
   return {
     mcpServers: currentMcpServers ? [...currentMcpServers] : null,
     enabledPluginIds: currentEnabledPluginIds ? [...currentEnabledPluginIds] : null,
+    enabledOfficialToolIds: currentEnabledOfficialToolIds ? [...currentEnabledOfficialToolIds] : null,
     agentDefinitions: currentAgentDefinitions,
     permissionMode: currentPermissionMode,
     prePlanPermissionMode,
@@ -477,6 +494,7 @@ export function resetConfigForTest(): void {
   currentMcpServers = null;
   frozenSdkMcpFingerprint = '';
   currentEnabledPluginIds = null;
+  currentEnabledOfficialToolIds = null;
   currentAgentDefinitions = null;
   currentPermissionMode = 'auto';
   prePlanPermissionMode = null;

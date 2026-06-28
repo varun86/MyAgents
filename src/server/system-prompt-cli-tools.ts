@@ -23,6 +23,7 @@
 
 import type { InteractionScenario } from './system-prompt';
 import { getUserToolsPromptSection } from './utils/cli-tools-registry';
+import { IMAGE_UNDERSTANDING_TOOL_ID, type OfficialToolId } from '../shared/official-tools';
 
 // ===== Capability sections =====
 //
@@ -119,6 +120,24 @@ works identically across platforms. Tag inline with \`#xxx\` inside
 the content itself — there's no separate --tag flag on create.
 </myagents-cli-thought>`;
 
+const SECTION_VISION = `<myagents-cli-vision>
+If the active model/runtime cannot see images, use MyAgents' image-understanding
+helper instead of guessing. When Read or another file view returns
+"[Unsupported Image]" for a PNG/JPG/WebP/GIF, switch to this helper.
+
+Quick use:
+  myagents vision analyze --image <path> [--image <path> ...] [--prompt 'short request']
+  myagents vision analyze --image <path> --prompt-file <workspace-relative-text-file> [--json]
+
+Use workspace-local paths only, especially \`@myagents_files/...\` attachment
+references. Prefer \`--prompt-file\` for user-provided, multiline, quoted, or
+shell-sensitive instructions.
+
+For details:
+  myagents vision --help
+  myagents vision readme
+</myagents-cli-vision>`;
+
 /**
  * Single source of truth for the widget trigger rule. Embedded into both the
  * system prompt's `SECTION_WIDGET` (always-on guidance) and the CLI's
@@ -198,7 +217,7 @@ export function buildSessionInboxSection(_scenario: InteractionScenario): string
  */
 export function buildCliToolsAppend(
   scenario: InteractionScenario,
-  options?: { includeUserTools?: boolean },
+  options?: { includeUserTools?: boolean; enabledOfficialToolIds?: readonly OfficialToolId[] },
 ): string {
   const parts: string[] = [];
 
@@ -220,6 +239,10 @@ export function buildCliToolsAppend(
   // human user to capture for, so the section is suppressed there.
   if (scenario.type === 'desktop' || scenario.type === 'im' || scenario.type === 'agent-channel') {
     parts.push(SECTION_THOUGHT);
+  }
+
+  if (options?.enabledOfficialToolIds?.includes(IMAGE_UNDERSTANDING_TOOL_ID)) {
+    parts.push(SECTION_VISION);
   }
 
   // User-registered CLI tools — universal (PRD 0.2.36 cli_first_tool_registry).

@@ -7,6 +7,7 @@
  */
 
 import { getSessionDetails } from '@/api/sessionClient';
+import { i18n } from '@/i18n';
 import { localDateStr, sanitizeFileName, downloadMarkdown, exportHeader } from '@/utils/markdownExport';
 
 export interface SessionExportResult {
@@ -33,6 +34,10 @@ function extractAssistantText(content: string): string {
 
 const pad2 = (n: number) => String(n).padStart(2, '0');
 
+function sessionExportText(key: string): string {
+    return String(i18n.t(`app:sessionExport.${key}`));
+}
+
 function fmtTs(iso: string): string {
     const d = new Date(iso);
     return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
@@ -42,7 +47,7 @@ export async function exportSessionAsMarkdown(sessionId: string): Promise<Sessio
     try {
         const data = await getSessionDetails(sessionId);
         if (!data || data.messages.length === 0) {
-            return { ok: false, message: '该对话暂无内容可导出', empty: true };
+            return { ok: false, message: sessionExportText('empty'), empty: true };
         }
 
         const dateStr = localDateStr();
@@ -71,6 +76,6 @@ export async function exportSessionAsMarkdown(sessionId: string): Promise<Sessio
         const message = await downloadMarkdown(fileName, markdown);
         return { ok: true, message };
     } catch {
-        return { ok: false, message: '导出失败，请重试' };
+        return { ok: false, message: sessionExportText('failed') };
     }
 }

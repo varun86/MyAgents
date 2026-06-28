@@ -2,6 +2,7 @@
 // NOTE: This panel is still used by the Settings page Agent card list.
 // The new WorkspaceGeneralTab replaces it inside WorkspaceConfigPanel.
 import { useState, useCallback, useEffect } from 'react';
+import { useTranslation } from 'react-i18next';
 import { useConfig } from '@/hooks/useConfig';
 import { useAgentStatuses } from '@/hooks/useAgentStatuses';
 import { getAgentById } from '@/config/services/agentConfigService';
@@ -20,6 +21,7 @@ interface AgentSettingsPanelProps {
 }
 
 export default function AgentSettingsPanel({ agentId }: AgentSettingsPanelProps) {
+  const { t } = useTranslation('settings');
   const { config, projects, refreshConfig } = useConfig();
   const { statuses, refresh: refreshStatuses } = useAgentStatuses();
   const [agent, setAgent] = useState<AgentConfig | undefined>(() => getAgentById(config, agentId));
@@ -37,7 +39,7 @@ export default function AgentSettingsPanel({ agentId }: AgentSettingsPanelProps)
     return (
       <div className="flex items-center justify-center py-12">
         <span className="text-sm text-[var(--ink-subtle)]">
-          Agent 未找到 (ID: {agentId})
+          {t('agentSettings.panel.agentNotFound', { id: agentId })}
         </span>
       </div>
     );

@@ -26,7 +26,12 @@ import { messageAttachmentsFromImagePayloads, resolveImagePayloads } from './ima
 import { maybeSpill } from '../utils/large-value-store';
 import type { AskUserQuestionInput, AskUserQuestion } from '../../shared/types/askUserQuestion';
 import { withQuestionTextAnswerKeys } from '../../shared/types/askUserQuestion';
-import { getExternalRuntime, getCurrentRuntimeType, isExternalRuntime } from './factory';
+import {
+  getExternalRuntime,
+  getCurrentRuntimeSource,
+  getCurrentRuntimeType,
+  isExternalRuntime,
+} from './factory';
 import { resolveCodexWorkspaceInstructions } from './workspace-instructions';
 import { RUNTIME_DISPLAY_NAMES, type RuntimeType } from '../../shared/types/runtime';
 import { deriveSessionTitle } from '../../shared/sessionTitle';
@@ -43,7 +48,8 @@ import {
   createMaterializedSessionMetadata,
   type SessionMaterializationScenario,
 } from '../utils/session-materialization';
-import { findAgentByWorkspacePath, isCliToolRegistryEnabled, loadConfig as loadAdminConfig } from '../utils/admin-config';
+import { isManagedCodexProviderReady } from '../utils/managed-codex-readiness';
+import { findAgentByWorkspacePath, getEffectiveOfficialToolIdsForSession, isCliToolRegistryEnabled, loadConfig as loadAdminConfig, resolveWorkspaceConfig } from '../utils/admin-config';
 import type { AgentConfig } from '../../shared/types/agent';
 import type { MessageUsage, SessionMessage, TurnAnalyticsSource } from '../types/session';
 import type { SystemInitInfo } from '../../shared/types/system';
@@ -779,6 +785,7 @@ async function ensureExternalSessionMetadataForRealUserTurn(params: {
     scenario: materializationScenarioFromInteraction(scenario),
     agent,
     runtimeOverride: getCurrentRuntimeType(),
+    managedCodexProviderReady: isManagedCodexProviderReady(loadAdminConfig()),
     fallbackRuntime: getCurrentRuntimeType(),
     title,
   });
@@ -1393,7 +1400,13 @@ export function getExternalSessionState(): ExternalSessionState {
   return getExternalLifecycleState();
 }
 
-export function getExternalSystemInitPayload(): { info: SystemInitInfo; sessionId: string; prewarm?: boolean; runtime: RuntimeType } | null {
+export function getExternalSystemInitPayload(): {
+  info: SystemInitInfo;
+  sessionId: string;
+  prewarm?: boolean;
+  runtime: RuntimeType;
+  runtimeSource?: import('../../shared/types/runtime').RuntimeSource;
+} | null {
   return getExternalSystemInitPayloadSnapshot();
 }
 
@@ -1403,6 +1416,10 @@ export function getExternalPendingInteractiveRequests(): ExternalPendingInteract
 
 export function getExternalSessionId(): string {
   return getExternalLifecycleSessionId();
+}
+
+export function getExternalSessionWorkspacePath(): string {
+  return getExternalLifecycleWorkspacePath();
 }
 
 /** The session this Sidecar is bound to right now — either already committed
@@ -1448,6 +1465,10 @@ export function getExternalLiveAssistantMessage(): SessionMessage | null {
  */
 export function getActiveRuntimeType(): RuntimeType {
   return getCurrentRuntimeType();
+}
+
+export function getActiveRuntimeSource(): ReturnType<typeof getCurrentRuntimeSource> {
+  return getCurrentRuntimeSource();
 }
 
 /**
@@ -1578,6 +1599,7 @@ async function _doStartExternalSession(options: {
 }): Promise<void> {
 
   const runtimeType = getCurrentRuntimeType();
+  const runtimeSource = getCurrentRuntimeSource();
   const runtime = getExternalRuntime(runtimeType);
   setExternalActiveRuntime(runtime);
 
@@ -1601,10 +1623,16 @@ async function _doStartExternalSession(options: {
   //
   // Generative-UI widget guidance is universal (no MCP equivalent) and is
   // injected unconditionally for desktop scenarios via buildWidgetSection().
+  const existingMetadataAtStart = getSessionMetadata(options.sessionId);
+  const enabledOfficialToolIds = getEffectiveOfficialToolIdsForSession(
+    options.workspacePath,
+    existingMetadataAtStart,
+  );
   const baseSystemPrompt = buildSystemPromptAppend(options.scenario, {
     runtime: runtimeType,
     cliToolsEnabled: true,
     userCliToolsEnabled: isCliToolRegistryEnabled(),
+    enabledOfficialToolIds,
   });
 
   // Cross-runtime workspace protocol: append workspace instruction files
@@ -1653,7 +1681,9 @@ async function _doStartExternalSession(options: {
     options.sessionId,
   );
 
-  const existingMetadataAtStart = getSessionMetadata(options.sessionId);
+  const managedCodexMcpServers = runtimeType === 'codex' && runtimeSource === 'managed-provider'
+    ? resolveWorkspaceConfig(options.workspacePath, existingMetadataAtStart, { includeMcp: true }).mcpServers
+    : undefined;
   if (shouldTrackPendingExternalSessionBirth({
     hasInitialMessage: Boolean(options.initialMessage),
     hasResumeSessionId: Boolean(options.resumeSessionId),
@@ -1773,6 +1803,8 @@ async function _doStartExternalSession(options: {
         scenario: options.scenario,
         resumeSessionId: resumeId,
         envPolicy: resolvedEnvPolicy,
+        runtimeSource,
+        mcpServers: managedCodexMcpServers,
       },
       handleUnifiedEvent,
     );
@@ -2999,13 +3031,17 @@ export async function prewarmExternalSession(options: {
 /**
  * Query models for a given runtime type
  */
-export async function queryRuntimeModels(runtimeType: RuntimeType): Promise<unknown[]> {
+export async function queryRuntimeModels(
+  runtimeType: RuntimeType,
+  options: { runtimeSource?: import('../../shared/types/runtime').RuntimeSource } = {},
+): Promise<unknown[]> {
   if (runtimeType === 'builtin') return [];
+  const runtimeSource = runtimeType === 'codex' ? options.runtimeSource : undefined;
   try {
     return await queryRuntimeModelsSingleFlight(runtimeType, async () => {
       const runtime = getExternalRuntime(runtimeType);
-      return await runtime.queryModels();
-    });
+      return await runtime.queryModels({ runtimeSource });
+    }, runtimeSource);
   } catch (err) {
     console.error(`[external-session] Failed to query models for ${runtimeType}:`, err);
     return [];
@@ -3664,6 +3700,7 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
       const systemInitPayload = buildExternalSystemInitPayload({
         info,
         runtime: getCurrentRuntimeType(),
+        runtimeSource: getCurrentRuntimeSource(),
       });
       setExternalSystemInitPayload(systemInitPayload);
       broadcast('chat:system-init', systemInitPayload);

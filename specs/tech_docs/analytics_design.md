@@ -87,6 +87,7 @@ Thinking export and copy:
 Tool and permission flow:
 
 - `tool_use`
+- `official_tool_vision_analyze`
 - `permission_grant`
 - `permission_deny`
 

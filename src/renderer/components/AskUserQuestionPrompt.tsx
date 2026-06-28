@@ -1,5 +1,6 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import { MessageCircleQuestion, ChevronLeft, ChevronRight, X, Check, Eye } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 
 // Import shared types
 import type { AskUserQuestionRequest } from '../../shared/types/askUserQuestion';
@@ -45,6 +46,7 @@ interface AskUserQuestionPromptProps {
  * Shows one question at a time with navigation between questions
  */
 export function AskUserQuestionPrompt({ request, onSubmit, onCancel }: AskUserQuestionPromptProps) {
+    const { t } = useTranslation('chat');
     const [currentIndex, setCurrentIndex] = useState(0);
     const [answers, setAnswers] = useState<Record<number, string[]>>({});
     const [customInputs, setCustomInputs] = useState<Record<number, string>>({});
@@ -309,7 +311,7 @@ export function AskUserQuestionPrompt({ request, onSubmit, onCancel }: AskUserQu
                                                                 ? 'text-[var(--accent)] bg-[var(--accent)]/10'
                                                                 : 'text-[var(--ink-muted)] hover:text-[var(--ink)] hover:bg-[var(--paper-inset)]'
                                                             }`}
-                                                        title="预览"
+                                                        title={t('shell.askQuestion.preview')}
                                                     >
                                                         <Eye className="size-3" />
                                                     </span>
@@ -373,7 +375,7 @@ export function AskUserQuestionPrompt({ request, onSubmit, onCancel }: AskUserQu
                                 value={currentCustomInput}
                                 onChange={(e) => handleCustomInputChange(e.target.value)}
                                 onKeyDown={handleCustomInputKeyDown}
-                                placeholder="说说你的想法"
+                                placeholder={t('shell.askQuestion.customPlaceholder')}
                                 autoComplete={currentQuestion.isSecret ? 'off' : undefined}
                                 disabled={isSubmitting}
                                 className={`flex-1 min-w-0 bg-transparent text-sm outline-none
@@ -387,7 +389,7 @@ export function AskUserQuestionPrompt({ request, onSubmit, onCancel }: AskUserQu
 
                 {/* Progress indicators (for multi-question) */}
                 {totalQuestions > 1 && (
-                    <div className="mt-3 flex justify-center gap-1.5" role="tablist" aria-label="问题进度">
+                    <div className="mt-3 flex justify-center gap-1.5" role="tablist" aria-label={t('shell.askQuestion.progressAria')}>
                         {request.questions.map((q, idx) => {
                             const isAnswered = (answers[idx]?.length ?? 0) > 0;
                             const isCurrent = idx === currentIndex;
@@ -397,7 +399,7 @@ export function AskUserQuestionPrompt({ request, onSubmit, onCancel }: AskUserQu
                                     onClick={() => handleIndicatorClick(idx)}
                                     role="tab"
                                     aria-selected={isCurrent}
-                                    aria-label={`问题 ${idx + 1}: ${q.header}`}
+                                    aria-label={t('shell.askQuestion.questionAria', { index: idx + 1, header: q.header })}
                                     className={`h-1.5 rounded-full transition-all
                                         ${isCurrent ? 'w-6' : 'w-1.5'}
                                         ${isCurrent
@@ -424,7 +426,7 @@ export function AskUserQuestionPrompt({ request, onSubmit, onCancel }: AskUserQu
                             transition-colors disabled:opacity-50"
                     >
                         <X className="size-3.5" />
-                        <span>取消</span>
+                        <span>{t('shell.common.cancel')}</span>
                     </button>
 
                     <div className="flex items-center gap-2">
@@ -439,7 +441,7 @@ export function AskUserQuestionPrompt({ request, onSubmit, onCancel }: AskUserQu
                                     transition-colors disabled:opacity-50"
                             >
                                 <ChevronLeft className="size-3.5" />
-                                <span>上一题</span>
+                                <span>{t('shell.askQuestion.previous')}</span>
                             </button>
                         )}
 
@@ -453,7 +455,7 @@ export function AskUserQuestionPrompt({ request, onSubmit, onCancel }: AskUserQu
                                     transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                             >
                                 <Check className="size-3.5" />
-                                <span>提交</span>
+                                <span>{t('shell.askQuestion.submit')}</span>
                             </button>
                         ) : (
                             <button
@@ -464,7 +466,7 @@ export function AskUserQuestionPrompt({ request, onSubmit, onCancel }: AskUserQu
                                     border border-[var(--line-subtle)] hover:border-[var(--accent)]/30 hover:bg-[var(--accent)]/5
                                     transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                             >
-                                <span>下一题</span>
+                                <span>{t('shell.askQuestion.next')}</span>
                                 <ChevronRight className="size-3.5" />
                             </button>
                         )}

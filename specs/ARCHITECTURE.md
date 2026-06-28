@@ -20,7 +20,7 @@ MyAgents 是基于 Tauri v2 的桌面 AI Agent 客户端，提供 Claude Agent S
 |------|------|
 | 前端 | React 19 + TypeScript + Vite + TailwindCSS |
 | 桌面框架 | Tauri v2 (Rust) |
-| 后端 | Node.js v24 + Claude Agent SDK 0.3.173（多实例 Sidecar 进程） |
+| 后端 | Node.js v24 + Claude Agent SDK 0.3.195（多实例 Sidecar 进程） |
 | 通信 | Rust HTTP/SSE Proxy (reqwest via `local_http` 模块) |
 | 拖拽 | @dnd-kit/sortable |
 
@@ -689,6 +689,18 @@ Cloud Space 把官方/团队空间接入桌面端，目前仍是开发中/半成
 
 ---
 
+### 20. UI 国际化 (`src/shared/i18n.ts` + `src/renderer/i18n/` + `src-tauri/src/i18n.rs`)
+
+产品界面语言由 `AppConfig.uiLanguage` 持久化，取值为 `system` 或显式 supported locale。TypeScript shared 层定义 allow-list 与 normalize 规则；renderer 用 i18next 加载 namespace JSON；Rust 拥有 native chrome（托盘菜单）的语言 mirror。
+
+`system` locale 在 Tauri 环境由 Rust `sys-locale` 解析并通过 `cmd_get_ui_language_state` / `ui-language-changed` 事件下发，避免主窗口、浮窗、托盘各自解析导致 split-brain。Settings 修改语言必须走 `ConfigProvider.updateConfig` → `cmd_set_ui_language`，Rust 在同一锁内完成写盘、托盘 relabel 与事件广播；Admin CLI 或其它外部写盘路径触发 `cmd_sync_ui_language_from_config` 重新同步 native mirror。
+
+浮球 / 伴随窗口没有完整 `ConfigProvider`，由 `FloatingI18nBootstrap` 启动前读取 native 语言状态并等待 ready 后渲染。
+
+详见 `tech_docs/i18n_architecture.md`。
+
+---
+
 ## Pit-of-Success 索引
 
 每个模块在 helper 层把"正确路径"做成默认。完整 Problem / Surface / Invariants / Don't 见 `tech_docs/pit_of_success.md`。
@@ -861,6 +873,7 @@ Windows 无自带 git/bash，NSIS 静默安装 Git for Windows（`src-tauri/nsis
 | `build_dev.sh` | Debug 构建（含 DevTools） |
 | `build_macos.sh` | 生产 DMG 构建 |
 | `publish_release.sh` | 发布到 R2 |
+| `publish_managed_codex_runtime.sh` | 单独发布 Managed Codex runtime set 的 macOS 平台资源 |
 
 ### Windows
 
@@ -869,6 +882,7 @@ Windows 无自带 git/bash，NSIS 静默安装 Git for Windows（`src-tauri/nsis
 | `setup_windows.ps1` | 首次环境初始化 |
 | `build_windows.ps1` | 生产构建（NSIS + 便携版） |
 | `publish_windows.ps1` | 发布到 R2 |
+| `publish_managed_codex_runtime.ps1` | 单独发布 Managed Codex runtime set 的 Windows 平台资源 |
 
 详见 `guides/windows_build_guide.md`。
 
@@ -914,6 +928,7 @@ Windows 无自带 git/bash，NSIS 静默安装 Git for Windows（`src-tauri/nsis
 ### 前端
 - [设计系统](./DESIGN.md) — Token / 组件 / 页面规范
 - [React 稳定性规范](./tech_docs/react_stability_rules.md) — Context / useEffect / memo 5 条规则
+- [UI 国际化架构](./tech_docs/i18n_architecture.md) — `uiLanguage`、i18next resources、native tray language mirror、增加新语言流程
 
 ### CLI
 - [CLI 架构](./tech_docs/cli_architecture.md) — 自配置 CLI 设计、版本门控、Admin API、PATH 注入

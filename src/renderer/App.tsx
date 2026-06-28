@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState, useRef, memo, lazy, Suspense } from 'react';
 import { flushSync } from 'react-dom';
+import { useTranslation } from 'react-i18next';
 import ChatBootOverlay from '@/components/ChatBootOverlay';
 import { arrayMove } from '@dnd-kit/sortable';
 
@@ -57,7 +58,7 @@ import {
   isProjectVisibleToUser,
   type Project,
 } from '@/config/types';
-import { type Tab, type InitialMessage, type SidecarConfigDisposition, type FilePreviewIntent, createNewTab, getFolderName, buildChatFlipPatch, MAX_TABS } from '@/types/tab';
+import { type Tab, type InitialMessage, type LaunchSessionBirthHint, type SidecarConfigDisposition, type FilePreviewIntent, createNewTab, getFolderName, buildChatFlipPatch, MAX_TABS } from '@/types/tab';
 import { buildRestoredTabs, saveOpenTabs, hydratePersistedState, pickDurableOverride, shouldOfferRestore, planRestoreTabs } from '@/utils/tabPersistence';
 import { persistOpenTabsDurable, loadAndClearOpenTabsDurable, clearOpenTabsDurable } from '@/utils/tabPersistenceDurable';
 import { consumeCleanExitMarker } from '@/utils/lastExitMarker';
@@ -70,7 +71,7 @@ import { getAllCronTasks, getTabCronTask, updateCronTaskTab } from '@/api/cronTa
 import { type CronRecoverySummaryPayload, type CronTaskRecoveredPayload, CRON_EVENTS } from '@/types/cronEvents';
 import { isBrowserDevMode, isTauriEnvironment } from '@/utils/browserMock';
 import { apiGetJson } from '@/api/apiFetch';
-import { getSessions, updateSession } from '@/api/sessionClient';
+import { createSession, getSessions, updateSession } from '@/api/sessionClient';
 import { dismissTopmost } from '@/utils/closeLayer';
 import { dispatchAppShortcut } from '@/utils/appShortcuts';
 import { handleSelectAllKeydown } from '@/utils/selectAllRouter';
@@ -82,12 +83,19 @@ import { getSessionDisplayText } from '@/utils/sessionDisplay';
 import { listenWithCleanup } from '@/utils/tauriListen';
 import { migrateFloatingBallSessionBinding } from '@/floating-ball/sessionBinding';
 import { CUSTOM_EVENTS, createPendingSessionId, isPendingSessionId } from '../shared/constants';
+import { normalizeOfficialToolIds, type OfficialToolId } from '../shared/official-tools';
 import { workspacePathsEqual } from '../shared/workspacePath';
 import type { CapabilityInitialSelect } from '../shared/skillsTypes';
 import { ensureSelfAwarenessWorkspace, resolveBuiltinSelection, pairBuiltinSelection, isProviderAvailable } from '@/config/configService';
 import { getAgentByWorkspacePath, getAgentById } from '@/config/services/agentConfigService';
 import type { SessionMetadata } from '@/api/sessionClient';
-import type { RuntimeType } from '../shared/types/runtime';
+import type { RuntimeSource, RuntimeType } from '../shared/types/runtime';
+import {
+  isRuntimeBackedProvider,
+  toProviderExecutionIntent,
+  type RuntimeBackedProviderIdentity,
+} from '../shared/providerExecution';
+import { buildRuntimeBackedInitialSessionBirth } from '@/utils/providerSwitchSessionBirth';
 
 // ============================================================
 // User Support Prompt Builder
@@ -105,23 +113,83 @@ function buildSupportPrompt(description: string, appVersion: string): string {
   ].join('\n');
 }
 
+function normalizeInitialPermissionMode(value: unknown): InitialMessage['permissionMode'] | undefined {
+  return value === 'auto' || value === 'plan' || value === 'fullAgency'
+    ? value
+    : undefined;
+}
+
+function resolveInitialPermissionMode(args: {
+  project: Pick<Project, 'permissionMode'>;
+  agent?: { permissionMode?: unknown };
+  defaultPermissionMode?: unknown;
+}): InitialMessage['permissionMode'] | undefined {
+  return normalizeInitialPermissionMode(args.agent?.permissionMode)
+    ?? normalizeInitialPermissionMode(args.project.permissionMode)
+    ?? normalizeInitialPermissionMode(args.defaultPermissionMode);
+}
+
+function normalizeStringSetting(value: unknown): string | undefined {
+  const trimmed = typeof value === 'string' ? value.trim() : '';
+  return trimmed || undefined;
+}
+
+function cloneStringArray(value: string[] | undefined): string[] | undefined {
+  return value ? [...value] : undefined;
+}
+
+interface SessionRuntimeOpenIdentity {
+  runtime: RuntimeType;
+  runtimeSource?: RuntimeSource;
+}
+
+function fallbackRuntimeForOpen(
+  fallbackRuntime: RuntimeType,
+  multiAgentRuntime: boolean | undefined,
+): RuntimeType {
+  return multiAgentRuntime ? fallbackRuntime : 'builtin';
+}
+
+function normalizeRuntimeSourceForOpen(
+  runtime: RuntimeType,
+  runtimeSource: RuntimeSource | undefined,
+): RuntimeSource | undefined {
+  if (runtime === 'builtin') return undefined;
+  return runtimeSource ?? 'system-cli';
+}
+
+async function resolveSessionRuntimeIdentityForOpen(
+  sessionId: string | null | undefined,
+  fallbackRuntime: RuntimeType,
+  multiAgentRuntime: boolean | undefined,
+): Promise<SessionRuntimeOpenIdentity> {
+  const fallback = fallbackRuntimeForOpen(fallbackRuntime, multiAgentRuntime);
+  if (!sessionId || isPendingSessionId(sessionId)) {
+    return { runtime: fallback, runtimeSource: normalizeRuntimeSourceForOpen(fallback, undefined) };
+  }
+  try {
+    const meta = await apiGetJson<{ success: boolean; session?: SessionMetadata }>(`/sessions/${encodeURIComponent(sessionId)}?limit=1`);
+    const runtime = meta.session?.runtime
+      ? normalizeRuntime(meta.session.runtime)
+      : fallback;
+    return {
+      runtime,
+      runtimeSource: normalizeRuntimeSourceForOpen(runtime, meta.session?.runtimeSource),
+    };
+  } catch (error) {
+    // Non-fatal: sidecar spawn/switch paths remain authoritative. Falling
+    // back only affects whether the UI opens a new tab proactively.
+    console.warn(`[App] Failed to resolve runtime for session ${sessionId}, using fallback ${fallback}:`, error);
+    return { runtime: fallback, runtimeSource: normalizeRuntimeSourceForOpen(fallback, undefined) };
+  }
+}
+
 async function resolveSessionRuntimeForOpen(
   sessionId: string | null | undefined,
   fallbackRuntime: RuntimeType,
   multiAgentRuntime: boolean | undefined,
 ): Promise<RuntimeType> {
-  if (!multiAgentRuntime || !sessionId || isPendingSessionId(sessionId)) {
-    return fallbackRuntime;
-  }
-  try {
-    const meta = await apiGetJson<{ success: boolean; session?: SessionMetadata }>(`/sessions/${encodeURIComponent(sessionId)}?limit=1`);
-    return normalizeRuntime(meta.session?.runtime ?? fallbackRuntime);
-  } catch (error) {
-    // Non-fatal: sidecar spawn/switch paths remain authoritative. Falling
-    // back only affects whether the UI opens a new tab proactively.
-    console.warn(`[App] Failed to resolve runtime for session ${sessionId}, using fallback ${fallbackRuntime}:`, error);
-    return fallbackRuntime;
-  }
+  return (await resolveSessionRuntimeIdentityForOpen(sessionId, fallbackRuntime, multiAgentRuntime)).runtime;
 }
 
 export interface LaunchProjectAnalyticsContext {
@@ -155,9 +223,10 @@ interface TabContentProps {
   isDeferredMount: boolean;
   settingsInitialSection: string | undefined;
   settingsInitialMcpId: string | undefined;
+  settingsInitialOfficialToolId?: OfficialToolId;
   settingsInitialSelect: CapabilityInitialSelect | undefined;
   // Launcher callbacks
-  onLaunchProject: (project: Project, sessionId?: string, initialMessage?: InitialMessage, analyticsContext?: LaunchProjectAnalyticsContext) => void;
+  onLaunchProject: (project: Project, sessionId?: string, initialMessage?: InitialMessage, analyticsContext?: LaunchProjectAnalyticsContext, sessionBirthHint?: LaunchSessionBirthHint) => void;
   // Chat callbacks
   onBack: () => Promise<void>;
   onSwitchSession: (tabId: string, sessionId: string, historyEntrySource?: HistoryEntrySource) => Promise<void>;
@@ -195,7 +264,7 @@ export const MemoizedTabContent = memo(function TabContent({
   onLaunchProject, onBack, onSwitchSession, onOpenSessionInNewTab, onNewSession,
   onUpdateGenerating, onUpdateTitle, onUpdateUnread, onRenameSession, onForkSession, onUpdateSessionId, onClearInitialMessage,
   onSidecarConfigAdopted, onFilePreviewIntentConsumed,
-  settingsInitialSection, settingsInitialMcpId, settingsInitialSelect, onSettingsSectionChange,
+  settingsInitialSection, settingsInitialMcpId, settingsInitialOfficialToolId, settingsInitialSelect, onSettingsSectionChange,
   updateReady, updateVersion, updateChecking, updateDownloading, updateInstalling, updatePreparing,
   onCheckForUpdate, onRestartAndUpdate,
   taskCenterPendingIntent,
@@ -225,6 +294,7 @@ export const MemoizedTabContent = memo(function TabContent({
           <Settings
             initialSection={settingsInitialSection}
             initialMcpId={settingsInitialMcpId}
+            initialOfficialToolId={settingsInitialOfficialToolId}
             initialSelect={settingsInitialSelect}
             onSectionChange={onSettingsSectionChange}
             isActive={isActive}
@@ -297,6 +367,7 @@ export const MemoizedTabContent = memo(function TabContent({
     prev.isDeferredMount === next.isDeferredMount &&
     prev.settingsInitialSection === next.settingsInitialSection &&
     prev.settingsInitialMcpId === next.settingsInitialMcpId &&
+    prev.settingsInitialOfficialToolId === next.settingsInitialOfficialToolId &&
     prev.settingsInitialSelect === next.settingsInitialSelect &&
     prev.updateReady === next.updateReady &&
     prev.updateVersion === next.updateVersion &&
@@ -316,6 +387,7 @@ export const MemoizedTabContent = memo(function TabContent({
 });
 
 export default function App() {
+  const { t } = useTranslation('app');
   // Auto-update state (silent background updates)
   const { updateReady, updateVersion, restartAndUpdate, checking: updateChecking, downloading: updateDownloading, installing: updateInstalling, preparing: updatePreparing, checkForUpdate, pendingUpdateOnStartup, dismissPendingUpdate } = useUpdater();
 
@@ -345,6 +417,7 @@ export default function App() {
   // Settings initial section state (for deep linking to specific section)
   const [settingsInitialSection, setSettingsInitialSection] = useState<string | undefined>(undefined);
   const [settingsInitialMcpId, setSettingsInitialMcpId] = useState<string | undefined>(undefined);
+  const [settingsInitialOfficialToolId, setSettingsInitialOfficialToolId] = useState<OfficialToolId | undefined>(undefined);
   const [settingsInitialSelect, setSettingsInitialSelect] = useState<CapabilityInitialSelect | undefined>(undefined);
 
   // Bug report overlay state (triggered from titlebar feedback button)
@@ -729,14 +802,14 @@ export default function App() {
       }
     }
     if (outcome === 'network-error') {
-      toastRef.current?.error('无法验证更新（网络异常），请稍后重试');
+      toastRef.current?.error(t('appChrome.updateVerifyFailed'));
     } else if (outcome === 'version-mismatch') {
-      toastRef.current?.info('已下载的更新已过期，正在重新下载新版本…');
+      toastRef.current?.info(t('appChrome.updateExpiredRedownloading'));
     } else if (outcome === 'error') {
-      toastRef.current?.error('安装更新失败，请重试或前往设置页手动重新检查');
+      toastRef.current?.error(t('appChrome.updateInstallFailed'));
     }
     // 'ok' → process is exiting via NSIS/relaunch, no toast needed
-  }, [flushOpenTabsNow]);
+  }, [flushOpenTabsNow, t]);
 
   // Per-tab loading state (keyed by tabId)
   const [loadingTabs, setLoadingTabs] = useState<Record<string, boolean>>({});
@@ -1292,13 +1365,13 @@ export default function App() {
 
     if (tab?.isGenerating && tab.sessionId) {
       void performCloseTab(tabId);
-      toastRef.current.info('AI 继续在后台完成任务');
+      toastRef.current.info(t('appChrome.backgroundCompletion'));
       return;
     }
 
     void performCloseTab(tabId);
   // eslint-disable-next-line react-hooks/exhaustive-deps -- callbacks stabilized via tabsRef
-  }, [setActiveTabId]);
+  }, [setActiveTabId, t]);
 
   // Close current active tab (for Cmd+W)
   const closeCurrentTab = useCallback(() => {
@@ -1370,6 +1443,7 @@ export default function App() {
     sessionId?: string,
     initialMessage?: InitialMessage,
     analyticsContext?: LaunchProjectAnalyticsContext,
+    sessionBirthHint?: LaunchSessionBirthHint,
   ) => {
     const activeTabId = activeTabIdRef.current;
     if (!activeTabId) return;
@@ -1458,16 +1532,18 @@ export default function App() {
           ? normalizeRuntime(getAgentByWorkspacePath(cfg, activeTab.agentDir)?.runtime)
           : targetAgentRuntime;
         const [
-          targetRuntime,
-          resolvedCurrentRuntime,
+          targetRuntimeIdentity,
+          resolvedCurrentRuntimeIdentity,
           activation,
           currentTabCronTask,
         ] = await Promise.all([
-          resolveSessionRuntimeForOpen(sessionId, targetAgentRuntime, cfg?.multiAgentRuntime),
-          resolveSessionRuntimeForOpen(activeTab?.sessionId, currentAgentRuntime, cfg?.multiAgentRuntime),
+          resolveSessionRuntimeIdentityForOpen(sessionId, targetAgentRuntime, cfg?.multiAgentRuntime),
+          resolveSessionRuntimeIdentityForOpen(activeTab?.sessionId, currentAgentRuntime, cfg?.multiAgentRuntime),
           getSessionActivation(sessionId),
           getTabCronTask(activeTabId),
         ]);
+        const targetRuntime = targetRuntimeIdentity.runtime;
+        const resolvedCurrentRuntime = resolvedCurrentRuntimeIdentity.runtime;
         // history_open analytics (cross-review C2): report the session's FROZEN
         // runtime (targetRuntime, from session metadata) — matches the sidecar
         // spawn runtime and thus server-side ai_turn_complete.runtime — rather
@@ -1485,6 +1561,8 @@ export default function App() {
           multiAgentRuntime: !!cfg?.multiAgentRuntime,
           currentRuntime,
           targetRuntime,
+          currentRuntimeIdentity: activeTab?.sessionId ? resolvedCurrentRuntimeIdentity : targetRuntimeIdentity,
+          targetRuntimeIdentity,
           targetActivation: activation,
           currentTabCronRunning: currentTabCronTask?.status === 'running',
         });
@@ -1528,7 +1606,7 @@ export default function App() {
 
         if (plan.type === 'open-new-tab') {
           if (tabsRef.current.length >= MAX_TABS) {
-            setTabErrors((prev) => ({ ...prev, [activeTabId]: '已达到最大标签页数量，请关闭其他标签页后重试' }));
+            setTabErrors((prev) => ({ ...prev, [activeTabId]: t('appChrome.maxTabsReached') }));
             setLoadingTabs((prev) => ({ ...prev, [activeTabId]: false }));
             launchingTabRef.current = null;
             return;
@@ -1592,7 +1670,7 @@ export default function App() {
           console.log(`[App] Scenario 3: Current tab ${activeTabId} has running cron task ${currentTabCronTask.id}, creating new tab`);
 
           if (tabsRef.current.length >= MAX_TABS) {
-            setTabErrors((prev) => ({ ...prev, [activeTabId]: '已达到最大标签页数量，请关闭其他标签页后重试' }));
+            setTabErrors((prev) => ({ ...prev, [activeTabId]: t('appChrome.maxTabsReached') }));
             setLoadingTabs((prev) => ({ ...prev, [activeTabId]: false }));
             launchingTabRef.current = null;
             return;
@@ -1627,9 +1705,110 @@ export default function App() {
         await deactivateSession(oldSessionForLaunch);
       }
 
-      // For new sessions (no sessionId), generate a temporary session ID
-      // The actual session ID will be created by the backend when the session starts
-      const effectiveSessionId = sessionId ?? createPendingSessionId(targetTabId);
+      const configForLaunchBirth = configRef.current;
+      const agentForLaunchBirth = configForLaunchBirth
+        ? getAgentByWorkspacePath(configForLaunchBirth, project.path)
+        : undefined;
+      const initialMessageHasExecutionSelection = Boolean(
+        initialMessage?.providerExecutionIdentity
+        || initialMessage?.builtinSelection
+        || initialMessage?.runtimeModel
+        || sessionBirthHint?.providerExecutionIdentity
+        || sessionBirthHint?.builtinSelection
+        || sessionBirthHint?.runtimeModel,
+      );
+      const runtimeBackedProviderIdentityFromConfig = (() => {
+        if (sessionId || initialMessageHasExecutionSelection || !configForLaunchBirth) {
+          return undefined;
+        }
+        const effectiveAgentRuntime = resolveEffectiveRuntime(
+          agentForLaunchBirth?.runtime,
+          !!configForLaunchBirth.multiAgentRuntime,
+        );
+        if (effectiveAgentRuntime !== 'builtin') {
+          return undefined;
+        }
+        const sel = resolveBuiltinSelection(
+          { agent: agentForLaunchBirth, workspace: project },
+          configForLaunchBirth,
+          appProvidersRef.current,
+          appApiKeysRef.current,
+          appProviderVerifyStatusRef.current,
+        );
+        if (!sel || !isRuntimeBackedProvider(sel.provider)) {
+          return undefined;
+        }
+        const intent = toProviderExecutionIntent(sel.provider, sel.model);
+        return intent.kind === 'runtime-backed-provider' ? intent : undefined;
+      })();
+      const runtimeBackedProviderIdentity =
+        initialMessage?.providerExecutionIdentity
+        ?? sessionBirthHint?.providerExecutionIdentity
+        ?? runtimeBackedProviderIdentityFromConfig;
+
+      // For ordinary new sessions (no sessionId), generate a temporary session ID;
+      // the sidecar materializes it later. Runtime-backed providers are different:
+      // Rust must read runtime/runtimeSource/providerExecutionIdentity from
+      // sessions.json before spawning, so create a real session metadata row before
+      // ensureSessionSidecar. This covers both explicit initial-message launches
+      // and empty Launcher opens whose current Provider is Codex (订阅).
+      let effectiveSessionId = sessionId ?? createPendingSessionId(targetTabId);
+      if (!sessionId && runtimeBackedProviderIdentity) {
+        try {
+          const identity = runtimeBackedProviderIdentity;
+          const identityResolvedFromCurrentConfig =
+            !initialMessage?.providerExecutionIdentity && !sessionBirthHint?.providerExecutionIdentity;
+          const birth = buildRuntimeBackedInitialSessionBirth({
+            identity,
+            permissionMode: initialMessage?.permissionMode
+              ?? sessionBirthHint?.permissionMode
+              ?? (identityResolvedFromCurrentConfig
+                ? (
+                    normalizeStringSetting(agentForLaunchBirth?.runtimeConfig?.permissionMode)
+                    ?? resolveInitialPermissionMode({
+                      project,
+                      agent: agentForLaunchBirth,
+                      defaultPermissionMode: configForLaunchBirth?.defaultPermissionMode,
+                    })
+                  )
+                : undefined),
+            reasoningEffort: initialMessage?.reasoningEffort
+              ?? sessionBirthHint?.reasoningEffort
+              ?? (identityResolvedFromCurrentConfig
+                ? (
+                    normalizeStringSetting(agentForLaunchBirth?.runtimeConfig?.reasoningEffort)
+                    ?? normalizeStringSetting(agentForLaunchBirth?.reasoningEffort)
+                  )
+                : undefined),
+            mcpEnabledServers: initialMessage?.mcpEnabledServers
+              ?? sessionBirthHint?.mcpEnabledServers
+              ?? (identityResolvedFromCurrentConfig
+                ? cloneStringArray(agentForLaunchBirth?.mcpEnabledServers ?? project.mcpEnabledServers)
+                : undefined),
+            enabledPluginIds: initialMessage?.enabledPluginIds
+              ?? sessionBirthHint?.enabledPluginIds
+              ?? (identityResolvedFromCurrentConfig
+                ? cloneStringArray(agentForLaunchBirth?.enabledPluginIds ?? project.enabledPluginIds)
+                : undefined),
+            enabledOfficialToolIds: initialMessage?.enabledOfficialToolIds
+              ?? sessionBirthHint?.enabledOfficialToolIds
+              ?? (identityResolvedFromCurrentConfig
+                ? normalizeOfficialToolIds(agentForLaunchBirth?.enabledOfficialToolIds ?? project.enabledOfficialToolIds ?? [])
+                : undefined),
+          });
+          console.log(
+            `[App] Runtime-backed provider launch birth: provider=${identity.providerId} runtime=${birth.runtime} source=${birth.opts.runtimeSource ?? 'none'} model=${identity.model}`,
+          );
+          const prepared = await createSession(project.path, birth.runtime, birth.opts);
+          effectiveSessionId = prepared.id;
+        } catch (err) {
+          console.error('[App] Failed to create runtime-backed provider session:', err);
+          setTabErrors((prev) => ({ ...prev, [targetTabId]: t('appChrome.codexSessionCreateFailed') }));
+          setLoadingTabs((prev) => ({ ...prev, [targetTabId]: false }));
+          launchingTabRef.current = null;
+          return;
+        }
+      }
 
       // Ensure Sidecar is running for this Session, Tab as owner.
       //
@@ -1657,8 +1836,9 @@ export default function App() {
 
       // INSTANT-NAV: flip to the chat shell BEFORE awaiting the sidecar boot, so the
       // user lands in Chat instantly (the boot runs under the "AI 启动中" overlay).
-      // `effectiveSessionId` is truthy (D1): a real history id, or a `pending-<tabId>`
-      // for new sessions → TabProvider's SSE connect fires and Chat mounts now.
+      // `effectiveSessionId` is truthy (D1): a real history/prepared runtime-backed
+      // id, or a `pending-<tabId>` for ordinary new sessions → TabProvider's SSE
+      // connect fires and Chat mounts now.
       //
       // `getSessionPort` is a PAINT-TIMING hint ONLY, never a config-correctness
       // input: null ⇒ flip instant (no ready sidecar to wait on); non-null ⇒ flip
@@ -1787,7 +1967,7 @@ export default function App() {
       // to a blank chat. A toast makes the boot failure visible regardless of
       // which view the user is on. (Full in-chat "启动失败 + 重试" via
       // useSessionReady('failed'): Phase A follow-up.)
-      toastRef.current.error(`启动失败：${errorMsg}`);
+      toastRef.current.error(t('appChrome.launchFailed', { message: errorMsg }));
 
       // Cross-AI review (Critical): an instant flip set the tab to chat + 'pending'
       // BEFORE this ensure threw. 'pending' has no resolver left now (the post-ensure
@@ -1826,7 +2006,7 @@ export default function App() {
       launchingTabRef.current = null;
       setLoadingTabs((prev) => ({ ...prev, [activeTabId]: false, [targetTabId]: false }));
     }
-  }, [setActiveTabId, trackHistorySessionOpen]);
+  }, [setActiveTabId, t, trackHistorySessionOpen]);
 
   // Clear initialMessage from a tab after it has been consumed by Chat
   const clearInitialMessage = useCallback((tabId: string) => {
@@ -1871,7 +2051,7 @@ export default function App() {
   const handleForkSession = useCallback(async (_tabId: string, newSessionId: string, forkAgentDir: string, title: string, initialMessage?: string) => {
     // Check tab limit
     if (tabsRef.current.length >= MAX_TABS) {
-      toastRef.current.error('标签页已达上限，请关闭一个后重试');
+      toastRef.current.error(t('appChrome.tabLimitReached'));
       return false;
     }
 
@@ -1914,7 +2094,7 @@ export default function App() {
     } finally {
       setLoadingTabs(prev => ({ ...prev, [newTab.id]: false }));
     }
-  }, [setActiveTabId]);
+  }, [setActiveTabId, t]);
 
   /**
    * Spawn a fresh Tab bound to an EXISTING session, ensure its sidecar, and
@@ -1938,7 +2118,7 @@ export default function App() {
     opts?: { preserveCronActivation?: boolean; pendingFilePreview?: FilePreviewIntent },
   ): Promise<boolean> => {
     if (tabsRef.current.length >= MAX_TABS) {
-      toastRef.current.error('标签页已达上限，请关闭一个后重试');
+      toastRef.current.error(t('appChrome.tabLimitReached'));
       return false;
     }
     const newTab: Tab = {
@@ -1996,7 +2176,7 @@ export default function App() {
     } finally {
       setLoadingTabs(prev => ({ ...prev, [newTab.id]: false }));
     }
-  }, [setActiveTabId]);
+  }, [setActiveTabId, t]);
 
   // Per-session in-flight guard for open-in-new-tab. Without it, a rapid
   // double-click both observe a `tabsRef.current` that doesn't yet reflect the
@@ -2090,16 +2270,18 @@ export default function App() {
       : 'builtin';
 
     const [
-      targetRuntime,
-      resolvedCurrentRuntime,
+      targetRuntimeIdentity,
+      resolvedCurrentRuntimeIdentity,
       activation,
       currentTabCronTask,
     ] = await Promise.all([
-      resolveSessionRuntimeForOpen(sessionId, currentAgentRuntime, cfg?.multiAgentRuntime),
-      resolveSessionRuntimeForOpen(currentTab?.sessionId, currentAgentRuntime, cfg?.multiAgentRuntime),
+      resolveSessionRuntimeIdentityForOpen(sessionId, currentAgentRuntime, cfg?.multiAgentRuntime),
+      resolveSessionRuntimeIdentityForOpen(currentTab?.sessionId, currentAgentRuntime, cfg?.multiAgentRuntime),
       getSessionActivation(sessionId),
       getTabCronTask(tabId),
     ]);
+    const targetRuntime = targetRuntimeIdentity.runtime;
+    const resolvedCurrentRuntime = resolvedCurrentRuntimeIdentity.runtime;
     // When the current Tab has no session yet (fresh chat), there's no "current
     // session runtime" to compare against — treat target's runtime as current,
     // so cross-runtime check doesn't false-positive on an empty Tab. Mirrors
@@ -2112,6 +2294,8 @@ export default function App() {
       multiAgentRuntime: !!cfg?.multiAgentRuntime,
       currentRuntime,
       targetRuntime,
+      currentRuntimeIdentity: currentTab?.sessionId ? resolvedCurrentRuntimeIdentity : targetRuntimeIdentity,
+      targetRuntimeIdentity,
       targetActivation: activation,
       currentTabCronRunning: currentTabCronTask?.status === 'running',
     });
@@ -2708,6 +2892,7 @@ export default function App() {
     initialSection?: string,
     mcpServerId?: string,
     initialSelect?: CapabilityInitialSelect,
+    officialToolId?: OfficialToolId,
   ) => {
     // Track settings_open event
     track('settings_open', { section: initialSection ?? null });
@@ -2715,6 +2900,7 @@ export default function App() {
     // Set initial section for Settings component
     setSettingsInitialSection(initialSection);
     setSettingsInitialMcpId(mcpServerId);
+    setSettingsInitialOfficialToolId(officialToolId);
     setSettingsInitialSelect(initialSelect);
 
     // Check if there's already a Settings tab
@@ -2743,22 +2929,23 @@ export default function App() {
       agentDir: null,
       sessionId: null,
       view: 'settings',
-      title: '设置',
+      title: t('tabs.settings'),
       sidecarConfigDisposition: 'push',
     };
     openNewTabDeferred(newTab);
 
     // Global Sidecar is now started on App mount, no need to start here
-  }, [openNewTabDeferred, setActiveTabId]);
+  }, [openNewTabDeferred, setActiveTabId, t]);
 
   // Listen for OPEN_SETTINGS custom event from child components
   useEffect(() => {
     const handleOpenSettingsEvent = (event: CustomEvent<{
       section?: string;
       mcpServerId?: string;
+      officialToolId?: OfficialToolId;
       selectItem?: CapabilityInitialSelect;
     }>) => {
-      handleOpenSettings(event.detail?.section, event.detail?.mcpServerId, event.detail?.selectItem);
+      handleOpenSettings(event.detail?.section, event.detail?.mcpServerId, event.detail?.selectItem, event.detail?.officialToolId);
     };
     window.addEventListener(CUSTOM_EVENTS.OPEN_SETTINGS, handleOpenSettingsEvent as EventListener);
     return () => {
@@ -2784,11 +2971,11 @@ export default function App() {
       agentDir: null,
       sessionId: null,
       view: 'taskcenter',
-      title: '任务中心',
+      title: t('tabs.taskCenter'),
       sidecarConfigDisposition: 'push',
     };
     openNewTabDeferred(newTab);
-  }, [openNewTabDeferred, setActiveTabId]);
+  }, [openNewTabDeferred, setActiveTabId, t]);
 
   // Intent carried across `OPEN_TASK_CENTER` — the event dispatcher
   // (Launcher "我的任务" tab's search icon) wants more than just "open
@@ -2838,15 +3025,15 @@ export default function App() {
 
   const handleOpenSpace = useCallback(() => {
     if (spaceBuildCapability.isLoading) {
-      toastRef.current.info('正在读取团队功能状态');
+      toastRef.current.info(t('titlebar.teamLoading'));
       return;
     }
     if (!spaceBuildCapability.available) {
-      toastRef.current.info(spaceBuildCapability.reason ?? '当前构建未启用团队功能');
+      toastRef.current.info(spaceBuildCapability.reason ?? t('titlebar.teamBuildUnavailable'));
       return;
     }
     if (!teamSpaceAvailable) {
-      toastRef.current.info('团队功能尚未开放');
+      toastRef.current.info(t('titlebar.teamUnavailable'));
       return;
     }
     const currentTabs = tabsRef.current;
@@ -2864,11 +3051,11 @@ export default function App() {
       agentDir: null,
       sessionId: null,
       view: 'space',
-      title: '团队',
+      title: t('tabs.team'),
       sidecarConfigDisposition: 'push',
     };
     openNewTabDeferred(newTab);
-  }, [openNewTabDeferred, setActiveTabId, spaceBuildCapability.available, spaceBuildCapability.isLoading, spaceBuildCapability.reason, teamSpaceAvailable]);
+  }, [openNewTabDeferred, setActiveTabId, spaceBuildCapability.available, spaceBuildCapability.isLoading, spaceBuildCapability.reason, teamSpaceAvailable, t]);
 
   useEffect(() => {
     window.addEventListener(CUSTOM_EVENTS.OPEN_SPACE, handleOpenSpace);
@@ -2937,13 +3124,13 @@ export default function App() {
       try {
         const currentTabs = tabsRef.current;
         if (currentTabs.length >= MAX_TABS) {
-          toastRef.current?.error(`已达标签页上限（${MAX_TABS} 个），请先关闭一个再开始 AI 讨论`);
+          toastRef.current?.error(t('appChrome.maxTabsReachedWithCount', { count: MAX_TABS }));
           return;
         }
 
         const projects = configProjectsRef.current.filter(isProjectVisibleToUser);
         if (projects.length === 0) {
-          toastRef.current?.error('还没有工作区，无法开始 AI 讨论');
+          toastRef.current?.error(t('appChrome.noWorkspaceForDiscussion'));
           return;
         }
         // Prefer the explicit pick; fall back to smart default for legacy
@@ -2971,7 +3158,7 @@ export default function App() {
           appProviderVerifyStatusRef.current,
         );
         if (!sel) {
-          toastRef.current?.error('未配置可用模型供应商，无法开始 AI 讨论');
+          toastRef.current?.error(t('appChrome.noModelProviderForDiscussion'));
           return;
         }
 
@@ -3034,9 +3221,26 @@ export default function App() {
           content,
         ].join('\n');
 
+        const alignmentProviderIntent = isRuntimeBackedProvider(sel.provider)
+          ? toProviderExecutionIntent(sel.provider, sel.model)
+          : undefined;
+        const alignmentProviderExecutionIdentity = alignmentProviderIntent?.kind === 'runtime-backed-provider'
+          ? alignmentProviderIntent
+          : undefined;
+        const alignmentPermissionMode = resolveInitialPermissionMode({
+          project: workspace,
+          agent: workspaceAgent,
+          defaultPermissionMode: configRef.current?.defaultPermissionMode,
+        });
         const initialMessage: InitialMessage = {
           text: alignmentPrompt,
-          builtinSelection: { providerId: sel.provider.id, model: sel.model },
+          ...(alignmentPermissionMode ? { permissionMode: alignmentPermissionMode } : {}),
+          ...(alignmentProviderExecutionIdentity
+            ? {
+                providerExecutionIdentity: alignmentProviderExecutionIdentity,
+                runtimeModel: alignmentProviderExecutionIdentity.model,
+              }
+            : { builtinSelection: { providerId: sel.provider.id, model: sel.model } }),
         };
 
         // Pre-seed the tab as a Chat tab before awaiting sidecar startup.
@@ -3047,16 +3251,20 @@ export default function App() {
         // resolves to the same id and its later setTabs is a no-op for
         // view/agentDir/sessionId.
         const newTab = createNewTab();
-        const seeded = {
-          ...newTab,
-          view: 'chat' as const,
-          agentDir: workspace.path,
-          sessionId: createPendingSessionId(newTab.id),
-          title: '任务讨论',
-          initialMessage,
-        };
-        setTabs((prev) => [...prev, seeded]);
-        setActiveTabId(newTab.id);
+        if (initialMessage.providerExecutionIdentity) {
+          openLaunchTabNow(newTab);
+        } else {
+          const seeded = {
+            ...newTab,
+            view: 'chat' as const,
+            agentDir: workspace.path,
+            sessionId: createPendingSessionId(newTab.id),
+            title: t('appChrome.discussionTabTitle'),
+            initialMessage,
+          };
+          setTabs((prev) => [...prev, seeded]);
+          setActiveTabId(newTab.id);
+        }
 
         await handleLaunchProject(
           workspace,
@@ -3070,8 +3278,8 @@ export default function App() {
         // the tab consistently reads as a discussion session, not the
         // workspace's generic name.
         setTabs((prev) =>
-          prev.map((t) =>
-            t.id === newTab.id ? { ...t, title: '任务讨论' } : t,
+          prev.map((tab) =>
+            tab.id === newTab.id ? { ...tab, title: t('appChrome.discussionTabTitle') } : tab,
           ),
         );
       } catch (err) {
@@ -3082,7 +3290,7 @@ export default function App() {
     return () =>
       window.removeEventListener(CUSTOM_EVENTS.OPEN_AI_DISCUSSION, handler);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- stable via refs
-  }, [setActiveTabId]);
+  }, [setActiveTabId, t]);
 
   // Listen for OPEN_SESSION_IN_NEW_TAB — task center's 任务执行 session list
   // dispatches this to open a historical execution in a fresh chat tab.
@@ -3282,10 +3490,14 @@ export default function App() {
         //      provider-unavailable: resolve via priority chain
         //      (helperAgent → helperProject → defaultProviderId → first available),
         //      each layer guarded by isProviderAvailable.
-        // Always pass an explicit builtinSelection (when any provider is available)
+        // Always pass an explicit execution identity (when any provider is available)
         // so Chat tab autoSend doesn't race against the invalid-model correction
         // useEffect when helper Agent's persisted (provider, model) has gone stale.
+        const helperAgent = project.agentId && configRef.current
+          ? getAgentById(configRef.current, project.agentId)
+          : undefined;
         let builtinSelection: { providerId: string; model: string } | undefined;
+        let providerExecutionIdentity: RuntimeBackedProviderIdentity | undefined;
         if (providerId) {
           const provider = appProvidersRef.current.find(p => p.id === providerId);
           if (provider && isProviderAvailable(
@@ -3293,13 +3505,18 @@ export default function App() {
             appApiKeysRef.current,
             appProviderVerifyStatusRef.current,
           )) {
-            builtinSelection = pairBuiltinSelection(provider, model);
+            const targetModel = model ?? provider.primaryModel;
+            if (isRuntimeBackedProvider(provider)) {
+              const intent = toProviderExecutionIntent(provider, targetModel);
+              if (intent.kind === 'runtime-backed-provider') {
+                providerExecutionIdentity = intent;
+              }
+            } else {
+              builtinSelection = pairBuiltinSelection(provider, model);
+            }
           }
         }
-        if (!builtinSelection) {
-          const helperAgent = project.agentId && configRef.current
-            ? getAgentById(configRef.current, project.agentId)
-            : undefined;
+        if (!builtinSelection && !providerExecutionIdentity) {
           const sel = resolveBuiltinSelection(
             { agent: helperAgent, workspace: project },
             configRef.current!,
@@ -3308,15 +3525,32 @@ export default function App() {
             appProviderVerifyStatusRef.current,
           );
           if (sel) {
-            builtinSelection = { providerId: sel.provider.id, model: sel.model };
+            if (isRuntimeBackedProvider(sel.provider)) {
+              const intent = toProviderExecutionIntent(sel.provider, sel.model);
+              if (intent.kind === 'runtime-backed-provider') {
+                providerExecutionIdentity = intent;
+              }
+            } else {
+              builtinSelection = { providerId: sel.provider.id, model: sel.model };
+            }
           }
           // else: no provider available system-wide — let Chat tab show its
           // empty-state guidance ("请先设置模型服务").
         }
+        const helperPermissionMode = resolveInitialPermissionMode({
+          project,
+          agent: helperAgent,
+          defaultPermissionMode: configRef.current?.defaultPermissionMode,
+        });
 
         const initialMessage: InitialMessage = {
           text: buildSupportPrompt(description, appVersion),
+          ...(helperPermissionMode ? { permissionMode: helperPermissionMode } : {}),
           ...(builtinSelection ? { builtinSelection } : {}),
+          ...(providerExecutionIdentity ? {
+            providerExecutionIdentity,
+            runtimeModel: providerExecutionIdentity.model,
+          } : {}),
           images: event.detail.images,
         };
 
@@ -3333,8 +3567,8 @@ export default function App() {
 
           // Override tab title
           setTabs((prev) =>
-            prev.map((t) =>
-              t.id === newTab.id ? { ...t, title: '问题诊断' } : t
+            prev.map((tab) =>
+              tab.id === newTab.id ? { ...tab, title: t('appChrome.diagnosticsTabTitle') } : tab
             )
           );
         } finally {
@@ -3350,7 +3584,7 @@ export default function App() {
       window.removeEventListener(CUSTOM_EVENTS.LAUNCH_BUG_REPORT, listener);
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps -- callbacks stabilized via refs, configAdd/patchProject are stable useCallbacks
-  }, [configAddProject, configPatchProject]);
+  }, [configAddProject, configPatchProject, t]);
 
   // Note: CRON_TASK_STOPPED event listener removed
   // With Session-centric Sidecar (Owner model), stopping a cron task only releases
@@ -3361,6 +3595,7 @@ export default function App() {
   const handleSettingsSectionChange = useCallback(() => {
     setSettingsInitialSection(undefined);
     setSettingsInitialMcpId(undefined);
+    setSettingsInitialOfficialToolId(undefined);
     setSettingsInitialSelect(undefined);
   }, []);
 
@@ -3494,6 +3729,7 @@ export default function App() {
             onFilePreviewIntentConsumed={handleFilePreviewIntentConsumed}
             settingsInitialSection={tab.view === 'settings' ? settingsInitialSection : undefined}
             settingsInitialMcpId={tab.view === 'settings' ? settingsInitialMcpId : undefined}
+            settingsInitialOfficialToolId={tab.view === 'settings' ? settingsInitialOfficialToolId : undefined}
             settingsInitialSelect={tab.view === 'settings' ? settingsInitialSelect : undefined}
             onSettingsSectionChange={handleSettingsSectionChange}
             updateReady={updateReady}
@@ -3512,10 +3748,10 @@ export default function App() {
       {/* Exit confirmation dialog for running cron tasks */}
       {exitConfirmState && (
         <ConfirmDialog
-          title="退出应用"
-          message={`有 ${exitConfirmState.runningTaskCount} 个循环任务正在运行中。退出后任务将被停止。确定要退出吗？`}
-          confirmText="退出"
-          cancelText="取消"
+          title={t('appChrome.exitAppTitle')}
+          message={t('appChrome.exitRunningTasksMessage', { count: exitConfirmState.runningTaskCount })}
+          confirmText={t('appChrome.exit')}
+          cancelText={t('appChrome.cancel')}
           confirmVariant="danger"
           onConfirm={() => {
             exitConfirmState.resolve(true);
@@ -3536,10 +3772,10 @@ export default function App() {
           is unchanged; only the visibility gate is `updatePreparing`). */}
       {pendingUpdateOnStartup && !updatePreparing && (
         <ConfirmDialog
-          title="发现新版本"
-          message={`最新版本 v${pendingUpdateOnStartup} 已下载完成，是否立即安装？`}
-          confirmText="安装"
-          cancelText="稍后"
+          title={t('appChrome.newVersionTitle')}
+          message={t('appChrome.newVersionMessage', { version: pendingUpdateOnStartup })}
+          confirmText={t('appChrome.install')}
+          cancelText={t('appChrome.later')}
           confirmVariant="primary"
           onConfirm={() => {
             dismissPendingUpdate();

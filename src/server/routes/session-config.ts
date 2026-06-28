@@ -1,4 +1,5 @@
 import type { McpServerDefinition } from '../../shared/config-types';
+import { normalizeOfficialToolIds } from '../../shared/official-tools';
 import { getSessionEngine } from '../session-engine';
 import type { PermissionMode, ProviderEnv, SessionEngineSnapshotMaterializePatch } from '../session-engine/types';
 import type { InteractionScenario } from '../system-prompt';
@@ -60,6 +61,23 @@ export async function handleSessionConfigRoute(
       console.error('[api/mcp/set] Error:', error);
       return jsonResponse(
         { success: false, error: error instanceof Error ? error.message : 'Failed to set MCP servers' },
+        500,
+      );
+    }
+  }
+
+  if (pathname === '/api/official-tools/session-enable' && request.method === 'POST') {
+    try {
+      const payload = await request.json() as { enabledIds?: unknown };
+      const ids = payload.enabledIds === null
+        ? null
+        : normalizeOfficialToolIds(payload.enabledIds);
+      const result = await getSessionEngine().updateOfficialToolIds(ids);
+      return jsonResponse({ ...result, enabledIds: ids }, result.success ? 200 : 500);
+    } catch (error) {
+      console.error('[api/official-tools/session-enable] Error:', error);
+      return jsonResponse(
+        { success: false, error: error instanceof Error ? error.message : 'Failed to set official tools' },
         500,
       );
     }

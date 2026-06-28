@@ -1,7 +1,9 @@
 import React from 'react';
+import { useTranslation } from 'react-i18next';
 import type { ImBotStatus } from '../../../../shared/types/im';
 
 export default function BotStatusPanel({ status }: { status: ImBotStatus | null }) {
+    const { t } = useTranslation('settings');
     if (!status) return null;
 
     const dotColor = {
@@ -19,10 +21,10 @@ export default function BotStatusPanel({ status }: { status: ImBotStatus | null 
     }[status.status];
 
     const statusLabel = {
-        online: '运行中',
-        connecting: '连接中',
-        error: '错误',
-        stopped: '已停止',
+        online: t('agentSettings.imComponents.statusOnline'),
+        connecting: t('agentSettings.imComponents.statusConnecting'),
+        error: t('agentSettings.imComponents.statusError'),
+        stopped: t('agentSettings.imComponents.statusStopped'),
     }[status.status];
 
     const formatUptime = (seconds: number): string => {
@@ -46,11 +48,15 @@ export default function BotStatusPanel({ status }: { status: ImBotStatus | null 
                     <span className="text-[var(--line-strong)]">·</span>
                     <span className="text-[var(--ink-muted)]">{formatUptime(status.uptimeSeconds)}</span>
                     <span className="text-[var(--line-strong)]">·</span>
-                    <span className="text-[var(--ink-muted)]">{status.activeSessions.length} 个会话</span>
+                    <span className="text-[var(--ink-muted)]">
+                        {t('agentSettings.imComponents.activeSessions', { count: status.activeSessions.length })}
+                    </span>
                     {status.restartCount > 0 && (
                         <>
                             <span className="text-[var(--line-strong)]">·</span>
-                            <span className="text-[var(--ink-muted)]">重启 {status.restartCount} 次</span>
+                            <span className="text-[var(--ink-muted)]">
+                                {t('agentSettings.imComponents.restartCount', { count: status.restartCount })}
+                            </span>
                         </>
                     )}
                 </>

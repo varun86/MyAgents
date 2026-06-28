@@ -26,6 +26,26 @@ describe('runtime model query single-flight', () => {
     expect(queryer).toHaveBeenCalledTimes(1);
   });
 
+  it('keeps system-cli and managed-provider model queries independent', async () => {
+    let releaseSystem!: (value: unknown[]) => void;
+    let releaseManaged!: (value: unknown[]) => void;
+    const systemQueryer = vi.fn(() => new Promise<unknown[]>((resolve) => { releaseSystem = resolve; }));
+    const managedQueryer = vi.fn(() => new Promise<unknown[]>((resolve) => { releaseManaged = resolve; }));
+
+    const system = queryRuntimeModelsSingleFlight('codex', systemQueryer, 'system-cli');
+    const managed = queryRuntimeModelsSingleFlight('codex', managedQueryer, 'managed-provider');
+
+    releaseSystem([{ value: 'system-gpt' }]);
+    releaseManaged([{ value: 'managed-gpt' }]);
+
+    await expect(Promise.all([system, managed])).resolves.toEqual([
+      [{ value: 'system-gpt' }],
+      [{ value: 'managed-gpt' }],
+    ]);
+    expect(systemQueryer).toHaveBeenCalledTimes(1);
+    expect(managedQueryer).toHaveBeenCalledTimes(1);
+  });
+
   it('clears in-flight state after rejection', async () => {
     const queryer = vi.fn<() => Promise<unknown[]>>()
       .mockRejectedValueOnce(new Error('boom'))

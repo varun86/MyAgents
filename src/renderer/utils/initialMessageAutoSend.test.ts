@@ -10,6 +10,7 @@ describe('shouldAutoSendInitialMessage', () => {
       hasSessionId: true,
       isConnected: true,
       isActive: false,
+      runtimeReady: true,
     })).toBe(true);
   });
 
@@ -18,6 +19,7 @@ describe('shouldAutoSendInitialMessage', () => {
     ['already consumed', { hasInitialMessage: true, alreadyConsumed: true, hasSessionId: true, isConnected: true, isActive: true }],
     ['missing session id', { hasInitialMessage: true, alreadyConsumed: false, hasSessionId: false, isConnected: true, isActive: true }],
     ['not connected', { hasInitialMessage: true, alreadyConsumed: false, hasSessionId: true, isConnected: false, isActive: true }],
+    ['runtime not ready', { hasInitialMessage: true, alreadyConsumed: false, hasSessionId: true, isConnected: true, isActive: true, runtimeReady: false }],
   ])('waits when %s', (_name, gate) => {
     expect(shouldAutoSendInitialMessage(gate)).toBe(false);
   });

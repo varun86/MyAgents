@@ -205,6 +205,7 @@ async function createHarness(
     rejectSteer: options.rejectSteer,
   });
   vi.doMock('./factory', () => ({
+    getCurrentRuntimeSource: () => 'system-cli',
     getCurrentRuntimeType: () => 'codex',
     getExternalRuntime: () => runtime,
     isExternalRuntime: (type: RuntimeType | undefined) => Boolean(type && type !== 'builtin'),

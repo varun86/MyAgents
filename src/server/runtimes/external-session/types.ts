@@ -158,6 +158,7 @@ export interface ExternalSystemInitPayload {
   sessionId: string;
   prewarm?: boolean;
   runtime: RuntimeType;
+  runtimeSource?: import('../../../shared/types/runtime').RuntimeSource;
 }
 
 export interface ExternalTurnPersistenceSnapshot {

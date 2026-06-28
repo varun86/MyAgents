@@ -24,7 +24,16 @@ import { stripBom } from '../../shared/utils';
 import { workspacePathsEqual } from '../../shared/workspacePath';
 import { promoteAgentMcpJsonToGlobal } from '../../shared/mcpConfig';
 import type { McpServerDefinition, ProviderVerifyStatus } from '../../shared/config-types';
-import { applyProviderEnablementAndOrder, isProviderEnabled, PRESET_MCP_SERVERS, PRESET_PROVIDERS } from '../../shared/config-types';
+import { applyProviderEnablementAndOrder, CODEX_SUBSCRIPTION_PROVIDER_ID, isProviderEnabled, PRESET_MCP_SERVERS, PRESET_PROVIDERS } from '../../shared/config-types';
+import { isRuntimeBackedProvider } from '../../shared/providerExecution';
+import type { AgentConfig, ChannelConfig } from '../../shared/types/agent';
+import {
+  IMAGE_UNDERSTANDING_TOOL_ID,
+  isImageUnderstandingToolConfigured,
+  normalizeOfficialToolIds,
+  type OfficialToolId,
+  type OfficialToolSettings,
+} from '../../shared/official-tools';
 import {
   coerceModelForRuntime,
   coercePermissionModeForRuntime,
@@ -42,6 +51,7 @@ import {
   resolveLegacyModelOnlyProviderRoute,
   type ProviderRoute,
 } from '../../shared/providerRoute';
+import { resolveSessionConfig } from './resolve-session-config';
 
 // ---------------------------------------------------------------------------
 // Paths
@@ -99,6 +109,9 @@ export interface AdminAppConfig {
   cliToolEnv?: Record<string, Record<string, string>>;
   // Experimental gate for user-registered CLI tools. Omitted means disabled.
   cliToolRegistryEnabled?: boolean;
+  // MyAgents official CLI tools
+  enabledOfficialToolIds?: OfficialToolId[];
+  officialToolSettings?: OfficialToolSettings;
   // Provider
   defaultProviderId?: string;
   providerApiKeys?: Record<string, string>;
@@ -125,6 +138,7 @@ export interface AgentConfigSlim {
   channels?: ChannelConfigSlim[];
   /** PRD 0.2.17 — plugins this Agent enables (subset of globally-visible). */
   enabledPluginIds?: string[];
+  enabledOfficialToolIds?: OfficialToolId[];
   [key: string]: unknown;
 }
 
@@ -148,6 +162,7 @@ export interface ProjectSlim {
   name: string;
   path: string;
   mcpEnabledServers?: string[];
+  enabledOfficialToolIds?: OfficialToolId[];
   model?: string;
   permissionMode?: string;
   [key: string]: unknown;
@@ -407,6 +422,187 @@ export function getEnabledMcpServerIds(config?: AdminAppConfig): string[] {
   return c.mcpEnabledServers ?? [];
 }
 
+export function getGloballyEnabledOfficialToolIds(config?: AdminAppConfig): OfficialToolId[] {
+  const c = config ?? loadConfig();
+  return normalizeOfficialToolIds(c.enabledOfficialToolIds);
+}
+
+export function isImageUnderstandingGloballyConfigured(config?: AdminAppConfig): boolean {
+  const c = config ?? loadConfig();
+  return isImageUnderstandingToolConfigured(c.officialToolSettings);
+}
+
+export type ImageUnderstandingToolUnavailableReason =
+  | 'not-configured'
+  | 'provider-unavailable'
+  | 'runtime-backed-provider'
+  | 'model-not-image-capable'
+  | 'missing-credential'
+  | 'subscription-not-verified';
+
+export type ImageUnderstandingToolAvailability =
+  | {
+      ok: true;
+      providerId: string;
+      model: string;
+      provider: ProviderRecord;
+      modelEntry: { model: string; inputModalities: string[] };
+    }
+  | {
+      ok: false;
+      reason: ImageUnderstandingToolUnavailableReason;
+      status: number;
+      message: string;
+      recoveryMessage: string;
+    };
+
+function unavailableImageUnderstandingTool(
+  reason: ImageUnderstandingToolUnavailableReason,
+  message: string,
+  recoveryMessage: string,
+  status = 409,
+): ImageUnderstandingToolAvailability {
+  return { ok: false, reason, status, message, recoveryMessage };
+}
+
+function findProviderImageModel(
+  provider: Record<string, unknown>,
+  model: string,
+): { model: string; inputModalities: string[] } | null {
+  const models = Array.isArray(provider.models) ? provider.models : [];
+  for (const entry of models) {
+    if (!entry || typeof entry !== 'object') continue;
+    const record = entry as Record<string, unknown>;
+    if (record.model !== model) continue;
+    const inputModalities = Array.isArray(record.inputModalities)
+      ? record.inputModalities.filter((value): value is string => typeof value === 'string')
+      : [];
+    return { model, inputModalities };
+  }
+  return null;
+}
+
+export function resolveImageUnderstandingToolAvailability(
+  config?: AdminAppConfig,
+): ImageUnderstandingToolAvailability {
+  const c = config ?? loadConfig();
+  const settings = c.officialToolSettings?.imageUnderstanding;
+  const providerId = settings?.providerId?.trim();
+  const model = settings?.model?.trim();
+  if (!providerId || !model) {
+    return unavailableImageUnderstandingTool(
+      'not-configured',
+      'Image understanding model is not configured.',
+      'Open Settings -> Toolbox -> Image Understanding and select an image-capable model.',
+    );
+  }
+
+  const provider = findEffectiveProvider(providerId, c);
+  if (!provider || !isProviderEnabled(provider)) {
+    return unavailableImageUnderstandingTool(
+      'provider-unavailable',
+      `Configured vision provider '${providerId}' is unavailable.`,
+      'Open Settings -> Model Providers and re-enable or reconfigure the selected provider.',
+    );
+  }
+  if (isRuntimeBackedProvider(provider)) {
+    return unavailableImageUnderstandingTool(
+      'runtime-backed-provider',
+      `Provider '${providerId}' is runtime-backed and cannot drive the vision helper.`,
+      'Choose an API-backed provider/model for Image Understanding.',
+    );
+  }
+
+  const modelEntry = findProviderImageModel(provider, model);
+  if (!modelEntry || !modelEntry.inputModalities.includes('image')) {
+    return unavailableImageUnderstandingTool(
+      'model-not-image-capable',
+      `Model '${model}' is not registered as image-capable for provider '${providerId}'.`,
+      'Open Model Providers and select or mark a model whose input modalities include image.',
+    );
+  }
+
+  if (provider.type === 'subscription') {
+    const verifyStatus = c.providerVerifyStatus?.[providerId];
+    if (verifyStatus?.status !== 'valid') {
+      return unavailableImageUnderstandingTool(
+        'subscription-not-verified',
+        `Subscription provider '${providerId}' is not verified.`,
+        'Open Settings -> Model Providers and verify the selected subscription provider.',
+      );
+    }
+  } else if (!resolveProviderEnv(providerId, c)) {
+    return unavailableImageUnderstandingTool(
+      'missing-credential',
+      `Provider '${providerId}' needs a valid API key before it can drive image understanding.`,
+      'Open Settings -> Model Providers and configure or verify the provider API key.',
+    );
+  }
+
+  return { ok: true, providerId, model, provider, modelEntry };
+}
+
+export function isImageUnderstandingToolCallable(config?: AdminAppConfig): boolean {
+  return resolveImageUnderstandingToolAvailability(config).ok;
+}
+
+function configuredOfficialToolSet(config: AdminAppConfig): Set<OfficialToolId> {
+  const configured = new Set<OfficialToolId>();
+  if (isImageUnderstandingToolCallable(config)) {
+    configured.add(IMAGE_UNDERSTANDING_TOOL_ID);
+  }
+  return configured;
+}
+
+function filterEffectiveOfficialToolIds(
+  config: AdminAppConfig,
+  requested: unknown,
+): OfficialToolId[] {
+  const globalEnabled = new Set(getGloballyEnabledOfficialToolIds(config));
+  const configured = configuredOfficialToolSet(config);
+  return normalizeOfficialToolIds(requested).filter(
+    id => globalEnabled.has(id) && configured.has(id),
+  );
+}
+
+export function getDefaultEnabledOfficialToolIdsForWorkspace(
+  agentDir: string | undefined | null,
+  config?: AdminAppConfig,
+): OfficialToolId[] {
+  if (!agentDir) return [];
+  const c = config ?? loadConfig();
+  const agents = (c.agents ?? []) as Array<Record<string, unknown>>;
+  const agent = agents.find(a =>
+    typeof a.workspacePath === 'string' && workspacePathsEqual(a.workspacePath, agentDir)
+  );
+  const project = loadProjects().find(p =>
+    typeof p.path === 'string' && workspacePathsEqual(p.path, agentDir)
+  );
+  return filterEffectiveOfficialToolIds(
+    c,
+    agent?.enabledOfficialToolIds ?? project?.enabledOfficialToolIds,
+  );
+}
+
+export function getEffectiveOfficialToolIdsForSession(
+  agentDir: string | undefined | null,
+  sessionMeta?: SessionMetadata | null,
+  overrideIds?: readonly OfficialToolId[] | null,
+  config?: AdminAppConfig,
+): OfficialToolId[] {
+  const c = config ?? loadConfig();
+  if (overrideIds !== null && overrideIds !== undefined) {
+    return filterEffectiveOfficialToolIds(c, overrideIds);
+  }
+  if (sessionMeta?.configSnapshotAt) {
+    return filterEffectiveOfficialToolIds(c, sessionMeta.enabledOfficialToolIds);
+  }
+  if (sessionMeta?.enabledOfficialToolIds !== undefined) {
+    return filterEffectiveOfficialToolIds(c, sessionMeta.enabledOfficialToolIds);
+  }
+  return getDefaultEnabledOfficialToolIdsForWorkspace(agentDir, c);
+}
+
 /**
  * Get effective MCP servers for a specific project (global enabled ∩ project enabled)
  */
@@ -480,7 +676,7 @@ export function loadCustomProviderFiles(): Array<Record<string, unknown>> {
   } catch { return []; }
 }
 
-type ProviderRecord = Record<string, unknown> & { id: string; enabled?: unknown };
+export type ProviderRecord = Record<string, unknown> & { id: string; enabled?: unknown };
 
 function hasProviderId(provider: Record<string, unknown>): provider is ProviderRecord {
   return typeof provider.id === 'string' && provider.id.length > 0;
@@ -680,6 +876,200 @@ export function findAgentByWorkspacePath(agentDir: string): AgentConfigSlim | un
   );
 }
 
+export type ImProviderRoutingResult =
+  | {
+      kind: 'provider-route';
+      providerRoute: ProviderRoute;
+      providerId: string;
+      model: string;
+      providerEnv: ResolvedProviderEnv | undefined;
+    }
+  | {
+      kind: 'external-runtime';
+      runtime: RuntimeType;
+      runtimeSource?: string;
+      model?: string;
+      providerId?: string;
+      reason: 'runtime-not-builtin' | 'managed-codex-provider';
+    }
+  | {
+      kind: 'legacy-fallback';
+      reason: 'agent-not-found' | 'provider-id-missing';
+    }
+  | {
+      kind: 'error';
+      status: 409;
+      reason:
+        | 'managed-codex-provider-not-ready'
+        | 'provider-route-unresolved'
+        | 'provider-env-unavailable';
+      message: string;
+      providerId?: string;
+      model?: string;
+      providerRoute?: ProviderRoute;
+    };
+
+function findImAgentAndChannel(
+  config: AdminAppConfig,
+  agentDir: string,
+  channelId: string | undefined,
+): { agent?: AgentConfigSlim; channel?: ChannelConfigSlim } {
+  const agents = (config.agents ?? []) as AgentConfigSlim[];
+  const agent = agents.find(a =>
+    typeof a.workspacePath === 'string' && workspacePathsEqual(a.workspacePath, agentDir)
+  );
+  if (!agent) return {};
+  const channel = channelId
+    ? ((agent.channels ?? []) as ChannelConfigSlim[]).find(ch => ch.id === channelId)
+    : undefined;
+  return { agent, channel };
+}
+
+function channelLevelProviderId(channel: ChannelConfigSlim | undefined): string | undefined {
+  if (!channel) return undefined;
+  const overrides = (channel.overrides as Record<string, unknown> | undefined) ?? undefined;
+  const overrideProviderId = overrides?.providerId;
+  if (typeof overrideProviderId === 'string' && overrideProviderId.trim()) {
+    return overrideProviderId;
+  }
+  const legacyProviderId = (channel as Record<string, unknown>).providerId;
+  if (typeof legacyProviderId === 'string' && legacyProviderId.trim()) {
+    return legacyProviderId;
+  }
+  return undefined;
+}
+
+function channelForSessionConfig(channel: ChannelConfigSlim | undefined): ChannelConfig | undefined {
+  if (!channel) return undefined;
+  const providerId = channelLevelProviderId(channel);
+  if (!providerId) return channel as unknown as ChannelConfig;
+  const overrides = (channel.overrides as Record<string, unknown> | undefined) ?? {};
+  return {
+    ...channel,
+    overrides: {
+      ...overrides,
+      providerId,
+    },
+  } as unknown as ChannelConfig;
+}
+
+function providerRouteFailureMessage(
+  route: ProviderRoute,
+  providerId: string | undefined,
+  model: string | undefined,
+): string {
+  if (route.kind !== 'unknown-legacy') {
+    return `Provider route for ${providerId ?? '<missing>'}/${model ?? '<missing>'} is not concrete.`;
+  }
+  return `Provider route for ${providerId ?? '<missing>'}/${model ?? '<missing>'} is unresolved: ${route.reason}.`;
+}
+
+/**
+ * Resolve the canonical ProviderRoute for a pure IM enqueue from disk.
+ *
+ * Route identity is validated against the live provider catalogue before a
+ * message is accepted. External runtime / managed Codex provider configs are
+ * reported as not applicable instead of being coerced into builtin provider env.
+ */
+export function resolveImProviderRouting(
+  agentDir: string,
+  channelId: string | undefined,
+  options?: {
+    config?: AdminAppConfig;
+    managedCodexProviderReady?: boolean;
+  },
+): ImProviderRoutingResult {
+  const c = options?.config ?? loadConfig();
+  const { agent, channel } = findImAgentAndChannel(c, agentDir, channelId);
+  if (!agent) return { kind: 'legacy-fallback', reason: 'agent-not-found' };
+
+  const resolved = resolveSessionConfig(
+    undefined,
+    agent as unknown as AgentConfig,
+    channelForSessionConfig(channel),
+    'im',
+    { managedCodexProviderReady: options?.managedCodexProviderReady === true },
+  );
+
+  const providerId = resolved.providerId
+    || channelLevelProviderId(channel)
+    || agent.providerId
+    || (c.defaultProviderId as string | undefined);
+  const model = resolved.model;
+
+  if (resolved.runtime !== 'builtin') {
+    return {
+      kind: 'external-runtime',
+      runtime: resolved.runtime,
+      runtimeSource: resolved.runtimeSource,
+      model,
+      providerId,
+      reason: 'runtime-not-builtin',
+    };
+  }
+
+  if (providerId === CODEX_SUBSCRIPTION_PROVIDER_ID) {
+    if (options?.managedCodexProviderReady === true && model) {
+      return {
+        kind: 'external-runtime',
+        runtime: 'codex',
+        runtimeSource: 'managed-provider',
+        model,
+        providerId,
+        reason: 'managed-codex-provider',
+      };
+    }
+    return {
+      kind: 'error',
+      status: 409,
+      reason: 'managed-codex-provider-not-ready',
+      providerId,
+      model,
+      message: 'Managed Codex Provider is configured for this IM channel but is not ready.',
+    };
+  }
+
+  if (!providerId) return { kind: 'legacy-fallback', reason: 'provider-id-missing' };
+
+  const route = resolveExplicitProviderRoute({
+    providerId,
+    model,
+    providers: providersForRouteResolution(c),
+  });
+  if (!isConcreteProviderRoute(route)) {
+    return {
+      kind: 'error',
+      status: 409,
+      reason: 'provider-route-unresolved',
+      providerId,
+      model,
+      providerRoute: route,
+      message: providerRouteFailureMessage(route, providerId, model),
+    };
+  }
+
+  const providerEnv = materializeProviderRouteEnv(route, c);
+  if (route.kind === 'provider' && !providerEnv) {
+    return {
+      kind: 'error',
+      status: 409,
+      reason: 'provider-env-unavailable',
+      providerId,
+      model: route.model,
+      providerRoute: route,
+      message: `Provider "${providerId}" is unavailable or missing an API key.`,
+    };
+  }
+
+  return {
+    kind: 'provider-route',
+    providerRoute: route,
+    providerId,
+    model: route.model,
+    providerEnv,
+  };
+}
+
 /**
  * Re-resolve providerEnv for an IM channel from canonical `providerId` (issue #237).
  *
@@ -693,71 +1083,31 @@ export function findAgentByWorkspacePath(agentDir: string): AgentConfigSlim | un
  * Desktop Chat is immune because Chat.tsx builds providerEnv live from React state
  * on every send; IM was not.
  *
- * The fix here mirrors that "live from canonical providerId" behavior on the
- * sidecar side: look up the agent + channel, resolve `providerId` via the same
- * priority chain Rust uses at `src-tauri/src/im/types.rs:968`
+ * The canonical implementation is now `resolveImProviderRouting()`: it looks
+ * up the agent + channel, resolves `providerId` via the same priority chain
+ * Rust uses at `src-tauri/src/im/types.rs:968`
  * (`channel.overrides.providerId` → legacy channel-root `channel.providerId`
- * (pre-bc06386) → `agent.providerId` → `config.defaultProviderId`), and
- * rebuild the env via `resolveProviderEnv()`.
+ * (pre-bc06386) → `agent.providerId` → `config.defaultProviderId`), validates
+ * the `(providerId, model)` pair as a ProviderRoute, then materializes env only
+ * for builtin API providers.
  *
  * Returns undefined when:
  *   - the agent can't be matched by workspacePath (legacy IM bot / drift) —
  *     deliberately does NOT fall through to `defaultProviderId` here, since
  *     rerouting every unmatched IM bot to the global default would be strictly
  *     worse than the stale-blob bug we're fixing,
- *   - or when the resolved providerId has no live env (provider deleted /
- *     disabled / no API key).
+ *   - or when the resolved route is not a builtin API provider with live env.
  *
- * Callers fall back to the legacy `payload.providerEnv` blob in those cases
- * to preserve back-compat for configs the user hasn't migrated yet.
+ * New enqueue paths must consume `resolveImProviderRouting()` directly so known
+ * provider/model/key failures return 409 instead of falling back to stale blobs.
  */
 export function resolveImProviderEnv(
   agentDir: string,
   channelId: string | undefined,
   config?: AdminAppConfig,
 ): ResolvedProviderEnv | undefined {
-  const c = config ?? loadConfig();
-  const agents = (c.agents ?? []) as AgentConfigSlim[];
-  const agent = agents.find(a =>
-    typeof a.workspacePath === 'string' && workspacePathsEqual(a.workspacePath, agentDir)
-  );
-  // No agent matched (legacy IM bot / workspace-path drift) — bail out so the
-  // caller falls back to `payload.providerEnv`. Returning a resolution against
-  // `defaultProviderId` here would silently reroute every legacy IM bot to the
-  // global default provider, which is a strictly worse regression than the
-  // original stale-blob bug.
-  if (!agent) return undefined;
-  // Channel provider chain (mirrors Rust `ChannelConfigRust::to_im_config` at
-  // src-tauri/src/im/types.rs:968): `overrides.providerId` → channel-root
-  // `providerId` (legacy pre-v0.1.45) → agent providerId. The legacy channel-
-  // root field is still on disk for users who configured providers via the
-  // pre-bc06386 in-IM `/provider` command — skipping it would reroute those
-  // configs to the agent default. payload.botId == channel.id under the
-  // v0.1.41 Agent architecture (see src-tauri/src/im/mod.rs `channel.id` →
-  // `bot_id` mapping at line 4360).
-  let channelLevelProviderId: string | undefined;
-  if (channelId) {
-    const channels = (agent.channels ?? []) as ChannelConfigSlim[];
-    const channel = channels.find(ch => ch.id === channelId);
-    if (channel) {
-      const overrides = (channel.overrides as Record<string, unknown> | undefined) ?? undefined;
-      const ovProviderId = overrides?.providerId;
-      if (typeof ovProviderId === 'string' && ovProviderId.length > 0) {
-        channelLevelProviderId = ovProviderId;
-      } else {
-        // Legacy root-level channel.providerId (pre-bc06386).
-        const legacyProviderId = (channel as Record<string, unknown>).providerId;
-        if (typeof legacyProviderId === 'string' && legacyProviderId.length > 0) {
-          channelLevelProviderId = legacyProviderId;
-        }
-      }
-    }
-  }
-  const providerId = channelLevelProviderId
-    || agent.providerId
-    || (c.defaultProviderId as string | undefined);
-  if (!providerId) return undefined;
-  return resolveProviderEnv(providerId, c);
+  const routing = resolveImProviderRouting(agentDir, channelId, { config });
+  return routing.kind === 'provider-route' ? routing.providerEnv : undefined;
 }
 
 /**
@@ -796,6 +1146,7 @@ export function decodeProviderEnvSnapshot(
 /** Result of self-resolution for a workspace */
 export interface WorkspaceResolvedConfig {
   mcpServers: McpServerDefinition[];
+  enabledOfficialToolIds: OfficialToolId[];
   providerEnv: ResolvedProviderEnv | undefined;
   providerRoute: ProviderRoute | undefined;
   model: string | undefined;
@@ -874,9 +1225,29 @@ export function resolveWorkspaceConfig(
     }
   }
 
-  const resolvedRuntime: RuntimeType = normalizeRuntime(
-    (sessionMeta?.runtime as string | undefined) ?? (agent?.runtime as string | undefined),
+  // --- Resolve MyAgents official CLI tools ---
+  const globalOfficialTools = new Set(getGloballyEnabledOfficialToolIds(config));
+  const configuredOfficialTools = configuredOfficialToolSet(config);
+  const requestedOfficialTools = snapshotOwnsConfig
+    ? normalizeOfficialToolIds(sessionMeta?.enabledOfficialToolIds)
+    : normalizeOfficialToolIds(
+      sessionMeta?.enabledOfficialToolIds
+      ?? agent?.enabledOfficialToolIds
+      ?? project?.enabledOfficialToolIds,
+    );
+  const enabledOfficialToolIds = requestedOfficialTools.filter(
+    id => globalOfficialTools.has(id) && configuredOfficialTools.has(id),
   );
+
+  const agentProvider = agent?.providerId
+    ? findEffectiveProvider(agent.providerId as string, config)
+    : undefined;
+  const agentUsesRuntimeBackedProvider = Boolean(agentProvider && isRuntimeBackedProvider(agentProvider));
+  const resolvedRuntime: RuntimeType = agentUsesRuntimeBackedProvider && !sessionMeta?.runtime
+    ? 'codex'
+    : normalizeRuntime(
+        (sessionMeta?.runtime as string | undefined) ?? (agent?.runtime as string | undefined),
+      );
   const agentRuntimeConfig = agent?.runtimeConfig as {
     model?: string;
     permissionMode?: string;
@@ -929,7 +1300,9 @@ export function resolveWorkspaceConfig(
     ? (snapshotOwnsConfig
       ? (isConcreteProviderRoute(providerRoute) ? providerRoute.model : sessionMeta?.model)
       : (sessionMeta?.model ?? (agent?.model as string | undefined) ?? undefined))
-    : (snapshotOwnsConfig ? sessionMeta?.model : (sessionMeta?.model ?? agentRuntimeConfig?.model));
+    : (snapshotOwnsConfig
+      ? sessionMeta?.model
+      : (sessionMeta?.model ?? (agentUsesRuntimeBackedProvider ? agent?.model as string | undefined : agentRuntimeConfig?.model)));
   let model = coerceModelForRuntime(rawModel, resolvedRuntime);
   if (resolvedRuntime !== 'builtin'
       && typeof rawModel === 'string'
@@ -1012,14 +1385,15 @@ export function resolveWorkspaceConfig(
   // which now always resolves to a non-empty string ('auto' fallback) and would
   // make this log fire on every call (incl. no-match). Stay silent when nothing
   // resolved, as before.
-  if (mcpServers.length > 0 || providerEnv || model || agent) {
+  if (mcpServers.length > 0 || enabledOfficialToolIds.length > 0 || providerEnv || model || agent) {
     const source = sessionMeta?.configSnapshotAt ? 'session-snapshot' : 'agent';
     console.log(
       `[admin-config] resolveWorkspaceConfig (${source}): ` +
       `provider=${providerId ?? 'subscription'}, model=${model ?? 'default'}, ` +
-      `permission=${permissionMode}, mcp=${mcpServers.length} server(s)${agent ? '' : ' (no agent match)'}`
+      `permission=${permissionMode}, mcp=${mcpServers.length} server(s), ` +
+      `officialTools=${enabledOfficialToolIds.join(',') || 'none'}${agent ? '' : ' (no agent match)'}`
     );
   }
 
-  return { mcpServers, providerEnv, providerRoute, model, permissionMode, reasoningEffort };
+  return { mcpServers, enabledOfficialToolIds, providerEnv, providerRoute, model, permissionMode, reasoningEffort };
 }

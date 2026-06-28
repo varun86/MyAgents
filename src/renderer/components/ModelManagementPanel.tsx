@@ -7,11 +7,11 @@
 import { X, Search, Loader2, RefreshCw, AlertCircle, Plus, Trash2, Settings2 } from 'lucide-react';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { useTranslation } from 'react-i18next';
 
 import { useCloseLayer } from '@/hooks/useCloseLayer';
 import {
   EDITABLE_MODALITIES,
-  MODALITY_LABELS,
   discoveredModelWritePlan,
   initialModalitySelection,
   isModalitySelectionValid,
@@ -53,6 +53,7 @@ export default function ModelManagementPanel({
   onSetPrimaryModel,
   onRefresh,
 }: ModelManagementPanelProps) {
+  const { t } = useTranslation('settings');
   // ===== Discovery state =====
   const [discoveredModels, setDiscoveredModels] = useState<DiscoveredModel[]>([]);
   const [discoveryLoading, setDiscoveryLoading] = useState(false);
@@ -302,7 +303,7 @@ export default function ModelManagementPanel({
         {/* Header */}
         <div className="flex flex-shrink-0 items-center justify-between border-b border-[var(--line)] px-5 py-3.5">
           <h2 className="text-lg font-semibold text-[var(--ink)]">
-            管理可用模型
+            {t('providers.models.title')}
             <span className="ml-2 text-sm font-normal text-[var(--ink-muted)]">{provider.name}</span>
           </h2>
           <button
@@ -319,14 +320,14 @@ export default function ModelManagementPanel({
           {/* ===== Upper: Active Models ===== */}
           <div className="border-b border-[var(--line-subtle)] px-5 py-4">
             <h3 className="mb-2.5 text-xs font-semibold text-[var(--ink-muted)]">
-              可用模型
+              {t('providers.models.activeTitle')}
               {provider.models.length > 0 && (
                 <span className="ml-1.5 font-normal text-[var(--ink-subtle)]">{provider.models.length}</span>
               )}
             </h3>
 
             {provider.models.length === 0 ? (
-              <p className="py-4 text-center text-sm text-[var(--ink-muted)]">暂无模型，请在下方发现或手动添加</p>
+              <p className="py-4 text-center text-sm text-[var(--ink-muted)]">{t('providers.models.emptyActive')}</p>
             ) : (
               <div>
                 {provider.models.map(model => (
@@ -360,7 +361,7 @@ export default function ModelManagementPanel({
                 value={customInput}
                 onChange={(e) => setCustomInput(e.target.value)}
                 onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); handleAddCustomModel(); } }}
-                placeholder="输入模型 ID，按 Enter 添加"
+                placeholder={t('providers.models.customPlaceholder')}
                 className="flex-1 rounded-lg border border-[var(--line)] bg-transparent px-3 py-1.5 text-sm text-[var(--ink)] placeholder:text-[var(--ink-subtle)] focus:border-[var(--ink-muted)] focus:outline-none"
               />
               <button
@@ -378,7 +379,7 @@ export default function ModelManagementPanel({
           <div className="px-5 py-4">
             <div className="mb-2.5 flex items-center justify-between">
               <h3 className="text-xs font-semibold text-[var(--ink-muted)]">
-                发现更多模型
+                {t('providers.models.discoverTitle')}
               </h3>
               {canDiscover && discoveredModels.length > 0 && (
                 <button
@@ -388,7 +389,7 @@ export default function ModelManagementPanel({
                   className="flex items-center gap-1 rounded-lg px-2 py-1 text-xs text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] disabled:opacity-50"
                 >
                   <RefreshCw className={`h-3 w-3 ${discoveryLoading ? 'animate-spin' : ''}`} />
-                  刷新
+                  {t('providers.models.refresh')}
                 </button>
               )}
             </div>
@@ -401,7 +402,7 @@ export default function ModelManagementPanel({
                   type="text"
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
-                  placeholder="搜索模型..."
+                  placeholder={t('providers.models.searchPlaceholder')}
                   className="w-full rounded-lg border border-[var(--line)] bg-transparent py-1.5 pl-8 pr-3 text-sm text-[var(--ink)] placeholder:text-[var(--ink-subtle)] focus:border-[var(--ink-muted)] focus:outline-none"
                 />
               </div>
@@ -409,23 +410,23 @@ export default function ModelManagementPanel({
 
             {/* States */}
             {!canDiscover && !apiKey && (
-              <p className="py-6 text-center text-sm text-[var(--ink-muted)]">请先配置 API Key</p>
+              <p className="py-6 text-center text-sm text-[var(--ink-muted)]">{t('providers.models.needApiKey')}</p>
             )}
             {!canDiscover && apiKey && (
-              <p className="py-6 text-center text-sm text-[var(--ink-muted)]">当前供应商不支持发现模型</p>
+              <p className="py-6 text-center text-sm text-[var(--ink-muted)]">{t('providers.models.notSupported')}</p>
             )}
 
             {canDiscover && discoveryLoading && discoveredModels.length === 0 && (
               <div className="flex flex-col items-center justify-center py-8 text-[var(--ink-muted)]">
                 <Loader2 className="h-5 w-5 animate-spin" />
-                <p className="mt-2 text-sm">正在拉取模型列表...</p>
+                <p className="mt-2 text-sm">{t('providers.models.loading')}</p>
               </div>
             )}
 
             {canDiscover && discoveryError && (
               <div className="flex flex-col items-center justify-center py-8 text-center">
                 <AlertCircle className="h-5 w-5 text-[var(--error)]" />
-                <p className="mt-2 text-sm text-[var(--ink)]">无法拉取模型列表</p>
+                <p className="mt-2 text-sm text-[var(--ink)]">{t('providers.models.loadFailed')}</p>
                 <p className="mt-1 max-w-md text-xs text-[var(--ink-muted)]">{discoveryError}</p>
                 <button
                   type="button"
@@ -433,21 +434,21 @@ export default function ModelManagementPanel({
                   className="mt-3 flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-medium text-[var(--accent)] transition-colors hover:bg-[var(--accent-warm-subtle)]"
                 >
                   <RefreshCw className="h-3.5 w-3.5" />
-                  重试
+                  {t('providers.models.retry')}
                 </button>
               </div>
             )}
 
             {canDiscover && !discoveryLoading && !discoveryError && allAdded && (
-              <p className="py-6 text-center text-sm text-[var(--ink-muted)]">所有可用模型已在上方列表中</p>
+              <p className="py-6 text-center text-sm text-[var(--ink-muted)]">{t('providers.models.allAdded')}</p>
             )}
 
             {canDiscover && !discoveryLoading && !discoveryError && !allAdded && filteredDiscovered.length === 0 && search && (
-              <p className="py-6 text-center text-sm text-[var(--ink-muted)]">没有匹配的模型</p>
+              <p className="py-6 text-center text-sm text-[var(--ink-muted)]">{t('providers.models.noMatches')}</p>
             )}
 
             {canDiscover && !discoveryLoading && !discoveryError && discoveredModels.length === 0 && (
-              <p className="py-6 text-center text-sm text-[var(--ink-muted)]">该供应商未返回可用模型</p>
+              <p className="py-6 text-center text-sm text-[var(--ink-muted)]">{t('providers.models.noneReturned')}</p>
             )}
 
             {/* Model list — no checkboxes, just rows with hover "添加" */}
@@ -472,7 +473,7 @@ export default function ModelManagementPanel({
             onClick={onClose}
             className="rounded-lg px-4 py-2 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
           >
-            完成
+            {t('providers.models.done')}
           </button>
         </div>
       </div>
@@ -500,6 +501,7 @@ const ActiveModelRow = React.memo(function ActiveModelRow({
   onDelete: (id: string) => void;
   onToggleEdit: (id: string) => void;
 }) {
+  const { t } = useTranslation('settings');
   const handleSetPrimary = useCallback(() => { if (!isPrimary) onSetPrimary(model.model); }, [isPrimary, onSetPrimary, model.model]);
   const handleDelete = useCallback(() => onDelete(model.model), [onDelete, model.model]);
   const handleToggleEdit = useCallback(() => onToggleEdit(model.model), [onToggleEdit, model.model]);
@@ -535,7 +537,7 @@ const ActiveModelRow = React.memo(function ActiveModelRow({
         <button
           type="button"
           onClick={handleToggleEdit}
-          title="模型参数设置"
+          title={t('providers.models.settingsTitle')}
           data-model-gear
           className={`flex-shrink-0 rounded p-1 transition-all hover:text-[var(--accent)] ${
             isEditing
@@ -550,7 +552,7 @@ const ActiveModelRow = React.memo(function ActiveModelRow({
       {/* Primary badge or hover action */}
       {isPrimary ? (
         <span className="flex-shrink-0 rounded-full bg-[var(--accent-warm-muted)] px-2 py-0.5 text-xs font-medium text-[var(--accent)]">
-          首选
+          {t('providers.models.primary')}
         </span>
       ) : (
         <button
@@ -558,7 +560,7 @@ const ActiveModelRow = React.memo(function ActiveModelRow({
           onClick={handleSetPrimary}
           className="flex-shrink-0 rounded-full px-2 py-0.5 text-xs font-medium text-[var(--ink-subtle)] opacity-0 transition-all hover:bg-[var(--paper-inset)] hover:text-[var(--accent)] group-hover:opacity-100"
         >
-          设为首选
+          {t('providers.models.setPrimary')}
         </button>
       )}
 
@@ -597,6 +599,7 @@ const ModelSettingsEditor = function ModelSettingsEditor({
   onCancel: () => void;
   onSave: (modelId: string, patch: Partial<ModelEntity>) => Promise<void>;
 }) {
+  const { t } = useTranslation('settings');
   const [nameDraft, setNameDraft] = useState(model.modelName ?? model.model);
   const [contextDraft, setContextDraft] = useState(
     model.contextLength ? String(model.contextLength) : '',
@@ -661,12 +664,12 @@ const ModelSettingsEditor = function ModelSettingsEditor({
 
   // Live hint: parsed-value echo when valid, error when invalid, default otherwise.
   const hint = contextInvalid
-    ? '格式无效 — 输入 token 数，可带 k / m 后缀（上限 20m）'
+    ? t('providers.models.invalidContext')
     : modalitiesInvalid
-      ? '至少选择一种模态'
+      ? t('providers.models.modalityRequired')
       : typeof parsedContext === 'number'
-        ? `≈ ${formatTokenCount(parsedContext)} tokens · 下一轮对话生效`
-        : '未设窗口按 200K 估算 · 下一轮对话生效';
+        ? t('providers.models.contextEcho', { tokens: formatTokenCount(parsedContext) })
+        : t('providers.models.contextDefault');
 
   const inputBase =
     'w-full rounded-lg border bg-[var(--paper)] px-2.5 py-1.5 text-xs text-[var(--ink)] outline-none transition-all placeholder:text-[var(--ink-faint)] focus:bg-[var(--paper-elevated)]';
@@ -684,13 +687,13 @@ const ModelSettingsEditor = function ModelSettingsEditor({
 
       {/* 标题带模型 ID，防止改错对象 */}
       <div className="mb-3 flex items-baseline gap-2">
-        <span className="flex-shrink-0 text-xs font-semibold text-[var(--ink)]">模型参数</span>
+        <span className="flex-shrink-0 text-xs font-semibold text-[var(--ink)]">{t('providers.models.parameterTitle')}</span>
         <code className="truncate font-mono text-xs text-[var(--ink-subtle)]">{model.model}</code>
       </div>
 
       {/* 显示名称 */}
       <div className="mb-2.5">
-        <label className="mb-1 block text-xs font-medium tracking-wide text-[var(--ink-muted)]">显示名称</label>
+        <label className="mb-1 block text-xs font-medium tracking-wide text-[var(--ink-muted)]">{t('providers.models.displayName')}</label>
         <input
           type="text"
           value={nameDraft}
@@ -702,19 +705,19 @@ const ModelSettingsEditor = function ModelSettingsEditor({
 
       {/* 上下文窗口 */}
       <div className="mb-2.5">
-        <label className="mb-1 block text-xs font-medium tracking-wide text-[var(--ink-muted)]">上下文窗口</label>
+        <label className="mb-1 block text-xs font-medium tracking-wide text-[var(--ink-muted)]">{t('providers.models.contextWindow')}</label>
         <input
           type="text"
           value={contextDraft}
           onChange={(e) => setContextDraft(e.target.value)}
-          placeholder="如 128000 · 支持 128k / 1m"
+          placeholder={t('providers.models.contextPlaceholder')}
           className={`${inputBase} font-mono placeholder:font-sans ${contextInvalid ? inputErr : inputOk}`}
         />
       </div>
 
       {/* 输入模态 */}
       <div>
-        <label className="mb-1 block text-xs font-medium tracking-wide text-[var(--ink-muted)]">输入模态</label>
+        <label className="mb-1 block text-xs font-medium tracking-wide text-[var(--ink-muted)]">{t('providers.models.inputModalities')}</label>
         <div className="flex gap-1.5 pt-0.5">
           {EDITABLE_MODALITIES.map(kind => {
             const selected = modalities.includes(kind);
@@ -730,7 +733,7 @@ const ModelSettingsEditor = function ModelSettingsEditor({
                 }`}
               >
                 {selected && <span className="mr-1 text-xs">✓</span>}
-                {MODALITY_LABELS[kind]}
+                {t(`providers.models.modality.${kind}`)}
               </button>
             );
           })}
@@ -748,7 +751,7 @@ const ModelSettingsEditor = function ModelSettingsEditor({
           onClick={onCancel}
           className="rounded-lg px-3 py-1.5 text-xs text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
         >
-          取消
+          {t('providers.models.cancel')}
         </button>
         <button
           type="button"
@@ -756,7 +759,7 @@ const ModelSettingsEditor = function ModelSettingsEditor({
           disabled={!canSave}
           className="rounded-lg bg-[var(--button-primary-bg)] px-4 py-1.5 text-xs font-medium text-white transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:opacity-40"
         >
-          {saving ? '保存中…' : '保存'}
+          {saving ? t('providers.models.saving') : t('providers.models.save')}
         </button>
       </div>
     </div>
@@ -772,6 +775,7 @@ const DiscoveredModelRow = React.memo(function DiscoveredModelRow({
   model: DiscoveredModel;
   onAdd: (model: DiscoveredModel) => void;
 }) {
+  const { t } = useTranslation('settings');
   const handleAdd = useCallback(() => onAdd(model), [onAdd, model]);
   const displayName = model.displayName && model.displayName !== model.id ? model.displayName : null;
   const title = displayName ?? model.id;
@@ -809,7 +813,7 @@ const DiscoveredModelRow = React.memo(function DiscoveredModelRow({
         onClick={handleAdd}
         className="flex-shrink-0 rounded-full px-2.5 py-0.5 text-xs font-medium text-[var(--accent)] opacity-0 transition-all hover:bg-[var(--accent-warm-subtle)] group-hover:opacity-100"
       >
-        添加
+        {t('providers.models.add')}
       </button>
     </div>
   );

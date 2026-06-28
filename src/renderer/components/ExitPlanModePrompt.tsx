@@ -1,5 +1,6 @@
 import { FileCheck, Check, Terminal, CheckCircle, XCircle, ArrowUp } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from 'react';
+import { useTranslation } from 'react-i18next';
 import Markdown from '@/components/Markdown';
 
 import type { ExitPlanModeRequest } from '../../shared/types/planMode';
@@ -21,6 +22,7 @@ const TEXTAREA_MAX_HEIGHT = 128; // px — caps the auto-grow textarea
  * ExitPlanMode prompt - AI submits a plan for user review
  */
 export function ExitPlanModePrompt({ request, onApprove, onReject }: ExitPlanModePromptProps) {
+    const { t } = useTranslation('chat');
     const isResolved = !!request.resolved;
     const isApproved = request.resolved === 'approved';
 
@@ -86,7 +88,7 @@ export function ExitPlanModePrompt({ request, onApprove, onReject }: ExitPlanMod
     }, []);
 
     const trimmed = feedback.trim();
-    const submitTitle = trimmed ? '提交修改意见' : '拒绝方案';
+    const submitTitle = trimmed ? t('shell.planPrompt.submitFeedback') : t('shell.planPrompt.rejectPlan');
 
     return (
         <div className="animate-in fade-in slide-in-from-bottom-2 duration-300">
@@ -113,12 +115,12 @@ export function ExitPlanModePrompt({ request, onApprove, onReject }: ExitPlanMod
                             isResolved && !isApproved
                                 ? 'text-[var(--ink-secondary)]'
                                 : 'text-[var(--success)]'
-                        }`}>方案审核</h3>
+                        }`}>{t('shell.planPrompt.title')}</h3>
                         <p className={`text-xs ${
                             isResolved && !isApproved
                                 ? 'text-[var(--ink-muted)]'
                                 : 'text-[var(--success)]'
-                        }`}>AI 完成了方案设计，请审核后决定是否执行</p>
+                        }`}>{t('shell.planPrompt.subtitle')}</p>
                     </div>
                     {/* Resolved badge in header */}
                     {isResolved && (
@@ -128,8 +130,8 @@ export function ExitPlanModePrompt({ request, onApprove, onReject }: ExitPlanMod
                                 : 'bg-[var(--paper-inset)] text-[var(--ink-muted)]'
                         }`}>
                             {isApproved
-                                ? <><CheckCircle className="h-3.5 w-3.5" />已批准</>
-                                : <><XCircle className="h-3.5 w-3.5" />已拒绝</>
+                                ? <><CheckCircle className="h-3.5 w-3.5" />{t('shell.planPrompt.approved')}</>
+                                : <><XCircle className="h-3.5 w-3.5" />{t('shell.planPrompt.rejected')}</>
                             }
                         </div>
                     )}
@@ -153,7 +155,7 @@ export function ExitPlanModePrompt({ request, onApprove, onReject }: ExitPlanMod
                             isResolved && !isApproved
                                 ? 'text-[var(--ink-muted)]'
                                 : 'text-[var(--success)]'
-                        }`}>需要的权限：</p>
+                        }`}>{t('shell.planPrompt.permissions')}</p>
                         {request.allowedPrompts.map((ap, i) => (
                             <div key={i} className={`flex items-center gap-2 rounded-md px-2.5 py-1.5 text-xs ${
                                 isResolved && !isApproved
@@ -180,7 +182,7 @@ export function ExitPlanModePrompt({ request, onApprove, onReject }: ExitPlanMod
                             className="flex w-full items-center justify-center gap-1.5 rounded-lg bg-[var(--success)] px-3 py-2 text-sm font-medium text-white transition-colors hover:brightness-110"
                         >
                             <Check className="h-4 w-4" />
-                            批准执行
+                            {t('shell.planPrompt.approve')}
                         </button>
                         <div className="flex items-end gap-2 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-2.5 py-1.5 transition-colors focus-within:border-[var(--success)]/50">
                             <textarea
@@ -190,7 +192,7 @@ export function ExitPlanModePrompt({ request, onApprove, onReject }: ExitPlanMod
                                 onKeyDown={handleKeyDown}
                                 onCompositionStart={handleCompositionStart}
                                 onCompositionEnd={handleCompositionEnd}
-                                placeholder="说说我的想法（留空则拒绝方案）"
+                                placeholder={t('shell.planPrompt.feedbackPlaceholder')}
                                 rows={1}
                                 className="max-h-32 min-h-[24px] flex-1 resize-none border-0 bg-transparent text-sm text-[var(--ink)] outline-none placeholder:text-[var(--ink-subtle)]"
                             />

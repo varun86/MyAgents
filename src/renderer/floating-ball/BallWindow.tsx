@@ -11,6 +11,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { useTranslation } from 'react-i18next';
 
 import { loadAppConfig } from '@/config/services/appConfigService';
 import { listenWithCleanup } from '@/utils/tauriListen';
@@ -36,14 +37,9 @@ interface FbCtx {
 }
 
 const DRAG_THRESHOLD = 4;
-const BALL_STATE_LABEL: Record<FbBallState, string> = {
-    idle: '空闲',
-    running: '正在处理',
-    blocked: '等你确认',
-    done: '有结果未读',
-};
 
 export default function BallWindow() {
+    const { t } = useTranslation('chat');
     const [state, setState] = useState<FbBallState>('idle');
     const [unread, setUnread] = useState(0);
     const [dragging, setDragging] = useState(false);
@@ -451,7 +447,7 @@ export default function BallWindow() {
                         <PetSprite
                             pack={petPack}
                             animation={petAnimation}
-                            title={`${petPack.displayName} · ${BALL_STATE_LABEL[state]}`}
+                            title={`${petPack.displayName} · ${t(`floatingBall.ballState.${state}`)}`}
                             onLoadError={handlePetLoadError}
                         />
                     </>

@@ -1,5 +1,5 @@
 import { randomUUID } from 'crypto';
-import { existsSync, readdirSync, symlinkSync, lstatSync, readFileSync, readlinkSync, rmSync } from 'fs';
+import { existsSync, readdirSync, symlinkSync, lstatSync, readFileSync, readlinkSync, rmSync, writeFileSync } from 'fs';
 import { dirname, join, resolve, sep } from 'path';
 import { createRequire } from 'module';
 import { query, getSessionMessages as sdkGetSessionMessages, forkSession as sdkForkSession, deleteSession as sdkDeleteSession, type Query, type SDKUserMessage, type AgentDefinition, type HookInput, type HookJSONOutput, type PreToolUseHookInput, type PostToolUseHookInput, type PermissionRequestHookInput, type SlashCommand as SdkSlashCommand } from '@anthropic-ai/claude-agent-sdk';
@@ -77,6 +77,7 @@ import {
 } from './utils/context-occupancy';
 import type { SystemInitInfo } from '../shared/types/system';
 import type { SlashCommand as UiSlashCommand } from '../shared/slashCommands';
+import type { OfficialToolId } from '../shared/official-tools';
 import { deleteSession, saveSessionMetadata, updateSessionTitleFromMessage, updateSessionMetadata, getSessionMetadata, getSessionData } from './SessionStore';
 import { firePostTurnTitleHook } from './turn-hooks';
 import { createSessionMetadata, type SessionMetadata, type SessionMessage, type MessageAttachment, type SessionSource, type TurnAnalyticsSource } from './types/session';
@@ -86,7 +87,8 @@ import {
   isLiveFollowScenario,
   type SessionMaterializationScenario,
 } from './utils/session-materialization';
-import { findAgentByWorkspacePath, isCliToolRegistryEnabled, loadConfig as loadAdminConfig } from './utils/admin-config';
+import { isManagedCodexProviderReady } from './utils/managed-codex-readiness';
+import { findAgentByWorkspacePath, getDefaultEnabledOfficialToolIdsForWorkspace, getEffectiveOfficialToolIdsForSession, isCliToolRegistryEnabled, loadConfig as loadAdminConfig } from './utils/admin-config';
 import type { AgentConfig } from '../shared/types/agent';
 import { broadcast } from './sse';
 import {
@@ -252,6 +254,7 @@ import {
   setProviderEnv as configSetProviderEnv,
   setReasoningEffort as configSetReasoningEffort,
   scheduleDeferredRestart as configScheduleDeferredRestart,
+  setSessionEnabledOfficialToolIds as configSetSessionEnabledOfficialToolIds,
   setSessionEnabledPluginIds as configSetSessionEnabledPluginIds,
   shouldApplyConfigUpdate,
   configState,
@@ -805,22 +808,24 @@ async function awaitSessionTermination(timeoutMs = 10_000, label = ''): Promise<
 
 let isInterruptingResponse = false;
 let isStreamingMessage = false;
-// Every `system` subtype defined in SDK 0.3.173 (sdk.d.ts) — handled here or
+// Every `system` subtype defined in SDK 0.3.195 (sdk.d.ts) — handled here or
 // deliberately untouched. A subtype outside this set means a NEWER SDK started
 // emitting a message kind we have never seen; the loop logs it once per
 // process instead of letting it vanish silently. Update this set when bumping
 // the SDK (grep sdk.d.ts for `type: 'system'` blocks).
 const KNOWN_SYSTEM_SUBTYPES = new Set([
   'api_retry', 'commands_changed', 'compact_boundary', 'elicitation_complete',
-  'files_persisted', 'hook_progress', 'hook_response', 'hook_started', 'init',
-  'local_command_output', 'memory_recall', 'mirror_error',
-  'model_refusal_fallback', 'notification', 'permission_denied',
+  'files_persisted', 'hook_progress', 'hook_response', 'hook_started',
+  'informational', 'init', 'local_command_output', 'memory_recall',
+  'mirror_error', 'model_refusal_fallback', 'model_refusal_no_fallback',
+  'notification', 'permission_denied',
   'plugin_install', 'session_state_changed', 'status', 'task_notification',
   'task_progress', 'task_started', 'task_updated', 'thinking_tokens',
+  'worker_shutting_down',
 ]);
 const warnedUnknownSystemSubtypes = new Set<string>();
 // Top-level half of the same sentinel: every `type` value an SDKMessage union
-// member carries in 0.3.173. Verified 1:1 against sdk.d.ts at upgrade time
+// member carries in 0.3.195. Verified 1:1 against sdk.d.ts at upgrade time
 // (the system-typed members are covered by KNOWN_SYSTEM_SUBTYPES above).
 const KNOWN_MESSAGE_TYPES = new Set([
   'assistant', 'user', 'result', 'system', 'stream_event', 'rate_limit_event',
@@ -2233,6 +2238,30 @@ export function setSessionEnabledPluginIds(ids: string[] | null): void {
 
 export function getSessionEnabledPluginIds(): readonly string[] | null {
   return configState.currentEnabledPluginIds;
+}
+
+/**
+ * Per-Tab override for MyAgents official CLI tools. This only changes the
+ * next session/pre-warm system prompt; the current SDK subprocess cannot have
+ * its system prompt mutated in place.
+ */
+export function setSessionEnabledOfficialToolIds(ids: OfficialToolId[] | null): void {
+  const current = configState.currentEnabledOfficialToolIds;
+  if (current === null && ids === null) return;
+  if (
+    current !== null &&
+    ids !== null &&
+    current.length === ids.length &&
+    current.every((id, i) => id === ids[i])
+  ) {
+    return;
+  }
+  configSetSessionEnabledOfficialToolIds(ids);
+  forceReloadActiveSession('official-tools');
+}
+
+export function getSessionEnabledOfficialToolIds(): readonly OfficialToolId[] | null {
+  return configState.currentEnabledOfficialToolIds;
 }
 
 /**
@@ -4309,6 +4338,7 @@ function createMetadataForSessionId(
     scenario,
     agent,
     runtimeOverride: getCurrentRuntimeType(),
+    managedCodexProviderReady: isManagedCodexProviderReady(loadAdminConfig()),
     fallbackRuntime: getCurrentRuntimeType(),
     title,
   });
@@ -4339,7 +4369,7 @@ async function materializeInitialPromptSessionMetadata(initialPromptText: string
 
 type DesktopSnapshotPatch = Pick<
   SessionMetadata,
-  'model' | 'reasoningEffort' | 'permissionMode' | 'mcpEnabledServers' | 'enabledPluginIds' | 'providerId' | 'providerRoute' | 'providerEnvJson'
+  'model' | 'reasoningEffort' | 'permissionMode' | 'mcpEnabledServers' | 'enabledPluginIds' | 'enabledOfficialToolIds' | 'providerId' | 'providerRoute' | 'providerEnvJson'
 >;
 type OwnedFreezeSnapshotPatch = Partial<Pick<
   SessionMetadata,
@@ -4366,6 +4396,7 @@ function applyDesktopSnapshotPatch(
   apply('permissionMode', patch.permissionMode);
   apply('mcpEnabledServers', patch.mcpEnabledServers);
   apply('enabledPluginIds', patch.enabledPluginIds);
+  apply('enabledOfficialToolIds', patch.enabledOfficialToolIds);
   apply('providerId', patch.providerId);
   apply('providerRoute', patch.providerRoute);
   apply('providerEnvJson', patch.providerEnvJson);
@@ -4394,6 +4425,7 @@ function buildDesktopSnapshotMetadataPatch(
   apply('permissionMode', patch.permissionMode);
   apply('mcpEnabledServers', patch.mcpEnabledServers);
   apply('enabledPluginIds', patch.enabledPluginIds);
+  apply('enabledOfficialToolIds', patch.enabledOfficialToolIds);
   apply('providerId', patch.providerId);
   apply('providerRoute', patch.providerRoute);
   apply('providerEnvJson', patch.providerEnvJson);
@@ -4411,6 +4443,7 @@ async function restoreBuiltinConfigFromOwnedMetadata(meta: SessionMetadata): Pro
   configSetProviderEnv(resolved.providerEnv);
   configSetReasoningEffort(normalizeReasoningEffort(resolved.reasoningEffort));
   configSetSessionEnabledPluginIds(meta.enabledPluginIds ? [...meta.enabledPluginIds] : []);
+  configSetSessionEnabledOfficialToolIds(meta.enabledOfficialToolIds ? [...meta.enabledOfficialToolIds] : []);
   if (resolved.permissionMode) {
     const restored = computeRestoredPlanState(resolved.permissionMode as PermissionMode);
     setPermissionPlanState(restored);
@@ -4463,6 +4496,7 @@ function buildOwnedFreezeSnapshotPatch(overrides?: OwnedFreezeSnapshotPatch): Ow
     ...(configState.currentPermissionMode ? { permissionMode: configState.currentPermissionMode } : {}),
     ...(currentMcpServers !== null ? { mcpEnabledServers: currentMcpServers.map(server => server.id) } : {}),
     ...(configState.currentEnabledPluginIds !== null ? { enabledPluginIds: [...configState.currentEnabledPluginIds] } : {}),
+    ...(configState.currentEnabledOfficialToolIds !== null ? { enabledOfficialToolIds: [...configState.currentEnabledOfficialToolIds] } : {}),
     ...(currentProviderId ? { providerId: currentProviderId } : {}),
     ...(currentProviderRoute ? { providerRoute: currentProviderRoute } : {}),
     ...overrides,
@@ -4476,11 +4510,15 @@ function buildOwnedFreezeSnapshotPatch(overrides?: OwnedFreezeSnapshotPatch): Ow
   } else if (patch.enabledPluginIds === undefined) {
     patch.enabledPluginIds = getDefaultEnabledPluginIdsForWorkspace(agentDir ?? '');
   }
+  if (patch.enabledOfficialToolIds === undefined) {
+    patch.enabledOfficialToolIds = getDefaultEnabledOfficialToolIdsForWorkspace(agentDir ?? '');
+  }
   return patch;
 }
 
 export async function freezeCurrentSessionMetadataForImDetach(
   overrides?: OwnedFreezeSnapshotPatch,
+  options?: { allowMissingMetadata?: boolean },
 ): Promise<{ success: boolean; sessionId?: string; metadata?: SessionMetadata; error?: string }> {
   const targetSessionId = sessionId;
   if (!targetSessionId) {
@@ -4502,6 +4540,14 @@ export async function freezeCurrentSessionMetadataForImDetach(
     setLazySessionMaterializationAllowed(false);
     console.log(`[agent] froze IM-bound session ${targetSessionId} as owned before binding transfer`);
     return { success: true, sessionId: targetSessionId, metadata: updated };
+  }
+
+  if (!options?.allowMissingMetadata) {
+    return {
+      success: false,
+      sessionId: targetSessionId,
+      error: `Session metadata not found for non-birth-pending IM session ${targetSessionId}.`,
+    };
   }
 
   const meta = createSessionMetadata(agentDir, patch);
@@ -5010,6 +5056,73 @@ function sealCcAuthEnv(env: NodeJS.ProcessEnv): void {
   }
 }
 
+const WINDOWS_UTF8_BASH_ENV_SENTINEL = 'MYAGENTS_WINDOWS_UTF8';
+const WINDOWS_UTF8_BASH_ENV_FILENAME = 'windows-utf8-bash-env.sh';
+const WINDOWS_UTF8_BASH_ENV_CONTENT = [
+  '# MyAgents-managed Bash prelude for Windows SDK tool output.',
+  `if [ -n "\${MYAGENTS_ORIGINAL_BASH_ENV:-}" ] && [ "\${MYAGENTS_ORIGINAL_BASH_ENV}" != "\${BASH_ENV:-}" ] && [ -r "\${MYAGENTS_ORIGINAL_BASH_ENV}" ]; then`,
+  '  . "${MYAGENTS_ORIGINAL_BASH_ENV}"',
+  'fi',
+  `export ${WINDOWS_UTF8_BASH_ENV_SENTINEL}=1`,
+  'export LANG=C.UTF-8',
+  'export LC_ALL=C.UTF-8',
+  'export PYTHONUTF8=1',
+  'export PYTHONIOENCODING=utf-8',
+  'export LESSCHARSET=utf-8',
+  'chcp.com 65001 >/dev/null 2>&1 || true',
+  '',
+].join('\n');
+
+function ensureWindowsUtf8BashEnvScript(home: string): string | undefined {
+  if (!home) return undefined;
+  const scriptDir = resolve(home, '.myagents', 'runtime');
+  const scriptPath = resolve(scriptDir, WINDOWS_UTF8_BASH_ENV_FILENAME);
+  try {
+    ensureDirSync(scriptDir);
+    if (!existsSync(scriptPath) || readFileSync(scriptPath, 'utf-8') !== WINDOWS_UTF8_BASH_ENV_CONTENT) {
+      writeFileSync(scriptPath, WINDOWS_UTF8_BASH_ENV_CONTENT, 'utf-8');
+    }
+    return scriptPath;
+  } catch (err) {
+    console.warn(`[env] Failed to prepare Windows UTF-8 Bash prelude at ${scriptPath}: ${err instanceof Error ? err.message : String(err)}`);
+    return undefined;
+  }
+}
+
+function toGitBashEnvPath(path: string): string {
+  return path.replace(/\\/g, '/');
+}
+
+export function applyWindowsUtf8SubprocessEnv(
+  env: NodeJS.ProcessEnv,
+  options: { platform?: NodeJS.Platform; useBashEnvPrelude?: boolean; home?: string } = {},
+): void {
+  const platform = options.platform ?? process.platform;
+  if (platform !== 'win32') return;
+
+  // The SDK serializes tool output as UTF-8 strings. On Windows, many child
+  // tools choose the system ANSI/OEM code page unless the process environment
+  // says otherwise, so force UTF-8 before bytes reach the SDK transport.
+  env.LANG = 'C.UTF-8';
+  env.LC_ALL = 'C.UTF-8';
+  env.PYTHONUTF8 = '1';
+  env.PYTHONIOENCODING = 'utf-8';
+  env.LESSCHARSET = 'utf-8';
+
+  if (!options.useBashEnvPrelude) return;
+
+  const bashEnvScript = ensureWindowsUtf8BashEnvScript(options.home ?? '');
+  if (!bashEnvScript) return;
+
+  const bashEnvScriptForShell = toGitBashEnvPath(bashEnvScript);
+  const existingBashEnv = env.BASH_ENV;
+  const existingBashEnvForShell = existingBashEnv ? toGitBashEnvPath(existingBashEnv) : undefined;
+  if (existingBashEnvForShell && existingBashEnvForShell !== bashEnvScriptForShell) {
+    env.MYAGENTS_ORIGINAL_BASH_ENV = existingBashEnvForShell;
+  }
+  env.BASH_ENV = bashEnvScriptForShell;
+}
+
 /**
  * Build the env map passed to the Claude Agent SDK subprocess.
  *
@@ -5271,6 +5384,12 @@ export function buildClaudeSessionEnv(
     }
     env.CLAUDE_CODE_GIT_BASH_PATH = resolvedGitBash;
   }
+
+  applyWindowsUtf8SubprocessEnv(env, {
+    platform: process.platform,
+    useBashEnvPrelude: isWindows,
+    home,
+  });
 
   // Use provided providerEnv or fall back to configState.currentProviderEnv
   const effectiveProviderEnv = providerEnv ?? configState.currentProviderEnv;
@@ -9616,6 +9735,11 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     const sdkEffort = configState.currentProviderEnv?.apiProtocol !== 'openai' && isSdkEffortLevel(configState.currentReasoningEffort)
       ? configState.currentReasoningEffort
       : ('high' as const);
+    const enabledOfficialToolIds = getEffectiveOfficialToolIdsForSession(
+      agentDir,
+      getSessionMetadata(sessionId),
+      configState.currentEnabledOfficialToolIds,
+    );
 
     const commonQueryOptions = {
       enableFileCheckpointing: true,
@@ -9690,6 +9814,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           // same prompt now. Single CLI, single source of truth across all runtimes.
           cliToolsEnabled: true,
           userCliToolsEnabled: cliToolRegistryEnabled,
+          enabledOfficialToolIds,
         }),
       },
       cwd: agentDir,
@@ -10878,8 +11003,23 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           applyMessageRetraction(rf.retracted_message_uuids, 'model_refusal_fallback');
         }
 
+        if (retryMsg.subtype === 'model_refusal_no_fallback') {
+          const rf = sdkMessage as {
+            original_model?: string;
+            api_refusal_category?: string | null;
+            api_refusal_explanation?: string | null;
+            content?: string;
+          };
+          const refusalDetail = rf.content || rf.api_refusal_explanation || '模型拒绝响应，且当前没有可用的 fallback 模型。';
+          const categorySuffix = rf.api_refusal_category ? ` (category=${rf.api_refusal_category})` : '';
+          console.warn(`[agent] model refusal without fallback: ${rf.original_model ?? 'unknown'}${categorySuffix}: ${refusalDetail}`);
+          lastAgentError = refusalDetail;
+          broadcast('chat:agent-error', { message: refusalDetail });
+          broadcast('chat:message-error', refusalDetail);
+        }
+
         // Sentinel for system message kinds added by FUTURE SDK versions.
-        // The set below enumerates every system subtype in SDK 0.3.173
+        // The set below enumerates every system subtype in SDK 0.3.195
         // (handled or deliberately untouched) — a subtype outside it means the
         // SDK started emitting something we have never seen. Without this log
         // line, new message kinds vanish silently (the pre-0.3.173 default,
@@ -11577,7 +11717,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         builtinTurnLifecycle.handleSdkResult(sdkMessage as BuiltinSdkResultMessage);
       } else if (!KNOWN_MESSAGE_TYPES.has(sdkMessage.type) && !warnedUnknownMessageTypes.has(sdkMessage.type)) {
         // Top-level half of the unknown-message sentinel (the system-subtype
-        // half lives in the system block above): a type outside the 0.3.173
+        // half lives in the system block above): a type outside the 0.3.195
         // union means a NEWER SDK started emitting a message kind this loop
         // has never seen — log once instead of letting it vanish silently.
         warnedUnknownMessageTypes.add(sdkMessage.type);

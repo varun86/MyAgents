@@ -63,6 +63,26 @@ pub fn ensure_session_sidecar_with_runtime_override<R: Runtime>(
     owner: SidecarOwner,
     runtime_override: Option<String>,
 ) -> Result<EnsureSidecarResult, String> {
+    ensure_session_sidecar_with_runtime_identity_override(
+        app_handle,
+        manager,
+        session_id,
+        workspace_path,
+        owner,
+        runtime_override,
+        None,
+    )
+}
+
+pub fn ensure_session_sidecar_with_runtime_identity_override<R: Runtime>(
+    app_handle: &AppHandle<R>,
+    manager: &ManagedSidecarManager,
+    session_id: &str,
+    workspace_path: &std::path::Path,
+    owner: SidecarOwner,
+    runtime_override: Option<String>,
+    runtime_source_override: Option<String>,
+) -> Result<EnsureSidecarResult, String> {
     ensure_session_sidecar_attempt(
         app_handle,
         manager,
@@ -70,6 +90,7 @@ pub fn ensure_session_sidecar_with_runtime_override<R: Runtime>(
         workspace_path,
         owner,
         runtime_override,
+        runtime_source_override,
         0,
     )
 }
@@ -81,6 +102,7 @@ fn ensure_session_sidecar_attempt<R: Runtime>(
     workspace_path: &std::path::Path,
     owner: SidecarOwner,
     runtime_override: Option<String>,
+    runtime_source_override: Option<String>,
     attempt: u32,
 ) -> Result<EnsureSidecarResult, String> {
     if attempt >= MAX_ENSURE_ATTEMPTS {
@@ -165,12 +187,26 @@ fn ensure_session_sidecar_attempt<R: Runtime>(
                 manager_guard.remove_sidecar(session_id);
                 None
             } else if sidecar.is_reusable() {
-                // Healthy — needs HTTP verification outside the lock
-                Some(ExistingSidecarReuse::Healthy {
-                    port: sidecar.port,
-                    generation,
-                    runtime: normalize_runtime_name(sidecar.runtime.as_deref()).to_string(),
-                })
+                if validate_sidecar_runtime_invariant(
+                    session_id,
+                    sidecar.runtime.as_deref(),
+                    sidecar.runtime_source.as_deref(),
+                    "reuse-healthy-precheck",
+                )
+                .is_err()
+                {
+                    manager_guard.remove_sidecar(session_id);
+                    manager_guard.clear_generation(session_id);
+                    None
+                } else {
+                    // Healthy — needs HTTP verification outside the lock
+                    Some(ExistingSidecarReuse::Healthy {
+                        port: sidecar.port,
+                        generation,
+                        runtime: normalize_runtime_name(sidecar.runtime.as_deref()).to_string(),
+                        runtime_source: sidecar.runtime_source.clone(),
+                    })
+                }
             } else {
                 // Starting — another thread is doing wait_for_health/readiness.
                 // Add the owner now, then wait for /health/ready outside the lock.
@@ -180,18 +216,27 @@ fn ensure_session_sidecar_attempt<R: Runtime>(
                     sidecar.port,
                     owner
                 );
-                validate_sidecar_runtime_invariant(
+                if validate_sidecar_runtime_invariant(
                     session_id,
                     sidecar.runtime.as_deref(),
+                    sidecar.runtime_source.as_deref(),
                     "reuse-starting",
-                );
-                let owner_added = sidecar.add_owner(owner.clone());
-                Some(ExistingSidecarReuse::Starting {
-                    port: sidecar.port,
-                    generation,
-                    runtime: normalize_runtime_name(sidecar.runtime.as_deref()).to_string(),
-                    owner_added,
-                })
+                )
+                .is_err()
+                {
+                    manager_guard.remove_sidecar(session_id);
+                    manager_guard.clear_generation(session_id);
+                    None
+                } else {
+                    let owner_added = sidecar.add_owner(owner.clone());
+                    Some(ExistingSidecarReuse::Starting {
+                        port: sidecar.port,
+                        generation,
+                        runtime: normalize_runtime_name(sidecar.runtime.as_deref()).to_string(),
+                        runtime_source: sidecar.runtime_source.clone(),
+                        owner_added,
+                    })
+                }
             }
         } else {
             None
@@ -203,20 +248,31 @@ fn ensure_session_sidecar_attempt<R: Runtime>(
     // can replace the sidecar during this window. We use a generation counter to detect this
     // and avoid accidentally killing the healthy replacement.
     if let Some(existing) = existing_sidecar_info {
-        let (port, pre_gen, runtime_for_trace, wait_for_starting, joined_owner_added) =
-            match existing {
-                ExistingSidecarReuse::Healthy {
-                    port,
-                    generation,
-                    runtime,
-                } => (port, generation, runtime, false, false),
-                ExistingSidecarReuse::Starting {
-                    port,
-                    generation,
-                    runtime,
-                    owner_added,
-                } => (port, generation, runtime, true, owner_added),
-            };
+        let (
+            port,
+            pre_gen,
+            runtime_for_trace,
+            runtime_source_for_trace,
+            wait_for_starting,
+            joined_owner_added,
+        ) = match existing {
+            ExistingSidecarReuse::Healthy {
+                port,
+                generation,
+                runtime,
+                runtime_source,
+            } => (port, generation, runtime, runtime_source, false, false),
+            ExistingSidecarReuse::Starting {
+                port,
+                generation,
+                runtime,
+                runtime_source,
+                owner_added,
+            } => (port, generation, runtime, runtime_source, true, owner_added),
+        };
+        let runtime_source_label =
+            normalize_runtime_source_name(&runtime_for_trace, runtime_source_for_trace.as_deref())
+                .to_string();
         drop(manager_guard);
 
         let check_started = trace_start();
@@ -224,6 +280,7 @@ fn ensure_session_sidecar_attempt<R: Runtime>(
             PerfTrace::new(PerfTraceName::SidecarBoot, "reuse_check_start")
                 .session_id(Some(session_id))
                 .runtime(Some(&runtime_for_trace))
+                .detail("runtimeSource", &runtime_source_label)
                 .detail("port", port)
                 .detail("starting", wait_for_starting),
         );
@@ -238,6 +295,7 @@ fn ensure_session_sidecar_attempt<R: Runtime>(
                 .duration_ms(elapsed_ms(check_started))
                 .session_id(Some(session_id))
                 .runtime(Some(&runtime_for_trace))
+                .detail("runtimeSource", &runtime_source_label)
                 .status(if http_healthy { "ok" } else { "error" })
                 .detail("port", port)
                 .detail("starting", wait_for_starting),
@@ -264,26 +322,35 @@ fn ensure_session_sidecar_attempt<R: Runtime>(
                         sidecar.port,
                         sidecar.state
                     );
-                    validate_sidecar_runtime_invariant(
+                    if validate_sidecar_runtime_invariant(
                         session_id,
                         sidecar.runtime.as_deref(),
+                        sidecar.runtime_source.as_deref(),
                         "reuse-replacement",
-                    );
-                    drop(manager_guard);
-                    return ensure_session_sidecar_attempt(
-                        app_handle,
-                        manager,
-                        session_id,
-                        workspace_path,
-                        owner,
-                        runtime_override,
-                        attempt + 1,
-                    );
+                    )
+                    .is_err()
+                    {
+                        manager_guard.remove_sidecar(session_id);
+                        manager_guard.clear_generation(session_id);
+                    } else {
+                        drop(manager_guard);
+                        return ensure_session_sidecar_attempt(
+                            app_handle,
+                            manager,
+                            session_id,
+                            workspace_path,
+                            owner,
+                            runtime_override,
+                            runtime_source_override,
+                            attempt + 1,
+                        );
+                    }
                 }
             }
             // Replacement sidecar process also dead — fall through to create
         } else if http_healthy {
             // Same generation, HTTP healthy — try to reuse
+            let mut remove_for_runtime_drift = false;
             if let Some(sidecar) = manager_guard.sidecars.get_mut(session_id) {
                 if sidecar.port == port && sidecar.is_reusable() {
                     ulog_info!(
@@ -292,61 +359,78 @@ fn ensure_session_sidecar_attempt<R: Runtime>(
                         port,
                         owner
                     );
-                    validate_sidecar_runtime_invariant(
+                    if validate_sidecar_runtime_invariant(
                         session_id,
                         sidecar.runtime.as_deref(),
+                        sidecar.runtime_source.as_deref(),
                         "reuse-http-healthy",
-                    );
-                    sidecar.add_owner(owner.clone());
-                    emit_perf_trace(
-                        PerfTrace::new(PerfTraceName::SidecarBoot, "ensure_done")
-                            .duration_ms(elapsed_ms(ensure_started))
-                            .session_id(Some(session_id))
-                            .runtime(Some(&runtime_for_trace))
-                            .status("ok")
-                            .detail("port", port)
-                            .detail("is_new", false)
-                            .detail(
-                                "reuse",
-                                if wait_for_starting {
-                                    "starting-ready"
-                                } else {
-                                    "healthy"
-                                },
-                            ),
-                    );
-                    return Ok(EnsureSidecarResult {
-                        port,
-                        is_new: false,
-                    });
-                }
-                if sidecar.port == port && wait_for_starting {
+                    )
+                    .is_err()
+                    {
+                        remove_for_runtime_drift = true;
+                    } else {
+                        sidecar.add_owner(owner.clone());
+                        emit_perf_trace(
+                            PerfTrace::new(PerfTraceName::SidecarBoot, "ensure_done")
+                                .duration_ms(elapsed_ms(ensure_started))
+                                .session_id(Some(session_id))
+                                .runtime(Some(&runtime_for_trace))
+                                .detail("runtimeSource", &runtime_source_label)
+                                .status("ok")
+                                .detail("port", port)
+                                .detail("is_new", false)
+                                .detail(
+                                    "reuse",
+                                    if wait_for_starting {
+                                        "starting-ready"
+                                    } else {
+                                        "healthy"
+                                    },
+                                ),
+                        );
+                        return Ok(EnsureSidecarResult {
+                            port,
+                            is_new: false,
+                        });
+                    }
+                } else if sidecar.port == port && wait_for_starting {
                     ulog_info!(
                         "[sidecar] Session {} starting Sidecar reached readiness on port {}, adding owner {:?}",
                         session_id, port, owner
                     );
-                    validate_sidecar_runtime_invariant(
+                    if validate_sidecar_runtime_invariant(
                         session_id,
                         sidecar.runtime.as_deref(),
+                        sidecar.runtime_source.as_deref(),
                         "reuse-starting-ready",
-                    );
-                    sidecar.state = SidecarState::Healthy;
-                    sidecar.add_owner(owner.clone());
-                    emit_perf_trace(
-                        PerfTrace::new(PerfTraceName::SidecarBoot, "ensure_done")
-                            .duration_ms(elapsed_ms(ensure_started))
-                            .session_id(Some(session_id))
-                            .runtime(Some(&runtime_for_trace))
-                            .status("ok")
-                            .detail("port", port)
-                            .detail("is_new", false)
-                            .detail("reuse", "starting-ready"),
-                    );
-                    return Ok(EnsureSidecarResult {
-                        port,
-                        is_new: false,
-                    });
+                    )
+                    .is_err()
+                    {
+                        remove_for_runtime_drift = true;
+                    } else {
+                        sidecar.state = SidecarState::Healthy;
+                        sidecar.add_owner(owner.clone());
+                        emit_perf_trace(
+                            PerfTrace::new(PerfTraceName::SidecarBoot, "ensure_done")
+                                .duration_ms(elapsed_ms(ensure_started))
+                                .session_id(Some(session_id))
+                                .runtime(Some(&runtime_for_trace))
+                                .detail("runtimeSource", &runtime_source_label)
+                                .status("ok")
+                                .detail("port", port)
+                                .detail("is_new", false)
+                                .detail("reuse", "starting-ready"),
+                        );
+                        return Ok(EnsureSidecarResult {
+                            port,
+                            is_new: false,
+                        });
+                    }
                 }
+            }
+            if remove_for_runtime_drift {
+                manager_guard.remove_sidecar(session_id);
+                manager_guard.clear_generation(session_id);
             }
             // Sidecar gone but generation unchanged (removed without replacement)
             ulog_info!(
@@ -403,6 +487,7 @@ fn ensure_session_sidecar_attempt<R: Runtime>(
             owner,
             manager_guard,
             runtime_override.as_deref(),
+            runtime_source_override.as_deref(),
             attempt,
         );
         if let Ok(ensure_result) = &result {
@@ -428,6 +513,7 @@ fn ensure_session_sidecar_attempt<R: Runtime>(
         owner,
         manager_guard,
         runtime_override.as_deref(),
+        runtime_source_override.as_deref(),
         attempt,
     );
     if let Ok(ensure_result) = &result {
@@ -454,6 +540,7 @@ fn create_new_session_sidecar<R: Runtime>(
     owner: SidecarOwner,
     mut manager_guard: std::sync::MutexGuard<'_, SidecarManager>,
     runtime_override: Option<&str>,
+    runtime_source_override: Option<&str>,
     attempt: u32,
 ) -> Result<EnsureSidecarResult, String> {
     let boot_started = trace_start();
@@ -474,6 +561,7 @@ fn create_new_session_sidecar<R: Runtime>(
                 workspace_path,
                 owner,
                 runtime_override.map(str::to_string),
+                runtime_source_override.map(str::to_string),
                 attempt + 1,
             );
         }
@@ -561,25 +649,59 @@ fn create_new_session_sidecar<R: Runtime>(
     //   Maintenance Agent owners (for example memory_update:{agent}:{session})
     //     target a concrete historical session_id, not an opaque peer binding,
     //     so they follow the desktop-style session metadata rule.
-    let session_runtime = if owner_prefers_live_agent_runtime(&owner) {
+    let session_runtime_identity = if owner_prefers_live_agent_runtime(&owner) {
         None
     } else {
-        resolve_session_runtime_identity(session_id)
+        resolve_session_runtime_identity_full(session_id)
     };
-    let agent_runtime = resolve_agent_runtime_from_config(workspace_path);
+    let session_runtime = session_runtime_identity
+        .as_ref()
+        .map(|identity| identity.runtime.clone());
+    let agent_runtime_identity = resolve_agent_runtime_identity_from_config(workspace_path);
+    let agent_runtime = agent_runtime_identity
+        .as_ref()
+        .map(|identity| identity.runtime.clone());
     let resolved_runtime = resolve_runtime_for_owner(
         runtime_override.map(str::to_string),
         &owner,
         session_runtime,
         agent_runtime,
     );
-    let runtime_for_env = resolved_runtime
-        .as_deref()
-        .filter(|runtime| *runtime != "builtin");
-    if let Some(runtime) = runtime_for_env {
+    let resolved_runtime_name = normalize_runtime_name(resolved_runtime.as_deref()).to_string();
+    let resolved_runtime_source = if resolved_runtime_name == "builtin" {
+        None
+    } else if runtime_override.is_some() {
+        Some(runtime_source_override.unwrap_or("system-cli"))
+    } else if session_runtime_identity
+        .as_ref()
+        .map(|identity| identity.runtime.as_str())
+        == Some(resolved_runtime_name.as_str())
+        && !owner_prefers_live_agent_runtime(&owner)
+    {
+        session_runtime_identity
+            .as_ref()
+            .and_then(|identity| identity.runtime_source.as_deref())
+    } else if agent_runtime_identity
+        .as_ref()
+        .map(|identity| identity.runtime.as_str())
+        == Some(resolved_runtime_name.as_str())
+    {
+        agent_runtime_identity
+            .as_ref()
+            .and_then(|identity| identity.runtime_source.as_deref())
+    } else {
+        Some("system-cli")
+    };
+    let resolved_identity =
+        RuntimeIdentity::new(Some(&resolved_runtime_name), resolved_runtime_source);
+    if let Some(runtime) = resolved_identity.runtime_for_env() {
         cmd.env("MYAGENTS_RUNTIME", runtime);
     }
-    let runtime_for_trace = normalize_runtime_name(resolved_runtime.as_deref()).to_string();
+    if let Some(runtime_source) = resolved_identity.runtime_source_for_env() {
+        cmd.env("MYAGENTS_RUNTIME_SOURCE", runtime_source);
+    }
+    let runtime_for_trace = resolved_identity.runtime.clone();
+    let runtime_source_for_trace = resolved_identity.runtime_source_label().to_string();
 
     cmd.stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -599,6 +721,7 @@ fn create_new_session_sidecar<R: Runtime>(
         PerfTrace::new(PerfTraceName::SidecarBoot, "spawn_start")
             .session_id(Some(session_id))
             .runtime(Some(&runtime_for_trace))
+            .detail("runtimeSource", &runtime_source_for_trace)
             .detail("owner", format!("{:?}", owner)),
     );
     let mut child = cmd.spawn().map_err(|e| {
@@ -608,6 +731,7 @@ fn create_new_session_sidecar<R: Runtime>(
                 .duration_ms(elapsed_ms(boot_started))
                 .session_id(Some(session_id))
                 .runtime(Some(&runtime_for_trace))
+                .detail("runtimeSource", &runtime_source_for_trace)
                 .status("error")
                 .detail("error", e.to_string()),
         );
@@ -618,6 +742,7 @@ fn create_new_session_sidecar<R: Runtime>(
             .duration_ms(elapsed_ms(boot_started))
             .session_id(Some(session_id))
             .runtime(Some(&runtime_for_trace))
+            .detail("runtimeSource", &runtime_source_for_trace)
             .status("ok")
             .detail("port", port),
     );
@@ -681,6 +806,7 @@ fn create_new_session_sidecar<R: Runtime>(
                 .duration_ms(elapsed_ms(boot_started))
                 .session_id(Some(session_id))
                 .runtime(Some(&runtime_for_trace))
+                .detail("runtimeSource", &runtime_source_for_trace)
                 .status("error")
                 .detail("status", format!("{:?}", status)),
         );
@@ -698,7 +824,10 @@ fn create_new_session_sidecar<R: Runtime>(
         state: SidecarState::Starting,
         owners,
         created_at: std::time::Instant::now(),
-        runtime: runtime_for_env.map(str::to_string),
+        runtime: resolved_identity.runtime_for_env().map(str::to_string),
+        runtime_source: resolved_identity
+            .runtime_source_for_env()
+            .map(str::to_string),
     };
 
     manager_guard.insert_sidecar(session_id, sidecar);

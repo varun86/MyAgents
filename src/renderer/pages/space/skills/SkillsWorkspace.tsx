@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Download, FileText, Loader2, Package, RefreshCw, Trash2, UploadCloud } from 'lucide-react';
 
 import { spaceErrorMessage, type SpaceSkill } from '@/api/spaceCloud';
@@ -40,6 +41,7 @@ export function SkillsWorkspace({
   onRefresh: () => Promise<void>;
   onUploaded: (id: string) => void;
 }) {
+  const { t } = useTranslation('app');
   const toast = useToast();
   const [screen, setScreen] = useState<SkillScreen>('list');
   const [detailMode, setDetailMode] = useState<SkillDetailMode>('overview');
@@ -52,13 +54,13 @@ export function SkillsWorkspace({
       const selectedPath = await open({
         multiple: false,
         directory: false,
-        title: '选择 Skill ZIP',
+        title: t('space.skills.pickZipTitle'),
         filters: [{ name: 'Skill ZIP', extensions: ['zip'] }],
       });
       if (!selectedPath || Array.isArray(selectedPath)) return;
       setUploading(true);
       const result = await actions.uploadSkillZip({ filePath: selectedPath });
-      toast.success(`已上传 ${result.name}`);
+      toast.success(t('space.toasts.skillUploaded', { name: result.name }));
       await actions.refreshSkills({ force: true, silent: true });
       onUploaded(result.id);
       setScreen('detail');
@@ -83,7 +85,7 @@ export function SkillsWorkspace({
           <Package className="h-4 w-4 shrink-0" />
           <span>Skills</span>
           <span className="rounded-md bg-[var(--paper-inset)] px-2 py-0.5 text-xs font-semibold text-[var(--ink-muted)]">{skills.length}</span>
-          <small className="truncate text-xs font-medium text-[var(--ink-muted)]">默认列表，点击后进入安装详情</small>
+          <small className="truncate text-xs font-medium text-[var(--ink-muted)]">{t('space.skills.hint')}</small>
         </div>
         {admin && (
           <button
@@ -93,15 +95,15 @@ export function SkillsWorkspace({
             className="flex h-9 shrink-0 items-center gap-2 rounded-xl bg-[var(--button-secondary-bg)] px-3 text-sm font-semibold text-[var(--button-secondary-text)] transition-colors hover:bg-[var(--button-secondary-bg-hover)] disabled:cursor-wait disabled:opacity-70"
           >
             {uploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <UploadCloud className="h-4 w-4" />}
-            上传
+            {t('space.skills.upload')}
           </button>
         )}
         <button
           type="button"
           onClick={() => void onRefresh()}
           className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-transparent text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
-          aria-label="刷新"
-          title="刷新"
+          aria-label={t('space.common.refresh')}
+          title={t('space.common.refresh')}
         >
           {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
         </button>
@@ -123,7 +125,7 @@ export function SkillsWorkspace({
               ) : skills.length === 0 ? (
                 <div className="grid min-h-44 place-items-center border-x border-dashed border-[var(--line-subtle)] text-sm text-[var(--ink-muted)]">
                   <div className="text-center">
-                    <p>暂无 Skills</p>
+                    <p>{t('space.skills.empty')}</p>
                     {admin && (
                       <button
                         type="button"
@@ -132,7 +134,7 @@ export function SkillsWorkspace({
                         className="mt-3 inline-flex h-9 items-center gap-2 rounded-xl bg-[var(--button-secondary-bg)] px-3 text-sm font-semibold text-[var(--button-secondary-text)] transition-colors hover:bg-[var(--button-secondary-bg-hover)] disabled:cursor-wait disabled:opacity-70"
                       >
                         {uploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <UploadCloud className="h-4 w-4" />}
-                        上传 Skill
+                        {t('space.skills.uploadSkill')}
                       </button>
                     )}
                   </div>
@@ -157,7 +159,7 @@ export function SkillsWorkspace({
                       <span className="mt-2 flex flex-wrap items-center gap-2 text-xs font-semibold text-[var(--ink-subtle)]">
                         <span>official</span>
                         <span className="before:mr-2 before:text-[var(--line-strong)] before:content-['·']">{formatDate(skill.updatedAt)}</span>
-                        <span className="before:mr-2 before:text-[var(--line-strong)] before:content-['·']">点击查看详情</span>
+                        <span className="before:mr-2 before:text-[var(--line-strong)] before:content-['·']">{t('space.skills.viewDetails')}</span>
                       </span>
                     </span>
                     <span className="hidden pt-1 text-xs font-semibold text-[var(--ink-subtle)] sm:block">{formatDate(skill.updatedAt)}</span>
@@ -178,6 +180,7 @@ export function SkillsWorkspace({
           onModeChange={setDetailMode}
           onBack={() => setScreen('list')}
           onDeleted={() => setScreen('list')}
+          t={t}
         />
       )}
     </div>
@@ -194,6 +197,7 @@ function SkillDetailWorkspace({
   onModeChange,
   onBack,
   onDeleted,
+  t,
 }: {
   skill: SpaceSkill;
   mode: SkillDetailMode;
@@ -204,6 +208,7 @@ function SkillDetailWorkspace({
   onModeChange: (mode: SkillDetailMode) => void;
   onBack: () => void;
   onDeleted: () => void;
+  t: ReturnType<typeof useTranslation>['t'];
 }) {
   const toast = useToast();
   const [selectedPath, setSelectedPath] = useState('');
@@ -253,7 +258,7 @@ function SkillDetailWorkspace({
   const install = async (target: 'global' | 'project') => {
     const workspacePath = target === 'project' ? projectPath || projects[0]?.path : undefined;
     if (target === 'project' && !workspacePath) {
-      toast.error('请选择目标工作区');
+      toast.error(t('space.toasts.selectWorkspace'));
       return;
     }
     setInstallingTarget(target);
@@ -264,7 +269,7 @@ function SkillDetailWorkspace({
         target,
         workspacePath,
       });
-      toast.success(`已安装到 ${result.target}`);
+      toast.success(t('space.toasts.skillInstalled', { target: result.target }));
     } catch (error) {
       toast.error(spaceErrorMessage(error));
     } finally {
@@ -278,13 +283,13 @@ function SkillDetailWorkspace({
       const selectedPath = await open({
         multiple: false,
         directory: false,
-        title: '选择 Skill Revision ZIP',
+        title: t('space.skills.pickRevisionZipTitle'),
         filters: [{ name: 'Skill ZIP', extensions: ['zip'] }],
       });
       if (!selectedPath || Array.isArray(selectedPath)) return;
       setRevisionUploading(true);
       const result = await actions.uploadSkillRevision(skill.id, selectedPath);
-      toast.success(`已更新到 rev ${result.latestRevision}`);
+      toast.success(t('space.toasts.skillRevisionUploaded', { revision: result.latestRevision }));
       await Promise.all([
         actions.refreshSkills({ force: true, silent: true }),
         actions.refreshSkillDetail(skill.id, { force: true, silent: true }),
@@ -300,7 +305,7 @@ function SkillDetailWorkspace({
     setDeleting(true);
     try {
       await actions.deleteSkill(skill.id);
-      toast.success('Skill 已下架');
+      toast.success(t('space.toasts.skillDeleted'));
       setDeleteConfirmOpen(false);
       onDeleted();
       await actions.refreshSkills({ force: true, silent: true });
@@ -327,7 +332,7 @@ function SkillDetailWorkspace({
         <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-4 border-b border-[var(--line)] px-5">
           <div className="min-w-0">
             <h2 className="truncate text-lg font-semibold leading-tight text-[var(--ink)]">{skill.name}</h2>
-            <p className="truncate text-sm text-[var(--ink-muted)]">{skill.description || 'No description'}</p>
+            <p className="truncate text-sm text-[var(--ink-muted)]">{skill.description || t('space.common.noDescription')}</p>
             <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
               <span className="rounded-md bg-[var(--paper-inset)] px-2 py-1 text-xs font-semibold text-[var(--ink-muted)]">rev {skill.latestRevision}</span>
               <span className="rounded-md bg-[var(--paper-inset)] px-2 py-1 text-xs font-semibold text-[var(--ink-muted)]">official</span>
@@ -341,14 +346,14 @@ function SkillDetailWorkspace({
                 onClick={() => onModeChange('overview')}
                 className={`h-7 rounded-lg px-2.5 text-sm font-semibold transition-colors ${mode === 'overview' ? 'bg-[var(--paper-elevated)] text-[var(--accent-warm)] shadow-sm' : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'}`}
               >
-                概览
+                {t('space.skills.overview')}
               </button>
               <button
                 type="button"
                 onClick={() => onModeChange('files')}
                 className={`h-7 rounded-lg px-2.5 text-sm font-semibold transition-colors ${mode === 'files' ? 'bg-[var(--paper-elevated)] text-[var(--accent-warm)] shadow-sm' : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'}`}
               >
-                文件
+                {t('space.skills.files')}
               </button>
             </div>
             {admin && (
@@ -360,7 +365,7 @@ function SkillDetailWorkspace({
                   className="flex h-9 items-center gap-2 rounded-xl bg-[var(--button-secondary-bg)] px-3 text-sm font-semibold text-[var(--button-secondary-text)] transition-colors hover:bg-[var(--button-secondary-bg-hover)] disabled:cursor-wait disabled:opacity-70"
                 >
                   {revisionUploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <UploadCloud className="h-4 w-4" />}
-                  更新版本
+                  {t('space.skills.updateRevision')}
                 </button>
                 <button
                   type="button"
@@ -369,7 +374,7 @@ function SkillDetailWorkspace({
                   className="flex h-9 items-center gap-2 rounded-xl px-3 text-sm font-semibold text-[var(--error)] transition-colors hover:bg-[var(--error-bg)] disabled:cursor-wait disabled:opacity-70"
                 >
                   {deleting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
-                  下架
+                  {t('space.skills.delete')}
                 </button>
               </>
             )}
@@ -380,24 +385,24 @@ function SkillDetailWorkspace({
               className="flex h-9 items-center gap-2 rounded-xl bg-[var(--button-secondary-bg)] px-3 text-sm font-semibold text-[var(--button-secondary-text)] transition-colors hover:bg-[var(--button-secondary-bg-hover)] disabled:cursor-wait disabled:opacity-70"
             >
               {installingTarget === 'global' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
-              全局安装
+              {t('space.skills.installGlobal')}
             </button>
             {hasProjects ? (
               <CustomSelect value={projectPath} options={projectOptions} onChange={setProjectPath} className="w-48" />
             ) : (
               <span className="inline-flex h-9 items-center rounded-xl bg-[var(--paper-inset)]/60 px-3 text-sm font-semibold text-[var(--ink-muted)]">
-                无项目工作区
+                {t('space.skills.noProjects')}
               </span>
             )}
             <button
               type="button"
               disabled={installingTarget !== null || !hasProjects}
-              title={hasProjects ? '安装到选中的项目' : '暂无可安装的项目工作区'}
+              title={hasProjects ? t('space.skills.installProjectTitle') : t('space.skills.noInstallProjectsTitle')}
               onClick={() => void install('project')}
               className="flex h-9 items-center gap-2 rounded-xl bg-[var(--button-primary-bg)] px-3 text-sm font-semibold text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:cursor-not-allowed disabled:opacity-70"
             >
               {installingTarget === 'project' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
-              安装到项目
+              {t('space.skills.installProject')}
             </button>
           </div>
         </div>
@@ -405,20 +410,20 @@ function SkillDetailWorkspace({
         {!detail && detailLoading ? (
           <div className="flex h-full items-center justify-center text-sm text-[var(--ink-muted)]">
             <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-            加载 Skill
+            {t('space.skills.loadingSkill')}
           </div>
         ) : !detail ? (
           <div className="flex h-full items-center justify-center text-sm text-[var(--ink-muted)]">
-            {detailState?.error ?? 'Skill 未找到'}
+            {detailState?.error ?? t('space.skills.notFound')}
           </div>
         ) : mode === 'overview' ? (
           <div className="grid min-h-0 grid-cols-[minmax(0,1fr)_320px] overflow-auto max-lg:grid-cols-1">
             <section className="min-w-0 border-r border-[var(--line-subtle)] p-5 max-lg:border-r-0 max-lg:border-b">
               <h3 className="mb-3 text-base font-semibold text-[var(--ink)]">Overview</h3>
-              <p className="whitespace-pre-wrap text-sm leading-6 text-[var(--ink-secondary)]">{detail.skill.description || 'No description'}</p>
+              <p className="whitespace-pre-wrap text-sm leading-6 text-[var(--ink-secondary)]">{detail.skill.description || t('space.common.noDescription')}</p>
             </section>
             <aside className="p-5">
-              <h3 className="mb-3 text-sm font-semibold text-[var(--ink)]">安装影响</h3>
+              <h3 className="mb-3 text-sm font-semibold text-[var(--ink)]">{t('space.skills.installImpact')}</h3>
               <div className="space-y-2 text-sm text-[var(--ink-secondary)]">
                 <div className="flex justify-between gap-3 border-b border-[var(--line-subtle)] pb-2">
                   <span className="text-[var(--ink-muted)]">Files</span>
@@ -457,10 +462,10 @@ function SkillDetailWorkspace({
               {fileLoading ? (
                 <div className="flex h-full items-center justify-center text-sm text-[var(--ink-muted)]">
                   <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                  加载文件
+                  {t('space.skills.loadingFile')}
                 </div>
               ) : (
-                <pre className="h-full overflow-auto whitespace-pre-wrap p-5 font-mono text-sm leading-7 text-[var(--ink-secondary)]">{fileState?.error ?? (fileText || 'Select a file')}</pre>
+                <pre className="h-full overflow-auto whitespace-pre-wrap p-5 font-mono text-sm leading-7 text-[var(--ink-secondary)]">{fileState?.error ?? (fileText || t('space.common.selectFile'))}</pre>
               )}
             </section>
           </div>
@@ -470,10 +475,10 @@ function SkillDetailWorkspace({
     </main>
     {deleteConfirmOpen && (
       <ConfirmDialog
-        title="下架 Skill"
-        message={`确定要下架「${skill.name}」吗？下架后列表中不再展示，历史 revision 和审计记录会保留。`}
-        confirmText="下架"
-        cancelText="取消"
+        title={t('space.skills.deleteTitle')}
+        message={t('space.skills.deleteMessage', { name: skill.name })}
+        confirmText={t('space.skills.delete')}
+        cancelText={t('space.common.cancel')}
         confirmVariant="danger"
         loading={deleting}
         onConfirm={() => void deleteSkill()}

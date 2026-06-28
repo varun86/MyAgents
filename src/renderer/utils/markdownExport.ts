@@ -16,7 +16,13 @@
  * consistent everywhere.
  */
 
+import { i18n } from '@/i18n';
+
 const pad2 = (n: number) => String(n).padStart(2, '0');
+
+function exportText(key: string, options?: Record<string, unknown>): string {
+    return String(i18n.t(`app:export.${key}`, options));
+}
 
 /** Local (not UTC) date string `YYYY-MM-DD`. Clock injectable for tests. */
 export function localDateStr(now: Date = new Date()): string {
@@ -90,8 +96,8 @@ export async function downloadMarkdown(fileName: string, content: string): Promi
         const { downloadDir, join: joinPath } = await import('@tauri-apps/api/path');
         const dlDir = await downloadDir();
         const fullPath = await joinPath(dlDir, fileName);
-        return `已导出：${fullPath}`;
+        return exportText('downloadedPath', { path: fullPath });
     } catch {
-        return `已导出到下载目录：${fileName}`;
+        return exportText('downloadedDownloads', { fileName });
     }
 }

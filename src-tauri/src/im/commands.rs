@@ -2002,9 +2002,9 @@ pub async fn cmd_update_agent_config(
             }
         }
         if let Some(ref runtime_config) = patch.runtime_config {
-            *agent.runtime_config.write().await = Some(runtime_config.clone());
+            *agent.runtime_config.write().await = runtime_config.clone();
             for (_ch_id, ch_inst) in &agent.channels {
-                *ch_inst.bot_instance.runtime_config.write().await = Some(runtime_config.clone());
+                *ch_inst.bot_instance.runtime_config.write().await = runtime_config.clone();
             }
         }
         // Hot-reload heartbeat config
@@ -2154,41 +2154,39 @@ pub async fn cmd_update_agent_config(
                     }
                 }
                 if patch.runtime_config.is_some() && is_external_runtime_type(&runtime) {
-                    if let Some(ref config) = runtime_config {
-                        for port in &ports {
-                            let url = format!("http://127.0.0.1:{}/api/runtime/config", *port);
-                            match router
-                                .http_client()
-                                .post(&url)
-                                .json(&json!({
-                                    "runtime": runtime,
-                                    "runtimeConfig": config,
-                                    "source": "im-sync",
-                                }))
-                                .send()
-                                .await
-                            {
-                                Ok(resp) if resp.status().is_success() => {
-                                    ulog_info!(
-                                        "[im] Synced runtime config for {} to port {}",
-                                        runtime,
-                                        port
-                                    );
-                                }
-                                Ok(resp) => {
-                                    ulog_warn!(
-                                        "[im] Failed to sync runtime config to port {}: HTTP {}",
-                                        port,
-                                        resp.status()
-                                    );
-                                }
-                                Err(e) => {
-                                    ulog_warn!(
-                                        "[im] Failed to sync runtime config to port {}: {}",
-                                        port,
-                                        e
-                                    );
-                                }
+                    for port in &ports {
+                        let url = format!("http://127.0.0.1:{}/api/runtime/config", *port);
+                        match router
+                            .http_client()
+                            .post(&url)
+                            .json(&json!({
+                                "runtime": runtime,
+                                "runtimeConfig": runtime_config.clone().unwrap_or(serde_json::Value::Null),
+                                "source": "im-sync",
+                            }))
+                            .send()
+                            .await
+                        {
+                            Ok(resp) if resp.status().is_success() => {
+                                ulog_info!(
+                                    "[im] Synced runtime config for {} to port {}",
+                                    runtime,
+                                    port
+                                );
+                            }
+                            Ok(resp) => {
+                                ulog_warn!(
+                                    "[im] Failed to sync runtime config to port {}: HTTP {}",
+                                    port,
+                                    resp.status()
+                                );
+                            }
+                            Err(e) => {
+                                ulog_warn!(
+                                    "[im] Failed to sync runtime config to port {}: {}",
+                                    port,
+                                    e
+                                );
                             }
                         }
                     }

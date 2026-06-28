@@ -38,11 +38,13 @@ describe('provider resume boundary', () => {
     )).toBe(false);
   });
 
-  it('blocks resume when a third-party provider changes protocol family', () => {
+  it('allows resume when a portable third-party provider changes transport protocol', () => {
     expect(canResumeAcrossProviderBoundary(
       { baseUrl: 'https://api.example.com/v1', apiProtocol: 'anthropic' },
       { baseUrl: 'https://api.example.com/v1', apiProtocol: 'openai' },
-    )).toBe(false);
+    )).toBe(true);
+    expect(getProviderHistoryIdentity({ baseUrl: 'https://api.example.com/v1', apiProtocol: 'anthropic' })).toBe('third-party');
+    expect(getProviderHistoryIdentity({ baseUrl: 'https://api.example.com/v1', apiProtocol: 'openai' })).toBe('third-party');
   });
 
   it('normalizes trailing slashes without guessing path semantics', () => {

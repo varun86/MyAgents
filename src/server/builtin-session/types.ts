@@ -108,6 +108,7 @@ export type MessageWire = {
 export type BuiltinRestartReason =
   | 'mcp'
   | 'agents'
+  | 'official-tools'
   | 'provider'
   | 'proxy'
   | 'oauth'
@@ -202,6 +203,7 @@ export type BuiltinLifecycleSnapshot = {
 export type BuiltinConfigSnapshot = {
   mcpServers: import('../../shared/config-types').McpServerDefinition[] | null;
   enabledPluginIds: string[] | null;
+  enabledOfficialToolIds: import('../../shared/official-tools').OfficialToolId[] | null;
   agentDefinitions: Record<string, import('@anthropic-ai/claude-agent-sdk').AgentDefinition> | null;
   permissionMode: PermissionMode;
   prePlanPermissionMode: PermissionMode | null;

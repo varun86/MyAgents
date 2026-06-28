@@ -2,6 +2,7 @@
 // Two options: upgrade existing workspace, create from template
 import { useState, useCallback, useRef, memo } from 'react';
 import { Plus, FolderUp, LayoutTemplate } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 
 import { Popover } from '@/components/ui/Popover';
 
@@ -14,6 +15,7 @@ export default memo(function AgentCreateMenu({
   onUpgradeWorkspace,
   onCreateFromTemplate,
 }: AgentCreateMenuProps) {
+  const { t } = useTranslation('settings');
   const [open, setOpen] = useState(false);
   const buttonRef = useRef<HTMLButtonElement>(null);
 
@@ -27,7 +29,7 @@ export default memo(function AgentCreateMenu({
         className="flex items-center gap-1.5 rounded-lg bg-[var(--button-primary-bg)] px-3 py-2 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)]"
       >
         <Plus className="h-3.5 w-3.5" />
-        创建 Agent
+        {t('agentSettings.createMenu.create')}
       </button>
       <Popover
         open={open}
@@ -43,7 +45,7 @@ export default memo(function AgentCreateMenu({
           className="flex w-full items-center gap-2.5 px-3 py-2 text-left text-sm text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)]"
         >
           <FolderUp className="h-3.5 w-3.5 text-[var(--ink-subtle)]" />
-          从现有工作区升级
+          {t('agentSettings.createMenu.upgradeWorkspace')}
         </button>
         <button
           type="button"
@@ -52,7 +54,7 @@ export default memo(function AgentCreateMenu({
           className="flex w-full items-center gap-2.5 px-3 py-2 text-left text-sm text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)]"
         >
           <LayoutTemplate className="h-3.5 w-3.5 text-[var(--ink-subtle)]" />
-          从模板创建
+          {t('agentSettings.createMenu.fromTemplate')}
         </button>
       </Popover>
     </>

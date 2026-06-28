@@ -1,5 +1,6 @@
 // Agent card list for Settings page — shows all agents with status indicators
 import { useMemo } from 'react';
+import { useTranslation } from 'react-i18next';
 import { useConfig } from '@/hooks/useConfig';
 import { useAgentStatuses } from '@/hooks/useAgentStatuses';
 import type { AgentConfig } from '../../../shared/types/agent';
@@ -23,6 +24,7 @@ function getStatusColor(onlineCount: number, totalCount: number, enabled: boolea
 }
 
 export default function AgentCardList({ onSelectAgent }: AgentCardListProps) {
+  const { t } = useTranslation('settings');
   const { config, providers, projects } = useConfig();
   const { statuses } = useAgentStatuses();
 
@@ -42,7 +44,7 @@ export default function AgentCardList({ onSelectAgent }: AgentCardListProps) {
       <div className="flex flex-col items-center rounded-xl border border-dashed border-[var(--line)] px-8 py-16">
         <HeartPulse className="h-8 w-8 text-[var(--heartbeat)]" />
         <p className="mt-3 text-sm text-[var(--ink-muted)]">
-          尚未创建 Agent。在工作区设置中可以将工作区升级为 Agent。
+          {t('agentSettings.agentList.empty')}
         </p>
       </div>
     );
@@ -59,7 +61,7 @@ export default function AgentCardList({ onSelectAgent }: AgentCardListProps) {
         const displayName = proj?.displayName || proj?.name || agent.name;
         const iconId = proj?.icon || agent.icon || DEFAULT_WORKSPACE_ICON;
         const providerName = providers.find(p => p.id === (proj?.providerId ?? agent.providerId))?.name;
-        const modelDisplay = proj?.model || agent.model || '默认模型';
+        const modelDisplay = proj?.model || agent.model || t('agentSettings.agentList.defaultModel');
 
         return (
           <button
@@ -84,7 +86,7 @@ export default function AgentCardList({ onSelectAgent }: AgentCardListProps) {
                 </span>
                 {!agent.enabled && (
                   <span className="shrink-0 rounded px-1.5 py-0.5 text-xs bg-[var(--paper-inset)] text-[var(--ink-subtle)]">
-                    已禁用
+                    {t('agentSettings.agentList.disabled')}
                   </span>
                 )}
               </div>
@@ -106,7 +108,9 @@ export default function AgentCardList({ onSelectAgent }: AgentCardListProps) {
               {/* Status + model */}
               <div className="mt-1.5 flex items-center gap-2 text-xs text-[var(--ink-subtle)]">
                 <span style={{ color: statusColor }}>
-                  {onlineChannels > 0 ? `${onlineChannels}/${totalChannels} 在线` : `${totalChannels} 渠道`}
+                  {onlineChannels > 0
+                    ? t('agentSettings.agentList.online', { online: onlineChannels, total: totalChannels })
+                    : t('agentSettings.agentList.channels', { count: totalChannels })}
                 </span>
                 {providerName && (
                   <>

@@ -7,6 +7,7 @@
 
 import { Check, ChevronDown } from 'lucide-react';
 import { type ReactNode, useCallback, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 
 import { Popover } from '@/components/ui/Popover';
 
@@ -51,13 +52,15 @@ export default function CustomSelect({
     value,
     options,
     onChange,
-    placeholder = '请选择',
+    placeholder,
     triggerIcon,
     className,
     size = 'sm',
     compact,
     footerAction,
 }: CustomSelectProps) {
+    const { t } = useTranslation('app');
+    const resolvedPlaceholder = placeholder ?? t('common.selectPlaceholder');
     const [isOpen, setIsOpen] = useState(false);
     const triggerRef = useRef<HTMLButtonElement>(null);
 
@@ -95,7 +98,7 @@ export default function CustomSelect({
                     <span className="shrink-0">{selectedOption.icon}</span>
                 )}
                 <span className={`min-w-0 flex-1 truncate ${selectedOption ? 'text-[var(--ink)]' : 'text-[var(--ink-muted)]'}`}>
-                    {selectedOption?.label ?? placeholder}
+                    {selectedOption?.label ?? resolvedPlaceholder}
                 </span>
                 <ChevronDown className={`h-3.5 w-3.5 shrink-0 text-[var(--ink-muted)] transition-transform ${isOpen ? 'rotate-180' : ''}`} />
             </button>

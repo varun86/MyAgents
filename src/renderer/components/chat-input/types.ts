@@ -8,6 +8,7 @@ import type {
 } from '@/config/types';
 import type { QueuedMessageInfo } from '@/types/queue';
 import type { SlashCommand } from '../SlashCommandMenu';
+import type { OfficialToolDefinition, OfficialToolId } from '../../../shared/official-tools';
 import type {
   RuntimeDetections,
   RuntimeModelInfo,
@@ -53,7 +54,6 @@ export interface SimpleChatInputProps {
   onModelChange?: (modelId: string) => void;
   reasoningEffort?: string;
   onReasoningEffortChange?: (effort: string) => void;
-  sessionUnlocked?: boolean;
   permissionMode?: PermissionMode;
   onPermissionModeChange?: (mode: PermissionMode) => void;
   apiKeys?: Record<string, string>;
@@ -63,6 +63,11 @@ export interface SimpleChatInputProps {
   globalMcpEnabled?: string[];
   mcpServers?: Array<{ id: string; name: string; description?: string }>;
   onWorkspaceMcpToggle?: (serverId: string, enabled: boolean) => void;
+  officialTools?: readonly OfficialToolDefinition[];
+  workspaceOfficialToolEnabled?: OfficialToolId[];
+  globalOfficialToolEnabled?: OfficialToolId[];
+  officialToolNeedsConfig?: Partial<Record<OfficialToolId, boolean>>;
+  onWorkspaceOfficialToolToggle?: (toolId: OfficialToolId, enabled: boolean) => void;
   globallyVisiblePlugins?: Array<{
     id: string;
     name: string;
@@ -85,15 +90,33 @@ export interface SimpleChatInputProps {
     schedule?: import('@/types/cronTask').CronSchedule;
     executionCount: number;
     lastExecutedAt?: string;
+    nextExecutionAt?: string;
+    prompt?: string;
     endConditions?: {
       maxExecutions?: number;
     };
     runMode?: import('@/types/cronTask').CronRunMode;
   } | null;
+  stoppedCronTask?: {
+    status?: 'stopped';
+    intervalMinutes: number;
+    schedule?: import('@/types/cronTask').CronSchedule;
+    executionCount: number;
+    nextExecutionAt?: string;
+    prompt?: string;
+    endConditions?: {
+      maxExecutions?: number;
+    };
+    runMode?: import('@/types/cronTask').CronRunMode;
+  } | null;
+  cronIsExecuting?: boolean;
+  cronExecutionNumber?: number;
+  composerConfigLockedReason?: string;
   onCronButtonClick?: () => void;
   onCronSettings?: () => void;
   onCronCancel?: () => void;
   onCronStop?: () => void;
+  onCronDismissStopped?: () => void;
   onSlashAction?: (name: string) => void;
   sdkSlashCommands?: SlashCommand[];
   mode?: 'chat' | 'launcher';

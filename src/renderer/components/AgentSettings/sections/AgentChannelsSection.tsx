@@ -2,6 +2,7 @@
 // All channel operations open in a unified overlay panel (same size as WorkspaceConfigPanel)
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { createPortal } from 'react-dom';
+import { useTranslation } from 'react-i18next';
 import { Plus, X, Loader2 } from 'lucide-react';
 import type { AgentConfig, ChannelConfig, ChannelType } from '../../../../shared/types/agent';
 import type { AgentStatusData, ChannelStatusData } from '@/hooks/useAgentStatuses';
@@ -57,6 +58,7 @@ type OverlayState =
   | { view: 'detail'; channelId: string };
 
 export default function AgentChannelsSection({ agent, status, onAgentChanged }: AgentChannelsSectionProps) {
+  const { t } = useTranslation('settings');
   const [loading, setLoading] = useState<string | null>(null);
   const [overlay, setOverlay] = useState<OverlayState>(null);
   const isMountedRef = useRef(true);
@@ -166,20 +168,20 @@ export default function AgentChannelsSection({ agent, status, onAgentChanged }: 
     <>
       <div className="space-y-4">
         <div className="flex items-center justify-between">
-          <h3 className="text-base font-medium text-[var(--ink)]">聊天机器人 Channels</h3>
+          <h3 className="text-base font-medium text-[var(--ink)]">{t('agentSettings.channels.title')}</h3>
           <button
             className="flex items-center gap-1 rounded-lg bg-[var(--button-primary-bg)] px-3 py-1.5 text-xs font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)]"
             onClick={() => setOverlay({ view: 'add' })}
           >
             <Plus className="h-3.5 w-3.5" />
-            添加
+            {t('agentSettings.channels.add')}
           </button>
         </div>
 
         {(agent.channels?.length ?? 0) === 0 && (
           <div className="flex flex-col items-center rounded-xl border border-dashed border-[var(--line)] bg-[var(--paper-inset)]/30 py-6">
             <p className="text-xs text-[var(--ink-subtle)]">
-              尚未添加任何 Channel。点击上方「添加」来添加 IM 渠道。
+              {t('agentSettings.channels.empty')}
             </p>
           </div>
         )}
@@ -214,7 +216,7 @@ export default function AgentChannelsSection({ agent, status, onAgentChanged }: 
                     <span className={`text-xs ${
                       isRunning ? 'text-[var(--success)]' : 'text-[var(--ink-muted)]'
                     }`}>
-                      {isRunning ? '运行中' : '已停止'}
+                      {isRunning ? t('agentSettings.channels.running') : t('agentSettings.channels.stopped')}
                     </span>
                   </div>
                 </div>
@@ -236,7 +238,7 @@ export default function AgentChannelsSection({ agent, status, onAgentChanged }: 
                 >
                   {isLoading ? (
                     <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                  ) : isRunning ? '停止' : '启动'}
+                  ) : isRunning ? t('agentSettings.channels.stop') : t('agentSettings.channels.start')}
                 </button>
               </div>
             );

@@ -37,6 +37,10 @@ describe('describeTerminalReason — known reasons map to severity', () => {
     expect(describeTerminalReason('rapid_refill_breaker')).toMatchObject({ severity: 'notice' });
   });
 
+  it('maps background handoff as an informational reason', () => {
+    expect(describeTerminalReason('background_requested')).toMatchObject({ severity: 'info' });
+  });
+
   it('gives every known reason a non-empty label + detail', () => {
     const info = describeTerminalReason('model_error');
     expect(info?.label).toBeTruthy();

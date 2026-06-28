@@ -27,6 +27,7 @@
 
 import { ChevronUp, Plus } from 'lucide-react';
 import { useCallback, useMemo, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 
 import { Popover } from '@/components/ui/Popover';
 import { type Project } from '@/config/types';
@@ -54,6 +55,7 @@ export default function WorkspaceSelector({
     onAddFolder,
     onSetDefault,
 }: WorkspaceSelectorProps) {
+    const { t } = useTranslation('launcher');
     const [isOpen, setIsOpen] = useState(false);
     const triggerRef = useRef<HTMLButtonElement>(null);
 
@@ -85,7 +87,7 @@ export default function WorkspaceSelector({
                 className="inline-flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--accent)]"
             >
                 <Plus className="h-3.5 w-3.5" />
-                <span>选择工作区</span>
+                <span>{t('workspaceSelector.selectWorkspace')}</span>
             </button>
         );
     }
@@ -99,7 +101,7 @@ export default function WorkspaceSelector({
             >
                 <WorkspaceIcon icon={selectedProject?.icon} size={16} />
                 <span className="max-w-[120px] truncate">
-                    {selectedProject ? (selectedProject.displayName || getFolderName(selectedProject.path)) : '选择工作区'}
+                    {selectedProject ? (selectedProject.displayName || getFolderName(selectedProject.path)) : t('workspaceSelector.selectWorkspace')}
                 </span>
                 <ChevronUp className={`h-3 w-3 shrink-0 transition-transform ${isOpen ? '' : 'rotate-180'}`} />
             </button>
@@ -113,7 +115,7 @@ export default function WorkspaceSelector({
             >
                 {/* Header — fixed at the top above the scroll region. */}
                 <div className="border-b border-[var(--line)] px-3 py-2 text-xs font-semibold text-[var(--ink-muted)]">
-                    Agent 工作区
+                    {t('workspaceSelector.title')}
                 </div>
                 {/* Scroll region — see CustomSelect.tsx pit-of-failure note:
                  *  Popover's DEFAULT_CHROME ships `overflow-hidden` for
@@ -175,6 +177,7 @@ function WorkspaceRow({
     onSelect,
     onSetDefault,
 }: WorkspaceRowProps) {
+    const { t } = useTranslation('launcher');
     const displayName = project.displayName || getFolderName(project.path);
     return (
         <div
@@ -203,7 +206,7 @@ function WorkspaceRow({
                     <span className="min-w-0 truncate font-medium">{displayName}</span>
                     {isDefault && (
                         <span className="shrink-0 rounded-full bg-[var(--accent)]/12 px-1.5 py-0.5 text-xs font-semibold uppercase tracking-wider text-[var(--accent)]">
-                            默认
+                            {t('workspaceSelector.defaultBadge')}
                         </span>
                     )}
                     <div className="flex-1" />
@@ -223,10 +226,10 @@ function WorkspaceRow({
                             // doesn't silently trigger this when the button
                             // is hidden (Codex review).
                             className="shrink-0 rounded-md px-2 py-0.5 text-xs font-medium text-[var(--ink-muted)] opacity-0 pointer-events-none transition-opacity hover:bg-[var(--paper-inset)] hover:text-[var(--accent)] focus-visible:opacity-100 focus-visible:pointer-events-auto focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--accent)] group-hover:opacity-100 group-hover:pointer-events-auto group-focus-within:opacity-100 group-focus-within:pointer-events-auto"
-                            aria-label={`设为默认工作区：${displayName}`}
-                            title="设为默认工作区"
+                            aria-label={t('workspaceSelector.setDefaultAria', { name: displayName })}
+                            title={t('workspaceSelector.setDefaultTitle')}
                         >
-                            设为默认
+                            {t('workspaceSelector.setDefault')}
                         </button>
                     )}
                 </div>

@@ -1,5 +1,6 @@
 import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 
+import { i18n } from '@/i18n';
 import { isTauriEnvironment } from '@/utils/browserMock';
 
 import { BUILTIN_PET_PACKS, MINO_DEFAULT_PET_PACK, normalizeBuiltinPetPackId } from './defaultPetPack';
@@ -65,22 +66,30 @@ export async function listInstalledPetPacks(): Promise<PetPack[]> {
 }
 
 export async function deleteInstalledPetPack(id: string): Promise<void> {
-    if (!isTauriEnvironment()) throw new Error('当前环境不支持删除桌宠素材');
+    if (!isTauriEnvironment()) {
+        throw new Error(String(i18n.t('floatingBallPet.errors.unsupportedDelete', { ns: 'settings' })));
+    }
     await invoke('cmd_fb_pet_delete_installed', { id });
 }
 
 export async function importPetFromPath(path: string): Promise<PetImportSummary> {
-    if (!isTauriEnvironment()) throw new Error('当前环境不支持本地导入');
+    if (!isTauriEnvironment()) {
+        throw new Error(String(i18n.t('floatingBallPet.errors.unsupportedLocalImport', { ns: 'settings' })));
+    }
     return invoke<PetImportSummary>('cmd_fb_pet_import_path', { path });
 }
 
 export async function importPetsFromCodex(): Promise<PetImportSummary> {
-    if (!isTauriEnvironment()) throw new Error('当前环境不支持从 Codex 导入');
+    if (!isTauriEnvironment()) {
+        throw new Error(String(i18n.t('floatingBallPet.errors.unsupportedCodexImport', { ns: 'settings' })));
+    }
     return invoke<PetImportSummary>('cmd_fb_pet_import_codex');
 }
 
 export async function importPetFromPetdex(url: string): Promise<PetImportSummary> {
-    if (!isTauriEnvironment()) throw new Error('当前环境不支持 Petdex 链接导入');
+    if (!isTauriEnvironment()) {
+        throw new Error(String(i18n.t('floatingBallPet.errors.unsupportedPetdexImport', { ns: 'settings' })));
+    }
     return invoke<PetImportSummary>('cmd_fb_pet_import_petdex', { url });
 }
 

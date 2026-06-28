@@ -7,6 +7,7 @@
  */
 import { Save, Edit2, X, FileText, Loader2, Trash2 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState, useImperativeHandle, forwardRef, useRef } from 'react';
+import { useTranslation } from 'react-i18next';
 import { invoke } from '@tauri-apps/api/core';
 
 import { useToast } from '@/components/Toast';
@@ -23,12 +24,17 @@ export interface IntroductionPanelRef {
 }
 
 const FILENAME = 'INTRODUCTION.md';
+// Seed file content is workspace data, not UI chrome; keep the existing preset as-is.
+const DEFAULT_INTRODUCTION_TEMPLATE = '# Agent 名称\n\n在这里编写使用指南，用户打开新对话时将看到此内容。\n';
 
 const IntroductionPanel = forwardRef<IntroductionPanelRef, IntroductionPanelProps>(
   function IntroductionPanel({ agentDir }, ref) {
+    const { t } = useTranslation('settings');
     const toast = useToast();
     const toastRef = useRef(toast);
     useEffect(() => { toastRef.current = toast; }, [toast]);
+    const tRef = useRef(t);
+    tRef.current = t;
 
     const isMountedRef = useRef(true);
     useEffect(() => () => { isMountedRef.current = false; }, []);
@@ -98,10 +104,10 @@ const IntroductionPanel = forwardRef<IntroductionPanelRef, IntroductionPanelProp
         setContent(editContent);
         setExists(true);
         setIsEditing(false);
-        toastRef.current.success('使用指南保存成功');
+        toastRef.current.success(tRef.current('agentSettings.introduction.saveSuccess'));
       } catch (err) {
         if (!isMountedRef.current) return;
-        toastRef.current.error(err instanceof Error ? err.message : '保存失败');
+        toastRef.current.error(err instanceof Error ? err.message : tRef.current('agentSettings.common.saveFailed'));
       } finally {
         if (isMountedRef.current) setSaving(false);
       }
@@ -109,8 +115,7 @@ const IntroductionPanel = forwardRef<IntroductionPanelRef, IntroductionPanelProp
 
     // Create (with default template)
     const handleCreate = useCallback(async () => {
-      const template = '# Agent 名称\n\n在这里编写使用指南，用户打开新对话时将看到此内容。\n';
-      setEditContent(template);
+      setEditContent(DEFAULT_INTRODUCTION_TEMPLATE);
       setIsEditing(true);
     }, []);
 
@@ -124,10 +129,10 @@ const IntroductionPanel = forwardRef<IntroductionPanelRef, IntroductionPanelProp
         setExists(false);
         setIsEditing(false);
         setDeleteConfirm(false);
-        toastRef.current.success('使用指南已删除');
+        toastRef.current.success(tRef.current('agentSettings.introduction.deleteSuccess'));
       } catch (err) {
         if (!isMountedRef.current) return;
-        toastRef.current.error(err instanceof Error ? err.message : '删除失败');
+        toastRef.current.error(err instanceof Error ? err.message : tRef.current('agentSettings.common.deleteFailed'));
         setDeleteConfirm(false);
       }
     }, [filePath]);
@@ -150,7 +155,7 @@ const IntroductionPanel = forwardRef<IntroductionPanelRef, IntroductionPanelProp
                     className="flex items-center gap-1 rounded-lg px-2.5 py-1 text-xs font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--error)]/10 hover:text-[var(--error)]"
                   >
                     <Trash2 className="h-3.5 w-3.5" />
-                    删除
+                    {t('agentSettings.common.delete')}
                   </button>
                   <button
                     type="button"
@@ -158,7 +163,7 @@ const IntroductionPanel = forwardRef<IntroductionPanelRef, IntroductionPanelProp
                     className="flex items-center gap-1 rounded-lg px-2.5 py-1 text-xs font-medium text-[var(--ink-muted)] hover:bg-[var(--paper-inset)]"
                   >
                     <X className="h-3.5 w-3.5" />
-                    取消
+                    {t('agentSettings.common.cancel')}
                   </button>
                   <button
                     type="button"
@@ -167,7 +172,7 @@ const IntroductionPanel = forwardRef<IntroductionPanelRef, IntroductionPanelProp
                     className="flex items-center gap-1 rounded-lg bg-[var(--button-primary-bg)] px-2.5 py-1 text-xs font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:opacity-50"
                   >
                     {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
-                    保存
+                    {t('agentSettings.common.save')}
                   </button>
                 </>
               ) : (
@@ -178,7 +183,7 @@ const IntroductionPanel = forwardRef<IntroductionPanelRef, IntroductionPanelProp
                     className="flex items-center gap-1 rounded-lg px-2.5 py-1 text-xs font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--error)]/10 hover:text-[var(--error)]"
                   >
                     <Trash2 className="h-3.5 w-3.5" />
-                    删除
+                    {t('agentSettings.common.delete')}
                   </button>
                   <button
                     type="button"
@@ -186,7 +191,7 @@ const IntroductionPanel = forwardRef<IntroductionPanelRef, IntroductionPanelProp
                     className="flex items-center gap-1 rounded-lg bg-[var(--button-dark-bg)] px-2.5 py-1 text-xs font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-dark-bg-hover)]"
                   >
                     <Edit2 className="h-3.5 w-3.5" />
-                    编辑
+                    {t('agentSettings.common.edit')}
                   </button>
                 </>
               )}
@@ -206,10 +211,10 @@ const IntroductionPanel = forwardRef<IntroductionPanelRef, IntroductionPanelProp
             <div className="flex h-full flex-col items-center justify-center gap-6 p-6">
               <div className="text-center">
                 <p className="text-lg font-semibold text-[var(--ink)]">
-                  暂无使用指南
+                  {t('agentSettings.introduction.emptyTitle')}
                 </p>
                 <p className="mt-1.5 text-sm text-[var(--ink-muted)]">
-                  使用指南是用户打开 Agent 时看到的欢迎页——告诉他们这个 Agent 能做什么。
+                  {t('agentSettings.introduction.emptyDescription')}
                 </p>
               </div>
               <div className="flex w-full max-w-xl flex-col gap-3">
@@ -220,10 +225,10 @@ const IntroductionPanel = forwardRef<IntroductionPanelRef, IntroductionPanelProp
                 >
                   <div className="flex items-center gap-2">
                     <Edit2 className="h-4 w-4 shrink-0 text-amber-500" />
-                    <h4 className="text-base font-semibold text-[var(--ink)]">手动创建</h4>
+                    <h4 className="text-base font-semibold text-[var(--ink)]">{t('agentSettings.introduction.manualTitle')}</h4>
                   </div>
                   <p className="text-sm leading-relaxed text-[var(--ink-muted)]">
-                    自己写一份 INTRODUCTION.md，进入编辑器从空白开始
+                    {t('agentSettings.introduction.manualDescription')}
                   </p>
                 </button>
               </div>
@@ -244,7 +249,7 @@ const IntroductionPanel = forwardRef<IntroductionPanelRef, IntroductionPanelProp
                 </div>
               ) : (
                 <span className="text-sm text-[var(--ink-muted)]/60">
-                  （无内容）
+                  {t('agentSettings.common.emptyContent')}
                 </span>
               )}
             </div>
@@ -254,9 +259,9 @@ const IntroductionPanel = forwardRef<IntroductionPanelRef, IntroductionPanelProp
         {/* Delete Confirmation */}
         {deleteConfirm && (
           <ConfirmDialog
-            title="删除使用指南"
-            message="确定删除使用指南？删除后，用户打开新对话时将不再看到使用指南内容。文件 INTRODUCTION.md 将从工作区中移除。"
-            confirmText="删除"
+            title={t('agentSettings.introduction.deleteTitle')}
+            message={t('agentSettings.introduction.deleteMessage', { filename: FILENAME })}
+            confirmText={t('agentSettings.common.delete')}
             confirmVariant="danger"
             onConfirm={handleDelete}
             onCancel={() => setDeleteConfirm(false)}

@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Eye, EyeOff, ExternalLink } from 'lucide-react';
 
 export default function DingtalkCredentialInput({
@@ -18,6 +19,7 @@ export default function DingtalkCredentialInput({
     botName?: string;
     showGuide?: boolean;
 }) {
+    const { t } = useTranslation('settings');
     const [showSecret, setShowSecret] = useState(false);
     const [localClientId, setLocalClientId] = useState(clientId);
     const [localClientSecret, setLocalClientSecret] = useState(clientSecret);
@@ -93,26 +95,28 @@ export default function DingtalkCredentialInput({
             )}
             {verifyStatus === 'invalid' && (
                 <div className="text-xs text-[var(--error)]">
-                    凭证验证失败，请检查 Client ID 和 Client Secret
+                    {t('agentSettings.imComponents.credentialsInvalid', { fields: 'Client ID / Client Secret' })}
                 </div>
             )}
 
             {/* Tutorial */}
             {showGuide && (
                 <div className="rounded-lg bg-[var(--paper-inset)] p-3">
-                    <p className="text-xs font-medium text-[var(--ink)]">如何获取钉钉应用凭证？</p>
+                    <p className="text-xs font-medium text-[var(--ink)]">
+                        {t('agentSettings.imComponents.dingtalkGuideTitle')}
+                    </p>
                     <ol className="mt-2 space-y-1.5 text-xs text-[var(--ink-muted)]">
-                        <li>1. 登录<a
+                        <li>1. {t('agentSettings.imComponents.dingtalkGuideStep1Prefix')}<a
                             href="https://open-dev.dingtalk.com"
                             target="_blank"
                             rel="noopener noreferrer"
                             className="mx-0.5 inline-flex items-center gap-0.5 text-[var(--button-primary-bg)] hover:underline"
                         >
-                            钉钉开放平台<ExternalLink className="inline h-2.5 w-2.5" />
-                        </a>并创建企业内部应用</li>
-                        <li>2. 在「凭证与基础信息」页获取 Client ID 和 Client Secret</li>
-                        <li>3. 添加「机器人」能力，消息接收模式选「Stream 模式」</li>
-                        <li>4. 发布应用版本后即可使用</li>
+                            {t('agentSettings.imComponents.dingtalkOpenPlatform')}<ExternalLink className="inline h-2.5 w-2.5" />
+                        </a>{t('agentSettings.imComponents.dingtalkGuideStep1Suffix')}</li>
+                        <li>2. {t('agentSettings.imComponents.dingtalkGuideStep2')}</li>
+                        <li>3. {t('agentSettings.imComponents.dingtalkGuideStep3')}</li>
+                        <li>4. {t('agentSettings.imComponents.dingtalkGuideStep4')}</li>
                     </ol>
                 </div>
             )}

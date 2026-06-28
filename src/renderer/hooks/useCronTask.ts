@@ -18,6 +18,11 @@ import { isTauriEnvironment } from '@/utils/browserMock';
 import { isDebugMode } from '@/utils/debug';
 import { createSyncStateRef } from '@/utils/syncStateRef';
 import { listenWithCleanup } from '@/utils/tauriListen';
+import { coerceRuntimeBirthPermissionMode } from '@/../shared/runtimeBirthFields';
+import {
+  resolveCronProviderEnvForExecution,
+  resolveCronProviderIntentForExecution,
+} from '@/utils/cronExecutionProjection';
 
 export interface CronTaskState {
   /** Whether cron mode is enabled (before task is created) */
@@ -58,8 +63,17 @@ export interface CronTaskState {
   task: CronTask | null;
   /** Whether task is currently being created/started */
   isStarting: boolean;
+  /** Whether the current task is inside one scheduler execution turn */
+  isExecuting: boolean;
+  /** 1-based scheduler execution number for the active turn */
+  executionNumber?: number;
   /** Error message if any */
   error: string | null;
+}
+
+export interface CronTaskStopResult {
+  task: CronTask;
+  prompt: string | null;
 }
 
 const initialState: CronTaskState = {
@@ -67,6 +81,8 @@ const initialState: CronTaskState = {
   config: null,
   task: null,
   isStarting: false,
+  isExecuting: false,
+  executionNumber: undefined,
   error: null,
 };
 
@@ -124,6 +140,15 @@ export function useCronTask(options: UseCronTaskOptions) {
   // the same settings that were active when the user enabled cron mode,
   // not the settings at execution time (which might have changed)
   const enableCronMode = useCallback((config: Omit<CronTaskConfig, 'workspacePath' | 'sessionId' | 'tabId'> & { executionTarget?: 'current_session' | 'new_task' }) => {
+    const providerEnv = resolveCronProviderEnvForExecution({
+      runtime: config.runtime,
+      providerId: config.providerId,
+      providerEnv: config.providerEnv,
+    });
+    const permissionMode = coerceRuntimeBirthPermissionMode(
+      config.permissionMode,
+      config.runtime ?? 'builtin',
+    );
     setState({
       isEnabled: true,
       config: {
@@ -133,27 +158,24 @@ export function useCronTask(options: UseCronTaskOptions) {
         runMode: config.runMode,
         notifyEnabled: config.notifyEnabled,
         model: config.model,
-        permissionMode: config.permissionMode,
-        // PRD 0.2.9 R2 invariant — zero credential copies on disk: when
-        // `providerId` is set (the live-resolve path), force-clear
-        // `providerEnv` so the persisted CronTask carries no apiKey
-        // snapshot, even if the caller accidentally forwarded one. The
-        // sidecar prefers providerId at runtime regardless, but on-disk
-        // shape is what matters for R2. Legacy callers that pass only
-        // `providerEnv` (no providerId) keep the explicit-snapshot path.
-        providerEnv: config.providerId ? undefined : config.providerEnv,
+        permissionMode,
+        // PRD 0.2.9 R2 invariant — zero credential copies on disk: live
+        // provider resolution and external runtime execution both clear
+        // `providerEnv`, so cron payloads do not mix provider snapshots
+        // into runtime-owned execution. Legacy builtin callers that pass
+        // only `providerEnv` keep the explicit-snapshot path.
+        providerEnv,
         providerId: config.providerId,
         // PRD #119 / 0.2.9 — When providerId is set, intent is ignored by
         // sidecar (live-resolve takes precedence). Otherwise we fall back
         // to the legacy explicit-vs-subscription split derived from
         // providerEnv presence so legacy crons still route correctly.
-        providerIntent:
-          config.providerIntent
-          ?? (config.providerId
-            ? undefined
-            : config.providerEnv
-              ? 'explicit'
-              : 'subscription'),
+        providerIntent: resolveCronProviderIntentForExecution({
+          runtime: config.runtime,
+          providerId: config.providerId,
+          providerEnv,
+          providerIntent: config.providerIntent,
+        }),
         runtime: config.runtime,
         runtimeConfig: config.runtimeConfig,
         schedule: config.schedule,
@@ -163,6 +185,8 @@ export function useCronTask(options: UseCronTaskOptions) {
       },
       task: null,
       isStarting: false,
+      isExecuting: false,
+      executionNumber: undefined,
       error: null,
     });
   }, [setState]);
@@ -192,6 +216,20 @@ export function useCronTask(options: UseCronTaskOptions) {
       };
     });
   }, [setState]);
+
+  const setExecutionState = useCallback((taskId: string, isExecuting: boolean, executionNumber?: number) => {
+    if (stateRef.current.task?.id !== taskId) return;
+    isExecutingRef.current = isExecuting;
+    setState(prev => (
+      prev.task?.id === taskId
+        ? {
+            ...prev,
+            isExecuting,
+            executionNumber: isExecuting ? executionNumber : undefined,
+          }
+        : prev
+    ));
+  }, [setState, stateRef]);
 
   // Create and start the cron task
   // Optional prompt parameter allows caller to pass the prompt directly,
@@ -242,11 +280,20 @@ export function useCronTask(options: UseCronTaskOptions) {
 
     let createdTaskId: string | null = null;
     try {
+      const providerEnv = resolveCronProviderEnvForExecution({
+        runtime: currentConfig.runtime,
+        providerId: currentConfig.providerId,
+        providerEnv: currentConfig.providerEnv,
+      });
+      const permissionMode = coerceRuntimeBirthPermissionMode(
+        currentConfig.permissionMode,
+        currentConfig.runtime ?? 'builtin',
+      );
+
       // PRD 0.2.9 — Forward providerId (live-resolve) when set; fall back
-      // to legacy providerEnv path otherwise. R2 invariant: when
-      // providerId is set, drop providerEnv from the create payload so
-      // no apiKey snapshot lands in cron_tasks.json (sidecar prefers
-      // providerId at runtime, but on-disk shape is what R2 enforces).
+      // to legacy providerEnv path only for builtin execution. R2 invariant:
+      // providerId and external runtime payloads drop providerEnv so no apiKey
+      // snapshot lands in cron_tasks.json or crosses runtime ownership.
       const task = await createCronTask({
         workspacePath,
         sessionId,
@@ -257,17 +304,16 @@ export function useCronTask(options: UseCronTaskOptions) {
         runMode: currentConfig.runMode,
         notifyEnabled: currentConfig.notifyEnabled,
         model: currentConfig.model,
-        permissionMode: currentConfig.permissionMode,
-        providerEnv: currentConfig.providerId ? undefined : currentConfig.providerEnv,
+        permissionMode,
+        providerEnv,
         providerId: currentConfig.providerId,
         // PRD #119 / 0.2.9 — see enableCronMode for the same fallback rules.
-        providerIntent:
-          currentConfig.providerIntent
-          ?? (currentConfig.providerId
-            ? undefined
-            : currentConfig.providerEnv
-              ? 'explicit'
-              : 'subscription'),
+        providerIntent: resolveCronProviderIntentForExecution({
+          runtime: currentConfig.runtime,
+          providerId: currentConfig.providerId,
+          providerEnv,
+          providerIntent: currentConfig.providerIntent,
+        }),
         runtime: currentConfig.runtime,
         runtimeConfig: currentConfig.runtimeConfig,
         schedule: currentConfig.schedule,
@@ -374,7 +420,7 @@ export function useCronTask(options: UseCronTaskOptions) {
 
   // Stop the task
   // Returns the original prompt so it can be restored to the input field
-  const stop = useCallback(async (): Promise<string | null> => {
+  const stop = useCallback(async (): Promise<CronTaskStopResult | null> => {
     const currentTask = stateRef.current.task;
     const currentConfig = stateRef.current.config;
     if (!currentTask) return null;
@@ -393,7 +439,10 @@ export function useCronTask(options: UseCronTaskOptions) {
       // Rust scheduler will detect status change and stop
       setState(initialState);
       console.log('[useCronTask] Task stopped:', stoppedTask.id);
-      return originalPrompt;
+      return {
+        task: stoppedTask,
+        prompt: originalPrompt,
+      };
     } catch (error) {
       console.error('[useCronTask] Failed to stop task:', error);
       return null;
@@ -476,9 +525,14 @@ export function useCronTask(options: UseCronTaskOptions) {
     }
 
     isExecutingRef.current = true;
-    await markTaskExecuting(payload.taskId);
-
+    setState(prev => ({
+      ...prev,
+      isExecuting: true,
+      executionNumber: (currentTask.executionCount ?? 0) + 1,
+    }));
     try {
+      await markTaskExecuting(payload.taskId);
+
       if (optionsRef.current.onExecute) {
         await optionsRef.current.onExecute(
           payload.taskId,
@@ -506,8 +560,18 @@ export function useCronTask(options: UseCronTaskOptions) {
         setState(initialState);
       }
     } finally {
-      await markTaskComplete(payload.taskId);
-      isExecutingRef.current = false;
+      try {
+        await markTaskComplete(payload.taskId);
+      } catch (error) {
+        console.warn('[useCronTask] failed to mark task complete:', error);
+      } finally {
+        isExecutingRef.current = false;
+        setState(prev => (
+          prev.task?.id === payload.taskId
+            ? { ...prev, isExecuting: false, executionNumber: undefined }
+            : prev
+        ));
+      }
     }
   }, [tabId, setState, stateRef]);
 
@@ -541,13 +605,20 @@ export function useCronTask(options: UseCronTaskOptions) {
       return;
     }
 
+    isExecutingRef.current = false;
+
     // Refresh task state from server to get updated lastExecutedAt and executionCount
     try {
       const task = await getCronTask(payload.taskId);
       // Check if component is still mounted before updating state
       if (!mountedRef.current) return;
 
-      setState(prev => ({ ...prev, task }));
+      setState(prev => ({
+        ...prev,
+        task,
+        isExecuting: false,
+        executionNumber: undefined,
+      }));
 
       // Notify caller that execution completed (for UI refresh, loading state reset, etc.)
       // Pass success flag so caller can decide whether to refresh (e.g., skip on timeout)
@@ -570,6 +641,12 @@ export function useCronTask(options: UseCronTaskOptions) {
       }
     } catch (error) {
       console.error('[useCronTask] Failed to refresh task after execution:', error);
+      if (!mountedRef.current) return;
+      setState(prev => (
+        prev.task?.id === payload.taskId
+          ? { ...prev, isExecuting: false, executionNumber: undefined }
+          : prev
+      ));
     }
   }, [setState, stateRef]);
 
@@ -579,12 +656,24 @@ export function useCronTask(options: UseCronTaskOptions) {
     if (!currentTask || currentTask.id !== payload.taskId) return;
 
     console.error('[useCronTask] Execution error from Rust scheduler:', payload);
+    isExecutingRef.current = false;
     // Task will continue to next interval, just log the error
     // Optionally refresh to get updated lastError
     getCronTask(payload.taskId).then(task => {
       if (!mountedRef.current) return;
-      setState(prev => ({ ...prev, task }));
+      setState(prev => ({
+        ...prev,
+        task,
+        isExecuting: false,
+        executionNumber: undefined,
+      }));
     }).catch(() => {
+      if (!mountedRef.current) return;
+      setState(prev => (
+        prev.task?.id === payload.taskId
+          ? { ...prev, isExecuting: false, executionNumber: undefined }
+          : prev
+      ));
       // Ignore refresh errors
     });
   }, [setState, stateRef]);
@@ -601,7 +690,13 @@ export function useCronTask(options: UseCronTaskOptions) {
     const currentTask = stateRef.current.task;
     if (!currentTask || currentTask.id !== payload.taskId) return;
     console.log('[useCronTask] Execution starting:', payload);
-  }, [stateRef]);
+    isExecutingRef.current = true;
+    setState(prev => ({
+      ...prev,
+      isExecuting: true,
+      executionNumber: payload.executionNumber,
+    }));
+  }, [setState, stateRef]);
 
   // Handle debug events from Rust (for debugging visibility)
   const handleDebugEvent = useCallback((payload: { taskId: string; message: string; error?: boolean }) => {
@@ -778,6 +873,8 @@ export function useCronTask(options: UseCronTaskOptions) {
       },
       task,
       isStarting: false,
+      isExecuting: false,
+      executionNumber: undefined,
       error: null,
     });
   }, [setState]);
@@ -802,6 +899,7 @@ export function useCronTask(options: UseCronTaskOptions) {
     disableCronMode,
     updateConfig,
     updateRunningConfig,
+    setExecutionState,
     startTask,
     stop,
     refresh,

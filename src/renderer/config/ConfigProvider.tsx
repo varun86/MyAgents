@@ -15,12 +15,20 @@ import {
     type ProxySettings,
     PRESET_PROVIDERS,
     PROXY_DEFAULTS,
+    MANAGED_CODEX_REQUIRED_RUNTIME,
+    applyManagedCodexProviderReadiness,
     applyProviderEnablementAndOrder,
+    getManagedCodexProviderReadiness,
+    isManagedCodexProviderGateEnabled,
+    withManagedCodexProviderCatalog,
 } from './types';
+import type { RuntimeModelInfo } from '../../shared/types/runtime';
+import { apiGetJson } from '@/api/apiFetch';
 import {
     loadAppConfig,
     atomicModifyConfig,
     ensureBundledWorkspace,
+    ensureManagedCodexProviderDevGateDefault,
     mergePresetCustomModels,
 } from './services/appConfigService';
 import {
@@ -47,6 +55,7 @@ import { migrateImBotConfigsToAgents, persistAgents, ensureAllProjectsHaveAgent,
 import { isTauriEnvironment } from '@/utils/browserMock';
 import { listenWithCleanup } from '@/utils/tauriListen';
 import { workspacePathsEqual } from '../../shared/workspacePath';
+import { normalizeUiLanguage, type SupportedLocale, type UiLanguage } from '../../shared/i18n';
 
 /**
  * Normalize agents loaded from disk: ensure every agent has a `channels` array.
@@ -93,6 +102,17 @@ function migrateToolGroups(config: AppConfig): boolean {
         console.log('[ConfigProvider] Migrated legacy openclawEnabledToolGroups → all groups enabled');
     }
     return changed;
+}
+
+function shouldAutoUpdateManagedCodexRuntime(config: AppConfig): boolean {
+    if (!isManagedCodexProviderGateEnabled(config)) return false;
+    const install = config.managedCodexRuntimeInstall;
+    const userEngaged = Boolean(install?.status || install?.installedVersion || install?.installedAt);
+    if (!userEngaged || !install) return false;
+    if (install.status === 'downloading' || install.status === 'checking') return false;
+    if (install.status === 'update-required') return true;
+    return install.status === 'installed'
+        && install.installedVersion !== MANAGED_CODEX_REQUIRED_RUNTIME.version;
 }
 
 // ============= Context Types =============
@@ -158,6 +178,7 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
     const [config, setConfig] = useState<AppConfig>(DEFAULT_CONFIG);
     const [projects, setProjects] = useState<Project[]>([]);
     const [rawProviders, setRawProviders] = useState<Provider[]>(PRESET_PROVIDERS);
+    const [managedCodexRuntimeModels, setManagedCodexRuntimeModels] = useState<RuntimeModelInfo[]>([]);
     const [apiKeys, setApiKeys] = useState<Record<string, string>>({});
     const [providerVerifyStatus, setProviderVerifyStatus] = useState<Record<string, ProviderVerifyStatus>>({});
     const [isLoading, setIsLoading] = useState(true);
@@ -165,14 +186,18 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
 
     // Derived: merge preset custom models + apply user primary model overrides
     const providers = useMemo(() => {
-        const merged = mergePresetCustomModels(rawProviders, config.presetCustomModels, config.presetRemovedModels);
+        const catalog = withManagedCodexProviderCatalog(rawProviders, config, managedCodexRuntimeModels);
+        const merged = mergePresetCustomModels(catalog, config.presetCustomModels, config.presetRemovedModels);
         const providerOrderSettings = {
             providerOrder: config.providerOrder,
             disabledProviderIds: config.disabledProviderIds,
         };
         const overrides = config.providerPrimaryModels;
         if (!overrides || Object.keys(overrides).length === 0) {
-            return applyProviderEnablementAndOrder(merged, providerOrderSettings);
+            return applyManagedCodexProviderReadiness(
+                applyProviderEnablementAndOrder(merged, providerOrderSettings),
+                config,
+            );
         }
         // Apply user's primaryModel override directly on the Provider object
         // so ALL consumers see the correct value without needing getEffectivePrimaryModel()
@@ -181,22 +206,49 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
             if (!userPrimary || !p.models?.some(m => m.model === userPrimary)) return p;
             return { ...p, primaryModel: userPrimary };
         });
-        return applyProviderEnablementAndOrder(withPrimaryOverrides, providerOrderSettings);
+        return applyManagedCodexProviderReadiness(
+            applyProviderEnablementAndOrder(withPrimaryOverrides, providerOrderSettings),
+            config,
+        );
     }, [
+        config,
         rawProviders,
-        config.presetCustomModels,
-        config.presetRemovedModels,
-        config.providerPrimaryModels,
-        config.providerOrder,
-        config.disabledProviderIds,
+        managedCodexRuntimeModels,
     ]);
+    const managedCodexReadiness = useMemo(
+        () => getManagedCodexProviderReadiness(config),
+        [config],
+    );
+    const managedCodexModelListKey = useMemo(
+        () => [
+            managedCodexReadiness.reason,
+            config.managedCodexRuntimeInstall?.installedVersion ?? '',
+            config.managedCodexRuntimeInstall?.requiredVersion ?? '',
+            config.managedCodexAuth?.status ?? '',
+            config.managedCodexAuth?.authMethod ?? '',
+            config.managedCodexAuth?.verifiedAt ?? '',
+        ].join('|'),
+        [
+            managedCodexReadiness.reason,
+            config.managedCodexRuntimeInstall?.installedVersion,
+            config.managedCodexRuntimeInstall?.requiredVersion,
+            config.managedCodexAuth?.status,
+            config.managedCodexAuth?.authMethod,
+            config.managedCodexAuth?.verifiedAt,
+        ],
+    );
 
     // Mount guard
     const isMountedRef = useRef(true);
+    const configRef = useRef<AppConfig>(DEFAULT_CONFIG);
+    const managedCodexAutoUpdateRef = useRef(false);
     useEffect(() => {
         isMountedRef.current = true;
         return () => { isMountedRef.current = false; };
     }, []);
+    useEffect(() => {
+        configRef.current = config;
+    }, [config]);
 
     // ============= Load All Data =============
 
@@ -224,6 +276,12 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
                 }
             } catch (e) {
                 console.warn('[ConfigProvider] Agent/CLI/system-skills sync failed:', e);
+            }
+
+            try {
+                await ensureManagedCodexProviderDevGateDefault();
+            } catch (e) {
+                console.warn('[ConfigProvider] Managed Codex provider default migration failed:', e);
             }
 
             const [rawConfig, loadedProjects, loadedProviders, loadedApiKeys, loadedVerifyStatus] = await Promise.all([
@@ -326,6 +384,7 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
             }
 
             if (!isMountedRef.current) return;
+            configRef.current = loadedConfig;
             setConfig(loadedConfig);
             setProjects(loadedProjects);
             setRawProviders(loadedProviders);
@@ -348,53 +407,151 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
         void load();
     }, [load]);
 
+    useEffect(() => {
+        if (!isTauriEnvironment()) return;
+        if (isLoading) return;
+        if (managedCodexAutoUpdateRef.current) return;
+        if (!shouldAutoUpdateManagedCodexRuntime(config)) return;
+
+        managedCodexAutoUpdateRef.current = true;
+        (async () => {
+            try {
+                const { invoke } = await import('@tauri-apps/api/core');
+                console.info(
+                    `[managed-codex] auto update start runtime=codex runtimeSource=managed-provider requiredVersion=${MANAGED_CODEX_REQUIRED_RUNTIME.version}`,
+                );
+                await invoke('cmd_managed_codex_download');
+            } catch (err) {
+                console.warn(
+                    `[managed-codex] auto update failed runtime=codex runtimeSource=managed-provider requiredVersion=${MANAGED_CODEX_REQUIRED_RUNTIME.version}`,
+                    err,
+                );
+            } finally {
+                managedCodexAutoUpdateRef.current = false;
+                await load();
+            }
+        })();
+    }, [
+        config,
+        isLoading,
+        load,
+    ]);
+
+    useEffect(() => {
+        if (managedCodexReadiness.reason !== 'ready' && managedCodexReadiness.reason !== 'provider-disabled') {
+            setManagedCodexRuntimeModels([]);
+            return;
+        }
+
+        let cancelled = false;
+        apiGetJson<{ models?: RuntimeModelInfo[] }>('/api/runtime/models?type=codex&source=managed-provider')
+            .then((result) => {
+                if (cancelled) return;
+                setManagedCodexRuntimeModels(Array.isArray(result.models) ? result.models : []);
+            })
+            .catch((err) => {
+                if (cancelled) return;
+                console.warn('[managed-codex] failed to load provider model list', err);
+                setManagedCodexRuntimeModels([]);
+            });
+
+        return () => { cancelled = true; };
+    }, [
+        managedCodexReadiness.reason,
+        managedCodexModelListKey,
+    ]);
+
+    const syncNativeUiLanguageFromConfig = useCallback(async () => {
+        if (!isTauriEnvironment()) return;
+        try {
+            const { invoke } = await import('@tauri-apps/api/core');
+            await invoke('cmd_sync_ui_language_from_config');
+        } catch (err) {
+            console.warn('[ConfigProvider] Failed to sync native UI language:', err);
+        }
+    }, []);
+
+    const refreshConfigFromDisk = useCallback(async (
+        reason: string,
+        options: { syncNativeUiLanguage: boolean },
+    ) => {
+        try {
+            const previousUiLanguage = normalizeUiLanguage(configRef.current.uiLanguage);
+            const latest = await loadAppConfig();
+            normalizeAgents(latest);
+            const nextUiLanguage = normalizeUiLanguage(latest.uiLanguage);
+            if (isMountedRef.current) {
+                configRef.current = latest;
+                setConfig(latest);
+            }
+            if (options.syncNativeUiLanguage && previousUiLanguage !== nextUiLanguage) {
+                await syncNativeUiLanguageFromConfig();
+            }
+        } catch (err) {
+            console.error(`[ConfigProvider] Failed to refresh config after ${reason}:`, err);
+        }
+    }, [syncNativeUiLanguageFromConfig]);
+
     // ============= Listen for im:bot-config-changed =============
 
     useEffect(() => {
         if (!isTauriEnvironment()) return;
         const ac = new AbortController();
 
-        const refreshOnEvent = () => {
+        const refreshOnConfigEvent = () => {
             if (!isMountedRef.current) return;
-            loadAppConfig().then(latest => {
-                normalizeAgents(latest);
-                if (isMountedRef.current) setConfig(latest);
-            }).catch(err => {
-                console.error('[ConfigProvider] Failed to refresh config after config-changed:', err);
-            });
+            void refreshConfigFromDisk('config-changed', { syncNativeUiLanguage: true });
+        };
+        const refreshOnUiLanguageEvent = () => {
+            if (!isMountedRef.current) return;
+            void refreshConfigFromDisk('ui-language-changed', { syncNativeUiLanguage: false });
         };
 
-        void listenWithCleanup<{ botId: string }>('im:bot-config-changed', refreshOnEvent, ac.signal);
-        void listenWithCleanup('agent:config-changed', refreshOnEvent, ac.signal);
+        void listenWithCleanup<{ botId: string }>('im:bot-config-changed', refreshOnConfigEvent, ac.signal);
+        void listenWithCleanup('agent:config-changed', refreshOnConfigEvent, ac.signal);
         // PRD 0.2.35 — the Rust `cmd_set_force_wake_lock` command (called from
         // Settings.tsx OR triggered by the tray CheckMenuItem click) writes
         // disk and emits this event. We re-read disk so the React state
         // matches the durable truth. Without this, a tray-side toggle would
         // leave Settings.tsx stuck on its last-rendered value.
-        void listenWithCleanup<boolean>('force-wake-lock-changed', refreshOnEvent, ac.signal);
+        void listenWithCleanup<boolean>('force-wake-lock-changed', refreshOnConfigEvent, ac.signal);
+        void listenWithCleanup<{ uiLanguage: UiLanguage; locale: SupportedLocale }>('ui-language-changed', refreshOnUiLanguageEvent, ac.signal);
 
         return () => ac.abort();
-    }, []);
+    }, [refreshConfigFromDisk]);
 
     // ============= Listen for Admin CLI config changes (via SSE → window event) =============
 
     useEffect(() => {
         const handler = () => {
             if (!isMountedRef.current) return;
-            loadAppConfig().then(latest => {
-                normalizeAgents(latest);
-                if (isMountedRef.current) setConfig(latest);
-            }).catch(err => {
-                console.error('[ConfigProvider] Failed to refresh config after admin CLI change:', err);
-            });
+            void refreshConfigFromDisk('admin CLI change', { syncNativeUiLanguage: true });
         };
         window.addEventListener('myagents:config-changed', handler);
         return () => window.removeEventListener('myagents:config-changed', handler);
-    }, []);
+    }, [refreshConfigFromDisk]);
 
     // ============= Actions =============
 
     const updateConfig = useCallback(async (updates: Partial<AppConfig>) => {
+        if ('uiLanguage' in updates) {
+            const value = normalizeUiLanguage(updates.uiLanguage);
+            const { uiLanguage: _, ...rest } = updates;
+            if (isTauriEnvironment()) {
+                try {
+                    const { invoke } = await import('@tauri-apps/api/core');
+                    await invoke('cmd_set_ui_language', { value });
+                    setConfig(prev => ({ ...prev, uiLanguage: value }));
+                } catch (err) {
+                    console.error('[ConfigProvider] cmd_set_ui_language failed:', err);
+                    throw err;
+                }
+                if (Object.keys(rest).length === 0) return;
+                updates = rest;
+            } else {
+                updates = { ...rest, uiLanguage: value };
+            }
+        }
         // PRD 0.2.35 D2 — `forceWakeLock` has OS-level side effects (acquire /
         // drop an IOPMAssertion-class lock, sync the tray CheckMenuItem, emit
         // to all renderers). Going through atomicModifyConfig writes disk
@@ -449,14 +606,8 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
     }, []);
 
     const refreshConfig = useCallback(async () => {
-        try {
-            const latest = await loadAppConfig();
-            normalizeAgents(latest);
-            if (isMountedRef.current) setConfig(latest);
-        } catch (err) {
-            console.error('[ConfigProvider] Failed to refresh config:', err);
-        }
-    }, []);
+        await refreshConfigFromDisk('manual refresh', { syncNativeUiLanguage: true });
+    }, [refreshConfigFromDisk]);
 
     const refreshProviderData = useCallback(async () => {
         try {

@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { ShieldAlert, X, Check, CheckCheck } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 
 export interface PermissionRequest {
     requestId: string;
@@ -17,6 +18,7 @@ interface PermissionPromptProps {
  * when Agent requests to use a tool that requires user confirmation
  */
 export function PermissionPrompt({ request, onDecision }: PermissionPromptProps) {
+    const { t } = useTranslation('chat');
     const [isResponding, setIsResponding] = useState(false);
     const [responded, setResponded] = useState(false);
 
@@ -72,11 +74,11 @@ export function PermissionPrompt({ request, onDecision }: PermissionPromptProps)
                         <ShieldAlert className="h-4.5 w-4.5 text-[var(--warning)]" />
                     </div>
                     <div className="flex-1 min-w-0">
-                        <div className="text-sm font-semibold text-[var(--ink)]">权限请求</div>
-                        <div className="mt-0.5 text-xs text-[var(--ink-muted)]">AI 请求执行以下操作</div>
+                        <div className="text-sm font-semibold text-[var(--ink)]">{t('shell.permissionPrompt.title')}</div>
+                        <div className="mt-0.5 text-xs text-[var(--ink-muted)]">{t('shell.permissionPrompt.subtitle')}</div>
                     </div>
                     <span className="flex items-center rounded-full bg-[var(--warning)]/15 px-2.5 py-1 text-xs font-medium text-[var(--warning)]">
-                        需授权
+                        {t('shell.permissionPrompt.badge')}
                     </span>
                 </div>
 
@@ -102,7 +104,7 @@ export function PermissionPrompt({ request, onDecision }: PermissionPromptProps)
                             disabled:opacity-50"
                     >
                         <X className="size-3.5" />
-                        <span>拒绝</span>
+                        <span>{t('shell.permissionPrompt.deny')}</span>
                     </button>
 
                     <div className="flex-1" />
@@ -114,7 +116,7 @@ export function PermissionPrompt({ request, onDecision }: PermissionPromptProps)
                             text-[var(--warning)] transition-colors hover:bg-[var(--warning)]/15 disabled:opacity-50"
                     >
                         <CheckCheck className="size-3.5" />
-                        <span>始终允许</span>
+                        <span>{t('shell.permissionPrompt.alwaysAllow')}</span>
                     </button>
 
                     <button
@@ -124,7 +126,7 @@ export function PermissionPrompt({ request, onDecision }: PermissionPromptProps)
                             text-white transition-colors hover:brightness-110 disabled:opacity-50"
                     >
                         <Check className="size-3.5" />
-                        <span>允许</span>
+                        <span>{t('shell.permissionPrompt.allow')}</span>
                     </button>
                 </div>
             </div>

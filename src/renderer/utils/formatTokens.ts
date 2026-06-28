@@ -16,18 +16,26 @@ export function formatTokens(tokens: number): string {
 
 /**
  * Format duration in milliseconds for display
+ * - >= 1h: "1h 8m"
  * - >= 60s: "1m 30s"
  * - >= 1s: "1.5s"
  * - < 1s: "500ms"
  */
 export function formatDuration(ms: number): string {
-    if (ms >= 60000) {
-        const minutes = Math.floor(ms / 60000);
-        const seconds = Math.round((ms % 60000) / 1000);
-        return `${minutes}m ${seconds}s`;
+    const safeMs = Math.max(0, Math.round(ms));
+    const totalSeconds = Math.round(safeMs / 1000);
+    if (totalSeconds >= 3600) {
+        const hours = Math.floor(totalSeconds / 3600);
+        const minutes = Math.floor((totalSeconds % 3600) / 60);
+        return minutes > 0 ? `${hours}h ${minutes}m` : `${hours}h`;
     }
-    if (ms >= 1000) {
-        return `${(ms / 1000).toFixed(1)}s`;
+    if (totalSeconds >= 60) {
+        const minutes = Math.floor(totalSeconds / 60);
+        const seconds = totalSeconds % 60;
+        return seconds > 0 ? `${minutes}m ${seconds}s` : `${minutes}m`;
     }
-    return `${ms}ms`;
+    if (safeMs >= 1000) {
+        return `${(safeMs / 1000).toFixed(1)}s`;
+    }
+    return `${safeMs}ms`;
 }

@@ -11,6 +11,7 @@
 //     flat meta text lets the status badge own the "chip" vocabulary.
 
 import type { TaskDispatchOrigin } from '@/../shared/types/task';
+import { useTranslation } from 'react-i18next';
 
 interface Props {
   origin: TaskDispatchOrigin;
@@ -18,11 +19,12 @@ interface Props {
 }
 
 export function DispatchOriginBadge({ origin, compact }: Props) {
-  const label = origin === 'direct' ? '直接派发' : '对齐讨论';
+  const { t } = useTranslation('task');
+  const label = origin === 'direct' ? t('badges.origin.directLabel') : t('badges.origin.alignedLabel');
   const title =
     origin === 'direct'
-      ? '直接派发：以想法原文为 task.md'
-      : '对齐讨论：通过 /task-alignment 生成完整四份文档';
+      ? t('badges.origin.directTitle')
+      : t('badges.origin.alignedTitle');
 
   if (compact) {
     // Plain meta text — no bg, no pill, no accent. Inherits color from

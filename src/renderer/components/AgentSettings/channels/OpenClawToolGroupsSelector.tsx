@@ -1,4 +1,5 @@
 import React, { useCallback, useMemo } from 'react';
+import { useTranslation } from 'react-i18next';
 
 interface ToolGroup {
     id: string;
@@ -38,6 +39,7 @@ export default function OpenClawToolGroupsSelector({
     onChange,
     pluginId,
 }: OpenClawToolGroupsSelectorProps) {
+    const { t } = useTranslation('settings');
     const toolGroups = TOOL_GROUPS_BY_PLUGIN[pluginId];
 
     // Effective list: stored value, or all groups if not yet configured
@@ -60,14 +62,14 @@ export default function OpenClawToolGroupsSelector({
     const knownIds = new Set(toolGroups.map(g => g.id));
     const unknownGroups: ToolGroup[] = effective
         .filter(id => !knownIds.has(id))
-        .map(id => ({ id, name: id, description: '插件新增工具组', toolCount: 0 }));
+        .map(id => ({ id, name: id, description: t('agentSettings.toolGroups.unknownDescription'), toolCount: 0 }));
     const allGroups = [...toolGroups, ...unknownGroups];
 
     return (
         <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
-            <h3 className="mb-4 text-sm font-semibold text-[var(--ink)]">工具组</h3>
+            <h3 className="mb-4 text-sm font-semibold text-[var(--ink)]">{t('agentSettings.toolGroups.title')}</h3>
             <p className="mb-3 text-xs text-[var(--ink-muted)]">
-                选择插件可使用的工具组，关闭不需要的工具组可减少 Token 消耗
+                {t('agentSettings.toolGroups.description')}
             </p>
             <div className="space-y-2">
                 {allGroups.map((group) => {
@@ -88,12 +90,12 @@ export default function OpenClawToolGroupsSelector({
                                     <p className="text-sm font-medium text-[var(--ink)]">{group.name}</p>
                                     {group.toolCount > 0 && (
                                         <span className="rounded-full bg-[var(--paper-inset)] px-1.5 py-0.5 text-xs font-medium text-[var(--ink-subtle)]">
-                                            {group.toolCount} 个工具
+                                            {t('agentSettings.toolGroups.toolCount', { count: group.toolCount })}
                                         </span>
                                     )}
                                     {group.sensitive && (
                                         <span className="rounded-full bg-[var(--warning-bg)] px-1.5 py-0.5 text-xs font-medium text-[var(--warning)]">
-                                            敏感
+                                            {t('agentSettings.toolGroups.sensitive')}
                                         </span>
                                     )}
                                 </div>

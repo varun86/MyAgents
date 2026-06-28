@@ -32,6 +32,7 @@ describe('validateExternalReadPathNode — blacklist (lexical, no fs)', () => {
     expect(lexical(path.join(home, '.ssh', 'id_rsa')).ok).toBe(false);
     expect(lexical(path.join(home, '.aws', 'credentials')).ok).toBe(false);
     expect(lexical(path.join(home, '.config', 'op', 'config')).ok).toBe(false);
+    expect(lexical(path.join(home, '.myagents', 'codex', 'auth.json')).ok).toBe(false);
   });
 
   it('allows an ordinary file under HOME/Documents', () => {

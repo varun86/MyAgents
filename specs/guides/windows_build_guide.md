@@ -185,6 +185,18 @@ src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/
 6. **上传构建产物** - 上传到 R2
 7. **上传更新清单** - 上传 JSON 文件
 
+`publish_windows.ps1` 只发布 Windows 桌面 App 和自动更新清单，不上传 Managed Codex Runtime 资源。
+
+### publish_managed_codex_runtime.ps1
+
+**用途**：单独发布 Windows 平台的 Managed Codex Runtime 资源。它上传同一个 runtime set 下的 `win32-x64` manifest/artifact，和 macOS 的 `publish_managed_codex_runtime.sh` 共同补齐跨平台 runtime set。
+
+```powershell
+.\publish_managed_codex_runtime.ps1 -RuntimeSet codex-0.142.2
+```
+
+默认读取 `src-tauri\src\managed_codex.rs` 中锁定的 `REQUIRED_RUNTIME_SET` 与 `REQUIRED_VERSION`。脚本会拒绝覆盖已存在的同平台 manifest；确实需要重发时显式加 `-ForceRepublish`。
+
 **环境变量**：
 
 | 变量 | 用途 |

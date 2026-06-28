@@ -12,6 +12,7 @@
 
 import { Component } from 'react';
 import type { ErrorInfo, ReactNode } from 'react';
+import { i18n } from '@/i18n';
 
 interface Props {
     children: ReactNode;
@@ -46,6 +47,7 @@ export default class AppErrorBoundary extends Component<Props, State> {
             return this.props.children;
         }
 
+        const t = i18n.getFixedT(null, 'app');
         // Hardcoded fallback colors ensure visibility even without CSS variables
         return (
             <div style={{
@@ -65,7 +67,7 @@ export default class AppErrorBoundary extends Component<Props, State> {
                     textAlign: 'center',
                 }}>
                     <h2 style={{ margin: '0 0 12px', fontSize: 18, fontWeight: 600 }}>
-                        界面渲染出错
+                        {t('errorBoundary.title')}
                     </h2>
                     <p style={{
                         margin: '0 0 20px',
@@ -73,7 +75,7 @@ export default class AppErrorBoundary extends Component<Props, State> {
                         color: 'var(--ink-muted, #666)',
                         lineHeight: 1.5,
                     }}>
-                        {this.state.error?.message || '发生了未知错误'}
+                        {this.state.error?.message || t('errorBoundary.unknown')}
                     </p>
                     <button
                         onClick={this.handleReload}
@@ -88,7 +90,7 @@ export default class AppErrorBoundary extends Component<Props, State> {
                             cursor: 'pointer',
                         }}
                     >
-                        重新加载
+                        {t('errorBoundary.reload')}
                     </button>
                 </div>
             </div>

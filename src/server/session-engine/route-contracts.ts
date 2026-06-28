@@ -269,6 +269,14 @@ export const SESSION_ENGINE_ROUTE_CONTRACTS: SessionEngineRouteContract[] = [
     behavior: 'Applies builtin MCP overrides through the engine; external runtimes explicitly skip route-level mutation.',
   },
   {
+    path: '/api/official-tools/session-enable',
+    method: 'POST',
+    engineMethod: 'updateOfficialToolIds',
+    responseKeys: ['success', 'enabledIds', 'skipped', 'error'],
+    failureStatuses: [500],
+    behavior: 'Applies per-session MyAgents official CLI tool selections through the active engine; prompt-changing external runtimes persist metadata and drop idle/prewarm processes.',
+  },
+  {
     path: '/api/agents/set',
     method: 'POST',
     engineMethod: 'updateAgents',

@@ -154,6 +154,7 @@ export type EventName =
   | 'thinking_export'
   // 工具使用
   | 'tool_use'
+  | 'official_tool_vision_analyze'
   // 权限控制
   | 'permission_grant'
   | 'permission_deny'

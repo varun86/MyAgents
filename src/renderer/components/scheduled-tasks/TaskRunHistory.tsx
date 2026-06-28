@@ -5,8 +5,10 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { CheckCircle, XCircle, ChevronDown, Loader2 } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 import * as cronClient from '@/api/cronTaskClient';
 import type { CronRunRecord } from '@/types/cronTask';
+import { isSupportedLocale } from '@/../shared/i18n';
 
 interface TaskRunHistoryProps {
   taskId: string;
@@ -17,6 +19,8 @@ interface TaskRunHistoryProps {
 }
 
 export default function TaskRunHistory({ taskId, onOpenSession, sessionId }: TaskRunHistoryProps) {
+  const { t, i18n } = useTranslation('task');
+  const locale = isSupportedLocale(i18n.language) ? i18n.language : 'zh-CN';
   const [runs, setRuns] = useState<CronRunRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [limit, setLimit] = useState(10);
@@ -50,7 +54,7 @@ export default function TaskRunHistory({ taskId, onOpenSession, sessionId }: Tas
 
   if (runs.length === 0) {
     return (
-      <p className="py-3 text-center text-xs text-[var(--ink-muted)]">暂无执行记录</p>
+      <p className="py-3 text-center text-xs text-[var(--ink-muted)]">{t('cron.runHistory.empty')}</p>
     );
   }
 
@@ -77,7 +81,7 @@ export default function TaskRunHistory({ taskId, onOpenSession, sessionId }: Tas
             <div className="flex w-full items-center gap-2">
               {/* Time */}
               <span className="w-24 flex-shrink-0 text-xs text-[var(--ink-muted)]/50">
-                {date.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}
+                {date.toLocaleString(locale, { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}
               </span>
               {/* Status icon */}
               {run.ok ? (
@@ -114,7 +118,7 @@ export default function TaskRunHistory({ taskId, onOpenSession, sessionId }: Tas
           onClick={handleLoadMore}
           className="mt-1 w-full py-1.5 text-center text-xs text-[var(--ink-muted)] hover:text-[var(--accent)] transition-colors"
         >
-          查看更多
+          {t('cron.runHistory.loadMore')}
         </button>
       )}
     </div>

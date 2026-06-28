@@ -2,6 +2,7 @@
 // PRD §7.3. Uses the shared OverlayBackdrop + closeLayer Cmd+W integration.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import {
   Archive,
   Bell,
@@ -76,6 +77,7 @@ export function TaskDetailOverlay({
   onClose,
   onChanged,
 }: Props) {
+  const { t } = useTranslation('task');
   const [task, setTask] = useState<Task>(initial);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -161,15 +163,15 @@ export function TaskDetailOverlay({
       if (task.permissionMode) patch.permissionMode = task.permissionMode;
       await patchAgentConfig(agentId, patch);
       if (!isMountedRef.current) return;
-      toast.success('已同步到 Agent');
+      toast.success(t('detail.syncSuccess'));
       setShowSyncConfirm(false);
     } catch (e) {
       if (!isMountedRef.current) return;
-      toast.error(`同步失败:${extractErrorMessage(e)}`);
+      toast.error(t('detail.syncFailed', { message: extractErrorMessage(e) }));
     } finally {
       if (isMountedRef.current) setSyncing(false);
     }
-  }, [agentId, task.model, task.permissionMode, toast]);
+  }, [agentId, task.model, task.permissionMode, toast, t]);
 
   // Refetch on mount so we show the latest statusHistory (in case UI was out of sync).
   useEffect(() => {
@@ -340,14 +342,14 @@ export function TaskDetailOverlay({
     <>
       {showSyncConfirm && (
         <ConfirmDialog
-          title={isDangerousSync ? '⚠️ 同步到 Agent(含完全自治)' : '同步到 Agent'}
+          title={isDangerousSync ? t('detail.syncDangerTitle') : t('detail.syncTitle')}
           message={
             isDangerousSync
-              ? '此任务使用【完全自治 (fullAgency)】权限 — 同步后该 Agent 未来所有新会话都将默认跳过权限确认，可直接执行删改文件等破坏性操作。确认要把这个宽松权限设为 Agent 默认吗？'
-              : '将该任务的模型 / 权限覆盖写回所属 Agent 的默认配置。这会影响之后新开的会话。确定继续?'
+              ? t('detail.syncDangerMessage')
+              : t('detail.syncMessage')
           }
-          confirmText={isDangerousSync ? '仍然同步' : '同步'}
-          cancelText="取消"
+          confirmText={isDangerousSync ? t('detail.syncDangerConfirm') : t('detail.syncConfirm')}
+          cancelText={t('common.cancel')}
           confirmVariant={isDangerousSync ? 'danger' : undefined}
           loading={syncing}
           onConfirm={() => void doSyncToAgent()}
@@ -356,10 +358,10 @@ export function TaskDetailOverlay({
       )}
       {showDeleteConfirm && (
         <ConfirmDialog
-          title="删除任务"
-          message={`确定删除任务「${task.name}」？此操作不可撤销。`}
-          confirmText="删除"
-          cancelText="取消"
+          title={t('detail.deleteTitle')}
+          message={t('detail.deleteMessage', { name: task.name })}
+          confirmText={t('common.delete')}
+          cancelText={t('common.cancel')}
           confirmVariant="danger"
           loading={busy}
           onConfirm={() => void doDelete()}
@@ -382,7 +384,7 @@ export function TaskDetailOverlay({
             <div className="flex items-center gap-2">
               {editing ? (
                 <span className="rounded-[var(--radius-sm)] bg-[var(--accent)]/10 px-1.5 py-0.5 text-xs font-medium text-[var(--accent)]">
-                  编辑中
+                  {t('detail.editing')}
                 </span>
               ) : (
                 <>
@@ -410,7 +412,7 @@ export function TaskDetailOverlay({
             type="button"
             onClick={onClose}
             className="shrink-0 rounded-[var(--radius-md)] p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
-            title="关闭 (Esc / Cmd+W)"
+            title={t('detail.closeTitle')}
           >
             <X className="h-4 w-4" />
           </button>
@@ -430,7 +432,7 @@ export function TaskDetailOverlay({
             {task.status === 'todo' && (
               <ActionBtn
                 icon={<Play className="h-3.5 w-3.5" />}
-                label="立即执行"
+                label={t('detail.runNow')}
                 disabled={busy}
                 onClick={dispatchRun}
               />
@@ -438,7 +440,7 @@ export function TaskDetailOverlay({
             {(task.status === 'running' || task.status === 'verifying') && (
               <ActionBtn
                 icon={<Square className="h-3.5 w-3.5" />}
-                label="中止"
+                label={t('detail.stop')}
                 variant="danger"
                 disabled={busy}
                 onClick={() => runStatus('stopped')}
@@ -450,7 +452,7 @@ export function TaskDetailOverlay({
               task.status === 'archived') && (
               <ActionBtn
                 icon={<RotateCcw className="h-3.5 w-3.5" />}
-                label="重新派发"
+                label={t('detail.rerun')}
                 disabled={busy}
                 onClick={dispatchRerun}
                 title="reset → todo → run (PRD §10.2.2)"
@@ -458,10 +460,10 @@ export function TaskDetailOverlay({
             )}
             <ActionBtn
               icon={<Pencil className="h-3.5 w-3.5" />}
-              label="编辑"
+              label={t('detail.edit')}
               disabled={busy || locked}
               onClick={() => enterEdit(null)}
-              title={locked ? '任务运行 / 验证中，不可编辑（PRD §9.4）' : undefined}
+              title={locked ? t('detail.editLockedTitle') : undefined}
             />
             <div className="flex-1" />
             <OverflowMenu
@@ -507,7 +509,9 @@ export function TaskDetailOverlay({
                   per v0.1.69 UX feedback. Users opening a task detail are
                   most often trying to "see what happened in the last run"
                   before they ever care about task.md / verify.md contents. */}
-              <TaskSessionsList task={task} onBeforeOpen={onClose} />
+              <div className="mt-5">
+                <TaskSessionsList task={task} onBeforeOpen={onClose} />
+              </div>
 
               {/* task.md / verify.md / progress.md — read-only previews.
                   The overlay's top-level "编辑" button is the single
@@ -516,8 +520,8 @@ export function TaskDetailOverlay({
               <TaskDocBlock
                 task={task}
                 doc="task"
-                title="task.md · 执行 Prompt"
-                emptyHint="还没有内容。点击上方「编辑」进入编辑页写入这个任务的执行提示词。"
+                title={t('detail.taskDocTitle')}
+                emptyHint={t('detail.taskDocEmpty')}
                 reloadKey={reloadToken}
                 onError={setErr}
               />
@@ -525,8 +529,8 @@ export function TaskDetailOverlay({
               <TaskDocBlock
                 task={task}
                 doc="verify"
-                title="verify.md · 验收标准"
-                emptyHint="还没有验收标准。点击上方「编辑」写一份;AI 在 verifying 阶段会用它自检。"
+                title={t('detail.verifyDocTitle')}
+                emptyHint={t('detail.verifyDocEmpty')}
                 reloadKey={reloadToken}
                 onError={setErr}
               />
@@ -534,7 +538,7 @@ export function TaskDetailOverlay({
               <TaskDocBlock
                 task={task}
                 doc="progress"
-                title="progress.md · 执行日志"
+                title={t('detail.progressDocTitle')}
                 emptyHint=""
                 hideWhenEmpty
                 reloadKey={reloadToken}
@@ -580,6 +584,7 @@ function OverflowMenu({
   onSyncToAgent: () => void;
   onDelete: () => void;
 }) {
+  const { t } = useTranslation('task');
   const canMarkDone = status === 'verifying';
   const canArchive = status === 'done';
 
@@ -587,22 +592,22 @@ function OverflowMenu({
   if (canMarkDone) {
     secondary.push({
       icon: <CheckCircle className="h-3.5 w-3.5" />,
-      label: '标记完成',
+      label: t('detail.markDone'),
       onClick: onMarkDone,
     });
   }
   if (canArchive) {
     secondary.push({
       icon: <Archive className="h-3.5 w-3.5" />,
-      label: '归档',
+      label: t('detail.archive'),
       onClick: onArchive,
     });
   }
   if (canSyncToAgent) {
     secondary.push({
       icon: <Bot className="h-3.5 w-3.5" />,
-      label: syncing ? '同步中…' : '同步到 Agent',
-      title: '把该任务的模型 / 权限覆盖写回所属 Agent 的默认配置',
+      label: syncing ? t('detail.syncing') : t('detail.syncToAgent'),
+      title: t('detail.syncToAgentTitle'),
       onClick: onSyncToAgent,
       disabled: syncing,
     });
@@ -614,7 +619,7 @@ function OverflowMenu({
       items: [
         {
           icon: <Trash2 className="h-3.5 w-3.5" />,
-          label: '删除',
+          label: t('common.delete'),
           onClick: onDelete,
           danger: true,
         },
@@ -637,6 +642,7 @@ function OverflowMenu({
  *  v0.1.69 preview polish: no inline edit button — the overlay's
  *  top-level "编辑" is the only edit entry across the whole preview. */
 function NotificationSummary({ task }: { task: Task }) {
+  const { t } = useTranslation('task');
   const { statuses } = useAgentStatuses();
   const cfg = task.notification;
   const desktop = cfg?.desktop !== false;
@@ -650,23 +656,23 @@ function NotificationSummary({ task }: { task: Task }) {
         }
       }
     }
-    return `未知频道 (${botChannelId})`;
-  }, [botChannelId, statuses]);
+    return t('detail.unknownChannel', { id: botChannelId });
+  }, [botChannelId, statuses, t]);
 
   return (
     <div>
       <div className="mb-1.5 flex items-center gap-1.5 text-sm font-semibold text-[var(--ink)]">
         <Bell className="h-3.5 w-3.5" />
-        通知
+        {t('detail.notification')}
       </div>
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
         <span className={desktop ? 'text-[var(--ink)]' : 'text-[var(--ink-muted)]'}>
-          桌面通知 {desktop ? '✓ 开启' : '✗ 关闭'}
+          {t('detail.desktopNotification')} {desktop ? `✓ ${t('detail.desktopOn')}` : `✗ ${t('detail.desktopOff')}`}
         </span>
         {channelLabel ? (
           <span className="text-[var(--ink)]">IM Bot: {channelLabel}</span>
         ) : (
-          <span className="text-[var(--ink-muted)]/70">不发送到 Bot</span>
+          <span className="text-[var(--ink-muted)]/70">{t('detail.noBot')}</span>
         )}
       </div>
     </div>

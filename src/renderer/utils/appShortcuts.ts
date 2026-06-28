@@ -46,8 +46,6 @@ export interface AppShortcutContext {
 
 export interface AppShortcut {
   id: string;
-  /** Human description for the Settings reference table. */
-  label: string;
   /** Platform-aware key-combo display. Omitted ⇒ hidden from the reference. */
   keys?: (isMac: boolean) => string;
   /** Pure predicate — does this event trigger the shortcut? */
@@ -83,7 +81,6 @@ export const APP_SHORTCUTS: AppShortcut[] = [
     // state and tears down every Sidecar (~30s cold-start) — never allowed.
     // Hidden from the reference (it's a block, not a user action).
     id: 'block-reload',
-    label: '阻止刷新',
     match: (e, isMac) =>
       e.key === 'F5'
       || (modHeld(e, isMac) && !e.altKey && (e.key === 'r' || e.key === 'R' || e.code === 'KeyR')),
@@ -92,7 +89,6 @@ export const APP_SHORTCUTS: AppShortcut[] = [
   {
     // Ctrl+Tab / Ctrl+Shift+Tab — cycle tabs (Ctrl on BOTH platforms by convention).
     id: 'cycle-tab',
-    label: '循环切换标签页（Shift 反向）',
     keys: () => 'Ctrl + Tab',
     match: (e) => e.ctrlKey && !e.metaKey && !e.altKey && e.key === 'Tab',
     run: (ctx, e) => shiftActiveTab(ctx, e.shiftKey ? -1 : 1, true),
@@ -100,7 +96,6 @@ export const APP_SHORTCUTS: AppShortcut[] = [
   {
     // ⌘/Ctrl + 1~9 — jump to the Nth tab (9 always = last).
     id: 'jump-to-tab',
-    label: '跳转到第 1–9 个标签页（9 为最后一个）',
     keys: (isMac) => `${modLabel(isMac)} + 1~9`,
     match: (e, isMac) => modHeld(e, isMac) && !e.shiftKey && !e.altKey && /^[1-9]$/.test(e.key),
     run: (ctx, e) => {
@@ -115,7 +110,6 @@ export const APP_SHORTCUTS: AppShortcut[] = [
     // ⌘/Ctrl+T — new tab. `!shiftKey` lets ⌘+Shift+T flow through to the
     // Launcher's 任务/想法 mode-toggle chord.
     id: 'new-tab',
-    label: '新建标签页',
     keys: (isMac) => `${modLabel(isMac)} + T`,
     match: (e, isMac) => modHeld(e, isMac) && !e.shiftKey && !e.altKey && (e.key === 't' || e.key === 'T'),
     run: (ctx) => ctx.newTab(),
@@ -123,7 +117,6 @@ export const APP_SHORTCUTS: AppShortcut[] = [
   {
     // ⌘/Ctrl+Y — open Task Center (singleton tab).
     id: 'open-task-center',
-    label: '打开任务中心',
     keys: (isMac) => `${modLabel(isMac)} + Y`,
     match: (e, isMac) => modHeld(e, isMac) && !e.shiftKey && !e.altKey && (e.key === 'y' || e.key === 'Y'),
     run: (ctx) => ctx.openTaskCenter(),
@@ -131,7 +124,6 @@ export const APP_SHORTCUTS: AppShortcut[] = [
   {
     // ⌘/Ctrl+U — open Settings.
     id: 'open-settings',
-    label: '打开设置',
     keys: (isMac) => `${modLabel(isMac)} + U`,
     match: (e, isMac) => modHeld(e, isMac) && !e.shiftKey && !e.altKey && (e.key === 'u' || e.key === 'U'),
     run: (ctx) => ctx.openSettings(),
@@ -141,7 +133,6 @@ export const APP_SHORTCUTS: AppShortcut[] = [
     // blocking modal backdrop is up). On macOS the native menu usually emits
     // this; kept as the primary path on Windows/Linux and a defensive fallback.
     id: 'close-tab',
-    label: '关闭当前标签页 / 关闭浮层',
     keys: (isMac) => `${modLabel(isMac)} + W`,
     match: (e, isMac) => modHeld(e, isMac) && (e.key === 'w' || e.key === 'W'),
     run: (ctx) => {
@@ -151,7 +142,6 @@ export const APP_SHORTCUTS: AppShortcut[] = [
   {
     // ⌘/Ctrl+Shift+[ / ] — previous / next tab (no wrap).
     id: 'switch-tab-bracket',
-    label: '上一个 / 下一个标签页',
     keys: (isMac) => `${modLabel(isMac)} + Shift + [ / ]`,
     match: (e, isMac) =>
       modHeld(e, isMac) && e.shiftKey && (e.code === 'BracketLeft' || e.code === 'BracketRight'),

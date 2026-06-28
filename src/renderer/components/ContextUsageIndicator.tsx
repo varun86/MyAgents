@@ -13,6 +13,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Minimize2 } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 
 import { useTabState } from '@/context/TabContext';
 import Popover from './ui/Popover';
@@ -66,6 +67,7 @@ export interface ContextUsageIndicatorProps {
 }
 
 export default function ContextUsageIndicator({ onCompact }: ContextUsageIndicatorProps) {
+  const { t } = useTranslation('app');
   const { contextUsage, isLoading } = useTabState();
   const anchorRef = useRef<HTMLSpanElement>(null);
   const [open, setOpen] = useState(false);
@@ -103,11 +105,13 @@ export default function ContextUsageIndicator({ onCompact }: ContextUsageIndicat
   // 外部 runtime 的压缩阈值各不相同（Codex 有自己的 auto-compact），不能套用同一文案（review #W4）。
   const windowDesc =
     windowSource === 'default'
-      ? `未配置上限，按默认 ${formatTokens(contextWindow)} 估算`
+      ? t('contextUsage.windowDefault', { window: formatTokens(contextWindow) })
       : windowSource === 'runtime'
-        ? `窗口 ${formatTokens(contextWindow)} · runtime 实时`
-        : `窗口 ${formatTokens(contextWindow)} 来自模型配置`;
-  const footnote = isBuiltin ? `${windowDesc} · 约 ${formatTokens(compactAt)} 时自动压缩` : windowDesc;
+        ? t('contextUsage.windowRuntime', { window: formatTokens(contextWindow) })
+        : t('contextUsage.windowModelConfig', { window: formatTokens(contextWindow) });
+  const footnote = isBuiltin
+    ? t('contextUsage.autoCompactFootnote', { windowDesc, threshold: formatTokens(compactAt) })
+    : windowDesc;
 
   return (
     <span
@@ -115,7 +119,7 @@ export default function ContextUsageIndicator({ onCompact }: ContextUsageIndicat
       onMouseEnter={openNow}
       onMouseLeave={scheduleClose}
       className="flex h-[30px] cursor-default items-center justify-center rounded-lg px-1 transition-colors hover:bg-[var(--hover-bg)]"
-      aria-label={`上下文已使用 ${usedPercent.toFixed(0)}%`}
+      aria-label={t('contextUsage.aria', { percent: usedPercent.toFixed(0) })}
     >
       <Ring percent={usedPercent} size={18} stroke={2} />
 
@@ -136,9 +140,9 @@ export default function ContextUsageIndicator({ onCompact }: ContextUsageIndicat
         >
           {/* 头部：标题 + 智能压缩入口（builtin only） */}
           <div className="mb-3 flex min-h-[24px] items-center justify-between">
-            <span className="text-xs font-semibold text-[var(--ink-muted)]">上下文用量</span>
+            <span className="text-xs font-semibold text-[var(--ink-muted)]">{t('contextUsage.title')}</span>
             {showCompact && (
-              <Tip label="智能压缩上下文，提供更大可用空间" position="top" align="end">
+              <Tip label={t('contextUsage.compactTip')} position="top" align="end">
                 <button
                   type="button"
                   disabled={isLoading}
@@ -149,7 +153,7 @@ export default function ContextUsageIndicator({ onCompact }: ContextUsageIndicat
                   className="flex items-center gap-1 rounded-lg border border-[var(--accent-warm-muted)] bg-[var(--accent-warm-subtle)] px-2 py-1 text-xs font-semibold leading-none text-[var(--accent)] transition-colors hover:border-[var(--accent)] hover:bg-[var(--accent-warm-muted)] disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   <Minimize2 className="h-3 w-3" />
-                  智能压缩
+                  {t('contextUsage.compact')}
                 </button>
               </Tip>
             )}
@@ -161,7 +165,7 @@ export default function ContextUsageIndicator({ onCompact }: ContextUsageIndicat
               <div className="text-3xl font-bold leading-none tracking-tight tabular-nums text-[var(--ink)]">
                 {usedPercent.toFixed(1)}%
               </div>
-              <div className="mt-1.5 text-xs text-[var(--ink-muted)]">已用 context 窗口</div>
+              <div className="mt-1.5 text-xs text-[var(--ink-muted)]">{t('contextUsage.usedLabel')}</div>
             </div>
             <Ring percent={usedPercent} size={44} stroke={3.5} />
           </div>

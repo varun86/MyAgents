@@ -52,12 +52,12 @@ describe('TodoWriteTool', () => {
   });
 
   it('uses SDK result newTodos for the compact process label', () => {
-    expect(getToolLabel(todoToolWithResult())).toBe('Todo 1/1');
+    expect(getToolLabel(todoToolWithResult())).toBe('待办 1/1');
   });
 
   it('uses SDK result newTodos for the compact label even if parsed input is missing', () => {
     const { parsedInput: _parsedInput, ...tool } = todoToolWithResult();
 
-    expect(getToolLabel(tool)).toBe('Todo 1/1');
+    expect(getToolLabel(tool)).toBe('待办 1/1');
   });
 });

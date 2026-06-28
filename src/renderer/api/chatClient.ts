@@ -11,6 +11,7 @@ import type {
 } from '@/types/stream';
 
 import type { SendMessagePayload, SendMessageResponse } from '../../shared/types/ipc';
+import type { RuntimeSource, RuntimeType } from '../../shared/types/runtime';
 import type { SystemInitInfo } from '../../shared/types/system';
 import type { SessionState } from '@/context/TabContext';
 import { onEvent } from './eventBus';
@@ -51,6 +52,10 @@ export type ChatAgentErrorPayload = {
 
 export type ChatSystemInitPayload = {
   info: SystemInitInfo;
+  sessionId?: string;
+  prewarm?: boolean;
+  runtime?: RuntimeType;
+  runtimeSource?: RuntimeSource;
 };
 
 /**

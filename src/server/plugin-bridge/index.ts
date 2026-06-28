@@ -21,6 +21,13 @@ import { FeishuStreamingSession } from './streaming-adapter';
 import { createMcpHandler } from './mcp-handler';
 import { getPendingDispatch, resolvePendingDispatch, rejectPendingDispatch, clearAllPendingDispatches } from './pending-dispatch';
 import { buildFunctionalHealth, buildReadyHealth, type GatewayRuntimeStatus } from './gateway-health';
+import {
+  addOpenClawChannelAliases,
+  buildOpenClawConfig,
+  getOpenClawConfigSnapshot,
+  setOpenClawConfigSnapshot,
+} from './openclaw-config';
+import { redactPluginBridgeSecrets } from './secret-redaction';
 import { serve as honoServe } from '@hono/node-server';
 import { readFile, mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
@@ -145,6 +152,22 @@ async function readJsonFile(path: string, fallback?: PkgJsonLike): Promise<PkgJs
   }
 }
 
+async function readOptionalJsonObject(path: string): Promise<Record<string, unknown> | null> {
+  try {
+    const raw = await readFile(path, 'utf8');
+    const parsed = JSON.parse(raw) as unknown;
+    return asOptionalJsonObject(parsed);
+  } catch {
+    return null;
+  }
+}
+
+function asOptionalJsonObject(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
 /**
  * Resolve an OpenClaw plugin's entry file inside its package directory.
  *
@@ -223,8 +246,6 @@ let streamIdCounter = 0;
 let mcpHandler: ReturnType<typeof createMcpHandler> | null = null;
 let getCapturedToolsFn: (() => CapturedTool[]) | null = null;
 let getCapturedCommandsFn: (() => import('./compat-api').CapturedCommand[]) | null = null;
-/** OpenClaw-format config (channels.{brand}.{...}), set during loadPlugin() */
-let loadedOpenclawConfig: Record<string, unknown> = {};
 /** Compat runtime — created in loadPlugin(), shared with gateway ctx for startAccount/restart */
 let loadedRuntime: ReturnType<typeof createCompatRuntime> | null = null;
 /** Current resolved account — shared by sendText/sendMedia closures, updated by /restart-gateway */
@@ -245,14 +266,18 @@ async function loadPlugin() {
   // Find installed packages (look in node_modules for packages with openclaw metadata)
   const deps = { ...pkgJson.dependencies, ...pkgJson.devDependencies };
   let entryModule: string | null = null;
+  let entryManifest: Record<string, unknown> | null = null;
 
   for (const depName of Object.keys(deps || {})) {
     if (depName === 'openclaw') continue; // Skip the shim
     try {
-      const depPkg = await readJsonFile(`${pluginDir}/node_modules/${depName}/package.json`, {});
+      const depPkgDir = `${pluginDir}/node_modules/${depName}`;
+      const depPkg = await readJsonFile(`${depPkgDir}/package.json`, {});
       if (depPkg.openclaw || depPkg.keywords?.includes('openclaw')) {
         entryModule = depName;
         pluginName = depPkg.name || depName;
+        entryManifest = await readOptionalJsonObject(`${depPkgDir}/openclaw.plugin.json`)
+          ?? asOptionalJsonObject(depPkg.openclaw);
         break;
       }
     } catch {
@@ -266,35 +291,16 @@ async function loadPlugin() {
 
   console.log(`[plugin-bridge] Loading plugin: ${entryModule}`);
 
-  // Infer channel brand from module name — needed to build OpenClaw-format config
-  // before register(). Plugin tools (e.g. getEnabledLarkAccounts) look for
-  // cfg.channels.feishu, not a flat {appId, appSecret} object.
-  let channelKey = entryModule.replace(/^@[^/]+\//, ''); // strip scope
-  if (/lark|feishu/i.test(entryModule)) {
-    channelKey = 'feishu';
-  } else if (/qqbot|qq/i.test(entryModule)) {
-    channelKey = 'qqbot';
-  } else if (/dingtalk/i.test(entryModule)) {
-    channelKey = 'dingtalk';
-  } else if (/telegram/i.test(entryModule)) {
-    channelKey = 'telegram';
-  }
-
   // Build OpenClaw-format config BEFORE register() so plugin tools can discover accounts.
   // The flat pluginConfig {appId, appSecret, ...} must be nested under channels.<brand>.
-  const openclawConfig: Record<string, unknown> = {
-    channels: {
-      [channelKey]: {
-        enabled: true,
-        ...pluginConfig,
-        dmPolicy: 'open',
-        groupPolicy: 'open',
-      },
-    },
-  };
+  const { channelKey, config: openclawConfig } = buildOpenClawConfig({
+    entryModule,
+    pluginConfig,
+    manifest: entryManifest,
+  });
 
   // Create compat API with properly structured config
-  loadedOpenclawConfig = openclawConfig;
+  setOpenClawConfigSnapshot(openclawConfig);
   const compatApi = createCompatApi(openclawConfig);
   // Runtime must be created early — plugins call setRuntime(api.runtime) during register()
   const runtime = createCompatRuntime(rustPort, botId, 'unknown');
@@ -411,10 +417,19 @@ async function loadPlugin() {
     (runtime as Record<string, unknown> & { setPluginId: (id: string) => void }).setPluginId(capturedPlugin.id);
   }
 
-  // Set up MCP handler with captured tools (use openclawConfig so tools resolve accounts)
+  // Add the registered ChannelPlugin.id as an additional alias when it differs
+  // from the manifest channel key. The manifest key is canonical for OpenClaw
+  // config, while historical MyAgents data and some plugins still mention
+  // install/package identities.
+  const openclawCfg = addOpenClawChannelAliases(openclawConfig, [capturedPlugin.id], channelKey);
+  compatApi.config = openclawCfg;
+  setOpenClawConfigSnapshot(openclawCfg);
+
+  // Set up MCP handler with captured tools (use the final config so tools and
+  // message routing see the same channel aliases).
   getCapturedToolsFn = () => compatApi.getCapturedTools();
   getCapturedCommandsFn = () => compatApi.getCapturedCommands();
-  mcpHandler = createMcpHandler(getCapturedToolsFn, openclawConfig, channelKey);
+  mcpHandler = createMcpHandler(getCapturedToolsFn, openclawCfg, channelKey);
   const toolCount = compatApi.getCapturedTools().length;
   if (toolCount > 0) {
     console.log(`[plugin-bridge] MCP handler initialized with ${toolCount} captured tool factories`);
@@ -444,14 +459,6 @@ async function loadPlugin() {
     }
   }
 
-  // Add plugin ID as additional channel key if it differs from inferred brand
-  // (e.g., plugin.id="openclaw-lark" but tools need channels.feishu)
-  const openclawCfg = openclawConfig;
-  if (capturedPlugin.id !== channelKey) {
-    (openclawCfg.channels as Record<string, unknown>)[capturedPlugin.id] =
-      (openclawCfg.channels as Record<string, unknown>)[channelKey];
-  }
-
   // Resolve account using the plugin's own config.resolveAccount if available
   // Pass accountId from pluginConfig (persisted after QR login) so plugins like
   // WeChat can find credentials saved under that specific accountId on disk.
@@ -471,14 +478,8 @@ async function loadPlugin() {
 
   currentAccount = account; // Share with /restart-gateway and sendText/sendMedia closures
 
-  // Log account with secrets redacted
-  const redactedAccount = Object.fromEntries(
-    Object.entries(account).map(([k, v]) =>
-      /secret|token|password|key/i.test(k) && typeof v === 'string'
-        ? [k, v.slice(0, 4) + '***']
-        : [k, v]
-    )
-  );
+  // Log account with secrets redacted, including nested plugin config.
+  const redactedAccount = redactPluginBridgeSecrets(account);
   console.log(`[plugin-bridge] Resolved account:`, JSON.stringify(redactedAccount));
 
   // Wrap outbound.sendText/sendMedia if top-level handlers are missing
@@ -673,6 +674,7 @@ const server = honoServe({
         waitingForQrLogin,
         hasGateway: typeof capturedPlugin?.gateway?.startAccount === 'function',
         pluginName,
+        pluginId: capturedPlugin?.id,
         gatewayStatus,
       });
       return Response.json(health.body, { status: health.status });
@@ -687,6 +689,7 @@ const server = honoServe({
         waitingForQrLogin,
         hasGateway: typeof capturedPlugin?.gateway?.startAccount === 'function',
         pluginName,
+        pluginId: capturedPlugin?.id,
         gatewayStatus,
         lastForwardAt: lastForward,
       });
@@ -833,7 +836,7 @@ const server = honoServe({
         // Build a temporary account-like object from the provided credentials
         const tempAccount = { accountId: 'default', enabled: true, ...body };
         // OpenClaw signature: isConfigured(account, cfg) → boolean | Promise<boolean>
-        const configuredResult = (configCheck.isConfigured as (a: unknown, c: unknown) => boolean | Promise<boolean>)(tempAccount, loadedOpenclawConfig);
+        const configuredResult = (configCheck.isConfigured as (a: unknown, c: unknown) => boolean | Promise<boolean>)(tempAccount, getOpenClawConfigSnapshot());
         const configured = configuredResult instanceof Promise ? await configuredResult : configuredResult;
         if (configured) {
           return Response.json({ ok: true, message: 'Credentials valid (isConfigured passed)' });
@@ -1119,7 +1122,7 @@ const server = honoServe({
           args: body.args || '',
           userId: body.userId,
           chatId: body.chatId,
-          config: loadedOpenclawConfig,
+          config: getOpenClawConfigSnapshot(),
         });
         const text = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
         return Response.json({ ok: true, result: text });
@@ -1184,11 +1187,12 @@ const server = honoServe({
         // accountId to look up the newly-saved credentials on disk
         const body = await req.json().catch(() => ({})) as Record<string, unknown>;
         const qrAccountId = body.accountId as string | undefined;
+        const openclawCfg = getOpenClawConfigSnapshot();
         const resolveAccount = capturedPlugin.raw?.config as Record<string, unknown> | undefined;
         let account: Record<string, unknown> = pluginConfig;
         if (typeof resolveAccount?.resolveAccount === 'function') {
           try {
-            account = await (resolveAccount.resolveAccount as (cfg: unknown, id?: string) => Promise<Record<string, unknown>>)(loadedOpenclawConfig, qrAccountId) || pluginConfig;
+            account = await (resolveAccount.resolveAccount as (cfg: unknown, id?: string) => Promise<Record<string, unknown>>)(openclawCfg, qrAccountId) || pluginConfig;
           } catch (err) {
             console.warn('[plugin-bridge] resolveAccount failed after QR login:', err);
             // If resolve failed but we have an accountId, try building a minimal account
@@ -1202,7 +1206,7 @@ const server = honoServe({
         // OpenClaw signature: isConfigured(account, cfg) → boolean | Promise<boolean>
         const isConfigured = resolveAccount;
         if (typeof isConfigured?.isConfigured === 'function') {
-          const configuredResult = (isConfigured.isConfigured as (a: unknown, c: unknown) => boolean | Promise<boolean>)(account, loadedOpenclawConfig);
+          const configuredResult = (isConfigured.isConfigured as (a: unknown, c: unknown) => boolean | Promise<boolean>)(account, openclawCfg);
           const configured = configuredResult instanceof Promise ? await configuredResult : configuredResult;
           if (!configured) {
             return Response.json({ ok: false, error: 'Account still not configured after QR login' }, { status: 400 });
@@ -1234,7 +1238,7 @@ const server = honoServe({
             log: console,
             runtime: loadedRuntime,
             channelRuntime: { ...channelSurface, channel: channelSurface },
-            cfg: loadedOpenclawConfig,
+            cfg: openclawCfg,
             getStatus: () => status,
             setStatus: (s: GatewayRuntimeStatus) => {
               status = { ...status, ...s };

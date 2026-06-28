@@ -12,6 +12,7 @@
 import { AlertCircle, Check, Code, Copy, Eye, RefreshCw } from 'lucide-react';
 import mermaid from 'mermaid';
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 
 import { codeBlockSyntaxTheme } from './CodeBlock';
@@ -106,6 +107,7 @@ function looksLikeValidMermaid(content: string): boolean {
 }
 
 export default function MermaidDiagram({ children }: MermaidDiagramProps) {
+    const { t } = useTranslation('app');
     // View mode: preview (rendered diagram) or code (syntax highlighted source)
     const [viewMode, setViewMode] = useState<'preview' | 'code'>('preview');
     const [copied, setCopied] = useState(false);
@@ -223,7 +225,7 @@ export default function MermaidDiagram({ children }: MermaidDiagramProps) {
                         }`}
                     >
                         <Eye className="size-3" />
-                        <span>预览</span>
+                        <span>{t('markdown.preview')}</span>
                     </button>
                     <button
                         type="button"
@@ -235,7 +237,7 @@ export default function MermaidDiagram({ children }: MermaidDiagramProps) {
                         }`}
                     >
                         <Code className="size-3" />
-                        <span>代码</span>
+                        <span>{t('markdown.code')}</span>
                     </button>
                 </div>
                 {/* Copy button */}
@@ -243,17 +245,17 @@ export default function MermaidDiagram({ children }: MermaidDiagramProps) {
                     type="button"
                     onClick={handleCopy}
                     className="flex items-center gap-1.5 rounded px-2 py-1 text-[var(--code-line-number)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
-                    title={copied ? '已复制' : '复制代码'}
+                    title={copied ? t('markdown.copied') : t('markdown.copyCode')}
                 >
                     {copied ? (
                         <>
                             <Check className="size-3.5" />
-                            <span>已复制</span>
+                            <span>{t('markdown.copied')}</span>
                         </>
                     ) : (
                         <>
                             <Copy className="size-3.5" />
-                            <span>复制</span>
+                            <span>{t('markdown.copy')}</span>
                         </>
                     )}
                 </button>
@@ -289,7 +291,7 @@ export default function MermaidDiagram({ children }: MermaidDiagramProps) {
                     {isRendering && (
                         <div className="flex items-center gap-1.5 border-b border-[var(--line)] px-3 py-1.5 text-xs text-[var(--code-line-number)]">
                             <RefreshCw className="size-3 animate-spin" />
-                            <span>更新中...</span>
+                            <span>{t('markdown.updating')}</span>
                         </div>
                     )}
                     {/*
@@ -313,7 +315,7 @@ export default function MermaidDiagram({ children }: MermaidDiagramProps) {
                         <div className="flex items-start gap-2 text-[var(--warning)]">
                             <AlertCircle className="mt-0.5 size-4 shrink-0" />
                             <div className="min-w-0">
-                                <p className="text-sm font-medium">图表渲染中...</p>
+                                <p className="text-sm font-medium">{t('markdown.diagramRendering')}</p>
                                 <p className="mt-1 truncate text-xs opacity-60">{parseError}</p>
                             </div>
                         </div>
@@ -321,7 +323,7 @@ export default function MermaidDiagram({ children }: MermaidDiagramProps) {
                             onClick={handleRetry}
                             className="shrink-0 rounded px-2 py-1 text-xs text-[var(--warning)] hover:bg-[var(--warning-bg)]"
                         >
-                            重试
+                            {t('message.actions.retry')}
                         </button>
                     </div>
                 </div>
@@ -333,7 +335,7 @@ export default function MermaidDiagram({ children }: MermaidDiagramProps) {
             <div className="flex h-20 items-center justify-center bg-[var(--paper-inset)]/50">
                 <div className="flex items-center gap-2 text-sm text-[var(--ink-muted)]">
                     <RefreshCw className="size-4 animate-spin" />
-                    <span>渲染图表...</span>
+                    <span>{t('markdown.renderDiagram')}</span>
                 </div>
             </div>
         );

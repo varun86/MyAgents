@@ -16,6 +16,7 @@
  * we already don't support per §9) is skipped. We deliberately keep CSP unchanged.
  */
 import { useEffect, useRef, useState } from 'react';
+import { i18n } from '@/i18n';
 import { Loader2 } from 'lucide-react';
 import { PptxViewer as PptxRenderer } from '@aiden0z/pptx-renderer';
 import './pdfWorker'; // pptx-renderer peerDeps pdfjs-dist (embedded PDF objects)
@@ -83,7 +84,7 @@ export default function PptxViewer({ bytes, onError, onEmpty }: RichDocSubViewer
       })
       .catch((e) => {
         if (!disposed && !ac.signal.aborted) {
-          onError(e instanceof Error ? e.message : '演示文稿渲染失败');
+          onError(e instanceof Error ? e.message : i18n.t('app:richDoc.pptRenderFailed'));
         }
       });
 

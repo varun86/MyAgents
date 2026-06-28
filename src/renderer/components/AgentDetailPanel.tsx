@@ -7,6 +7,7 @@
  */
 import { Loader2, ChevronDown, ChevronUp, Trash2, Edit2, X, Check, Plus } from 'lucide-react';
 import { useCallback, useEffect, useState, useImperativeHandle, forwardRef, useRef, useMemo } from 'react';
+import { useTranslation } from 'react-i18next';
 
 import { load as yamlLoad, dump as yamlDump } from 'js-yaml';
 import { track } from '@/analytics';
@@ -219,6 +220,7 @@ export interface AgentDetailPanelRef {
 
 const AgentDetailPanel = forwardRef<AgentDetailPanelRef, AgentDetailPanelProps>(
     function AgentDetailPanel({ name, scope, onBack: _onBack, onSaved, onDeleted, startInEditMode = false, agentDir, isAnthropicProvider = true }, ref) {
+        const { t } = useTranslation('settings');
         const toast = useToast();
         const toastRef = useRef(toast);
         useEffect(() => { toastRef.current = toast; }, [toast]);
@@ -297,20 +299,25 @@ const AgentDetailPanel = forwardRef<AgentDetailPanelRef, AgentDetailPanelProps>(
 
         // Model options for CustomSelect
         const modelOptions = useMemo<SelectOption[]>(() => [
-            { value: '', label: '继承主模型 (inherit)' },
+            { value: '', label: t('agentSettings.agentDetail.inheritModel') },
             { value: 'sonnet', label: 'Sonnet' },
             { value: 'opus', label: 'Opus' },
             { value: 'haiku', label: 'Haiku' },
-        ], []);
+        ], [t]);
 
         // Permission mode options for CustomSelect
         const permissionModeOptions = useMemo<SelectOption[]>(() => [
-            { value: '', label: '默认' },
+            { value: '', label: t('agentSettings.agentDetail.defaultPermission') },
             ...PERMISSION_MODES.map(m => ({
                 value: m.sdkValue,
-                label: `${m.icon} ${m.label} (${m.sdkValue})`,
+                label: `${m.icon} ${t(`agentSettings.permission.${m.value}`)} (${m.sdkValue})`,
             })),
-        ], []);
+        ], [t]);
+
+        const permissionLabel = useCallback((sdkValue: string) => {
+            const match = PERMISSION_MODES.find(m => m.sdkValue === sdkValue);
+            return match ? t(`agentSettings.permission.${match.value}`) : sdkValue;
+        }, [t]);
 
         useImperativeHandle(ref, () => ({
             isEditing: () => isEditing
@@ -354,16 +361,16 @@ const AgentDetailPanel = forwardRef<AgentDetailPanelRef, AgentDetailPanelProps>(
 
                         if (startInEditMode) setIsEditing(true);
                     } else {
-                        toastRef.current.error(response.error || '加载失败');
+                        toastRef.current.error(response.error || t('agentSettings.common.loadFailed'));
                     }
                 } catch {
-                    toastRef.current.error('加载失败');
+                    toastRef.current.error(t('agentSettings.common.loadFailed'));
                 } finally {
                     setLoading(false);
                 }
             };
             loadAgent();
-        }, [name, scope, agentDir, startInEditMode, api, isInTabContext]);
+        }, [name, scope, agentDir, startInEditMode, api, isInTabContext, t]);
 
         const handleEdit = useCallback((field?: 'name' | 'description' | 'body') => {
             setFocusField(field || 'name');
@@ -414,7 +421,7 @@ const AgentDetailPanel = forwardRef<AgentDetailPanelRef, AgentDetailPanelProps>(
         const handleSave = useCallback(async () => {
             if (!agent) return;
             if (!agentName.trim()) {
-                toastRef.current.error('Agent 名称不能为空');
+                toastRef.current.error(t('agentSettings.agentDetail.nameRequired'));
                 return;
             }
             setSaving(true);
@@ -435,7 +442,7 @@ const AgentDetailPanel = forwardRef<AgentDetailPanelRef, AgentDetailPanelProps>(
                     try {
                         frontmatter.hooks = yamlLoad(hooksYaml) as Record<string, unknown>;
                     } catch {
-                        toastRef.current.error('Hooks YAML 格式错误');
+                        toastRef.current.error(t('agentSettings.agentDetail.hooksYamlInvalid'));
                         setSaving(false);
                         return;
                     }
@@ -459,7 +466,7 @@ const AgentDetailPanel = forwardRef<AgentDetailPanelRef, AgentDetailPanelProps>(
                 }>(`/api/agent/${encodeURIComponent(name)}`, payload);
 
                 if (response.success) {
-                    toastRef.current.success('保存成功');
+                    toastRef.current.success(t('agentSettings.agentDetail.saveSuccess'));
                     setIsEditing(false);
                     setIsNewAgent(false);
                     setOriginalAgentName(agentName.trim());
@@ -480,14 +487,14 @@ const AgentDetailPanel = forwardRef<AgentDetailPanelRef, AgentDetailPanelProps>(
                         onSaved();
                     }
                 } else {
-                    toastRef.current.error(response.error || '保存失败');
+                    toastRef.current.error(response.error || t('agentSettings.common.saveFailed'));
                 }
             } catch {
-                toastRef.current.error('保存失败');
+                toastRef.current.error(t('agentSettings.common.saveFailed'));
             } finally {
                 setSaving(false);
             }
-        }, [agent, canRename, agentName, description, body, model, toolsTags, disallowedToolsTags, maxTurns, permissionMode, memory, skillsTags, hooksYaml, name, scope, agentDir, originalAgentName, onSaved, api, isInTabContext]);
+        }, [agent, canRename, agentName, description, body, model, toolsTags, disallowedToolsTags, maxTurns, permissionMode, memory, skillsTags, hooksYaml, name, scope, agentDir, originalAgentName, onSaved, api, isInTabContext, t]);
 
         const handleDelete = useCallback(async () => {
             if (!agent) return;
@@ -499,18 +506,18 @@ const AgentDetailPanel = forwardRef<AgentDetailPanelRef, AgentDetailPanelProps>(
                 );
                 if (response.success) {
                     track('agent_remove', { scope });
-                    toastRef.current.success('已删除');
+                    toastRef.current.success(t('agentSettings.common.deleteSuccess'));
                     onDeleted();
                 } else {
-                    toastRef.current.error(response.error || '删除失败');
+                    toastRef.current.error(response.error || t('agentSettings.common.deleteFailed'));
                 }
             } catch {
-                toastRef.current.error('删除失败');
+                toastRef.current.error(t('agentSettings.common.deleteFailed'));
             } finally {
                 setDeleting(false);
                 setShowDeleteConfirm(false);
             }
-        }, [agent, name, scope, agentDir, onDeleted, api, isInTabContext]);
+        }, [agent, name, scope, agentDir, onDeleted, api, isInTabContext, t]);
 
         if (loading) {
             return (
@@ -523,7 +530,7 @@ const AgentDetailPanel = forwardRef<AgentDetailPanelRef, AgentDetailPanelProps>(
         if (!agent) {
             return (
                 <div className="flex h-64 items-center justify-center text-[var(--ink-muted)]">
-                    Agent 未找到
+                    {t('agentSettings.agentDetail.notFound')}
                 </div>
             );
         }
@@ -547,7 +554,7 @@ const AgentDetailPanel = forwardRef<AgentDetailPanelRef, AgentDetailPanelProps>(
                                     className="flex items-center gap-1 rounded-lg border border-[var(--line)] px-3 py-1.5 text-sm text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
                                 >
                                     <Edit2 className="h-3.5 w-3.5" />
-                                    编辑
+                                    {t('agentSettings.common.edit')}
                                 </button>
                                 <button
                                     onClick={() => setShowDeleteConfirm(true)}
@@ -561,17 +568,17 @@ const AgentDetailPanel = forwardRef<AgentDetailPanelRef, AgentDetailPanelProps>(
                         <div className="mt-2 flex flex-wrap items-center gap-2">
                             {model && isAnthropicProvider && (
                                 <span className="rounded-full bg-[var(--paper-inset)] px-2 py-0.5 text-xs text-[var(--ink-muted)]">
-                                    模型: {model}
+                                    {t('agentSettings.agentDetail.modelBadge', { model })}
                                 </span>
                             )}
                             {permissionMode && (
                                 <span className="rounded-full bg-[var(--paper-inset)] px-2 py-0.5 text-xs text-[var(--ink-muted)]">
-                                    权限: {PERMISSION_MODES.find(m => m.sdkValue === permissionMode)?.label ?? permissionMode}
+                                    {t('agentSettings.agentDetail.permissionBadge', { permission: permissionLabel(permissionMode) })}
                                 </span>
                             )}
                             {toolsTags.length > 0 && (
                                 <span className="rounded-full bg-[var(--paper-inset)] px-2 py-0.5 text-xs text-[var(--ink-muted)]">
-                                    工具: {toolsTags.length}
+                                    {t('agentSettings.agentDetail.toolsBadge', { count: toolsTags.length })}
                                 </span>
                             )}
                             {skillsTags.length > 0 && (
@@ -588,18 +595,18 @@ const AgentDetailPanel = forwardRef<AgentDetailPanelRef, AgentDetailPanelProps>(
                                 <Markdown>{body}</Markdown>
                             </div>
                         ) : (
-                            <p className="text-sm italic text-[var(--ink-muted)]">暂无 System Prompt</p>
+                            <p className="text-sm italic text-[var(--ink-muted)]">{t('agentSettings.agentDetail.noSystemPrompt')}</p>
                         )}
                     </div>
 
                     {showDeleteConfirm && (
                         <ConfirmDialog
-                            title="删除 Agent"
+                            title={t('agentSettings.agentDetail.deleteTitle')}
                             message={scope === 'user'
-                                ? `确定要删除 "${agentName}" 吗？引用此 Agent 的项目将受到影响，此操作不可恢复。`
-                                : `确定要删除 "${agentName}" 吗？此操作不可恢复。`}
-                            confirmText="删除"
-                            cancelText="取消"
+                                ? t('agentSettings.agentDetail.deleteUserMessage', { name: agentName })
+                                : t('agentSettings.agentDetail.deleteProjectMessage', { name: agentName })}
+                            confirmText={t('agentSettings.common.delete')}
+                            cancelText={t('agentSettings.common.cancel')}
                             confirmVariant="danger"
                             onConfirm={handleDelete}
                             onCancel={() => setShowDeleteConfirm(false)}
@@ -616,14 +623,14 @@ const AgentDetailPanel = forwardRef<AgentDetailPanelRef, AgentDetailPanelProps>(
                 {/* Edit Header */}
                 <div className="border-b border-[var(--line)] px-6 py-3">
                     <div className="flex items-center justify-between">
-                        <span className="text-sm font-medium text-[var(--ink-muted)]">编辑子 Agent</span>
+                        <span className="text-sm font-medium text-[var(--ink-muted)]">{t('agentSettings.agentDetail.editSubAgent')}</span>
                         <div className="flex items-center gap-2">
                             <button
                                 onClick={handleCancel}
                                 className="flex items-center gap-1 rounded-lg border border-[var(--line)] px-3 py-1.5 text-sm text-[var(--ink-muted)] hover:bg-[var(--paper-inset)]"
                             >
                                 <X className="h-3.5 w-3.5" />
-                                取消
+                                {t('agentSettings.common.cancel')}
                             </button>
                             <button
                                 onClick={handleSave}
@@ -631,7 +638,7 @@ const AgentDetailPanel = forwardRef<AgentDetailPanelRef, AgentDetailPanelProps>(
                                 className="flex items-center gap-1 rounded-lg bg-[var(--button-primary-bg)] px-3 py-1.5 text-sm font-medium text-[var(--button-primary-text)] hover:bg-[var(--button-primary-bg-hover)] disabled:opacity-50"
                             >
                                 {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}
-                                保存
+                                {t('agentSettings.common.save')}
                             </button>
                         </div>
                     </div>
@@ -641,58 +648,59 @@ const AgentDetailPanel = forwardRef<AgentDetailPanelRef, AgentDetailPanelProps>(
                 <div className="flex-1 overflow-y-auto overscroll-contain px-6 py-4 space-y-4">
                     {/* Name */}
                     <div>
-                        <label className="mb-1 block text-sm font-medium text-[var(--ink-muted)]">名称</label>
+                        <label className="mb-1 block text-sm font-medium text-[var(--ink-muted)]">{t('agentSettings.common.name')}</label>
                         <input
                             ref={nameInputRef}
                             type="text"
                             value={agentName}
                             onChange={e => setAgentName(e.target.value)}
                             className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 text-sm text-[var(--ink)] focus:border-[var(--accent-warm)] focus:outline-none"
-                            placeholder="Agent 名称"
+                            placeholder={t('agentSettings.agentDetail.namePlaceholder')}
                         />
                         {/* Folder name hint — only for the canonical 'folder' layout.
                             flat/nested agents keep their path; name edits only touch frontmatter. */}
                         {!canRename && agent && agentName.trim() !== originalAgentName && (
                             <p className="mt-1 text-xs text-[var(--ink-muted)]">
-                                当前 Agent 布局为 <code className="rounded bg-[var(--paper-inset)] px-1">{agent.layout}</code>，
-                                仅更新显示名，文件路径不变（<code className="rounded bg-[var(--paper-inset)] px-1">{agent.folderName}</code>）
+                                {t('agentSettings.agentDetail.layoutHintPrefix')} <code className="rounded bg-[var(--paper-inset)] px-1">{agent.layout}</code>
+                                {t('agentSettings.agentDetail.layoutHintSuffix')} <code className="rounded bg-[var(--paper-inset)] px-1">{agent.folderName}</code>
+                                {t('agentSettings.agentDetail.layoutHintClosing')}
                             </p>
                         )}
                         {canRename && agentName.trim() && expectedFolderName !== name && (
                             <p className="mt-1 text-xs text-[var(--ink-muted)]">
-                                文件夹将重命名为: {expectedFolderName}
+                                {t('agentSettings.agentDetail.renameHint', { name: expectedFolderName })}
                             </p>
                         )}
                     </div>
 
                     {/* Description */}
                     <div>
-                        <label className="mb-1 block text-sm font-medium text-[var(--ink-muted)]">描述</label>
+                        <label className="mb-1 block text-sm font-medium text-[var(--ink-muted)]">{t('agentSettings.agentDetail.description')}</label>
                         <textarea
                             value={description}
                             onChange={e => setDescription(e.target.value)}
                             rows={2}
                             className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 text-sm text-[var(--ink)] focus:border-[var(--accent-warm)] focus:outline-none resize-none"
-                            placeholder="描述 Agent 的职责和使用场景（模型据此决定何时委派）"
+                            placeholder={t('agentSettings.agentDetail.descriptionPlaceholder')}
                         />
                     </div>
 
                     {/* Model - only show for Anthropic providers */}
                     {isAnthropicProvider && (
                         <div>
-                            <label className="mb-1 block text-sm font-medium text-[var(--ink-muted)]">模型</label>
+                            <label className="mb-1 block text-sm font-medium text-[var(--ink-muted)]">{t('agentSettings.basics.model')}</label>
                             <CustomSelect
                                 value={model}
                                 options={modelOptions}
                                 onChange={setModel}
-                                placeholder="继承主模型 (inherit)"
+                                placeholder={t('agentSettings.agentDetail.inheritModel')}
                             />
                         </div>
                     )}
 
                     {/* System Prompt */}
                     <div>
-                        <label className="mb-1 block text-sm font-medium text-[var(--ink-muted)]">系统提示词 (System Prompt)</label>
+                        <label className="mb-1 block text-sm font-medium text-[var(--ink-muted)]">{t('agentSettings.agentDetail.systemPrompt')}</label>
                         <div className="overflow-hidden rounded-lg border border-[var(--line)]" style={{ height: '300px' }}>
                             <MonacoEditor
                                 value={body}
@@ -709,7 +717,7 @@ const AgentDetailPanel = forwardRef<AgentDetailPanelRef, AgentDetailPanelProps>(
                             onClick={() => setShowAdvanced(!showAdvanced)}
                             className="flex w-full items-center justify-between text-sm font-medium text-[var(--ink-muted)] hover:text-[var(--ink)]"
                         >
-                            <span>高级设置</span>
+                            <span>{t('agentSettings.agentDetail.advancedSettings')}</span>
                             {showAdvanced ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
                         </button>
 
@@ -717,60 +725,60 @@ const AgentDetailPanel = forwardRef<AgentDetailPanelRef, AgentDetailPanelProps>(
                             <div className="mt-4 space-y-4">
                                 {/* Allowed Tools - Tag input */}
                                 <div>
-                                    <label className="mb-1 block text-sm font-medium text-[var(--ink-muted)]">允许的工具</label>
+                                    <label className="mb-1 block text-sm font-medium text-[var(--ink-muted)]">{t('agentSettings.agentDetail.allowedTools')}</label>
                                     <TagInput
                                         tags={toolsTags}
                                         onChange={setToolsTags}
                                         suggestions={COMMON_TOOLS}
-                                        placeholder="输入工具名或从列表选择"
-                                        emptyHint="留空则继承主 Agent 的所有工具"
+                                        placeholder={t('agentSettings.agentDetail.allowedToolsPlaceholder')}
+                                        emptyHint={t('agentSettings.agentDetail.allowedToolsEmpty')}
                                     />
                                 </div>
 
                                 {/* Disallowed Tools - Tag input */}
                                 <div>
-                                    <label className="mb-1 block text-sm font-medium text-[var(--ink-muted)]">禁用的工具</label>
+                                    <label className="mb-1 block text-sm font-medium text-[var(--ink-muted)]">{t('agentSettings.agentDetail.disallowedTools')}</label>
                                     <TagInput
                                         tags={disallowedToolsTags}
                                         onChange={setDisallowedToolsTags}
                                         suggestions={COMMON_TOOLS}
-                                        placeholder="输入要禁用的工具名"
-                                        emptyHint="留空则不禁用任何工具"
+                                        placeholder={t('agentSettings.agentDetail.disallowedToolsPlaceholder')}
+                                        emptyHint={t('agentSettings.agentDetail.disallowedToolsEmpty')}
                                     />
                                 </div>
 
                                 {/* Skills - Tag input with available skills suggestions */}
                                 <div>
-                                    <label className="mb-1 block text-sm font-medium text-[var(--ink-muted)]">预加载 Skills</label>
+                                    <label className="mb-1 block text-sm font-medium text-[var(--ink-muted)]">{t('agentSettings.agentDetail.preloadSkills')}</label>
                                     <TagInput
                                         tags={skillsTags}
                                         onChange={setSkillsTags}
                                         suggestions={availableSkills}
-                                        placeholder="输入 Skill 名称或从列表选择"
-                                        emptyHint="留空则不预加载 Skill。添加后 Skill 完整内容将注入 Agent 上下文"
+                                        placeholder={t('agentSettings.agentDetail.preloadSkillsPlaceholder')}
+                                        emptyHint={t('agentSettings.agentDetail.preloadSkillsEmpty')}
                                     />
                                 </div>
 
                                 {/* Permission Mode */}
                                 <div>
-                                    <label className="mb-1 block text-sm font-medium text-[var(--ink-muted)]">权限模式</label>
+                                    <label className="mb-1 block text-sm font-medium text-[var(--ink-muted)]">{t('agentSettings.agentDetail.permissionMode')}</label>
                                     <CustomSelect
                                         value={permissionMode}
                                         options={permissionModeOptions}
                                         onChange={setPermissionMode}
-                                        placeholder="默认"
+                                        placeholder={t('agentSettings.agentDetail.defaultPermission')}
                                     />
                                 </div>
 
                                 {/* Max Turns */}
                                 <div>
-                                    <label className="mb-1 block text-sm font-medium text-[var(--ink-muted)]">最大轮数</label>
+                                    <label className="mb-1 block text-sm font-medium text-[var(--ink-muted)]">{t('agentSettings.agentDetail.maxTurns')}</label>
                                     <input
                                         type="number"
                                         value={maxTurns}
                                         onChange={e => setMaxTurns(e.target.value)}
                                         className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 text-sm text-[var(--ink)] focus:border-[var(--accent-warm)] focus:outline-none"
-                                        placeholder="留空使用默认值"
+                                        placeholder={t('agentSettings.agentDetail.maxTurnsPlaceholder')}
                                         min={1}
                                     />
                                 </div>
@@ -781,12 +789,12 @@ const AgentDetailPanel = forwardRef<AgentDetailPanelRef, AgentDetailPanelProps>(
 
                 {showDeleteConfirm && (
                     <ConfirmDialog
-                        title="删除 Agent"
+                        title={t('agentSettings.agentDetail.deleteTitle')}
                         message={scope === 'user'
-                            ? `确定要删除 "${agentName}" 吗？引用此 Agent 的项目将受到影响，此操作不可恢复。`
-                            : `确定要删除 "${agentName}" 吗？此操作不可恢复。`}
-                        confirmText="删除"
-                        cancelText="取消"
+                            ? t('agentSettings.agentDetail.deleteUserMessage', { name: agentName })
+                            : t('agentSettings.agentDetail.deleteProjectMessage', { name: agentName })}
+                        confirmText={t('agentSettings.common.delete')}
+                        cancelText={t('agentSettings.common.cancel')}
                         confirmVariant="danger"
                         onConfirm={handleDelete}
                         onCancel={() => setShowDeleteConfirm(false)}

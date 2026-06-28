@@ -10,6 +10,10 @@ import {
   type ProviderHistoryEnv,
   type ProviderHistoryPolicy,
 } from '../../shared/providerHistory';
+import {
+  canReuseSessionAcrossProviderExecutionBoundary,
+  type ProviderExecutionIntent,
+} from '../../shared/providerExecution';
 import type { ProviderVerifyStatus } from '../../shared/config-types';
 import {
   isConcreteProviderRoute,
@@ -191,11 +195,23 @@ export function resolveLegacyBuiltinSnapshotProviderId(args: {
  * mechanism; when the current boundary is unknown, do not invent a boundary.
  */
 export function canResumeProviderHistoryForSwitch(args: {
+  currentIntent?: ProviderExecutionIntent;
+  nextIntent?: ProviderExecutionIntent;
   currentProviderEnv?: ProviderHistoryEnv;
   nextProviderEnv?: ProviderHistoryEnv;
   legacyCurrentProviderUnknown: boolean;
   policy?: ProviderHistoryPolicy;
 }): boolean {
+  if (args.currentIntent || args.nextIntent) {
+    return canReuseSessionAcrossProviderExecutionBoundary({
+      currentIntent: args.currentIntent,
+      nextIntent: args.nextIntent,
+      currentProviderEnv: args.currentProviderEnv,
+      nextProviderEnv: args.nextProviderEnv,
+      legacyCurrentProviderUnknown: args.legacyCurrentProviderUnknown,
+      policy: args.policy,
+    });
+  }
   if (args.legacyCurrentProviderUnknown && !args.currentProviderEnv) {
     return true;
   }
@@ -276,6 +292,22 @@ export function isPinnedProviderUnavailable(args: {
   if (!args.providersLoaded) return false;
   if (!args.selectedProviderId) return false;
   return args.resolvedProviderId !== args.selectedProviderId;
+}
+
+/**
+ * Labs `multiAgentRuntime` only gates user-managed CLI runtimes. Managed Codex
+ * Provider sessions are provider-owned and carry `runtimeSource=managed-provider`;
+ * they must remain sendable when Labs is off.
+ */
+export function shouldBlockSendForLabsDisabledExternalRuntime(args: {
+  sessionRuntime: string | null;
+  sessionRuntimeSource: string | undefined;
+  multiAgentRuntimeEnabled: boolean;
+}): boolean {
+  return args.sessionRuntime !== null
+    && args.sessionRuntime !== 'builtin'
+    && args.sessionRuntimeSource !== 'managed-provider'
+    && !args.multiAgentRuntimeEnabled;
 }
 
 /**

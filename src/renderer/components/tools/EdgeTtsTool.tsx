@@ -1,4 +1,5 @@
 import type { ToolUseSimple } from '@/types/chat';
+import { useTranslation } from 'react-i18next';
 import { CollapsibleTool } from './CollapsibleTool';
 import { ToolHeader } from './utils';
 import AudioPlayerBar from './AudioPlayerBar';
@@ -9,11 +10,12 @@ interface EdgeTtsToolProps {
 }
 
 export default function EdgeTtsTool({ tool }: EdgeTtsToolProps) {
+  const { t } = useTranslation('chat');
   // PRD 0.2.31 — shared single-source parser (server + this card use the same one).
   const parsed = parseEdgeTtsResult(tool.result);
 
   const isListVoices = tool.name.includes('list_voices');
-  const toolLabel = isListVoices ? '查询语音' : '语音合成';
+  const toolLabel = isListVoices ? t('shell.toolChrome.labels.listVoices') : t('shell.toolChrome.labels.textToSpeech');
   const isGenerating = !tool.result;
 
   // PRD 0.2.30 — when the audio is surfaced via the first-class attachment
@@ -27,7 +29,7 @@ export default function EdgeTtsTool({ tool }: EdgeTtsToolProps) {
       <ToolHeader tool={tool} toolName={tool.name} label={toolLabel} />
       {isGenerating && (
         <span className="text-xs text-[var(--ink-muted)] animate-pulse">
-          {isListVoices ? '查询中...' : '生成中...'}
+          {isListVoices ? t('shell.toolChrome.tts.querying') : t('shell.toolChrome.tts.generating')}
         </span>
       )}
       {parsed.voice && (
@@ -88,13 +90,13 @@ export default function EdgeTtsTool({ tool }: EdgeTtsToolProps) {
       {/* Metadata */}
       {parsed.filePath && !parsed.error && (
         <div className="text-xs text-[var(--ink-muted)] space-y-0.5 mt-1">
-          {parsed.voice && <div>语音: {parsed.voice}</div>}
-          {parsed.duration && <div>时长: {parsed.duration}</div>}
-          {parsed.format && parsed.size && <div>格式: {parsed.format} | 大小: {parsed.size}</div>}
-          {parsed.rate && parsed.rate !== '0%' && <div>语速: {parsed.rate}</div>}
-          {parsed.volume && parsed.volume !== '0%' && <div>音量: {parsed.volume}</div>}
-          {parsed.pitch && parsed.pitch !== '+0Hz' && <div>音调: {parsed.pitch}</div>}
-          <div className="font-mono opacity-60 break-all">文件: {parsed.filePath}</div>
+          {parsed.voice && <div>{t('shell.toolChrome.tts.voice')}: {parsed.voice}</div>}
+          {parsed.duration && <div>{t('shell.toolChrome.tts.duration')}: {parsed.duration}</div>}
+          {parsed.format && parsed.size && <div>{t('shell.toolChrome.tts.format')}: {parsed.format} | {t('shell.toolChrome.tts.size')}: {parsed.size}</div>}
+          {parsed.rate && parsed.rate !== '0%' && <div>{t('shell.toolChrome.tts.rate')}: {parsed.rate}</div>}
+          {parsed.volume && parsed.volume !== '0%' && <div>{t('shell.toolChrome.tts.volume')}: {parsed.volume}</div>}
+          {parsed.pitch && parsed.pitch !== '+0Hz' && <div>{t('shell.toolChrome.tts.pitch')}: {parsed.pitch}</div>}
+          <div className="font-mono opacity-60 break-all">{t('shell.toolChrome.tts.file')}: {parsed.filePath}</div>
         </div>
       )}
 

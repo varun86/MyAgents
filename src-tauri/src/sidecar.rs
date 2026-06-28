@@ -82,18 +82,22 @@ pub use proxy::cmd_propagate_proxy;
 #[allow(unused_imports)]
 pub use runtime_identity::cmd_can_restore_session;
 pub use runtime_identity::resolve_session_runtime_identity;
+#[cfg(test)]
+use runtime_identity::resolve_session_runtime_identity_from_json;
 #[allow(unused_imports)]
 use runtime_identity::{
-    resolve_agent_runtime_from_config, resolve_session_runtime,
-    resolve_session_runtime_identity_from_json, validate_sidecar_runtime_invariant,
+    resolve_agent_runtime_from_config, resolve_agent_runtime_identity_from_config,
+    resolve_session_runtime_identity_full, resolve_session_runtime_identity_full_from_json,
+    validate_sidecar_runtime_invariant, RuntimeIdentity,
 };
 #[allow(unused_imports)]
 pub use session_lifecycle::{
     cmd_ensure_session_sidecar, cmd_get_session_generation, cmd_get_session_port,
     cmd_has_session_sidecar, cmd_release_session_sidecar, cmd_session_has_persistent_owners,
-    cmd_upgrade_session_id, ensure_session_sidecar, ensure_session_sidecar_with_runtime_override,
-    get_session_generation, get_session_sidecar_port, has_session_sidecar, release_session_sidecar,
-    EnsureSidecarResult,
+    cmd_upgrade_session_id, ensure_session_sidecar,
+    ensure_session_sidecar_with_runtime_identity_override,
+    ensure_session_sidecar_with_runtime_override, get_session_generation, get_session_sidecar_port,
+    has_session_sidecar, release_session_sidecar, EnsureSidecarResult,
 };
 pub use shutdown::{shutdown_for_update, stop_all_sidecars};
 pub use spawn::find_node_executable_pub;
@@ -106,8 +110,9 @@ pub(crate) use stdio::{classify_sidecar_stderr, SidecarStderrLevel};
 #[allow(unused_imports)]
 pub use types::SidecarInfo;
 use types::{
-    decide_runtime_drift_result, normalize_runtime_name, owner_prefers_live_agent_runtime,
-    resolve_runtime_for_owner, sidecar_removal_event_policy, ExistingSidecarReuse,
+    decide_runtime_identity_drift_result, normalize_runtime_name, normalize_runtime_source_name,
+    owner_prefers_live_agent_runtime, resolve_runtime_for_owner, sidecar_removal_event_policy,
+    ExistingSidecarReuse,
 };
 pub use types::{
     RuntimeDriftResult, SessionActivation, SessionSidecar, SidecarInstance, SidecarOwner,

@@ -1,5 +1,7 @@
 // Agent basics: name, icon, provider+model, permission, enable/disable
 import { useState, useCallback, useEffect, useRef } from 'react';
+import type { TFunction } from 'i18next';
+import { useTranslation } from 'react-i18next';
 import { useConfig } from '@/hooks/useConfig';
 import { isProviderAvailable } from '@/config/services/providerService';
 import type { AgentConfig } from '../../../../shared/types/agent';
@@ -12,7 +14,14 @@ interface AgentBasicsSectionProps {
   onAgentChanged: () => void;
 }
 
+function permissionLabel(mode: string | undefined, t: TFunction<'settings'>): string {
+  if (mode === 'fullAgency') return `🚀 ${t('agentSettings.permission.fullAgency')}`;
+  if (mode === 'auto') return `⚡ ${t('agentSettings.permission.auto')}`;
+  return `📋 ${t('agentSettings.permission.plan')}`;
+}
+
 export default function AgentBasicsSection({ agent, status, onAgentChanged }: AgentBasicsSectionProps) {
+  const { t } = useTranslation('settings');
   const { providers, apiKeys, providerVerifyStatus } = useConfig();
   const [name, setName] = useState(agent.name);
   const [saving, setSaving] = useState(false);
@@ -50,7 +59,7 @@ export default function AgentBasicsSection({ agent, status, onAgentChanged }: Ag
   }, [agent.enabled, saveField]);
 
   const selectedProvider = providers.find(p => p.id === agent.providerId);
-  const modelDisplay = agent.model || selectedProvider?.primaryModel || '未设置';
+  const modelDisplay = agent.model || selectedProvider?.primaryModel || t('agentSettings.basics.notSet');
   // Summary is read-only (no picker here) so we show the persisted value
   // as-is, but annotate when credentials are missing so the user isn't
   // surprised by a runtime failure. Same treatment as WorkspaceBasicsSection.
@@ -62,11 +71,11 @@ export default function AgentBasicsSection({ agent, status, onAgentChanged }: Ag
 
   return (
     <div className="space-y-4">
-      <h3 className="text-sm font-semibold text-[var(--ink)]">基础信息</h3>
+      <h3 className="text-sm font-semibold text-[var(--ink)]">{t('agentSettings.basics.basicInfo')}</h3>
 
       {/* Name */}
       <div className="flex items-center gap-3">
-        <label className="w-20 shrink-0 text-xs text-[var(--ink-muted)]">名称</label>
+        <label className="w-20 shrink-0 text-xs text-[var(--ink-muted)]">{t('agentSettings.basics.name')}</label>
         <input
           className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-1.5 text-sm text-[var(--ink)] placeholder:text-[var(--ink-subtle)] focus:border-[var(--accent)] focus:outline-none"
           value={name}
@@ -78,15 +87,15 @@ export default function AgentBasicsSection({ agent, status, onAgentChanged }: Ag
 
       {/* Provider + Model (read-only summary) */}
       <div className="flex items-center gap-3">
-        <label className="w-20 shrink-0 text-xs text-[var(--ink-muted)]">模型</label>
+        <label className="w-20 shrink-0 text-xs text-[var(--ink-muted)]">{t('agentSettings.basics.model')}</label>
         <span className="flex items-center gap-2 text-sm text-[var(--ink)]">
-          <span>{selectedProvider?.name ?? '默认'} / {modelDisplay}</span>
+          <span>{selectedProvider?.name ?? t('agentSettings.basics.defaultProvider')} / {modelDisplay}</span>
           {!isSelectedProviderAvailable && selectedProvider && (
             <span
               className="rounded px-1.5 py-0.5 text-xs font-medium text-[var(--warning)]"
-              title="该供应商未配置 API Key / 订阅登录"
+              title={t('agentSettings.basics.providerUnavailableHint')}
             >
-              ⚠ 暂不可用
+              ⚠ {t('agentSettings.basics.unavailable')}
             </span>
           )}
         </span>
@@ -94,16 +103,15 @@ export default function AgentBasicsSection({ agent, status, onAgentChanged }: Ag
 
       {/* Permission Mode */}
       <div className="flex items-center gap-3">
-        <label className="w-20 shrink-0 text-xs text-[var(--ink-muted)]">权限</label>
+        <label className="w-20 shrink-0 text-xs text-[var(--ink-muted)]">{t('agentSettings.basics.permission')}</label>
         <span className="text-sm text-[var(--ink)]">
-          {agent.permissionMode === 'fullAgency' ? '🚀 自主行动' :
-           agent.permissionMode === 'auto' ? '⚡ 行动' : '📋 规划'}
+          {permissionLabel(agent.permissionMode, t)}
         </span>
       </div>
 
       {/* Enable/Disable */}
       <div className="flex items-center gap-3">
-        <label className="w-20 shrink-0 text-xs text-[var(--ink-muted)]">状态</label>
+        <label className="w-20 shrink-0 text-xs text-[var(--ink-muted)]">{t('agentSettings.basics.status')}</label>
         <button
           className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent transition-colors focus:outline-none ${
             agent.enabled ? 'bg-[var(--accent)]' : 'bg-[var(--line-strong)]'
@@ -118,11 +126,11 @@ export default function AgentBasicsSection({ agent, status, onAgentChanged }: Ag
           />
         </button>
         <span className="text-xs text-[var(--ink-muted)]">
-          {agent.enabled ? '已启用' : '已禁用'}
+          {agent.enabled ? t('agentSettings.basics.enabled') : t('agentSettings.basics.disabled')}
         </span>
         {hasRunningChannels && (
           <span className="text-xs text-[var(--ink-subtle)]">
-            有运行中的 Channel，请先停止
+            {t('agentSettings.basics.runningChannelsHint')}
           </span>
         )}
       </div>

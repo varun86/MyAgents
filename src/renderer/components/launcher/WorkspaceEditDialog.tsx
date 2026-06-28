@@ -4,6 +4,7 @@
  */
 
 import { memo, useCallback, useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import type { Project } from '@/config/types';
 import { getFolderName } from '@/types/tab';
 import { ALL_WORKSPACE_ICON_IDS, DEFAULT_WORKSPACE_ICON } from '@/assets/workspace-icons';
@@ -22,6 +23,7 @@ export default memo(function WorkspaceEditDialog({
     onSave,
     onClose,
 }: WorkspaceEditDialogProps) {
+    const { t } = useTranslation('launcher');
     useCloseLayer(() => { onClose(); return true; }, 200);
 
     // Escape to close
@@ -53,11 +55,11 @@ export default memo(function WorkspaceEditDialog({
     return (
         <OverlayBackdrop onClose={onClose} className="z-[200]">
             <div className="w-[420px] rounded-2xl bg-[var(--paper-elevated)] p-6 shadow-lg">
-                <h3 className="mb-5 text-lg font-semibold text-[var(--ink)]">编辑工作区</h3>
+                <h3 className="mb-5 text-lg font-semibold text-[var(--ink)]">{t('workspaceEdit.title')}</h3>
 
                 {/* Icon selector — flat grid, same size as workspace cards */}
                 <div className="mb-4">
-                    <label className="mb-2 block text-sm font-medium text-[var(--ink)]">图标</label>
+                    <label className="mb-2 block text-sm font-medium text-[var(--ink)]">{t('workspaceEdit.icon')}</label>
                     <div className="max-h-[260px] overflow-y-auto overscroll-contain rounded-xl border border-[var(--line)] p-2">
                         <div className="flex flex-wrap gap-1.5">
                             {/* Default icon */}
@@ -69,7 +71,7 @@ export default memo(function WorkspaceEditDialog({
                                         ? 'bg-[var(--accent-warm-muted)] ring-1 ring-[var(--accent-warm)]'
                                         : 'hover:bg-[var(--hover-bg)]'
                                 }`}
-                                title="默认图标"
+                                title={t('workspaceEdit.defaultIcon')}
                             >
                                 <WorkspaceIcon icon={DEFAULT_WORKSPACE_ICON} size={26} />
                             </button>
@@ -95,13 +97,13 @@ export default memo(function WorkspaceEditDialog({
 
                 {/* Name input */}
                 <div className="mb-6">
-                    <label className="mb-2 block text-sm font-medium text-[var(--ink)]">名称</label>
+                    <label className="mb-2 block text-sm font-medium text-[var(--ink)]">{t('workspaceEdit.name')}</label>
                     <input
                         type="text"
                         value={name}
                         onChange={(e) => setName(e.target.value)}
                         className="w-full rounded-[6px] border border-[var(--line)] bg-transparent px-3 py-2.5 text-sm text-[var(--ink)] placeholder:text-[var(--ink-muted)] focus:border-[var(--focus-border)] focus:outline-none transition-colors"
-                        placeholder="工作区名称"
+                        placeholder={t('workspaceEdit.namePlaceholder')}
                         autoFocus
                         onKeyDown={(e) => { if (e.key === 'Enter' && name.trim()) void handleSave(); }}
                     />
@@ -114,7 +116,7 @@ export default memo(function WorkspaceEditDialog({
                         onClick={onClose}
                         className="rounded-lg bg-[var(--button-secondary-bg)] px-4 py-2 text-sm font-medium text-[var(--button-secondary-text)] transition-colors hover:bg-[var(--button-secondary-bg-hover)]"
                     >
-                        取消
+                        {t('workspaceEdit.cancel')}
                     </button>
                     <button
                         type="button"
@@ -122,7 +124,7 @@ export default memo(function WorkspaceEditDialog({
                         disabled={!name.trim() || saving}
                         className="rounded-lg bg-[var(--button-primary-bg)] px-4 py-2 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:opacity-50"
                     >
-                        {saving ? '保存中...' : '保存'}
+                        {saving ? t('workspaceEdit.saving') : t('workspaceEdit.save')}
                     </button>
                 </div>
             </div>

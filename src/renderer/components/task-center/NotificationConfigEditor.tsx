@@ -16,6 +16,7 @@ import { useDeliveryChannels } from '@/hooks/useDeliveryChannels';
 import CustomSelect from '@/components/CustomSelect';
 import type { NotificationConfig } from '@/../shared/types/task';
 import { Toggle } from './editors/PanelChrome';
+import { useTranslation } from 'react-i18next';
 
 const DEFAULT_EVENTS: NonNullable<NotificationConfig['events']> = [
   'done',
@@ -33,6 +34,7 @@ interface Props {
 }
 
 export function NotificationConfigEditor({ value, onChange, workspacePath }: Props) {
+  const { t } = useTranslation('task');
   const { options, hasChannels } = useDeliveryChannels(workspacePath);
 
   const current: NotificationConfig = {
@@ -50,15 +52,15 @@ export function NotificationConfigEditor({ value, onChange, workspacePath }: Pro
           "settings switch" aesthetic. */}
       <div className="flex items-center justify-between rounded-[var(--radius-lg)] border border-[var(--line)] bg-[var(--paper)] px-4 py-3">
         <div className="min-w-0 pr-3">
-          <div className="text-sm text-[var(--ink)]">桌面通知</div>
+          <div className="text-sm text-[var(--ink)]">{t('notifications.desktopTitle')}</div>
           <div className="mt-0.5 text-xs text-[var(--ink-muted)]">
-            任务状态变化时弹出系统通知
+            {t('notifications.desktopDescription')}
           </div>
         </div>
         <Toggle
           checked={current.desktop}
           onChange={(v) => patch({ desktop: v })}
-          ariaLabel="桌面通知开关"
+          ariaLabel={t('notifications.desktopAria')}
         />
       </div>
 
@@ -66,9 +68,9 @@ export function NotificationConfigEditor({ value, onChange, workspacePath }: Pro
           a quiet hint so the user knows where to wire one up. */}
       <div>
         <label className="mb-1.5 block text-sm font-medium text-[var(--ink-secondary)]">
-          投递到 IM Bot
+          {t('notifications.imBot')}
           <span className="ml-1 text-xs font-normal text-[var(--ink-muted)]/80">
-            （可选）
+            {t('notifications.optional')}
           </span>
         </label>
         {hasChannels ? (
@@ -76,12 +78,12 @@ export function NotificationConfigEditor({ value, onChange, workspacePath }: Pro
             value={current.botChannelId ?? ''}
             options={options}
             onChange={(v) => patch({ botChannelId: v || undefined })}
-            placeholder="桌面通知（默认）"
+            placeholder={t('notifications.desktopDefault')}
             size="md"
           />
         ) : (
           <div className="rounded-[var(--radius-md)] border border-dashed border-[var(--line)] bg-[var(--paper)] px-3 py-2 text-xs text-[var(--ink-muted)]">
-            该工作区还没有可用的 IM 频道。仅发送桌面通知。
+            {t('notifications.noChannels')}
           </div>
         )}
       </div>

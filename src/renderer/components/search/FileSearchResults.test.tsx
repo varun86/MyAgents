@@ -1,8 +1,9 @@
 import { fireEvent, render, screen } from '@testing-library/react';
 import type { ComponentProps } from 'react';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { FileSearchHit } from '@/api/searchClient';
+import { i18n } from '@/i18n';
 import FileSearchResults from './FileSearchResults';
 
 const hit: FileSearchHit = {
@@ -43,6 +44,10 @@ function renderResults(overrides: Partial<ComponentProps<typeof FileSearchResult
 }
 
 describe('FileSearchResults', () => {
+    beforeEach(async () => {
+        await i18n.changeLanguage('zh-CN');
+    });
+
     it('keeps expand/collapse separate from file preview', () => {
         const props = renderResults();
 

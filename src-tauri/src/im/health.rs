@@ -8,6 +8,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::time::{interval, Duration};
 
+use super::router::SessionRouter;
 use super::types::{ImActiveSession, ImHealthState, ImStatus};
 use crate::utils::bom::strip_bom;
 use crate::{ulog_info, ulog_warn};
@@ -19,6 +20,8 @@ const PERSIST_INTERVAL_SECS: u64 = 5;
 pub struct HealthManager {
     state: Arc<Mutex<ImHealthState>>,
     persist_path: PathBuf,
+    active_sessions_projection: Arc<Mutex<()>>,
+    persist_write: Arc<Mutex<()>>,
 }
 
 impl HealthManager {
@@ -36,6 +39,8 @@ impl HealthManager {
         Self {
             state: Arc::new(Mutex::new(state)),
             persist_path,
+            active_sessions_projection: Arc::new(Mutex::new(())),
+            persist_write: Arc::new(Mutex::new(())),
         }
     }
 
@@ -106,6 +111,7 @@ impl HealthManager {
 
     /// Persist current state to disk
     pub async fn persist(&self) -> Result<(), String> {
+        let _write_guard = self.persist_write.lock().await;
         let mut state = self.state.lock().await;
         state.last_persisted = chrono::Utc::now().to_rfc3339();
 
@@ -124,6 +130,27 @@ impl HealthManager {
         Ok(())
     }
 
+    async fn persist_active_sessions(&self, sessions: Vec<ImActiveSession>) -> Result<(), String> {
+        let _write_guard = self.persist_write.lock().await;
+        let mut state = self.state.lock().await;
+        state.active_sessions = sessions;
+        state.last_persisted = chrono::Utc::now().to_rfc3339();
+
+        let json =
+            serde_json::to_string_pretty(&*state).map_err(|e| format!("Serialize error: {}", e))?;
+        drop(state);
+
+        if let Some(parent) = self.persist_path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create health dir: {}", e))?;
+        }
+
+        std::fs::write(&self.persist_path, json)
+            .map_err(|e| format!("Failed to write health state: {}", e))?;
+
+        Ok(())
+    }
+
     /// Start periodic persistence task (runs until shutdown)
     pub fn start_persist_loop(
         &self,
@@ -131,6 +158,7 @@ impl HealthManager {
     ) -> tauri::async_runtime::JoinHandle<()> {
         let state = Arc::clone(&self.state);
         let persist_path = self.persist_path.clone();
+        let persist_write = Arc::clone(&self.persist_write);
 
         tauri::async_runtime::spawn(async move {
             let mut tick = interval(Duration::from_secs(PERSIST_INTERVAL_SECS));
@@ -138,6 +166,7 @@ impl HealthManager {
             loop {
                 tokio::select! {
                     _ = tick.tick() => {
+                        let _write_guard = persist_write.lock().await;
                         let mut s = state.lock().await;
                         s.last_persisted = chrono::Utc::now().to_rfc3339();
                         let json = serde_json::to_string_pretty(&*s).unwrap_or_default();
@@ -159,6 +188,53 @@ impl HealthManager {
                 }
             }
         })
+    }
+}
+
+fn summarize_active_sessions(sessions: &[ImActiveSession]) -> String {
+    sessions
+        .iter()
+        .take(4)
+        .map(|session| {
+            let short_session_id: String = session.session_id.chars().take(8).collect();
+            format!(
+                "{}:{}",
+                session.session_key,
+                if short_session_id.is_empty() {
+                    "<empty>"
+                } else {
+                    short_session_id.as_str()
+                }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+pub(crate) async fn persist_router_active_sessions(
+    health: &Arc<HealthManager>,
+    router: &Arc<Mutex<SessionRouter>>,
+    context: &str,
+) -> Result<(), String> {
+    let _projection_guard = health.active_sessions_projection.lock().await;
+    let sessions = {
+        let router_guard = router.lock().await;
+        router_guard.active_sessions()
+    };
+    let count = sessions.len();
+    let summary = summarize_active_sessions(&sessions);
+    match health.persist_active_sessions(sessions).await {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            ulog_warn!(
+                "[im-health] persist active sessions failed context={} count={} sessions=[{}]: {}",
+                context,
+                count,
+                summary,
+                e
+            );
+            Err(e)
+        }
     }
 }
 
@@ -573,4 +649,67 @@ fn extract_bot_id_from_flat_filename(name: &str) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::router::SessionRouter;
+    use super::super::types::{ImSourceType, PeerSession};
+    use super::*;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::time::Instant;
+    use tokio::sync::Mutex;
+
+    fn peer(session_key: &str, session_id: &str) -> PeerSession {
+        PeerSession {
+            session_key: session_key.to_string(),
+            session_id: session_id.to_string(),
+            sidecar_port: 0,
+            workspace_path: PathBuf::from("/tmp/workspace"),
+            source_type: ImSourceType::Private,
+            source_id: session_key.to_string(),
+            source_display_name: None,
+            last_sender_name: None,
+            message_count: 0,
+            metadata_birth_pending: false,
+            last_active: Instant::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn router_active_session_projection_reads_current_router_state() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        let health = Arc::new(HealthManager::new(path.clone()));
+        let router = Arc::new(Mutex::new(SessionRouter::new(PathBuf::from(
+            "/tmp/workspace",
+        ))));
+
+        {
+            let mut router_guard = router.lock().await;
+            router_guard.upsert_peer_session(peer("agent:a:weixin:private:a", "session-a"));
+            let stale_snapshot = router_guard.active_sessions();
+            assert_eq!(stale_snapshot.len(), 1);
+            router_guard.upsert_peer_session(peer("agent:a:weixin:private:b", "session-b"));
+        }
+
+        persist_router_active_sessions(&health, &router, "test-current-router-state")
+            .await
+            .expect("persist active sessions");
+
+        let state = health.get_state().await;
+        let mut ids = state
+            .active_sessions
+            .iter()
+            .map(|session| session.session_id.as_str())
+            .collect::<Vec<_>>();
+        ids.sort_unstable();
+        assert_eq!(ids, vec!["session-a", "session-b"]);
+
+        let disk_state: ImHealthState =
+            serde_json::from_str(&std::fs::read_to_string(path).expect("state file"))
+                .expect("state json");
+        assert_eq!(disk_state.active_sessions.len(), 2);
+    }
 }

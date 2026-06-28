@@ -361,11 +361,13 @@ async fn remove_mcp_references_handler(
             task_updated,
             cron_updated,
         })
-        .unwrap_or_else(|_| serde_json::json!({
-            "ok": true,
-            "taskUpdated": task_updated,
-            "cronUpdated": cron_updated,
-        })),
+        .unwrap_or_else(|_| {
+            serde_json::json!({
+                "ok": true,
+                "taskUpdated": task_updated,
+                "cronUpdated": cron_updated,
+            })
+        }),
     )
 }
 

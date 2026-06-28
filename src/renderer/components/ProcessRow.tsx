@@ -1,6 +1,7 @@
 
 import { AlertCircle, Brain, ChevronDown, Image as ImageIcon, Loader2, XCircle, StopCircle, Copy, Check, Download } from 'lucide-react';
 import { memo, useEffect, useMemo, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 
 import { track } from '@/analytics';
 import Markdown from '@/components/Markdown';
@@ -51,6 +52,7 @@ const ProcessRow = memo(function ProcessRow({
     const copyTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
     const exportingRef = useRef(false);
     const toast = useToastOptional();
+    const { t } = useTranslation('chat');
 
     useEffect(() => () => { if (copyTimerRef.current) clearTimeout(copyTimerRef.current); }, []);
 
@@ -206,7 +208,7 @@ const ProcessRow = memo(function ProcessRow({
         exportingRef.current = true;
         try {
             track('thinking_export', {});
-            const fileName = `${localDateStr()}_思考过程.md`;
+            const fileName = `${localDateStr()}_${t('shell.toolChrome.thinking.exportFilename')}.md`;
             toast?.success(await downloadMarkdown(fileName, buildThinkingMarkdown(block.thinking)));
         } finally {
             exportingRef.current = false;
@@ -222,29 +224,35 @@ const ProcessRow = memo(function ProcessRow({
     // already wrapped in React.memo so we only render when `block` changes, and the
     // React Compiler handles further optimization. Manual useMemo with granular deps
     // would defeat compiler auto-memoization.
-    const summaryNode = isTool && block.tool ? getToolSummaryNode(block.tool) : null;
+    const summaryNode = isTool && block.tool ? getToolSummaryNode(block.tool, t) : null;
 
     if (isThinking) {
         const durationSec = block.thinkingDurationMs ? Math.floor(block.thinkingDurationMs / 1000) : 0;
         if (isThinkingActive) {
             const elapsedSec = thinkingElapsed > 0 ? Math.floor(thinkingElapsed / 1000) : 0;
-            mainLabel = elapsedSec > 0 ? `思考中… (${elapsedSec}s)` : '思考中…';
+            mainLabel = elapsedSec > 0 ?
+                t('shell.toolChrome.thinking.activeWithSeconds', { seconds: elapsedSec })
+                : t('shell.toolChrome.thinking.active');
             icon = <Loader2 className="size-4 animate-spin" />;
         } else if (block.isFailed) {
-            mainLabel = durationSec > 0 ? `思考失败 (${durationSec}s)` : '思考失败';
+            mainLabel = durationSec > 0 ?
+                t('shell.toolChrome.thinking.failedWithSeconds', { seconds: durationSec })
+                : t('shell.toolChrome.thinking.failed');
             icon = <XCircle className="size-4 text-[var(--error)]" />;
         } else if (block.isStopped) {
-            mainLabel = durationSec > 0 ? `思考中断 (${durationSec}s)` : '思考中断';
+            mainLabel = durationSec > 0 ?
+                t('shell.toolChrome.thinking.stoppedWithSeconds', { seconds: durationSec })
+                : t('shell.toolChrome.thinking.stopped');
             icon = <StopCircle className="size-4 text-[var(--warning)]" />;
         } else {
-            mainLabel = `思考了 ${Math.max(durationSec, 1)}s`;
+            mainLabel = t('shell.toolChrome.thinking.completedWithSeconds', { seconds: Math.max(durationSec, 1) });
             icon = <Brain className="size-4" />;
         }
     } else if (isTool && block.tool) {
         const config = getToolBadgeConfig(block.tool.name);
-        const toolLabel = getToolLabel(block.tool);
+        const toolLabel = getToolLabel(block.tool, t);
 
-        mainLabel = getToolMainLabel(block.tool);
+        mainLabel = getToolMainLabel(block.tool, t);
         subLabel = toolLabel !== mainLabel ? toolLabel : '';
 
         if (isToolActive || isTaskRunning) {
@@ -315,7 +323,7 @@ const ProcessRow = memo(function ProcessRow({
                     {/* Background task badge */}
                     {isTaskTool && (block.tool?.parsedInput as unknown as Record<string, unknown>)?.run_in_background === true && (
                         <span className="rounded-full bg-[var(--accent)]/10 px-1.5 py-0.5 text-xs font-medium text-[var(--accent)]">
-                            后台
+                            {t('shell.toolChrome.common.background')}
                         </span>
                     )}
                     {/* Task duration - similar to thinking duration */}
@@ -366,17 +374,17 @@ const ProcessRow = memo(function ProcessRow({
                                         <Markdown compact>{block.thinking}</Markdown>
                                         {!isThinkingActive && (
                                             <div className="mt-2 flex select-none items-center gap-2 opacity-0 transition-opacity duration-150 group-hover/think:opacity-100 focus-within:opacity-100">
-                                                <Tip label={thinkingCopied ? '已复制' : '复制'}>
+                                                <Tip label={thinkingCopied ? t('shell.toolChrome.common.copied') : t('shell.toolChrome.common.copy')}>
                                                     <button type="button"
-                                                        aria-label="复制思考过程"
+                                                        aria-label={t('shell.toolChrome.thinking.copyAria')}
                                                         onClick={handleCopyThinking}
                                                         className="rounded-lg p-1 text-[var(--ink-muted)] transition-all hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]">
                                                         {thinkingCopied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
                                                     </button>
                                                 </Tip>
-                                                <Tip label="导出 markdown">
+                                                <Tip label={t('shell.toolChrome.common.exportMarkdown')}>
                                                     <button type="button"
-                                                        aria-label="导出思考过程为 markdown"
+                                                        aria-label={t('shell.toolChrome.thinking.exportAria')}
                                                         onClick={handleExportThinking}
                                                         className="rounded-lg p-1 text-[var(--ink-muted)] transition-all hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]">
                                                         <Download className="size-3.5" />

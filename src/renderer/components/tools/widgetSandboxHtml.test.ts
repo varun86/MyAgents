@@ -26,7 +26,21 @@ describe('widget sandbox failure handling', () => {
 
   it('renders a visible inline notice (not a silent blank)', () => {
     expect(html).toContain('data-widget-error');
-    expect(html).toContain('这个组件的脚本没能运行');
+    expect(html).toContain("This component's script could not run");
+  });
+
+  it('accepts a localized inline notice prefix', () => {
+    const localized = buildSandboxHtml(':root{}', {
+      scriptErrorPrefix: 'This component failed: ',
+    });
+
+    expect(localized).toContain('This component failed: ');
+    expect(localized).not.toContain("This component's script could not run");
+  });
+
+  it('can update the inline notice prefix without rebuilding the iframe srcdoc', () => {
+    expect(html).toContain('widgetScriptErrorPrefix');
+    expect(html).toContain("e.data.type === 'widget:i18n'");
   });
 
   it('wraps inline-script execution in try/catch so one bad script does not abort the chain', () => {

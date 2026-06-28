@@ -5,6 +5,7 @@
 
 import { memo } from 'react';
 import { Clock, BarChart2, Trash2 } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 import type { SessionSearchHit } from '@/api/searchClient';
 import type { SessionMetadata } from '@/api/sessionClient';
 import type { Project } from '@/config/types';
@@ -31,10 +32,13 @@ export default memo(function SessionSearchItem({
     onShowStats,
     onDelete,
 }: SessionSearchItemProps) {
+    const { t } = useTranslation('app');
     // If we don't have project info, fallback to showing just the agentDir
     const projectName = project ? getFolderName(project.path) : getFolderName(hit.agentDir);
     const displayLastActiveAt = session?.lastActiveAt ?? hit.lastActiveAt;
-    const msgCountStr = hit.messageCount !== null && hit.messageCount > 0 ? `${hit.messageCount}条` : '';
+    const msgCountStr = hit.messageCount !== null && hit.messageCount > 0
+        ? t('historyOverlay.messageCount', { count: hit.messageCount })
+        : '';
 
     return (
         <div
@@ -92,7 +96,7 @@ export default memo(function SessionSearchItem({
                     <div className="flex items-center gap-1 bg-[var(--paper-inset)] pl-1">
                         <button
                             onClick={onShowStats}
-                            title="查看统计"
+                            title={t('historyOverlay.viewStats')}
                             className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper)] hover:text-[var(--ink)]"
                         >
                             <BarChart2 className="h-3.5 w-3.5" />
@@ -100,7 +104,7 @@ export default memo(function SessionSearchItem({
                         {isCronProtected ? (
                             <button
                                 disabled
-                                title="请先停止定时任务后再删除"
+                                title={t('historyOverlay.deleteBlocked')}
                                 className="flex h-7 w-7 cursor-not-allowed items-center justify-center rounded-md text-[var(--ink-muted)] opacity-40"
                             >
                                 <Trash2 className="h-3.5 w-3.5" />
@@ -108,7 +112,7 @@ export default memo(function SessionSearchItem({
                         ) : (
                             <button
                                 onClick={onDelete}
-                                title="删除"
+                                title={t('historyOverlay.delete')}
                                 className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--ink-muted)] transition-colors hover:bg-[var(--error-bg)] hover:text-[var(--error)]"
                             >
                                 <Trash2 className="h-3.5 w-3.5" />

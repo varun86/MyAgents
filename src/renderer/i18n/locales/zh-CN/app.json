@@ -1,0 +1,587 @@
+{
+  "tabs": {
+    "allTabs": "所有标签页",
+    "openTabs": "打开的标签页",
+    "genericTab": "标签页",
+    "settings": "设置",
+    "taskCenter": "任务中心",
+    "team": "团队",
+    "launcher": "启动页",
+    "newTab": "新建标签页",
+    "closeTab": "关闭标签页",
+    "generating": "AI 正在输出",
+    "unread": "有未读消息",
+    "switchTo": "切换到 {{title}}"
+  },
+  "titlebar": {
+    "helper": "小助理",
+    "feedbackTitle": "帮助与反馈",
+    "helperDescription": "不会使用、反馈问题或提出建议，都可以找小助理。",
+    "communityTitle": "加入用户交流群",
+    "communityDescription": "扫码加入，与其他用户交流使用心得",
+    "communityQrAlt": "用户交流群二维码",
+    "team": "团队",
+    "task": "任务",
+    "taskCenterTitle": "任务中心 ({{shortcut}})",
+    "settings": "设置",
+    "settingsTitle": "设置 ({{shortcut}})",
+    "restorePrevious": "恢复上次对话",
+    "restoreTitle": "上次有 {{count}} 个对话未关闭，点击恢复",
+    "dismiss": "忽略",
+    "installingUpdate": "正在安装更新…",
+    "updateToVersion": "更新到 v{{version}}",
+    "restartAndUpdate": "重启并更新",
+    "installing": "安装中…",
+    "restartUpdate": "重启更新",
+    "minimize": "最小化",
+    "maximize": "最大化",
+    "restoreWindow": "还原",
+    "close": "关闭",
+    "teamLoading": "正在读取团队功能状态",
+    "teamBuildUnavailable": "当前构建未启用团队功能",
+    "teamUnavailable": "团队功能尚未开放"
+  },
+  "appChrome": {
+    "updateVerifyFailed": "无法验证更新（网络异常），请稍后重试",
+    "updateExpiredRedownloading": "已下载的更新已过期，正在重新下载新版本...",
+    "updateInstallFailed": "安装更新失败，请重试或前往设置页手动重新检查",
+    "backgroundCompletion": "AI 继续在后台完成任务",
+    "maxTabsReached": "已达到最大标签页数量，请关闭其他标签页后重试",
+    "maxTabsReachedWithCount": "已达标签页上限（{{count}} 个），请先关闭一个再开始 AI 讨论",
+    "codexSessionCreateFailed": "创建 Codex 会话失败",
+    "launchFailed": "启动失败：{{message}}",
+    "tabLimitReached": "标签页已达上限，请关闭一个后重试",
+    "noWorkspaceForDiscussion": "还没有工作区，无法开始 AI 讨论",
+    "noModelProviderForDiscussion": "未配置可用模型供应商，无法开始 AI 讨论",
+    "discussionTabTitle": "任务讨论",
+    "diagnosticsTabTitle": "问题诊断",
+    "exitAppTitle": "退出应用",
+    "exitRunningTasksMessage": "有 {{count}} 个循环任务正在运行中。退出后任务将被停止。确定要退出吗？",
+    "exit": "退出",
+    "cancel": "取消",
+    "newVersionTitle": "发现新版本",
+    "newVersionMessage": "最新版本 v{{version}} 已下载完成，是否立即安装？",
+    "install": "安装",
+    "later": "稍后"
+  },
+  "tabProvider": {
+    "compactSuccess": "上下文已压缩",
+    "compactFailed": "上下文压缩失败",
+    "sendFailed": "发送失败",
+    "networkError": "网络错误",
+    "networkDisconnected": "网络连接中断，请重试"
+  },
+  "floatingSession": {
+    "sidecarUnavailable": "sidecar 不可达",
+    "backendNotConfirmed": "后端未确认（请求可能已过期）",
+    "replyFailed": "回复出错了",
+    "agentErrorOpenMainWindow": "Agent 出错了，点 ↗ 去主窗口查看",
+    "sessionExpiredNewChat": "上一条会话已失效，已为你开启新对话",
+    "noWorkspace": "没有可用的工作区——请先在 MyAgents 中完成初始化",
+    "switchWorkspaceFailed": "切换工作区失败，请重试",
+    "newConversationFailed": "新建对话失败，请重试",
+    "engineNotReady": "AI 引擎尚未就绪，稍等片刻再试",
+    "confirmSendFailed": "确认发送失败，请重试",
+    "answerSendFailed": "回答发送失败，请重试",
+    "submitFailed": "提交失败，请重试"
+  },
+  "updater": {
+    "remoteVersionParseFailed": "无法解析远程版本信息"
+  },
+  "common": {
+    "loading": "加载中...",
+    "selectPlaceholder": "请选择"
+  },
+  "workspaceNameValidation": {
+    "empty": "名称不能为空",
+    "trim": "名称不能以空格开头或结尾",
+    "pathSeparators": "名称不能包含路径分隔符或 '..'",
+    "illegalChars": "名称包含非法字符 < > : \" | ? *",
+    "controlChars": "名称包含控制字符",
+    "dotsOnly": "名称不能只由点组成",
+    "windowsReserved": "'{{name}}' 是 Windows 保留文件名",
+    "duplicate": "已存在同名文件或文件夹"
+  },
+  "pathInput": {
+    "title": "确认项目路径",
+    "selectedFolder": "已选择文件夹:",
+    "fullPath": "完整路径",
+    "browserPathHint": "浏览器无法获取真实路径，请确认或手动修改上方路径",
+    "confirm": "确认添加"
+  },
+  "monacoEditor": {
+    "loading": "加载编辑器...",
+    "quote": "引用"
+  },
+  "blockGroup": {
+    "expandAll": "展开全部"
+  },
+  "agentStatus": {
+    "expand": "展开 Agent 状态面板",
+    "collapse": "收起 Agent 状态面板",
+    "background": "后台",
+    "backgroundTooltip": "[后台]"
+  },
+  "workspaceTree": {
+    "collapseFolder": "收起文件夹",
+    "emptyFolderHint": "空文件夹 — 拖入文件或右键新建"
+  },
+  "sessionTags": {
+    "cron": "定时",
+    "background": "后台",
+    "floatingBall": "桌面宠物"
+  },
+  "modalities": {
+    "image": "图片",
+    "video": "视频",
+    "audio": "音频"
+  },
+  "modalityBadges": {
+    "supportsInput": "支持{{modality}}输入"
+  },
+  "helperModelPicker": {
+    "noModelSelected": "未选择模型",
+    "configureModel": "请先配置模型 →"
+  },
+  "markdown": {
+    "imageLoadFailed": "图片加载失败: {{src}}",
+    "emptyImagePath": "图片路径为空"
+  },
+  "export": {
+    "downloadedPath": "已导出：{{path}}",
+    "downloadedDownloads": "已导出到下载目录：{{fileName}}"
+  },
+  "sessionExport": {
+    "empty": "该对话暂无内容可导出",
+    "failed": "导出失败，请重试"
+  },
+  "workspaceFile": {
+    "desktopOnly": "工作区文件操作仅在桌面应用中可用。当前为浏览器开发模式。",
+    "selectWorkspaceFirst": "请先选择工作区"
+  },
+  "browserPanel": {
+    "urlPlaceholder": "输入网址或搜索…",
+    "openFailed": "无法打开内嵌浏览器：{{message}}",
+    "back": "后退",
+    "forward": "前进",
+    "stop": "停止",
+    "reload": "刷新",
+    "editSource": "编辑源码",
+    "openExternal": "在浏览器中打开",
+    "close": "关闭浏览器",
+    "newTab": "新标签页",
+    "blankHint": "在上方地址栏输入网址或粘贴链接"
+  },
+  "imagePreview": {
+    "zoomOut": "缩小",
+    "zoomIn": "放大",
+    "rotate": "旋转",
+    "reset": "重置",
+    "closeEsc": "关闭 (Esc)",
+    "hint": "双击图片放大 · 按 Esc 关闭"
+  },
+  "errorBoundary": {
+    "title": "界面渲染出错",
+    "unknown": "发生了未知错误",
+    "reload": "重新加载"
+  },
+  "dropZone": {
+    "defaultMessage": "松手将文件加入工作区"
+  },
+  "richDoc": {
+    "tooLarge": "文件超过 50MB，暂不支持内联预览。",
+    "renderFailed": "无法渲染此文件。",
+    "readFailed": "无法读取此文件。",
+    "openDefault": "用默认程序打开",
+    "empty": "此文档没有内容",
+    "sheetParseFailed": "表格解析失败",
+    "sheetTruncated": "表格较大，已截断显示前 {{rows}} 行 × {{cols}} 列。完整内容请「用默认程序打开」。",
+    "resetZoom": "重置为 100%",
+    "wordRenderFailed": "Word 文档渲染失败",
+    "pdfRenderFailed": "PDF 渲染失败",
+    "pptRenderFailed": "演示文稿渲染失败"
+  },
+  "message": {
+    "turnDuration": "本轮耗时 {{duration}}",
+    "replyFileName": "{{date}}_回复.md",
+    "actions": {
+      "copy": "复制",
+      "copied": "已复制",
+      "exportMarkdown": "导出 markdown",
+      "retry": "重试",
+      "fork": "分支",
+      "rewind": "时间回溯"
+    },
+    "systemTags": {
+      "heartbeat": "心跳感知",
+      "cronTask": "定时任务",
+      "floatingContext": "悬浮上下文"
+    },
+    "taskStatus": {
+      "completed": "已完成",
+      "error": "出错",
+      "failed": "失败",
+      "stopped": "已停止"
+    },
+    "backgroundTask": "后台任务",
+    "systemInfo": "系统信息",
+    "expand": "展开"
+  },
+  "fileActions": {
+    "copy": "复制",
+    "copied": "已复制",
+    "copyFailed": "复制失败",
+    "reference": "引用",
+    "openContainingFolder": "打开所在文件夹",
+    "openMyAgentsPreview": "打开 MyAgents 预览",
+    "preview": "预览",
+    "open": "打开",
+    "revealInTree": "在文件目录中展示"
+  },
+  "markdown": {
+    "copyCode": "复制代码",
+    "copy": "复制",
+    "copied": "已复制",
+    "preview": "预览",
+    "code": "代码",
+    "updating": "更新中...",
+    "diagramRendering": "图表渲染中...",
+    "renderDiagram": "渲染图表..."
+  },
+  "inlineCode": {
+    "pause": "暂停",
+    "playAudio": "播放音频",
+    "folderTitle": "文件夹: {{path}}",
+    "fileTitle": "文件: {{path}}"
+  },
+  "linkContext": {
+    "previewInternal": "预览（内置浏览器）",
+    "copyLink": "拷贝链接",
+    "copied": "已拷贝链接",
+    "copyFailed": "拷贝失败",
+    "openSystem": "在系统浏览器中打开"
+  },
+  "monacoFind": {
+    "close": "关闭",
+    "previousMatch": "上一个匹配",
+    "nextMatch": "下一个匹配",
+    "matchCase": "区分大小写",
+    "matchWholeWord": "全词匹配",
+    "useRegularExpression": "使用正则表达式",
+    "findInSelection": "在选区中查找",
+    "toggleReplace": "切换替换",
+    "replaceAll": "全部替换",
+    "replace": "替换"
+  },
+  "monacoContext": {
+    "cut": "剪切",
+    "copy": "复制",
+    "paste": "粘贴",
+    "selectAll": "全选",
+    "find": "查找"
+  },
+  "dropdown": {
+    "moreActions": "更多操作"
+  },
+  "notifications": {
+    "messageCompleteTitle": "MyAgents - 任务完成",
+    "messageCompleteBody": "请您查看结果",
+    "permissionTitle": "MyAgents - 权限请求",
+    "permissionBody": "AI 请求使用工具 - {{toolName}}",
+    "askUserTitle": "MyAgents - 需求确认",
+    "askUserBody": "AI 等待您的确认相关信息",
+    "planModeTitle": "MyAgents - 方案审核",
+    "planModeBody": "AI 等待您审核方案"
+  },
+  "contextUsage": {
+    "windowDefault": "未配置上限，按默认 {{window}} 估算",
+    "windowRuntime": "窗口 {{window}} · runtime 实时",
+    "windowModelConfig": "窗口 {{window}} 来自模型配置",
+    "autoCompactFootnote": "{{windowDesc}} · 约 {{threshold}} 时自动压缩",
+    "aria": "上下文已使用 {{percent}}%",
+    "title": "上下文用量",
+    "compactTip": "智能压缩上下文，提供更大可用空间",
+    "compact": "智能压缩",
+    "usedLabel": "已用 context 窗口"
+  },
+  "space": {
+    "errors": {
+      "operations": {
+        "comment": "评论发送",
+        "createIssue": "Issue 创建",
+        "updateIssueStatus": "Issue 状态更新",
+        "closeIssue": "Issue 关闭",
+        "dispatchAgent": "Agent 指派",
+        "createTag": "Tag 创建",
+        "attachment": "附件操作",
+        "skill": "Skill 操作",
+        "request": "Space 请求"
+      },
+      "templates": {
+        "relogin": "{{operation}}失败：请重新登录 MyAgents 社区",
+        "permissionDenied": "{{operation}}失败：权限不足",
+        "serviceUnavailable": "{{operation}}失败：服务暂时不可用，请稍后重试",
+        "withDetail": "{{operation}}失败：{{detail}}",
+        "network": "{{operation}}失败，请检查网络或稍后重试",
+        "invalidResponse": "{{operation}}失败：服务返回了无法识别的数据",
+        "failed": "{{operation}}失败"
+      }
+    },
+    "login": {
+      "eyebrow": "Official Space",
+      "title": "MyAgents 社区",
+      "description": "使用 Google 账号进入官方 Space",
+      "waiting": "等待浏览器授权完成",
+      "continueWithGoogle": "继续使用 Google",
+      "returnHint": "授权完成后会自动回到 MyAgents。"
+    },
+    "sidebar": {
+      "openJoin": "开放加入",
+      "signedInWithGoogle": "已通过 Google 登录",
+      "logout": "退出登录"
+    },
+    "common": {
+      "refresh": "刷新",
+      "create": "创建",
+      "cancel": "取消",
+      "save": "保存",
+      "upload": "上传",
+      "loadingTeam": "加载团队",
+      "teamLoadFailed": "团队数据加载失败",
+      "retry": "重试",
+      "noDescription": "No description",
+      "selectFile": "Select a file",
+      "notSynced": "未同步"
+    },
+    "filters": {
+      "allTags": "全部标签",
+      "allStatuses": "全部状态",
+      "noTag": "无标签",
+      "newTag": "新 tag"
+    },
+    "toasts": {
+      "loginSuccess": "已登录 MyAgents 社区",
+      "loginFailed": "登录失败",
+      "loginSlow": "登录状态同步较慢，正在继续重试",
+      "loginTimeout": "登录等待超时，请重新发起 Google 登录",
+      "browserLoginOpened": "已打开浏览器登录",
+      "dispatchProcessed": "已处理 {{count}} 个 Space 派发任务",
+      "refreshed": "已刷新",
+      "logoutSuccess": "已退出 Space",
+      "skillUploaded": "已上传 {{name}}",
+      "selectWorkspace": "请选择目标工作区",
+      "skillInstalled": "已安装到 {{target}}",
+      "skillRevisionUploaded": "已更新到 rev {{revision}}",
+      "skillDeleted": "Skill 已下架",
+      "agentEnabled": "Agent 已启用",
+      "agentDisabled": "Agent 已禁用",
+      "agentRevoked": "Agent 已撤销",
+      "agentUpdated": "Registered Agent 已更新",
+      "agentCreated": "Registered Agent 已创建",
+      "issueStatusUpdated": "Issue 状态已更新",
+      "attachmentsUploaded": "已上传 {{count}} 个附件",
+      "attachmentDownloaded": "已下载到 {{path}}",
+      "noAgentWorkspaces": "暂无可用 Agent 工作区",
+      "attachmentCommandCopied": "已复制附件下载命令",
+      "attachmentPathCopied": "已复制附件本地路径",
+      "assignedToAgent": "已指派给 {{name}}",
+      "assignmentRecorded": "已记录指派：{{name}}",
+      "issueCommandCopied": "已复制 issue 口令",
+      "tagCreated": "已创建 tag：{{name}}",
+      "issueCreated": "已创建 Issue",
+      "issueCreatedWithAttachments": "已创建 Issue 并上传 {{count}} 个附件"
+    },
+    "issues": {
+      "searchPlaceholder": "搜索标题",
+      "closeSearch": "关闭搜索",
+      "searchIssue": "搜索 Issue",
+      "createIssue": "新建 Issue",
+      "empty": "暂无匹配 Issue",
+      "comments": "{{count}} 评论"
+    },
+    "createIssue": {
+      "community": "MyAgents社区",
+      "title": "New issue",
+      "close": "关闭",
+      "titlePlaceholder": "Issue title",
+      "bodyPlaceholder": "Add description...",
+      "removeFile": "移除 {{name}}",
+      "addAttachment": "添加附件",
+      "attachment": "附件",
+      "tagPlaceholder": "tag 名称",
+      "createTag": "创建 tag",
+      "cancelCreateTag": "取消创建 tag",
+      "continuous": "持续创建",
+      "pickAttachmentsTitle": "选择 Issue 附件"
+    },
+    "detail": {
+      "close": "关闭详情",
+      "loadingIssue": "加载 Issue",
+      "notFound": "Issue 未找到",
+      "attachments": "附件",
+      "uploadAttachment": "上传附件",
+      "emptyAttachments": "暂无附件",
+      "downloadAttachment": "下载附件 {{name}}",
+      "chooseDownloadWorkspace": "选择下载工作区",
+      "downloadToAgentWorkspace": "下载到 Agent 工作区",
+      "copyAttachmentCommand": "复制附件下载命令 {{name}}",
+      "copyCliDownloadCommand": "复制 CLI 下载命令",
+      "copyAttachmentPath": "复制附件本地路径 {{name}}",
+      "copyLocalPath": "复制本地路径",
+      "dispatchToAgent": "派发给 Agent",
+      "issueCommand": "Issue 口令",
+      "assignAgent": "指派 Agent",
+      "emptyRegisteredAgents": "暂无 Registered Agent",
+      "copyIssueCommand": "复制 issue 口令",
+      "comments": "评论",
+      "commentCount": "{{count}} 条",
+      "emptyComments": "暂无评论。可以直接在底部补充信息。",
+      "commentPlaceholder": "说说你的想法",
+      "uploadAttachmentAria": "上传附件",
+      "sendComment": "发送评论"
+    },
+    "skills": {
+      "hint": "默认列表，点击后进入安装详情",
+      "upload": "上传",
+      "uploadSkill": "上传 Skill",
+      "empty": "暂无 Skills",
+      "viewDetails": "点击查看详情",
+      "overview": "概览",
+      "files": "文件",
+      "updateRevision": "更新版本",
+      "delete": "下架",
+      "installGlobal": "全局安装",
+      "noProjects": "无项目工作区",
+      "installProjectTitle": "安装到选中的项目",
+      "noInstallProjectsTitle": "暂无可安装的项目工作区",
+      "installProject": "安装到项目",
+      "loadingSkill": "加载 Skill",
+      "notFound": "Skill 未找到",
+      "installImpact": "安装影响",
+      "loadingFile": "加载文件",
+      "deleteTitle": "下架 Skill",
+      "deleteMessage": "确定要下架「{{name}}」吗？下架后列表中不再展示，历史 revision 和审计记录会保留。",
+      "pickZipTitle": "选择 Skill ZIP",
+      "pickRevisionZipTitle": "选择 Skill Revision ZIP"
+    },
+    "agents": {
+      "hint": "登记本地工作区，订阅并响应云端派发",
+      "sync": "同步",
+      "register": "登记",
+      "empty": "暂无 Registered Agents",
+      "registerAgent": "登记 Agent",
+      "editAgent": "编辑 Agent {{name}}",
+      "edit": "编辑",
+      "enableAgent": "启用 Agent {{name}}",
+      "disableAgent": "禁用 Agent {{name}}",
+      "enable": "启用",
+      "disable": "禁用",
+      "revokeAgent": "撤销 Agent {{name}}",
+      "revoke": "撤销",
+      "viewSettings": "查看登记设置",
+      "status": "Status",
+      "lastSync": "Last sync",
+      "workspace": "Workspace",
+      "goal": "Goal",
+      "revokeTitle": "撤销 Registered Agent",
+      "revokeMessage": "确定要撤销「{{name}}」吗？撤销后该本地节点的 token 将失效，不能再接收新的派发。",
+      "editTitle": "Edit Agent",
+      "registerTitle": "Register Agent",
+      "officialSpace": "Official Space",
+      "name": "Name",
+      "workspaceLabel": "Workspace label",
+      "displayNamePlaceholder": "Agent display name",
+      "goalPlaceholder": "Describe what this registered agent should handle."
+    }
+  },
+  "usageStats": {
+    "ranges": {
+      "7d": "7天",
+      "30d": "30天",
+      "60d": "60天"
+    },
+    "loadDataFailed": "无法加载统计数据",
+    "loadFailed": "加载失败",
+    "title": "使用统计",
+    "description": "全局 Token 消耗统计",
+    "loading": "加载中...",
+    "summary": {
+      "totalTokens": "总 Token",
+      "inputTokens": "输入 Token",
+      "outputTokens": "输出 Token",
+      "cacheInput": "输入缓存",
+      "messageCount": "对话轮次"
+    },
+    "dailyTrend": "每日用量趋势",
+    "empty": "暂无数据",
+    "totalConsumption": "总消耗: {{tokens}} tokens",
+    "tooltip": {
+      "input": "输入: {{tokens}}",
+      "output": "输出: {{tokens}}",
+      "messages": "对话: {{count}} 轮"
+    },
+    "legend": {
+      "input": "输入",
+      "output": "输出"
+    },
+    "vendors": {
+      "all": "全部",
+      "other": "其他"
+    },
+    "modelDistribution": "模型用量分布",
+    "table": {
+      "model": "模型",
+      "totalTokens": "总 Token",
+      "input": "输入",
+      "output": "输出",
+      "cacheInput": "输入缓存",
+      "count": "次数"
+    }
+  },
+  "logsPanel": {
+    "hideAnalytics": "统计日志",
+    "searchPlaceholder": "搜索日志... (⌘F)",
+    "previous": "上一个 (Shift+Enter)",
+    "next": "下一个 (Enter)",
+    "clearSearch": "清空",
+    "export": "导出日志",
+    "clear": "清空日志",
+    "close": "关闭",
+    "scope": "范围",
+    "type": "类型",
+    "hide": "隐藏",
+    "empty": "No logs yet.",
+    "total": "Total: {{count}}",
+    "escToClose": "Press <key>ESC</key> to close"
+  },
+  "historyOverlay": {
+    "filters": {
+      "all": "全部",
+      "favorite": "收藏",
+      "active": "活跃中",
+      "desktop": "桌面",
+      "bot": "聊天机器人"
+    },
+    "allWorkspaces": "全部工作区",
+    "deleted": "已删除",
+    "deleteFailedRetry": "删除失败，请重试",
+    "deleteFailed": "删除失败",
+    "favoriteFailed": "收藏失败，请重试",
+    "title": "历史对话",
+    "searchPlaceholder": "搜索历史记录的内容或标题...",
+    "exitSearch": "退出搜索",
+    "directMatch": "匹配到会话 · 回车或点击打开",
+    "sessionNotFound": "未找到该 SessionID 对应的会话",
+    "empty": "暂无匹配的历史对话",
+    "noResults": "未找到结果",
+    "unfavorite": "取消收藏",
+    "favorite": "收藏",
+    "messageCount": "{{count}} 条",
+    "viewStats": "查看统计",
+    "deleteBlocked": "请先停止定时任务后再删除",
+    "deleteBlockedAria": "删除（请先停止定时任务）",
+    "delete": "删除",
+    "deleteTitle": "删除对话",
+    "deleteMessage": "确定要删除「{{title}}」吗？此操作不可撤销。"
+  }
+}

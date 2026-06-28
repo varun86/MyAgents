@@ -14,6 +14,7 @@ import 'katex/dist/katex.min.css';
 import { memo, useContext, useEffect, useMemo, useState, type ComponentProps } from 'react';
 import type { Components } from 'react-markdown';
 import ReactMarkdown from 'react-markdown';
+import { useTranslation } from 'react-i18next';
 
 import CodeBlock from './markdown/CodeBlock';
 import InlineCode from './markdown/InlineCode';
@@ -395,6 +396,7 @@ function MarkdownImageInner({ src, alt, basePath, workspacePath }: {
   basePath: string;
   workspacePath: string | null;
 }) {
+  const { t } = useTranslation('app');
   // Classify src type on every render (derived, not state)
   const srcType: 'empty' | 'absolute' | 'relative' =
     !src ? 'empty' : isAbsoluteUrl(src) ? 'absolute' : 'relative';
@@ -430,7 +432,7 @@ function MarkdownImageInner({ src, alt, basePath, workspacePath }: {
         }
         setBlobUrl(handle.blobUrl);
       } catch {
-        if (!cancelled) setError(`图片加载失败: ${src}`);
+        if (!cancelled) setError(t('markdown.imageLoadFailed', { src }));
       }
     })();
 
@@ -442,11 +444,11 @@ function MarkdownImageInner({ src, alt, basePath, workspacePath }: {
       setBlobUrl(null);
       setError(null);
     };
-  }, [src, srcType, basePath, fileService]);
+  }, [src, srcType, basePath, fileService, t]);
 
   // Empty src: static error (no state needed)
   if (srcType === 'empty') {
-    return <span className="text-xs text-[var(--ink-muted)] italic">[图片路径为空]</span>;
+    return <span className="text-xs text-[var(--ink-muted)] italic">[{t('markdown.emptyImagePath')}]</span>;
   }
 
   // Absolute URL: render directly (no state needed, always fresh from props)

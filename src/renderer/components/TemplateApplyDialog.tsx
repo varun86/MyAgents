@@ -17,6 +17,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Loader2, AlertCircle, FilePlus, FileWarning, ArrowLeft } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
+import { useTranslation } from 'react-i18next';
 
 import type { WorkspaceTemplate } from '@/config/types';
 import { PRESET_TEMPLATES } from '@/config/types';
@@ -41,6 +42,7 @@ interface ApplyPreview {
 type Step = 'pick' | 'confirm';
 
 export default function TemplateApplyDialog({ agentDir, onClose, onApplied }: TemplateApplyDialogProps) {
+    const { t: tSettings } = useTranslation('settings');
     // Block dismissal (Cmd+W / backdrop / Esc) while an apply is in flight — letting the
     // component unmount mid-merge would invoke `onApplied` after unmount AND leave the
     // user without feedback while files keep being written. `applyInFlightRef` is consulted
@@ -149,19 +151,22 @@ export default function TemplateApplyDialog({ agentDir, onClose, onApplied }: Te
                                 type="button"
                                 onClick={() => { setStep('pick'); setPreview(null); setError(null); }}
                                 className="rounded-md p-1 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
-                                title="返回"
+                                title={tSettings('agentSettings.templateApply.back')}
                             >
                                 <ArrowLeft className="h-4 w-4" />
                             </button>
                         )}
                         <h2 className="text-lg font-semibold text-[var(--ink)]">
-                            {step === 'pick' ? '选择模板应用到当前工作区' : '确认应用'}
+                            {step === 'pick'
+                                ? tSettings('agentSettings.templateApply.pickTitle')
+                                : tSettings('agentSettings.templateApply.confirmTitle')}
                         </h2>
                     </div>
                     <button
                         type="button"
                         onClick={handleClose}
                         disabled={loading}
+                        title={tSettings('agentSettings.templateApply.close')}
                         className="rounded-md p-1 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] disabled:cursor-not-allowed disabled:opacity-50"
                     >
                         <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -174,13 +179,13 @@ export default function TemplateApplyDialog({ agentDir, onClose, onApplied }: Te
                 <div className="flex-1 overflow-auto px-6 py-4">
                     {step === 'pick' ? (
                         <ul className="flex flex-col gap-2">
-                            {templates.map(t => {
-                                const active = t.id === selectedId;
+                            {templates.map(tpl => {
+                                const active = tpl.id === selectedId;
                                 return (
-                                    <li key={t.id}>
+                                    <li key={tpl.id}>
                                         <button
                                             type="button"
-                                            onClick={() => setSelectedId(t.id)}
+                                            onClick={() => setSelectedId(tpl.id)}
                                             className={`flex w-full items-start gap-3 rounded-xl border px-4 py-3 text-left transition-all ${
                                                 active
                                                     ? 'border-[var(--accent)] bg-[var(--accent-warm-subtle)]'
@@ -188,19 +193,19 @@ export default function TemplateApplyDialog({ agentDir, onClose, onApplied }: Te
                                             }`}
                                         >
                                             <div className="mt-0.5 flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg bg-[var(--paper)]">
-                                                <WorkspaceIcon icon={t.icon} size={20} />
+                                                <WorkspaceIcon icon={tpl.icon} size={20} />
                                             </div>
                                             <div className="min-w-0 flex-1">
                                                 <div className="flex items-center gap-2">
-                                                    <span className="text-sm font-medium text-[var(--ink)]">{t.name}</span>
-                                                    {t.isBuiltin && (
+                                                    <span className="text-sm font-medium text-[var(--ink)]">{tpl.name}</span>
+                                                    {tpl.isBuiltin && (
                                                         <span className="rounded px-1.5 py-0.5 text-xs text-[var(--ink-muted)] bg-[var(--paper-inset)]">
-                                                            内置
+                                                            {tSettings('agentSettings.templateApply.builtin')}
                                                         </span>
                                                     )}
                                                 </div>
-                                                {t.description && (
-                                                    <p className="mt-1 text-xs text-[var(--ink-muted)] leading-relaxed">{t.description}</p>
+                                                {tpl.description && (
+                                                    <p className="mt-1 text-xs text-[var(--ink-muted)] leading-relaxed">{tpl.description}</p>
                                                 )}
                                             </div>
                                         </button>
@@ -211,14 +216,13 @@ export default function TemplateApplyDialog({ agentDir, onClose, onApplied }: Te
                     ) : (
                         <div className="flex flex-col gap-4">
                             <p className="text-sm text-[var(--ink-muted)]">
-                                将「<span className="text-[var(--ink)]">{selectedTemplate?.name}</span>」模板的内容合并到当前工作区。
-                                同名文件会被覆盖，工作区中其它文件保留不变。
+                                {tSettings('agentSettings.templateApply.confirmMerge', { name: selectedTemplate?.name ?? '' })}
                             </p>
                             {preview && preview.overwrite.length > 0 && (
                                 <section>
                                     <h3 className="mb-2 flex items-center gap-1.5 text-xs font-semibold text-[var(--warning)]">
                                         <FileWarning className="h-3.5 w-3.5" />
-                                        将覆盖 {preview.overwrite.length} 个文件
+                                        {tSettings('agentSettings.templateApply.overwriteFiles', { count: preview.overwrite.length })}
                                     </h3>
                                     <ul className="max-h-[180px] overflow-auto rounded-lg border border-[var(--line)] bg-[var(--paper-inset)] px-3 py-2 font-mono text-xs text-[var(--ink-muted)]">
                                         {preview.overwrite.map(f => <li key={f} className="py-0.5">{f}</li>)}
@@ -229,7 +233,7 @@ export default function TemplateApplyDialog({ agentDir, onClose, onApplied }: Te
                                 <section>
                                     <h3 className="mb-2 flex items-center gap-1.5 text-xs font-semibold text-[var(--ink-secondary)]">
                                         <FilePlus className="h-3.5 w-3.5" />
-                                        将新增 {preview.add.length} 个文件
+                                        {tSettings('agentSettings.templateApply.addFiles', { count: preview.add.length })}
                                     </h3>
                                     <ul className="max-h-[180px] overflow-auto rounded-lg border border-[var(--line)] bg-[var(--paper-inset)] px-3 py-2 font-mono text-xs text-[var(--ink-muted)]">
                                         {preview.add.map(f => <li key={f} className="py-0.5">{f}</li>)}
@@ -237,7 +241,7 @@ export default function TemplateApplyDialog({ agentDir, onClose, onApplied }: Te
                                 </section>
                             )}
                             {preview && preview.overwrite.length === 0 && preview.add.length === 0 && (
-                                <p className="text-xs text-[var(--ink-muted)]">模板为空，无文件可应用。</p>
+                                <p className="text-xs text-[var(--ink-muted)]">{tSettings('agentSettings.templateApply.empty')}</p>
                             )}
                         </div>
                     )}
@@ -259,7 +263,7 @@ export default function TemplateApplyDialog({ agentDir, onClose, onApplied }: Te
                         disabled={loading}
                         className="rounded-md border border-[var(--line-strong)] bg-[var(--button-secondary-bg)] px-3 py-1.5 text-xs font-semibold text-[var(--ink)] hover:bg-[var(--button-secondary-bg-hover)] disabled:opacity-50"
                     >
-                        取消
+                        {tSettings('agentSettings.templateApply.cancel')}
                     </button>
                     {step === 'pick' ? (
                         <button
@@ -269,7 +273,7 @@ export default function TemplateApplyDialog({ agentDir, onClose, onApplied }: Te
                             className="inline-flex items-center gap-1.5 rounded-md bg-[var(--accent)] px-3 py-1.5 text-xs font-semibold text-white hover:bg-[var(--accent-warm-hover)] disabled:opacity-50"
                         >
                             {loading && <Loader2 className="h-3 w-3 animate-spin" />}
-                            下一步
+                            {tSettings('agentSettings.templateApply.next')}
                         </button>
                     ) : (
                         <button
@@ -279,7 +283,7 @@ export default function TemplateApplyDialog({ agentDir, onClose, onApplied }: Te
                             className="inline-flex items-center gap-1.5 rounded-md bg-[var(--accent)] px-3 py-1.5 text-xs font-semibold text-white hover:bg-[var(--accent-warm-hover)] disabled:opacity-50"
                         >
                             {loading && <Loader2 className="h-3 w-3 animate-spin" />}
-                            确认应用
+                            {tSettings('agentSettings.templateApply.confirmApply')}
                         </button>
                     )}
                 </div>

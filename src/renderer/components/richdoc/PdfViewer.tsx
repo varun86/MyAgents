@@ -19,6 +19,7 @@
  * cancels in-flight render tasks + text layers and destroys the document.
  */
 import { useEffect, useRef, useState } from 'react';
+import { i18n } from '@/i18n';
 import { Loader2 } from 'lucide-react';
 import * as pdfjsLib from 'pdfjs-dist';
 import type { PDFDocumentProxy, RenderTask, TextLayer } from 'pdfjs-dist';
@@ -203,7 +204,7 @@ export default function PdfViewer({ bytes, onError, onEmpty }: RichDocSubViewerP
         content.querySelectorAll<HTMLElement>('[data-page]').forEach((holder) => io.observe(holder));
         setLoading(false);
       } catch (e) {
-        if (!cancelled) onError(e instanceof Error ? e.message : 'PDF 渲染失败');
+        if (!cancelled) onError(e instanceof Error ? e.message : i18n.t('app:richDoc.pdfRenderFailed'));
       }
     })();
 

@@ -1,4 +1,5 @@
 import React from 'react';
+import { useTranslation } from 'react-i18next';
 import type { McpServerDefinition } from '@/config/types';
 
 export default function McpToolsCard({
@@ -17,11 +18,12 @@ export default function McpToolsCard({
     subtitle?: string;
     emptyHint?: string;
 }) {
+    const { t } = useTranslation('settings');
     return (
         <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
-            <h3 className="mb-4 text-sm font-semibold text-[var(--ink)]">{title ?? 'MCP 工具'}</h3>
+            <h3 className="mb-4 text-sm font-semibold text-[var(--ink)]">{title ?? t('agentSettings.toolsCard.mcpTitle')}</h3>
             <p className="mb-3 text-xs text-[var(--ink-muted)]">
-                {subtitle ?? 'Bot 可使用的 MCP 工具（独立于客户端设置，仅显示全局已启用的 MCP 服务）'}
+                {subtitle ?? t('agentSettings.toolsCard.mcpSubtitle')}
             </p>
             {availableMcpServers.length > 0 ? (
                 <div className="space-y-2">
@@ -50,7 +52,7 @@ export default function McpToolsCard({
                 </div>
             ) : (
                 <p className="text-xs text-[var(--ink-muted)]">
-                    {emptyHint ?? '暂无全局已启用的 MCP 服务。请先在「设置 → MCP 工具」中启用。'}
+                    {emptyHint ?? t('agentSettings.toolsCard.mcpEmpty')}
                 </p>
             )}
         </div>

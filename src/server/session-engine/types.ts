@@ -1,5 +1,5 @@
 import type { BackgroundAgentPermissionMode } from '../../shared/config-types';
-import type { RuntimeConfig } from '../../shared/types/runtime';
+import type { RuntimeConfig, RuntimeSource } from '../../shared/types/runtime';
 import type { RuntimeType } from '../../shared/types/runtime';
 import type { McpServerDefinition } from '../../shared/config-types';
 import type { EnqueueResult, PermissionMode, ProviderEnv, QueueCancelResult } from '../agent-session';
@@ -10,6 +10,8 @@ import type { ExternalRuntimeConfigPatch, ImagePayload } from '../runtimes/types
 import type { ExternalConfigSource } from '../runtimes/external-session';
 import type { InboxTurnMeta } from '../inbox/types';
 import type { ProviderRoute } from '../../shared/providerRoute';
+import type { RuntimeBackedProviderIdentity } from '../../shared/providerExecution';
+import type { OfficialToolId } from '../../shared/official-tools';
 
 export type SessionEngineKind = 'builtin' | 'external';
 
@@ -122,6 +124,7 @@ export type QueueStatusItem = { id: string; messagePreview: string };
 export type SessionEngineRuntimeIdentity = {
   kind: SessionEngineKind;
   runtime: RuntimeType;
+  runtimeSource?: RuntimeSource;
   sessionId: string;
   boundSessionId?: string;
 };
@@ -168,13 +171,23 @@ export type SessionEngineStreamReplaySnapshot = {
 export type SessionEngineConfigSnapshot = {
   success: true;
   runtime: RuntimeType;
+  runtimeSource?: RuntimeSource;
   model: string | null;
   mcpServerIds: string[] | null;
   agentNames: string[] | null;
+  enabledOfficialToolIds: OfficialToolId[] | null;
   permissionMode: string | null;
   providerId: string | null;
   providerRoute?: ProviderRoute | null;
+  providerExecutionIdentity?: RuntimeBackedProviderIdentity | null;
   reasoningEffort: string | null;
+};
+
+export type SessionEngineCurrentContext = {
+  runtime: RuntimeType;
+  sessionId: string | null;
+  workspacePath: string | null;
+  sessionMeta?: import('../types/session').SessionMetadata | null;
 };
 
 export type SessionEngineHeldImConfigSnapshot = {
@@ -190,8 +203,10 @@ export type SessionEngineSnapshotMaterializePatch = {
   permissionMode?: string | null;
   mcpEnabledServers?: string[] | null;
   enabledPluginIds?: string[] | null;
+  enabledOfficialToolIds?: OfficialToolId[] | null;
   providerId?: string | null;
   providerRoute?: ProviderRoute | null;
+  providerExecutionIdentity?: RuntimeBackedProviderIdentity | null;
   providerEnvJson?: string | null;
 };
 
@@ -233,6 +248,7 @@ export interface SessionEngine {
   getLatestAssistantResult(): SessionEngineLatestResult;
   getStreamReplaySnapshot(): SessionEngineStreamReplaySnapshot;
   getSessionConfigSnapshot(): SessionEngineConfigSnapshot;
+  getCurrentSessionContext(): SessionEngineCurrentContext;
   getHeldImConfigSnapshot(): SessionEngineHeldImConfigSnapshot;
   getLiveSessionOverlay(sessionId: string): SessionEngineLiveOverlay;
   sendDesktopMessage(request: DesktopMessageRequest): Promise<DesktopAdmissionResult>;
@@ -249,13 +265,14 @@ export interface SessionEngine {
   updateModel(model: string, opts?: { imConfigSync?: boolean }): Promise<{ success: boolean; error?: string }>;
   updatePermissionMode(mode: string): Promise<{ success: boolean; error?: string }>;
   updateReasoningEffort(effort: string): Promise<{ success: boolean; error?: string }>;
+  updateOfficialToolIds(ids: OfficialToolId[] | null): Promise<{ success: boolean; error?: string; skipped?: string }>;
   materializePendingDesktopSession(request: {
     workspacePath: string;
     phase?: 'prepare' | 'commit' | 'rollback';
     preparedSessionId?: string;
     snapshotPatch?: SessionEngineSnapshotMaterializePatch;
   }): Promise<SessionEngineMaterializePendingResult>;
-  freezeCurrentSessionForImDetach(): Promise<{
+  freezeCurrentSessionForImDetach(options?: { metadataBirthPending?: boolean }): Promise<{
     success: boolean;
     sessionId?: string;
     metadata?: unknown;
@@ -293,5 +310,8 @@ export interface SessionEngine {
     getSessionMetadata: (sessionId: string) => { runtime?: RuntimeType } | null | undefined,
   ): Promise<{ success: boolean; sessionId?: string; error?: string; status?: number }>;
   resetForNewDesktopSession(workspacePath: string): Promise<{ success: boolean; sessionId?: string; error?: string }>;
-  resetForNewImSession(workspacePath: string): Promise<{ success: boolean; sessionId?: string; error?: string }>;
+  resetForNewImSession(
+    workspacePath: string,
+    options?: { metadataBirthPending?: boolean },
+  ): Promise<{ success: boolean; sessionId?: string; error?: string }>;
 }

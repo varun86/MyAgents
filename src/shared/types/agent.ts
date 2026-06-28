@@ -9,6 +9,7 @@ import type {
   GroupActivation,
 } from './im';
 import type { RuntimeType, RuntimeConfig } from './runtime';
+import type { OfficialToolId } from '../official-tools';
 
 /**
  * Channel type — reuses ImPlatform, not redefined
@@ -31,6 +32,8 @@ export interface ChannelOverrides {
   providerId?: string;
   providerEnvJson?: string;
   model?: string;
+  runtime?: RuntimeType;
+  runtimeConfig?: RuntimeConfig;
   permissionMode?: string;
   toolsDeny?: string[];
 }
@@ -108,6 +111,8 @@ export interface AgentConfig {
    *  this Agent inherit this list as their initial selection; per-Tab UI can
    *  override transiently. Mirrors mcpEnabledServers semantics exactly. */
   enabledPluginIds?: string[];
+  /** MyAgents official CLI tools enabled for this Agent. Separate from MCP/plugin ids. */
+  enabledOfficialToolIds?: OfficialToolId[];
 
   // Heartbeat (Agent-level, shared across channels)
   heartbeat?: HeartbeatConfig;
