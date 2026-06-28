@@ -121,33 +121,21 @@ the content itself — there's no separate --tag flag on create.
 </myagents-cli-thought>`;
 
 const SECTION_VISION = `<myagents-cli-vision>
-MyAgents has an official image-understanding CLI tool for sessions where the
-main model may not accept image input. Use it when the user asks about an image,
-screenshot, chart, UI, photo, or visual attachment and you need visual details
-before answering.
+If the active model/runtime cannot see images, use MyAgents' image-understanding
+helper instead of guessing. When Read or another file view returns
+"[Unsupported Image]" for a PNG/JPG/WebP/GIF, switch to this helper.
 
-Command:
-  myagents vision analyze --image <path> [--image <path> ...] --prompt-file <workspace-relative-text-file> [--json]
-  myagents vision analyze --image <path> [--image <path> ...] --prompt 'short literal request' [--json]
+Quick use:
+  myagents vision analyze --image <path> [--image <path> ...] [--prompt 'short request']
+  myagents vision analyze --image <path> --prompt-file <workspace-relative-text-file> [--json]
 
-Use paths that are available in the current workspace, especially
-\`@myagents_files/...\` references shown in the conversation. The CLI resolves
-those paths inside the current MyAgents workspace and sends the images to the
-vision model configured by the user in Settings.
+Use workspace-local paths only, especially \`@myagents_files/...\` attachment
+references. Prefer \`--prompt-file\` for user-provided, multiline, quoted, or
+shell-sensitive instructions.
 
-If you need specific information, prefer \`--prompt-file\`: write the inspection
-request to a text file inside the current workspace and pass that path. This is
-required for user-provided text, multiline text, quotes, backticks, dollar signs,
-or other shell metacharacters. Only use \`--prompt '...'\` for a short literal
-request that you authored and can safely single-quote. If you omit both,
-MyAgents uses a default prompt that asks for a faithful, structured visual
-description with text/OCR, layout, objects, and any task-relevant details.
-
-Before first use in a session, you may run:
+For details:
+  myagents vision --help
   myagents vision readme
-
-Do not use this tool for arbitrary file reading or URL fetching. It accepts
-local image paths only.
 </myagents-cli-vision>`;
 
 /**
