@@ -34,7 +34,7 @@ import type { AskUserQuestionRequest, AskUserQuestion } from '../../shared/types
 import type { ExitPlanModeRequest, EnterPlanModeRequest, ExitPlanModeAllowedPrompt } from '../../shared/types/planMode';
 import { CUSTOM_EVENTS, isPendingSessionId } from '../../shared/constants';
 import { TabContext, TabApiContext, TabActiveContext, type AdoptMigratedSessionOptions, type SessionState, type SystemNotice, type TabContextValue, type TabApiContextValue } from './TabContext';
-import { shouldSkipHistoryReplay, shouldClearHistoryOnInit } from './sessionRestoreGuards';
+import { appendUniqueMessageById, upsertMessageById, updateMessageById, shouldSkipHistoryReplay, shouldClearHistoryOnInit } from './sessionRestoreGuards';
 import {
     decidePersistedContextUsageSeed,
     shouldAcceptSessionScopedSseSnapshot,
@@ -146,6 +146,32 @@ type WireSessionMessage = {
     toolCount?: number;
     durationMs?: number | null;
 };
+
+type AssistantCompletionPatch = {
+    realId?: string;
+    sdkUuid?: string;
+    usage?: Message['usage'];
+    toolCount?: number;
+    durationMs?: number;
+};
+
+function applyAssistantCompletionPatch(message: Message, patch: AssistantCompletionPatch | undefined): Message {
+    if (!patch || message.role !== 'assistant') return message;
+    const needsUuid = patch.sdkUuid && message.sdkUuid !== patch.sdkUuid;
+    const needsId = patch.realId && message.id !== patch.realId;
+    const needsUsage = patch.usage && message.usage !== patch.usage;
+    const needsToolCount = patch.toolCount !== undefined && message.toolCount !== patch.toolCount;
+    const needsDuration = patch.durationMs !== undefined && message.durationMs !== patch.durationMs;
+    if (!needsUuid && !needsId && !needsUsage && !needsToolCount && !needsDuration) return message;
+    return {
+        ...message,
+        ...(needsId ? { id: patch.realId } : {}),
+        ...(needsUuid ? { sdkUuid: patch.sdkUuid } : {}),
+        ...(patch.usage ? { usage: patch.usage } : {}),
+        ...(patch.toolCount !== undefined ? { toolCount: patch.toolCount } : {}),
+        ...(patch.durationMs !== undefined ? { durationMs: patch.durationMs } : {}),
+    };
+}
 
 function normalizeFiniteNumber(value: number | null | undefined): number | undefined {
     return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
@@ -1369,7 +1395,10 @@ export default function TabProvider({
      * Move the current streaming message into history, marking incomplete blocks as finished.
      * Replaces the old markIncompleteBlocksAsFinished — does everything in one atomic step.
      */
-    const moveStreamingToHistory = useCallback((status: 'completed' | 'stopped' | 'failed') => {
+    const moveStreamingToHistory = useCallback((
+        status: 'completed' | 'stopped' | 'failed',
+        completionPatch?: AssistantCompletionPatch,
+    ) => {
         // Stop the reveal loop + drain ALL un-revealed text into the streaming message before
         // finalizing — history must capture the full text. flushPendingTextNow drains with
         // expectedId=null (append to current message), and the finalize updater below is
@@ -1430,9 +1459,14 @@ export default function TabProvider({
                 }
             }
 
+            finalMsg = applyAssistantCompletionPatch(finalMsg, completionPatch);
+
             // Side effect inside updater — technically impure, but safe because:
             // (1) StrictMode is off (no double invocation), (2) same pattern as setMessages (line 243).
-            setHistoryMessages(prevHistory => [...prevHistory, finalMsg]);
+            setHistoryMessages(prevHistory => {
+                seenIdsRef.current.add(finalMsg.id);
+                return upsertMessageById(prevHistory, finalMsg);
+            });
             // Set isStreamingRef inside the updater so pending message-chunk updaters
             // (which check isStreamingRef.current) still see true and correctly append
             // rather than creating a new message. Must NOT be set before this updater runs.
@@ -1602,7 +1636,7 @@ export default function TabProvider({
                     metadata: msg.metadata,
                     ...getAssistantTurnMetrics(msg),
                 };
-                setHistoryMessages(prev => [...prev, replayMessage]);
+                setHistoryMessages(prev => appendUniqueMessageById(prev, replayMessage));
                 break;
             }
 
@@ -2197,38 +2231,6 @@ export default function TabProvider({
 
             case 'chat:message-complete': {
                 console.log(`[TabProvider ${tabId}] message-complete received`);
-                // Pattern 3 §3.2.2 — drain all pending RAF-batched tool deltas
-                // before finalising the message; otherwise stragglers would
-                // land on a freshly-cleared streaming slot.
-                flushAllPendingToolDeltas();
-                flushSync(() => {
-                    // NOTE: isStreamingRef.current is set to false inside moveStreamingToHistory's
-                    // updater, NOT here. Setting it here would cause pending message-chunk updaters
-                    // (queued by React batching) to see false and create a new message instead
-                    // of appending, losing the accumulated content.
-                    moveStreamingToHistory('completed');
-                    // Finalize the message in the same synchronous commit as the loading-state
-                    // cleanup so ultra-short one-chunk responses do not disappear between batches.
-                    setIsLoading(false);
-                    setSessionState('idle');  // Reset session state to idle
-                    setSystemStatus(null);  // Clear system status (e.g., 'compacting') when message completes
-                    clearRuntimePlanTodos();
-                    // Do NOT clear agentError here — chat:agent-error is only emitted for terminal,
-                    // unrecoverable errors (rate_limit, auth fail, SDK is_error result, timeouts).
-                    // Clearing on message-complete would hide the banner in the race where the error
-                    // fires ~ms before the turn closes (e.g. five-hour quota hit mid-turn).
-                    // Transient recoveries use chat:api-retry, not chat:agent-error.
-                    // Banner is cleared on: new send, session load, api-retry resolved, reset.
-                });
-
-                // Send system notification if user is not focused on the app
-                notifyMessageComplete(tabId);
-
-                // Mark tab as unread if user is viewing a different tab
-                if (!isActiveRef.current) {
-                    onUnreadChangeRef.current?.(true);
-                }
-
                 // Track message_complete event with usage data
                 const completePayload = data as {
                     model?: string;
@@ -2243,29 +2245,6 @@ export default function TabProvider({
                     assistant_message_id?: string;
                     compact_result?: 'success';
                 } | null;
-
-                // SDK 0.2.91+: map terminal_reason to UI banner. Only SET when reason is
-                // explicitly provided and non-completed — do NOT wipe to null on every
-                // complete event. External-runtime `chat:message-complete` (external-session.ts)
-                // never carries terminal_reason, so wiping would silently dismiss a
-                // still-actionable banner from the previous builtin turn. Banner clearing
-                // happens at send / reset / loadSession / chat:init instead (those are the
-                // only events that semantically invalidate the prior turn's outcome).
-                {
-                    const reason = completePayload?.terminal_reason;
-                    if (reason && reason !== 'completed') {
-                        setLastTerminalReason(reason);
-                    }
-                }
-
-                if (completePayload?.compact_result === 'success') {
-                    setSystemNotice({
-                        kind: 'compact',
-                        level: 'success',
-                        message: '上下文已压缩',
-                    });
-                }
-
                 const inputTokens = normalizeFiniteNumber(completePayload?.input_tokens);
                 const outputTokens = normalizeFiniteNumber(completePayload?.output_tokens);
                 const cacheReadTokens = normalizeFiniteNumber(completePayload?.cache_read_tokens);
@@ -2286,37 +2265,85 @@ export default function TabProvider({
                     : undefined;
                 const completedToolCount = normalizeFiniteNumber(completePayload?.tool_count);
                 const completedDurationMs = normalizeTurnDurationMs(completePayload?.duration_ms);
-
-                // Apply backend's real message ID/sdkUuid plus turn metrics to the just-moved history message.
-                // Streaming messages use Date.now() IDs that don't match backend's messageSequence IDs.
-                // Without this, fork/rewind pass the wrong ID to the backend.
-                if (
+                const completionPatch: AssistantCompletionPatch | undefined =
                     completePayload?.assistant_sdk_uuid ||
                     completePayload?.assistant_message_id ||
                     completedUsage ||
                     completedToolCount !== undefined ||
                     completedDurationMs !== undefined
-                ) {
-                    const uuid = completePayload?.assistant_sdk_uuid;
-                    const realId = completePayload?.assistant_message_id;
+                        ? {
+                            sdkUuid: completePayload?.assistant_sdk_uuid,
+                            realId: completePayload?.assistant_message_id,
+                            usage: completedUsage,
+                            toolCount: completedToolCount,
+                            durationMs: completedDurationMs,
+                        }
+                        : undefined;
+                // Pattern 3 §3.2.2 — drain all pending RAF-batched tool deltas
+                // before finalising the message; otherwise stragglers would
+                // land on a freshly-cleared streaming slot.
+                flushAllPendingToolDeltas();
+                flushSync(() => {
+                    // NOTE: isStreamingRef.current is set to false inside moveStreamingToHistory's
+                    // updater, NOT here. Setting it here would cause pending message-chunk updaters
+                    // (queued by React batching) to see false and create a new message instead
+                    // of appending, losing the accumulated content.
+                    moveStreamingToHistory('completed', completionPatch);
+                    // Finalize the message in the same synchronous commit as the loading-state
+                    // cleanup so ultra-short one-chunk responses do not disappear between batches.
+                    setIsLoading(false);
+                    setSessionState('idle');  // Reset session state to idle
+                    setSystemStatus(null);  // Clear system status (e.g., 'compacting') when message completes
+                    clearRuntimePlanTodos();
+                    // Do NOT clear agentError here — chat:agent-error is only emitted for terminal,
+                    // unrecoverable errors (rate_limit, auth fail, SDK is_error result, timeouts).
+                    // Clearing on message-complete would hide the banner in the race where the error
+                    // fires ~ms before the turn closes (e.g. five-hour quota hit mid-turn).
+                    // Transient recoveries use chat:api-retry, not chat:agent-error.
+                    // Banner is cleared on: new send, session load, api-retry resolved, reset.
+                });
+                if (completionPatch?.realId) {
+                    const realId = completionPatch.realId;
                     setHistoryMessages(prev => {
-                        if (prev.length === 0) return prev;
-                        const last = prev[prev.length - 1];
-                        if (last.role !== 'assistant') return prev;
-                        const needsUuid = uuid && last.sdkUuid !== uuid;
-                        const needsId = realId && last.id !== realId;
-                        const needsUsage = completedUsage && last.usage !== completedUsage;
-                        const needsToolCount = completedToolCount !== undefined && last.toolCount !== completedToolCount;
-                        const needsDuration = completedDurationMs !== undefined && last.durationMs !== completedDurationMs;
-                        if (!needsUuid && !needsId && !needsUsage && !needsToolCount && !needsDuration) return prev;
-                        return [...prev.slice(0, -1), {
-                            ...last,
-                            ...(needsId ? { id: realId } : {}),
-                            ...(needsUuid ? { sdkUuid: uuid } : {}),
-                            ...(completedUsage ? { usage: completedUsage } : {}),
-                            ...(completedToolCount !== undefined ? { toolCount: completedToolCount } : {}),
-                            ...(completedDurationMs !== undefined ? { durationMs: completedDurationMs } : {}),
-                        }];
+                        const next = updateMessageById(
+                            prev,
+                            realId,
+                            message => applyAssistantCompletionPatch(message, completionPatch),
+                        );
+                        if (next !== prev) {
+                            seenIdsRef.current.add(realId);
+                        }
+                        return next;
+                    });
+                }
+
+                // Send system notification if user is not focused on the app
+                notifyMessageComplete(tabId);
+
+                // Mark tab as unread if user is viewing a different tab
+                if (!isActiveRef.current) {
+                    onUnreadChangeRef.current?.(true);
+                }
+
+                // SDK 0.2.91+: map terminal_reason to UI banner. Only SET when reason is
+                // explicitly provided and non-completed — do NOT wipe to null on every
+                // complete event. External-runtime `chat:message-complete` (external-session.ts)
+                // never carries terminal_reason, so wiping would silently dismiss a
+                // still-actionable banner from the previous builtin turn. Banner clearing
+                // happens at send / reset / loadSession / chat:init instead (those are the
+                // only events that semantically invalidate the prior turn's outcome).
+                {
+                    const reason = completePayload?.terminal_reason;
+                    if (reason && reason !== 'completed') {
+                        setLastTerminalReason(reason);
+                    }
+                }
+
+                if (completePayload?.compact_result === 'success') {
+                    setSystemNotice({
+                        kind: 'compact',
+                        level: 'success',
+                        message: '上下文已压缩',
                     });
                 }
                 // Always track message_complete, use defaults if payload is missing

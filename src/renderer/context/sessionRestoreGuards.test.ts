@@ -3,6 +3,9 @@ import {
     isRestoredSession,
     shouldSkipHistoryReplay,
     shouldClearHistoryOnInit,
+    appendUniqueMessageById,
+    upsertMessageById,
+    updateMessageById,
 } from './sessionRestoreGuards';
 
 const SID = 'e959f73c-42af-4fb6-9c50-4b9c589ee975';
@@ -180,5 +183,73 @@ describe('shouldClearHistoryOnInit', () => {
                 currentSessionId: SID,
             }),
         ).toBe(true);
+    });
+});
+
+describe('appendUniqueMessageById', () => {
+    it('appends a replay message whose backend id is not already in history', () => {
+        const existing = [{ id: 'user-1', role: 'user' }];
+        const next = { id: 'assistant-42', role: 'assistant' };
+
+        expect(appendUniqueMessageById(existing, next)).toEqual([...existing, next]);
+    });
+
+    it('returns the original history array when replay repeats an existing backend id', () => {
+        const existing = [
+            { id: 'user-1', role: 'user' },
+            { id: 'assistant-42', role: 'assistant' },
+        ];
+
+        const result = appendUniqueMessageById(existing, {
+            id: 'assistant-42',
+            role: 'assistant',
+        });
+
+        expect(result).toBe(existing);
+    });
+});
+
+describe('upsertMessageById', () => {
+    it('reconciles a final streaming assistant over an existing backend-id history row', () => {
+        const existing = [
+            { id: 'user-1', content: 'hello' },
+            { id: 'assistant-42', content: 'partial' },
+        ];
+        const finalAssistant = { id: 'assistant-42', content: 'partial plus final suffix' };
+
+        expect(upsertMessageById(existing, finalAssistant)).toEqual([
+            existing[0],
+            finalAssistant,
+        ]);
+    });
+
+    it('appends when the id is new', () => {
+        const existing = [{ id: 'user-1', content: 'hello' }];
+        const finalAssistant = { id: 'assistant-42', content: 'done' };
+
+        expect(upsertMessageById(existing, finalAssistant)).toEqual([
+            existing[0],
+            finalAssistant,
+        ]);
+    });
+});
+
+describe('updateMessageById', () => {
+    it('patches an existing backend-id row when completion arrives without a live streaming row', () => {
+        const existing = [
+            { id: 'user-1', usage: 0 },
+            { id: 'assistant-42', usage: 0 },
+        ];
+
+        expect(updateMessageById(existing, 'assistant-42', message => ({ ...message, usage: 12 }))).toEqual([
+            existing[0],
+            { id: 'assistant-42', usage: 12 },
+        ]);
+    });
+
+    it('returns the original array when the target id is absent', () => {
+        const existing = [{ id: 'user-1', usage: 0 }];
+
+        expect(updateMessageById(existing, 'assistant-42', message => ({ ...message, usage: 12 }))).toBe(existing);
     });
 });

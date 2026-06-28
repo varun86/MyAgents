@@ -13,7 +13,8 @@
 // inactive and resume live on re-activation.
 import { render } from '@testing-library/react';
 import React from 'react';
-import { describe, expect, it, vi, beforeEach } from 'vitest';
+import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
+import type { VirtuosoHandle } from 'react-virtuoso';
 
 import type { Message as MessageType } from '@/types/chat';
 
@@ -63,7 +64,20 @@ const streamingText = (r: Recorded) => {
 };
 
 describe('MessageList — freeze data while inactive (Virtuoso cache-poisoning regression)', () => {
-  beforeEach(() => { recorded.length = 0; });
+  beforeEach(() => {
+    recorded.length = 0;
+    vi.spyOn(performance, 'now').mockReturnValue(1_000);
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      cb(1_000);
+      return 1;
+    });
+    vi.stubGlobal('cancelAnimationFrame', vi.fn());
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
 
   it('does NOT forward streaming growth to Virtuoso while inactive, and resumes live on re-activation', () => {
     const history = [msg('h1', 'hello', 'user'), msg('h2', 'hi there')];
@@ -195,5 +209,55 @@ describe('MessageList — freeze data while inactive (Virtuoso cache-poisoning r
       />,
     );
     expect(lastData().firstItemIndex).toBe(1_000_000);
+  });
+
+  it('keeps active streaming pinned through Virtuoso autoscroll while following', () => {
+    const autoscrollToBottom = vi.fn();
+    renderList({
+      historyMessages: [msg('h1', 'hello', 'user')],
+      streamingMessage: msg('stream', 'partial'),
+      isLoading: true,
+      isActive: true,
+      followEnabledRef: { current: true },
+      virtuosoRef: {
+        current: { autoscrollToBottom },
+      } as unknown as React.RefObject<VirtuosoHandle | null>,
+    });
+
+    expect(autoscrollToBottom).toHaveBeenCalledTimes(1);
+  });
+
+  it('pins to bottom once when a turn completes while follow is enabled', () => {
+    const followRef: { current: boolean | 'force' } = { current: true };
+    const scrollToBottom = vi.fn();
+    const history = [msg('h1', 'hello', 'user')];
+    const baseProps = {
+      firstItemIndex: 1_000_000,
+      sessionId: 's1',
+      virtuosoRef: { current: null },
+      followEnabledRef: followRef,
+      scrollToBottom,
+      handleAtBottomChange: vi.fn(),
+    };
+    const { rerender } = renderList({
+      ...baseProps,
+      historyMessages: history,
+      streamingMessage: msg('stream', 'partial'),
+      isLoading: true,
+      isActive: true,
+    });
+    scrollToBottom.mockClear();
+
+    rerender(
+      <MessageList
+        {...baseProps}
+        historyMessages={[...history, msg('assistant-1', 'final')]}
+        streamingMessage={null}
+        isLoading={false}
+        isActive
+      />,
+    );
+
+    expect(scrollToBottom).toHaveBeenCalledWith('auto');
   });
 });

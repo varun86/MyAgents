@@ -85,3 +85,45 @@ export function shouldClearHistoryOnInit(p: {
         !isRestoredSession(p.restoredSessionId, p.currentSessionId)
     );
 }
+
+/**
+ * Idempotent history append for replay/sync paths. The ref-level seen-id guard
+ * catches most duplicate bursts before scheduling React work; this updater-level
+ * guard is the final boundary because it checks against the actual committed
+ * history array.
+ */
+export function appendUniqueMessageById<T extends { id: string }>(
+    messages: T[],
+    message: T,
+): T[] {
+    return messages.some(existing => existing.id === message.id)
+        ? messages
+        : [...messages, message];
+}
+
+export function upsertMessageById<T extends { id: string }>(
+    messages: T[],
+    message: T,
+): T[] {
+    const idx = messages.findIndex(existing => existing.id === message.id);
+    if (idx === -1) return [...messages, message];
+    if (messages[idx] === message) return messages;
+    const next = [...messages];
+    next[idx] = message;
+    return next;
+}
+
+export function updateMessageById<T extends { id: string }>(
+    messages: T[],
+    id: string | null | undefined,
+    update: (message: T) => T,
+): T[] {
+    if (!id) return messages;
+    const idx = messages.findIndex(existing => existing.id === id);
+    if (idx === -1) return messages;
+    const updated = update(messages[idx]);
+    if (updated === messages[idx]) return messages;
+    const next = [...messages];
+    next[idx] = updated;
+    return next;
+}

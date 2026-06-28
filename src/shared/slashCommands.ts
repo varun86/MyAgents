@@ -72,6 +72,86 @@ function extractFrontmatter(content: string): { frontmatterStr: string; body: st
     };
 }
 
+type LooseScalarParse =
+    | { ok: true; value: string | boolean }
+    | { ok: false };
+
+function parseLooseScalarValue(rawValue: string): LooseScalarParse {
+    const value = rawValue.trim();
+    if (!value || value === '|' || value === '>' || value.startsWith('|') || value.startsWith('>')) {
+        return { ok: false };
+    }
+    if (value.startsWith('[') || value.startsWith('{')) {
+        return { ok: false };
+    }
+    if (value === 'true') return { ok: true, value: true };
+    if (value === 'false') return { ok: true, value: false };
+    const quote = value[0];
+    if (quote === '"' || quote === "'") {
+        if (!value.endsWith(quote)) return { ok: false };
+        const inner = value.slice(1, -1);
+        return {
+            ok: true,
+            value: quote === '"' ? inner.replace(/\\"/g, '"').replace(/\\\\/g, '\\') : inner.replace(/''/g, "'")
+        };
+    }
+    return { ok: true, value };
+}
+
+function parseLooseFrontmatterScalars(frontmatterStr: string): Record<string, unknown> | null {
+    const result: Record<string, unknown> = {};
+    let metadata: Record<string, unknown> | null = null;
+    let recoveredScalarCount = 0;
+
+    for (const line of frontmatterStr.split(/\r?\n/)) {
+        if (!line.trim() || line.trimStart().startsWith('#')) continue;
+
+        const topLevelMatch = /^([A-Za-z][A-Za-z0-9_-]*):(?:\s*(.*))?$/.exec(line);
+        if (topLevelMatch) {
+            const [, key, rawValue = ''] = topLevelMatch;
+            if (key === 'metadata' && rawValue.trim() === '') {
+                metadata = {};
+                result.metadata = metadata;
+                continue;
+            }
+            if (key === 'metadata') return null;
+            metadata = null;
+            const parsed = parseLooseScalarValue(rawValue);
+            if (!parsed.ok) return null;
+            result[key] = parsed.value;
+            recoveredScalarCount += 1;
+            continue;
+        }
+
+        if (metadata) {
+            const nestedMatch = /^\s+([A-Za-z][A-Za-z0-9_-]*):(?:\s*(.*))?$/.exec(line);
+            if (!nestedMatch) return null;
+            const [, key, rawValue = ''] = nestedMatch;
+            const parsed = parseLooseScalarValue(rawValue);
+            if (!parsed.ok) return null;
+            metadata[key] = parsed.value;
+            recoveredScalarCount += 1;
+            continue;
+        }
+
+        return null;
+    }
+
+    return recoveredScalarCount > 0 ? result : null;
+}
+
+function loadFrontmatterObject(frontmatterStr: string, warnLabel: string): Record<string, unknown> | null {
+    try {
+        const parsed = yamlLoad(frontmatterStr) as Record<string, unknown> | null;
+        return parsed && typeof parsed === 'object' ? parsed : null;
+    } catch (error) {
+        const loose = parseLooseFrontmatterScalars(frontmatterStr);
+        if (loose) return loose;
+        console.warn(warnLabel, error);
+        return null;
+    }
+}
+
 /**
  * Extract author from parsed YAML object
  * Checks both top-level (author, Author) and nested (metadata.author, metadata.Author)
@@ -107,8 +187,8 @@ export function parseYamlFrontmatter(content: string): { description?: string; a
         if (!extracted) {
             return {};
         }
-        const parsed = yamlLoad(extracted.frontmatterStr) as Record<string, unknown> | null;
-        if (!parsed || typeof parsed !== 'object') {
+        const parsed = loadFrontmatterObject(extracted.frontmatterStr, 'Failed to parse YAML frontmatter:');
+        if (!parsed) {
             return {};
         }
         return {
@@ -146,8 +226,8 @@ export function parseSkillFrontmatter(content: string): { name?: string; descrip
         let author: string | undefined;
 
         if (extracted) {
-            const parsed = yamlLoad(extracted.frontmatterStr) as Record<string, unknown> | null;
-            if (parsed && typeof parsed === 'object') {
+            const parsed = loadFrontmatterObject(extracted.frontmatterStr, 'Failed to parse skill frontmatter:');
+            if (parsed) {
                 name = typeof parsed.name === 'string' ? parsed.name : undefined;
                 description = typeof parsed.description === 'string' ? parsed.description : undefined;
                 author = extractAuthor(parsed);
@@ -194,8 +274,8 @@ export function parseFullSkillContent(content: string): {
             return { frontmatter: {}, body: content };
         }
 
-        const parsed = yamlLoad(extracted.frontmatterStr) as Record<string, unknown> | null;
-        if (!parsed || typeof parsed !== 'object') {
+        const parsed = loadFrontmatterObject(extracted.frontmatterStr, 'Failed to parse full skill content:');
+        if (!parsed) {
             return { frontmatter: {}, body: extracted.body };
         }
 
@@ -243,8 +323,8 @@ export function parseFullCommandContent(content: string): {
             return { frontmatter: name ? { name } : {}, body: content };
         }
 
-        const parsed = yamlLoad(extracted.frontmatterStr) as Record<string, unknown> | null;
-        if (!parsed || typeof parsed !== 'object') {
+        const parsed = loadFrontmatterObject(extracted.frontmatterStr, 'Failed to parse full command content:');
+        if (!parsed) {
             return { frontmatter: {}, body: extracted.body };
         }
 
