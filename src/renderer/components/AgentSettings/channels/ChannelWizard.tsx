@@ -1451,21 +1451,23 @@ export default function ChannelWizard({
                                 />
                             </div>
                             <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
-                                <p className="text-sm font-medium text-[var(--ink)]">如何获取钉钉应用凭证？</p>
+                                <p className="text-sm font-medium text-[var(--ink)]">
+                                    {t('agentSettings.channelWizard.guides.dingtalk.credentialsTitle')}
+                                </p>
                                 <ol className="mt-3 space-y-1.5 text-sm text-[var(--ink-muted)]">
-                                    <li>1. 登录<a
+                                    <li>{t('agentSettings.channelWizard.guides.dingtalk.credentialsStep1Prefix')}<a
                                         href="https://open-dev.dingtalk.com"
                                         target="_blank"
                                         rel="noopener noreferrer"
                                         className="mx-0.5 inline-flex items-center gap-0.5 text-[var(--button-primary-bg)] hover:underline"
                                     >
-                                        钉钉开放平台
-                                    </a>，进入 <span className="font-medium text-[var(--ink)]">应用开发</span> &gt; <span className="font-medium text-[var(--ink)]">钉钉应用</span></li>
-                                    <li>2. 点击右上角 <span className="font-medium text-[var(--ink)]">创建应用</span>，填写应用名称和描述</li>
-                                    <li>3. 创建后进入应用详情，在左侧菜单 <span className="font-medium text-[var(--ink)]">凭证与基础信息</span> 页获取 Client ID 和 Client Secret</li>
+                                        {t('agentSettings.channelWizard.guides.dingtalk.openPlatform')}
+                                    </a>{t('agentSettings.channelWizard.guides.dingtalk.credentialsStep1Middle')}<span className="font-medium text-[var(--ink)]">{t('agentSettings.channelWizard.guides.dingtalk.appDevelopment')}</span> &gt; <span className="font-medium text-[var(--ink)]">{t('agentSettings.channelWizard.guides.dingtalk.dingtalkApps')}</span></li>
+                                    <li>{t('agentSettings.channelWizard.guides.dingtalk.credentialsStep2Prefix')}<span className="font-medium text-[var(--ink)]">{t('agentSettings.channelWizard.guides.dingtalk.createApp')}</span>{t('agentSettings.channelWizard.guides.dingtalk.credentialsStep2Suffix')}</li>
+                                    <li>{t('agentSettings.channelWizard.guides.dingtalk.credentialsStep3Prefix')}<span className="font-medium text-[var(--ink)]">{t('agentSettings.channelWizard.guides.dingtalk.credentialsBasicInfo')}</span>{t('agentSettings.channelWizard.guides.dingtalk.credentialsStep3Suffix')}</li>
                                 </ol>
-                                <img src={dingtalkStep1CreateAppImg} alt="钉钉开放平台 - 创建应用" className="mt-4 w-full rounded-lg border border-[var(--line)]" />
-                                <img src={dingtalkStep1CredentialsImg} alt="钉钉凭证与基础信息" className="mt-4 w-full rounded-lg border border-[var(--line)]" />
+                                <img src={dingtalkStep1CreateAppImg} alt={t('agentSettings.channelWizard.guides.dingtalk.altCreateApp')} className="mt-4 w-full rounded-lg border border-[var(--line)]" />
+                                <img src={dingtalkStep1CredentialsImg} alt={t('agentSettings.channelWizard.guides.dingtalk.altCredentials')} className="mt-4 w-full rounded-lg border border-[var(--line)]" />
                             </div>
                         </div>
                     ) : isFeishu ? (
@@ -1482,20 +1484,22 @@ export default function ChannelWizard({
                                 />
                             </div>
                             <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
-                                <p className="text-sm font-medium text-[var(--ink)]">如何获取飞书应用凭证？</p>
+                                <p className="text-sm font-medium text-[var(--ink)]">
+                                    {t('agentSettings.channelWizard.guides.feishu.credentialsTitle')}
+                                </p>
                                 <ol className="mt-3 space-y-1.5 text-sm text-[var(--ink-muted)]">
-                                    <li>1. 登录<a
+                                    <li>{t('agentSettings.channelWizard.guides.feishu.credentialsStep1Prefix')}<a
                                         href="https://open.feishu.cn/app"
                                         target="_blank"
                                         rel="noopener noreferrer"
                                         className="mx-0.5 inline-flex items-center gap-0.5 text-[var(--button-primary-bg)] hover:underline"
                                     >
-                                        飞书开放平台
-                                    </a>并创建自建应用</li>
-                                    <li>2. 在「凭证与基础信息」页获取 App ID 和 App Secret 填入上方</li>
-                                    <li>3. 填入凭证后点击「下一步」，会引导你完成权限、事件订阅、添加机器人能力等设置</li>
+                                        {t('agentSettings.channelWizard.guides.feishu.openPlatform')}
+                                    </a>{t('agentSettings.channelWizard.guides.feishu.credentialsStep1Suffix')}</li>
+                                    <li>{t('agentSettings.channelWizard.guides.feishu.credentialsStep2')}</li>
+                                    <li>{t('agentSettings.channelWizard.guides.feishu.credentialsStep3')}</li>
                                 </ol>
-                                <img src={feishuStep1Img} alt="飞书开放平台 - 凭证与基础信息" className="mt-4 w-full rounded-lg border border-[var(--line)]" />
+                                <img src={feishuStep1Img} alt={t('agentSettings.channelWizard.guides.feishu.altCredentials')} className="mt-4 w-full rounded-lg border border-[var(--line)]" />
                             </div>
                         </div>
                     ) : (
@@ -1510,20 +1514,20 @@ export default function ChannelWizard({
                             </div>
                             <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
                                 <h3 className="text-sm font-medium text-[var(--ink)]">
-                                    如何获取 Bot Token？
+                                    {t('agentSettings.channelWizard.guides.telegram.tokenTitle')}
                                 </h3>
                                 <div className="mt-3 flex gap-5">
                                     <img
                                         src={telegramBotAddImg}
-                                        alt="Telegram BotFather tutorial"
+                                        alt={t('agentSettings.channelWizard.guides.telegram.altBotFather')}
                                         className="h-[270px] flex-shrink-0 rounded-lg border border-[var(--line)] object-cover"
                                     />
                                     <ol className="flex-1 space-y-2 text-sm text-[var(--ink-muted)]">
-                                        <li>1. 扫左侧二维码，或在 Telegram 中搜索 <span className="font-medium text-[var(--ink)]">@BotFather</span></li>
-                                        <li>2. 发送 <code className="rounded bg-[var(--paper-inset)] px-1.5 py-0.5 text-xs">/newbot</code> 创建新 Bot</li>
-                                        <li>3. 按提示设置 Bot 名称和用户名</li>
-                                        <li>4. 复制返回的 <span className="font-medium text-[var(--ink)]">HTTP API Token</span></li>
-                                        <li>5. 粘贴到上方的 Bot Token 输入框</li>
+                                        <li>{t('agentSettings.channelWizard.guides.telegram.step1Prefix')}<span className="font-medium text-[var(--ink)]">@BotFather</span>{t('agentSettings.channelWizard.guides.telegram.step1Suffix')}</li>
+                                        <li>{t('agentSettings.channelWizard.guides.telegram.step2Prefix')}<code className="rounded bg-[var(--paper-inset)] px-1.5 py-0.5 text-xs">/newbot</code>{t('agentSettings.channelWizard.guides.telegram.step2Suffix')}</li>
+                                        <li>{t('agentSettings.channelWizard.guides.telegram.step3')}</li>
+                                        <li>{t('agentSettings.channelWizard.guides.telegram.step4Prefix')}<span className="font-medium text-[var(--ink)]">HTTP API Token</span></li>
+                                        <li>{t('agentSettings.channelWizard.guides.telegram.step5')}</li>
                                     </ol>
                                 </div>
                             </div>
@@ -1544,34 +1548,40 @@ export default function ChannelWizard({
                     })}
 
                     <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
-                        <h3 className="text-sm font-medium text-[var(--ink)]">4. 添加机器人能力</h3>
+                        <h3 className="text-sm font-medium text-[var(--ink)]">
+                            {t('agentSettings.channelWizard.guides.dingtalk.addBotTitle')}
+                        </h3>
                         <ol className="mt-3 space-y-1.5 text-sm text-[var(--ink-muted)]">
-                            <li>在应用详情页，左侧菜单进入 <span className="font-medium text-[var(--ink)]">添加应用能力</span></li>
-                            <li>找到 <span className="font-medium text-[var(--ink)]">机器人</span> 卡片，点击 <span className="font-medium text-[var(--ink)]">+ 添加</span></li>
+                            <li>{t('agentSettings.channelWizard.guides.dingtalk.addBotStep1Prefix')}<span className="font-medium text-[var(--ink)]">{t('agentSettings.channelWizard.guides.dingtalk.addCapability')}</span></li>
+                            <li>{t('agentSettings.channelWizard.guides.dingtalk.addBotStep2Prefix')}<span className="font-medium text-[var(--ink)]">{t('agentSettings.channelWizard.guides.dingtalk.bot')}</span>{t('agentSettings.channelWizard.guides.dingtalk.addBotStep2Middle')}<span className="font-medium text-[var(--ink)]">+ {t('agentSettings.channelWizard.guides.dingtalk.add')}</span></li>
                         </ol>
-                        <img src={dingtalkStep2AddRobotImg} alt="钉钉添加应用能力 - 机器人" className="mt-4 w-full rounded-lg border border-[var(--line)]" />
+                        <img src={dingtalkStep2AddRobotImg} alt={t('agentSettings.channelWizard.guides.dingtalk.altAddBot')} className="mt-4 w-full rounded-lg border border-[var(--line)]" />
                     </div>
 
                     <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
-                        <h3 className="text-sm font-medium text-[var(--ink)]">5. 配置机器人</h3>
+                        <h3 className="text-sm font-medium text-[var(--ink)]">
+                            {t('agentSettings.channelWizard.guides.dingtalk.configureBotTitle')}
+                        </h3>
                         <ol className="mt-3 space-y-1.5 text-sm text-[var(--ink-muted)]">
-                            <li>左侧菜单进入 <span className="font-medium text-[var(--ink)]">机器人</span>，开启 <span className="font-medium text-[var(--ink)]">机器人配置</span> 开关</li>
-                            <li>填写机器人名称和简介</li>
-                            <li>消息接收模式选择 <span className="font-medium text-[var(--ink)]">Stream 模式</span>（无需公网服务器，推荐）</li>
-                            <li>点击 <span className="font-medium text-[var(--ink)]">发布</span> 保存机器人配置</li>
+                            <li>{t('agentSettings.channelWizard.guides.dingtalk.configureBotStep1Prefix')}<span className="font-medium text-[var(--ink)]">{t('agentSettings.channelWizard.guides.dingtalk.bot')}</span>{t('agentSettings.channelWizard.guides.dingtalk.configureBotStep1Middle')}<span className="font-medium text-[var(--ink)]">{t('agentSettings.channelWizard.guides.dingtalk.botConfig')}</span>{t('agentSettings.channelWizard.guides.dingtalk.configureBotStep1Suffix')}</li>
+                            <li>{t('agentSettings.channelWizard.guides.dingtalk.configureBotStep2')}</li>
+                            <li>{t('agentSettings.channelWizard.guides.dingtalk.configureBotStep3Prefix')}<span className="font-medium text-[var(--ink)]">{t('agentSettings.channelWizard.guides.dingtalk.streamMode')}</span>{t('agentSettings.channelWizard.guides.dingtalk.configureBotStep3Suffix')}</li>
+                            <li>{t('agentSettings.channelWizard.guides.dingtalk.configureBotStep4Prefix')}<span className="font-medium text-[var(--ink)]">{t('agentSettings.channelWizard.guides.dingtalk.publish')}</span>{t('agentSettings.channelWizard.guides.dingtalk.configureBotStep4Suffix')}</li>
                         </ol>
-                        <img src={dingtalkStep2StreamModeImg} alt="钉钉机器人配置 - Stream 模式" className="mt-4 w-full rounded-lg border border-[var(--line)]" />
+                        <img src={dingtalkStep2StreamModeImg} alt={t('agentSettings.channelWizard.guides.dingtalk.altStreamMode')} className="mt-4 w-full rounded-lg border border-[var(--line)]" />
                     </div>
 
                     <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
-                        <h3 className="text-sm font-medium text-[var(--ink)]">6. 创建版本并发布</h3>
+                        <h3 className="text-sm font-medium text-[var(--ink)]">
+                            {t('agentSettings.channelWizard.guides.dingtalk.publishTitle')}
+                        </h3>
                         <ol className="mt-3 space-y-1.5 text-sm text-[var(--ink-muted)]">
-                            <li>左侧菜单进入 <span className="font-medium text-[var(--ink)]">版本管理与发布</span></li>
-                            <li>点击右上角 <span className="font-medium text-[var(--ink)]">创建新版本</span>，填写版本号和描述</li>
-                            <li>设置 <span className="font-medium text-[var(--ink)]">应用可用范围</span>（建议选择<span className="font-medium text-[var(--ink)]">全部员工</span>或目标范围）</li>
-                            <li>保存后提交发布，管理员审批通过后即可使用</li>
+                            <li>{t('agentSettings.channelWizard.guides.dingtalk.publishStep1Prefix')}<span className="font-medium text-[var(--ink)]">{t('agentSettings.channelWizard.guides.dingtalk.versionRelease')}</span></li>
+                            <li>{t('agentSettings.channelWizard.guides.dingtalk.publishStep2Prefix')}<span className="font-medium text-[var(--ink)]">{t('agentSettings.channelWizard.guides.dingtalk.createVersion')}</span>{t('agentSettings.channelWizard.guides.dingtalk.publishStep2Suffix')}</li>
+                            <li>{t('agentSettings.channelWizard.guides.dingtalk.publishStep3Prefix')}<span className="font-medium text-[var(--ink)]">{t('agentSettings.channelWizard.guides.dingtalk.appAvailableScope')}</span>{t('agentSettings.channelWizard.guides.dingtalk.publishStep3Middle')}<span className="font-medium text-[var(--ink)]">{t('agentSettings.channelWizard.guides.dingtalk.allEmployees')}</span>{t('agentSettings.channelWizard.guides.dingtalk.publishStep3Suffix')}</li>
+                            <li>{t('agentSettings.channelWizard.guides.dingtalk.publishStep4')}</li>
                         </ol>
-                        <img src={dingtalkStep2PublishImg} alt="钉钉版本管理与发布" className="mt-4 w-full rounded-lg border border-[var(--line)]" />
+                        <img src={dingtalkStep2PublishImg} alt={t('agentSettings.channelWizard.guides.dingtalk.altPublish')} className="mt-4 w-full rounded-lg border border-[var(--line)]" />
                     </div>
                 </div>
             )}
@@ -1591,25 +1601,31 @@ export default function ChannelWizard({
                     <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-inset)] px-4 py-3">
                         <div className="flex items-center gap-2 text-sm text-[var(--ink)]">
                             <Check className="h-4 w-4 text-[var(--success)]" />
-                            <span>凭证已验证{botUsername ? `：${botUsername}` : ''}</span>
+                            <span>
+                                {botUsername
+                                    ? t('agentSettings.channelWizard.guides.feishu.credentialVerifiedWithName', { name: botUsername })
+                                    : t('agentSettings.channelWizard.guides.feishu.credentialVerified')}
+                            </span>
                         </div>
                         <p className="mt-1.5 pl-6 text-xs text-[var(--ink-muted)]">
-                            按照下面 3 步在飞书开放平台完成权限、事件订阅、版本发布，然后点上方「下一步」继续绑定。
+                            {t('agentSettings.channelWizard.guides.feishu.nextHint')}
                         </p>
                     </div>
 
                     <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
-                        <h3 className="text-sm font-medium text-[var(--ink)]">4. 配置权限</h3>
+                        <h3 className="text-sm font-medium text-[var(--ink)]">
+                            {t('agentSettings.channelWizard.guides.feishu.permissionsTitle', { step: 4 })}
+                        </h3>
                         <ol className="mt-3 space-y-1.5 text-sm text-[var(--ink-muted)]">
-                            <li>左侧菜单进入 <span className="font-medium text-[var(--ink)]">权限管理</span></li>
-                            <li>点击 <span className="font-medium text-[var(--ink)]">批量导入</span></li>
-                            <li>粘贴以下 JSON（一键导入所有需要的权限）：</li>
+                            <li>{t('agentSettings.channelWizard.guides.feishu.permissionsStep1Prefix')}<span className="font-medium text-[var(--ink)]">{t('agentSettings.channelWizard.guides.feishu.permissionManagement')}</span></li>
+                            <li>{t('agentSettings.channelWizard.guides.feishu.permissionsStep2Prefix')}<span className="font-medium text-[var(--ink)]">{t('agentSettings.channelWizard.guides.feishu.batchImport')}</span></li>
+                            <li>{t('agentSettings.channelWizard.guides.feishu.permissionsStep3')}</li>
                         </ol>
                         <div className="mt-3 relative">
                             <button
                                 onClick={handleCopyPermJson}
                                 className="absolute right-2 top-2 rounded-md border border-[var(--line)] bg-[var(--paper-elevated)] p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
-                                title="复制 JSON"
+                                title={t('agentSettings.channelWizard.guides.feishu.copyJson')}
                             >
                                 {permJsonCopied ? <Check className="h-3.5 w-3.5 text-[var(--success)]" /> : <Copy className="h-3.5 w-3.5" />}
                             </button>
@@ -1617,26 +1633,30 @@ export default function ChannelWizard({
                                 {FEISHU_PERMISSIONS_JSON}
                             </pre>
                         </div>
-                        <img src={feishuStep2PermImg} alt="飞书权限管理 - 批量导入" className="mt-4 w-full rounded-lg border border-[var(--line)]" />
+                        <img src={feishuStep2PermImg} alt={t('agentSettings.channelWizard.guides.feishu.altPermissions')} className="mt-4 w-full rounded-lg border border-[var(--line)]" />
                     </div>
 
                     <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
-                        <h3 className="text-sm font-medium text-[var(--ink)]">5. 配置事件订阅</h3>
+                        <h3 className="text-sm font-medium text-[var(--ink)]">
+                            {t('agentSettings.channelWizard.guides.feishu.eventsTitle', { step: 5 })}
+                        </h3>
                         <ol className="mt-3 space-y-1.5 text-sm text-[var(--ink-muted)]">
-                            <li>左侧菜单进入 <span className="font-medium text-[var(--ink)]">事件与回调</span> &gt; <span className="font-medium text-[var(--ink)]">事件配置</span></li>
-                            <li>请求方式选择：<span className="font-medium text-[var(--ink)]">使用长连接接收事件</span>（不需要公网服务器）</li>
-                            <li>添加事件：搜索 <code className="rounded bg-[var(--paper-inset)] px-1.5 py-0.5 text-xs">im.message.receive_v1</code>（接收消息），勾选添加</li>
+                            <li>{t('agentSettings.channelWizard.guides.feishu.eventsStep1Prefix')}<span className="font-medium text-[var(--ink)]">{t('agentSettings.channelWizard.guides.feishu.eventsCallbacks')}</span> &gt; <span className="font-medium text-[var(--ink)]">{t('agentSettings.channelWizard.guides.feishu.eventConfig')}</span></li>
+                            <li>{t('agentSettings.channelWizard.guides.feishu.eventsStep2Prefix')}<span className="font-medium text-[var(--ink)]">{t('agentSettings.channelWizard.guides.feishu.longConnection')}</span>{t('agentSettings.channelWizard.guides.feishu.eventsStep2Suffix')}</li>
+                            <li>{t('agentSettings.channelWizard.guides.feishu.eventsStep3Prefix')}<code className="rounded bg-[var(--paper-inset)] px-1.5 py-0.5 text-xs">im.message.receive_v1</code>{t('agentSettings.channelWizard.guides.feishu.eventsStep3Suffix')}</li>
                         </ol>
-                        <img src={feishuStep2EventImg} alt="飞书事件与回调 - 事件配置" className="mt-4 w-full rounded-lg border border-[var(--line)]" />
+                        <img src={feishuStep2EventImg} alt={t('agentSettings.channelWizard.guides.feishu.altEvents')} className="mt-4 w-full rounded-lg border border-[var(--line)]" />
                     </div>
 
                     <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
-                        <h3 className="text-sm font-medium text-[var(--ink)]">6. 创建版本并发布</h3>
+                        <h3 className="text-sm font-medium text-[var(--ink)]">
+                            {t('agentSettings.channelWizard.guides.feishu.publishTitle', { step: 6 })}
+                        </h3>
                         <ol className="mt-3 space-y-1.5 text-sm text-[var(--ink-muted)]">
-                            <li>左侧菜单进入 <span className="font-medium text-[var(--ink)]">版本管理与发布</span></li>
-                            <li>点击右上角 <span className="font-medium text-[var(--ink)]">创建版本</span>，填写版本信息后提交发布</li>
+                            <li>{t('agentSettings.channelWizard.guides.feishu.publishStep1Prefix')}<span className="font-medium text-[var(--ink)]">{t('agentSettings.channelWizard.guides.feishu.versionRelease')}</span></li>
+                            <li>{t('agentSettings.channelWizard.guides.feishu.publishStep2Prefix')}<span className="font-medium text-[var(--ink)]">{t('agentSettings.channelWizard.guides.feishu.createVersion')}</span>{t('agentSettings.channelWizard.guides.feishu.publishStep2Suffix')}</li>
                         </ol>
-                        <img src={feishuStep2PublishImg} alt="飞书版本管理与发布" className="mt-4 w-full rounded-lg border border-[var(--line)]" />
+                        <img src={feishuStep2PublishImg} alt={t('agentSettings.channelWizard.guides.feishu.altPublish')} className="mt-4 w-full rounded-lg border border-[var(--line)]" />
                     </div>
                 </div>
             )}
@@ -1674,17 +1694,19 @@ export default function ChannelWizard({
                     {promoted?.pluginId === 'openclaw-lark' && (
                         <>
                             <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
-                                <h3 className="text-sm font-medium text-[var(--ink)]">2. 配置权限</h3>
+                                <h3 className="text-sm font-medium text-[var(--ink)]">
+                                    {t('agentSettings.channelWizard.guides.feishu.permissionsTitle', { step: 2 })}
+                                </h3>
                                 <ol className="mt-3 space-y-1.5 text-sm text-[var(--ink-muted)]">
-                                    <li>左侧菜单进入 <span className="font-medium text-[var(--ink)]">权限管理</span></li>
-                                    <li>点击 <span className="font-medium text-[var(--ink)]">批量导入</span></li>
-                                    <li>粘贴以下 JSON（一键导入所有需要的权限）：</li>
+                                    <li>{t('agentSettings.channelWizard.guides.feishu.permissionsStep1Prefix')}<span className="font-medium text-[var(--ink)]">{t('agentSettings.channelWizard.guides.feishu.permissionManagement')}</span></li>
+                                    <li>{t('agentSettings.channelWizard.guides.feishu.permissionsStep2Prefix')}<span className="font-medium text-[var(--ink)]">{t('agentSettings.channelWizard.guides.feishu.batchImport')}</span></li>
+                                    <li>{t('agentSettings.channelWizard.guides.feishu.permissionsStep3')}</li>
                                 </ol>
                                 <div className="mt-3 relative">
                                     <button
                                         onClick={handleCopyPermJson}
                                         className="absolute right-2 top-2 rounded-md border border-[var(--line)] bg-[var(--paper-elevated)] p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
-                                        title="复制 JSON"
+                                        title={t('agentSettings.channelWizard.guides.feishu.copyJson')}
                                     >
                                         {permJsonCopied ? <Check className="h-3.5 w-3.5 text-[var(--success)]" /> : <Copy className="h-3.5 w-3.5" />}
                                     </button>
@@ -1692,26 +1714,30 @@ export default function ChannelWizard({
                                         {FEISHU_PERMISSIONS_JSON}
                                     </pre>
                                 </div>
-                                <img src={feishuStep2PermImg} alt="飞书权限管理 - 批量导入" className="mt-4 w-full rounded-lg border border-[var(--line)]" />
+                                <img src={feishuStep2PermImg} alt={t('agentSettings.channelWizard.guides.feishu.altPermissions')} className="mt-4 w-full rounded-lg border border-[var(--line)]" />
                             </div>
 
                             <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
-                                <h3 className="text-sm font-medium text-[var(--ink)]">3. 配置事件订阅</h3>
+                                <h3 className="text-sm font-medium text-[var(--ink)]">
+                                    {t('agentSettings.channelWizard.guides.feishu.eventsTitle', { step: 3 })}
+                                </h3>
                                 <ol className="mt-3 space-y-1.5 text-sm text-[var(--ink-muted)]">
-                                    <li>左侧菜单进入 <span className="font-medium text-[var(--ink)]">事件与回调</span> &gt; <span className="font-medium text-[var(--ink)]">事件配置</span></li>
-                                    <li>请求方式选择：<span className="font-medium text-[var(--ink)]">使用长连接接收事件</span>（不需要公网服务器）</li>
-                                    <li>添加事件：搜索 <code className="rounded bg-[var(--paper-inset)] px-1.5 py-0.5 text-xs">im.message.receive_v1</code>（接收消息），勾选添加</li>
+                                    <li>{t('agentSettings.channelWizard.guides.feishu.eventsStep1Prefix')}<span className="font-medium text-[var(--ink)]">{t('agentSettings.channelWizard.guides.feishu.eventsCallbacks')}</span> &gt; <span className="font-medium text-[var(--ink)]">{t('agentSettings.channelWizard.guides.feishu.eventConfig')}</span></li>
+                                    <li>{t('agentSettings.channelWizard.guides.feishu.eventsStep2Prefix')}<span className="font-medium text-[var(--ink)]">{t('agentSettings.channelWizard.guides.feishu.longConnection')}</span>{t('agentSettings.channelWizard.guides.feishu.eventsStep2Suffix')}</li>
+                                    <li>{t('agentSettings.channelWizard.guides.feishu.eventsStep3Prefix')}<code className="rounded bg-[var(--paper-inset)] px-1.5 py-0.5 text-xs">im.message.receive_v1</code>{t('agentSettings.channelWizard.guides.feishu.eventsStep3Suffix')}</li>
                                 </ol>
-                                <img src={feishuStep2EventImg} alt="飞书事件与回调 - 事件配置" className="mt-4 w-full rounded-lg border border-[var(--line)]" />
+                                <img src={feishuStep2EventImg} alt={t('agentSettings.channelWizard.guides.feishu.altEvents')} className="mt-4 w-full rounded-lg border border-[var(--line)]" />
                             </div>
 
                             <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
-                                <h3 className="text-sm font-medium text-[var(--ink)]">4. 添加机器人能力并发布</h3>
+                                <h3 className="text-sm font-medium text-[var(--ink)]">
+                                    {t('agentSettings.channelWizard.guides.feishu.botPublishTitle', { step: 4 })}
+                                </h3>
                                 <ol className="mt-3 space-y-1.5 text-sm text-[var(--ink-muted)]">
-                                    <li>左侧菜单进入 <span className="font-medium text-[var(--ink)]">添加应用能力</span>，找到 <span className="font-medium text-[var(--ink)]">机器人</span> 卡片，点击添加</li>
-                                    <li>左侧菜单进入 <span className="font-medium text-[var(--ink)]">版本管理与发布</span>，点击 <span className="font-medium text-[var(--ink)]">创建版本</span>，提交发布</li>
+                                    <li>{t('agentSettings.channelWizard.guides.feishu.botPublishStep1Prefix')}<span className="font-medium text-[var(--ink)]">{t('agentSettings.channelWizard.guides.feishu.addCapability')}</span>{t('agentSettings.channelWizard.guides.feishu.botPublishStep1Middle')}<span className="font-medium text-[var(--ink)]">{t('agentSettings.channelWizard.guides.feishu.bot')}</span>{t('agentSettings.channelWizard.guides.feishu.botPublishStep1Suffix')}</li>
+                                    <li>{t('agentSettings.channelWizard.guides.feishu.botPublishStep2Prefix')}<span className="font-medium text-[var(--ink)]">{t('agentSettings.channelWizard.guides.feishu.versionRelease')}</span>{t('agentSettings.channelWizard.guides.feishu.botPublishStep2Middle')}<span className="font-medium text-[var(--ink)]">{t('agentSettings.channelWizard.guides.feishu.createVersion')}</span>{t('agentSettings.channelWizard.guides.feishu.botPublishStep2Suffix')}</li>
                                 </ol>
-                                <img src={feishuStep2AddBotImg} alt="飞书添加机器人能力" className="mt-4 w-full rounded-lg border border-[var(--line)]" />
+                                <img src={feishuStep2AddBotImg} alt={t('agentSettings.channelWizard.guides.feishu.altAddBot')} className="mt-4 w-full rounded-lg border border-[var(--line)]" />
                             </div>
                         </>
                     )}
