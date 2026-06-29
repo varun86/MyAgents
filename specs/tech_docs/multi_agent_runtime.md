@@ -231,6 +231,15 @@ Server → Client (Notification): {"jsonrpc":"2.0","method":"item/agentMessage/d
 
 **注意**：Codex 不支持通过 `thread/start`/`thread/resume` 注入 MCP Server 配置。Codex 的 MCP 由其自身管理（`~/.codex/` 配置），MyAgents 无法控制。
 
+### Skills 加载
+
+Codex 原生扫描 `.agents/skills`，而 MyAgents/Claude Agent SDK 的工作区协议使用 `.claude/skills`。为保持产品层一致性，Codex adapter 在 `startSession()` 中做两步桥接：
+
+1. 调 `syncProjectUserConfigFiles(workspacePath)`，把 `~/.myagents/skills` 中启用的用户级 skills 同步为工作区 `.claude/skills/*` symlink（与 builtin Claude SDK 共用同一套磁盘桥接逻辑，不另建 Codex 专用目录）。
+2. `initialize` 握手完成后调 Codex app-server RPC `skills/extraRoots/set`，把 `<workspace>/.claude/skills` 作为额外 skill root 注入当前 Codex 进程。
+
+同步失败只记录 warning，Codex 会话继续启动；`.claude/skills` 作为工作区级 extra root 的注入与用户级 symlink 同步解耦，仍会照常尝试。这条路径在 `src/server/runtimes/codex.ts::CodexRuntime.startSession()` 内，因此 `runtimeSource:'managed-provider'`（内置 Codex 订阅）和 `runtimeSource:'system-cli'`（实验室外部 Codex CLI）都会生效。若用户系统 CLI 版本过旧、不支持 `skills/extraRoots/set`，adapter 同样只记录 warning 并继续启动会话；此时 Codex 回落到自身默认 `.agents/skills` 扫描。
+
 ### 事件映射
 
 | Codex Notification | UnifiedEvent |

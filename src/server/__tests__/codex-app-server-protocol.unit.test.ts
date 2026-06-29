@@ -1,4 +1,8 @@
-import { describe, expect, it, vi } from 'vitest';
+import { existsSync, mkdirSync, rmSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
+
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   buildCodexFileChangeResultContent,
@@ -7,15 +11,33 @@ import {
   buildCodexSandboxPolicy,
   buildCodexTurnStartParams,
   CodexRuntime,
+  configureCodexSkillExtraRoots,
   initializeCodexRpc,
   KNOWN_CODEX_SERVER_REQUEST_METHODS,
   mapCodexTurnCompletedNotification,
   mapCodexTurnPlanUpdatedNotification,
+  resolveCodexSkillExtraRoots,
   serializeCodexPermissionResponse,
   type PendingCodexRequest,
 } from '../runtimes/codex';
 
 describe('Codex app-server protocol helpers', () => {
+  const tempRoots: string[] = [];
+
+  afterEach(() => {
+    while (tempRoots.length > 0) {
+      const dir = tempRoots.pop();
+      if (dir) rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  function tempWorkspace(): string {
+    const dir = join(tmpdir(), `myagents-codex-test-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+    mkdirSync(dir, { recursive: true });
+    tempRoots.push(dir);
+    return dir;
+  }
+
   it('uses v2 initialize capabilities and sends initialized notification', async () => {
     const rpc = {
       call: vi.fn().mockResolvedValue({}),
@@ -184,6 +206,50 @@ describe('Codex app-server protocol helpers', () => {
     expect(env.OPENAI_API_KEY).toBeUndefined();
     expect(args.join('\n')).not.toContain('sk-test-secret-value');
     expect(args.join('\n')).not.toContain('must-not-leak');
+  });
+
+  it('injects project .claude/skills as Codex app-server extra skill roots', async () => {
+    const workspace = tempWorkspace();
+    const projectSkillsDir = join(workspace, '.claude', 'skills');
+    mkdirSync(projectSkillsDir, { recursive: true });
+    const rpc = { call: vi.fn().mockResolvedValue({}) };
+
+    await expect(configureCodexSkillExtraRoots(rpc, workspace, 1234)).resolves.toEqual([projectSkillsDir]);
+
+    expect(resolveCodexSkillExtraRoots(workspace)).toEqual([projectSkillsDir]);
+    expect(rpc.call).toHaveBeenCalledWith(
+      'skills/extraRoots/set',
+      { extraRoots: [projectSkillsDir] },
+      1234,
+    );
+  });
+
+  it('skips Codex skill extra roots when project .claude/skills is absent', async () => {
+    const workspace = tempWorkspace();
+    const rpc = { call: vi.fn().mockResolvedValue({}) };
+
+    await expect(configureCodexSkillExtraRoots(rpc, workspace)).resolves.toEqual([]);
+
+    expect(existsSync(join(workspace, '.claude', 'skills'))).toBe(false);
+    expect(resolveCodexSkillExtraRoots(workspace)).toEqual([]);
+    expect(rpc.call).not.toHaveBeenCalled();
+  });
+
+  it('does not fail Codex startup when extraRoots RPC is unavailable', async () => {
+    const workspace = tempWorkspace();
+    const projectSkillsDir = join(workspace, '.claude', 'skills');
+    mkdirSync(projectSkillsDir, { recursive: true });
+    const rpc = {
+      call: vi.fn().mockRejectedValue(new Error('Method not found: skills/extraRoots/set')),
+    };
+
+    await expect(configureCodexSkillExtraRoots(rpc, workspace)).resolves.toEqual([]);
+
+    expect(rpc.call).toHaveBeenCalledWith(
+      'skills/extraRoots/set',
+      { extraRoots: [projectSkillsDir] },
+      5000,
+    );
   });
 
   it('passes cwd, approvalPolicy, sandboxPolicy, model, and summary to turn/start', () => {

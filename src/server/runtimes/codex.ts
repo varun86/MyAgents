@@ -28,6 +28,7 @@ import { ensureDirSync } from '../utils/fs-utils';
 import { getBundledCusePath } from '../utils/runtime';
 import { killWithEscalation } from './utils/kill-with-escalation';
 import { withLogContext } from '../logger-context';
+import { trySyncProjectUserConfigFiles } from '../utils/project-user-config-sync';
 import {
   saveToolAttachment,
   makePlaceholderAttachment,
@@ -233,6 +234,38 @@ function canExposeMcpEnvKeyToCodexParent(key: string): boolean {
 
 function pushCodexConfigArg(target: string[], key: string, valueToml: string): void {
   target.push('-c', `${key}=${valueToml}`);
+}
+
+export function resolveCodexSkillExtraRoots(workspacePath: string): string[] {
+  const projectSkillsDir = join(workspacePath, '.claude', 'skills');
+  try {
+    if (!existsSync(projectSkillsDir)) return [];
+    if (!statSync(projectSkillsDir).isDirectory()) return [];
+    return [projectSkillsDir];
+  } catch {
+    return [];
+  }
+}
+
+export async function configureCodexSkillExtraRoots(
+  rpc: Pick<JsonRpcClient, 'call'>,
+  workspacePath: string,
+  timeoutMs = 5_000,
+): Promise<string[]> {
+  const extraRoots = resolveCodexSkillExtraRoots(workspacePath);
+  if (extraRoots.length === 0) return [];
+
+  try {
+    await rpc.call('skills/extraRoots/set', { extraRoots }, timeoutMs);
+    console.log(`[codex] skills extra roots injected: ${extraRoots.join(',')}`);
+    return extraRoots;
+  } catch (err) {
+    console.warn(
+      '[codex] skills extra roots injection failed; continuing without .claude/skills:',
+      err instanceof Error ? err.message : String(err),
+    );
+    return [];
+  }
 }
 
 function buildManagedCodexMcpConfigArgs(
@@ -2153,6 +2186,7 @@ export class CodexRuntime implements AgentRuntime {
   ): Promise<RuntimeProcess> {
     // Clean up stale temp images from previous sessions
     cleanupStaleTempImages();
+    trySyncProjectUserConfigFiles(options.workspacePath, {}, 'codex');
 
     // Cross-runtime workspace protocol: make Codex natively discover CLAUDE.md
     // when no AGENTS.md is present. The -c flag overrides config.toml at runtime
@@ -2353,6 +2387,7 @@ export class CodexRuntime implements AgentRuntime {
     try {
       // 1. Initialize handshake
       await initializeCodexRpc(codexProc.rpc, 15_000);
+      await configureCodexSkillExtraRoots(codexProc.rpc, options.workspacePath);
 
       // 2. Determine permission mode
       const isImOrCron = options.scenario.type === 'im' || options.scenario.type === 'agent-channel' || options.scenario.type === 'cron';
