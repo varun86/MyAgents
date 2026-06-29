@@ -85,6 +85,18 @@ function task(overrides: Partial<Task> = {}): Task {
   };
 }
 
+function expectedTaskSessionTimestamp(iso: string): string {
+  const d = new Date(iso);
+  const now = new Date();
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mi = String(d.getMinutes()).padStart(2, '0');
+  return d.getFullYear() === now.getFullYear()
+    ? `${mm}-${dd} ${hh}:${mi}`
+    : `${d.getFullYear()}-${mm}-${dd} ${hh}:${mi}`;
+}
+
 describe('Task Center UX refinements', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -128,7 +140,7 @@ describe('Task Center UX refinements', () => {
     expect(await screen.findByText('每日 AI 行业新闻采集与总结')).toBeInTheDocument();
     expect(screen.queryByText('New Chat')).not.toBeInTheDocument();
 
-    const timestamp = screen.getByText('06-27 11:12');
+    const timestamp = screen.getByText(expectedTaskSessionTimestamp(session.lastActiveAt));
     expect(timestamp).toHaveClass('whitespace-nowrap', 'tabular-nums');
     expect(taskApiMocks.getSessions).toHaveBeenCalledWith('/Users/me/mino');
   });
