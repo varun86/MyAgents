@@ -785,6 +785,7 @@ async function ensureExternalSessionMetadataForRealUserTurn(params: {
     scenario: materializationScenarioFromInteraction(scenario),
     agent,
     runtimeOverride: getCurrentRuntimeType(),
+    runtimeSourceOverride: getCurrentRuntimeSource(),
     managedCodexProviderReady: isManagedCodexProviderReady(loadAdminConfig()),
     fallbackRuntime: getCurrentRuntimeType(),
     title,
@@ -3667,7 +3668,11 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
               runtimeSessionId: targetRuntimeId,
             };
           }
-          void updateSessionMetadata(targetSessionId, { runtimeSessionId: targetRuntimeId })
+          void updateSessionMetadata(targetSessionId, {
+            runtime: getCurrentRuntimeType(),
+            runtimeSource: getCurrentRuntimeSource(),
+            runtimeSessionId: targetRuntimeId,
+          })
             .then((updated) => {
               if (
                 updated

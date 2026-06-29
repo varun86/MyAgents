@@ -1032,10 +1032,15 @@ pub(super) async fn create_bot_instance<R: Runtime>(
 
                             let mut models = fallback_runtime_models(&current_runtime);
                             if models.is_empty() {
+                                let current_runtime_source = runtime_config_string(
+                                    current_runtime_config.as_ref(),
+                                    "source",
+                                );
                                 match ensure_sidecar_port_for_command(
                                     &router_clone,
                                     &session_key,
                                     &current_runtime,
+                                    current_runtime_source.as_deref(),
                                     &app_clone,
                                     &manager_clone,
                                     &health_clone,
@@ -1841,11 +1846,16 @@ pub(super) async fn create_bot_instance<R: Runtime>(
                             // task_runtime is already a String cloned above at the top of
                             // this spawn (runtime_for_loop.read().await.clone()).
                             let drift_result = {
+                                let task_runtime_source = runtime_config_string(
+                                    task_runtime_config.as_ref(),
+                                    "source",
+                                );
                                 let mut router_guard = task_router.lock().await;
                                 router_guard
-                                    .check_and_reset_on_runtime_drift(
+                                    .check_and_reset_on_runtime_identity_drift(
                                         &session_key,
                                         &task_runtime,
+                                        task_runtime_source.as_deref(),
                                         &task_manager,
                                     )
                             };

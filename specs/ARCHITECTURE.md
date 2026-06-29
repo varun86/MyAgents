@@ -473,10 +473,12 @@ SDK subprocess → ANTHROPIC_BASE_URL=127.0.0.1:${sidecarPort}
 
 | Owner 类型 | Snapshot helper | 策略 |
 |-----------|----------------|------|
-| Tab / Cron / Background | `snapshotForOwnedSession(agent, { runtimeOverride? })` | 冻结 model / permission / MCP / provider / runtime；runtime 切换出生路径用 override 生成目标 runtime view |
-| IM / Agent Channel | `snapshotForImSession(agent, { runtimeOverride? })` | 只记 runtime；其它每次消息 live resolve |
+| Tab / Cron / Background | `snapshotForOwnedSession(agent, { runtimeOverride?, runtimeSourceOverride? })` | 冻结 model / permission / MCP / provider / runtime identity；runtime 切换出生路径用 override 生成目标 runtime view |
+| IM / Agent Channel | `snapshotForImSession(agent, { runtimeOverride?, runtimeSourceOverride? })` | 仅保存完整 runtime identity（`runtime` + `runtimeSource`）；其它每次消息 live resolve |
 
 读侧通过 `resolveSessionConfig(sessionMeta, ownerKind)` 统一消费。详见 `tech_docs/pit_of_success.md` 的「Snapshot Helpers」节。
+
+Runtime identity 必须按 `runtime` + `runtimeSource` 比较：`codex/system-cli`（用户外部 Codex CLI）与 `codex/managed-provider`（内置 Codex 订阅 Provider）不是同一种会话身份。IM / Agent Channel 的 session drift、Sidecar 唤醒、`/model` 命令和 heartbeat 都必须携带 source；只覆盖 `runtime:'codex'` 而不覆盖 `runtimeSource` 会被解释为 system CLI。
 
 跨 Runtime Session 保护见模块 9 的「跨 Runtime Session 保护」节，详见 `tech_docs/multi_agent_runtime.md`。
 

@@ -3,6 +3,7 @@ import {
   buildRuntimeChangePatch,
   coerceModelForRuntime,
   coercePermissionModeForRuntime,
+  type RuntimeSource,
   type RuntimeType,
 } from '../../shared/types/runtime';
 import { coerceReasoningEffortSettingForRuntime } from '../../shared/reasoningEffort';
@@ -89,6 +90,11 @@ interface SessionSnapshotRuntimeOptions {
    */
   runtimeOverride?: RuntimeType;
   /**
+   * Source half of the runtime identity. `codex/system-cli` and
+   * `codex/managed-provider` are different owners.
+   */
+  runtimeSourceOverride?: RuntimeSource;
+  /**
    * Caller-owned readiness decision for provider-backed Managed Codex. Snapshot
    * helpers stay pure and do not read config.json themselves.
    */
@@ -118,11 +124,16 @@ function shouldSnapshotManagedCodexProvider(
   providerId: typeof CODEX_SUBSCRIPTION_PROVIDER_ID;
   model: string;
 } {
-  // runtimeOverride is an explicit runtime operation (runtime switch, prepared
-  // runtime birth, etc.). Do not let a stale Agent.providerId=codex-sub turn
-  // that operation back into a provider-owned managed Codex session. Callers
-  // that really want managed Codex pass providerExecutionIdentity explicitly.
-  return options?.runtimeOverride === undefined
+  // runtimeOverride alone is an explicit runtime operation (runtime switch,
+  // prepared runtime birth, etc.). Do not let a stale Agent.providerId=codex-sub
+  // turn that operation back into a provider-owned managed Codex session. When
+  // runtimeSourceOverride is also managed-provider, the caller supplied the full
+  // runtime identity and the provider-backed owner should be preserved.
+  const isImplicitAgentRuntime = options?.runtimeOverride === undefined;
+  const isExplicitManagedCodexRuntime =
+    options?.runtimeOverride === 'codex'
+    && options?.runtimeSourceOverride === 'managed-provider';
+  return (isImplicitAgentRuntime || isExplicitManagedCodexRuntime)
     && options?.managedCodexProviderReady === true
     && agent.providerId === CODEX_SUBSCRIPTION_PROVIDER_ID
     && typeof agent.model === 'string'
@@ -143,7 +154,9 @@ export function snapshotForImSession(
   const runtime = snapshotAgent.runtime ?? 'builtin';
   return {
     runtime,
-    runtimeSource: runtime !== 'builtin' ? (snapshotAgent.runtimeConfig?.source ?? 'system-cli') : undefined,
+    runtimeSource: runtime !== 'builtin'
+      ? (options?.runtimeSourceOverride ?? snapshotAgent.runtimeConfig?.source ?? 'system-cli')
+      : undefined,
   };
 }
 
@@ -220,7 +233,9 @@ export function snapshotForOwnedSession(
     : undefined;
   return {
     runtime,
-    runtimeSource: isExternal ? (snapshotAgent.runtimeConfig?.source ?? 'system-cli') : undefined,
+    runtimeSource: isExternal
+      ? (options?.runtimeSourceOverride ?? snapshotAgent.runtimeConfig?.source ?? 'system-cli')
+      : undefined,
     model,
     // #324 — same runtime-aware dispatch as model (issue #224 rationale).
     reasoningEffort: isExternal

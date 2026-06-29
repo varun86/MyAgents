@@ -935,7 +935,7 @@ fn default_permission_mode() -> String {
     "plan".to_string()
 }
 
-fn project_runtime_for_provider(
+pub(crate) fn project_runtime_for_provider(
     provider_id: Option<&str>,
     model: Option<&str>,
     runtime: Option<String>,
@@ -974,7 +974,10 @@ fn project_runtime_for_provider(
     )
 }
 
-fn project_permission_for_provider(provider_id: Option<&str>, permission_mode: String) -> String {
+pub(crate) fn project_permission_for_provider(
+    provider_id: Option<&str>,
+    permission_mode: String,
+) -> String {
     if provider_id != Some(CODEX_SUBSCRIPTION_PROVIDER_ID) {
         return permission_mode;
     }
@@ -994,6 +997,13 @@ where
     D: Deserializer<'de>,
 {
     Option::<serde_json::Value>::deserialize(deserializer).map(Some)
+}
+
+fn deserialize_nullable_string<'de, D>(deserializer: D) -> Result<Option<Option<String>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer).map(Some)
 }
 
 /// Agent-level status (aggregates all channel statuses)
@@ -1111,7 +1121,8 @@ pub struct AgentConfigPatch {
     pub name: Option<String>,
     pub icon: Option<String>,
     pub enabled: Option<bool>,
-    pub provider_id: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_nullable_string")]
+    pub provider_id: Option<Option<String>>,
     pub model: Option<String>,
     pub provider_env_json: Option<String>,
     pub permission_mode: Option<String>,
@@ -1274,6 +1285,25 @@ mod tests {
                 .and_then(|v| v.get("source"))
                 .and_then(|v| v.as_str()),
             Some("managed-provider")
+        );
+    }
+
+    #[test]
+    fn agent_config_patch_provider_id_distinguishes_missing_null_and_value() {
+        let missing: AgentConfigPatch = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(missing.provider_id.is_none());
+
+        let clear: AgentConfigPatch =
+            serde_json::from_value(serde_json::json!({ "providerId": null })).unwrap();
+        assert_eq!(clear.provider_id, Some(None));
+
+        let replace: AgentConfigPatch = serde_json::from_value(serde_json::json!({
+            "providerId": CODEX_SUBSCRIPTION_PROVIDER_ID
+        }))
+        .unwrap();
+        assert_eq!(
+            replace.provider_id.as_ref().and_then(|v| v.as_deref()),
+            Some(CODEX_SUBSCRIPTION_PROVIDER_ID)
         );
     }
 }

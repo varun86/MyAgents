@@ -127,7 +127,10 @@ type RuntimeType = 'builtin' | 'claude-code' | 'codex' | 'gemini';
 持久化边界：
 
 - Chat session birth 保存 `runtimeSource:'managed-provider'` 与 `providerExecutionIdentity`；Task/Cron 执行 override 保存 `runtimeConfig.source:'managed-provider'` 与 model。两类 payload shape 不同，但都用于重建执行 runtime。
+- IM / Agent Channel 是 live-follow owner：session birth 只保存 runtime identity（`runtime` + `runtimeSource`），model / provider / permission / MCP 每条消息从当前 Agent 配置重新 resolve。漂移判定必须比较完整 identity，`codex/system-cli` 与 `codex/managed-provider` 不可互相复用。
 - Agent/Channel 默认配置只保存 `providerId:'codex-sub'` 与 model；不得把 managed runtime projection 写入默认 `runtimeConfig`，否则会和用户手动安装的 Codex CLI runtime 混淆。
+
+所有 helper 边界都必须保留 source：`snapshotForImSession` / `snapshotForOwnedSession` 的 override 形态是 `runtimeOverride` + `runtimeSourceOverride`，Rust IM router / heartbeat / `/model` wake path 则从 `RuntimeConfig.source` 传入 drift check。只传 `runtime:'codex'` 等价于 system CLI，不代表 Codex 订阅 Provider。
 
 ## Claude Code Runtime (`src/server/runtimes/claude-code.ts`)
 

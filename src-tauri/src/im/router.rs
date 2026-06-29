@@ -17,7 +17,7 @@ use serde_json::json;
 use tauri::{AppHandle, Runtime};
 
 use crate::sidecar::{
-    ensure_session_sidecar, release_session_sidecar, resolve_session_runtime_identity,
+    ensure_session_sidecar, release_session_sidecar, resolve_session_runtime_identity_full,
     ManagedSidecarManager, RuntimeDriftResult, SidecarOwner,
 };
 
@@ -120,15 +120,52 @@ fn normalize_runtime_for_peer_drift(runtime: Option<&str>) -> &str {
     }
 }
 
+fn normalize_runtime_source_for_peer_drift(
+    runtime: Option<&str>,
+    source: Option<&str>,
+) -> &'static str {
+    let runtime = normalize_runtime_for_peer_drift(runtime);
+    if runtime == "builtin" {
+        return "builtin";
+    }
+    match source {
+        Some("managed-provider") => "managed-provider",
+        _ => "system-cli",
+    }
+}
+
+#[cfg(test)]
 fn persisted_session_runtime_differs(
     persisted_runtime: Option<&str>,
     desired_runtime: &str,
+) -> bool {
+    persisted_session_runtime_identity_differs(persisted_runtime, None, desired_runtime, None)
+}
+
+fn persisted_session_runtime_identity_differs(
+    persisted_runtime: Option<&str>,
+    persisted_source: Option<&str>,
+    desired_runtime: &str,
+    desired_source: Option<&str>,
 ) -> bool {
     let Some(persisted_runtime) = persisted_runtime else {
         return false;
     };
     normalize_runtime_for_peer_drift(Some(persisted_runtime))
         != normalize_runtime_for_peer_drift(Some(desired_runtime))
+        || normalize_runtime_source_for_peer_drift(Some(persisted_runtime), persisted_source)
+            != normalize_runtime_source_for_peer_drift(Some(desired_runtime), desired_source)
+}
+
+fn runtime_identity_label(runtime: &str, source: Option<&str>) -> String {
+    let normalized_runtime = normalize_runtime_for_peer_drift(Some(runtime));
+    let normalized_source =
+        normalize_runtime_source_for_peer_drift(Some(normalized_runtime), source);
+    if normalized_runtime == "builtin" {
+        normalized_runtime.to_string()
+    } else {
+        format!("{}/{}", normalized_runtime, normalized_source)
+    }
 }
 
 impl SessionRouter {
@@ -473,23 +510,38 @@ impl SessionRouter {
         desired_runtime: &str,
         manager: &ManagedSidecarManager,
     ) -> Option<(String, String)> {
-        self.check_and_reset_on_runtime_drift_with_resolver(
-            session_key,
-            desired_runtime,
-            manager,
-            resolve_session_runtime_identity,
-        )
+        self.check_and_reset_on_runtime_identity_drift(session_key, desired_runtime, None, manager)
     }
 
-    fn check_and_reset_on_runtime_drift_with_resolver<F>(
+    pub fn check_and_reset_on_runtime_identity_drift(
         &mut self,
         session_key: &str,
         desired_runtime: &str,
+        desired_runtime_source: Option<&str>,
+        manager: &ManagedSidecarManager,
+    ) -> Option<(String, String)> {
+        self.check_and_reset_on_runtime_identity_drift_with_resolver(
+            session_key,
+            desired_runtime,
+            desired_runtime_source,
+            manager,
+            |session_id| {
+                resolve_session_runtime_identity_full(session_id)
+                    .map(|identity| (identity.runtime, identity.runtime_source))
+            },
+        )
+    }
+
+    fn check_and_reset_on_runtime_identity_drift_with_resolver<F>(
+        &mut self,
+        session_key: &str,
+        desired_runtime: &str,
+        desired_runtime_source: Option<&str>,
         manager: &ManagedSidecarManager,
         resolve_persisted_runtime: F,
     ) -> Option<(String, String)>
     where
-        F: FnOnce(&str) -> Option<String>,
+        F: FnOnce(&str) -> Option<(String, Option<String>)>,
     {
         let old_id = self.peer_sessions.get(session_key)?.session_id.clone();
 
@@ -506,11 +558,24 @@ impl SessionRouter {
         //     desktop session continues unperturbed on the old session_id.
         let drift_result = {
             let mut mgr = manager.lock().ok()?;
-            mgr.kill_sidecar_if_runtime_differs(&old_id, desired_runtime)
+            mgr.kill_sidecar_if_runtime_identity_differs(
+                &old_id,
+                desired_runtime,
+                desired_runtime_source,
+            )
         };
-        let persisted_runtime = resolve_persisted_runtime(&old_id);
-        let persisted_drift =
-            persisted_session_runtime_differs(persisted_runtime.as_deref(), desired_runtime);
+        let persisted_identity = resolve_persisted_runtime(&old_id);
+        let persisted_drift = persisted_identity
+            .as_ref()
+            .map(|(runtime, source)| {
+                persisted_session_runtime_identity_differs(
+                    Some(runtime.as_str()),
+                    source.as_deref(),
+                    desired_runtime,
+                    desired_runtime_source,
+                )
+            })
+            .unwrap_or(false);
 
         if !drift_result.is_drift() && !persisted_drift {
             return None;
@@ -544,13 +609,18 @@ impl SessionRouter {
             ps.last_active = Instant::now();
         }
 
+        let desired_label = runtime_identity_label(desired_runtime, desired_runtime_source);
+        let persisted_label = persisted_identity
+            .as_ref()
+            .map(|(runtime, source)| runtime_identity_label(runtime, source.as_deref()))
+            .unwrap_or_else(|| "unknown".to_string());
         ulog_info!(
             "[im-router] Runtime drift: peer={} old={} → new={} desired={} persisted={} live_result={:?}",
             session_key,
             &old_id[..8.min(old_id.len())],
             &new_id[..8.min(new_id.len())],
-            desired_runtime,
-            persisted_runtime.as_deref().unwrap_or("unknown"),
+            desired_label,
+            persisted_label,
             drift_result,
         );
 
@@ -1250,7 +1320,8 @@ mod tests {
     use std::time::Instant;
 
     use super::{
-        parse_session_key, persisted_session_runtime_differs, EnsureSidecarInfo, SessionRouter,
+        parse_session_key, persisted_session_runtime_differs,
+        persisted_session_runtime_identity_differs, EnsureSidecarInfo, SessionRouter,
     };
     use crate::im::types::{ImActiveSession, PeerSession};
     use crate::sidecar::SidecarManager;
@@ -1334,6 +1405,22 @@ mod tests {
     }
 
     #[test]
+    fn persisted_external_runtime_source_drift_is_detected() {
+        assert!(persisted_session_runtime_identity_differs(
+            Some("codex"),
+            Some("system-cli"),
+            "codex",
+            Some("managed-provider"),
+        ));
+        assert!(!persisted_session_runtime_identity_differs(
+            Some("codex"),
+            Some("managed-provider"),
+            "codex",
+            Some("managed-provider"),
+        ));
+    }
+
+    #[test]
     fn metadata_birth_pending_is_consumed_after_first_enqueue() {
         let session_key = "agent:a:feishu:private:user";
         let mut router = SessionRouter::new(PathBuf::from("/tmp/workspace"));
@@ -1403,11 +1490,12 @@ mod tests {
         router.upsert_peer_session(peer(session_key, "old-session"));
         let manager = Arc::new(Mutex::new(SidecarManager::new()));
 
-        let reset = router.check_and_reset_on_runtime_drift_with_resolver(
+        let reset = router.check_and_reset_on_runtime_identity_drift_with_resolver(
             session_key,
             "codex",
+            None,
             &manager,
-            |_| Some("builtin".to_string()),
+            |_| Some(("builtin".to_string(), None)),
         );
 
         let (old_id, new_id) = reset.expect("persisted runtime drift should reset");

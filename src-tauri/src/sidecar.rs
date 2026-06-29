@@ -81,14 +81,17 @@ pub use manager::{
 pub use proxy::cmd_propagate_proxy;
 #[allow(unused_imports)]
 pub use runtime_identity::cmd_can_restore_session;
-pub use runtime_identity::resolve_session_runtime_identity;
 #[cfg(test)]
 use runtime_identity::resolve_session_runtime_identity_from_json;
 #[allow(unused_imports)]
 use runtime_identity::{
     resolve_agent_runtime_from_config, resolve_agent_runtime_identity_from_config,
-    resolve_session_runtime_identity_full, resolve_session_runtime_identity_full_from_json,
-    validate_sidecar_runtime_invariant, RuntimeIdentity,
+    resolve_session_runtime_identity_full_from_json, validate_sidecar_runtime_invariant,
+    RuntimeIdentity,
+};
+#[allow(unused_imports)]
+pub use runtime_identity::{
+    resolve_session_runtime_identity, resolve_session_runtime_identity_full,
 };
 #[allow(unused_imports)]
 pub use session_lifecycle::{
