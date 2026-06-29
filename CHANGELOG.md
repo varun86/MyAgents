@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.2.43] - 2026-06-30
+
+> 本版继续收紧 Codex 订阅 Provider 与外部 Runtime 的身份边界：Codex 会话可以读取 MyAgents 用户 Skills，订阅型 Codex 在 Chat、任务、定时任务和 IM / Agent Channel 中更稳定地保持受管身份；同时修复 Windows 上 managed Codex 安装、模型解析和本地插件路径相关问题，并补齐若干菜单与历史操作细节。
+
+### Added
+
+- **Codex 会话可使用 MyAgents 用户 Skills**：启用的用户级 Skills 会同步到工作区并注入 Codex Runtime，Codex 订阅和系统 Codex CLI 都能发现同一套工作区 Skills。
+
+### Fixed
+
+- **Codex 订阅 Provider 身份更稳定**：managed Codex 不再在历史会话、IM / Agent Channel、heartbeat 或 `/model` 唤醒路径中退回系统 Codex CLI；运行时切换和会话冻结会保留完整 runtime source 与 provider identity。
+- **Windows managed Codex 更可靠**：安装包校验、安装元数据、旧 metadata 下的模型解析和 spawn 包装在 Windows 上更稳，减少下载完成后状态不一致、模型列表不可用或启动失败。
+- **Windows 本地插件路径修复**：本地 `file://` 插件路径使用平台原生解析，避免 Windows drive-letter 路径被解析成错误目录。
+- **工作区 Skills / Commands 同步可自愈**：断链 symlink 不再阻塞 `.claude/skills` 和 `.claude/commands` 刷新，用户级 Skills / Commands 更新后能重新同步到工作区。
+- **菜单和历史操作更稳**：修复文件预览、会话历史、Launcher 右栏等位置的 tooltip / 菜单交互细节，减少 hover 菜单错位或历史操作误触。
+
+---
+
 ## [0.2.42] - 2026-06-28
 
 > 本版把产品界面国际化推进到可用状态，并补齐订阅型 Provider 与官方图片理解工具：界面可跟随系统或切换中英文，Codex 订阅可作为受管 Provider 使用，内置 CLI 也能读取工作区图片。另有任务创建、定时任务、IM 渠道和 Chat 稳定性修复。
