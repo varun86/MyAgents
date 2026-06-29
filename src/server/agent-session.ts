@@ -1,6 +1,6 @@
 import { randomUUID } from 'crypto';
-import { existsSync, readdirSync, symlinkSync, lstatSync, readFileSync, readlinkSync, rmSync, writeFileSync } from 'fs';
-import { dirname, join, resolve, sep } from 'path';
+import { existsSync, readFileSync, writeFileSync } from 'fs';
+import { dirname, join, resolve } from 'path';
 import { createRequire } from 'module';
 import { query, getSessionMessages as sdkGetSessionMessages, forkSession as sdkForkSession, deleteSession as sdkDeleteSession, type Query, type SDKUserMessage, type AgentDefinition, type HookInput, type HookJSONOutput, type PreToolUseHookInput, type PostToolUseHookInput, type PermissionRequestHookInput, type SlashCommand as SdkSlashCommand } from '@anthropic-ai/claude-agent-sdk';
 import {
@@ -11,8 +11,8 @@ import {
 } from './utils/background-agent-permission';
 import { registerBridge as registerBridgeInRegistry, unregisterBridge as unregisterBridgeInRegistry, type UpstreamBridgeConfig } from './openai-bridge/bridge-registry';
 import { getScriptDir, getBundledNodeDir, getSystemNodeDirs, getBundledRuntimePath, getSystemNpxPaths, findExistingPath } from './utils/runtime';
-import { getCrossPlatformEnv, isSkillBlockedOnPlatform } from './utils/platform';
-import { ensureDirSync, isDirEntry } from './utils/fs-utils';
+import { getCrossPlatformEnv } from './utils/platform';
+import { ensureDirSync } from './utils/fs-utils';
 import { getMyAgentsNpmGlobalBinDir, getMyAgentsNpmGlobalPrefix, scrubMyAgentsNpmPrefixEnv } from './utils/npm-prefix-env';
 import { applyContextWindowSuffix, lookupModelContextLength, lookupProviderModelContextLength, modelSupportsModality } from './utils/model-capabilities';
 import { modelAliasEnvChangesForModel, resolveSessionModelAliases } from './utils/model-aliases';
@@ -118,6 +118,11 @@ import { elapsedMs, emitPerfTrace, nowMs } from './utils/perf-trace';
 import type { ImagePayload, ResolvedImagePayload } from './runtimes/types';
 import { messageAttachmentsFromImagePayloads, resolveImagePayloads } from './runtimes/image-payload';
 import { buildBuiltinMediaAttachments, saveExtractedToolResultAttachments } from './runtimes/builtin-media-attachments';
+import {
+  getMyAgentsUserDir,
+  trySyncProjectUserConfigFiles,
+  type ProjectUserConfigSyncOptions,
+} from './utils/project-user-config-sync';
 import {
   appendOmittedImageNote,
   classifyToolAttachmentPresentation,
@@ -442,29 +447,6 @@ function logStringify(obj: unknown, maxLen = LOG_STRING_MAX_LEN): string {
 const DECORATIVE_TEXT_MIN_LENGTH = 50;
 const DECORATIVE_TEXT_MAX_LENGTH = 5000;
 
-// ===== Product Directory Configuration =====
-// Our product (MyAgents) uses ~/.myagents/ for user configuration
-// This is SEPARATE from Claude CLI's ~/.claude/ directory
-// Only subscription-related features may access ~/.claude/ (handled by SDK internally)
-//
-// IMPORTANT: Do NOT set CLAUDE_CONFIG_DIR in the SDK subprocess environment.
-// The SDK derives Keychain service names from CLAUDE_CONFIG_DIR — setting it would
-// break Anthropic subscription OAuth (Keychain entry "Claude Code-credentials" won't be found).
-// Instead, user-level skills are synced as symlinks into each project's .claude/skills/.
-const MYAGENTS_USER_DIR = '.myagents';
-
-/**
- * Get the MyAgents user directory path
- * All user configs (MCP, providers, projects, etc.) are stored here
- */
-export function getMyAgentsUserDir(): string {
-  const { home, temp } = getCrossPlatformEnv();
-  // Fallback to temp directory if home is not available (extremely rare)
-  // temp is now guaranteed to have a valid platform-specific fallback
-  const homeDir = home || temp;
-  return join(homeDir, MYAGENTS_USER_DIR);
-}
-
 /**
  * Sync user-level skills and commands into a project's .claude/ as symlinks.
  *
@@ -487,147 +469,10 @@ export function getMyAgentsUserDir(): string {
  */
 export function syncProjectUserConfig(
   projectDir: string,
-  options: { cliToolRegistryEnabled?: boolean } = {},
+  options: ProjectUserConfigSyncOptions = {},
 ): void {
-  const myagentsDir = getMyAgentsUserDir();
-  const isWin = process.platform === 'win32';
-
-  // ===== SKILLS SYNC =====
-  const userSkillsDir = join(myagentsDir, 'skills');
-  const projectSkillsDir = join(projectDir, '.claude', 'skills');
-
-  if (existsSync(userSkillsDir)) {
-    ensureDirSync(projectSkillsDir);
-
-    // Read disabled list from skills-config.json
-    let disabled: string[] = [];
-    try {
-      const configPath = join(myagentsDir, 'skills-config.json');
-      if (existsSync(configPath)) {
-        const raw = JSON.parse(readFileSync(configPath, 'utf-8'));
-        disabled = Array.isArray(raw?.disabled) ? raw.disabled : [];
-      }
-    } catch {
-      // Ignore read errors — treat all skills as enabled
-    }
-    const cliToolRegistryEnabled = options.cliToolRegistryEnabled ?? isCliToolRegistryEnabled(loadAdminConfig());
-
-    // Track which skill names we manage (enabled or disabled) so we can detect dangling symlinks
-    const managedSkillNames = new Set<string>();
-
-    for (const entry of readdirSync(userSkillsDir, { withFileTypes: true })) {
-      // isDirEntry follows symlinks + Windows junctions (issue #104).
-      // Without it, junction-mounted skills never reach the project symlink
-      // bridge, so they're invisible to the SDK too (not just the UI).
-      const target = join(userSkillsDir, entry.name);
-      if (!isDirEntry(entry, target)) continue;
-      if (entry.name.startsWith('.')) continue;
-      if (isSkillBlockedOnPlatform(entry.name)) continue;
-      // Require SKILL.md to match scanSkills/scanSkillsDir's definition of
-      // a "valid skill". Without this guard, a junction pointing at an
-      // arbitrary directory (or a plain empty dir under ~/.myagents/skills/)
-      // would produce a project-level symlink that the SDK follows but the
-      // UI scanners skip — inviting the "runtime vs UI" divergence we're
-      // fixing.
-      if (!existsSync(join(target, 'SKILL.md'))) continue;
-
-      managedSkillNames.add(entry.name);
-      const linkPath = join(projectSkillsDir, entry.name);
-
-      if (disabled.includes(entry.name) || (!cliToolRegistryEnabled && entry.name === 'tool-creator')) {
-        // Disabled: remove symlink if we created one (never remove real dirs)
-        try {
-          if (existsSync(linkPath) && lstatSync(linkPath).isSymbolicLink()) {
-            // recursive: true needed on Windows — junctions are directories, rmSync() alone throws EPERM
-            rmSync(linkPath, { recursive: true });
-          }
-        } catch { /* ignore */ }
-        continue;
-      }
-
-      // Skip if a real (non-symlink) directory exists — don't overwrite project skills
-      try {
-        if (existsSync(linkPath)) {
-          if (!lstatSync(linkPath).isSymbolicLink()) continue; // real dir, skip
-          rmSync(linkPath, { recursive: true }); // recursive for Windows junctions
-        }
-      } catch { /* doesn't exist, create it */ }
-
-      try {
-        symlinkSync(target, linkPath, isWin ? 'junction' : undefined);
-      } catch (err) {
-        console.warn(`[skill-sync] Failed to symlink skill ${entry.name}:`, err);
-      }
-    }
-
-    // Cleanup: remove dangling symlinks left by deleted/renamed user skills
-    // Only removes symlinks pointing into our userSkillsDir — never touches real project dirs
-    try {
-      for (const entry of readdirSync(projectSkillsDir, { withFileTypes: true })) {
-        const linkPath = join(projectSkillsDir, entry.name);
-        try {
-          if (!lstatSync(linkPath).isSymbolicLink()) continue;
-          const target = readlinkSync(linkPath);
-          const resolvedTarget = resolve(projectSkillsDir, target);
-          if (resolvedTarget.startsWith(userSkillsDir + sep) && !managedSkillNames.has(entry.name)) {
-            rmSync(linkPath, { recursive: true });
-          }
-        } catch { /* ignore individual errors */ }
-      }
-    } catch { /* ignore — projectSkillsDir may have been removed externally */ }
-  }
-
-  // ===== COMMANDS SYNC =====
-  const userCommandsDir = join(myagentsDir, 'commands');
-  const projectCommandsDir = join(projectDir, '.claude', 'commands');
-
-  if (existsSync(userCommandsDir)) {
-    ensureDirSync(projectCommandsDir);
-
-    // Track managed command filenames for dangling symlink cleanup
-    const managedCommandFiles = new Set<string>();
-
-    for (const entry of readdirSync(userCommandsDir, { withFileTypes: true })) {
-      if (!entry.isFile() || !entry.name.endsWith('.md')) continue;
-      if (entry.name.startsWith('.')) continue;
-
-      managedCommandFiles.add(entry.name);
-      const linkPath = join(projectCommandsDir, entry.name);
-      const target = join(userCommandsDir, entry.name);
-
-      // Skip if a real (non-symlink) file exists — don't overwrite project commands
-      try {
-        if (existsSync(linkPath)) {
-          if (!lstatSync(linkPath).isSymbolicLink()) continue; // real file, skip
-          rmSync(linkPath, { recursive: true }); // stale symlink, recreate
-        }
-      } catch { /* doesn't exist, create it */ }
-
-      try {
-        // Note: file symlinks on Windows require Developer Mode (unlike junction for directories).
-        // If this fails, the command won't be available in the project — logged as warning.
-        symlinkSync(target, linkPath);
-      } catch (err) {
-        console.warn(`[command-sync] Failed to symlink command ${entry.name}:`, err);
-      }
-    }
-
-    // Cleanup: remove dangling symlinks left by deleted/renamed user commands
-    try {
-      for (const entry of readdirSync(projectCommandsDir, { withFileTypes: true })) {
-        const linkPath = join(projectCommandsDir, entry.name);
-        try {
-          if (!lstatSync(linkPath).isSymbolicLink()) continue;
-          const target = readlinkSync(linkPath);
-          const resolvedTarget = resolve(projectCommandsDir, target);
-          if (resolvedTarget.startsWith(userCommandsDir + sep) && !managedCommandFiles.has(entry.name)) {
-            rmSync(linkPath, { recursive: true });
-          }
-        } catch { /* ignore individual errors */ }
-      }
-    } catch { /* ignore */ }
-  }
-
+  const synced = trySyncProjectUserConfigFiles(projectDir, options, 'skill-sync');
+  if (!synced) return;
   // The symlinks above just changed what's on disk, but the live SDK session
   // only scans skills at startup — without a reload, a skill installed
   // mid-session is visible in the UI (Rust scans disk) yet unusable by the AI
@@ -4373,7 +4218,7 @@ type DesktopSnapshotPatch = Pick<
 >;
 type OwnedFreezeSnapshotPatch = Partial<Pick<
   SessionMetadata,
-  'runtime' | keyof DesktopSnapshotPatch
+  'runtime' | 'runtimeSource' | 'providerExecutionIdentity' | keyof DesktopSnapshotPatch
 >>;
 
 function applyDesktopSnapshotPatch(
@@ -4503,7 +4348,12 @@ function buildOwnedFreezeSnapshotPatch(overrides?: OwnedFreezeSnapshotPatch): Ow
     configSnapshotAt: new Date().toISOString(),
   };
   if (patch.runtime && isExternalRuntime(patch.runtime)) {
-    delete patch.providerId;
+    if (patch.providerExecutionIdentity) {
+      patch.providerId = patch.providerExecutionIdentity.providerId;
+      patch.model = patch.providerExecutionIdentity.model;
+    } else {
+      delete patch.providerId;
+    }
     delete patch.providerRoute;
     delete patch.providerEnvJson;
     delete patch.enabledPluginIds;

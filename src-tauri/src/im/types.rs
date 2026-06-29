@@ -935,13 +935,21 @@ fn default_permission_mode() -> String {
     "plan".to_string()
 }
 
-fn project_runtime_for_provider(
+pub(crate) fn project_runtime_for_provider(
     provider_id: Option<&str>,
     model: Option<&str>,
     runtime: Option<String>,
     runtime_config: Option<serde_json::Value>,
 ) -> (Option<String>, Option<serde_json::Value>) {
     if provider_id != Some(CODEX_SUBSCRIPTION_PROVIDER_ID) {
+        if runtime_config
+            .as_ref()
+            .and_then(|v| v.get("source"))
+            .and_then(|v| v.as_str())
+            == Some("managed-provider")
+        {
+            return (Some("builtin".to_string()), None);
+        }
         return (runtime, runtime_config);
     }
     let mut config = runtime_config
@@ -974,7 +982,10 @@ fn project_runtime_for_provider(
     )
 }
 
-fn project_permission_for_provider(provider_id: Option<&str>, permission_mode: String) -> String {
+pub(crate) fn project_permission_for_provider(
+    provider_id: Option<&str>,
+    permission_mode: String,
+) -> String {
     if provider_id != Some(CODEX_SUBSCRIPTION_PROVIDER_ID) {
         return permission_mode;
     }
@@ -994,6 +1005,13 @@ where
     D: Deserializer<'de>,
 {
     Option::<serde_json::Value>::deserialize(deserializer).map(Some)
+}
+
+fn deserialize_nullable_string<'de, D>(deserializer: D) -> Result<Option<Option<String>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer).map(Some)
 }
 
 /// Agent-level status (aggregates all channel statuses)
@@ -1111,9 +1129,15 @@ pub struct AgentConfigPatch {
     pub name: Option<String>,
     pub icon: Option<String>,
     pub enabled: Option<bool>,
-    pub provider_id: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_nullable_string")]
+    pub provider_id: Option<Option<String>>,
     pub model: Option<String>,
-    pub provider_env_json: Option<String>,
+    /// Tri-state patch field: missing = do not change, null = clear,
+    /// string = replace. Renderer sends null when switching away from a
+    /// provider-backed route; treating that as "absent" leaves hot Agent/IM
+    /// instances with stale provider credentials.
+    #[serde(default, deserialize_with = "deserialize_nullable_string")]
+    pub provider_env_json: Option<Option<String>>,
     pub permission_mode: Option<String>,
     pub mcp_enabled_servers: Option<Vec<String>>,
     pub mcp_servers_json: Option<String>,
@@ -1275,5 +1299,62 @@ mod tests {
                 .and_then(|v| v.as_str()),
             Some("managed-provider")
         );
+    }
+
+    #[test]
+    fn agent_config_patch_provider_id_distinguishes_missing_null_and_value() {
+        let missing: AgentConfigPatch = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(missing.provider_id.is_none());
+
+        let clear: AgentConfigPatch =
+            serde_json::from_value(serde_json::json!({ "providerId": null })).unwrap();
+        assert_eq!(clear.provider_id, Some(None));
+
+        let replace: AgentConfigPatch = serde_json::from_value(serde_json::json!({
+            "providerId": CODEX_SUBSCRIPTION_PROVIDER_ID
+        }))
+        .unwrap();
+        assert_eq!(
+            replace.provider_id.as_ref().and_then(|v| v.as_deref()),
+            Some(CODEX_SUBSCRIPTION_PROVIDER_ID)
+        );
+    }
+
+    #[test]
+    fn agent_config_patch_provider_env_json_distinguishes_missing_null_and_value() {
+        let missing: AgentConfigPatch = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(missing.provider_env_json.is_none());
+
+        let clear: AgentConfigPatch =
+            serde_json::from_value(serde_json::json!({ "providerEnvJson": null })).unwrap();
+        assert_eq!(clear.provider_env_json, Some(None));
+
+        let replace: AgentConfigPatch = serde_json::from_value(serde_json::json!({
+            "providerEnvJson": "{\"providerId\":\"openrouter\"}"
+        }))
+        .unwrap();
+        assert_eq!(
+            replace
+                .provider_env_json
+                .as_ref()
+                .and_then(|v| v.as_deref()),
+            Some("{\"providerId\":\"openrouter\"}")
+        );
+    }
+
+    #[test]
+    fn project_runtime_for_provider_clears_stale_managed_runtime_when_provider_changes() {
+        let (runtime, runtime_config) = project_runtime_for_provider(
+            Some("openrouter"),
+            Some("anthropic/claude-sonnet-4.6"),
+            Some("codex".to_string()),
+            Some(serde_json::json!({
+                "source": "managed-provider",
+                "model": "gpt-5"
+            })),
+        );
+
+        assert_eq!(runtime.as_deref(), Some("builtin"));
+        assert!(runtime_config.is_none());
     }
 }

@@ -70,6 +70,16 @@ describe('SessionMenuButton', () => {
     expect(screen.getByRole('button', { name: '复制 SessionID' })).toBeInTheDocument();
   });
 
+  it('hides the trigger tooltip while the session menu is open', () => {
+    renderMenu();
+
+    expect(screen.getByText('对话操作')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '对话操作' }));
+
+    expect(screen.queryByText('对话操作')).not.toBeInTheDocument();
+    expect(screen.getByText('SessionID:')).toBeInTheDocument();
+  });
+
   it('copies the AI-ready SessionID text', async () => {
     renderMenu();
 

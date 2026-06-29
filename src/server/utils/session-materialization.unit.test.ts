@@ -96,6 +96,28 @@ describe('createMaterializedSessionMetadata', () => {
     expect(meta.model).toBeUndefined();
   });
 
+  it('materializes live-follow managed Codex as provider-backed runtime identity', () => {
+    const meta = createMaterializedSessionMetadata({
+      agentDir: '/tmp/workspace',
+      sessionId: 'managed-codex-session-id',
+      scenario: 'agent-channel',
+      agent: makeAgent({
+        providerId: 'codex-sub',
+        model: 'gpt-5.4-codex',
+        runtime: 'builtin',
+        runtimeConfig: { source: 'system-cli' },
+      }),
+      runtimeOverride: 'codex',
+      runtimeSourceOverride: 'managed-provider',
+      managedCodexProviderReady: true,
+    });
+
+    expect(meta.runtime).toBe('codex');
+    expect(meta.runtimeSource).toBe('managed-provider');
+    expect(meta.model).toBeUndefined();
+    expect(meta.providerExecutionIdentity).toBeUndefined();
+  });
+
   it('classifies IM and agent-channel scenarios as live-follow', () => {
     expect(isLiveFollowScenario('im')).toBe(true);
     expect(isLiveFollowScenario('agent-channel')).toBe(true);

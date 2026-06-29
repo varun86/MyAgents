@@ -156,6 +156,13 @@ function safeManagedCodexRelativePath(raw: string | undefined): string | null {
   return join(...segments);
 }
 
+function safeManagedCodexInstalledRelativePath(raw: string | undefined): string | null {
+  const normalized = safeManagedCodexRelativePath(raw);
+  if (normalized) return normalized;
+  if (process.platform !== 'win32' || !raw?.includes('\\')) return null;
+  return safeManagedCodexRelativePath(raw.replace(/\\/g, '/'));
+}
+
 export function resolveManagedCodexCommandPath(): string {
   const platform = managedCodexPlatform();
   if (!platform) {
@@ -168,7 +175,7 @@ export function resolveManagedCodexCommandPath(): string {
     installed?.version === MANAGED_CODEX_REQUIRED_RUNTIME.version
     && installed.platform === platform
   ) {
-    const rel = safeManagedCodexRelativePath(installed.executableRelativePath);
+    const rel = safeManagedCodexInstalledRelativePath(installed.executableRelativePath);
     if (rel) {
       const commandPath = join(installDir, rel);
       if (isExecutableFile(commandPath)) return commandPath;

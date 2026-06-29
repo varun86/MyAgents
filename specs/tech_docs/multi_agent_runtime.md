@@ -127,7 +127,10 @@ type RuntimeType = 'builtin' | 'claude-code' | 'codex' | 'gemini';
 持久化边界：
 
 - Chat session birth 保存 `runtimeSource:'managed-provider'` 与 `providerExecutionIdentity`；Task/Cron 执行 override 保存 `runtimeConfig.source:'managed-provider'` 与 model。两类 payload shape 不同，但都用于重建执行 runtime。
+- IM / Agent Channel 是 live-follow owner：session birth 只保存 runtime identity（`runtime` + `runtimeSource`），model / provider / permission / MCP 每条消息从当前 Agent 配置重新 resolve。漂移判定必须比较完整 identity，`codex/system-cli` 与 `codex/managed-provider` 不可互相复用。
 - Agent/Channel 默认配置只保存 `providerId:'codex-sub'` 与 model；不得把 managed runtime projection 写入默认 `runtimeConfig`，否则会和用户手动安装的 Codex CLI runtime 混淆。
+
+所有 helper 边界都必须保留 source：`snapshotForImSession` / `snapshotForOwnedSession` 的 override 形态是 `runtimeOverride` + `runtimeSourceOverride`，Rust IM router / heartbeat / `/model` wake path 则从 `RuntimeConfig.source` 传入 drift check。只传 `runtime:'codex'` 等价于 system CLI，不代表 Codex 订阅 Provider。
 
 ## Claude Code Runtime (`src/server/runtimes/claude-code.ts`)
 
@@ -230,6 +233,15 @@ Server → Client (Notification): {"jsonrpc":"2.0","method":"item/agentMessage/d
 | `baseInstructions` | string? | ❌ 未对接 | |
 
 **注意**：Codex 不支持通过 `thread/start`/`thread/resume` 注入 MCP Server 配置。Codex 的 MCP 由其自身管理（`~/.codex/` 配置），MyAgents 无法控制。
+
+### Skills 加载
+
+Codex 原生扫描 `.agents/skills`，而 MyAgents/Claude Agent SDK 的工作区协议使用 `.claude/skills`。为保持产品层一致性，Codex adapter 在 `startSession()` 中做两步桥接：
+
+1. 调 `syncProjectUserConfigFiles(workspacePath)`，把 `~/.myagents/skills` 中启用的用户级 skills 同步为工作区 `.claude/skills/*` symlink（与 builtin Claude SDK 共用同一套磁盘桥接逻辑，不另建 Codex 专用目录）。
+2. `initialize` 握手完成后调 Codex app-server RPC `skills/extraRoots/set`，把 `<workspace>/.claude/skills` 作为额外 skill root 注入当前 Codex 进程。
+
+同步失败只记录 warning，Codex 会话继续启动；`.claude/skills` 作为工作区级 extra root 的注入与用户级 symlink 同步解耦，仍会照常尝试。这条路径在 `src/server/runtimes/codex.ts::CodexRuntime.startSession()` 内，因此 `runtimeSource:'managed-provider'`（内置 Codex 订阅）和 `runtimeSource:'system-cli'`（实验室外部 Codex CLI）都会生效。若用户系统 CLI 版本过旧、不支持 `skills/extraRoots/set`，adapter 同样只记录 warning 并继续启动会话；此时 Codex 回落到自身默认 `.agents/skills` 扫描。
 
 ### 事件映射
 

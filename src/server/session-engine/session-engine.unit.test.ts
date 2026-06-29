@@ -82,7 +82,7 @@ const mocks = vi.hoisted(() => {
       dispatch: Promise.resolve({ queued: true }),
     })),
     forceExecuteExternalQueueItem: vi.fn(async () => true),
-    getActiveRuntimeSource: vi.fn(() => 'system-cli' as const),
+    getActiveRuntimeSource: vi.fn<() => 'system-cli' | 'managed-provider'>(() => 'system-cli'),
     getActiveRuntimeType: vi.fn(() => 'codex'),
     getCurrentBoundSessionId: vi.fn<() => string | null>(() => null),
     getExternalLiveAssistantMessage: vi.fn<() => { id: string; role: 'user' | 'assistant'; content: string; timestamp: string } | null>(() => null),
@@ -724,6 +724,7 @@ describe('session-engine selector and adapters', () => {
     expect(mocks.freezeCurrentSessionMetadataForImDetach).toHaveBeenCalledWith(
       {
         runtime: 'codex',
+        runtimeSource: 'system-cli',
         model: 'gpt-5',
         permissionMode: 'no-restrictions',
         reasoningEffort: 'medium',
@@ -741,6 +742,7 @@ describe('session-engine selector and adapters', () => {
 
   it('freezes the current external IM session through the engine facade', async () => {
     mocks.state.useExternal = true;
+    mocks.getActiveRuntimeSource.mockReturnValueOnce('managed-provider');
 
     const result = await getSessionEngine().freezeCurrentSessionForImDetach({
       metadataBirthPending: true,
@@ -750,9 +752,17 @@ describe('session-engine selector and adapters', () => {
     expect(mocks.freezeCurrentSessionMetadataForImDetach).toHaveBeenCalledWith(
       {
         runtime: 'codex',
+        runtimeSource: 'managed-provider',
         model: 'gpt-5',
         permissionMode: 'no-restrictions',
         reasoningEffort: 'medium',
+        providerExecutionIdentity: {
+          kind: 'runtime-backed-provider',
+          providerId: 'codex-sub',
+          runtime: 'codex',
+          runtimeSource: 'managed-provider',
+          model: 'gpt-5',
+        },
       },
       {
         allowMissingMetadata: true,

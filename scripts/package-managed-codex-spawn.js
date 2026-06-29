@@ -1,13 +1,18 @@
 import { existsSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, win32 } from 'node:path';
+
+function pathApiForPlatform(platform) {
+  return platform === 'win32' ? win32 : { dirname, join };
+}
 
 export function resolveSpawnInvocation(command, args, options = {}) {
   const platform = options.platform ?? process.platform;
   const nodeExecPath = options.nodeExecPath ?? process.execPath;
   const fileExists = options.fileExists ?? existsSync;
   if (platform === 'win32' && (command === 'npm' || command === 'npx')) {
+    const pathApi = pathApiForPlatform(platform);
     const cliName = command === 'npm' ? 'npm-cli.js' : 'npx-cli.js';
-    const cliPath = join(dirname(nodeExecPath), 'node_modules', 'npm', 'bin', cliName);
+    const cliPath = pathApi.join(pathApi.dirname(nodeExecPath), 'node_modules', 'npm', 'bin', cliName);
     if (fileExists(cliPath)) {
       return {
         command: nodeExecPath,

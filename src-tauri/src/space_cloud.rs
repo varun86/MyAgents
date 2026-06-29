@@ -1386,6 +1386,9 @@ fn build_dispatch_task_md(issue_id: &str, issue_title: &str, goal_md: &str) -> S
 }
 
 fn http_client() -> Result<reqwest::Client, String> {
+    // Space talks to configured external HTTPS origins. `local_http` is
+    // localhost-only; this client must honor the app's proxy settings.
+    #[allow(clippy::disallowed_methods)]
     let builder = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
         .redirect(reqwest::redirect::Policy::limited(5));
@@ -2577,6 +2580,9 @@ mod tests {
             public_client_id: Some("client_test_123".to_string()),
             reason: None,
         };
+        // The request is never sent; this only constructs a request for an
+        // external Space URL so the header helper can be asserted.
+        #[allow(clippy::disallowed_methods)]
         let client = reqwest::Client::builder().build().expect("client");
         let request = with_public_client_id_header(
             client.get("https://space.myagents.test/api/issues/iss_1"),

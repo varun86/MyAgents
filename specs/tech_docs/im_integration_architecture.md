@@ -234,6 +234,10 @@ Per-Message Task:
  └── 重放缓冲消息（若有）
 ```
 
+**Runtime identity drift**：
+
+IM / Agent Channel 属于 live-follow owner，但 peer session 仍必须绑定执行 runtime identity。Router 在普通消息、heartbeat、`/model` 命令唤醒 Sidecar 前比较 desired identity 与 persisted / live sidecar identity；只要 `runtime` 或 `runtimeSource` 任一变化，就 reset peer session 并释放旧 Sidecar，随后新建会话。`codex/system-cli`（外部 Codex CLI）与 `codex/managed-provider`（Codex 订阅 Provider）必须视为不同身份；`codex-sub` 选择路径要把 `RuntimeConfig.source:'managed-provider'` 传入 drift check，不能只传 `runtime:'codex'`。
+
 ### 2.5 Telegram Adapter
 
 ```rust

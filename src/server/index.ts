@@ -745,6 +745,30 @@ function runtimeBackedProviderIdentityFromCronPayload(
   };
 }
 
+function runtimeBackedProviderIdentityFromSnapshot(
+  value: unknown,
+): RuntimeBackedProviderIdentity | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const identity = value as Record<string, unknown>;
+  const model = typeof identity.model === 'string' ? identity.model.trim() : '';
+  if (
+    identity.kind !== 'runtime-backed-provider'
+    || identity.providerId !== CODEX_SUBSCRIPTION_PROVIDER_ID
+    || identity.runtime !== 'codex'
+    || identity.runtimeSource !== 'managed-provider'
+    || !model
+  ) {
+    return undefined;
+  }
+  return {
+    kind: 'runtime-backed-provider',
+    providerId: CODEX_SUBSCRIPTION_PROVIDER_ID,
+    runtime: 'codex',
+    runtimeSource: 'managed-provider',
+    model,
+  };
+}
+
 function buildSnapshotRuntimeConfig(resolved: {
   model?: string;
   permissionMode?: string;
@@ -7829,6 +7853,13 @@ async function main() {
           if (typeof snapshot.runtime === 'string' && snapshot.runtime.length > 0) {
             patch.runtime = snapshot.runtime as FreezePatch['runtime'];
           }
+          if (
+            (snapshot.runtimeSource === 'managed-provider' || snapshot.runtimeSource === 'system-cli')
+            && patch.runtime
+            && patch.runtime !== 'builtin'
+          ) {
+            patch.runtimeSource = snapshot.runtimeSource;
+          }
           if (typeof snapshot.model === 'string') {
             patch.model = snapshot.model;
           }
@@ -7865,6 +7896,16 @@ async function main() {
           }
           if (!patch.providerRoute && typeof snapshot.providerEnvJson === 'string') {
             patch.providerEnvJson = snapshot.providerEnvJson;
+          }
+          const identity = runtimeBackedProviderIdentityFromSnapshot(snapshot.providerExecutionIdentity);
+          if (identity) {
+            patch.providerExecutionIdentity = identity;
+            patch.providerId = identity.providerId;
+            patch.model = identity.model;
+            patch.runtime = identity.runtime;
+            patch.runtimeSource = identity.runtimeSource;
+            patch.providerRoute = undefined;
+            patch.providerEnvJson = undefined;
           }
 
           const updated = await updateSessionMetadata(raw.sessionId, patch);

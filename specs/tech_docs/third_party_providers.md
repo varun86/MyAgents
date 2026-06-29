@@ -128,6 +128,7 @@ interface Provider {
 边界规则：
 
 - Chat session birth 保存 runtime projection：`runtime:'codex'` + `runtimeSource:'managed-provider'` + `providerExecutionIdentity`；Task/Cron 执行 override 保存 `runtimeConfig.source:'managed-provider'` + 选中的 Codex model。这样 Rust spawn Sidecar 时能注入 `MYAGENTS_RUNTIME=codex` 与 runtime source。
+- IM / Agent Channel session birth 只保存 runtime identity：`runtime:'codex'` + `runtimeSource:'managed-provider'`。model / provider / permission / MCP 继续每条消息 live resolve 当前 Agent 配置；session drift、heartbeat、`/model` 命令唤醒 Sidecar 时必须比较并传递完整 identity。
 - Agent/Channel 默认值保存用户的 Provider 选择：`providerId:'codex-sub'` + model，`runtime` 仍保持 `builtin`，且不得把 `runtimeConfig.source/model` 写进 Agent 默认配置。否则 Codex 订阅会和用户手动安装的 Codex CLI runtime 混成同一种身份。
 - `codex-sub` 的可见性由 `managedCodexProviderDevGate` 控制；可选择性还要求 managed runtime 已安装到要求版本、managed Codex auth 有效（`chatgpt` 或兼容的 `access-token`），并且 provider 未被 `disabledProviderIds` 禁用。
 - 进入 runtime-backed family 后，历史边界是 `runtime-backed:codex-sub`，不与 builtin Anthropic / third-party Provider transcript 互相 resume。

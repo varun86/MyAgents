@@ -510,6 +510,10 @@ async function syncAgentRuntime(
     runtimePatch.providerEnvJson = patch.providerEnvJson ?? null;
     hasRuntimeChanges = true;
   }
+  if ('providerId' in patch) {
+    runtimePatch.providerId = patch.providerId ?? null;
+    hasRuntimeChanges = true;
+  }
   if ('permissionMode' in patch) {
     runtimePatch.permissionMode = patch.permissionMode ?? null;
     hasRuntimeChanges = true;

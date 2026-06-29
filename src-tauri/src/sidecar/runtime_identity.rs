@@ -149,6 +149,7 @@ fn workspace_paths_match(agent_path: &str, workspace_path: &std::path::Path) -> 
 /// and is gated by `multiAgentRuntime`; session metadata is stable once created and is
 /// read regardless of that gate so an existing runtime-A history is never reopened as
 /// runtime B under the same MyAgents session_id.
+#[allow(dead_code)]
 pub fn resolve_session_runtime_identity(session_id: &str) -> Option<String> {
     resolve_session_runtime_identity_full(session_id).map(|identity| identity.runtime)
 }

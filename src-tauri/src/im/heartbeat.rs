@@ -400,13 +400,20 @@ impl HeartbeatRunner {
         ulog_debug!("[heartbeat] Acquired peer lock for {}", session_key);
 
         let current_runtime = self.runtime.read().await.clone();
+        let current_runtime_config = self.runtime_config.read().await.clone();
+        let current_runtime_source = current_runtime_config
+            .as_ref()
+            .and_then(|v| v.get("source"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
 
         {
             let drift_result = {
                 let mut router_guard = router.lock().await;
-                router_guard.check_and_reset_on_runtime_drift(
+                router_guard.check_and_reset_on_runtime_identity_drift(
                     &session_key,
                     &current_runtime,
+                    current_runtime_source.as_deref(),
                     sidecar_manager,
                 )
             };
@@ -438,6 +445,10 @@ impl HeartbeatRunner {
         let (port, is_new_sidecar) = match prep {
             EnsureSidecarPrep::Healthy(p) => (p, false),
             EnsureSidecarPrep::NeedCreate(info) => {
+                let info = info.with_runtime_identity(
+                    Some(&current_runtime),
+                    current_runtime_source.as_deref(),
+                );
                 // Phase 2: Create sidecar (NO lock held — blocking up to 5 min)
                 match super::router::SessionRouter::create_sidecar_blocking(
                     info.clone(),

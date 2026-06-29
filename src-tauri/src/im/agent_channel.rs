@@ -1032,10 +1032,15 @@ pub(super) async fn create_bot_instance<R: Runtime>(
 
                             let mut models = fallback_runtime_models(&current_runtime);
                             if models.is_empty() {
+                                let current_runtime_source = runtime_config_string(
+                                    current_runtime_config.as_ref(),
+                                    "source",
+                                );
                                 match ensure_sidecar_port_for_command(
                                     &router_clone,
                                     &session_key,
                                     &current_runtime,
+                                    current_runtime_source.as_deref(),
                                     &app_clone,
                                     &manager_clone,
                                     &health_clone,
@@ -1830,6 +1835,9 @@ pub(super) async fn create_bot_instance<R: Runtime>(
                         task_adapter.ack_processing(&chat_id, &message_id).await;
                         task_adapter.send_typing(&chat_id).await;
 
+                        let task_runtime_source =
+                            runtime_config_string(task_runtime_config.as_ref(), "source");
+
                         // 3b. Runtime drift check (v0.1.66): if the agent's runtime has
                         // been changed in Settings since the current Sidecar was spawned,
                         // kill it, regenerate the peer session_id, and notify the user with
@@ -1843,9 +1851,10 @@ pub(super) async fn create_bot_instance<R: Runtime>(
                             let drift_result = {
                                 let mut router_guard = task_router.lock().await;
                                 router_guard
-                                    .check_and_reset_on_runtime_drift(
+                                    .check_and_reset_on_runtime_identity_drift(
                                         &session_key,
                                         &task_runtime,
+                                        task_runtime_source.as_deref(),
                                         &task_manager,
                                     )
                             };
@@ -1884,7 +1893,13 @@ pub(super) async fn create_bot_instance<R: Runtime>(
                         let (port, is_new_sidecar) = match task_router
                             .lock()
                             .await
-                            .ensure_sidecar(&session_key, &task_app, &task_manager)
+                            .ensure_sidecar_with_runtime_identity(
+                                &session_key,
+                                &task_app,
+                                &task_manager,
+                                Some(&task_runtime),
+                                task_runtime_source.as_deref(),
+                            )
                             .await
                         {
                             Ok(result) => result,

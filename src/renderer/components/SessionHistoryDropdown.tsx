@@ -533,7 +533,7 @@ export default function SessionHistoryDropdown({
                                                     </button>
                                                 </Tip>
                                             )}
-                                            <Tip label={t('shell.history.more')} position="bottom">
+                                            <Tip label={t('shell.history.more')} position="bottom" disabled={menuOpen}>
                                                 <button
                                                     type="button"
                                                     aria-label={t('shell.history.moreActions')}

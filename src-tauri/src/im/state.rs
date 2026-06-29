@@ -233,13 +233,19 @@ pub(super) async fn ensure_sidecar_port_for_command<R: Runtime>(
     router: &Arc<Mutex<SessionRouter>>,
     session_key: &str,
     desired_runtime: &str,
+    desired_runtime_source: Option<&str>,
     app_handle: &AppHandle<R>,
     manager: &ManagedSidecarManager,
     health: &Arc<HealthManager>,
 ) -> Result<u16, String> {
     let drift_result = {
         let mut router_guard = router.lock().await;
-        router_guard.check_and_reset_on_runtime_drift(session_key, desired_runtime, manager)
+        router_guard.check_and_reset_on_runtime_identity_drift(
+            session_key,
+            desired_runtime,
+            desired_runtime_source,
+            manager,
+        )
     };
     if drift_result.is_some() {
         let _ =
@@ -254,6 +260,7 @@ pub(super) async fn ensure_sidecar_port_for_command<R: Runtime>(
     match prep {
         EnsureSidecarPrep::Healthy(port) => Ok(port),
         EnsureSidecarPrep::NeedCreate(info) => {
+            let info = info.with_runtime_identity(Some(desired_runtime), desired_runtime_source);
             // Command path only needs the port; is_new is irrelevant here (no
             // config sync). Destructure the tuple but ignore the flag.
             let (port, _is_new) =

@@ -188,4 +188,19 @@ describe('snapshotForOwnedSession — reasoning effort capture (#324)', () => {
       runtimeSource: 'system-cli',
     });
   });
+
+  it('Managed Codex IM snapshot preserves explicit managed-provider runtime identity', () => {
+    expect(snapshotForImSession(makeAgent({
+      providerId: 'codex-sub',
+      model: 'gpt-5.4-codex',
+      runtimeConfig: { source: 'system-cli' },
+    }), {
+      runtimeOverride: 'codex',
+      runtimeSourceOverride: 'managed-provider',
+      managedCodexProviderReady: true,
+    })).toEqual({
+      runtime: 'codex',
+      runtimeSource: 'managed-provider',
+    });
+  });
 });

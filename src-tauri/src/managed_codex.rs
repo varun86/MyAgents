@@ -248,7 +248,7 @@ fn managed_codex_binary_path(platform: &str) -> Option<PathBuf> {
     if let Some(meta) = read_installed_json() {
         if meta.version == REQUIRED_VERSION && meta.platform == platform {
             if let Some(rel) = meta.executable_relative_path.as_deref() {
-                if let Ok(rel_path) = validate_executable_relative_path(rel) {
+                if let Ok(rel_path) = validate_installed_executable_relative_path(rel) {
                     let candidate = dir.join(rel_path);
                     if candidate.is_file() {
                         return Some(candidate);
@@ -442,6 +442,22 @@ fn validate_executable_relative_path(raw: &str) -> Result<PathBuf, String> {
         ));
     }
     Ok(path)
+}
+
+fn normalize_executable_relative_path_for_metadata(raw: &str) -> Result<String, String> {
+    let path = validate_executable_relative_path(raw)?;
+    archive_key_from_path(&path)
+}
+
+fn validate_installed_executable_relative_path(raw: &str) -> Result<PathBuf, String> {
+    match validate_executable_relative_path(raw) {
+        Ok(path) => Ok(path),
+        Err(original_err) if raw.contains('\\') => {
+            let normalized = raw.replace('\\', "/");
+            validate_executable_relative_path(&normalized).map_err(|_| original_err)
+        }
+        Err(err) => Err(err),
+    }
 }
 
 fn validate_download_url(raw: &str) -> Result<(), String> {
@@ -905,6 +921,64 @@ fn powershell_path() -> PathBuf {
 }
 
 #[cfg(target_os = "windows")]
+fn decode_powershell_text_output(bytes: &[u8]) -> String {
+    if bytes.starts_with(&[0xff, 0xfe]) || looks_like_utf16le(bytes) {
+        let units: Vec<u16> = bytes
+            .chunks_exact(2)
+            .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+            .collect();
+        return String::from_utf16_lossy(&units);
+    }
+    if bytes.starts_with(&[0xfe, 0xff]) {
+        let units: Vec<u16> = bytes
+            .chunks_exact(2)
+            .map(|chunk| u16::from_be_bytes([chunk[0], chunk[1]]))
+            .collect();
+        return String::from_utf16_lossy(&units);
+    }
+    String::from_utf8_lossy(bytes).to_string()
+}
+
+#[cfg(target_os = "windows")]
+fn looks_like_utf16le(bytes: &[u8]) -> bool {
+    if bytes.len() < 8 {
+        return false;
+    }
+    let sampled = bytes.iter().skip(1).step_by(2).take(32).count();
+    if sampled == 0 {
+        return false;
+    }
+    let nul_odd_bytes = bytes
+        .iter()
+        .skip(1)
+        .step_by(2)
+        .take(32)
+        .filter(|byte| **byte == 0)
+        .count();
+    nul_odd_bytes * 2 >= sampled
+}
+
+#[cfg(target_os = "windows")]
+fn decode_powershell_base64_utf8_output(bytes: &[u8], label: &str) -> Result<String, String> {
+    let text = decode_powershell_text_output(bytes);
+    let encoded: String = text
+        .chars()
+        .filter(|ch| !ch.is_whitespace() && *ch != '\u{feff}' && *ch != '\0')
+        .collect();
+    if encoded.is_empty() {
+        return Err(format!("[managed-codex] {} output is empty", label));
+    }
+    let decoded = general_purpose::STANDARD.decode(encoded).map_err(|e| {
+        format!(
+            "[managed-codex] {} output is not valid base64: {}",
+            label, e
+        )
+    })?;
+    String::from_utf8(decoded)
+        .map_err(|e| format!("[managed-codex] {} output is not UTF-8: {}", label, e))
+}
+
+#[cfg(target_os = "windows")]
 fn verify_windows_platform_signature(
     executable: &Path,
     signing: &ManagedCodexArtifactSigning,
@@ -916,6 +990,9 @@ fn verify_windows_platform_signature(
     let script = format!(
         r#"
 $ErrorActionPreference = 'Stop'
+$utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+$OutputEncoding = $utf8NoBom
+[Console]::OutputEncoding = $utf8NoBom
 $path = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{encoded_path}'))
 $sig = Get-AuthenticodeSignature -LiteralPath $path
 $cert = $sig.SignerCertificate
@@ -923,12 +1000,13 @@ $sha256 = $null
 if ($cert -ne $null) {{
   $sha256 = [System.BitConverter]::ToString($cert.GetCertHash('SHA256')).Replace('-', '').ToLowerInvariant()
 }}
-[ordered]@{{
+$json = [ordered]@{{
   status = [string]$sig.Status
   statusMessage = [string]$sig.StatusMessage
   subject = if ($cert -ne $null) {{ [string]$cert.Subject }} else {{ $null }}
   sha256 = $sha256
 }} | ConvertTo-Json -Compress
+[Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($json))
 "#
     );
     let encoded = encode_powershell(&script);
@@ -947,8 +1025,7 @@ if ($cert -ne $null) {{
     if !output.status.success() {
         return Err(command_failure("Get-AuthenticodeSignature", &output));
     }
-    let stdout = String::from_utf8(output.stdout)
-        .map_err(|e| format!("[managed-codex] Authenticode output is not UTF-8: {}", e))?;
+    let stdout = decode_powershell_base64_utf8_output(&output.stdout, "Authenticode")?;
     let parsed: Value = serde_json::from_str(stdout.trim())
         .map_err(|e| format!("[managed-codex] Authenticode JSON parse failed: {}", e))?;
     let status = parsed
@@ -1337,7 +1414,9 @@ fn install_verified_artifact(
         platform_signature: Some(platform_signature),
         installed_at: Some(now_iso()),
         source_url: Some(artifact.url.clone()),
-        executable_relative_path: Some(executable_rel.to_string_lossy().to_string()),
+        executable_relative_path: Some(normalize_executable_relative_path_for_metadata(
+            &artifact.executable_relative_path,
+        )?),
     };
     if let Err(err) = write_installed_json(&installed_json) {
         let _ = remove_path_entry(&target);
@@ -2689,6 +2768,31 @@ mod tests {
         ));
     }
 
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn powershell_base64_utf8_output_decodes_utf8_and_utf16le_shell_output() {
+        let json =
+            r#"{"status":"Valid","statusMessage":"已验证","subject":"CN=OpenAI","sha256":"abc"}"#;
+        let encoded = general_purpose::STANDARD.encode(json.as_bytes());
+
+        let utf8_output = format!("{}\r\n", encoded);
+        assert_eq!(
+            decode_powershell_base64_utf8_output(utf8_output.as_bytes(), "Authenticode")
+                .expect("utf8 powershell output"),
+            json
+        );
+
+        let mut utf16le_output = Vec::new();
+        for unit in format!("\u{feff}{}\r\n", encoded).encode_utf16() {
+            utf16le_output.extend_from_slice(&unit.to_le_bytes());
+        }
+        assert_eq!(
+            decode_powershell_base64_utf8_output(&utf16le_output, "Authenticode")
+                .expect("utf16le powershell output"),
+            json
+        );
+    }
+
     #[test]
     fn fresh_downloading_state_is_owned_by_download_flow() {
         let state = ManagedCodexRuntimeInstallState {
@@ -2957,6 +3061,34 @@ On a remote or headless machine? Use `codex login --device-auth` instead.";
         assert!(validate_executable_relative_path("bin/codex.exe").is_ok());
         assert!(validate_executable_relative_path("bin/node").is_err());
         assert!(validate_executable_relative_path("bin/codex/").is_err());
+    }
+
+    #[test]
+    fn executable_metadata_path_is_slash_normalized() {
+        assert_eq!(
+            normalize_executable_relative_path_for_metadata(
+                "vendor/x86_64-pc-windows-msvc/bin/codex.exe"
+            )
+            .unwrap(),
+            "vendor/x86_64-pc-windows-msvc/bin/codex.exe"
+        );
+        assert!(normalize_executable_relative_path_for_metadata(
+            "vendor\\x86_64-pc-windows-msvc\\bin\\codex.exe"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn installed_executable_path_accepts_legacy_windows_separators() {
+        let path = validate_installed_executable_relative_path(
+            "vendor\\x86_64-pc-windows-msvc\\bin\\codex.exe",
+        )
+        .unwrap();
+        assert_eq!(
+            archive_key_from_path(&path).unwrap(),
+            "vendor/x86_64-pc-windows-msvc/bin/codex.exe"
+        );
+        assert!(validate_installed_executable_relative_path("..\\codex.exe").is_err());
     }
 
     #[cfg(unix)]

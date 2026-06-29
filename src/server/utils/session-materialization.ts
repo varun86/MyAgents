@@ -1,5 +1,5 @@
 import type { AgentConfig } from '../../shared/types/agent';
-import type { RuntimeType } from '../../shared/types/runtime';
+import type { RuntimeSource, RuntimeType } from '../../shared/types/runtime';
 import { createSessionMetadata, type SessionMetadata } from '../types/session';
 import { snapshotForImSession, snapshotForOwnedSession } from './session-snapshot';
 
@@ -12,7 +12,7 @@ export function isLiveFollowScenario(scenario: SessionMaterializationScenario): 
 export function snapshotForMaterializedSession(
   agent: AgentConfig,
   scenario: SessionMaterializationScenario,
-  options?: { runtimeOverride?: RuntimeType; managedCodexProviderReady?: boolean },
+  options?: { runtimeOverride?: RuntimeType; runtimeSourceOverride?: RuntimeSource; managedCodexProviderReady?: boolean },
 ): Partial<SessionMetadata> {
   return isLiveFollowScenario(scenario)
     ? snapshotForImSession(agent, options)
@@ -25,6 +25,7 @@ export function createMaterializedSessionMetadata(params: {
   scenario: SessionMaterializationScenario;
   agent?: AgentConfig;
   runtimeOverride?: RuntimeType;
+  runtimeSourceOverride?: RuntimeSource;
   managedCodexProviderReady?: boolean;
   fallbackRuntime?: RuntimeType;
   title?: string;
@@ -32,6 +33,7 @@ export function createMaterializedSessionMetadata(params: {
   const snapshot = params.agent
     ? snapshotForMaterializedSession(params.agent, params.scenario, {
         runtimeOverride: params.runtimeOverride,
+        runtimeSourceOverride: params.runtimeSourceOverride,
         managedCodexProviderReady: params.managedCodexProviderReady,
       })
     : undefined;
@@ -39,7 +41,9 @@ export function createMaterializedSessionMetadata(params: {
   const fallbackRuntime = params.runtimeOverride ?? params.fallbackRuntime;
   if (!params.agent && fallbackRuntime) {
     meta.runtime = fallbackRuntime;
-    meta.runtimeSource = fallbackRuntime !== 'builtin' ? 'system-cli' : undefined;
+    meta.runtimeSource = fallbackRuntime !== 'builtin'
+      ? (params.runtimeSourceOverride ?? 'system-cli')
+      : undefined;
   }
   meta.id = params.sessionId;
   meta.title = params.title ?? 'New Chat';

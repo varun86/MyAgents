@@ -101,4 +101,50 @@ describe('codex command context', () => {
 
     expect(context.commandPath).toBe(binary);
   });
+
+  it.runIf(process.platform === 'win32')('accepts legacy Windows separators in managed installed metadata', () => {
+    const platform = platformKey();
+    if (!platform) return;
+
+    tempHome = mkdtempSync(join(tmpdir(), 'myagents-managed-codex-'));
+    vi.stubEnv('HOME', tempHome);
+    vi.stubEnv('USERPROFILE', tempHome);
+
+    const root = join(tempHome, '.myagents', 'runtimes', 'codex');
+    const installDir = join(root, MANAGED_CODEX_REQUIRED_RUNTIME.version, platform);
+    const nestedDir = join(installDir, 'vendor', 'x86_64-pc-windows-msvc', 'bin');
+    mkdirSync(nestedDir, { recursive: true });
+    const binary = join(nestedDir, 'codex.exe');
+    writeFileSync(binary, '');
+    writeFileSync(join(root, 'installed.json'), JSON.stringify({
+      version: MANAGED_CODEX_REQUIRED_RUNTIME.version,
+      platform,
+      executableRelativePath: 'vendor\\x86_64-pc-windows-msvc\\bin\\codex.exe',
+    }));
+
+    const context = resolveCodexCommandContext({ source: 'managed-provider' });
+
+    expect(context.commandPath).toBe(binary);
+  });
+
+  it.runIf(process.platform === 'win32')('rejects traversal in legacy Windows metadata paths', () => {
+    const platform = platformKey();
+    if (!platform) return;
+
+    tempHome = mkdtempSync(join(tmpdir(), 'myagents-managed-codex-'));
+    vi.stubEnv('HOME', tempHome);
+    vi.stubEnv('USERPROFILE', tempHome);
+
+    const root = join(tempHome, '.myagents', 'runtimes', 'codex');
+    const installDir = join(root, MANAGED_CODEX_REQUIRED_RUNTIME.version, platform);
+    mkdirSync(installDir, { recursive: true });
+    writeFileSync(join(root, 'installed.json'), JSON.stringify({
+      version: MANAGED_CODEX_REQUIRED_RUNTIME.version,
+      platform,
+      executableRelativePath: '..\\codex.exe',
+    }));
+
+    expect(() => resolveCodexCommandContext({ source: 'managed-provider' }))
+      .toThrow(/not installed/i);
+  });
 });

@@ -298,7 +298,7 @@ export default function SessionMenuButton({
 
     return (
         <>
-            <Tip label={t('shell.sessionMenu.trigger')} position="bottom">
+            <Tip label={t('shell.sessionMenu.trigger')} position="bottom" disabled={open}>
                 <button
                     ref={triggerRef}
                     type="button"
