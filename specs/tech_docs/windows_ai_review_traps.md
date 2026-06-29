@@ -28,6 +28,7 @@ These are representative incidents that shaped the patterns below:
 | UTF-8 BOM from Windows editors breaks config parsing | `CHANGELOG.md` entries for issue #170 and Windows config crash; `src/shared/utils.ts` BOM stripping |
 | Workspace path identity mismatch silently breaks features | #320 / `d7d431d2`; `src/shared/workspacePath.ts`; `pit_of_success.md` workspace path section |
 | Archive paths accidentally serialized with OS separators | Managed Codex Windows install wrote `executableRelativePath` as `vendor\\...`; status reads rejected it as an archive path and preserved stale `downloading` at 100% |
+| File URLs are not paths with a prefix | Plugin local install parsed `file:///C:/...` via `new URL().pathname`, which becomes `/C:/...`; on Windows `resolve()` turns that into `C:\C:\...` |
 | `\\?\` long-path prefix breaks non-Rust consumers | `pit_of_success.md::normalize_external_path`; #229 stripped `\\?\` from bundled Node path in `myagents.cmd` |
 | Windows shell quoting drops CLI content | issue #149; `src/cli/myagents.ts` requires `--content-file` / `--prompt-file` for fragile payloads |
 | GUI process spawn flashes or hangs through console wrappers | issue #170; `process_cmd::new`; `ed9c341c`, `1bb503db`, `bcb1a04e` |
@@ -66,6 +67,7 @@ These are representative incidents that shaped the patterns below:
 **Real failures.**
 
 - Managed Codex Windows download installed successfully, but `installed.json` stored `executableRelativePath` with backslashes from `PathBuf::to_string_lossy()`. The status reader validates that field as an archive-relative path, failed to locate the nested `vendor/.../codex.exe`, and preserved the stale 100% `downloading` state.
+- Plugin local install accepted `file://` sources, but parsing with `new URL(...).pathname` produced `/C:/...` for Windows drive URLs and could resolve to `C:\C:\...`. The fix is to use Node's `fileURLToPath` and `pathToFileURL` helpers at the URL boundary.
 
 - #320: legacy cron/task/session/project lookups could not find the owning workspace because one store used backslashes and another used forward slashes. This caused "找不到工作区", empty recent sessions, task cards without workspace names, and invalid workspace filters.
 - `\\?\` paths from Tauri/Rust resource discovery work with Rust `fs`, but break Node file URLs, npm, CLI wrappers, and spawned programs.
@@ -76,6 +78,7 @@ These are representative incidents that shaped the patterns below:
 - Is a `Project.path` compared with `Task.workspacePath`, `CronTask.workspacePath`, session `agentDir`, or `defaultWorkspacePath`? Use `workspacePathsEqual`.
 - Is a path used as a Map/Set key? Normalize with `normalizeWorkspacePathIdentity` at both build and lookup.
 - Is a path from a ZIP/manifest/archive key persisted to JSON? Store the normalized archive key with `/`, not `PathBuf::to_string_lossy()`. If legacy installed metadata already contains backslashes, accept it only at the installed-metadata read boundary, not in manifest validation.
+- Is a filesystem path crossing a `file://` URL boundary? Use `pathToFileURL` / `fileURLToPath` instead of `new URL(...).pathname`, ``file://${path}``, or manual slash replacement.
 - Is a Rust `PathBuf` crossing into Node, npm, URL, shell args, config JSON, or a child process? Strip `\\?\` via `normalize_external_path` at the boundary. Do not mutate pure path-format helpers to guess callers.
 - Is the code using canonicalize before write? For paths that may not exist yet, use the lexical write-side resolver, not read-side canonicalization.
 - Are symlinks/junctions involved? Directory tests need the repo's junction-aware helpers, not only `Dirent.isDirectory()`.
@@ -84,6 +87,7 @@ These are representative incidents that shaped the patterns below:
 
 - Raw `===` path comparison outside same-owner in-memory tree nodes.
 - Inline `.replace(/\\/g, '/')` as a "quick fix".
+- `new URL(fileUrl).pathname`, ``file://${path}``, or ``file:///${path.replace(/\\/g, '/')}`` around local paths.
 - `PathBuf::to_string_lossy()` used to serialize archive members, manifest paths, or installed metadata.
 - `PathBuf::to_string_lossy()` immediately passed to Node/npm/URL/spawn without boundary normalization.
 

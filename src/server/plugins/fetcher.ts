@@ -20,6 +20,7 @@ import {
   type Dirent,
 } from 'fs';
 import { basename, dirname, join, relative, sep } from 'path';
+import { pathToFileURL } from 'node:url';
 
 import {
   fetchSkillZip,
@@ -204,7 +205,7 @@ function readLocalDirTree(absRootInput: string): ExtractedTree {
 
   return {
     files,
-    sourceUrl: `file://${absRoot}`,
+    sourceUrl: pathToFileURL(absRoot).href,
   };
 }
 

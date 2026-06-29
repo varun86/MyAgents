@@ -20,6 +20,7 @@
  */
 
 import { resolve as resolvePath, isAbsolute } from 'path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { ResolvedSkillSource } from '../skills/url-resolver';
 
 export type ResolvedPluginSource =
@@ -50,6 +51,18 @@ export class PluginUrlError extends Error {
   }
 }
 
+function hasParentPathSegment(path: string): boolean {
+  return path.split(/[\\/]+/).some((seg) => seg === '..');
+}
+
+function hasRawParentPathSegment(path: string): boolean {
+  try {
+    return hasParentPathSegment(decodeURIComponent(path));
+  } catch {
+    return hasParentPathSegment(path);
+  }
+}
+
 /**
  * Normalize user input into a ResolvedPluginSource.
  * Throws PluginUrlError on unrecognized / unsupported input.
@@ -65,9 +78,12 @@ export function resolvePluginUrl(rawInput: string): ResolvedPluginSource {
 
   // ---------------------------------------------------------------- file:// or absolute path
   if (trimmed.startsWith('file://')) {
+    if (hasRawParentPathSegment(trimmed)) {
+      throw new PluginUrlError(`路径含非法 .. 段：${trimmed}`);
+    }
     let p: string;
     try {
-      p = decodeURIComponent(new URL(trimmed).pathname);
+      p = fileURLToPath(trimmed);
     } catch {
       throw new PluginUrlError(`无法解析 file:// URL：${trimmed}`);
     }
@@ -75,7 +91,7 @@ export function resolvePluginUrl(rawInput: string): ResolvedPluginSource {
       throw new PluginUrlError(`file:// 必须是绝对路径：${trimmed}`);
     }
     // Defense in depth: reject path traversal segments before any disk touch.
-    if (p.split('/').some(seg => seg === '..')) {
+    if (hasParentPathSegment(p)) {
       throw new PluginUrlError(`路径含非法 .. 段：${trimmed}`);
     }
     return {
@@ -88,14 +104,15 @@ export function resolvePluginUrl(rawInput: string): ResolvedPluginSource {
   // POSIX-style absolute path (/Users/..., /home/...). `isAbsolute` on
   // POSIX runtimes accepts /; on Windows it accepts both / and \.
   if (isAbsolute(trimmed) && !trimmed.startsWith('http')) {
-    if (trimmed.split('/').some(seg => seg === '..')) {
+    if (hasParentPathSegment(trimmed)) {
       throw new PluginUrlError(`路径含非法 .. 段：${trimmed}`);
     }
+    const absolutePath = resolvePath(trimmed);
     return {
       kind: 'local',
       displayName: trimmed,
-      absolutePath: resolvePath(trimmed),
-      sourceUrl: `file://${trimmed}`,
+      absolutePath,
+      sourceUrl: pathToFileURL(absolutePath).href,
     };
   }
   // Windows-style absolute path (C:\foo, D:/bar). `isAbsolute` running on
@@ -104,14 +121,15 @@ export function resolvePluginUrl(rawInput: string): ResolvedPluginSource {
   // sidecar build accept both forms.
   if (/^[A-Za-z]:[\\/]/.test(trimmed)) {
     // Reject `..` segments in either separator before any disk touch.
-    if (/(^|[\\/])\.\.([\\/]|$)/.test(trimmed)) {
+    if (hasParentPathSegment(trimmed)) {
       throw new PluginUrlError(`路径含非法 .. 段：${trimmed}`);
     }
+    const absolutePath = resolvePath(trimmed);
     return {
       kind: 'local',
       displayName: trimmed,
-      absolutePath: resolvePath(trimmed),
-      sourceUrl: `file:///${trimmed.replace(/\\/g, '/')}`,
+      absolutePath,
+      sourceUrl: pathToFileURL(absolutePath).href,
     };
   }
 
