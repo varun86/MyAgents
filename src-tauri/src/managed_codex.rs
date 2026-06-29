@@ -248,7 +248,7 @@ fn managed_codex_binary_path(platform: &str) -> Option<PathBuf> {
     if let Some(meta) = read_installed_json() {
         if meta.version == REQUIRED_VERSION && meta.platform == platform {
             if let Some(rel) = meta.executable_relative_path.as_deref() {
-                if let Ok(rel_path) = validate_executable_relative_path(rel) {
+                if let Ok(rel_path) = validate_installed_executable_relative_path(rel) {
                     let candidate = dir.join(rel_path);
                     if candidate.is_file() {
                         return Some(candidate);
@@ -442,6 +442,22 @@ fn validate_executable_relative_path(raw: &str) -> Result<PathBuf, String> {
         ));
     }
     Ok(path)
+}
+
+fn normalize_executable_relative_path_for_metadata(raw: &str) -> Result<String, String> {
+    let path = validate_executable_relative_path(raw)?;
+    archive_key_from_path(&path)
+}
+
+fn validate_installed_executable_relative_path(raw: &str) -> Result<PathBuf, String> {
+    match validate_executable_relative_path(raw) {
+        Ok(path) => Ok(path),
+        Err(original_err) if raw.contains('\\') => {
+            let normalized = raw.replace('\\', "/");
+            validate_executable_relative_path(&normalized).map_err(|_| original_err)
+        }
+        Err(err) => Err(err),
+    }
 }
 
 fn validate_download_url(raw: &str) -> Result<(), String> {
@@ -1398,7 +1414,9 @@ fn install_verified_artifact(
         platform_signature: Some(platform_signature),
         installed_at: Some(now_iso()),
         source_url: Some(artifact.url.clone()),
-        executable_relative_path: Some(executable_rel.to_string_lossy().to_string()),
+        executable_relative_path: Some(normalize_executable_relative_path_for_metadata(
+            &artifact.executable_relative_path,
+        )?),
     };
     if let Err(err) = write_installed_json(&installed_json) {
         let _ = remove_path_entry(&target);
@@ -3043,6 +3061,34 @@ On a remote or headless machine? Use `codex login --device-auth` instead.";
         assert!(validate_executable_relative_path("bin/codex.exe").is_ok());
         assert!(validate_executable_relative_path("bin/node").is_err());
         assert!(validate_executable_relative_path("bin/codex/").is_err());
+    }
+
+    #[test]
+    fn executable_metadata_path_is_slash_normalized() {
+        assert_eq!(
+            normalize_executable_relative_path_for_metadata(
+                "vendor/x86_64-pc-windows-msvc/bin/codex.exe"
+            )
+            .unwrap(),
+            "vendor/x86_64-pc-windows-msvc/bin/codex.exe"
+        );
+        assert!(normalize_executable_relative_path_for_metadata(
+            "vendor\\x86_64-pc-windows-msvc\\bin\\codex.exe"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn installed_executable_path_accepts_legacy_windows_separators() {
+        let path = validate_installed_executable_relative_path(
+            "vendor\\x86_64-pc-windows-msvc\\bin\\codex.exe",
+        )
+        .unwrap();
+        assert_eq!(
+            archive_key_from_path(&path).unwrap(),
+            "vendor/x86_64-pc-windows-msvc/bin/codex.exe"
+        );
+        assert!(validate_installed_executable_relative_path("..\\codex.exe").is_err());
     }
 
     #[cfg(unix)]
