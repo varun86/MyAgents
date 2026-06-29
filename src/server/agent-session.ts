@@ -4218,7 +4218,7 @@ type DesktopSnapshotPatch = Pick<
 >;
 type OwnedFreezeSnapshotPatch = Partial<Pick<
   SessionMetadata,
-  'runtime' | keyof DesktopSnapshotPatch
+  'runtime' | 'runtimeSource' | 'providerExecutionIdentity' | keyof DesktopSnapshotPatch
 >>;
 
 function applyDesktopSnapshotPatch(
@@ -4348,7 +4348,12 @@ function buildOwnedFreezeSnapshotPatch(overrides?: OwnedFreezeSnapshotPatch): Ow
     configSnapshotAt: new Date().toISOString(),
   };
   if (patch.runtime && isExternalRuntime(patch.runtime)) {
-    delete patch.providerId;
+    if (patch.providerExecutionIdentity) {
+      patch.providerId = patch.providerExecutionIdentity.providerId;
+      patch.model = patch.providerExecutionIdentity.model;
+    } else {
+      delete patch.providerId;
+    }
     delete patch.providerRoute;
     delete patch.providerEnvJson;
     delete patch.enabledPluginIds;

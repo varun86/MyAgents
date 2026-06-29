@@ -17,8 +17,8 @@ use serde_json::json;
 use tauri::{AppHandle, Runtime};
 
 use crate::sidecar::{
-    ensure_session_sidecar, release_session_sidecar, resolve_session_runtime_identity_full,
-    ManagedSidecarManager, RuntimeDriftResult, SidecarOwner,
+    ensure_session_sidecar_with_runtime_identity_override, release_session_sidecar,
+    resolve_session_runtime_identity_full, ManagedSidecarManager, RuntimeDriftResult, SidecarOwner,
 };
 
 use super::runtime_change::OwnedSessionSnapshot;
@@ -61,6 +61,20 @@ pub struct EnsureSidecarInfo {
     pub workspace: PathBuf,
     pub prev_count: u32,
     pub metadata_birth_pending: bool,
+    pub runtime_override: Option<String>,
+    pub runtime_source_override: Option<String>,
+}
+
+impl EnsureSidecarInfo {
+    pub fn with_runtime_identity(
+        mut self,
+        runtime_override: Option<&str>,
+        runtime_source_override: Option<&str>,
+    ) -> Self {
+        self.runtime_override = runtime_override.map(str::to_string);
+        self.runtime_source_override = runtime_source_override.map(str::to_string);
+        self
+    }
 }
 
 /// Error from Sidecar routing — distinguishes bufferable vs non-bufferable failures.
@@ -257,6 +271,18 @@ impl SessionRouter {
         app_handle: &AppHandle<R>,
         manager: &ManagedSidecarManager,
     ) -> Result<(u16, bool), String> {
+        self.ensure_sidecar_with_runtime_identity(session_key, app_handle, manager, None, None)
+            .await
+    }
+
+    pub async fn ensure_sidecar_with_runtime_identity<R: Runtime>(
+        &mut self,
+        session_key: &str,
+        app_handle: &AppHandle<R>,
+        manager: &ManagedSidecarManager,
+        runtime_override: Option<&str>,
+        runtime_source_override: Option<&str>,
+    ) -> Result<(u16, bool), String> {
         // Phase 1: Check existing healthy sidecar (brief)
         let prep = self.prepare_ensure_sidecar(session_key).await;
         if let EnsureSidecarPrep::Healthy(port) = prep {
@@ -265,7 +291,9 @@ impl SessionRouter {
 
         // Phase 2: Create sidecar (blocking — holds lock the entire time)
         let info = match prep {
-            EnsureSidecarPrep::NeedCreate(info) => info,
+            EnsureSidecarPrep::NeedCreate(info) => {
+                info.with_runtime_identity(runtime_override, runtime_source_override)
+            }
             EnsureSidecarPrep::Healthy(_) => unreachable!(),
         };
         // #327: forward the manager's authoritative is_new — a reused sidecar
@@ -331,6 +359,8 @@ impl SessionRouter {
             workspace,
             prev_count,
             metadata_birth_pending,
+            runtime_override: None,
+            runtime_source_override: None,
         })
     }
 
@@ -356,9 +386,19 @@ impl SessionRouter {
         let manager_clone = Arc::clone(manager);
         let sid = info.session_id.clone();
         let ws = info.workspace.clone();
+        let runtime_override = info.runtime_override.clone();
+        let runtime_source_override = info.runtime_source_override.clone();
 
         let result = tokio::task::spawn_blocking(move || {
-            ensure_session_sidecar(&app_clone, &manager_clone, &sid, &ws, owner)
+            ensure_session_sidecar_with_runtime_identity_override(
+                &app_clone,
+                &manager_clone,
+                &sid,
+                &ws,
+                owner,
+                runtime_override,
+                runtime_source_override,
+            )
         })
         .await
         .map_err(|e| format!("spawn_blocking failed: {}", e))?
@@ -1430,6 +1470,8 @@ mod tests {
             workspace: PathBuf::from("/tmp/workspace"),
             prev_count: 0,
             metadata_birth_pending: true,
+            runtime_override: None,
+            runtime_source_override: None,
         };
 
         router.commit_ensure_sidecar(session_key, &info, 1234);

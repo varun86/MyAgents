@@ -1993,12 +1993,16 @@ pub async fn cmd_update_agent_config(
                 *ch_inst.bot_instance.current_model.write().await = Some(model.clone());
             }
         }
-        if let Some(ref env_json) = patch.provider_env_json {
-            let parsed: Option<serde_json::Value> = if env_json.is_empty() {
-                None
-            } else {
-                serde_json::from_str(env_json).ok()
-            };
+        if let Some(ref env_json_patch) = patch.provider_env_json {
+            agent.config.provider_env_json = env_json_patch.clone();
+            let parsed: Option<serde_json::Value> =
+                env_json_patch.as_deref().and_then(|env_json| {
+                    if env_json.is_empty() {
+                        None
+                    } else {
+                        serde_json::from_str(env_json).ok()
+                    }
+                });
             *agent.current_provider_env.write().await = parsed.clone();
             for (_ch_id, ch_inst) in &agent.channels {
                 *ch_inst.bot_instance.current_provider_env.write().await = parsed.clone();
@@ -2129,12 +2133,14 @@ pub async fn cmd_update_agent_config(
 
         // Push config changes to all active Sidecar ports (same as legacy update_bot_config_internal)
         let parsed_provider_env: Option<serde_json::Value> =
-            patch.provider_env_json.as_ref().and_then(|s| {
-                if s.is_empty() {
-                    None
-                } else {
-                    serde_json::from_str(s).ok()
-                }
+            patch.provider_env_json.as_ref().and_then(|env_patch| {
+                env_patch.as_deref().and_then(|s| {
+                    if s.is_empty() {
+                        None
+                    } else {
+                        serde_json::from_str(s).ok()
+                    }
+                })
             });
         for (_ch_id, ch_inst) in &agent.channels {
             let router = ch_inst.bot_instance.router.lock().await;

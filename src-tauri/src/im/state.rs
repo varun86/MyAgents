@@ -260,6 +260,7 @@ pub(super) async fn ensure_sidecar_port_for_command<R: Runtime>(
     match prep {
         EnsureSidecarPrep::Healthy(port) => Ok(port),
         EnsureSidecarPrep::NeedCreate(info) => {
+            let info = info.with_runtime_identity(Some(desired_runtime), desired_runtime_source);
             // Command path only needs the port; is_new is irrelevant here (no
             // config sync). Destructure the tuple but ignore the flag.
             let (port, _is_new) =

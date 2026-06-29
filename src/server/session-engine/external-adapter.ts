@@ -56,6 +56,8 @@ import { getEffectiveOfficialToolIdsForSession } from '../utils/admin-config';
 import { getSessionData, updateSessionMetadata } from '../SessionStore';
 import { getLatestAssistantResultFromMessages, NO_TEXT_RESPONSE } from '../inbox/latest-result';
 import type { SessionMessage } from '../types/session';
+import { CODEX_SUBSCRIPTION_PROVIDER_ID } from '../../shared/config-types';
+import type { RuntimeBackedProviderIdentity } from '../../shared/providerExecution';
 
 function getRuntimeSessionId(): string {
   return getExternalSessionId() || getCurrentBoundSessionId() || getSessionId();
@@ -90,6 +92,35 @@ function externalLiveMessageToSessionMessage(message: SessionMessage): SessionMe
     toolCount: message.toolCount,
     durationMs: message.durationMs,
   };
+}
+
+type ExternalFreezeSnapshotPatch = NonNullable<
+  Parameters<typeof freezeCurrentSessionMetadataForImDetach>[0]
+>;
+
+function buildExternalFreezeSnapshotPatch(): ExternalFreezeSnapshotPatch {
+  const runtime = getActiveRuntimeType();
+  const runtimeSource = getActiveRuntimeSource();
+  const model = getExternalSessionModel() ?? undefined;
+  const permissionMode = getExternalSessionPermissionMode() ?? undefined;
+  const reasoningEffort = getExternalSessionReasoningEffort() ?? undefined;
+  const patch: ExternalFreezeSnapshotPatch = {
+    runtime,
+  };
+  if (runtime !== 'builtin' && runtimeSource) patch.runtimeSource = runtimeSource;
+  if (model) patch.model = model;
+  if (permissionMode) patch.permissionMode = permissionMode;
+  if (reasoningEffort) patch.reasoningEffort = reasoningEffort;
+  if (runtime === 'codex' && runtimeSource === 'managed-provider' && model) {
+    patch.providerExecutionIdentity = {
+      kind: 'runtime-backed-provider',
+      providerId: CODEX_SUBSCRIPTION_PROVIDER_ID as RuntimeBackedProviderIdentity['providerId'],
+      runtime: 'codex',
+      runtimeSource: 'managed-provider',
+      model,
+    };
+  }
+  return patch;
 }
 
 export function createExternalSessionEngine(): SessionEngine {
@@ -403,16 +434,8 @@ export function createExternalSessionEngine(): SessionEngine {
     },
 
     freezeCurrentSessionForImDetach(options) {
-      const model = getExternalSessionModel() ?? undefined;
-      const permissionMode = getExternalSessionPermissionMode() ?? undefined;
-      const reasoningEffort = getExternalSessionReasoningEffort() ?? undefined;
       return freezeCurrentSessionMetadataForImDetach(
-        {
-          runtime: getActiveRuntimeType(),
-          ...(model ? { model } : {}),
-          ...(permissionMode ? { permissionMode } : {}),
-          ...(reasoningEffort ? { reasoningEffort } : {}),
-        },
+        buildExternalFreezeSnapshotPatch(),
         {
           allowMissingMetadata: options?.metadataBirthPending === true,
         },
@@ -525,16 +548,8 @@ export function createExternalSessionEngine(): SessionEngine {
 
     async resetForNewImSession(workspacePath, options) {
       await awaitExternalSessionStarting();
-      const model = getExternalSessionModel() ?? undefined;
-      const permissionMode = getExternalSessionPermissionMode() ?? undefined;
-      const reasoningEffort = getExternalSessionReasoningEffort() ?? undefined;
       const freeze = await freezeCurrentSessionMetadataForImDetach(
-        {
-          runtime: getActiveRuntimeType(),
-          ...(model ? { model } : {}),
-          ...(permissionMode ? { permissionMode } : {}),
-          ...(reasoningEffort ? { reasoningEffort } : {}),
-        },
+        buildExternalFreezeSnapshotPatch(),
         {
           allowMissingMetadata: options?.metadataBirthPending === true,
         },

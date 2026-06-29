@@ -1,4 +1,4 @@
-import { existsSync, lstatSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { existsSync, lstatSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 
@@ -89,6 +89,21 @@ describe('project-user-config-sync', () => {
     expect(readFileSync(join(projectSkillDir, 'SKILL.md'), 'utf-8')).toBe('project-owned');
   });
 
+  itNonWindows('replaces broken managed skill symlinks with current user skills', () => {
+    const { home, root, workspace } = makeEnv();
+    writeUserSkill(home, 'review-helper');
+    const projectSkillsDir = join(workspace, '.claude', 'skills');
+    mkdirSync(projectSkillsDir, { recursive: true });
+    const linkPath = join(projectSkillsDir, 'review-helper');
+    symlinkSync(join(root, 'missing-old-skill'), linkPath, 'dir');
+    expect(existsSync(linkPath)).toBe(false);
+
+    syncProjectUserConfigFiles(workspace, { cliToolRegistryEnabled: true });
+
+    expect(lstatSync(linkPath).isSymbolicLink()).toBe(true);
+    expect(readFileSync(join(linkPath, 'SKILL.md'), 'utf-8')).toContain('review-helper');
+  });
+
   itNonWindows('links MyAgents user commands into the project .claude/commands directory', () => {
     const { home, workspace } = makeEnv();
     writeUserCommand(home, 'ship-it');
@@ -96,6 +111,21 @@ describe('project-user-config-sync', () => {
     syncProjectUserConfigFiles(workspace, { cliToolRegistryEnabled: true });
 
     const linkPath = join(workspace, '.claude', 'commands', 'ship-it.md');
+    expect(lstatSync(linkPath).isSymbolicLink()).toBe(true);
+    expect(readFileSync(linkPath, 'utf-8')).toBe('# ship-it\n');
+  });
+
+  itNonWindows('replaces broken managed command symlinks with current user commands', () => {
+    const { home, root, workspace } = makeEnv();
+    writeUserCommand(home, 'ship-it');
+    const projectCommandsDir = join(workspace, '.claude', 'commands');
+    mkdirSync(projectCommandsDir, { recursive: true });
+    const linkPath = join(projectCommandsDir, 'ship-it.md');
+    symlinkSync(join(root, 'missing-old-command.md'), linkPath);
+    expect(existsSync(linkPath)).toBe(false);
+
+    syncProjectUserConfigFiles(workspace, { cliToolRegistryEnabled: true });
+
     expect(lstatSync(linkPath).isSymbolicLink()).toBe(true);
     expect(readFileSync(linkPath, 'utf-8')).toBe('# ship-it\n');
   });

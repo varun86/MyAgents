@@ -1,5 +1,6 @@
 import { existsSync, lstatSync, readdirSync, readFileSync, readlinkSync, rmSync, symlinkSync } from 'fs';
-import { join, resolve, sep } from 'path';
+import type { Stats } from 'fs';
+import { isAbsolute, join, relative, resolve } from 'path';
 
 import { isCliToolRegistryEnabled, loadConfig as loadAdminConfig } from './admin-config';
 import { ensureDirSync, isDirEntry } from './fs-utils';
@@ -19,6 +20,23 @@ export function getMyAgentsUserDir(): string {
 
 export interface ProjectUserConfigSyncOptions {
   cliToolRegistryEnabled?: boolean;
+}
+
+function lstatIfPresent(path: string): Stats | null {
+  try {
+    return lstatSync(path);
+  } catch {
+    return null;
+  }
+}
+
+function removeSymlinkPath(path: string): void {
+  rmSync(path, { recursive: true, force: true });
+}
+
+function isInside(parent: string, child: string): boolean {
+  const rel = relative(parent, child);
+  return rel === '' || (!!rel && !rel.startsWith('..') && !isAbsolute(rel));
 }
 
 export function trySyncProjectUserConfigFiles(
@@ -85,8 +103,9 @@ export function syncProjectUserConfigFiles(
 
       if (disabled.includes(entry.name) || (!cliToolRegistryEnabled && entry.name === 'tool-creator')) {
         try {
-          if (existsSync(linkPath) && lstatSync(linkPath).isSymbolicLink()) {
-            rmSync(linkPath, { recursive: true });
+          const linkMeta = lstatIfPresent(linkPath);
+          if (linkMeta?.isSymbolicLink()) {
+            removeSymlinkPath(linkPath);
           }
         } catch {
           // Ignore individual cleanup failures.
@@ -95,9 +114,10 @@ export function syncProjectUserConfigFiles(
       }
 
       try {
-        if (existsSync(linkPath)) {
-          if (!lstatSync(linkPath).isSymbolicLink()) continue;
-          rmSync(linkPath, { recursive: true });
+        const linkMeta = lstatIfPresent(linkPath);
+        if (linkMeta) {
+          if (!linkMeta.isSymbolicLink()) continue;
+          removeSymlinkPath(linkPath);
         }
       } catch {
         // Missing or racing path; recreate below.
@@ -117,8 +137,8 @@ export function syncProjectUserConfigFiles(
           if (!lstatSync(linkPath).isSymbolicLink()) continue;
           const target = readlinkSync(linkPath);
           const resolvedTarget = resolve(projectSkillsDir, target);
-          if (resolvedTarget.startsWith(userSkillsDir + sep) && !managedSkillNames.has(entry.name)) {
-            rmSync(linkPath, { recursive: true });
+          if (isInside(userSkillsDir, resolvedTarget) && !managedSkillNames.has(entry.name)) {
+            removeSymlinkPath(linkPath);
           }
         } catch {
           // Ignore individual cleanup failures.
@@ -145,9 +165,10 @@ export function syncProjectUserConfigFiles(
       const target = join(userCommandsDir, entry.name);
 
       try {
-        if (existsSync(linkPath)) {
-          if (!lstatSync(linkPath).isSymbolicLink()) continue;
-          rmSync(linkPath, { recursive: true });
+        const linkMeta = lstatIfPresent(linkPath);
+        if (linkMeta) {
+          if (!linkMeta.isSymbolicLink()) continue;
+          removeSymlinkPath(linkPath);
         }
       } catch {
         // Missing or racing path; recreate below.
@@ -167,8 +188,8 @@ export function syncProjectUserConfigFiles(
           if (!lstatSync(linkPath).isSymbolicLink()) continue;
           const target = readlinkSync(linkPath);
           const resolvedTarget = resolve(projectCommandsDir, target);
-          if (resolvedTarget.startsWith(userCommandsDir + sep) && !managedCommandFiles.has(entry.name)) {
-            rmSync(linkPath, { recursive: true });
+          if (isInside(userCommandsDir, resolvedTarget) && !managedCommandFiles.has(entry.name)) {
+            removeSymlinkPath(linkPath);
           }
         } catch {
           // Ignore individual cleanup failures.

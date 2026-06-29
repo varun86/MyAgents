@@ -445,6 +445,10 @@ impl HeartbeatRunner {
         let (port, is_new_sidecar) = match prep {
             EnsureSidecarPrep::Healthy(p) => (p, false),
             EnsureSidecarPrep::NeedCreate(info) => {
+                let info = info.with_runtime_identity(
+                    Some(&current_runtime),
+                    current_runtime_source.as_deref(),
+                );
                 // Phase 2: Create sidecar (NO lock held — blocking up to 5 min)
                 match super::router::SessionRouter::create_sidecar_blocking(
                     info.clone(),
