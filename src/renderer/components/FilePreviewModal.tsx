@@ -1079,7 +1079,7 @@ export default function FilePreviewModal({
 
         return (
             <>
-                <Tip label={t('workspaceFiles.common.more')} position="bottom">
+                <Tip label={t('workspaceFiles.common.more')} position="bottom" disabled={moreMenuOpen}>
                     <button
                         ref={moreButtonRef}
                         type="button"

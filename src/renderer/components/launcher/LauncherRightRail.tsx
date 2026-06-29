@@ -38,6 +38,7 @@ import { sortLauncherProjects } from './workspaceSort';
 const COLLAPSED_WORKSPACE_COUNT = 6;
 const HISTORY_PAGE_SIZE = 30;
 const WORKSPACE_ROW_MAX_HEIGHT = 94;
+const EMPTY_SESSION_TAGS: SessionTag[] = [];
 
 type HistoryFilterValue = 'all' | 'favorites' | string;
 
@@ -231,6 +232,13 @@ export default memo(function LauncherRightRail({
         }
     }, [actions, t, toast]);
 
+    const handleHistoryMenuOpenChange = useCallback((sessionId: string, open: boolean) => {
+        setOpenHistoryMenuSessionId(current => {
+            if (open) return sessionId;
+            return current === sessionId ? null : current;
+        });
+    }, []);
+
     const showEmptyProjects = !isProjectsLoading && sortedProjects.length === 0;
     const hasMoreHistory = visibleHistoryCount < filteredSessions.length;
 
@@ -409,16 +417,14 @@ export default memo(function LauncherRightRail({
                                                 key={session.id}
                                                 session={session}
                                                 project={project}
-                                                tags={sessionTagsMap.get(session.id) ?? []}
+                                                tags={sessionTagsMap.get(session.id) ?? EMPTY_SESSION_TAGS}
                                                 isCronProtected={cronProtectedSessionIds.has(session.id)}
                                                 onOpen={onOpenTask}
                                                 onToggleFavorite={handleToggleFavoriteSession}
                                                 onShowStats={handleShowStatsSession}
                                                 onRequestDelete={handleRequestDeleteSession}
                                                 menuOpen={openHistoryMenuSessionId === session.id}
-                                                onMenuOpenChange={(open) => {
-                                                    setOpenHistoryMenuSessionId(open ? session.id : null);
-                                                }}
+                                                onMenuOpenChange={handleHistoryMenuOpenChange}
                                             />
                                         );
                                     })}
@@ -547,7 +553,7 @@ interface LauncherHistoryRowProps {
     onShowStats: (session: SessionMetadata) => void;
     onRequestDelete: (session: SessionMetadata) => void;
     menuOpen: boolean;
-    onMenuOpenChange: (open: boolean) => void;
+    onMenuOpenChange: (sessionId: string, open: boolean) => void;
 }
 
 const LauncherHistoryRow = memo(function LauncherHistoryRow({
@@ -575,13 +581,16 @@ const LauncherHistoryRow = memo(function LauncherHistoryRow({
 
     const closeMenu = useCallback(() => {
         setMenuAnchor(null);
-        onMenuOpenChange(false);
-    }, [onMenuOpenChange]);
+        onMenuOpenChange(session.id, false);
+    }, [onMenuOpenChange, session.id]);
 
-    const openMenuAt = useCallback((x: number, y: number) => {
-        setMenuAnchor({ x, y, placement: 'bottom-start' });
-        onMenuOpenChange(true);
-    }, [onMenuOpenChange]);
+    const openMenuAt = useCallback((x: number, y: number, placement: 'bottom-start' | 'bottom-end' = 'bottom-start') => {
+        setMenuAnchor(current => {
+            if (current?.x === x && current.y === y && current.placement === placement) return current;
+            return { x, y, placement };
+        });
+        onMenuOpenChange(session.id, true);
+    }, [onMenuOpenChange, session.id]);
 
     const handleOpen = useCallback(() => onOpen(session, project), [onOpen, project, session]);
     const handleClick = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
@@ -647,12 +656,7 @@ const LauncherHistoryRow = memo(function LauncherHistoryRow({
                             return;
                         }
                         const rect = event.currentTarget.getBoundingClientRect();
-                        setMenuAnchor({
-                            x: rect.right,
-                            y: rect.bottom,
-                            placement: 'bottom-end',
-                        });
-                        onMenuOpenChange(true);
+                        openMenuAt(rect.right, rect.bottom, 'bottom-end');
                     }}
                     className="pointer-events-auto flex h-7 w-7 items-center justify-center rounded-md text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper)] hover:text-[var(--ink)] focus-visible:opacity-100"
                     title={t('rightRail.more')}
