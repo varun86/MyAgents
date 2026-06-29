@@ -324,24 +324,29 @@ function signingSpecForPlatform(platform, allowUnsigned) {
 function readWindowsAuthenticode(executablePath) {
   const script = `
 $ErrorActionPreference = 'Stop'
+$utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+$OutputEncoding = $utf8NoBom
+[Console]::OutputEncoding = $utf8NoBom
 $sig = Get-AuthenticodeSignature -LiteralPath '${psSingleQuote(executablePath)}'
 $cert = $sig.SignerCertificate
 $sha256 = $null
 if ($cert -ne $null) {
   $sha256 = [System.BitConverter]::ToString($cert.GetCertHash('SHA256')).Replace('-', '').ToLowerInvariant()
 }
-[ordered]@{
+$json = [ordered]@{
   status = [string]$sig.Status
   statusMessage = [string]$sig.StatusMessage
   subject = if ($cert -ne $null) { [string]$cert.Subject } else { $null }
   sha256 = $sha256
 } | ConvertTo-Json -Compress
+[Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($json))
 `;
   const result = tryRun('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script]);
   if (!result.ok) {
     throw new Error(`Get-AuthenticodeSignature failed for ${executablePath}\n${result.error?.message || result.stderr || result.stdout}`);
   }
-  return JSON.parse(result.stdout.trim());
+  const encodedJson = result.stdout.replace(/[^A-Za-z0-9+/=]/g, '');
+  return JSON.parse(Buffer.from(encodedJson, 'base64').toString('utf8'));
 }
 
 function verifyMacSigning(executablePath, signing) {
